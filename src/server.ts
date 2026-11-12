@@ -13391,28 +13391,21 @@ class GodotServer {
         servesAProject: this.ownProject !== null,
       });
     }
-    // The editor is asked about a run it is playing no more often than the wait loop asks it, so
-    // a look every fifty milliseconds does not become a request every fifty milliseconds, and
-    // beside the looks rather than between them: an editor that does not answer holds the
-    // question for a second, and an announcement that lands in that second should not wait it out.
-    let asking: Promise<void> | null = null;
-    let editorAskedAt = 0;
-    let editorSaysGoing = true;
-    let editorAsks = 0;
-    // A run started here is held by the debugger its keeper holds, which the editor's session
-    // never sees, so the keeper is asked the same way, beside the looks.
-    let holding: Promise<void> | null = null;
-    let keeperAskedAt = 0;
-    let heldHere: StoppedAt | null = null;
+    const probe: AnnounceProbe = {
+      asking: null,
+      editorAskedAt: 0,
+      editorSaysGoing: true,
+      editorAsks: 0,
+      holding: null,
+      keeperAskedAt: 0,
+      heldHere: null,
+    };
     const waitBegan = Date.now();
     // Counted from the run's start rather than from here, since the boot the budget is sized to is
     // measured from there and the answer says "within" the budget: counted from here, whatever the
     // start did after the play lengthened the wait unsaid, and a loaded machine that took two
     // seconds over it found a game announcing two seconds past a five-second budget.
     const runBegan = Math.min(this.activeProcess?.startedAt ?? waitBegan, waitBegan);
-    // Read through a call rather than directly, since the variable is written from the closure
-    // below and the type checker reads it as never changing.
-    const lastSaid = (): string => (editorSaysGoing ? 'playing' : 'not playing');
     const fresh = await announcedSince(projectPath, before, {
       budgetMs: Math.max(runBegan + budgetMs - waitBegan, 0),
       // Not a game of this project that somebody else started: for a run the editor plays, one
@@ -13423,63 +13416,117 @@ class GodotServer {
       // and a spawned start judged by the played rule waited its whole budget on its own game.
       // The run held rather than one picked up from disk: the start that waits here has just taken it.
       accept: (one) => this.isTheGameOf(this.activeProcess, one),
-      // A game held at a breakpoint set before the run is not booting any more, and waiting out
-      // the budget on one says nothing. It cannot announce until it is let go. Nor is there
-      // anything to wait for once the process is over: a boot that fails on a parse error is
-      // gone in half a second, and sitting out the rest of the budget delays the answer that
-      // says so. The announcement is looked for before this is asked, so a game that announced
-      // and then quit is still found. A run the editor plays has no process to ask, so the editor
-      // is asked instead: without that a played scene that died on boot was waited for the whole
-      // budget and then reported, correctly, as no longer running.
-      giveUp: () => {
-        if (this.dapClient?.isStopped() === true) {
-          return true;
-        }
-        const run = this.activeProcess;
-        if (run === null || !run.throughEditor) {
-          if (!stillRunning(run)) {
-            return true;
-          }
-          const keeper = run?.keeper;
-          if (keeper !== undefined && holding === null && Date.now() - keeperAskedAt >= RUN_POLL_MS) {
-            keeperAskedAt = Date.now();
-            holding = this.keptHold(keeper)
-              .then((held) => {
-                heldHere = held;
-              })
-              .finally(() => {
-                holding = null;
-              });
-          }
-          return heldHere !== null;
-        }
-        if (asking === null && Date.now() - editorAskedAt >= RUN_POLL_MS) {
-          editorAskedAt = Date.now();
-          editorAsks += 1;
-          asking = this.runStillGoing(run)
-            .then((going) => {
-              editorSaysGoing = going;
-            })
-            .finally(() => {
-              asking = null;
-            });
-        }
-        return !editorSaysGoing;
-      },
+      giveUp: () => this.giveUpOnTheAnnouncement(probe),
     });
     // How the wait ended, for the log a slow start is read back from: what it found, how long it
     // took, and how often the editor was asked on the way.
     // A run started here never asks the editor, and "last said playing" about an editor nobody
     // asked is the closure's starting value rather than an answer.
     const asked =
-      editorAsks === 0
+      probe.editorAsks === 0
         ? 'editor not asked'
-        : `editor asked ${editorAsks === 1 ? 'once' : `${editorAsks} times`}, last said ${lastSaid()}`;
+        : `editor asked ${probe.editorAsks === 1 ? 'once' : `${probe.editorAsks} times`}, last said ${probe.editorSaysGoing ? 'playing' : 'not playing'}`;
     this.logDebug(
       `announce wait ended after ${Date.now() - waitBegan}ms: ${
         fresh.length === 0 ? 'nothing announced' : `pid ${fresh.map((one) => one.pid).join(', ')} announced`
       }, ${asked}`,
     );
+    return await this.verdictOnTheAnnouncement(fresh, { budget, withArgs });
+  }
+
+  /**
+   * Whether the wait for an announcement is over without one. A game held at a breakpoint set
+   * before the run is not booting any more, and waiting out the budget on one says nothing. It
+   * cannot announce until it is let go. Nor is there anything to wait for once the process is
+   * over: a boot that fails on a parse error is gone in half a second, and sitting out the rest of
+   * the budget delays the answer that says so. The announcement is looked for before this is
+   * asked, so a game that announced and then quit is still found. A run the editor plays has no
+   * process to ask, so the editor is asked instead: without that a played scene that died on boot
+   * was waited for the whole budget and then reported, correctly, as no longer running.
+   */
+  private giveUpOnTheAnnouncement(probe: AnnounceProbe): boolean {
+    if (this.dapClient?.isStopped() === true) {
+      return true;
+    }
+    const run = this.activeProcess;
+    if (run === null || !run.throughEditor) {
+      if (!stillRunning(run)) {
+        return true;
+      }
+      this.askTheKeeperBesidesTheLooks(probe, run?.keeper);
+      return probe.heldHere !== null;
+    }
+    this.askTheEditorBesidesTheLooks(probe, run);
+    return !probe.editorSaysGoing;
+  }
+
+  /**
+   * A run started here is held by the debugger its keeper holds, which the editor's session
+   * never sees, so the keeper is asked beside the looks, no more often than the wait loop asks.
+   */
+  private askTheKeeperBesidesTheLooks(probe: AnnounceProbe, keeper: string | undefined): void {
+    if (keeper === undefined || probe.holding !== null || Date.now() - probe.keeperAskedAt < RUN_POLL_MS) {
+      return;
+    }
+    probe.keeperAskedAt = Date.now();
+    probe.holding = this.keptHold(keeper)
+      .then((held) => {
+        probe.heldHere = held;
+      })
+      .finally(() => {
+        probe.holding = null;
+      });
+  }
+
+  /**
+   * The editor is asked about a run it is playing no more often than the wait loop asks it, so
+   * a look every fifty milliseconds does not become a request every fifty milliseconds, and
+   * beside the looks rather than between them: an editor that does not answer holds the
+   * question for a second, and an announcement that lands in that second should not wait it out.
+   */
+  private askTheEditorBesidesTheLooks(probe: AnnounceProbe, run: GodotProcess): void {
+    if (probe.asking !== null || Date.now() - probe.editorAskedAt < RUN_POLL_MS) {
+      return;
+    }
+    probe.editorAskedAt = Date.now();
+    probe.editorAsks += 1;
+    probe.asking = this.runStillGoing(run)
+      .then((going) => {
+        probe.editorSaysGoing = going;
+      })
+      .finally(() => {
+        probe.asking = null;
+      });
+  }
+
+  /** Ties [param going] to the game it announced, unless it is already tied to one. */
+  private tieTheAnnouncedGame(going: GodotProcess | null, endpoint: RuntimeEndpoint | null): void {
+    if (endpoint !== null && going !== null && going.announcedPid === undefined) {
+      this.tie(going, endpoint);
+    }
+  }
+
+  /**
+   * Where the debugger holds the game of [param going], or null. The editor's session is read for
+   * a run the editor plays, and the keeper only when [param unannouncedAndGoing].
+   */
+  private async whereTheStartedGameIsHeld(
+    going: GodotProcess | null,
+    unannouncedAndGoing: boolean,
+  ): Promise<StoppedAt | null> {
+    if (going === null || going.throughEditor) {
+      return this.dapClient?.whereItStopped() ?? null;
+    }
+    return unannouncedAndGoing && going.keeper !== undefined ? await this.keptHold(going.keeper) : null;
+  }
+
+  /** The verdict on the run just started once the announcement wait is over: its runtime, or why none. */
+  private async verdictOnTheAnnouncement(
+    fresh: readonly RuntimeEndpoint[],
+    start: { budget: AnnounceBudget; withArgs: boolean },
+  ): Promise<Record<string, unknown>> {
+    const { budget, withArgs } = start;
+    const budgetMs = budget.ms;
     // Kept on the run: a number the game gave for itself, which is what the announcement was
     // waited for. For a run the editor plays it is the only process the run has, so its liveness
     // is the editor's word without it. For a run started here it is usually the run's own number
@@ -13489,9 +13536,7 @@ class GodotServer {
     // `announcedSince` excludes everything that was already announced before the start.
     const going = await this.currentRun();
     const endpoint = await this.theRunsAmong(going, fresh);
-    if (endpoint !== null && going !== null && going.announcedPid === undefined) {
-      this.tie(going, endpoint);
-    }
+    this.tieTheAnnouncedGame(going, endpoint);
     if (endpoint === null && fresh.length > 1) {
       return {
         listening: true,
@@ -13509,12 +13554,7 @@ class GodotServer {
       addon: true,
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
-      heldAt:
-        going === null || going.throughEditor
-          ? (this.dapClient?.whereItStopped() ?? null)
-          : endpoint === null && running && going.keeper !== undefined
-            ? await this.keptHold(going.keeper)
-            : null,
+      heldAt: await this.whereTheStartedGameIsHeld(going, endpoint === null && running),
       running,
       withArgs,
       servesAProject: this.ownProject !== null,
@@ -14174,14 +14214,7 @@ class GodotServer {
     project: string | null,
     clearTheRecord: () => void,
   ): Promise<Ending | null> {
-    const why =
-      announced === undefined
-        ? 'its game announced no runtime to be asked'
-        : await closeLikeAPlayer(
-            announced,
-            running.throughEditor || running.pid === null ? [] : [running.pid],
-            project,
-          );
+    const why = await this.whyItWouldNotClose(running, announced, project);
     const spawned = !running.throughEditor && running.pid !== null;
     if (why === null && spawned) {
       await this.untilTheExitIsRecorded(running);
@@ -14205,6 +14238,22 @@ class GodotServer {
     running.notClosedBecause =
       why ?? `it restarted itself as it closed, into pid ${running.pid ?? 'unknown'}`;
     return null;
+  }
+
+  /** Why [param running] would not close as a player's close asks it to, or null when it closed. */
+  private async whyItWouldNotClose(
+    running: GodotProcess,
+    announced: number | undefined,
+    project: string | null,
+  ): Promise<string | null> {
+    if (announced === undefined) {
+      return 'its game announced no runtime to be asked';
+    }
+    return await closeLikeAPlayer(
+      announced,
+      running.throughEditor || running.pid === null ? [] : [running.pid],
+      project,
+    );
   }
 
   /**
@@ -14428,7 +14477,7 @@ class GodotServer {
       await this.untilTheExitIsRecorded(run);
     }
     // Followed into a process the game restarted itself into as it went, which the keeper ends too.
-    if (gone && again && run.pid !== null && run.pid !== pid && !exited(run) && alive(run.pid)) {
+    if (gone && again && run.pid !== null && this.restartedAwayFrom(run, pid)) {
       run.log.record(
         'info',
         `gdharness had the keeper end pid ${pid}, which restarted itself into pid ${run.pid}.`,
@@ -14440,15 +14489,13 @@ class GodotServer {
       run.exitSignal = 'SIGTERM';
       run.endedAt ??= Date.now();
     }
-    run.log.record(
-      gone ? 'info' : 'warning',
-      !gone
-        ? `gdharness had the keeper holding pid ${pid} end it, and it was still running ${stopWaitMs() / 1000} seconds later.`
-        : asked === 'signalled'
-          ? `gdharness ended pid ${pid} through the keeper holding it.`
-          : `gdharness asked the keeper holding pid ${pid} to end it, and it had already gone.`,
-    );
+    run.log.record(gone ? 'info' : 'warning', keeperEndingText(pid, gone, asked === 'signalled'));
     return gone ? 'gone' : 'lingering';
+  }
+
+  /** Whether [param run] went on in another process than [param pid], which its game restarted itself into. */
+  private restartedAwayFrom(run: GodotProcess, pid: number): boolean {
+    return run.pid !== null && run.pid !== pid && !exited(run) && alive(run.pid);
   }
 
   /**
@@ -16424,6 +16471,23 @@ class GodotServer {
     const going = await this.runStillGoing(run);
     this.settleARunThatEnded(run, going);
     enterASilentCrash(run);
+    return await this.outputOfTheRun(run, going, { args, waited });
+  }
+
+  /** The answer of editor_output for [param run], whether [param going], with the entries the caller selected. */
+  private async outputOfTheRun(
+    run: GodotProcess,
+    going: boolean,
+    asked: {
+      args: OperationParams;
+      waited:
+        | { readonly ranOutMs: number }
+        | { readonly heldAfterMs: number }
+        | { readonly crashedAfterMs: number }
+        | undefined;
+    },
+  ): Promise<ToolResponse> {
+    const { args, waited } = asked;
     const selected = run.log.selectFolded({
       severity: this.severityAsked(readString(args, 'severity')),
       sinceLastCall: readBoolean(args, 'sinceLastCall') ?? false,
@@ -17805,8 +17869,6 @@ class GodotServer {
     const {
       busy,
       unseen,
-      stillGone,
-      stillAtMissingPaths,
       dependents,
       reloads,
       checked,
@@ -17821,15 +17883,7 @@ class GodotServer {
       uidsDuplicatedOnDisk,
     } = rescan;
     return this.jsonTextResponse({
-      ok:
-        !busy &&
-        unseen.length === 0 &&
-        stillGone.length === 0 &&
-        stillAtMissingPaths.length === 0 &&
-        (dependents === null || dependents.notReloaded.length === 0) &&
-        // The script asked for by name is the stronger case of a dependent that would not reload.
-        reloads.every((one) => one.reloaded.problem === undefined) &&
-        checked.unchecked === undefined,
+      ok: rescanWentThrough(rescan),
       stillWorking: busy,
       waitedMs: Date.now() - started,
       // How much of that was the editor's own scan or import, finished before this one was asked
@@ -17840,10 +17894,7 @@ class GodotServer {
       ...reloadDifference(reloaded),
       ...this.memberListsOf(reloaded, args['listMembers'] === true),
       reloadProblem: reloaded.problem,
-      reloadedFirst: (() => {
-        const all = [...reloadedFirst, ...(dependents?.reloadedFirst ?? [])];
-        return all.length > 0 ? all : undefined;
-      })(),
+      reloadedFirst: orNothing([...reloadedFirst, ...(dependents?.reloadedFirst ?? [])]),
       unsavedInEditorNote: reloaded.unsaved,
       reloads: Array.isArray(asked)
         ? reloads.map(({ scriptPath, reloaded: one }) => ({
@@ -17856,16 +17907,14 @@ class GodotServer {
             unsavedInEditorNote: one.unsaved,
           }))
         : undefined,
-      unseenByEditor: unseen.length > 0 ? unseen : undefined,
-      broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
-      dependentsReloaded:
-        dependents !== null && dependents.reloaded.length > 0 ? dependents.reloaded : undefined,
-      dependentsNotReloaded:
-        dependents !== null && dependents.notReloaded.length > 0 ? dependents.notReloaded : undefined,
+      unseenByEditor: orNothing(unseen),
+      broughtIn: orNothing(broughtIn),
+      dependentsReloaded: orNothing(dependents?.reloaded ?? []),
+      dependentsNotReloaded: orNothing(dependents?.notReloaded ?? []),
       ...this.cacheFieldsOf(rescan),
       classesUnchecked: checked.unchecked,
-      uidsReread: uidsReread.length > 0 ? uidsReread : undefined,
-      uidsDuplicatedOnDisk: uidsDuplicatedOnDisk.length > 0 ? uidsDuplicatedOnDisk : undefined,
+      uidsReread: orNothing(uidsReread),
+      uidsDuplicatedOnDisk: orNothing(uidsDuplicatedOnDisk),
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
   }
@@ -19426,22 +19475,38 @@ class GodotServer {
     const payload = asParams(JSON.parse(first.text));
     // What the rebuild itself said comes first: a class the editor wrote out since the last
     // rebuild is the reason it cannot see it now.
-    const said = readString(payload, 'note');
-    const notes: string[] = [
-      ...(said === undefined ? [] : [said]),
-      ...(checked.unseen.length > 0 ? [this.stillNotResolvingNote(projectPath)] : []),
-      ...(stillHeld.length > 0 ? [this.stillHeldNote(stillHeld)] : []),
-      ...(behind.length > 0 ? [this.heldBehindNote(behind)] : []),
-    ];
+    const notes = this.cannotSeeNotes(readString(payload, 'note'), projectPath, {
+      unseen: checked.unseen,
+      stillHeld,
+      behind,
+    });
     return this.jsonTextResponse({
       ...payload,
-      unseenByEditor: checked.unseen.length > 0 ? checked.unseen : undefined,
-      stillHeldByEditor: stillHeld.length > 0 ? stillHeld : undefined,
-      heldBehindInEditor: behind.length > 0 ? behind : undefined,
+      unseenByEditor: orNothing(checked.unseen),
+      stillHeldByEditor: orNothing(stillHeld),
+      heldBehindInEditor: orNothing(behind),
       classesUnchecked: checked.unchecked,
       heldBehindUnchecked: behindUnchecked,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
+  }
+
+  /** The notes for what the editor cannot see, after [param said], which the rebuild itself gave, if it did. */
+  private cannotSeeNotes(
+    said: string | undefined,
+    projectPath: string,
+    found: {
+      unseen: readonly UnseenClass[];
+      stillHeld: readonly string[];
+      behind: readonly { className: string; scriptPath: string }[];
+    },
+  ): string[] {
+    return [
+      ...(said === undefined ? [] : [said]),
+      ...(found.unseen.length > 0 ? [this.stillNotResolvingNote(projectPath)] : []),
+      ...(found.stillHeld.length > 0 ? [this.stillHeldNote(found.stillHeld)] : []),
+      ...(found.behind.length > 0 ? [this.heldBehindNote(found.behind)] : []),
+    ];
   }
 
   /**
@@ -20663,6 +20728,47 @@ function screenshotScratchFor(expectsScreenshot: boolean): {
 } {
   const screenshotDir = expectsScreenshot ? scratchDirectory('runtime-screenshot') : null;
   return { screenshotDir, screenshotPath: screenshotDir ? join(screenshotDir, 'capture.png') : null };
+}
+
+/** What the wait for a game's announcement has learnt from the editor and the keeper beside its looks. */
+interface AnnounceProbe {
+  asking: Promise<void> | null;
+  editorAskedAt: number;
+  editorSaysGoing: boolean;
+  editorAsks: number;
+  holding: Promise<void> | null;
+  keeperAskedAt: number;
+  heldHere: StoppedAt | null;
+}
+
+/** The line a run's log gets once the keeper holding [param pid] was asked to end it. */
+function keeperEndingText(pid: number, gone: boolean, signalled: boolean): string {
+  if (!gone) {
+    return `gdharness had the keeper holding pid ${pid} end it, and it was still running ${stopWaitMs() / 1000} seconds later.`;
+  }
+  return signalled
+    ? `gdharness ended pid ${pid} through the keeper holding it.`
+    : `gdharness asked the keeper holding pid ${pid} to end it, and it had already gone.`;
+}
+
+/** [param list] itself, or undefined when it is empty, so an answer leaves the field out. */
+function orNothing<T>(list: T[]): T[] | undefined {
+  return list.length > 0 ? list : undefined;
+}
+
+/** Whether every part of a rescan went through: nothing busy, unseen, gone, missing or left unreloaded. */
+function rescanWentThrough(rescan: RescanChecked): boolean {
+  const { busy, unseen, stillGone, stillAtMissingPaths, dependents, reloads, checked } = rescan;
+  return (
+    !busy &&
+    unseen.length === 0 &&
+    stillGone.length === 0 &&
+    stillAtMissingPaths.length === 0 &&
+    (dependents === null || dependents.notReloaded.length === 0) &&
+    // The script asked for by name is the stronger case of a dependent that would not reload.
+    reloads.every((one) => one.reloaded.problem === undefined) &&
+    checked.unchecked === undefined
+  );
 }
 
 interface RescanCall {
