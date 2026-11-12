@@ -31878,13 +31878,12 @@ function assertACrashOverAStaleDocCacheIsNamed(): void {
     ),
     exitedZero || 'a crash the handler reported, followed by exit code 0, gave no note',
   );
-
 }
 
 /** The cache directory is the platform's folder, or beside a self-contained engine or its app bundle. */
 function assertTheEditorCacheDirectoryIsFoundWhereTheEngineLooks(): void {
   const home = join('home', 'someone');
-  const sc =mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
+  const sc = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
   try {
     writeFileSync(join(sc, '._sc_'), '');
     mkdirSync(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS'), { recursive: true });
@@ -31922,13 +31921,12 @@ function assertTheEditorCacheDirectoryIsFoundWhereTheEngineLooks(): void {
   } finally {
     sweep(sc);
   }
-
 }
 
 /** An import pass that failed over a stale doc cache is run again, and its note is carried to the answer. */
 async function assertAnImportThatCrashedOverAStaleDocCacheRunsAgain(): Promise<void> {
   const outcomes: ImportOutcome[] = [];
-  const stand =(): Promise<ImportOutcome> => {
+  const stand = (): Promise<ImportOutcome> => {
     const next = outcomes.shift();
     assert.ok(next !== undefined, 'no more passes were expected');
     return Promise.resolve(next);
@@ -32396,7 +32394,6 @@ function assertEveryCallWithoutProjectPathRefusesIt(without: readonly string[]):
       );
     }
   }
-
 }
 
 /** The tool reference and the skill carry the generated clause as it is, naming each call as a code span. */
@@ -32432,7 +32429,6 @@ function assertTheGeneratedClauseIsCarriedUnaltered(without: readonly string[]):
     /except `editor_status`, which takes none$/,
     'and one of them reads as one',
   );
-
 }
 
 /** The sentence about which game answers a call that names neither is the same in both renderings. */
@@ -42232,44 +42228,24 @@ async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
     const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-slot-'));
     const lock = join(slots, '0.lock');
     const held: { game: ChildProcess | null } = { game: null };
-    let atThePlay: SlotHolder | null = null;
+    const atThePlay: { holder: SlotHolder | null } = { holder: null };
     try {
       await withAPlayingEditor(
         ({ adapter, project, runtimeDir }) =>
-          (tool) => {
-            if (tool === 'play_scene') {
-              atThePlay = existsSync(lock) ? holderOf(readFileSync(lock, 'utf8')) : null;
-              const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-                stdio: 'ignore',
-              });
-              held.game = game;
-              if (announces) {
-                writeFileSync(
-                  join(runtimeDir, `runtime-${String(game.pid)}.json`),
-                  JSON.stringify({
-                    protocol: RUNTIME_PROTOCOL,
-                    pid: game.pid,
-                    port: 51_996,
-                    address: '127.0.0.1',
-                    project: { name: 'Played', path: project },
-                    addon_version: SERVER_VERSION,
-                    addon_digest: shippedRuntimeDigest(),
-                    editor_pid: FAKE_EDITOR_PID,
-                  }),
-                  'utf8',
-                );
-              }
-              return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-            }
-            if (tool === 'playing_status') {
-              return { ok: true, playing: true, scenePath: '', debugPort: adapter };
-            }
-            return { ok: true };
-          },
+          (tool) =>
+            answerAsAnEditorPlayingAGameInASlot(tool, {
+              lock,
+              held,
+              announces,
+              adapter,
+              project,
+              runtimeDir,
+              atThePlay,
+            }),
         async ({ server, project, start }) => {
           await start(announces ? 5_000 : 300);
           assert.equal(
-            atThePlay?.pid,
+            atThePlay.holder?.pid,
             server.child.pid,
             `${round}: the server holds the slot as it asks for the play`,
           );
@@ -42304,6 +42280,54 @@ async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
   }
 }
 
+/** What the fake editor of the engine-slot case needs to play a game: the slot's lock, the game it holds and how it announces. */
+interface PlayedGameInASlot {
+  readonly lock: string;
+  readonly held: { game: ChildProcess | null };
+  readonly announces: boolean;
+  readonly adapter: number;
+  readonly project: string;
+  readonly runtimeDir: string;
+  readonly atThePlay: { holder: SlotHolder | null };
+}
+
+/** The fake editor's answer to one tool call: a play notes who holds the slot, then starts a game. */
+function answerAsAnEditorPlayingAGameInASlot(tool: string, play: PlayedGameInASlot): Record<string, unknown> {
+  if (tool === 'play_scene') {
+    play.atThePlay.holder = existsSync(play.lock) ? holderOf(readFileSync(play.lock, 'utf8')) : null;
+    const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    play.held.game = game;
+    if (play.announces) {
+      announceAPlayedGame(game, play.runtimeDir, play.project);
+    }
+    return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: play.adapter };
+  }
+  if (tool === 'playing_status') {
+    return { ok: true, playing: true, scenePath: '', debugPort: play.adapter };
+  }
+  return { ok: true };
+}
+
+/** Writes the record a game of the runtime addon announces itself with, tied to the fake editor. */
+function announceAPlayedGame(game: ChildProcess, runtimeDir: string, project: string): void {
+  writeFileSync(
+    join(runtimeDir, `runtime-${String(game.pid)}.json`),
+    JSON.stringify({
+      protocol: RUNTIME_PROTOCOL,
+      pid: game.pid,
+      port: 51_996,
+      address: '127.0.0.1',
+      project: { name: 'Played', path: project },
+      addon_version: SERVER_VERSION,
+      addon_digest: shippedRuntimeDigest(),
+      editor_pid: FAKE_EDITOR_PID,
+    }),
+    'utf8',
+  );
+}
+
 async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
   const rounds = [
     { round: 'inside the wait', inside: true, read: 'editor_output' },
@@ -42334,29 +42358,13 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
               game.stdout.once('data', (chunk: Buffer) => {
                 const worker = Number(String(chunk).trim());
                 void met.meet(game.pid ?? 0, worker);
-                announce = () => {
-                  for (const pid of [game.pid ?? 0, worker]) {
-                    spawned.push(pid);
-                    writeFileSync(
-                      join(runtimeDir, `runtime-${pid}.json`),
-                      JSON.stringify({
-                        protocol: RUNTIME_PROTOCOL,
-                        pid,
-                        port: 51_997,
-                        address: '127.0.0.1',
-                        project: { name: 'Played', path: project },
-                        addon_version: SERVER_VERSION,
-                        addon_digest: shippedRuntimeDigest(),
-                        editor_pid: FAKE_EDITOR_PID,
-                      }),
-                      'utf8',
-                    );
-                  }
-                  writeFileSync(
-                    join(runtimeDir, `runtime-${game.pid ?? 0}.log`),
-                    'ERROR: the game raised this\n',
-                  );
-                };
+                announce = announcementOfAGameAndItsWorker(
+                  game.pid ?? 0,
+                  worker,
+                  spawned,
+                  runtimeDir,
+                  project,
+                );
                 if (inside) {
                   announce();
                 }
@@ -42431,6 +42439,36 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
       await met.end();
     }
   }
+}
+
+/** What announces a game and its worker both, and leaves the report of the error the game raised. */
+function announcementOfAGameAndItsWorker(
+  game: number,
+  worker: number,
+  spawned: number[],
+  runtimeDir: string,
+  project: string,
+): () => void {
+  return () => {
+    for (const pid of [game, worker]) {
+      spawned.push(pid);
+      writeFileSync(
+        join(runtimeDir, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: 51_997,
+          address: '127.0.0.1',
+          project: { name: 'Played', path: project },
+          addon_version: SERVER_VERSION,
+          addon_digest: shippedRuntimeDigest(),
+          editor_pid: FAKE_EDITOR_PID,
+        }),
+        'utf8',
+      );
+    }
+    writeFileSync(join(runtimeDir, `runtime-${game}.log`), 'ERROR: the game raised this\n');
+  };
 }
 
 /**
@@ -42856,9 +42894,7 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
           }
           if (tool === 'stop_playing') {
             playing = false;
-            for (const game of games) {
-              game.kill();
-            }
+            killTheGames(games);
             return { ok: true };
           }
           return { ok: true };
@@ -42966,6 +43002,13 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
         game.kill();
       }
     }
+  }
+}
+
+/** Ends every game the stand-in editor started. */
+function killTheGames(games: readonly ChildProcess[]): void {
+  for (const game of games) {
+    game.kill();
   }
 }
 
@@ -44155,6 +44198,12 @@ async function aSubViewportCaptureIsDrawnNow(lowProcessor: boolean): Promise<voi
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-subviewport-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-subviewport-rt-'));
+  writeTheSubViewportGame(project, lowProcessor);
+  await captureTheSubViewportAsItIsNow(engine, project, runtimeDir, lowProcessor);
+}
+
+/** A game whose SubViewport turns blue after a second, and then draws nothing while it waits if the project is low-processor. */
+function writeTheSubViewportGame(project: string, lowProcessor: boolean): void {
   cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
     recursive: true,
   });
@@ -44180,6 +44229,15 @@ async function aSubViewportCaptureIsDrawnNow(lowProcessor: boolean): Promise<voi
       '[node name="Sub" type="SubViewport" parent="."]\nsize = Vector2i(4, 4)\nrender_target_update_mode = 1\n\n' +
       '[node name="Colour" type="ColorRect" parent="Sub"]\noffset_right = 4.0\noffset_bottom = 4.0\ncolor = Color(1, 0, 0, 1)\n',
   );
+}
+
+/** Plays the game and holds the capture of the SubViewport to the blue it has now, not the red it last drew. */
+async function captureTheSubViewportAsItIsNow(
+  engine: string,
+  project: string,
+  runtimeDir: string,
+  lowProcessor: boolean,
+): Promise<void> {
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
@@ -44394,136 +44452,15 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
-  let stopped = false;
+  const run = { stopped: false };
   try {
     await server.initialize('regression-test');
-    const started = parseTextContent(
-      await server.request(
-        'tools/call',
-        {
-          name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
-        },
-        WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
-    let printed = '';
-    for (let waited = 0; waited < 30_000 && !printed.includes('window open'); waited += 250) {
-      await delay(250);
-      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
-    }
-    assert.match(printed, /window open/, `the game should open its window: ${printed}`);
-    await server.request('tools/call', { name: 'runtime_wait', arguments: { op: 'frames', frames: 5 } });
-
-    const answered = await server.request(
-      'tools/call',
-      { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
-      ENGINE_CALL_TIMEOUT_MS,
-    );
-    const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
-    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
-    const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
-    // Half and half, because the window lies over the right half: all blue is the window left out,
-    // and anything else is it laid in the wrong place.
-    const even = (value: number | undefined): boolean => value !== undefined && value > 100 && value < 160;
-    assert.ok(
-      even(pixel[0]) && even(pixel[2]),
-      `the screen with the game's red window over its right half: ${pixel.join(',')}`,
-    );
-
-    // The window on its own, shown and then hidden. Hidden it holds no frame, and asking it for its
-    // image made the engine log an error into the game's output, so the run stopped unclean for the
-    // capture's doing rather than the game's.
-    const ofTheWindow = async (): Promise<JsonRpcMessage> =>
-      await server.request(
-        'tools/call',
-        {
-          name: 'runtime_capture',
-          arguments: { op: 'viewport', viewportPath: '/root/Main/Over', width: 1, height: 1 },
-        },
-        ENGINE_CALL_TIMEOUT_MS,
-      );
-    const shown = await ofTheWindow();
-    const shownImage = asArray(get(shown, 'result', 'content')).find(
-      (chunk) => get(chunk, 'type') === 'image',
-    );
-    assert.ok(shownImage !== undefined, `a shown window is captured: ${JSON.stringify(shown)}`);
-    const red = [...onePixelOf(Buffer.from(String(get(shownImage, 'data')), 'base64'))];
-    assert.ok((red[0] ?? 0) > 200 && (red[2] ?? 255) < 60, `as the red it draws: ${red.join(',')}`);
-    await server.request('tools/call', {
-      name: 'runtime_invoke',
-      arguments: { op: 'set', nodePath: '/root/Main/Over', property: 'visible', value: false },
-    });
-    const hidden = textOf(await ofTheWindow()) ?? '';
-    assert.match(
-      hidden,
-      /The Window at \/root\/Main\/Over is hidden, so nothing is drawn to it\. Show it \(its visible property\) and ask again\./,
-      hidden,
-    );
-    for (const [property, value] of [
-      ['visible', true],
-      ['mode', 1],
-    ] as const) {
-      await server.request('tools/call', {
-        name: 'runtime_invoke',
-        arguments: { op: 'set', nodePath: '/root/Main/Over', property, value },
-      });
-    }
-    // Windows minimises the window on its desktop by itself. An X server with no window manager
-    // has nobody to take the request, so there the window says whether it went.
-    const mode = get(
-      parseTextContent(
-        await server.request('tools/call', {
-          name: 'runtime_inspect',
-          arguments: { op: 'property', nodePath: '/root/Main/Over', property: 'mode' },
-        }),
-      ),
-      'value',
-    );
-    if (process.platform === 'win32' || mode === 1) {
-      const minimised = textOf(await ofTheWindow()) ?? '';
-      assert.match(
-        minimised,
-        /Nothing is being drawn to the Window at \/root\/Main\/Over, which is minimised\. Restore it and ask again\./,
-        `${minimised} (mode ${String(mode)})`,
-      );
-      // Nor is it laid over the screen: it is not on it, and its texture still holds the red it
-      // last drew over the right half.
-      const without = await server.request(
-        'tools/call',
-        { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
-        ENGINE_CALL_TIMEOUT_MS,
-      );
-      const withoutImage = asArray(get(without, 'result', 'content')).find(
-        (chunk) => get(chunk, 'type') === 'image',
-      );
-      assert.ok(withoutImage !== undefined, `the screen is still captured: ${JSON.stringify(without)}`);
-      const blue = [...onePixelOf(Buffer.from(String(get(withoutImage, 'data')), 'base64'))];
-      assert.ok(
-        (blue[0] ?? 255) < 60 && (blue[2] ?? 0) > 200,
-        `the screen without the minimised window: ${blue.join(',')}`,
-      );
-    } else {
-      console.log(
-        `minimised window capture step skipped: the window manager left it in mode ${String(mode)}`,
-      );
-    }
-    const ended = parseTextContent(
-      await server.request(
-        'tools/call',
-        { name: 'editor_run', arguments: { op: 'stop' } },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    stopped = get(ended, 'stopped') === true;
-    assert.deepEqual(
-      [get(ended, 'stopped'), get(ended, 'errors'), get(ended, 'clean')],
-      [true, 0, true],
-      `and the run stops clean, the refusal having asked the engine nothing: ${JSON.stringify(ended)}`,
-    );
+    await captureTheScreenWithTheGamesOwnWindowOverIt(server, project);
+    await captureTheOwnWindowShownAndThenHidden(server);
+    await captureTheScreenWithTheOwnWindowMinimised(server);
+    await stopTheGameWithItsOwnWindowCleanly(server, run);
   } finally {
-    if (!stopped) {
+    if (!run.stopped) {
       await server.request(
         'tools/call',
         { name: 'editor_run', arguments: { op: 'stop' } },
@@ -44533,6 +44470,153 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
     await server.stop();
     sweep(project, runtimeDir);
   }
+}
+
+/** The screenshot, brought down to one pixel, is half red where the game's own window lies over the right half. */
+async function captureTheScreenWithTheGamesOwnWindowOverIt(
+  server: ServerProcess,
+  project: string,
+): Promise<void> {
+  const started = parseTextContent(
+    await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+  let printed = '';
+  for (let waited = 0; waited < 30_000 && !printed.includes('window open'); waited += 250) {
+    await delay(250);
+    printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+  }
+  assert.match(printed, /window open/, `the game should open its window: ${printed}`);
+  await server.request('tools/call', { name: 'runtime_wait', arguments: { op: 'frames', frames: 5 } });
+
+  const answered = await server.request(
+    'tools/call',
+    { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
+    ENGINE_CALL_TIMEOUT_MS,
+  );
+  const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
+  assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+  const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
+  // Half and half, because the window lies over the right half: all blue is the window left out,
+  // and anything else is it laid in the wrong place.
+  const even = (value: number | undefined): boolean => value !== undefined && value > 100 && value < 160;
+  assert.ok(
+    even(pixel[0]) && even(pixel[2]),
+    `the screen with the game's red window over its right half: ${pixel.join(',')}`,
+  );
+}
+
+/** A capture of the window over the screen, brought down to one pixel. */
+async function captureTheOverWindow(server: ServerProcess): Promise<JsonRpcMessage> {
+  return await server.request(
+    'tools/call',
+    {
+      name: 'runtime_capture',
+      arguments: { op: 'viewport', viewportPath: '/root/Main/Over', width: 1, height: 1 },
+    },
+    ENGINE_CALL_TIMEOUT_MS,
+  );
+}
+
+/** The window on its own is captured as the red it draws while shown, and refused once hidden. */
+async function captureTheOwnWindowShownAndThenHidden(server: ServerProcess): Promise<void> {
+  // The window on its own, shown and then hidden. Hidden it holds no frame, and asking it for its
+  // image made the engine log an error into the game's output, so the run stopped unclean for the
+  // capture's doing rather than the game's.
+  const ofTheWindow = (): Promise<JsonRpcMessage> => captureTheOverWindow(server);
+  const shown = await ofTheWindow();
+  const shownImage = asArray(get(shown, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
+  assert.ok(shownImage !== undefined, `a shown window is captured: ${JSON.stringify(shown)}`);
+  const red = [...onePixelOf(Buffer.from(String(get(shownImage, 'data')), 'base64'))];
+  assert.ok((red[0] ?? 0) > 200 && (red[2] ?? 255) < 60, `as the red it draws: ${red.join(',')}`);
+  await server.request('tools/call', {
+    name: 'runtime_invoke',
+    arguments: { op: 'set', nodePath: '/root/Main/Over', property: 'visible', value: false },
+  });
+  const hidden = textOf(await ofTheWindow()) ?? '';
+  assert.match(
+    hidden,
+    /The Window at \/root\/Main\/Over is hidden, so nothing is drawn to it\. Show it \(its visible property\) and ask again\./,
+    hidden,
+  );
+  for (const [property, value] of [
+    ['visible', true],
+    ['mode', 1],
+  ] as const) {
+    await server.request('tools/call', {
+      name: 'runtime_invoke',
+      arguments: { op: 'set', nodePath: '/root/Main/Over', property, value },
+    });
+  }
+}
+
+/** A minimised window is refused where the platform minimises it, and is not laid over the screen. */
+async function captureTheScreenWithTheOwnWindowMinimised(server: ServerProcess): Promise<void> {
+  const ofTheWindow = (): Promise<JsonRpcMessage> => captureTheOverWindow(server);
+  // Windows minimises the window on its desktop by itself. An X server with no window manager
+  // has nobody to take the request, so there the window says whether it went.
+  const mode = get(
+    parseTextContent(
+      await server.request('tools/call', {
+        name: 'runtime_inspect',
+        arguments: { op: 'property', nodePath: '/root/Main/Over', property: 'mode' },
+      }),
+    ),
+    'value',
+  );
+  if (process.platform === 'win32' || mode === 1) {
+    const minimised = textOf(await ofTheWindow()) ?? '';
+    assert.match(
+      minimised,
+      /Nothing is being drawn to the Window at \/root\/Main\/Over, which is minimised\. Restore it and ask again\./,
+      `${minimised} (mode ${String(mode)})`,
+    );
+    // Nor is it laid over the screen: it is not on it, and its texture still holds the red it
+    // last drew over the right half.
+    const without = await server.request(
+      'tools/call',
+      { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const withoutImage = asArray(get(without, 'result', 'content')).find(
+      (chunk) => get(chunk, 'type') === 'image',
+    );
+    assert.ok(withoutImage !== undefined, `the screen is still captured: ${JSON.stringify(without)}`);
+    const blue = [...onePixelOf(Buffer.from(String(get(withoutImage, 'data')), 'base64'))];
+    assert.ok(
+      (blue[0] ?? 255) < 60 && (blue[2] ?? 0) > 200,
+      `the screen without the minimised window: ${blue.join(',')}`,
+    );
+  } else {
+    console.log(`minimised window capture step skipped: the window manager left it in mode ${String(mode)}`);
+  }
+}
+
+/** The run stops clean, the refusals having asked the engine nothing. Notes in [run] whether it stopped. */
+async function stopTheGameWithItsOwnWindowCleanly(
+  server: ServerProcess,
+  run: { stopped: boolean },
+): Promise<void> {
+  const ended = parseTextContent(
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  run.stopped = get(ended, 'stopped') === true;
+  assert.deepEqual(
+    [get(ended, 'stopped'), get(ended, 'errors'), get(ended, 'clean')],
+    [true, 0, true],
+    `and the run stops clean, the refusal having asked the engine nothing: ${JSON.stringify(ended)}`,
+  );
 }
 
 /**
