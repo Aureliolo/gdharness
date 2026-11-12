@@ -58558,6 +58558,41 @@ async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promis
 }
 
 /**
+ * [param childPid], holding more than [param bytes], is read at each sample while watched for memory,
+ * whether the machine is busy or not, and a process watched for its processor time alone is not.
+ */
+async function samplesReadAChildWatchedForMemory(childPid: number, bytes: number): Promise<void> {
+  watching(process.pid, true);
+  watching(childPid, true, true);
+  try {
+    await delay(1100);
+    const first = await sampled();
+    await delay(1100);
+    const second = await sampled();
+    const share = (second.machine - first.machine) / ((second.at - first.at) * availableParallelism());
+    assert.ok(
+      (second.held?.get(childPid) ?? 0) > bytes,
+      `the sample holds the child's memory at a busy share of ${String(share)} between the samples: ${JSON.stringify([...(second.held ?? [])])}`,
+    );
+    assert.equal(second.held?.has(process.pid), false, 'and not a process watched for its time alone');
+
+    watching(childPid, false);
+    await delay(1100);
+    const without = await sampled();
+    assert.equal(without.held?.has(childPid) ?? false, false, 'a sample taken while the child is unwatched');
+    watching(childPid, true, true);
+    const flagged = await sampled();
+    assert.ok(
+      (flagged.held?.get(childPid) ?? 0) > bytes,
+      `an engine watched after the newest sample is read at once, not a sample later: ${JSON.stringify([...(flagged.held ?? [])])}`,
+    );
+  } finally {
+    watching(childPid, false);
+    watching(process.pid, false);
+  }
+}
+
+/**
  * What an engine holds is read at every sample of an engine watched for memory, on a quiet machine
  * too, and the largest reading is what the engine ends with. The kernel's own reader is asked of a
  * real process that fills memory, since a reader answering kilobytes or pages, or one that left out a
@@ -58715,25 +58750,7 @@ async function testAnEngineIsReadForWhatItHolds(): Promise<void> {
         `the child filling 200 MiB holds more than that, in bytes: ${String(read.get(childPid))}`,
       );
 
-      // Read at each sample of an engine watched for memory, whether the machine is busy or not, and
-      // not for one watched for its processor time alone.
-      watching(process.pid, true);
-      watching(childPid, true, true);
-      try {
-        await delay(1100);
-        const first = await sampled();
-        await delay(1100);
-        const second = await sampled();
-        const share = (second.machine - first.machine) / ((second.at - first.at) * availableParallelism());
-        assert.ok(
-          (second.held?.get(childPid) ?? 0) > 200 * MIB,
-          `the sample holds the child's memory at a busy share of ${String(share)} between the samples: ${JSON.stringify([...(second.held ?? [])])}`,
-        );
-        assert.equal(second.held?.has(process.pid), false, 'and not a process watched for its time alone');
-      } finally {
-        watching(childPid, false);
-        watching(process.pid, false);
-      }
+      await samplesReadAChildWatchedForMemory(childPid, 200 * MIB);
 
       if (process.platform !== 'win32') {
         const seconds = (await processorSecondsOf([childPid])).get(childPid);

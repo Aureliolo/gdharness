@@ -24,8 +24,11 @@ export const STARVED = 8;
 /** The share of the machine others keep busy from which an engine counts as crowded. */
 const BUSY = 0.25;
 
-/** How often the machine and the engines whose memory is watched are read, and while it is busy every engine. */
-const SAMPLE_MS = 1000;
+/**
+ * How often the machine and the engines whose memory is watched are read, and while it is busy every
+ * engine. As often as an engine's watch looks, so an engine that lives a second is still read.
+ */
+const SAMPLE_MS = 500;
 
 /** A wait the operating system is given to answer, past which the stretch counts by the clock. */
 const ASK_TIMEOUT_MS = 3000;
@@ -154,8 +157,10 @@ let quietAt: Sample | null = null;
 export function watching(pid: number, on: boolean, memory = false): void {
   if (on) {
     watched.add(pid);
-    if (memory) {
+    if (memory && !withMemory.has(pid)) {
       withMemory.add(pid);
+      // The newest sample was taken without it, and a short engine may end before the next.
+      latest = null;
     }
   } else {
     watched.delete(pid);
