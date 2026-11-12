@@ -603,6 +603,7 @@ import {
   lanesOf,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
+  peakOf,
   readTimes,
   Shares,
   SPLIT_PAST_SECONDS,
@@ -616,6 +617,7 @@ import {
   writeJson,
 } from '../src/suite-plan.js';
 import {
+  type Admitted,
   acrossSaid,
   engineSaid,
   importEnd,
@@ -627,6 +629,7 @@ import {
   reachedAlsoSaid,
   reportsFault,
   roomSaid,
+  runShares,
   sharesSaid,
   silenceWhile,
   startsSaid,
@@ -59448,90 +59451,6 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     assert.match(memorySaid(2, 3, memory), /^Memory had room for 2 of these 3 engines at once/);
 
-    // A run held by memory starts each engine once memory has room for another, read again before
-    // each: one held all its life to the room it began with dealt 465 of 470 suites to one engine,
-    // while exports beside it freed their memory. A gate held at 6.6 GB free runs one engine, and
-    // another once the exports end and 9 GB are free.
-    const gigabytes = 1024 ** 3;
-    let freeBytes = 6.6 * gigabytes;
-    let memoryClock = 0;
-    const memoryMarks: string[] = [];
-    const memoryGate = new MemoryGate(
-      {
-        markWaiting: () => {
-          memoryMarks.push('marked');
-          return () => {
-            memoryMarks.push('taken up');
-          };
-        },
-      },
-      () => Promise.resolve(freeBytes),
-      () => memoryClock,
-      5,
-    );
-    // Ended with the case, so an assertion failing beside a wait does not leave it reading forever.
-    const caseOver = new AbortController();
-    const unended = caseOver.signal;
-    try {
-      const firstEngine = await memoryGate.admit(unended);
-      assert.deepEqual(memoryMarks, [], 'the first engine starts at once, with no mark');
-      let secondEngine: (() => void) | undefined;
-      const secondEngineComing = memoryGate
-        .admit(unended)
-        .then((ended) => {
-          secondEngine = ended;
-        })
-        .catch(() => undefined);
-      await delay(50);
-      assert.deepEqual(
-        [secondEngine, memoryMarks],
-        [undefined, ['marked']],
-        'the next waits while the memory free holds only the one, and marks its wait',
-      );
-      freeBytes = 9 * gigabytes;
-      await secondEngineComing;
-      assert.deepEqual(memoryMarks, ['marked', 'taken up'], 'and starts once memory frees, its mark gone');
-      // 9 GB beside two engines started this moment leaves 2 GB past what is kept: room for a third,
-      // but not with three counted at their whole allowance.
-      const thirdEngine = await memoryGate.admit(unended);
-      let fourthEngine: (() => void) | undefined;
-      const fourthEngineComing = memoryGate
-        .admit(unended)
-        .then((ended) => {
-          fourthEngine = ended;
-          return ended;
-        })
-        .catch(() => undefined);
-      await delay(50);
-      assert.equal(fourthEngine, undefined, 'engines just started are counted at what they will take');
-      memoryClock += 30_000;
-      const fourthAdmitted = await fourthEngineComing;
-      assert.equal(
-        typeof fourthAdmitted,
-        'function',
-        'and at what the memory read shows once they have settled',
-      );
-      for (const ended of [firstEngine, secondEngine, thirdEngine, fourthAdmitted]) {
-        ended?.();
-      }
-      freeBytes = 0;
-      const aloneEngine = await memoryGate.admit(unended);
-      assert.equal(
-        typeof aloneEngine,
-        'function',
-        'with none of its engines going, the next starts whatever is free',
-      );
-      const giveUp = new AbortController();
-      const abandoned = memoryGate.admit(giveUp.signal);
-      await delay(50);
-      giveUp.abort();
-      await assert.rejects(abandoned, 'a wait ended once every share is handed out');
-      assert.deepEqual(memoryMarks.slice(-2), ['marked', 'taken up'], 'and its mark goes with it');
-      aloneEngine();
-    } finally {
-      caseOver.abort();
-    }
-
     let going = 0;
     let most = 0;
     const turned = await inTurns([30, 10, 20, 5], 2, async (wait, index) => {
@@ -59616,25 +59535,29 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       times,
       [big, small],
       [
-        readRun(
-          [
-            `Run Test Suite: ${big.path}`,
-            caseLine(big.path, 'test_x', 'PASSED', '3s 0ms'),
-            `Statistics: 1 test cases | PASSED 4s 0ms`,
-          ].join('\n'),
-        ),
-        readRun(
-          [
-            `Run Test Suite: ${big.path}`,
-            caseLine(big.path, 'test_y', 'PASSED', '1s 0ms'),
-            caseLine(big.path, 'test_gone', 'PASSED', '1s 0ms'),
-            `Statistics: 2 test cases | PASSED 2s 500ms`,
-            `Run Test Suite: ${small.path}`,
-            caseLine(small.path, 'test_s:0 (1)', 'PASSED', '200ms'),
-            caseLine(small.path, 'test_s:1 (2)', 'PASSED', '300ms'),
-            `Statistics: 2 test cases | PASSED 600ms`,
-          ].join('\n'),
-        ),
+        {
+          printed: readRun(
+            [
+              `Run Test Suite: ${big.path}`,
+              caseLine(big.path, 'test_x', 'PASSED', '3s 0ms'),
+              `Statistics: 1 test cases | PASSED 4s 0ms`,
+            ].join('\n'),
+          ),
+        },
+        {
+          printed: readRun(
+            [
+              `Run Test Suite: ${big.path}`,
+              caseLine(big.path, 'test_y', 'PASSED', '1s 0ms'),
+              caseLine(big.path, 'test_gone', 'PASSED', '1s 0ms'),
+              `Statistics: 2 test cases | PASSED 2s 500ms`,
+              `Run Test Suite: ${small.path}`,
+              caseLine(small.path, 'test_s:0 (1)', 'PASSED', '200ms'),
+              caseLine(small.path, 'test_s:1 (2)', 'PASSED', '300ms'),
+              `Statistics: 2 test cases | PASSED 600ms`,
+            ].join('\n'),
+          ),
+        },
       ],
       // shown_test.gd is gone from the project.
       (path) => [big, small, edge].find((one) => one.path === path) ?? null,
@@ -59754,12 +59677,14 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         rowTimes,
         [lone_],
         [
-          rowRun(lone_.path, [[0, '1s 0ms']]),
-          rowRun(lone_.path, [
-            [1, '2s 0ms'],
-            [2, '1s 0ms'],
-            [3, '1s 0ms'],
-          ]),
+          { printed: rowRun(lone_.path, [[0, '1s 0ms']]) },
+          {
+            printed: rowRun(lone_.path, [
+              [1, '2s 0ms'],
+              [2, '1s 0ms'],
+              [3, '1s 0ms'],
+            ]),
+          },
         ],
         declaredNow,
       )[lone_.path],
@@ -59768,7 +59693,9 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'a row grown since is timed, and the case is its rows added up',
     );
     assert.deepEqual(
-      timesAfter(rowTimes, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
+      timesAfter(rowTimes, [lone_], [{ printed: rowRun(lone_.path, [[0, '1s 0ms']]) }], declaredNow)[
+        lone_.path
+      ],
       { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
       'every engine holding it having finished, a case with fewer rows is timed as it is now',
     );
@@ -59779,7 +59706,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         'Statistics: 1 test cases | PASSED 12s 500ms',
       ].join('\n'),
     );
-    const noLongerRows = timesAfter(rowTimes, [lone_], [plainRun], declaredNow);
+    const noLongerRows = timesAfter(rowTimes, [lone_], [{ printed: plainRun }], declaredNow);
     assert.deepEqual(
       noLongerRows[lone_.path],
       { seconds: 12.5, cases: { test_only: 12 } },
@@ -59791,12 +59718,14 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'so it is dealt whole, to one engine',
     );
     assert.deepEqual(
-      timesAfter({}, [lone_], [plainRun], declaredNow)[lone_.path],
+      timesAfter({}, [lone_], [{ printed: plainRun }], declaredNow)[lone_.path],
       { seconds: 12.5, cases: { test_only: 12 } },
       'with no times before it is timed whole',
     );
     assert.deepEqual(
-      timesAfter(noLongerRows, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
+      timesAfter(noLongerRows, [lone_], [{ printed: rowRun(lone_.path, [[0, '1s 0ms']]) }], declaredNow)[
+        lone_.path
+      ],
       { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
       'and a case that gained rows is timed by them',
     );
@@ -59809,7 +59738,10 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       timesAfter(
         rowTimes,
         [lone_],
-        [rowRun(lone_.path, [[0, '1s 0ms']]), rowRun(lone_.path, [[1, '2s 0ms']], false)],
+        [
+          { printed: rowRun(lone_.path, [[0, '1s 0ms']]) },
+          { printed: rowRun(lone_.path, [[1, '2s 0ms']], false) },
+        ],
         declaredNow,
         new Set([`${lone_.path}:test_only`]),
       )[lone_.path],
@@ -62890,6 +62822,467 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
       `dealt by the times in the file named, the project's own being empty: ${byGateTimes.said}`,
     );
     assert.equal(readFileSync(own, 'utf8'), '{}\n', "the project's own left as it was");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
+/**
+ * An engine is sized by the most memory one holding its suites was seen to hold, kept with the
+ * suite times, and the gate counts a going engine at what it has yet to take.
+ */
+async function testAnEngineIsSizedByWhatItWasSeenToHold(): Promise<void> {
+  const gib = 1024 ** 3;
+  const gateOf = (read: () => Promise<number>, lookMs = 5): { gate: MemoryGate; marks: string[] } => {
+    const marks: string[] = [];
+    const gate = new MemoryGate(
+      {
+        markWaiting: () => {
+          marks.push('marked');
+          return () => {
+            marks.push('taken up');
+          };
+        },
+      },
+      read,
+      lookMs,
+    );
+    return { gate, marks };
+  };
+  // Ended with the case, so an assertion failing beside a wait does not leave it reading forever.
+  const caseOver = new AbortController();
+  const asked = (gate: MemoryGate, signal: AbortSignal, need: () => number): Promise<Admitted> => {
+    const pending = gate.admit(signal, need);
+    pending.catch(() => undefined);
+    return pending;
+  };
+  const within = (pending: Promise<Admitted>, ms: number): Promise<Admitted | undefined> =>
+    Promise.race([pending, delay(ms).then(() => undefined)]);
+  try {
+    // Free memory falls by what the first engine holds. The second waits while the first has yet to
+    // take its 3 GiB and after it has taken them, since 8 GiB less 3 held and 4 kept is 1 GiB.
+    let heldByFirst = 0;
+    const waiting = gateOf(() => Promise.resolve(8 * gib - heldByFirst));
+    const first = await asked(waiting.gate, caseOver.signal, () => 3 * gib);
+    const second = asked(waiting.gate, caseOver.signal, () => 1.5 * gib);
+    assert.equal(
+      await within(second, 100),
+      undefined,
+      'a second engine waits for the first to take its 3 GiB',
+    );
+    heldByFirst = 3 * gib;
+    first.holds(heldByFirst);
+    assert.equal(await within(second, 100), undefined, 'and after it has taken them, with 1 GiB left');
+    assert.deepEqual(waiting.marks, ['marked'], 'with one mark for the whole wait');
+    first.ended();
+    assert.notEqual(await within(second, 2000), undefined, 'until the first ends and none is going');
+    assert.deepEqual(waiting.marks, ['marked', 'taken up'], 'its mark gone');
+    (await second).ended();
+
+    // A going engine that holds all it needs is counted at nothing: free memory shows what it holds.
+    const roomy = gateOf(() => Promise.resolve(6 * gib));
+    const holder = await asked(roomy.gate, caseOver.signal, () => 3 * gib);
+    holder.holds(3 * gib);
+    const beside = await within(
+      asked(roomy.gate, caseOver.signal, () => 1.5 * gib),
+      2000,
+    );
+    assert.notEqual(beside, undefined, '1.5 GiB is admitted at once beside an engine holding its 3 GiB');
+    assert.deepEqual(roomy.marks, [], 'with no wait');
+    beside?.ended();
+    holder.ended();
+
+    // The need is read at each look, since the share a lane would draw changes as others draw theirs.
+    const reading = gateOf(() => Promise.resolve(6.5 * gib));
+    const going = await asked(reading.gate, caseOver.signal, () => 1 * gib);
+    let looks = 0;
+    const changing = await within(
+      asked(reading.gate, AbortSignal.timeout(2000), () => {
+        looks += 1;
+        return looks === 1 ? 3 * gib : 1 * gib;
+      }),
+      2000,
+    );
+    assert.notEqual(
+      changing,
+      undefined,
+      `a need that falls to 1 GiB is admitted, after ${String(looks)} looks`,
+    );
+    assert.ok(looks >= 2, 'having waited at the first');
+    changing?.ended();
+    going.ended();
+
+    // The first engine of a run starts whatever it needs.
+    const empty = gateOf(() => Promise.resolve(0));
+    const huge = await within(
+      asked(empty.gate, AbortSignal.timeout(2000), () => 64 * gib),
+      2000,
+    );
+    assert.notEqual(huge, undefined, 'a peak past the machine still runs alone');
+    huge?.ended();
+
+    // What the gate sums is taken before its memory read, since a reading told while the read is out
+    // would otherwise count as owed no longer and as free memory too: 8 GiB in all, 4 kept, one
+    // going engine needing 3, a 1.5 GiB need.
+    let used = 1 * gib;
+    const ordered = gateOf(() => {
+      const free = 8 * gib - used;
+      return delay(10).then(() => free);
+    });
+    const growing = await asked(ordered.gate, caseOver.signal, () => 3 * gib);
+    growing.holds(used);
+    const late = asked(ordered.gate, caseOver.signal, () => 1.5 * gib);
+    setTimeout(() => {
+      used = 3 * gib;
+      growing.holds(used);
+    }, 5);
+    assert.equal(
+      await within(late, 200),
+      undefined,
+      'a reading told during the read is not counted twice as free: 1 GiB is left past what is kept',
+    );
+    growing.ended();
+    assert.notEqual(await within(late, 2000), undefined, 'and the wait ends once no engine is going');
+    (await late).ended();
+
+    // The lane in runShares waits on the share it would draw now.
+    const suite = (path: string, windowed = false): DeclaredSuite => ({
+      path,
+      cases: ['test_one'],
+      windowed,
+      headless: false,
+      together: false,
+      accessible: false,
+    });
+    const timed = (seconds: number, peakGiB: number): SuiteTimes[string] => ({
+      seconds,
+      cases: { test_one: seconds },
+      peak: peakGiB * gib,
+    });
+    const dealtRun = async (times: SuiteTimes, free: number): Promise<string[]> => {
+      const paths = Object.keys(times);
+      const suites = paths.map((path) => suite(path));
+      const events: string[] = [];
+      let started = 0;
+      const run = async (plan: EnginePlan, index: number): Promise<{ index: number }> => {
+        const name = plan.suites.map((one) => one.path.replace('res://', '')).join('+');
+        events.push(`start ${name}`);
+        started += 1;
+        const mine = started;
+        const deadline = Date.now() + 2000;
+        const alone = (): boolean => started === mine;
+        while (alone() && Date.now() < deadline) {
+          await delay(5);
+        }
+        events.push(`end ${name}`);
+        return { index };
+      };
+      await runShares(
+        { take: () => Promise.reject(new Error('every lane holds a slot')), release: () => undefined },
+        unitsOf(suites, times),
+        new Map(suites.map((one) => [one.path, one.cases])),
+        2,
+        ['one', 'two'],
+        times,
+        run,
+        undefined,
+        gateOf(() => Promise.resolve(free * gib), 1).gate,
+      );
+      return events;
+    };
+    const lightFirst = await dealtRun(
+      {
+        'res://s1_test.gd': timed(60, 0.5),
+        'res://s2_test.gd': timed(50, 0.5),
+        'res://h_test.gd': timed(10, 3),
+      },
+      6,
+    );
+    assert.ok(
+      lightFirst.includes('start s2_test.gd') &&
+        lightFirst.indexOf('start s2_test.gd') < lightFirst.indexOf('end s1_test.gd'),
+      `the second light engine starts beside the first, not held by the heavy suite left: ${lightFirst.join(', ')}`,
+    );
+    assert.ok(lightFirst.includes('start h_test.gd'), 'and the heavy one runs in the end');
+    assert.deepEqual(
+      await dealtRun({ 'res://a_test.gd': timed(60, 0.5), 'res://b_test.gd': timed(40, 3) }, 6),
+      ['start a_test.gd', 'end a_test.gd', 'start b_test.gd', 'end b_test.gd'],
+      'a heavy share waits for the light one before it, sized by itself and not by the one drawn',
+    );
+
+    // What the next share is, drawing nothing: windowed units first, as next hands them.
+    const mixed = [suite('res://w_test.gd', true), suite('res://x_test.gd'), suite('res://y_test.gd')];
+    const mixedTimes: SuiteTimes = {
+      'res://w_test.gd': timed(40, 3),
+      'res://x_test.gd': timed(40, 0.5),
+      'res://y_test.gd': timed(40, 0.5),
+    };
+    const shares = new Shares(
+      unitsOf(mixed, mixedTimes),
+      new Map(mixed.map((one) => [one.path, one.cases])),
+      2,
+    );
+    assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'the windowed suite comes first');
+    assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'and looking hands out nothing');
+    assert.deepEqual(
+      shares.next(0)?.suites.map((one) => one.path),
+      ['res://w_test.gd'],
+      'next hands what peek listed',
+    );
+    const afterwards = shares.peek();
+    assert.deepEqual(afterwards, ['res://x_test.gd'], 'then the headless share');
+    assert.deepEqual(
+      shares.next(1)?.suites.map((one) => one.path),
+      afterwards,
+      'which next hands as peek listed it',
+    );
+
+    // The start's room and its line, with an engine's own size.
+    assert.deepEqual(
+      roomFor(2, 16, 8 * gib, 'of memory left to commit', undefined, {
+        bytes: 3 * gib,
+        said: 'taken for each engine, the most one holding these suites was seen to hold',
+      }),
+      {
+        engines: 1,
+        held: 'the machine has 8.0 GB of memory left to commit, 4.0 GB of it kept for everything else and 3.0 GB taken for each engine, the most one holding these suites was seen to hold',
+      },
+      'divided by what an engine needs, not by 1.5 GB',
+    );
+
+    // The most a share's suites were seen to hold, or the size taken for one with none.
+    const peaks: SuiteTimes = {
+      'res://big_test.gd': timed(1, 3),
+      'res://small_test.gd': timed(1, 0.6),
+      'res://none_test.gd': { seconds: 1, cases: {} },
+    };
+    assert.deepEqual(
+      peakOf(['res://big_test.gd', 'res://none_test.gd'], peaks, 1.5 * gib),
+      { bytes: 3 * gib, seen: true },
+      'the largest peak kept for any of them',
+    );
+    assert.deepEqual(
+      peakOf(['res://none_test.gd'], peaks, 1.5 * gib),
+      { bytes: 1.5 * gib, seen: false },
+      'a suite with none is taken at the size given',
+    );
+    assert.deepEqual(
+      peakOf(['res://small_test.gd'], peaks, 1.5 * gib),
+      { bytes: 0.6 * gib, seen: true },
+      'a peak below that size stands',
+    );
+    assert.deepEqual(
+      peakOf([], peaks, 1.5 * gib),
+      { bytes: 1.5 * gib, seen: false },
+      'and no suite has none',
+    );
+
+    // A renamed suite's peak goes with its record and is never read for the suite that replaced it.
+    const renamed: SuiteTimes = { 'res://old_test.gd': timed(1, 3) };
+    assert.deepEqual(
+      peakOf(['res://new_test.gd'], renamed, 1.5 * gib),
+      { bytes: 1.5 * gib, seen: false },
+      'the new name has no peak',
+    );
+    assert.deepEqual(
+      timesAfter(renamed, [], [], () => null),
+      {},
+      'and the old one is dropped with its peak',
+    );
+
+    // A suite closed this run takes its engines' largest peak, and one not closed keeps its own.
+    const names = ['a', 'b', 'c', 'd', 'e', 'f'].map((name) => `res://${name}_test.gd`);
+    const [a, b, c, d, e, f] = names.map((path) => suite(path));
+    const before: SuiteTimes = {
+      [a?.path ?? '']: timed(1, 0.5),
+      [b?.path ?? '']: timed(1, 2),
+      [c?.path ?? '']: timed(1, 1.2),
+      [e?.path ?? '']: timed(1, 3),
+      [f?.path ?? '']: timed(1, 2),
+    };
+    const closed = (path: string): ReturnType<typeof readRun> =>
+      readRun(
+        [
+          `Run Test Suite: ${path}`,
+          caseLine(path, 'test_one', 'PASSED', '1s 0ms'),
+          'Statistics: 1 test cases | PASSED 1s 0ms',
+        ].join('\n'),
+      );
+    const declaredAll = [a, b, c, d, e, f].flatMap((one) => (one === undefined ? [] : [one]));
+    const after = timesAfter(
+      before,
+      declaredAll,
+      [
+        { printed: closed(a?.path ?? ''), peakBytes: 1 * gib },
+        { printed: closed(a?.path ?? ''), peakBytes: 3 * gib },
+        { printed: closed(c?.path ?? '') },
+        { printed: closed(d?.path ?? '') },
+        { printed: closed(e?.path ?? ''), peakBytes: 1 * gib },
+        { printed: closed(f?.path ?? ''), peakBytes: 0 },
+      ],
+      (path) => declaredAll.find((one) => one.path === path) ?? null,
+    );
+    assert.deepEqual(
+      names.map((path) => after[path]?.peak),
+      [3 * gib, 2 * gib, 1.2 * gib, undefined, 1 * gib, 2 * gib],
+      'the largest of its engines, replacing the old: a kept one not run, one run with no reading, and one read as 0 keep theirs, and a smaller one replaces',
+    );
+    assert.equal(
+      Object.hasOwn(after[d?.path ?? ''] ?? {}, 'peak'),
+      false,
+      'a suite never read has no peak key',
+    );
+    assert.deepEqual(after[b?.path ?? ''], before[b?.path ?? ''], 'a suite not run keeps its record whole');
+
+    // Kept with the times, and read back: a peak that is no number above 0 reads as none.
+    const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-peaks-'));
+    try {
+      const file = join(folder, 'suite-times.json');
+      assert.equal(writeJson(file, peaks), true, 'the times are written');
+      assert.deepEqual(readTimes(file), peaks, 'and read back as they were');
+      const odd = (peak: string): string => `{"seconds":1,"cases":{},"peak":${peak}}`;
+      writeFileSync(
+        file,
+        `{"zero":${odd('0')},"endless":${odd('1e999')},"below":${odd('-1')},"text":${odd('"3"')},"fine":${odd('2048')}}`,
+      );
+      const read = readTimes(file);
+      assert.deepEqual(
+        Object.entries(read).map(([path, time]) => [path, time.peak]),
+        [
+          ['zero', undefined],
+          ['endless', undefined],
+          ['below', undefined],
+          ['text', undefined],
+          ['fine', 2048],
+        ],
+        'a peak of 0, 1e999, below 0 or text reads as none',
+      );
+      assert.deepEqual(
+        peakOf(['zero'], read, 1.5 * gib),
+        { bytes: 1.5 * gib, seen: false },
+        'so a kept 0 is never an engine size',
+      );
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  } finally {
+    caseOver.abort();
+  }
+}
+
+/**
+ * A test run is held to what its suites were seen to hold: an engine starts once memory covers the
+ * most any suite of the run was seen to hold, and the run keeps what each engine held.
+ */
+function testATestRunIsHeldToWhatItsSuitesWereSeenToHold(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('held-by-peaks regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-peaks-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  try {
+    const suite = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(1)\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="PeaksHeld"\n',
+      'tests/a_held_test.gd': suite('a'),
+      'tests/b_beside_test.gd': suite('b'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const gateTimes = join(project, 'gate', 'suite-times.json');
+    const resultFile = join(project, 'gate', 'result.json');
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        [
+          'build/cli.js',
+          'test',
+          project,
+          '--slots',
+          slots,
+          '--times',
+          gateTimes,
+          '--result',
+          resultFile,
+          ...args,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const keep = (times: Record<string, unknown>): void => {
+      mkdirSync(dirname(gateTimes), { recursive: true });
+      writeFileSync(gateTimes, JSON.stringify(times));
+    };
+    const a = 'res://tests/a_held_test.gd';
+    const b = 'res://tests/b_beside_test.gd';
+    const huge = 1024 ** 5;
+
+    keep({
+      [a]: { seconds: 40, cases: { test_a: 40 }, peak: huge },
+      [b]: { seconds: 40, cases: { test_b: 40 } },
+    });
+    const held = test('--engines', '2', '--slot-count', '2');
+    assert.equal(held.status, 0, held.said);
+    assert.match(
+      held.said,
+      /1048576\.0 GB taken for each engine, the most one/,
+      `engines sized by the peak kept: ${held.said}`,
+    );
+    const heldResult = readRunResult(resultFile);
+    const [zeroth, next] = heldResult.engines;
+    assert.ok(zeroth !== undefined && next !== undefined, `two engines ran: ${held.said}`);
+    assert.ok(
+      next.startedAfter >= zeroth.startedAfter + zeroth.seconds - 0.001,
+      `engine 1 started after engine 0 ended: ${JSON.stringify(heldResult.engines)}`,
+    );
+    const sixteenMiB = 16 * 1024 ** 2;
+    const terabyte = 1024 ** 4;
+    for (const engine of heldResult.engines) {
+      assert.ok(
+        typeof engine.peakBytes === 'number' && engine.peakBytes > sixteenMiB && engine.peakBytes < terabyte,
+        `an engine's peak is what it held: ${String(engine.peakBytes)}`,
+      );
+    }
+    const recorded = readTimes(gateTimes);
+    for (const path of [a, b]) {
+      const peak = recorded[path]?.peak;
+      assert.ok(
+        peak !== undefined && peak > sixteenMiB && peak < terabyte,
+        `${path} keeps what its engine held in place of the figure it had: ${String(peak)}`,
+      );
+    }
+
+    // Held to one slot, an engine is no longer admitted before it has a slot: two engines still run.
+    keep({
+      [a]: { seconds: 40, cases: { test_a: 40 }, peak: huge },
+      [b]: { seconds: 40, cases: { test_b: 40 }, peak: huge },
+    });
+    const oneSlot = test('--engines', '2', '--slot-count', '1');
+    assert.equal(oneSlot.status, 0, oneSlot.said);
+    assert.equal(readRunResult(resultFile).engines.length, 2, `two engines ran in one slot: ${oneSlot.said}`);
+
+    // A peak kept for a suite no file is sizes nothing.
+    keep({ 'res://tests/renamed_test.gd': { seconds: 40, cases: { test_r: 40 }, peak: huge } });
+    const renamed = test('--engines', '2', '--slot-count', '2');
+    assert.equal(renamed.status, 0, renamed.said);
+    assert.doesNotMatch(renamed.said, /1048576\.0 GB/, 'a suite that is no file sizes no engine');
+    assert.deepEqual(
+      Object.keys(readTimes(gateTimes)).toSorted(),
+      [a, b],
+      'and its record is gone, the suites that ran recorded',
+    );
   } finally {
     rmSync(project, { recursive: true, force: true });
     rmSync(slots, { recursive: true, force: true });
@@ -91085,6 +91478,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer,
   testARegistryThatIsDownIsAskedOnADoublingWindow,
   testAnEngineIsReadForWhatItHolds,
+  testAnEngineIsSizedByWhatItWasSeenToHold,
+  testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
 ];
 
 /**

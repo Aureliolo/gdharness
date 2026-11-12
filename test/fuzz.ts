@@ -39,7 +39,13 @@ import {
   sweepTranscripts,
   writeRunRecord,
 } from '../src/run-record.js';
-import { type CasesBySuite, type DeclaredSuite, type SuiteTimes, unitsOf } from '../src/suite-plan.js';
+import {
+  type CasesBySuite,
+  type DeclaredSuite,
+  peakOf,
+  type SuiteTimes,
+  unitsOf,
+} from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -1008,7 +1014,6 @@ function junkIsNeverAReport(): void {
 const GIB = 1024 ** 3;
 const ENGINE_BYTES = 1.5 * GIB;
 const KEPT_BYTES = 4 * GIB;
-const CLOCK_MOVE_MS = 30_000;
 const IDLE_STEPS_BEFORE_HUNG = 100;
 const SETTLE_ROUNDS_BEFORE_STUCK = 1000;
 
@@ -1069,6 +1074,8 @@ interface RunSetup {
   readonly lanes: number;
   readonly suites: number;
   readonly freeGiB: number;
+  /** What each suite was seen to hold, in GiB, in suite order. */
+  readonly peaksGiB: readonly number[];
 }
 
 interface Ran {
@@ -1088,8 +1095,14 @@ function enginesByMemory(freeGiB: number): number {
   return Math.max(1, Math.floor((freeGiB * GIB - KEPT_BYTES) / ENGINE_BYTES));
 }
 
-/** Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part of one. */
-function suitesOf(count: number): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite } {
+/**
+ * Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part
+ * of one. Suite `at` was seen to hold `peaksGiB[at]`.
+ */
+function suitesOf(
+  count: number,
+  peaksGiB: readonly number[],
+): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite; times: SuiteTimes } {
   const paths = Array.from({ length: count }, (_, at) => `res://suite_${String(at)}.gd`);
   const suites: DeclaredSuite[] = paths.map((path) => ({
     path,
@@ -1100,9 +1113,16 @@ function suitesOf(count: number): { units: ReturnType<typeof unitsOf>; declared:
     accessible: false,
   }));
   const times: SuiteTimes = Object.fromEntries(
-    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 } }]),
+    paths.map((path, at) => [
+      path,
+      { seconds: 40, cases: { test_one: 40 }, peak: (peaksGiB[at] ?? 1.5) * GIB },
+    ]),
   );
-  return { units: unitsOf(suites, times), declared: new Map(paths.map((path) => [path, ['test_one']])) };
+  return {
+    units: unitsOf(suites, times),
+    declared: new Map(paths.map((path) => [path, ['test_one']])),
+    times,
+  };
 }
 
 function takeFreeSlots(slots: StandInSlots, count: number): string[] {
@@ -1126,35 +1146,47 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
       slots.release('outside');
     });
   }
-  let clock = 0;
-  for (let move = 0; move < 4; move += 1) {
-    void s.schedule(Promise.resolve(), 'clock moves 30 s').then(() => {
-      clock += CLOCK_MOVE_MS;
-    });
-  }
-  let running = 0;
+  // Each going engine tells what its share was seen to hold at a point the scheduler picks, and the
+  // memory read falls by what the engines have told.
+  const going = new Map<number, { readonly need: number; held: number }>();
   let hung = false;
+  const told = (): number => [...going.values()].reduce((sum, one) => sum + one.held, 0);
   const free = (): Promise<number> =>
-    hung
-      ? Promise.reject(new Error('judged hung'))
-      : Promise.resolve(setup.freeGiB * GIB - running * ENGINE_BYTES);
-  const gate = new MemoryGate(slots, free, () => clock, 1);
+    hung ? Promise.reject(new Error('judged hung')) : Promise.resolve(setup.freeGiB * GIB - told());
+  const gate = new MemoryGate(slots, free, 1);
   const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
-  const { units, declared } = suitesOf(setup.suites);
+  const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
+    _lock: string,
+    holds?: (bytes: number) => void,
   ): Promise<Ran> => {
-    running += 1;
-    peak.engines = Math.max(peak.engines, running);
-    const engine: Ran = { index, suites: plan.suites.map((suite) => suite.path) };
-    return s.schedule(Promise.resolve(engine), `engine ${String(index)} ends`).finally(() => {
-      running -= 1;
+    const suites = plan.suites.map((suite) => suite.path);
+    const need = peakOf(suites, times, ENGINE_BYTES).bytes;
+    const owed = [...going.values()].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
+    if (going.size > 0) {
+      assert.ok(
+        setup.freeGiB * GIB - told() - KEPT_BYTES - owed >= need,
+        `engine ${String(index)} started needing ${String(need / GIB)} GiB without room`,
+      );
+    }
+    const engine = { need, held: 0 };
+    going.set(index, engine);
+    peak.engines = Math.max(peak.engines, going.size);
+    void s.schedule(Promise.resolve(), `engine ${String(index)} tells`).then(() => {
+      if (going.get(index) === engine) {
+        engine.held = need;
+        holds?.(need);
+      }
+    });
+    return s.schedule(Promise.resolve({ index, suites }), `engine ${String(index)} ends`).finally(() => {
+      going.delete(index);
     });
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, run, undefined, gate)
+  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate)
     .then(
       (ran) => {
         result = ran;
@@ -1223,11 +1255,12 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
         fc.integer({ min: 2, max: 3 }),
         fc.integer({ min: 2, max: 5 }),
         fc.constantFrom(4.5, 5, 6.5, 8),
-        async (s, slotCount, outsideHolds, lanes, suites, freeGiB) => {
+        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 5, maxLength: 5 }),
+        async (s, slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB) => {
           if (enginesByMemory(freeGiB) >= lanes) {
             return;
           }
-          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB }, peak);
+          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB }, peak);
           if (!(await stepUntilEnded(s, started))) {
             await endHungRun(started);
             throw new Error(
@@ -1238,7 +1271,7 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
           const ran = started.ran() ?? [];
           assert.deepEqual(
             ran.flatMap((engine) => engine.suites).toSorted(),
-            suitesOf(suites)
+            suitesOf(suites, peaksGiB)
               .units.map((unit) => unit.suite)
               .toSorted(),
           );
@@ -1250,7 +1283,7 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
   } finally {
     jest.useRealTimers();
   }
-  assert.equal(peak.engines, 2);
+  assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
 }
 
 framesRoundTripUnderAnyChunking();
