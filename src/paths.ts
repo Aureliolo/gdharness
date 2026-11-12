@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
@@ -26,15 +26,6 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
  * already exist and the boundary has to hold against a link out of the project, resolve the real
  * path first and hand that in, which is what the LSP tools do.
  */
-
-/**
- * Whether [param directory] holds a `project.godot` of its own. The engine's scan steps over such a
- * folder below the project's root and warns that it detected another project, so nothing in it is
- * imported or loaded. The root holds one too, so a walk asks this of the folders below it only.
- */
-export function holdsAProject(directory: string): boolean {
-  return existsSync(join(directory, 'project.godot'));
-}
 
 /** How Godot spells the project root. Callers pass paths with and without it. */
 const RESOURCE_SCHEME = 'res://';

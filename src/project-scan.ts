@@ -7,7 +7,7 @@ import { type Dirent, existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { holdsAProject, relativeWithin } from './paths.js';
+import { relativeWithin } from './paths.js';
 import { uidCacheEntries } from './uid-cache.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
@@ -42,16 +42,6 @@ export const VERSION_MARKER = '.gdharness-version';
  */
 function steppedOver(directory: string): boolean {
   return gdignored(directory) || installedByUs(directory);
-}
-
-/** [method steppedOver] for a folder below the project's root, which also steps over a nested project. */
-function steppedOverBelow(directory: string): boolean {
-  return steppedOver(directory) || holdsAProject(directory);
-}
-
-/** [method steppedOver] for [param directory], the walk's start when [param atRoot], else a folder below it. */
-function steppedOverFrom(directory: string, atRoot: boolean): boolean {
-  return atRoot ? steppedOver(directory) : steppedOverBelow(directory);
 }
 
 function gdignored(directory: string): boolean {
@@ -134,10 +124,7 @@ function countFilesIn(structure: ProjectStructure, directory: string): void {
       continue;
     }
     if (entry.isDirectory()) {
-      const inner = join(directory, entry.name);
-      if (!holdsAProject(inner)) {
-        countFilesIn(structure, inner);
-      }
+      countFilesIn(structure, join(directory, entry.name));
     } else if (entry.isFile()) {
       const kind = kindOfFile(extensionOf(entry.name));
       if (kind !== null) {
@@ -195,7 +182,7 @@ export function underGdignore(projectPath: string, relativePath: string): boolea
 export interface SteppedOver {
   /** Relative to the folder walked, with forward slashes. Empty for that folder itself. */
   readonly folder: string;
-  readonly why: 'gdignore' | 'gdharness' | 'project';
+  readonly why: 'gdignore' | 'gdharness';
 }
 
 /**
@@ -232,9 +219,6 @@ function whySteppedOver(directory: string): SteppedOver['why'] | null {
   if (gdignored(directory)) {
     return 'gdignore';
   }
-  if (holdsAProject(directory)) {
-    return 'project';
-  }
   return installedByUs(directory) ? 'gdharness' : null;
 }
 
@@ -253,7 +237,7 @@ function filesBelow(root: string, extensions: readonly string[]): string[] {
       const spelled = spelledUnder(prefix, entry.name);
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!steppedOverBelow(path)) {
+        if (!steppedOver(path)) {
           visit(path, spelled);
         }
       } else if (isWantedFile(entry, extensions)) {
@@ -283,7 +267,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
     CARRIES_A_UID.has(extensionOf(entry.name)) &&
     !existsSync(join(directory, `${entry.name}.uid`));
   const visit = (directory: string, prefix: string): void => {
-    if (steppedOverFrom(directory, prefix === '')) {
+    if (steppedOver(directory)) {
       return;
     }
     for (const entry of entriesOf(directory)) {
@@ -371,7 +355,7 @@ export interface SearchResult {
     total_matches: number;
     truncated: boolean;
   };
-  /** The folders a `.gdignore` or a `project.godot` of their own kept out, which a search for words the project holds may want. */
+  /** The folders a `.gdignore` kept out, which a search for words the project holds may want. */
   not_searched?: string[];
   /**
    * Why nothing was searched, when the extensions asked for matched no file, and that the place
@@ -411,9 +395,6 @@ function whyAWholeSearchSkips(step: string, at: string): string | null {
   if (gdignored(at)) {
     return 'it holds a .gdignore';
   }
-  if (holdsAProject(at)) {
-    return 'it holds a project.godot of its own, which makes it another project';
-  }
   return installedByUs(at) ? 'gdharness installed it' : null;
 }
 
@@ -449,7 +430,7 @@ const BINARY_EXTENSIONS = new Set([
 
 /**
  * Every text file of the project the engine would see, as the search walks them: dot directories,
- * node_modules, directories holding a `.gdignore` and nested projects are stepped over, and a file is text when its
+ * node_modules and directories holding a `.gdignore` are stepped over, and a file is text when its
  * first eight thousand bytes hold no NUL.
  */
 export function projectTexts(projectPath: string): ProjectText[] {
@@ -459,7 +440,7 @@ export function projectTexts(projectPath: string): ProjectText[] {
 }
 
 function collectTexts(found: ProjectText[], directory: string, prefix: string): void {
-  if (steppedOverFrom(directory, prefix === '')) {
+  if (steppedOver(directory)) {
     return;
   }
   for (const entry of entriesOf(directory)) {
@@ -489,36 +470,27 @@ function textOf(absolute: string, spelled: string): ProjectText | null {
   return { path: `res://${spelled}`, absolute, text: bytes.toString('utf8') };
 }
 
-/** Why the engine leaves a folder's files out: a `.gdignore`, or a `project.godot` of the folder's own. */
-export type IgnoredBy = 'gdignore' | 'project';
-
-/** A text file the engine never loads, with why. */
-export interface IgnoredText extends ProjectText {
-  readonly why: IgnoredBy;
-}
-
 /**
- * The text files under the directories [projectTexts] steps over for holding a `.gdignore` or a
- * `project.godot` of their own: copies the engine never loads, such as a mod kit's sources, which
- * still name the project's classes and are still broken by a rename. Dot directories and
- * node_modules are stepped over here too.
+ * The text files under the directories [projectTexts] steps over for holding a `.gdignore`: copies
+ * the engine never loads, such as a mod kit's sources, which still name the project's classes and
+ * are still broken by a rename. Dot directories and node_modules are stepped over here too.
  */
-export function ignoredTexts(projectPath: string): IgnoredText[] {
-  const found: IgnoredText[] = [];
-  collectIgnoredTexts(found, projectPath, '', null);
+export function ignoredTexts(projectPath: string): ProjectText[] {
+  const found: ProjectText[] = [];
+  collectIgnoredTexts(found, projectPath, '', false);
   return found;
 }
 
 function collectIgnoredTexts(
-  found: IgnoredText[],
+  found: ProjectText[],
   directory: string,
   prefix: string,
-  ignored: IgnoredBy | null,
+  ignored: boolean,
 ): void {
   if (installedByUs(directory)) {
     return;
   }
-  const under = ignored ?? (gdignored(directory) ? 'gdignore' : null);
+  const under = ignored || gdignored(directory);
   for (const entry of entriesOf(directory)) {
     if (skipped(entry.name)) {
       continue;
@@ -526,26 +498,19 @@ function collectIgnoredTexts(
     const absolute = join(directory, entry.name);
     const spelled = `${prefix}${entry.name}`;
     if (entry.isDirectory()) {
-      collectIgnoredTexts(found, absolute, `${spelled}/`, ignoredBelow(under, absolute));
+      collectIgnoredTexts(found, absolute, `${spelled}/`, under);
       continue;
     }
-    const text = under === null ? null : ignoredTextOf(entry, absolute, spelled);
-    if (text !== null && under !== null) {
-      found.push({ ...text, why: under });
+    const wanted =
+      under &&
+      entry.isFile() &&
+      !BINARY_EXTENSIONS.has(extensionOf(entry.name)) &&
+      entry.name !== '.gdignore';
+    const text = wanted ? textOf(absolute, spelled) : null;
+    if (text !== null) {
+      found.push(text);
     }
   }
-}
-
-/** Why the folder [param absolute], below one that is ignored for [param under] or is not, is ignored. */
-function ignoredBelow(under: IgnoredBy | null, absolute: string): IgnoredBy | null {
-  return under ?? (holdsAProject(absolute) ? 'project' : null);
-}
-
-/** The text of [param entry] when it is a text file of an ignored folder, or null. */
-function ignoredTextOf(entry: Dirent, absolute: string, spelled: string): ProjectText | null {
-  const wanted =
-    entry.isFile() && !BINARY_EXTENSIONS.has(extensionOf(entry.name)) && entry.name !== '.gdignore';
-  return wanted ? textOf(absolute, spelled) : null;
 }
 
 /**
@@ -708,8 +673,8 @@ function searchFile(run: SearchRun, entryPath: string, name: string): void {
 }
 
 function searchDirectory(run: SearchRun, directory: string, named = false): void {
-  if (!named && (steppedOver(directory) || holdsAProject(directory))) {
-    if (gdignored(directory) || holdsAProject(directory)) {
+  if (!named && steppedOver(directory)) {
+    if (gdignored(directory)) {
       run.notSearched.push(`res://${resPathOf(run, directory)}/`);
     }
     return;

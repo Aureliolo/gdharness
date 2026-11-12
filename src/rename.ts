@@ -27,7 +27,7 @@ import {
   type ScriptShape,
   shapeOf,
 } from './gdscript-source.js';
-import type { IgnoredBy, IgnoredText, ProjectText } from './project-scan.js';
+import type { ProjectText } from './project-scan.js';
 
 /** What an edit changes, which says why it was made. */
 export type EditKind =
@@ -50,7 +50,7 @@ export interface Edit {
 /**
  * Where an occurrence was left alone. code, string, comment, doc and nodePath are the tokenizer's
  * view of a script. scene is a scene or resource file, and text is any other file. ignored is any
- * file under a directory holding a `.gdignore` or a `project.godot` of its own. binary is a scene or resource saved as .scn or
+ * file under a directory holding a `.gdignore`. binary is a scene or resource saved as .scn or
  * .res, which names its dependencies in bytes this cannot rewrite.
  */
 type MentionKind = RegionKind | 'scene' | 'text' | 'ignored' | 'binary';
@@ -1254,18 +1254,13 @@ function sceneOrText(file: string): 'scene' | 'text' {
  */
 export function mentionIgnored(
   plan: Plan,
-  ignored: readonly IgnoredText[],
+  ignored: readonly ProjectText[],
   name: string | null,
   movedFrom: readonly string[],
 ): Plan {
   const mentions = [...plan.mentions];
-  const reasons: Record<IgnoredBy, string> = {
-    gdignore: 'under a directory holding a .gdignore, which the engine does not load, so it was not changed',
-    project:
-      'in a folder holding a project.godot of its own, which the engine does not load as part of this project, so it was not changed',
-  };
+  const why = 'under a directory holding a .gdignore, which the engine does not load, so it was not changed';
   for (const file of ignored) {
-    const why = reasons[file.why];
     const lines = new Lines(file.text);
     const offsets =
       name === null

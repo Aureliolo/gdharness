@@ -8,7 +8,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { holdsAProject } from './paths.js';
 import { readWhole } from './whole-file.js';
 
 /** What freeing a project's library copies did, for the debug log. */
@@ -131,8 +130,8 @@ export function isLibraryCopy(name: string, siblings: Iterable<string>): boolean
  * scan of an editor-mode run, after that. On a fresh clone the first import therefore ran with no
  * extension loaded, so every script
  * using a class an extension adds failed to compile in it, and the class cache it wrote left
- * those scripts out. Walked past names starting with a dot and folders holding a `.gdignore` or a
- * `project.godot` of their own, as the editor's scan walks.
+ * those scripts out. Walked past names starting with a dot and folders holding a `.gdignore`, as
+ * the editor's scan walks.
  */
 export function seedExtensionList(projectPath: string): string[] | null {
   const list = join(projectPath, '.godot', 'extension_list.cfg');
@@ -177,9 +176,7 @@ function collectExtensions(directory: string, resDirectory: string, found: strin
       continue;
     }
     if (entry.isDirectory()) {
-      if (!holdsAProject(join(directory, entry.name))) {
-        collectExtensions(join(directory, entry.name), `${resDirectory}${entry.name}/`, found);
-      }
+      collectExtensions(join(directory, entry.name), `${resDirectory}${entry.name}/`, found);
     } else if (entry.name.endsWith('.gdextension')) {
       found.push(`${resDirectory}${entry.name}`);
     }

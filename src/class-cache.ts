@@ -14,7 +14,6 @@ import { existsSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { codeOf, shapeOf } from './gdscript-source.js';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { holdsAProject } from './paths.js';
 import { isRecord } from './records.js';
 import { readWhole } from './whole-file.js';
 
@@ -48,8 +47,8 @@ export function isToolScript(source: string): boolean {
 /**
  * Every `class_name` declared under the project, with the script that declares it.
  *
- * A directory holding a `.gdignore` or a `project.godot` of its own is stepped over, because the
- * engine steps over it: nothing inside is imported and no declaration in there is ever a global class. Counting them makes a
+ * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
+ * inside is imported and no declaration in there is ever a global class. Counting them makes a
  * correct project look like one whose editor has gone blind, every time it is asked.
  */
 export function declaredClasses(projectPath: string): Map<string, string> {
@@ -156,9 +155,7 @@ function visitScripts(
     }
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      if (!holdsAProject(path)) {
-        visitScripts(path, `${prefix}${entry.name}/`, each);
-      }
+      visitScripts(path, `${prefix}${entry.name}/`, each);
     } else if (entry.isFile() && entry.name.endsWith('.gd')) {
       const source = bytesOf(path);
       if (source !== null) {

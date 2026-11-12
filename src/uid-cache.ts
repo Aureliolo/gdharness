@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url';
 import { cachedEntries } from './class-cache.js';
 import { errorMessage } from './errors.js';
 import { fileNoCaseCompare } from './file-order.js';
-import { holdsAProject } from './paths.js';
 
 /**
  * A project's uid cache, `.godot/uid_cache.bin`, set right before an engine starts on it: an entry
@@ -165,8 +164,7 @@ function declared(path: string, name: string): readonly [text: string, owner: st
 
 /**
  * The `res://` path of the file declaring each of [param wanted], as the engine's scan settles it:
- * a folder or file spelled with a leading dot, and a folder holding a `.gdignore` or a
- * `project.godot` of its own, are stepped over.
+ * a folder or file spelled with a leading dot, and a folder holding a `.gdignore`, are stepped over.
  * The scan takes a folder's subfolders first, then its files, each in `fileNoCaseCompare` order, and
  * of two files declaring one id the later wins. The walk goes in the reverse order and keeps the
  * first, so it ends once every id is found.
@@ -197,7 +195,7 @@ function findDeclarations(
     .filter((entry) => entry.isFile())
     .toSorted((a, b) => fileNoCaseCompare(declaredFor(b.name), declaredFor(a.name)));
   const folders = shown
-    .filter((entry) => entry.isDirectory() && !holdsAProject(join(directory, entry.name)))
+    .filter((entry) => entry.isDirectory())
     .toSorted((a, b) => fileNoCaseCompare(b.name, a.name));
   for (const file of files) {
     if (found.size === wanted.size) {

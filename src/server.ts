@@ -4277,11 +4277,8 @@ function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): 
 function noScriptUnder(entry: string, absolute: string, fromRoot: string): string {
   const said = (stepped: SteppedOver): string => {
     const folder = [fromRoot, stepped.folder].filter((step) => step !== '').join('/') || entry;
-    if (stepped.why === 'gdharness') {
-      return `${folder} is an addon gdharness installed, whose scripts are checked when it is named`;
-    }
-    return stepped.why === 'project'
-      ? `${folder} holds a project.godot of its own, so the engine never loads what is under it as part of this project, and a script there is checked when the script is named`
+    return stepped.why === 'gdharness'
+      ? `${folder} is an addon gdharness installed, whose scripts are checked when it is named`
       : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
   };
   const stepped = steppedOverIn(absolute);
