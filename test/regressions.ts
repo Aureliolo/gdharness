@@ -48356,715 +48356,27 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
 
       const invoke = (method: string, args: unknown[]): Promise<{ result: unknown; said: string }> =>
         invokeOnTheGameMain(server, method, args);
-      const wearing = async (index: number): Promise<unknown> => (await invoke('mounted_is', [index])).result;
-
-      // A result a method declares as an enum is named as well: emit_signal answered 37 with nothing
-      // saying it is Error's "Method not found".
-      const namedResults = await resultsOfCallsThatReturnAnEnum(server);
-      assert.deepEqual(
-        namedResults,
-        [
-          [2, 'Unavailable'],
-          [0, 'PROCESS_MODE_INHERIT'],
-          [1, 'ANGRY'],
-          [3, undefined],
-        ],
-        JSON.stringify(namedResults),
-      );
-
-      const mounted = await invoke('mount', ['items:2']);
-      assert.equal(
-        mounted.result,
-        'piece 2',
-        `a path from the node hands over that element: ${mounted.said}`,
-      );
-      assert.equal(await wearing(2), true, 'and the game holds that very instance, not a copy');
-
-      const absolute = await invoke('mount', ['/root/Main:items:-1']);
-      assert.equal(
-        absolute.result,
-        'wheel',
-        `a path from a named node, counting from the end: ${absolute.said}`,
-      );
-      assert.equal(await wearing(4), true, 'a subclass of the declared script class is accepted as it');
-
-      const node = await invoke('named', ['/root/Main']);
-      assert.equal(node.result, 'Main', `a node is named by its path alone: ${node.said}`);
-
-      // A static function of a class no node carries, named by the class or by its script's path.
-      const onClass = (nodePath: string, method: string, args: unknown[]): Promise<string> =>
-        callOnTheGameAt(server, nodePath, method, args);
-      // A refusal is prose, so it is matched before being read as an answer and is shown whole.
-      const answered = (said: string): unknown => {
-        assert.match(said, /^\{/, `an answer rather than a refusal: ${said}`);
-        return JSON.parse(said);
+      const run: ObjectCallRun = {
+        server,
+        project,
+        runtimeDir,
+        held,
+        invoke,
+        wearing: async (index: number): Promise<unknown> => (await invoke('mounted_is', [index])).result,
+        onClass: (nodePath: string, method: string, args: unknown[]): Promise<string> =>
+          callOnTheGameAt(server, nodePath, method, args),
+        set: (property: string, value: unknown) => setOnTheGameMain(server, property, value),
       };
-      for (const named of ['Chooser', 'res://chooser.gd']) {
-        const best = await onClass(named, 'best', [[3, 9, 4]]);
-        assert.deepEqual(
-          [get(answered(best), 'type'), get(answered(best), 'result')],
-          ['method_result', 9],
-          `${named} answers its static function: ${best}`,
-        );
-      }
-      const passed = await onClass('Chooser', 'named_of', ['/root/Main']);
-      assert.equal(get(answered(passed), 'result'), 'Main', `an object argument is a node path: ${passed}`);
-      // A node is called before a class of the same name: Main is both, and only the node is at /root.
-      const nodeFirst = await onClass('Main', 'get_path', []);
-      assert.match(JSON.stringify(get(answered(nodeFirst), 'result')), /\/root\/Main/, nodeFirst);
-      assert.doesNotMatch(nodeFirst, /main_rules/, nodeFirst);
-      assert.match(
-        await onClass('Chooser', 'not_static', []),
-        /Chooser\.not_static is not static, so it runs on an instance of the class: call it on a node carrying res:\/\/chooser\.gd, or on an object a path from one reaches/,
-      );
-      assert.match(
-        await onClass('Chooser', 'bets', [[1]]),
-        /Chooser has no method bets\. Its static functions are best, named_of$/,
-      );
-      assert.match(
-        await onClass('Choser', 'best', [[1]]),
-        /No global class is called Choser either, and the nearest is Chooser\. A static function is called with its class's name or its script's res:\/\/ path as the path\./,
-      );
-      assert.match(
-        await onClass('res://nowhere.gd', 'best', [[1]]),
-        /No script is at res:\/\/nowhere\.gd to call a static function of\./,
-      );
-      // Written while the game runs, so nothing loads it before the call does. ok compiles on its
-      // own, so only the failed compile explains a refusal of it.
-      writeFileSync(
-        join(project, 'broken.gd'),
-        'extends RefCounted\n\n\nstatic func ok() -> int:\n\treturn 1\n\n\n' +
-          'static func bad() -> void:\n\tvar count: int = "many"\n\tprint(count)\n',
-      );
-      assert.match(
-        await onClass('res://broken.gd', 'ok', []),
-        /^res:\/\/broken\.gd did not compile, so none of its functions can be called\. script_diagnostics on it gives the error and its line\.$/,
-      );
-
-      const cleared = await invoke('unmount', [null]);
-      assert.equal(cleared.result, true, `null still reaches an object parameter as null: ${cleared.said}`);
-      await invoke('mount', ['items:4']);
-
-      const refusals: [unknown, RegExp][] = [
-        [
-          'items:9',
-          /^\/root\/Main\.mount argument 1: \/root\/Main:items is a list of 5, so there is no 9 in it$/,
-        ],
-        ['count', /^\/root\/Main\.mount argument 1: \/root\/Main:count holds int, not an object$/],
-        ['spare', /^\/root\/Main\.mount argument 1: spare is RefCounted, not a Part$/],
-        [
-          '/root/Nope:items:0',
-          /^\/root\/Main\.mount argument 1: Node not found: \/root\/Nope\. \/root has no Nope\. Its children are GdharnessRuntime, Main\.$/,
-        ],
-        [
-          '/root/Main/Shelf:items:0',
-          /^\/root\/Main\.mount argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf\. Its children are Rack\.$/,
-        ],
-        [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
-      ];
-      for (const [given, expected] of refusals) {
-        const refused = await invoke('mount', [given]);
-        assert.equal(refused.result, undefined, `${JSON.stringify(given)} is refused: ${refused.said}`);
-        assert.match(refused.said, expected, `and says why: ${refused.said}`);
-        assert.equal(
-          await wearing(4),
-          true,
-          `mount was not called with anything for ${JSON.stringify(given)}`,
-        );
-      }
-
-      // A node path written from the current scene, as the scene tools take one, is given the path
-      // from the root that reaches it.
-      const inspected = async (nodePath: string): Promise<string> =>
-        textOf(
-          await server.request(
-            'tools/call',
-            { name: 'runtime_inspect', arguments: { op: 'property', nodePath, property: 'name' } },
-            ENGINE_CALL_TIMEOUT_MS,
-          ),
-        ) ?? '';
-      assert.match(await inspected('/root/Main/Rack'), /"Rack"/, 'the path from the root reads the node');
-      assert.match(
-        await inspected('Rack'),
-        /Node not found: Rack\. Paths here go from the root, \/root, not from the current scene, so this one is \/root\/Main\/Rack\./,
-      );
-      assert.match(
-        await inspected('Shelf'),
-        /Node not found: Shelf\. \/root has no Shelf\. Its children are GdharnessRuntime, Main\./,
-        'a path the scene has not either is told what the root has',
-      );
-      // A constant is read as its script declares it, through a path and from a script the object's
-      // extends too: the wheel is a Wheel, and Part declares the constant.
-      const readOff = async (property: string): Promise<unknown> =>
-        get(
-          parseTextContent(
-            await server.request(
-              'tools/call',
-              { name: 'runtime_inspect', arguments: { op: 'property', nodePath: '/root/Main', property } },
-              ENGINE_CALL_TIMEOUT_MS,
-            ),
-          ),
-          'value',
-        );
-      assert.deepEqual([await readOff('STOCK_NOTE'), await readOff('items:4:KIND')], ['held', 'part']);
-
-      // The same naming on a write. Each slot starts empty or holding another piece, so the write
-      // is what puts the instance there: an empty `Part` property reads as no type at all, and is
-      // told apart from an untyped one only by what it declares.
-      const set = async (property: string, value: unknown): Promise<{ written: boolean; said: string }> => {
-        const response = await server.request(
-          'tools/call',
-          { name: 'runtime_invoke', arguments: { op: 'set', nodePath: '/root/Main', property, value } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        return { written: parseTextContent(response) !== null, said: textOf(response) ?? '' };
-      };
-      await invoke('unmount', [null]);
-      const intoProperty = await set('mounted', 'items:1');
-      assert.ok(intoProperty.written, `an empty typed property takes a path: ${intoProperty.said}`);
-      assert.equal(await wearing(1), true, 'and holds that very instance');
-      const intoList = await set('items:0', 'items:3');
-      assert.ok(intoList.written, `a typed list slot takes one: ${intoList.said}`);
-      assert.equal((await invoke('same', [0, 3])).result, true, 'and holds the instance the path named');
-      const intoMap = await set('by_name:head', '/root/Main:items:2');
-      assert.ok(intoMap.written, `an empty typed map slot takes one: ${intoMap.said}`);
-      assert.equal(
-        (await invoke('head_is', [2])).result,
-        true,
-        'and the map holds the instance the path named',
-      );
-
-      const refusedWrites: [string, unknown, RegExp][] = [
-        ['mounted', 'spare', /^\/root\/Main\.mounted holds an object: spare is RefCounted, not a Part$/],
-        ['items:0', 'spare', /^\/root\/Main:items\.0 holds an object: spare is RefCounted, not a Part$/],
-        [
-          'mounted',
-          'count',
-          /^\/root\/Main\.mounted holds an object: \/root\/Main:count holds int, not an object$/,
-        ],
-        [
-          'STOCK_NOTE',
-          'sold',
-          /^\/root\/Main:STOCK_NOTE is a constant its script declares, and a constant cannot be set$/,
-        ],
-      ];
-      for (const [property, value, expected] of refusedWrites) {
-        const refused = await set(property, value);
-        assert.equal(
-          refused.written,
-          false,
-          `${property} = ${JSON.stringify(value)} is refused: ${refused.said}`,
-        );
-        assert.match(refused.said, expected, `and says why: ${refused.said}`);
-      }
-      assert.equal(await wearing(1), true, 'the refused writes left the property as it was');
-      assert.equal((await invoke('same', [0, 3])).result, true, 'and the list slot');
-
-      // A resource is named by its file and loaded as the game loads one, so the slot holds the
-      // texture the script preloaded rather than a copy of it.
-      const filed = await set('art', 'res://shine.tres');
-      assert.ok(filed.written, `a texture slot takes a res:// path: ${filed.said}`);
-      assert.equal((await invoke('art_is_kept', [])).result, true, 'and holds the instance the game loaded');
-      await set('art', 'null');
-      const byRecord = await set('art', {
-        _type: 'Resource',
-        path: 'res://shine.tres',
-        class: 'GradientTexture1D',
-      });
-      assert.ok(
-        byRecord.written,
-        `the record a read answers a filed resource with names it: ${byRecord.said}`,
-      );
-      assert.equal((await invoke('art_is_kept', [])).result, true, 'the same instance through the record');
-      assert.equal(
-        (await invoke('width_of', ['res://shine.tres'])).result,
-        16,
-        'an argument takes one by its path',
-      );
-      assert.equal(
-        (await invoke('named', [{ _type: 'Node', path: '/root/Main/Rack', class: 'Node' }])).result,
-        'Rack',
-        'and a node by the record a read answers it with',
-      );
-      const unfiled: [unknown, RegExp][] = [
-        [
-          'res://part.gd',
-          /^\/root\/Main\.art holds an object: res:\/\/part\.gd is GDScript, not a Texture2D$/,
-        ],
-        ['res://nowhere.tres', /^\/root\/Main\.art holds an object: No resource at res:\/\/nowhere\.tres$/],
-        [
-          'res://late.svg',
-          /^\/root\/Main\.art holds an object: res:\/\/late\.svg is there, but it has never been imported, so the game has no resource to load from it\. project_import reimport with resourcePath res:\/\/late\.svg imports it$/,
-        ],
-        [
-          { _type: 'GradientTexture1D', width: 8 },
-          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none\. A resource built into a scene has no path\. The call builds a resource from its properties only inside an object it builds, such as a PhysicsShapeQueryParameters2D's shape\. resource_edit create writes a GradientTexture1D to a \.tres file\. Pass that file's res:\/\/ path here$/,
-        ],
-      ];
-      for (const [value, expected] of unfiled) {
-        const refused = await set('art', value);
-        assert.equal(refused.written, false, `${JSON.stringify(value)} is refused: ${refused.said}`);
-        assert.match(refused.said, expected, `and says why: ${refused.said}`);
-      }
-      assert.equal(
-        (await invoke('art_is_kept', [])).result,
-        true,
-        'the refused resources left the texture as it was',
-      );
-
-      for (const material of ['res://panorama.tres', 'res://shaded.tres']) {
-        const listed = await set('sky:sky_material', material);
-        assert.ok(listed.written, `a hint listing several classes takes each of them: ${listed.said}`);
-      }
-      const plain = await set('sky:sky_material', 'res://plain.tres');
-      assert.equal(plain.written, false, `a class the hint does not list is refused: ${plain.said}`);
-      assert.match(
-        plain.said,
-        /holds an object: res:\/\/plain\.tres is StandardMaterial3D, not one of PanoramaSkyMaterial, ProceduralSkyMaterial, PhysicalSkyMaterial, ShaderMaterial$/,
-      );
-
-      // A JSON number arrives as a float whether or not it has a fraction, so a refusal calling it
-      // one names a type the caller never sent.
-      const numberFor = await invoke('aim_at', [5]);
-      assert.match(
-        numberFor.said,
-        /^\/root\/Main\.aim_at takes Vector2 as argument 1 and was given a number, which cannot be converted\./,
-        numberFor.said,
-      );
-      const numberInto = await set('aim', 5);
-      assert.match(
-        numberInto.said,
-        /^\/root\/Main\.aim holds Vector2 and the value given is a number, which cannot become one\./,
-        numberInto.said,
-      );
-      const numberWait =
-        textOf(
-          await server.request(
-            'tools/call',
-            {
-              name: 'runtime_wait',
-              arguments: { op: 'until', nodePath: '/root/Main', property: 'aim', value: 5, timeoutMs: 500 },
-            },
-            ENGINE_CALL_TIMEOUT_MS,
-          ),
-        ) ?? '';
-      assert.match(
-        numberWait,
-        /\/root\/Main\.aim holds Vector2 and the value to wait for is a number, which cannot become one/,
-        numberWait,
-      );
-
-      // A typed container written with the plain one JSON carries. The engine keeps what it held and
-      // says nothing, so this answered as a set whose old and new values were both [].
-      const listed = await set('done_at', [30, '12']);
-      assert.ok(listed.written, `a list is fitted to Array[int]: ${listed.said}`);
-      assert.deepEqual(
-        get(JSON.parse(listed.said), 'new_value'),
-        [30, 12],
-        `with each element fitted: ${listed.said}`,
-      );
-      const worded = await set('done_at', ['thirty']);
-      assert.equal(worded.written, false, `an element that is no number is refused: ${worded.said}`);
-      assert.match(
-        worded.said,
-        /^\/root\/Main\.done_at is a typed list: element 0 is "thirty", which cannot become int\.$/,
-        worded.said,
-      );
-      const mapped = await set('tally', { wins: '3' });
-      assert.ok(mapped.written, `a map is fitted to Dictionary[String, int]: ${mapped.said}`);
-      assert.match(mapped.said, /"new_value":\s*\{\s*"wins":\s*3\s*\}/, mapped.said);
-
-      // A write that leaves the property as it was is refused rather than answered as done, and said
-      // as what was seen: a setter keeping the value and the engine refusing it look the same.
-      const kept = await set('locked', 9);
-      assert.equal(kept.written, false, `a property that ignores the write is refused: ${kept.said}`);
-      assert.match(
-        kept.said,
-        /^\/root\/Main\.locked was given 9 and reads 5 afterwards, as it did before: the write left it as it was/,
-        kept.said,
-      );
-
-      // And a typed list as an argument, which raised inside the game when handed a plain one.
-      const summed = await invoke('total', [[1, 2, '3']]);
-      assert.equal(summed.result, 6, `an Array[int] argument is built from the list: ${summed.said}`);
-      const pieces = await invoke('armour', [['items:0', '/root/Main:items:-1']]);
-      // items:0 holds piece 3 by now, written there by the list-slot set above.
-      assert.equal(pieces.result, 'piece 3, wheel', `and an Array[Part] from paths: ${pieces.said}`);
-      const stray = await invoke('armour', [[7]]);
-      assert.match(
-        stray.said,
-        /^\/root\/Main\.armour takes a typed list as argument 1: element 0 is 7(\.0)?, which cannot become Part\.$/,
-        stray.said,
-      );
-
-      // A call that outlasts the wait is not a failure. It runs on and does what it was asked, so the
-      // answer is pending with an id, and the reply is collected by that id once it comes. The
-      // counter is read too, because a call answered as failed was repeated and ran twice.
-      const before = asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result'));
-      const invokeWaiting = async (args: Record<string, unknown>): Promise<unknown> =>
-        parseTextContent(
-          await server.request(
-            'tools/call',
-            { name: 'runtime_invoke', arguments: args },
-            ENGINE_CALL_TIMEOUT_MS,
-          ),
-        );
-      const pending = await invokeWaiting({
-        op: 'call',
-        nodePath: '/root/Main',
-        method: 'slow',
-        args: [3000],
-        timeoutMs: 500,
-      });
-      assert.equal(
-        get(pending, 'pending'),
-        true,
-        `a long call is pending, not failed: ${JSON.stringify(pending)}`,
-      );
-      const requestId = asNumber(get(pending, 'requestId'), 'with an id to collect it by');
-      assert.match(text(get(pending, 'note')), /Nothing was cancelled/, JSON.stringify(pending));
-      assert.match(
-        text(get(pending, 'note')),
-        /timeoutMs waits longer next time\.$/,
-        `runtime_invoke call takes timeoutMs, so its note offers it: ${JSON.stringify(pending)}`,
-      );
-      const early = await invokeWaiting({ op: 'result', requestId });
-      assert.equal(get(early, 'pending'), true, `asked early, it is still running: ${JSON.stringify(early)}`);
-      let collected: unknown = early;
-      for (let waited = 0; get(collected, 'pending') === true && waited < 20_000; waited += 250) {
-        await delay(250);
-        collected = await invokeWaiting({ op: 'result', requestId });
-      }
-      assert.equal(
-        get(collected, 'result'),
-        'done after 3000',
-        `and collected once it comes: ${JSON.stringify(collected)}`,
-      );
-      assert.equal(
-        asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
-        before + 1,
-        'the call ran once',
-      );
-
-      // A method that awaits hands its caller a function state at the first await, which was
-      // answered as the result. The answer is the value it returns once it ends, whether that comes
-      // inside the wait or is collected after it, and the frames go on drawing while it waits.
-      const awaited = await invokeWaiting({
-        op: 'call',
-        nodePath: '/root/Main',
-        method: 'later',
-        args: [300],
-      });
-      assert.equal(
-        get(awaited, 'result'),
-        'awaited 300',
-        `an awaiting method answers its value: ${JSON.stringify(awaited)}`,
-      );
-      assert.equal(get(awaited, 'awaited'), true, JSON.stringify(awaited));
-      // Held against the method's own reading rather than the timer's length: a timer counts whole
-      // frame steps, including the part of its first frame before it was made, so on a loaded macOS
-      // runner a 300 ms timer ended after 245 ms.
-      const took = asNumber(get(JSON.parse((await invoke('get', ['later_took'])).said), 'result'));
-      assert.ok(
-        took > 0 && asNumber(get(awaited, 'elapsed_usec'), JSON.stringify(awaited)) >= took,
-        `and its time runs to its end, past the method's own ${String(took)} us: ${JSON.stringify(awaited)}`,
-      );
-      const awaitedLater = await invokeWaiting({
-        op: 'call',
-        nodePath: '/root/Main',
-        method: 'later',
-        args: [2000],
-        timeoutMs: 500,
-      });
-      assert.equal(
-        get(awaitedLater, 'pending'),
-        true,
-        `one that outlasts the wait is pending: ${JSON.stringify(awaitedLater)}`,
-      );
-      const laterId = asNumber(get(awaitedLater, 'requestId'), JSON.stringify(awaitedLater));
-      let laterCollected: unknown = awaitedLater;
-      for (let waited = 0; get(laterCollected, 'pending') === true && waited < 20_000; waited += 250) {
-        await delay(250);
-        laterCollected = await invokeWaiting({ op: 'result', requestId: laterId });
-      }
-      assert.equal(
-        get(laterCollected, 'result'),
-        'awaited 2000',
-        `and collected by its id: ${JSON.stringify(laterCollected)}`,
-      );
-      assert.equal(
-        asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
-        before + 3,
-        'each awaiting call ran once',
-      );
-      assert.match(
-        textOf(
-          await server.request('tools/call', {
-            name: 'runtime_invoke',
-            arguments: { op: 'result', requestId: 999_999 },
-          }),
-        ) ?? '',
-        /No request 999999 is waiting to be collected here/,
-        'an id this server never gave is refused',
-      );
-
-      // What waits longer, for calls that take no timeoutMs: the note offered it to every call and
-      // runtime_wait frames refused it. The game is held past the standing wait so that a frames wait
-      // and an input both run out. Each is told what sets its own wait instead.
-      const holding = await invokeWaiting({
-        op: 'call',
-        nodePath: '/root/Main',
-        method: 'slow',
-        args: [12_000],
-        timeoutMs: 500,
-      });
-      const holdingId = asNumber(get(holding, 'requestId'), JSON.stringify(holding));
-      const asking = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
-        parseTextContent(
-          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
-        );
-      const [framesWait, moved] = await Promise.all([
-        asking('runtime_wait', { op: 'frames', frames: 1 }),
-        asking('runtime_input', { op: 'mouse_motion', x: 1, y: 1 }),
-      ]);
-      assert.equal(get(framesWait, 'pending'), true, JSON.stringify(framesWait));
-      assert.match(
-        text(get(framesWait, 'note')),
-        /runtime_wait frames takes no timeoutMs: it was given \d+ms, and the wait is counted from the number of frames, at 20 a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS: a game drawing frames more slowly than that is waited on in fewer frames at a time, and a game inside one long frame, such as a long _ready, answers no call however few frames are asked for\.$/,
-        `a frames wait is told what sizes its wait: ${JSON.stringify(framesWait)}`,
-      );
-      assert.equal(get(moved, 'pending'), true, JSON.stringify(moved));
-      assert.match(
-        text(get(moved, 'note')),
-        /runtime_input mouse_motion takes no timeoutMs: it was given \d+ms, and the wait is GDHARNESS_RUNTIME_TIMEOUT_MS/,
-        `and an input is told its wait is the server's: ${JSON.stringify(moved)}`,
-      );
-      for (const one of [framesWait, moved]) {
-        assert.doesNotMatch(text(get(one, 'note')), /timeoutMs waits longer/, JSON.stringify(one));
-      }
-      let released: unknown = holding;
-      for (let waited = 0; get(released, 'pending') === true && waited < 30_000; waited += 500) {
-        await delay(500);
-        released = await invokeWaiting({ op: 'result', requestId: holdingId });
-      }
-      assert.equal(get(released, 'result'), 'done after 12000', JSON.stringify(released));
-
-      // A list's size is a call on the list, and a wait for a board to fill is written against it.
-      // The step was read as an index, so the answer was "a list of 5, so there is no size() in it".
-      const tool = async (
-        name: string,
-        args: Record<string, unknown>,
-      ): Promise<{ parsed: unknown; said: string }> => {
-        const response = await server.request(
-          'tools/call',
-          { name, arguments: args },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        return { parsed: parseTextContent(response), said: textOf(response) ?? '' };
-      };
-      const read = async (property: string): Promise<{ parsed: unknown; said: string }> =>
-        await tool('runtime_inspect', { op: 'property', nodePath: '/root/Main', property });
-      assert.equal(get((await read('items:size()')).parsed, 'value'), 5, (await read('items:size()')).said);
-      assert.equal(get((await read('board:size()')).parsed, 'value'), 0, 'an empty list has a size too');
-      assert.deepEqual(
-        get((await read('by_name:keys()')).parsed, 'value'),
-        ['head'],
-        'a map answers its keys',
-      );
-      // A map comes back in the order the game keeps it, which is the order its keys() and a loop
-      // over it give. Sorted on the way out of the game, a stock keyed base:water, base:sand and
-      // base:clay was read with clay first while its keys() put it third.
-      const ledgerOrder = ['zeta', 'alpha', 'mid'];
-      assert.deepEqual(Object.keys(asObject(get((await read('ledger')).parsed, 'value'))), ledgerOrder);
-      assert.deepEqual(get((await read('ledger:keys()')).parsed, 'value'), ledgerOrder, 'as keys() lists it');
-      assert.match((await read('board:back()')).said, /is an empty list, so it has no back\(\)/);
-      assert.match((await read('items:clear()')).said, /not one of the calls a path makes on one/);
-      assert.equal(
-        get((await read('items:size()')).parsed, 'value'),
-        5,
-        'and the refused call changed nothing',
-      );
-
-      // A packed list, which a game keeps names in as often as an Array, and which a path could not
-      // step into at all: "names:1" answered that names held no object to read 1 off.
-      assert.equal(get((await read('names:1')).parsed, 'value'), 'Bram', (await read('names:1')).said);
-      assert.equal(get((await read('names:size()')).parsed, 'value'), 2, 'a packed list answers its size');
-      assert.match((await read('names:9')).said, /names is a packed list of 2, so there is no 9 in it/);
-      assert.match((await read('names:sort()')).said, /not one of the calls a path makes on one.*size\(\)/);
-      // A string answers calls that read it, its code points among them, which tell a non-breaking
-      // space from the space the answer's JSON shows in its place.
-      assert.deepEqual(
-        get((await read('sign:to_utf32_buffer():to_int32_array()')).parsed, 'value'),
-        [105, 110, 160, 50],
-        (await read('sign:to_utf32_buffer():to_int32_array()')).said,
-      );
-      assert.equal(get((await read('sign:length()')).parsed, 'value'), 4, (await read('sign:length()')).said);
-      assert.match(
-        (await read('sign:0')).said,
-        /sign is a string, so a path makes only calls on it, which read it and take no arguments: length\(\), /,
-      );
-      assert.match(
-        (await read('sign:sort()')).said,
-        /sign is a string, and sort\(\) is not one of the calls/,
-      );
-      // A packed list of bytes is offered the calls it has: it has no to_byte_array().
-      const bytes = (await read('sign:to_utf8_buffer():to_byte_array()')).said;
-      assert.match(
-        bytes,
-        /is a packed list, and to_byte_array\(\) is not one of the calls .*to_int32_array\(\)/,
-        bytes,
-      );
-      assert.doesNotMatch(bytes, /: [^;]*to_byte_array\(\)/, bytes);
-      const upper = await tool('runtime_invoke', {
-        op: 'call',
-        nodePath: '/root/Main',
-        method: 'sign:to_upper()',
-      });
-      assert.equal(get(upper.parsed, 'result'), 'IN 2', upper.said);
-      const renamed = await tool('runtime_invoke', {
-        op: 'set',
-        nodePath: '/root/Main',
-        property: 'names:0',
-        value: 'Cass',
-      });
-      assert.equal(get(renamed.parsed, 'new_value'), 'Cass', renamed.said);
-      assert.deepEqual(
-        get((await read('names')).parsed, 'value'),
-        ['Cass', 'Bram'],
-        'an element written through a path is written into the list the game holds',
-      );
-      // A call that changes a list is pointed at the write that does, and was told to call the
-      // method on an element instead: "board:0:append", for a list being added to.
-      const call = (method: string, args: unknown[]): Promise<{ parsed: unknown; said: string }> =>
-        tool('runtime_invoke', { op: 'call', nodePath: '/root/Main', method, args });
-      const appended = (await call('board:append', [7])).said;
-      assert.match(
-        appended,
-        /append\(\) changes the list: to change it, give \/root\/Main:board its new value whole with runtime_invoke set, property board, or call a method of the game that changes it/,
-        appended,
-      );
-      assert.doesNotMatch(appended, /on the element/, appended);
-      const given = await tool('runtime_invoke', {
-        op: 'set',
-        nodePath: '/root/Main',
-        property: 'board',
-        value: [7],
-      });
-      assert.deepEqual(get(given.parsed, 'new_value'), [7], given.said);
-      assert.deepEqual(get((await read('board')).parsed, 'value'), [7], 'and the write it names takes');
-      // The waits below need the board empty again.
-      await tool('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'board', value: [] });
-      assert.deepEqual(get((await read('board')).parsed, 'value'), [], 'the board is emptied again');
-      const lookedIn = (await call('ledger:has', ['zeta'])).said;
-      assert.match(
-        lookedIn,
-        /To look in the map with has\(\), read \/root\/Main:ledger whole with runtime_inspect property, property ledger, and look in what comes back/,
-        lookedIn,
-      );
-      const copied = (await call('ledger:duplicate():erase', ['zeta'])).said;
-      assert.match(
-        copied,
-        /erase\(\) changes the map: to change it, call a method of the game that changes it, since \/root\/Main:ledger:duplicate\(\) is returned by a call/,
-        copied,
-      );
-      const elementWise = (await call('names:to_upper', [])).said;
-      assert.match(elementWise, /is called on the element, as in \/root\/Main:names:0:to_upper/, elementWise);
-      assert.equal(get((await call('names:0:to_upper()', [])).parsed, 'result'), 'CASS', 'as that names it');
-
-      // Depth 0 is the node alone, the one depth that reads exactly one node's properties. It read
-      // as "not given" and walked the default three levels, which over a router was 4 MB.
-      const tree = async (depth: unknown): Promise<{ parsed: unknown; said: string }> =>
-        await tool('runtime_inspect', { op: 'tree', nodePath: '/root', depth, properties: ['name'] });
-      const alone = await tree(0);
-      assert.equal(get(alone.parsed, 'root', 'path'), '/root', alone.said);
-      assert.equal(
-        get(alone.parsed, 'root', 'children'),
-        undefined,
-        `depth 0 has no children: ${alone.said}`,
-      );
-      const oneLevel = await tree(1);
-      const children = asArray(get(oneLevel.parsed, 'root', 'children'));
-      assert.ok(children.length > 0, `depth 1 lists the children: ${oneLevel.said}`);
-      assert.ok(
-        children.every((child) => get(child, 'children') === undefined),
-        `and nothing under them: ${oneLevel.said}`,
-      );
-      assert.match((await tree(-1)).said, /runtime_inspect takes depth of 0 or more, not -1\./);
-
-      const waitFor = async (timeoutMs: number): Promise<unknown> =>
-        (
-          await tool('runtime_wait', {
-            op: 'until',
-            nodePath: '/root/Main',
-            property: 'board:size()',
-            value: 1,
-            timeoutMs,
-          })
-        ).parsed;
-      const unmet = await waitFor(500);
-      assert.equal(
-        get(unmet, 'met'),
-        false,
-        `a list still empty is not waited out: ${JSON.stringify(unmet)}`,
-      );
-      await tool('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'board', value: [7] });
-      const met = await waitFor(5_000);
-      assert.equal(
-        get(met, 'met'),
-        true,
-        `a wait on a list's size is met when it gets there: ${JSON.stringify(met)}`,
-      );
-
-      // The game takes every connection waiting each frame, not one, so a queue several servers
-      // filled empties at once. Eight are queued during a long frame, and on the first welcome a
-      // second long call goes down that connection: taking one a frame, the game gets through only
-      // the few frames before the call arrives, and the rest wait out the call.
-      const recordPort = asNumber(
-        get(
-          JSON.parse(readFileSync(join(runtimeDir, `runtime-${held.game?.pid ?? 0}.json`), 'utf8')),
-          'port',
-        ),
-        "the held game's runtime port",
-      );
-      const longFrame = invoke('slow', [1500]);
-      await delay(500);
-      const { told, welcomedAt, answeredAt } = await dialTheHeldGameEightTimes(recordPort);
-      await longFrame;
-      assert.deepEqual(
-        told,
-        Array(8).fill('welcome'),
-        `each of eight queued connections was welcomed: ${told.join(', ')}`,
-      );
-      const beforeTheCall = welcomedAt.filter((at) => at <= answeredAt).length;
-      assert.equal(
-        beforeTheCall,
-        8,
-        `all eight were welcomed before a one-second call sent on the first welcome answered, not ${beforeTheCall}`,
-      );
-
-      // Naming the result read the freed node's methods, which failed the answer into {}.
-      const freed =
-        textOf(
-          await server.request(
-            'tools/call',
-            {
-              name: 'runtime_invoke',
-              arguments: { op: 'call', nodePath: '/root/Main/Rack', method: 'free' },
-            },
-            ENGINE_CALL_TIMEOUT_MS,
-          ),
-        ) ?? '';
-      assert.deepEqual(
-        [get(answered(freed), 'type'), get(answered(freed), 'result'), get(answered(freed), 'errors')],
-        ['method_result', null, undefined],
-        freed,
-      );
-      assert.match(
-        await inspected('/root/Main/Rack'),
-        /Node not found: \/root\/Main\/Rack/,
-        'and the node is gone',
-      );
-
+      await assertAnObjectArgumentIsHandedOverByItsPath(run);
+      await assertStaticFunctionsOfAClassAreCalledByName(run);
+      await assertAnObjectParameterRefusesWhatIsNotAPath(run);
+      await assertAPathFromTheCurrentSceneIsGivenTheRootsPath(run);
+      await assertTheSameNamingOnAWrite(run);
+      await assertTypedContainersAreWrittenWithThePlainOne(run);
+      await assertACallThatOutlastsTheWaitIsCollected(run);
+      await assertListsAndMapsAreReadAndCalledThroughTheirNames(run);
+      await assertEightQueuedConnectionsAreAllWelcomed(run);
+      await assertAFreedNodeIsNamedAndGone(run);
       await server.request(
         'tools/call',
         { name: 'editor_run', arguments: { op: 'stop' } },
@@ -49072,6 +48384,728 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       );
     },
     { realAddon: true, engine, held },
+  );
+}
+
+/** What the phases of the object-argument case share: the played game's server and the calls made on its Main node. */
+interface ObjectCallRun {
+  readonly server: ServerProcess;
+  readonly project: string;
+  readonly runtimeDir: string;
+  readonly held: { game: ChildProcess | null };
+  readonly invoke: (method: string, args: unknown[]) => Promise<{ result: unknown; said: string }>;
+  readonly wearing: (index: number) => Promise<unknown>;
+  readonly onClass: (nodePath: string, method: string, args: unknown[]) => Promise<string>;
+  readonly set: (property: string, value: unknown) => Promise<{ written: boolean; said: string }>;
+}
+
+/** A node's `name` property read through `runtime_inspect`, as the text it came as. */
+async function inspectedNameAt(server: ServerProcess, nodePath: string): Promise<string> {
+  return (
+    textOf(
+      await server.request(
+        'tools/call',
+        { name: 'runtime_inspect', arguments: { op: 'property', nodePath, property: 'name' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ) ?? ''
+  );
+}
+
+/** A refusal is prose, so it is matched before being read as an answer and is shown whole. */
+function anAnswerNotARefusal(said: string): unknown {
+  assert.match(said, /^\{/, `an answer rather than a refusal: ${said}`);
+  return JSON.parse(said);
+}
+
+/** A `runtime_invoke set` of a property of Main, answered with whether it was written and the text it came as. */
+async function setOnTheGameMain(
+  server: ServerProcess,
+  property: string,
+  value: unknown,
+): Promise<{ written: boolean; said: string }> {
+  const response = await server.request(
+    'tools/call',
+    { name: 'runtime_invoke', arguments: { op: 'set', nodePath: '/root/Main', property, value } },
+    ENGINE_CALL_TIMEOUT_MS,
+  );
+  return { written: parseTextContent(response) !== null, said: textOf(response) ?? '' };
+}
+
+/** A result a method declares as an enum is named, and an object argument is handed over as the instance its path names. */
+async function assertAnObjectArgumentIsHandedOverByItsPath({
+  server,
+  invoke,
+  wearing,
+}: ObjectCallRun): Promise<void> {
+  // A result a method declares as an enum is named as well: emit_signal answered 37 with nothing
+  // saying it is Error's "Method not found".
+  const namedResults = await resultsOfCallsThatReturnAnEnum(server);
+  assert.deepEqual(
+    namedResults,
+    [
+      [2, 'Unavailable'],
+      [0, 'PROCESS_MODE_INHERIT'],
+      [1, 'ANGRY'],
+      [3, undefined],
+    ],
+    JSON.stringify(namedResults),
+  );
+
+  const mounted = await invoke('mount', ['items:2']);
+  assert.equal(mounted.result, 'piece 2', `a path from the node hands over that element: ${mounted.said}`);
+  assert.equal(await wearing(2), true, 'and the game holds that very instance, not a copy');
+
+  const absolute = await invoke('mount', ['/root/Main:items:-1']);
+  assert.equal(absolute.result, 'wheel', `a path from a named node, counting from the end: ${absolute.said}`);
+  assert.equal(await wearing(4), true, 'a subclass of the declared script class is accepted as it');
+
+  const node = await invoke('named', ['/root/Main']);
+  assert.equal(node.result, 'Main', `a node is named by its path alone: ${node.said}`);
+}
+
+/** A static function of a class no node carries is called by the class's name or by its script's path. */
+async function assertStaticFunctionsOfAClassAreCalledByName({
+  project,
+  onClass,
+}: ObjectCallRun): Promise<void> {
+  const answered = anAnswerNotARefusal;
+  for (const named of ['Chooser', 'res://chooser.gd']) {
+    const best = await onClass(named, 'best', [[3, 9, 4]]);
+    assert.deepEqual(
+      [get(answered(best), 'type'), get(answered(best), 'result')],
+      ['method_result', 9],
+      `${named} answers its static function: ${best}`,
+    );
+  }
+  const passed = await onClass('Chooser', 'named_of', ['/root/Main']);
+  assert.equal(get(answered(passed), 'result'), 'Main', `an object argument is a node path: ${passed}`);
+  // A node is called before a class of the same name: Main is both, and only the node is at /root.
+  const nodeFirst = await onClass('Main', 'get_path', []);
+  assert.match(JSON.stringify(get(answered(nodeFirst), 'result')), /\/root\/Main/, nodeFirst);
+  assert.doesNotMatch(nodeFirst, /main_rules/, nodeFirst);
+  assert.match(
+    await onClass('Chooser', 'not_static', []),
+    /Chooser\.not_static is not static, so it runs on an instance of the class: call it on a node carrying res:\/\/chooser\.gd, or on an object a path from one reaches/,
+  );
+  assert.match(
+    await onClass('Chooser', 'bets', [[1]]),
+    /Chooser has no method bets\. Its static functions are best, named_of$/,
+  );
+  assert.match(
+    await onClass('Choser', 'best', [[1]]),
+    /No global class is called Choser either, and the nearest is Chooser\. A static function is called with its class's name or its script's res:\/\/ path as the path\./,
+  );
+  assert.match(
+    await onClass('res://nowhere.gd', 'best', [[1]]),
+    /No script is at res:\/\/nowhere\.gd to call a static function of\./,
+  );
+  // Written while the game runs, so nothing loads it before the call does. ok compiles on its
+  // own, so only the failed compile explains a refusal of it.
+  writeFileSync(
+    join(project, 'broken.gd'),
+    'extends RefCounted\n\n\nstatic func ok() -> int:\n\treturn 1\n\n\n' +
+      'static func bad() -> void:\n\tvar count: int = "many"\n\tprint(count)\n',
+  );
+  assert.match(
+    await onClass('res://broken.gd', 'ok', []),
+    /^res:\/\/broken\.gd did not compile, so none of its functions can be called\. script_diagnostics on it gives the error and its line\.$/,
+  );
+}
+
+/** An object parameter refuses what is not the path of a Part, and the game keeps the part it held. */
+async function assertAnObjectParameterRefusesWhatIsNotAPath({
+  invoke,
+  wearing,
+}: ObjectCallRun): Promise<void> {
+  const cleared = await invoke('unmount', [null]);
+  assert.equal(cleared.result, true, `null still reaches an object parameter as null: ${cleared.said}`);
+  await invoke('mount', ['items:4']);
+
+  const refusals: [unknown, RegExp][] = [
+    [
+      'items:9',
+      /^\/root\/Main\.mount argument 1: \/root\/Main:items is a list of 5, so there is no 9 in it$/,
+    ],
+    ['count', /^\/root\/Main\.mount argument 1: \/root\/Main:count holds int, not an object$/],
+    ['spare', /^\/root\/Main\.mount argument 1: spare is RefCounted, not a Part$/],
+    [
+      '/root/Nope:items:0',
+      /^\/root\/Main\.mount argument 1: Node not found: \/root\/Nope\. \/root has no Nope\. Its children are GdharnessRuntime, Main\.$/,
+    ],
+    [
+      '/root/Main/Shelf:items:0',
+      /^\/root\/Main\.mount argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf\. Its children are Rack\.$/,
+    ],
+    [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
+  ];
+  for (const [given, expected] of refusals) {
+    const refused = await invoke('mount', [given]);
+    assert.equal(refused.result, undefined, `${JSON.stringify(given)} is refused: ${refused.said}`);
+    assert.match(refused.said, expected, `and says why: ${refused.said}`);
+    assert.equal(await wearing(4), true, `mount was not called with anything for ${JSON.stringify(given)}`);
+  }
+}
+
+/** A node path written from the current scene is given the path from the root, and a constant is read through a path. */
+async function assertAPathFromTheCurrentSceneIsGivenTheRootsPath({ server }: ObjectCallRun): Promise<void> {
+  // A node path written from the current scene, as the scene tools take one, is given the path
+  // from the root that reaches it.
+  const inspected = (nodePath: string): Promise<string> => inspectedNameAt(server, nodePath);
+  assert.match(await inspected('/root/Main/Rack'), /"Rack"/, 'the path from the root reads the node');
+  assert.match(
+    await inspected('Rack'),
+    /Node not found: Rack\. Paths here go from the root, \/root, not from the current scene, so this one is \/root\/Main\/Rack\./,
+  );
+  assert.match(
+    await inspected('Shelf'),
+    /Node not found: Shelf\. \/root has no Shelf\. Its children are GdharnessRuntime, Main\./,
+    'a path the scene has not either is told what the root has',
+  );
+  // A constant is read as its script declares it, through a path and from a script the object's
+  // extends too: the wheel is a Wheel, and Part declares the constant.
+  const readOff = async (property: string): Promise<unknown> =>
+    get(
+      parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_inspect', arguments: { op: 'property', nodePath: '/root/Main', property } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      ),
+      'value',
+    );
+  assert.deepEqual([await readOff('STOCK_NOTE'), await readOff('items:4:KIND')], ['held', 'part']);
+}
+
+/** A path is taken on a write too: into a typed property, a list slot and a map slot, and a resource by its file. */
+async function assertTheSameNamingOnAWrite({ server, invoke, wearing, set }: ObjectCallRun): Promise<void> {
+  // The same naming on a write. Each slot starts empty or holding another piece, so the write
+  // is what puts the instance there: an empty `Part` property reads as no type at all, and is
+  // told apart from an untyped one only by what it declares.
+  await invoke('unmount', [null]);
+  const intoProperty = await set('mounted', 'items:1');
+  assert.ok(intoProperty.written, `an empty typed property takes a path: ${intoProperty.said}`);
+  assert.equal(await wearing(1), true, 'and holds that very instance');
+  const intoList = await set('items:0', 'items:3');
+  assert.ok(intoList.written, `a typed list slot takes one: ${intoList.said}`);
+  assert.equal((await invoke('same', [0, 3])).result, true, 'and holds the instance the path named');
+  const intoMap = await set('by_name:head', '/root/Main:items:2');
+  assert.ok(intoMap.written, `an empty typed map slot takes one: ${intoMap.said}`);
+  assert.equal((await invoke('head_is', [2])).result, true, 'and the map holds the instance the path named');
+
+  const refusedWrites: [string, unknown, RegExp][] = [
+    ['mounted', 'spare', /^\/root\/Main\.mounted holds an object: spare is RefCounted, not a Part$/],
+    ['items:0', 'spare', /^\/root\/Main:items\.0 holds an object: spare is RefCounted, not a Part$/],
+    [
+      'mounted',
+      'count',
+      /^\/root\/Main\.mounted holds an object: \/root\/Main:count holds int, not an object$/,
+    ],
+    [
+      'STOCK_NOTE',
+      'sold',
+      /^\/root\/Main:STOCK_NOTE is a constant its script declares, and a constant cannot be set$/,
+    ],
+  ];
+  for (const [property, value, expected] of refusedWrites) {
+    const refused = await set(property, value);
+    assert.equal(
+      refused.written,
+      false,
+      `${property} = ${JSON.stringify(value)} is refused: ${refused.said}`,
+    );
+    assert.match(refused.said, expected, `and says why: ${refused.said}`);
+  }
+  assert.equal(await wearing(1), true, 'the refused writes left the property as it was');
+  assert.equal((await invoke('same', [0, 3])).result, true, 'and the list slot');
+
+  // A resource is named by its file and loaded as the game loads one, so the slot holds the
+  // texture the script preloaded rather than a copy of it.
+  const filed = await set('art', 'res://shine.tres');
+  assert.ok(filed.written, `a texture slot takes a res:// path: ${filed.said}`);
+  assert.equal((await invoke('art_is_kept', [])).result, true, 'and holds the instance the game loaded');
+  await set('art', 'null');
+  const byRecord = await set('art', {
+    _type: 'Resource',
+    path: 'res://shine.tres',
+    class: 'GradientTexture1D',
+  });
+  assert.ok(byRecord.written, `the record a read answers a filed resource with names it: ${byRecord.said}`);
+  assert.equal((await invoke('art_is_kept', [])).result, true, 'the same instance through the record');
+  assert.equal(
+    (await invoke('width_of', ['res://shine.tres'])).result,
+    16,
+    'an argument takes one by its path',
+  );
+  assert.equal(
+    (await invoke('named', [{ _type: 'Node', path: '/root/Main/Rack', class: 'Node' }])).result,
+    'Rack',
+    'and a node by the record a read answers it with',
+  );
+  const unfiled: [unknown, RegExp][] = [
+    ['res://part.gd', /^\/root\/Main\.art holds an object: res:\/\/part\.gd is GDScript, not a Texture2D$/],
+    ['res://nowhere.tres', /^\/root\/Main\.art holds an object: No resource at res:\/\/nowhere\.tres$/],
+    [
+      'res://late.svg',
+      /^\/root\/Main\.art holds an object: res:\/\/late\.svg is there, but it has never been imported, so the game has no resource to load from it\. project_import reimport with resourcePath res:\/\/late\.svg imports it$/,
+    ],
+    [
+      { _type: 'GradientTexture1D', width: 8 },
+      /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none\. A resource built into a scene has no path\. The call builds a resource from its properties only inside an object it builds, such as a PhysicsShapeQueryParameters2D's shape\. resource_edit create writes a GradientTexture1D to a \.tres file\. Pass that file's res:\/\/ path here$/,
+    ],
+  ];
+  for (const [value, expected] of unfiled) {
+    const refused = await set('art', value);
+    assert.equal(refused.written, false, `${JSON.stringify(value)} is refused: ${refused.said}`);
+    assert.match(refused.said, expected, `and says why: ${refused.said}`);
+  }
+  assert.equal(
+    (await invoke('art_is_kept', [])).result,
+    true,
+    'the refused resources left the texture as it was',
+  );
+
+  for (const material of ['res://panorama.tres', 'res://shaded.tres']) {
+    const listed = await set('sky:sky_material', material);
+    assert.ok(listed.written, `a hint listing several classes takes each of them: ${listed.said}`);
+  }
+  const plain = await set('sky:sky_material', 'res://plain.tres');
+  assert.equal(plain.written, false, `a class the hint does not list is refused: ${plain.said}`);
+  assert.match(
+    plain.said,
+    /holds an object: res:\/\/plain\.tres is StandardMaterial3D, not one of PanoramaSkyMaterial, ProceduralSkyMaterial, PhysicalSkyMaterial, ShaderMaterial$/,
+  );
+
+  // A JSON number arrives as a float whether or not it has a fraction, so a refusal calling it
+  // one names a type the caller never sent.
+  const numberFor = await invoke('aim_at', [5]);
+  assert.match(
+    numberFor.said,
+    /^\/root\/Main\.aim_at takes Vector2 as argument 1 and was given a number, which cannot be converted\./,
+    numberFor.said,
+  );
+  const numberInto = await set('aim', 5);
+  assert.match(
+    numberInto.said,
+    /^\/root\/Main\.aim holds Vector2 and the value given is a number, which cannot become one\./,
+    numberInto.said,
+  );
+  const numberWait =
+    textOf(
+      await server.request(
+        'tools/call',
+        {
+          name: 'runtime_wait',
+          arguments: { op: 'until', nodePath: '/root/Main', property: 'aim', value: 5, timeoutMs: 500 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ) ?? '';
+  assert.match(
+    numberWait,
+    /\/root\/Main\.aim holds Vector2 and the value to wait for is a number, which cannot become one/,
+    numberWait,
+  );
+}
+
+/** A typed container is written with the plain one JSON carries, and a typed list is passed as an argument. */
+async function assertTypedContainersAreWrittenWithThePlainOne({ invoke, set }: ObjectCallRun): Promise<void> {
+  // A typed container written with the plain one JSON carries. The engine keeps what it held and
+  // says nothing, so this answered as a set whose old and new values were both [].
+  const listed = await set('done_at', [30, '12']);
+  assert.ok(listed.written, `a list is fitted to Array[int]: ${listed.said}`);
+  assert.deepEqual(
+    get(JSON.parse(listed.said), 'new_value'),
+    [30, 12],
+    `with each element fitted: ${listed.said}`,
+  );
+  const worded = await set('done_at', ['thirty']);
+  assert.equal(worded.written, false, `an element that is no number is refused: ${worded.said}`);
+  assert.match(
+    worded.said,
+    /^\/root\/Main\.done_at is a typed list: element 0 is "thirty", which cannot become int\.$/,
+    worded.said,
+  );
+  const mapped = await set('tally', { wins: '3' });
+  assert.ok(mapped.written, `a map is fitted to Dictionary[String, int]: ${mapped.said}`);
+  assert.match(mapped.said, /"new_value":\s*\{\s*"wins":\s*3\s*\}/, mapped.said);
+
+  // A write that leaves the property as it was is refused rather than answered as done, and said
+  // as what was seen: a setter keeping the value and the engine refusing it look the same.
+  const kept = await set('locked', 9);
+  assert.equal(kept.written, false, `a property that ignores the write is refused: ${kept.said}`);
+  assert.match(
+    kept.said,
+    /^\/root\/Main\.locked was given 9 and reads 5 afterwards, as it did before: the write left it as it was/,
+    kept.said,
+  );
+
+  // And a typed list as an argument, which raised inside the game when handed a plain one.
+  const summed = await invoke('total', [[1, 2, '3']]);
+  assert.equal(summed.result, 6, `an Array[int] argument is built from the list: ${summed.said}`);
+  const pieces = await invoke('armour', [['items:0', '/root/Main:items:-1']]);
+  // items:0 holds piece 3 by now, written there by the list-slot set above.
+  assert.equal(pieces.result, 'piece 3, wheel', `and an Array[Part] from paths: ${pieces.said}`);
+  const stray = await invoke('armour', [[7]]);
+  assert.match(
+    stray.said,
+    /^\/root\/Main\.armour takes a typed list as argument 1: element 0 is 7(\.0)?, which cannot become Part\.$/,
+    stray.said,
+  );
+}
+
+/** A call that outlasts the wait answers pending with an id, and its reply is collected by that id. */
+async function assertACallThatOutlastsTheWaitIsCollected({ server, invoke }: ObjectCallRun): Promise<void> {
+  // A call that outlasts the wait is not a failure. It runs on and does what it was asked, so the
+  // answer is pending with an id, and the reply is collected by that id once it comes. The
+  // counter is read too, because a call answered as failed was repeated and ran twice.
+  const before = asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result'));
+  const invokeWaiting = async (args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', { name: 'runtime_invoke', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+    );
+  const pending = await invokeWaiting({
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'slow',
+    args: [3000],
+    timeoutMs: 500,
+  });
+  assert.equal(
+    get(pending, 'pending'),
+    true,
+    `a long call is pending, not failed: ${JSON.stringify(pending)}`,
+  );
+  const requestId = asNumber(get(pending, 'requestId'), 'with an id to collect it by');
+  assert.match(text(get(pending, 'note')), /Nothing was cancelled/, JSON.stringify(pending));
+  assert.match(
+    text(get(pending, 'note')),
+    /timeoutMs waits longer next time\.$/,
+    `runtime_invoke call takes timeoutMs, so its note offers it: ${JSON.stringify(pending)}`,
+  );
+  const early = await invokeWaiting({ op: 'result', requestId });
+  assert.equal(get(early, 'pending'), true, `asked early, it is still running: ${JSON.stringify(early)}`);
+  let collected: unknown = early;
+  for (let waited = 0; get(collected, 'pending') === true && waited < 20_000; waited += 250) {
+    await delay(250);
+    collected = await invokeWaiting({ op: 'result', requestId });
+  }
+  assert.equal(
+    get(collected, 'result'),
+    'done after 3000',
+    `and collected once it comes: ${JSON.stringify(collected)}`,
+  );
+  assert.equal(
+    asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
+    before + 1,
+    'the call ran once',
+  );
+
+  // A method that awaits hands its caller a function state at the first await, which was
+  // answered as the result. The answer is the value it returns once it ends, whether that comes
+  // inside the wait or is collected after it, and the frames go on drawing while it waits.
+  const awaited = await invokeWaiting({
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'later',
+    args: [300],
+  });
+  assert.equal(
+    get(awaited, 'result'),
+    'awaited 300',
+    `an awaiting method answers its value: ${JSON.stringify(awaited)}`,
+  );
+  assert.equal(get(awaited, 'awaited'), true, JSON.stringify(awaited));
+  // Held against the method's own reading rather than the timer's length: a timer counts whole
+  // frame steps, including the part of its first frame before it was made, so on a loaded macOS
+  // runner a 300 ms timer ended after 245 ms.
+  const took = asNumber(get(JSON.parse((await invoke('get', ['later_took'])).said), 'result'));
+  assert.ok(
+    took > 0 && asNumber(get(awaited, 'elapsed_usec'), JSON.stringify(awaited)) >= took,
+    `and its time runs to its end, past the method's own ${String(took)} us: ${JSON.stringify(awaited)}`,
+  );
+  const awaitedLater = await invokeWaiting({
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'later',
+    args: [2000],
+    timeoutMs: 500,
+  });
+  assert.equal(
+    get(awaitedLater, 'pending'),
+    true,
+    `one that outlasts the wait is pending: ${JSON.stringify(awaitedLater)}`,
+  );
+  const laterId = asNumber(get(awaitedLater, 'requestId'), JSON.stringify(awaitedLater));
+  let laterCollected: unknown = awaitedLater;
+  for (let waited = 0; get(laterCollected, 'pending') === true && waited < 20_000; waited += 250) {
+    await delay(250);
+    laterCollected = await invokeWaiting({ op: 'result', requestId: laterId });
+  }
+  assert.equal(
+    get(laterCollected, 'result'),
+    'awaited 2000',
+    `and collected by its id: ${JSON.stringify(laterCollected)}`,
+  );
+  assert.equal(
+    asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
+    before + 3,
+    'each awaiting call ran once',
+  );
+  assert.match(
+    textOf(
+      await server.request('tools/call', {
+        name: 'runtime_invoke',
+        arguments: { op: 'result', requestId: 999_999 },
+      }),
+    ) ?? '',
+    /No request 999999 is waiting to be collected here/,
+    'an id this server never gave is refused',
+  );
+
+  // What waits longer, for calls that take no timeoutMs: the note offered it to every call and
+  // runtime_wait frames refused it. The game is held past the standing wait so that a frames wait
+  // and an input both run out. Each is told what sets its own wait instead.
+  const holding = await invokeWaiting({
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'slow',
+    args: [12_000],
+    timeoutMs: 500,
+  });
+  const holdingId = asNumber(get(holding, 'requestId'), JSON.stringify(holding));
+  const asking = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS));
+  const [framesWait, moved] = await Promise.all([
+    asking('runtime_wait', { op: 'frames', frames: 1 }),
+    asking('runtime_input', { op: 'mouse_motion', x: 1, y: 1 }),
+  ]);
+  assert.equal(get(framesWait, 'pending'), true, JSON.stringify(framesWait));
+  assert.match(
+    text(get(framesWait, 'note')),
+    /runtime_wait frames takes no timeoutMs: it was given \d+ms, and the wait is counted from the number of frames, at 20 a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS: a game drawing frames more slowly than that is waited on in fewer frames at a time, and a game inside one long frame, such as a long _ready, answers no call however few frames are asked for\.$/,
+    `a frames wait is told what sizes its wait: ${JSON.stringify(framesWait)}`,
+  );
+  assert.equal(get(moved, 'pending'), true, JSON.stringify(moved));
+  assert.match(
+    text(get(moved, 'note')),
+    /runtime_input mouse_motion takes no timeoutMs: it was given \d+ms, and the wait is GDHARNESS_RUNTIME_TIMEOUT_MS/,
+    `and an input is told its wait is the server's: ${JSON.stringify(moved)}`,
+  );
+  for (const one of [framesWait, moved]) {
+    assert.doesNotMatch(text(get(one, 'note')), /timeoutMs waits longer/, JSON.stringify(one));
+  }
+  let released: unknown = holding;
+  for (let waited = 0; get(released, 'pending') === true && waited < 30_000; waited += 500) {
+    await delay(500);
+    released = await invokeWaiting({ op: 'result', requestId: holdingId });
+  }
+  assert.equal(get(released, 'result'), 'done after 12000', JSON.stringify(released));
+}
+
+/** Lists and maps are read and called through their names, and a wait on a list's size is met. */
+async function assertListsAndMapsAreReadAndCalledThroughTheirNames({ server }: ObjectCallRun): Promise<void> {
+  // A list's size is a call on the list, and a wait for a board to fill is written against it.
+  // The step was read as an index, so the answer was "a list of 5, so there is no size() in it".
+  const tool = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ parsed: unknown; said: string }> => {
+    const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    return { parsed: parseTextContent(response), said: textOf(response) ?? '' };
+  };
+  const read = async (property: string): Promise<{ parsed: unknown; said: string }> =>
+    await tool('runtime_inspect', { op: 'property', nodePath: '/root/Main', property });
+  assert.equal(get((await read('items:size()')).parsed, 'value'), 5, (await read('items:size()')).said);
+  assert.equal(get((await read('board:size()')).parsed, 'value'), 0, 'an empty list has a size too');
+  assert.deepEqual(get((await read('by_name:keys()')).parsed, 'value'), ['head'], 'a map answers its keys');
+  // A map comes back in the order the game keeps it, which is the order its keys() and a loop
+  // over it give. Sorted on the way out of the game, a stock keyed base:water, base:sand and
+  // base:clay was read with clay first while its keys() put it third.
+  const ledgerOrder = ['zeta', 'alpha', 'mid'];
+  assert.deepEqual(Object.keys(asObject(get((await read('ledger')).parsed, 'value'))), ledgerOrder);
+  assert.deepEqual(get((await read('ledger:keys()')).parsed, 'value'), ledgerOrder, 'as keys() lists it');
+  assert.match((await read('board:back()')).said, /is an empty list, so it has no back\(\)/);
+  assert.match((await read('items:clear()')).said, /not one of the calls a path makes on one/);
+  assert.equal(get((await read('items:size()')).parsed, 'value'), 5, 'and the refused call changed nothing');
+
+  // A packed list, which a game keeps names in as often as an Array, and which a path could not
+  // step into at all: "names:1" answered that names held no object to read 1 off.
+  assert.equal(get((await read('names:1')).parsed, 'value'), 'Bram', (await read('names:1')).said);
+  assert.equal(get((await read('names:size()')).parsed, 'value'), 2, 'a packed list answers its size');
+  assert.match((await read('names:9')).said, /names is a packed list of 2, so there is no 9 in it/);
+  assert.match((await read('names:sort()')).said, /not one of the calls a path makes on one.*size\(\)/);
+  // A string answers calls that read it, its code points among them, which tell a non-breaking
+  // space from the space the answer's JSON shows in its place.
+  assert.deepEqual(
+    get((await read('sign:to_utf32_buffer():to_int32_array()')).parsed, 'value'),
+    [105, 110, 160, 50],
+    (await read('sign:to_utf32_buffer():to_int32_array()')).said,
+  );
+  assert.equal(get((await read('sign:length()')).parsed, 'value'), 4, (await read('sign:length()')).said);
+  assert.match(
+    (await read('sign:0')).said,
+    /sign is a string, so a path makes only calls on it, which read it and take no arguments: length\(\), /,
+  );
+  assert.match((await read('sign:sort()')).said, /sign is a string, and sort\(\) is not one of the calls/);
+  // A packed list of bytes is offered the calls it has: it has no to_byte_array().
+  const bytes = (await read('sign:to_utf8_buffer():to_byte_array()')).said;
+  assert.match(
+    bytes,
+    /is a packed list, and to_byte_array\(\) is not one of the calls .*to_int32_array\(\)/,
+    bytes,
+  );
+  assert.doesNotMatch(bytes, /: [^;]*to_byte_array\(\)/, bytes);
+  const upper = await tool('runtime_invoke', {
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'sign:to_upper()',
+  });
+  assert.equal(get(upper.parsed, 'result'), 'IN 2', upper.said);
+  const renamed = await tool('runtime_invoke', {
+    op: 'set',
+    nodePath: '/root/Main',
+    property: 'names:0',
+    value: 'Cass',
+  });
+  assert.equal(get(renamed.parsed, 'new_value'), 'Cass', renamed.said);
+  assert.deepEqual(
+    get((await read('names')).parsed, 'value'),
+    ['Cass', 'Bram'],
+    'an element written through a path is written into the list the game holds',
+  );
+  // A call that changes a list is pointed at the write that does, and was told to call the
+  // method on an element instead: "board:0:append", for a list being added to.
+  const call = (method: string, args: unknown[]): Promise<{ parsed: unknown; said: string }> =>
+    tool('runtime_invoke', { op: 'call', nodePath: '/root/Main', method, args });
+  const appended = (await call('board:append', [7])).said;
+  assert.match(
+    appended,
+    /append\(\) changes the list: to change it, give \/root\/Main:board its new value whole with runtime_invoke set, property board, or call a method of the game that changes it/,
+    appended,
+  );
+  assert.doesNotMatch(appended, /on the element/, appended);
+  const given = await tool('runtime_invoke', {
+    op: 'set',
+    nodePath: '/root/Main',
+    property: 'board',
+    value: [7],
+  });
+  assert.deepEqual(get(given.parsed, 'new_value'), [7], given.said);
+  assert.deepEqual(get((await read('board')).parsed, 'value'), [7], 'and the write it names takes');
+  // The waits below need the board empty again.
+  await tool('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'board', value: [] });
+  assert.deepEqual(get((await read('board')).parsed, 'value'), [], 'the board is emptied again');
+  const lookedIn = (await call('ledger:has', ['zeta'])).said;
+  assert.match(
+    lookedIn,
+    /To look in the map with has\(\), read \/root\/Main:ledger whole with runtime_inspect property, property ledger, and look in what comes back/,
+    lookedIn,
+  );
+  const copied = (await call('ledger:duplicate():erase', ['zeta'])).said;
+  assert.match(
+    copied,
+    /erase\(\) changes the map: to change it, call a method of the game that changes it, since \/root\/Main:ledger:duplicate\(\) is returned by a call/,
+    copied,
+  );
+  const elementWise = (await call('names:to_upper', [])).said;
+  assert.match(elementWise, /is called on the element, as in \/root\/Main:names:0:to_upper/, elementWise);
+  assert.equal(get((await call('names:0:to_upper()', [])).parsed, 'result'), 'CASS', 'as that names it');
+
+  // Depth 0 is the node alone, the one depth that reads exactly one node's properties. It read
+  // as "not given" and walked the default three levels, which over a router was 4 MB.
+  const tree = async (depth: unknown): Promise<{ parsed: unknown; said: string }> =>
+    await tool('runtime_inspect', { op: 'tree', nodePath: '/root', depth, properties: ['name'] });
+  const alone = await tree(0);
+  assert.equal(get(alone.parsed, 'root', 'path'), '/root', alone.said);
+  assert.equal(get(alone.parsed, 'root', 'children'), undefined, `depth 0 has no children: ${alone.said}`);
+  const oneLevel = await tree(1);
+  const children = asArray(get(oneLevel.parsed, 'root', 'children'));
+  assert.ok(children.length > 0, `depth 1 lists the children: ${oneLevel.said}`);
+  assert.ok(
+    children.every((child) => get(child, 'children') === undefined),
+    `and nothing under them: ${oneLevel.said}`,
+  );
+  assert.match((await tree(-1)).said, /runtime_inspect takes depth of 0 or more, not -1\./);
+
+  const waitFor = async (timeoutMs: number): Promise<unknown> =>
+    (
+      await tool('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'board:size()',
+        value: 1,
+        timeoutMs,
+      })
+    ).parsed;
+  const unmet = await waitFor(500);
+  assert.equal(get(unmet, 'met'), false, `a list still empty is not waited out: ${JSON.stringify(unmet)}`);
+  await tool('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'board', value: [7] });
+  const met = await waitFor(5_000);
+  assert.equal(
+    get(met, 'met'),
+    true,
+    `a wait on a list's size is met when it gets there: ${JSON.stringify(met)}`,
+  );
+}
+
+/** Eight connections queued during a long frame are all welcomed before a call sent on the first welcome answers. */
+async function assertEightQueuedConnectionsAreAllWelcomed({
+  runtimeDir,
+  held,
+  invoke,
+}: ObjectCallRun): Promise<void> {
+  // The game takes every connection waiting each frame, not one, so a queue several servers
+  // filled empties at once. Eight are queued during a long frame, and on the first welcome a
+  // second long call goes down that connection: taking one a frame, the game gets through only
+  // the few frames before the call arrives, and the rest wait out the call.
+  const recordPort = asNumber(
+    get(JSON.parse(readFileSync(join(runtimeDir, `runtime-${held.game?.pid ?? 0}.json`), 'utf8')), 'port'),
+    "the held game's runtime port",
+  );
+  const longFrame = invoke('slow', [1500]);
+  await delay(500);
+  const { told, welcomedAt, answeredAt } = await dialTheHeldGameEightTimes(recordPort);
+  await longFrame;
+  assert.deepEqual(
+    told,
+    Array(8).fill('welcome'),
+    `each of eight queued connections was welcomed: ${told.join(', ')}`,
+  );
+  const beforeTheCall = welcomedAt.filter((at) => at <= answeredAt).length;
+  assert.equal(
+    beforeTheCall,
+    8,
+    `all eight were welcomed before a one-second call sent on the first welcome answered, not ${beforeTheCall}`,
+  );
+}
+
+/** A call that frees a node is answered with its result, and the node is gone afterwards. */
+async function assertAFreedNodeIsNamedAndGone({ server }: ObjectCallRun): Promise<void> {
+  const answered = anAnswerNotARefusal;
+  const inspected = (nodePath: string): Promise<string> => inspectedNameAt(server, nodePath);
+  // Naming the result read the freed node's methods, which failed the answer into {}.
+  const freed =
+    textOf(
+      await server.request(
+        'tools/call',
+        {
+          name: 'runtime_invoke',
+          arguments: { op: 'call', nodePath: '/root/Main/Rack', method: 'free' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ) ?? '';
+  assert.deepEqual(
+    [get(answered(freed), 'type'), get(answered(freed), 'result'), get(answered(freed), 'errors')],
+    ['method_result', null, undefined],
+    freed,
+  );
+  assert.match(
+    await inspected('/root/Main/Rack'),
+    /Node not found: \/root\/Main\/Rack/,
+    'and the node is gone',
   );
 }
 
@@ -49578,114 +49612,19 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         ENGINE_CALL_TIMEOUT_MS,
       );
       const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
-      let workers: number[] = [];
-      let other = 0;
-      const met = new MetProcesses();
+      const run: UnannouncedWorkersRun = {
+        shape,
+        engine,
+        server,
+        started,
+        met: new MetProcesses(),
+        benchPid: 0,
+        workers: [],
+        other: 0,
+      };
       try {
-        assert.equal(
-          get(started, 'runtime', 'mayYetAnnounce'),
-          false,
-          `${shape}: ${JSON.stringify(started)}`,
-        );
-        const benchPid = asNumber(get(started, 'pid'), 'the spawned bench has a pid');
-        const printed = async (): Promise<string[]> =>
-          asArray(
-            get(
-              parseTextContent(
-                await server.request(
-                  'tools/call',
-                  { name: 'editor_output', arguments: {} },
-                  ENGINE_CALL_TIMEOUT_MS,
-                ),
-              ),
-              'entries',
-            ),
-          ).map((entry) => text(get(entry, 'text')).trim());
-        const deadline = Date.now() + 30_000;
-        let lines = await printed();
-        while (!lines.some((line) => /^other \d+$/.test(line)) && Date.now() < deadline) {
-          await delay(250);
-          lines = await printed();
-        }
-        assert.ok(
-          lines.some((line) => /^other \d+$/.test(line)),
-          `${shape}: the bench prints what it opened: ${JSON.stringify(lines)}`,
-        );
-        for (const line of lines) {
-          const worker = /^worker (\d+)$/.exec(line);
-          if (worker) workers.push(Number(worker[1]));
-          const bystanding = /^other (\d+)$/.exec(line);
-          if (bystanding) other = Number(bystanding[1]);
-        }
-        workers = workers.toSorted((a, b) => a - b);
-        assert.equal(workers.length, 2, `${shape}: two workers: ${JSON.stringify(lines)}`);
-        assert.ok(other > 0 && workers.every((pid) => pid > 0), `${shape}: every pid is a number`);
-        await met.meet(...workers, other);
-        assert.ok(
-          await cameTrue(() => workers.every(alive) && alive(other), 5_000),
-          `${shape}: all three are up before the stop`,
-        );
-        // Read while everything lives, to say afterwards what each process named was.
-        const table = await processTree();
-        assert.ok(table !== undefined, `${shape}: the platform lists its processes`);
-        const executableOf = (pid: number): string =>
-          readCommandLine(table.get(pid)?.command ?? '').executable;
-
-        const stopped = parseTextContent(
-          await server.request(
-            'tools/call',
-            { name: 'editor_run', arguments: { op: 'stop', andChildren: true } },
-            ENGINE_CALL_TIMEOUT_MS,
-          ),
-        );
-        assert.equal(get(stopped, 'endedPid'), benchPid, `${shape}: ${JSON.stringify(stopped)}`);
-        assert.deepEqual(
-          get(stopped, 'endedChildren'),
-          workers,
-          `${shape}: both workers are ended, announced or not: ${JSON.stringify(stopped)}`,
-        );
-        for (const worker of workers) {
-          assert.match(
-            text(get(stopped, 'identifiedBy', String(worker))),
-            /run with --path .*, this project's engine on this project/,
-            `${shape}: and what identified ${worker} is said: ${JSON.stringify(stopped)}`,
-          );
-        }
-        // Named among what is left, rather than the whole of it: on Windows a console process
-        // opened from a game brings a conhost of its own, which is a child of the run too.
-        const left = asArray(get(stopped, 'childrenLeft')).map((pid) => asNumber(pid));
-        assert.ok(
-          left.includes(other),
-          `${shape}: the process that is not an engine is left and named: ${JSON.stringify(stopped)}`,
-        );
-        assert.ok(
-          workers.every((pid) => !left.includes(pid)),
-          `${shape}: and no worker is: ${JSON.stringify(stopped)}`,
-        );
-        // Nor the run's own engine: under the console wrapper it sits under the handle, and it is
-        // not something the game started. Read off the table taken before the stop, since by now
-        // it is gone.
-        const enginesLeft = left.filter((pid) => /godot/i.test(executableOf(pid)));
-        assert.deepEqual(
-          enginesLeft,
-          [],
-          `${shape}: no engine is left unaccounted for: ${JSON.stringify(left.map((pid) => [pid, executableOf(pid)]))}`,
-        );
-        assert.match(
-          text(get(stopped, 'note')),
-          /2 processes the game had started for itself were ended with it.*2 this project's engine run with --path on it, by their command line/,
-        );
-        assert.match(text(get(stopped, 'note')), /it had started (was|were) left, named under childrenLeft/);
-        assert.ok(
-          (await Promise.all(workers.map((pid) => met.gone(pid, 10_000)))).every(Boolean),
-          `${shape}: and both worker processes are gone`,
-        );
-        // Under the console wrapper everything under it goes when it does, the bystander with the
-        // rest, so whether it is still there is the platform's doing and not this stop's: what
-        // the stop owes is that it was named and not signalled, which is held above.
-        if (!/_console\.exe$/i.test(engine)) {
-          assert.ok(alive(other), `${shape}: while the other child is still there`);
-        }
+        await readTheWorkersAndTheBystanderTheBenchOpened(run);
+        await assertAStopWithChildrenEndsTheWorkersAndNamesTheBystander(run);
       } finally {
         // Listed before the stop, since POSIX hands a bench's orphans to init the moment it goes:
         // everything under the bench is this fixture's, learned or not, so a run that failed
@@ -49693,8 +49632,8 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         const benchPid = get(started, 'pid');
         const tree = typeof benchPid === 'number' ? await processTree() : undefined;
         const under = tree === undefined || typeof benchPid !== 'number' ? [] : descendantsIn(tree, benchPid);
-        await met.meet(...under);
-        await met.end();
+        await run.met.meet(...under);
+        await run.met.end();
         await server.request(
           'tools/call',
           { name: 'editor_run', arguments: { op: 'stop' } },
@@ -49704,6 +49643,144 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
     },
     { engine, playsWindowed: true },
   );
+}
+
+/** What the phases of the unannounced-workers case share. */
+interface UnannouncedWorkersRun {
+  readonly shape: string;
+  readonly engine: string;
+  readonly server: ServerProcess;
+  readonly started: unknown;
+  readonly met: MetProcesses;
+  benchPid: number;
+  workers: number[];
+  other: number;
+}
+
+/** Waits for the bench to print the pids of its two workers and the bystander, which are met and found alive. */
+async function readTheWorkersAndTheBystanderTheBenchOpened(run: UnannouncedWorkersRun): Promise<void> {
+  const { shape, server, started, met } = run;
+  assert.equal(get(started, 'runtime', 'mayYetAnnounce'), false, `${shape}: ${JSON.stringify(started)}`);
+  run.benchPid = asNumber(get(started, 'pid'), 'the spawned bench has a pid');
+  const lines = await waitForTheBenchToPrintWhatItOpened(server);
+  assert.ok(
+    lines.some((line) => /^other \d+$/.test(line)),
+    `${shape}: the bench prints what it opened: ${JSON.stringify(lines)}`,
+  );
+  const { workers, other } = workersAndBystanderPrintedBy(lines);
+  run.workers = workers;
+  run.other = other;
+  assert.equal(workers.length, 2, `${shape}: two workers: ${JSON.stringify(lines)}`);
+  assert.ok(other > 0 && workers.every((pid) => pid > 0), `${shape}: every pid is a number`);
+  await met.meet(...workers, other);
+  assert.ok(
+    await cameTrue(() => workers.every(alive) && alive(other), 5_000),
+    `${shape}: all three are up before the stop`,
+  );
+}
+
+/** The bench's printed lines, read until it has said what it opened or thirty seconds have gone. */
+async function waitForTheBenchToPrintWhatItOpened(server: ServerProcess): Promise<string[]> {
+  const printed = async (): Promise<string[]> =>
+    asArray(
+      get(
+        parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_output', arguments: {} },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ),
+        'entries',
+      ),
+    ).map((entry) => text(get(entry, 'text')).trim());
+  const deadline = Date.now() + 30_000;
+  let lines = await printed();
+  while (!lines.some((line) => /^other \d+$/.test(line)) && Date.now() < deadline) {
+    await delay(250);
+    lines = await printed();
+  }
+  return lines;
+}
+
+/** The worker pids, sorted, and the bystander pid the bench printed. */
+function workersAndBystanderPrintedBy(lines: readonly string[]): { workers: number[]; other: number } {
+  const workers: number[] = [];
+  let other = 0;
+  for (const line of lines) {
+    const worker = /^worker (\d+)$/.exec(line);
+    if (worker) workers.push(Number(worker[1]));
+    const bystanding = /^other (\d+)$/.exec(line);
+    if (bystanding) other = Number(bystanding[1]);
+  }
+  return { workers: workers.toSorted((a, b) => a - b), other };
+}
+
+/** A stop with andChildren ends both workers, names the bystander that is not an engine, and leaves no engine behind. */
+async function assertAStopWithChildrenEndsTheWorkersAndNamesTheBystander(
+  run: UnannouncedWorkersRun,
+): Promise<void> {
+  const { shape, engine, server, met, benchPid, workers, other } = run;
+  // Read while everything lives, to say afterwards what each process named was.
+  const table = await processTree();
+  assert.ok(table !== undefined, `${shape}: the platform lists its processes`);
+  const executableOf = (pid: number): string => readCommandLine(table.get(pid)?.command ?? '').executable;
+
+  const stopped = parseTextContent(
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop', andChildren: true } },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(stopped, 'endedPid'), benchPid, `${shape}: ${JSON.stringify(stopped)}`);
+  assert.deepEqual(
+    get(stopped, 'endedChildren'),
+    workers,
+    `${shape}: both workers are ended, announced or not: ${JSON.stringify(stopped)}`,
+  );
+  for (const worker of workers) {
+    assert.match(
+      text(get(stopped, 'identifiedBy', String(worker))),
+      /run with --path .*, this project's engine on this project/,
+      `${shape}: and what identified ${worker} is said: ${JSON.stringify(stopped)}`,
+    );
+  }
+  // Named among what is left, rather than the whole of it: on Windows a console process
+  // opened from a game brings a conhost of its own, which is a child of the run too.
+  const left = asArray(get(stopped, 'childrenLeft')).map((pid) => asNumber(pid));
+  assert.ok(
+    left.includes(other),
+    `${shape}: the process that is not an engine is left and named: ${JSON.stringify(stopped)}`,
+  );
+  assert.ok(
+    workers.every((pid) => !left.includes(pid)),
+    `${shape}: and no worker is: ${JSON.stringify(stopped)}`,
+  );
+  // Nor the run's own engine: under the console wrapper it sits under the handle, and it is
+  // not something the game started. Read off the table taken before the stop, since by now
+  // it is gone.
+  const enginesLeft = left.filter((pid) => /godot/i.test(executableOf(pid)));
+  assert.deepEqual(
+    enginesLeft,
+    [],
+    `${shape}: no engine is left unaccounted for: ${JSON.stringify(left.map((pid) => [pid, executableOf(pid)]))}`,
+  );
+  assert.match(
+    text(get(stopped, 'note')),
+    /2 processes the game had started for itself were ended with it.*2 this project's engine run with --path on it, by their command line/,
+  );
+  assert.match(text(get(stopped, 'note')), /it had started (was|were) left, named under childrenLeft/);
+  assert.ok(
+    (await Promise.all(workers.map((pid) => met.gone(pid, 10_000)))).every(Boolean),
+    `${shape}: and both worker processes are gone`,
+  );
+  // Under the console wrapper everything under it goes when it does, the bystander with the
+  // rest, so whether it is still there is the platform's doing and not this stop's: what
+  // the stop owes is that it was named and not signalled, which is held above.
+  if (!/_console\.exe$/i.test(engine)) {
+    assert.ok(alive(other), `${shape}: while the other child is still there`);
+  }
 }
 
 /**
