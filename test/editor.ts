@@ -6152,6 +6152,7 @@ async function testAShownSceneIsSavedAsTheEditorHoldsIt({ project, printed }: Ed
 
   // Second pass: the tab is the person's, so the save leaves it.
   await hook(project, { op: 'open', path: card(1) });
+  await hook(project, { op: 'open', path: mainScene });
   const open = await save(1);
   assert.equal(
     get(answerOf(open), 'openedFirst'),
@@ -6215,6 +6216,7 @@ async function testAShownSceneIsSavedAsTheEditorHoldsIt({ project, printed }: Ed
   while (reopened > 0 && leave[reopened - 1]?.front === card(4)) {
     reopened -= 1;
   }
+  assert.equal(leave[reopened - 1]?.front, other, 'the run is of the card coming back after the switch');
   assert.ok(
     last - reopened + 1 >= 3,
     `the card is in front for frames before it is closed: ${last - reopened + 1}`,
