@@ -62858,7 +62858,7 @@ async function testAnEngineIsSizedByWhatItWasSeenToHold(): Promise<void> {
     return pending;
   };
   const within = (pending: Promise<Admitted>, ms: number): Promise<Admitted | undefined> =>
-    Promise.race([pending, delay(ms).then(() => undefined)]);
+    Promise.race([pending.catch(() => undefined), delay(ms).then(() => undefined)]);
   try {
     // Free memory falls by what the first engine holds. The second waits while the first has yet to
     // take its 3 GiB and after it has taken them, since 8 GiB less 3 held and 4 kept is 1 GiB.
