@@ -53,53 +53,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # uv rather than setup-python and pip: setup-python fetches an interpreter by version and
-      # checks nothing about it, and pip trusts whatever the index serves. uv is the one download
-      # done on trust here, and it is refused unless it matches the digest written below; the
-      # interpreter it then installs is checked against the hashes uv itself carries, and every
-      # package against the hashes in uv.lock.
-      #
-      # --retry-all-errors is what makes --retry mean what it looks like it means. On its own,
-      # --retry covers timeouts and 5xx and nothing else, so a connection reset mid-handshake is
-      # not retried at all: this step went red in 0.16s on `curl: (35) Recv failure: Connection
-      # reset by peer`, having tried once. The digest below is unchanged, so what is retried is
-      # the download and what is accepted is still one exact archive. Every pinned download in
-      # this repository carries the same flags for the same reason.
-      #
-      # The file comes through the API, as every release file here does: the releases/download
-      # address on github.com answered 504 for over half an hour while the API served the same
-      # files. curl drops the token when the API redirects to signed storage.
-      - name: Install uv
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
-          UV_TAG: 0.13.7
-          UV_SHA256: c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
-        run: |
-          set -euo pipefail
-          name=uv-x86_64-unknown-linux-gnu.tar.gz
-          archive="${RUNNER_TEMP}/${name}"
-          api=(--proto '=https' --tlsv1.2 --retry 6 --retry-all-errors --connect-timeout 20
-            -H "Authorization: Bearer ${GH_TOKEN}")
-          url="$(curl -fsSL "${api[@]}" "https://api.github.com/repos/astral-sh/uv/releases/tags/${UV_TAG}" |
-            jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .url')"
-          [[ -n "${url}" ]] || { echo "uv ${UV_TAG} has no ${name}." >&2; exit 1; }
-          curl -fsSL "${api[@]}" --speed-limit 1024 --speed-time 60 \
-            -H 'Accept: application/octet-stream' -o "${archive}" "${url}"
-          echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
-          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
-          echo "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu" >> "${GITHUB_PATH}"
-
-      # --locked refuses a uv.lock that no longer matches pyproject.toml instead of re-resolving,
-      # and the interpreter is the one pyproject.toml pins.
-      - name: Install yamllint
-        env:
-          # The interpreter uv downloads and verifies, never one the runner image happens to have.
-          UV_MANAGED_PYTHON: '1'
-        run: |
-          set -euo pipefail
-          uv sync --locked
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
+      - name: Install uv and yamllint
+        uses: ./.github/actions/install-uv # zizmor: ignore[self-repository]
 
       - name: Lint
         run: yamllint --strict .
@@ -135,6 +90,15 @@ jobs:
       - name: Lint
         if: '!cancelled()'
         run: bun run lint:gd
+
+      # gdstyle has no complexity rule, so lizard holds the ceiling the TypeScript gets from Biome.
+      - name: Install uv and lizard
+        if: '!cancelled()'
+        uses: ./.github/actions/install-uv # zizmor: ignore[self-repository]
+
+      - name: Complexity
+        if: '!cancelled()'
+        run: bun run lint:gd:complexity
 
   # Whether the engine legs have anything to test. A release pull request changes the version in
   # package.json and server.json and nothing else; its tree is main's with those two lines, and
