@@ -181,67 +181,91 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 static func follow(
 	changed: String, old_path: String, new_path: String, carried: GdhPaths
 ) -> Dictionary:
-	var texts: Dictionary = {}
-	_read_scenes("res://", texts)
-	var kin: Array[String] = _kin_of(changed, texts)
-	var followed: Array[String] = []
-	var not_followed: Array[Dictionary] = []
-	var dropped: Array[Dictionary] = []
+	var run: GdhFollow = GdhFollow.new(changed, old_path, new_path, carried)
+	_read_scenes("res://", run.texts)
+	var kin: Array[String] = _kin_of(changed, run.texts)
 	for scene_path: String in kin:
-		if scene_path == changed:
-			continue
-		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
-		if not read.get("ok", false):
-			not_followed.append({ "scenePath": scene_path, "reason": str(read.get("error", "")) })
-			continue
-		var tree: Dictionary = read["tree"]
-		var moves: Dictionary = {}
-		for at: String in _placements(scene_path, tree, changed, texts):
-			moves[_under(at, old_path)] = "" if new_path.is_empty() else _under(at, new_path)
-		var text: String = texts[scene_path]
-		var unsaved: String = GdhSceneFile.unsaved_in_editor(scene_path)
-		var rewritten: String = text
-		if not new_path.is_empty():
-			rewritten = _rewritten(text, moves, old_path.get_base_dir() != new_path.get_base_dir())
-		var vanished: Array[Dictionary] = []
-		if new_path.is_empty() and not moves.is_empty():
-			rewritten = _without_vanished(text, moves, scene_path, vanished)
-		if rewritten != text:
-			if not unsaved.is_empty():
-				not_followed.append({ "scenePath": scene_path, "reason": unsaved })
-				continue
-			var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
-			if file == null or not file.store_string(rewritten):
-				not_followed.append(
-					{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
-				)
-				continue
-			file.close()
-			GdhSceneFile.refresh(scene_path)
-			followed.append(scene_path)
-			dropped.append_array(vanished)
-		var holds_paths: bool = text.contains("NodePath(")
-		# A script is only read, for the lines naming the node, so it does not need the file
-		# written.
-		if moves.is_empty() or not (holds_paths or text.contains('Script"')):
-			continue
-		if holds_paths and not unsaved.is_empty() and not new_path.is_empty():
-			not_followed.append({ "scenePath": scene_path, "reason": unsaved })
-			continue
-		var before: int = carried.retargeted.size()
-		var unwritten: String = carried.carry_into(scene_path, moves)
-		if not unwritten.is_empty() and not followed.has(scene_path):
-			not_followed.append({ "scenePath": scene_path, "reason": unwritten })
-		elif carried.retargeted.size() > before and not followed.has(scene_path):
-			followed.append(scene_path)
+		_follow_scene(scene_path, run)
 	var answer: Dictionary = carried.answer()
-	if not followed.is_empty():
-		answer["followed"] = followed
-	if not not_followed.is_empty():
-		answer["notFollowed"] = not_followed
-	if not dropped.is_empty():
-		answer["dropped"] = dropped
+	if not run.followed.is_empty():
+		answer["followed"] = run.followed
+	if not run.not_followed.is_empty():
+		answer["notFollowed"] = run.not_followed
+	if not run.dropped.is_empty():
+		answer["dropped"] = run.dropped
 	return answer
+
+
+## Follows the move into the scene at [param scene_path], which [param run] records.
+static func _follow_scene(scene_path: String, run: GdhFollow) -> void:
+	if scene_path == run.changed:
+		return
+	var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
+	if not read.get("ok", false):
+		run.not_followed.append({ "scenePath": scene_path, "reason": str(read.get("error", "")) })
+		return
+	var tree: Dictionary = read["tree"]
+	var moves: Dictionary = {}
+	for at: String in _placements(scene_path, tree, run.changed, run.texts):
+		var moved_to: String = "" if run.new_path.is_empty() else _under(at, run.new_path)
+		moves[_under(at, run.old_path)] = moved_to
+	var text: String = run.texts[scene_path]
+	var unsaved: String = GdhSceneFile.unsaved_in_editor(scene_path)
+	var vanished: Array[Dictionary] = []
+	var rewritten: String = text
+	if not run.new_path.is_empty():
+		rewritten = _rewritten(
+			text, moves, run.old_path.get_base_dir() != run.new_path.get_base_dir()
+		)
+	if run.new_path.is_empty() and not moves.is_empty():
+		rewritten = _without_vanished(text, moves, scene_path, vanished)
+	if rewritten != text:
+		if not _store_scene(scene_path, rewritten, unsaved, run):
+			return
+		run.dropped.append_array(vanished)
+	_carry_paths(scene_path, text, moves, unsaved, run)
+
+
+## Writes [param rewritten] over the scene at [param scene_path] and records it as followed. Answers
+## false, with the scene recorded as left, when [param unsaved] says the editor holds changes to it
+## or the file cannot be written.
+static func _store_scene(
+	scene_path: String, rewritten: String, unsaved: String, run: GdhFollow
+) -> bool:
+	if not unsaved.is_empty():
+		run.not_followed.append({ "scenePath": scene_path, "reason": unsaved })
+		return false
+	var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+	if file == null or not file.store_string(rewritten):
+		run.not_followed.append(
+			{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
+		)
+		return false
+	file.close()
+	GdhSceneFile.refresh(scene_path)
+	run.followed.append(scene_path)
+	return true
+
+
+## Carries the node paths and script lines of the scene at [param scene_path], whose text is
+## [param text], by [param moves].
+static func _carry_paths(
+	scene_path: String, text: String, moves: Dictionary, unsaved: String, run: GdhFollow
+) -> void:
+	var holds_paths: bool = text.contains("NodePath(")
+	# A script is only read, for the lines naming the node, so it does not need the file
+	# written.
+	if moves.is_empty() or not (holds_paths or text.contains('Script"')):
+		return
+	if holds_paths and not unsaved.is_empty() and not run.new_path.is_empty():
+		run.not_followed.append({ "scenePath": scene_path, "reason": unsaved })
+		return
+	var before: int = run.carried.retargeted.size()
+	var unwritten: String = run.carried.carry_into(scene_path, moves)
+	if not unwritten.is_empty() and not run.followed.has(scene_path):
+		run.not_followed.append({ "scenePath": scene_path, "reason": unwritten })
+	elif run.carried.retargeted.size() > before and not run.followed.has(scene_path):
+		run.followed.append(scene_path)
 
 
 ## [param text] without the entries it kept for a node a delete took, or one below it, which
@@ -541,3 +565,25 @@ static func _attribute_moved(
 
 static func _without_ids(line: String, ids: String) -> String:
 	return RegEx.create_from_string(" %s=PackedInt32Array\\([^)]*\\)" % ids).sub(line, "")
+
+
+## What [method follow] works on and records: the move, the text of every scene, and the scenes
+## followed, left as they were with why, and the entries dropped.
+class GdhFollow:
+	var changed: String
+	var old_path: String
+	var new_path: String
+	var carried: GdhPaths
+	var texts: Dictionary = {}
+	var followed: Array[String] = []
+	var not_followed: Array[Dictionary] = []
+	var dropped: Array[Dictionary] = []
+
+
+	func _init(
+		changed_scene: String, from_path: String, to_path: String, paths: GdhPaths
+	) -> void:
+		changed = changed_scene
+		old_path = from_path
+		new_path = to_path
+		carried = paths

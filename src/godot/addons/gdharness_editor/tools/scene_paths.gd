@@ -325,48 +325,13 @@ func _carried(
 	match typeof(value):
 		TYPE_NODE_PATH:
 			var path: NodePath = value
-			var after: Array = _after(path, was, now)
-			var record: Dictionary = entry.duplicate()
-			record["from"] = str(path)
-			if not elsewhere.is_empty():
-				if after[0] == REWRITTEN and _names_nothing(path, now):
-					not_retargeted.append(
-						_left(
-							record,
-							(
-								"The value is set in %s, and an edit here would not be saved there."
-								% elsewhere
-							)
-						)
-					)
-			elif after[0] == DELETED:
-				still_naming.append(record)
-			elif after[0] == REWRITTEN:
-				record["to"] = after[1]
-				retargeted.append(record)
-				return [true, NodePath(str(after[1]))]
+			return _carried_path(path, was, now, entry, elsewhere)
 		TYPE_ARRAY:
 			var items: Array = value
-			var changed: bool = false
-			for index: int in items.size():
-				var carried: Array = _carried(items[index], was, now, entry, elsewhere)
-				if carried[0]:
-					if not changed:
-						items = items.duplicate()
-						changed = true
-					items[index] = carried[1]
-			return [changed, items]
+			return _carried_array(items, was, now, entry, elsewhere)
 		TYPE_DICTIONARY:
 			var pairs: Dictionary = value
-			var changed: bool = false
-			for key: Variant in pairs.keys():
-				var carried: Array = _carried(pairs[key], was, now, entry, elsewhere)
-				if carried[0]:
-					if not changed:
-						pairs = pairs.duplicate()
-						changed = true
-					pairs[key] = carried[1]
-			return [changed, pairs]
+			return _carried_dictionary(pairs, was, now, entry, elsewhere)
 		TYPE_OBJECT:
 			var held: Object = value
 			# The editor leaves animations to the tracks below, and materials for what it costs.
@@ -376,18 +341,80 @@ func _carried(
 			var file: String = resource.resource_path.get_slice("::", 0)
 			if not elsewhere.is_empty() or (not file.is_empty() and file != _scene.path):
 				return [false, value]
-			var reached: bool = false
-			for property: Dictionary in resource.get_property_list():
-				var name: String = str(property["name"])
-				if not _may_hold_paths(property):
-					continue
-				var carried: Array = _carried(resource.get(name), was, now, entry, "")
-				if carried[0]:
-					resource.set(name, carried[1])
-					reached = true
-			if reached:
-				_scene.reached_into(resource)
+			_carry_into_resource(resource, was, now, entry)
 	return [false, value]
+
+
+## [method _carried] for a NodePath [param path], recording what becomes of it.
+func _carried_path(
+	path: NodePath, was: String, now: String, entry: Dictionary, elsewhere: String
+) -> Array:
+	var after: Array = _after(path, was, now)
+	var record: Dictionary = entry.duplicate()
+	record["from"] = str(path)
+	if not elsewhere.is_empty():
+		if after[0] == REWRITTEN and _names_nothing(path, now):
+			not_retargeted.append(
+				_left(
+					record,
+					(
+						"The value is set in %s, and an edit here would not be saved there."
+						% elsewhere
+					)
+				)
+			)
+	elif after[0] == DELETED:
+		still_naming.append(record)
+	elif after[0] == REWRITTEN:
+		record["to"] = after[1]
+		retargeted.append(record)
+		return [true, NodePath(str(after[1]))]
+	return [false, path]
+
+
+## [method _carried] for the elements of [param items], copied once one changes.
+func _carried_array(
+	items: Array, was: String, now: String, entry: Dictionary, elsewhere: String
+) -> Array:
+	var changed: bool = false
+	for index: int in items.size():
+		var carried: Array = _carried(items[index], was, now, entry, elsewhere)
+		if carried[0]:
+			if not changed:
+				items = items.duplicate()
+				changed = true
+			items[index] = carried[1]
+	return [changed, items]
+
+
+## [method _carried] for the values of [param pairs], copied once one changes.
+func _carried_dictionary(
+	pairs: Dictionary, was: String, now: String, entry: Dictionary, elsewhere: String
+) -> Array:
+	var changed: bool = false
+	for key: Variant in pairs.keys():
+		var carried: Array = _carried(pairs[key], was, now, entry, elsewhere)
+		if carried[0]:
+			if not changed:
+				pairs = pairs.duplicate()
+				changed = true
+			pairs[key] = carried[1]
+	return [changed, pairs]
+
+
+## Carries each path held by [param resource] in place, and has the scene note it when any changed.
+func _carry_into_resource(resource: Resource, was: String, now: String, entry: Dictionary) -> void:
+	var reached: bool = false
+	for property: Dictionary in resource.get_property_list():
+		var name: String = str(property["name"])
+		if not _may_hold_paths(property):
+			continue
+		var carried: Array = _carried(resource.get(name), was, now, entry, "")
+		if carried[0]:
+			resource.set(name, carried[1])
+			reached = true
+	if reached:
+		_scene.reached_into(resource)
 
 
 ## What [param path], held by the node that was at [param was] and is at [param now], becomes, as
@@ -510,7 +537,6 @@ func _tracks(mixer: AnimationMixer, now: String) -> void:
 		for animation_name: StringName in library.get_animation_list():
 			var animation: Animation = library.get_animation(animation_name)
 			var home: Dictionary = _home_of(animation, library)
-			var why: String = home["why"]
 			# Carried once, from the first scene playing it. One kept in a file of its own that this
 			# call rewrote is held in _homes, so a later scene loading that file is given this same
 			# copy.
@@ -522,35 +548,47 @@ func _tracks(mixer: AnimationMixer, now: String) -> void:
 				if str(library_name).is_empty()
 				else "%s/%s" % [library_name, animation_name]
 			)
-			for track: int in animation.get_track_count():
-				if animation.track_is_imported(track):
-					continue
-				var path: NodePath = animation.track_get_path(track)
-				var after: Array = _after(path, root_was, root_now)
-				var record: Dictionary = {
-					"scenePath": _scene.path,
-					"nodePath": now,
-					"animation": named,
-					"track": track,
-					"from": str(path),
-				}
-				if home.get("theirs", false):
-					if after[0] == REWRITTEN and _names_nothing(path, root_now):
-						not_retargeted.append(_left(record, why))
-				elif after[0] == DELETED:
-					still_naming.append(record)
-				elif after[0] == REWRITTEN and not why.is_empty():
-					not_retargeted.append(_left(record, why))
-				elif after[0] == REWRITTEN:
-					var file: String = home["file"]
-					if file.is_empty():
-						_scene.reached_into(animation)
-					else:
-						_homes[file] = home["home"]
-						_outside.append([animation, track, path, record, file])
-					animation.track_set_path(track, NodePath(str(after[1])))
-					record["to"] = after[1]
-					retargeted.append(record)
+			_carry_animation(animation, named, now, [root_was, root_now], home)
+
+
+## Carries the moves into each track of [param animation], named [param named] on the node at
+## [param now]. [param roots] holds the mixer's root node's path before and after the move, and
+## [param home] where the animation is kept ([method _home_of]).
+func _carry_animation(
+	animation: Animation, named: String, now: String, roots: Array[String], home: Dictionary
+) -> void:
+	var root_was: String = roots[0]
+	var root_now: String = roots[1]
+	var why: String = home["why"]
+	for track: int in animation.get_track_count():
+		if animation.track_is_imported(track):
+			continue
+		var path: NodePath = animation.track_get_path(track)
+		var after: Array = _after(path, root_was, root_now)
+		var record: Dictionary = {
+			"scenePath": _scene.path,
+			"nodePath": now,
+			"animation": named,
+			"track": track,
+			"from": str(path),
+		}
+		if home.get("theirs", false):
+			if after[0] == REWRITTEN and _names_nothing(path, root_now):
+				not_retargeted.append(_left(record, why))
+		elif after[0] == DELETED:
+			still_naming.append(record)
+		elif after[0] == REWRITTEN and not why.is_empty():
+			not_retargeted.append(_left(record, why))
+		elif after[0] == REWRITTEN:
+			var file: String = home["file"]
+			if file.is_empty():
+				_scene.reached_into(animation)
+			else:
+				_homes[file] = home["home"]
+				_outside.append([animation, track, path, record, file])
+			animation.track_set_path(track, NodePath(str(after[1])))
+			record["to"] = after[1]
+			retargeted.append(record)
 
 
 ## Where an edit to [param animation], played from [param library], is saved, as {file, home, why,
