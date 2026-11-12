@@ -127,28 +127,13 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 			"error": GdhFileWalk.new().with_nearest_files("Scene not found: " + path, path),
 		}
 	if for_writing:
-		_opened_sha = FileAccess.get_sha256(path)
-		_opened_at = path
-		var held_back: String = unsaved_in_editor(path)
-		if not held_back.is_empty():
-			return { "ok": false, "error": held_back }
-		var as_text: String = FileAccess.get_file_as_string(path) if path.ends_with(".tscn") else ""
-		var missing: String = missing_said(path, as_text)
-		if not missing.is_empty():
-			return { "ok": false, "error": missing }
+		var barred: String = _barred_from_writing()
+		if not barred.is_empty():
+			return { "ok": false, "error": barred }
 	# A script the scene's scripts load that fails to compile names no node, so nothing else sees
 	# it.
 	var failed: GdhHeadlessCheck.GdhParseErrors = GdhHeadlessCheck.GdhParseErrors.new()
-	var watching: bool = for_writing and not Engine.is_editor_hint()
-	if watching:
-		OS.add_logger(failed)
-	var packed: PackedScene = (
-		ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
-	)
-	if packed != null:
-		root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
-	if watching:
-		OS.remove_logger(failed)
+	var packed: PackedScene = _load_packed(for_writing, failed)
 	if packed == null:
 		return { "ok": false, "error": "Failed to load %s as a scene" % path }
 	if root == null:
@@ -159,6 +144,44 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	_base_paths = makers(_state)
 	if for_writing:
 		_unmade = _unmade_connections(_state)
+	_note_filed(for_writing)
+	if not Engine.is_editor_hint():
+		var unsettled: String = _unsettled_on_open(for_writing, failed)
+		if not unsettled.is_empty():
+			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
+	return {}
+
+
+## Why a write to the scene at [member path] is refused before it loads, or "": the editor holds
+## unsaved changes to it, or it names a file that is gone.
+func _barred_from_writing() -> String:
+	_opened_sha = FileAccess.get_sha256(path)
+	_opened_at = path
+	var held_back: String = unsaved_in_editor(path)
+	if not held_back.is_empty():
+		return held_back
+	var as_text: String = FileAccess.get_file_as_string(path) if path.ends_with(".tscn") else ""
+	return missing_said(path, as_text)
+
+
+## Loads the scene at [member path] and sets [member root] from it. A write outside an editor has
+## [param failed] listen for the scripts that fail to compile meanwhile.
+func _load_packed(for_writing: bool, failed: GdhHeadlessCheck.GdhParseErrors) -> PackedScene:
+	var watching: bool = for_writing and not Engine.is_editor_hint()
+	if watching:
+		OS.add_logger(failed)
+	var packed: PackedScene = (
+		ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
+	)
+	if packed != null:
+		root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	if watching:
+		OS.remove_logger(failed)
+	return packed
+
+
+## Records what the file holds for each node, as it was opened.
+func _note_filed(for_writing: bool) -> void:
 	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
 	if for_writing or not Engine.is_editor_hint():
 		for index: int in _state.get_node_count():
@@ -166,15 +189,16 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 			if node != null:
 				_filed[node.get_instance_id()] = _stored_at(_state, index)
 		_note_opened(root)
-	if not Engine.is_editor_hint():
-		if for_writing:
-			_text = FileAccess.get_file_as_string(path)
-		var unsettled: String = settle()
-		if unsettled.is_empty() and for_writing:
-			unsettled = failed.refusal(path)
-		if not unsettled.is_empty():
-			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
-	return {}
+
+
+## Why an open outside an editor is refused after the load, or "".
+func _unsettled_on_open(for_writing: bool, failed: GdhHeadlessCheck.GdhParseErrors) -> String:
+	if for_writing:
+		_text = FileAccess.get_file_as_string(path)
+	var unsettled: String = settle()
+	if unsettled.is_empty() and for_writing:
+		unsettled = failed.refusal(path)
+	return unsettled
 
 
 ## Puts back each placeholder this scene places as the instance itself, marked, as an editor opens
@@ -334,39 +358,50 @@ func _repointed(
 	top: Node, was: Node, now: Node, unheld: Array[Dictionary] = [], own: bool = false
 ) -> void:
 	if top.owner == root or top == root:
-		var holding: Dictionary[String, String] = {}
-		for declared: Dictionary in top.get_property_list():
-			if not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
-				continue
-			var named: String = str(declared["name"])
-			var value: Variant = top.get(named)
-			if value is Object and value == was:
-				holding[named] = str(declared.get("class_name", ""))
-			elif value is Array:
-				var listed: Array = value
-				# Not has(): a typed array raises an engine error for a node it could not hold.
-				for item: Variant in listed:
-					if is_same(item, was):
-						holding[named] = str(listed.get_typed_class_name())
-						break
+		var holding: Dictionary[String, String] = _holding(top, was)
 		if own and not holding.is_empty():
 			asked(top, holding.keys())
 		for named: String in holding:
 			var fits: bool = _takes(holding[named], now)
-			var put: Variant = now if fits else null
-			var value: Variant = top.get(named)
-			if value is Array:
-				var held: Array = value
-				var listed: Array = held.duplicate()
-				for index: int in listed.size():
-					if listed[index] == was:
-						listed[index] = put
-				put = listed
-			top.set(named, put)
+			top.set(named, _repointed_value(top.get(named), was, now if fits else null))
 			if not fits and own:
 				unheld.append({ "nodePath": path_of(top), "property": named })
 	for child: Node in top.get_children():
 		_repointed(child, was, now, unheld, own)
+
+
+## The stored properties of [param top] that hold [param was], alone or in an array, by the class
+## each is typed as.
+func _holding(top: Node, was: Node) -> Dictionary[String, String]:
+	var holding: Dictionary[String, String] = {}
+	for declared: Dictionary in top.get_property_list():
+		if not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			continue
+		var named: String = str(declared["name"])
+		var value: Variant = top.get(named)
+		if value is Object and value == was:
+			holding[named] = str(declared.get("class_name", ""))
+		elif value is Array:
+			var listed: Array = value
+			# Not has(): a typed array raises an engine error for a node it could not hold.
+			for item: Variant in listed:
+				if is_same(item, was):
+					holding[named] = str(listed.get_typed_class_name())
+					break
+	return holding
+
+
+## What a property holding [param was] holds once [param put] takes its place: the value itself, or
+## a copy of the array with each [param was] swapped.
+static func _repointed_value(value: Variant, was: Node, put: Variant) -> Variant:
+	if not value is Array:
+		return put
+	var held: Array = value
+	var listed: Array = held.duplicate()
+	for index: int in listed.size():
+		if listed[index] == was:
+			listed[index] = put
+	return listed
 
 
 ## Whether a value typed as [param type], an engine class or a script's class_name, can hold
@@ -394,39 +429,43 @@ static func _named_file_there(scene_path: String, uid: String, written: String) 
 	return FileAccess.file_exists(scene_path.get_base_dir().path_join(written).simplify_path())
 
 
-## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":
-## an [ext_resource] naming no file the project has, by its uid or by its path. The engine loads the
-## scene without it, so a save drops the entry and every value set from it, and the answer could
-## only call those values empty.
-static func missing_said(scene_path: String, text: String) -> String:
+## The [ext_resource] entries of the text scene at [param scene_path] that name no file there, as
+## {id: path or uid}.
+static func _gone_in_text(scene_path: String, text: String) -> Dictionary:
 	var gone: Dictionary = {}
-	if scene_path.ends_with(".tscn"):
-		var entry: RegEx = RegEx.create_from_string("(?m)^\\[ext_resource\\b[^\\n]*\\]")
-		var field: RegEx = RegEx.create_from_string('\\b(path|uid|id)="([^"]*)"')
-		for found: RegExMatch in entry.search_all(text):
-			var fields: Dictionary = {}
-			for one: RegExMatch in field.search_all(found.get_string()):
-				fields[one.get_string(1)] = one.get_string(2)
-			var uid: String = str(fields.get("uid", ""))
-			var named: String = str(fields.get("path", ""))
-			if _named_file_there(scene_path, uid, named):
-				continue
-			gone[str(fields.get("id", ""))] = named if not named.is_empty() else uid
-	else:
-		# A binary scene has no entries to read, but the engine lists what it loads.
-		for dependency: String in ResourceLoader.get_dependencies(scene_path):
-			var uid: String = (
-				dependency.get_slice("::", 0) if dependency.begins_with("uid://") else ""
-			)
-			var named: String = (
-				dependency.substr(dependency.rfind("::") + 2) if dependency.contains("::") else ""
-			)
-			if uid.is_empty() and named.is_empty():
-				named = dependency
-			if not _named_file_there(scene_path, uid, named):
-				gone[dependency] = named if not named.is_empty() else uid
-	if gone.is_empty():
-		return ""
+	var entry: RegEx = RegEx.create_from_string("(?m)^\\[ext_resource\\b[^\\n]*\\]")
+	var field: RegEx = RegEx.create_from_string('\\b(path|uid|id)="([^"]*)"')
+	for found: RegExMatch in entry.search_all(text):
+		var fields: Dictionary = {}
+		for one: RegExMatch in field.search_all(found.get_string()):
+			fields[one.get_string(1)] = one.get_string(2)
+		var uid: String = str(fields.get("uid", ""))
+		var named: String = str(fields.get("path", ""))
+		if _named_file_there(scene_path, uid, named):
+			continue
+		gone[str(fields.get("id", ""))] = named if not named.is_empty() else uid
+	return gone
+
+
+## What a binary scene at [param scene_path] loads that is not there, as {dependency: path or uid}.
+## A binary scene has no entries to read, but the engine lists what it loads.
+static func _gone_in_binary(scene_path: String) -> Dictionary:
+	var gone: Dictionary = {}
+	for dependency: String in ResourceLoader.get_dependencies(scene_path):
+		var uid: String = dependency.get_slice("::", 0) if dependency.begins_with("uid://") else ""
+		var named: String = (
+			dependency.substr(dependency.rfind("::") + 2) if dependency.contains("::") else ""
+		)
+		if uid.is_empty() and named.is_empty():
+			named = dependency
+		if not _named_file_there(scene_path, uid, named):
+			gone[dependency] = named if not named.is_empty() else uid
+	return gone
+
+
+## The lines of [param text] that use a resource in [param gone], each as "line N on <node>,
+## <line>".
+static func _lines_using(text: String, gone: Dictionary) -> PackedStringArray:
 	var uses: PackedStringArray = []
 	var on: String = ""
 	var lines: PackedStringArray = text.split("\n")
@@ -449,6 +488,22 @@ static func missing_said(scene_path: String, text: String) -> String:
 				var said: String = "line %d on %s, %s" % [index + 1, on, line.strip_edges()]
 				var _used: bool = uses.append(said)
 				break
+	return uses
+
+
+## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":
+## an [ext_resource] naming no file the project has, by its uid or by its path. The engine loads the
+## scene without it, so a save drops the entry and every value set from it, and the answer could
+## only call those values empty.
+static func missing_said(scene_path: String, text: String) -> String:
+	var gone: Dictionary = (
+		_gone_in_text(scene_path, text)
+		if scene_path.ends_with(".tscn")
+		else _gone_in_binary(scene_path)
+	)
+	if gone.is_empty():
+		return ""
+	var uses: PackedStringArray = _lines_using(text, gone)
 	var paths: PackedStringArray = []
 	for id: String in gone:
 		var _named: bool = paths.append(str(gone[id]))
@@ -561,49 +616,12 @@ func _unmade_lines() -> PackedStringArray:
 	for held: Dictionary in _unmade:
 		var ends: Array[Node] = []
 		var paths: Array[String] = []
-		var inside: bool = true
-		for end: String in ["source", "target"]:
-			if held[end + "Gone"]:
-				# No node to follow, so the path stays as the file gave it.
-				ends.append(null)
-				paths.append(str(held["from" if end == "source" else "to"]))
-				continue
-			var held_end: Variant = held[end]
-			if not is_instance_valid(held_end) or not held_end is Node:
-				inside = false
-				break
-			var node: Node = held_end
-			if node != root and not root.is_ancestor_of(node):
-				inside = false
-				break
-			ends.append(node)
-			paths.append(path_of(node))
-		if not inside:
+		if not _unmade_ends(held, ends, paths):
 			continue
 		var from: String = paths[0]
 		var to: String = paths[1]
-		var line: String = (
-			'[connection signal="%s" from="%s" to="%s" method="%s"'
-			% [
-				str(held["signal"]).c_escape(),
-				from.c_escape(),
-				to.c_escape(),
-				str(held["method"]).c_escape(),
-			]
-		)
-		var flags: int = held["flags"]
-		if flags != Object.CONNECT_PERSIST:
-			line += " flags=%d" % flags
-		var bound: PackedStringArray = []
-		var unbinds: int = held["unbinds"]
-		if unbinds > 0:
-			line += " unbinds=%d" % unbinds
-			var _unbinding: bool = bound.append("unbinds %d" % unbinds)
-		var binds: Array = held["binds"]
-		if not binds.is_empty():
-			line += " binds= " + var_to_str(binds)
-			var _binding: bool = bound.append("binds " + var_to_str(binds))
-		var _added: bool = lines.append(line + "]")
+		var bound: PackedStringArray = _unmade_bound(held)
+		var _added: bool = lines.append(_unmade_line(held, from, to) + "]")
 		var named_from: String = str(ends[0].name) if ends[0] == root else from
 		var named_to: String = str(ends[1].name) if ends[1] == root else to
 		held["said"] = (
@@ -616,21 +634,83 @@ func _unmade_lines() -> PackedStringArray:
 				"" if bound.is_empty() else " with " + " and ".join(bound),
 			]
 		)
-		match str(held["kind"]):
-			"method":
-				held["lacks"] = "%s has no method %s" % [named_to, held["method"]]
-			"signal":
-				held["lacks"] = "%s has no signal %s" % [named_from, held["signal"]]
-			_:
-				var absent: PackedStringArray = []
-				if held["sourceGone"]:
-					var _source_named: bool = absent.append(from)
-				if held["targetGone"]:
-					var _target_named: bool = absent.append(to)
-				held["lacks"] = "%s is not in the scene" % " and ".join(absent)
+		held["lacks"] = _unmade_lacks(held, named_from, named_to, [from, to])
 		still.append(held)
 	_unmade = still
 	return lines
+
+
+## Fills [param ends] and [param paths] with the source and target of [param held], and answers
+## whether both are still in the scene.
+func _unmade_ends(held: Dictionary, ends: Array[Node], paths: Array[String]) -> bool:
+	for end: String in ["source", "target"]:
+		if held[end + "Gone"]:
+			# No node to follow, so the path stays as the file gave it.
+			ends.append(null)
+			paths.append(str(held["from" if end == "source" else "to"]))
+			continue
+		var held_end: Variant = held[end]
+		if not is_instance_valid(held_end) or not held_end is Node:
+			return false
+		var node: Node = held_end
+		if node != root and not root.is_ancestor_of(node):
+			return false
+		ends.append(node)
+		paths.append(path_of(node))
+	return true
+
+
+## The unbinds and binds of [param held], each as a phrase for a sentence.
+static func _unmade_bound(held: Dictionary) -> PackedStringArray:
+	var bound: PackedStringArray = []
+	var unbinds: int = held["unbinds"]
+	if unbinds > 0:
+		var _unbinding: bool = bound.append("unbinds %d" % unbinds)
+	var binds: Array = held["binds"]
+	if not binds.is_empty():
+		var _binding: bool = bound.append("binds " + var_to_str(binds))
+	return bound
+
+
+## The [code][connection][/code] line of [param held] between [param from] and [param to], without
+## its closing bracket.
+static func _unmade_line(held: Dictionary, from: String, to: String) -> String:
+	var line: String = (
+		'[connection signal="%s" from="%s" to="%s" method="%s"'
+		% [
+			str(held["signal"]).c_escape(),
+			from.c_escape(),
+			to.c_escape(),
+			str(held["method"]).c_escape(),
+		]
+	)
+	var flags: int = held["flags"]
+	if flags != Object.CONNECT_PERSIST:
+		line += " flags=%d" % flags
+	var unbinds: int = held["unbinds"]
+	if unbinds > 0:
+		line += " unbinds=%d" % unbinds
+	var binds: Array = held["binds"]
+	if not binds.is_empty():
+		line += " binds= " + var_to_str(binds)
+	return line
+
+
+## What [param held] lacks, as a clause. [param ends] holds the source and target paths.
+static func _unmade_lacks(
+	held: Dictionary, named_from: String, named_to: String, ends: Array[String]
+) -> String:
+	match str(held["kind"]):
+		"method":
+			return "%s has no method %s" % [named_to, held["method"]]
+		"signal":
+			return "%s has no signal %s" % [named_from, held["signal"]]
+	var absent: PackedStringArray = []
+	if held["sourceGone"]:
+		var _source_named: bool = absent.append(ends[0])
+	if held["targetGone"]:
+		var _target_named: bool = absent.append(ends[1])
+	return "%s is not in the scene" % " and ".join(absent)
 
 
 ## The connections [method _unmade_lines] kept, named for a sentence.
@@ -1319,31 +1399,15 @@ func _write(check: Callable) -> Dictionary:
 		return refuse("Failed to pack %s: %s" % [path, error_string(packing)])
 	var headless: bool = not Engine.is_editor_hint()
 	if headless:
-		var settled: Array = _settled(packed)
-		if not str(settled[1]).is_empty():
-			return refuse("Nothing was written: " + str(settled[1]))
+		var settled: Array = _headless_packed(packed)
+		var unsettled: String = str(settled[1])
+		if not unsettled.is_empty():
+			return refuse(unsettled)
 		packed = settled[0]
-		var unleft: String = _leave_out_unsaved(packed)
-		if not unleft.is_empty():
-			return refuse("Nothing was written: " + unleft)
-		if not path.ends_with(".tscn") and _holds_scripted_embedded():
-			var binary: String = (
-				"Nothing was written: %s is a binary scene holding an embedded resource with a "
-				+ "script that is not a tool, and what that script changed when a headless engine "
-				+ "loaded it cannot be told apart from the file here. "
-			)
-			return refuse(binary % path + GdhHeadlessCheck.REMEDY)
 	if check.is_valid():
-		var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
-		if saved == null:
-			return refuse(
-				"The packed copy of %s did not instantiate, so nothing was written." % path
-			)
-		_checked_pack = packed
-		var missing: String = str(check.call(saved))
-		saved.free()
-		if not missing.is_empty():
-			return refuse("Nothing was written: " + missing)
+		var failed: String = _failed_check(packed, check)
+		if not failed.is_empty():
+			return refuse(failed)
 	if path == _opened_at and FileAccess.get_sha256(path) != _opened_sha:
 		return refuse(
 			(
@@ -1369,6 +1433,54 @@ func _write(check: Callable) -> Dictionary:
 		if written.is_empty():
 			also_saved.append_array(also)
 		return written
+	return _settled_write(packed, keep, values, carried, previous, also)
+
+
+## What a write outside an editor does to [param packed] before it saves, as [packed scene,
+## refusal].
+## The refusal is "" when nothing stands in the way, and holds the whole text otherwise.
+func _headless_packed(packed: PackedScene) -> Array:
+	var settled: Array = _settled(packed)
+	if not str(settled[1]).is_empty():
+		return [null, "Nothing was written: " + str(settled[1])]
+	var settled_pack: PackedScene = settled[0]
+	var unleft: String = _leave_out_unsaved(settled_pack)
+	if not unleft.is_empty():
+		return [null, "Nothing was written: " + unleft]
+	if not path.ends_with(".tscn") and _holds_scripted_embedded():
+		var binary: String = (
+			"Nothing was written: %s is a binary scene holding an embedded resource with a "
+			+ "script that is not a tool, and what that script changed when a headless engine "
+			+ "loaded it cannot be told apart from the file here. "
+		)
+		return [null, binary % path + GdhHeadlessCheck.REMEDY]
+	return [settled_pack, ""]
+
+
+## The refusal [param check] gives for a copy of [param packed] instantiated, or "".
+func _failed_check(packed: PackedScene, check: Callable) -> String:
+	var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	if saved == null:
+		return "The packed copy of %s did not instantiate, so nothing was written." % path
+	_checked_pack = packed
+	var missing: String = str(check.call(saved))
+	saved.free()
+	if missing.is_empty():
+		return ""
+	return "Nothing was written: " + missing
+
+
+## Settles the text scene just saved from [param packed] against what the headless load changed.
+## [param values] and [param carried] are what the pack holds, [param previous] the file before it
+## and [param also] what [method _also_saved] found.
+func _settled_write(
+	packed: PackedScene,
+	keep: Dictionary,
+	values: Array,
+	carried: Dictionary,
+	previous: Variant,
+	also: Array[Dictionary],
+) -> Dictionary:
 	var just_saved: GdhHeadlessCheck.GdhSaved = GdhHeadlessCheck.GdhSaved.new(
 		path, _text, func() -> Error: return _saved_keeping_ids(packed, path, keep)
 	)
