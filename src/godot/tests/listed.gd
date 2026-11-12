@@ -438,6 +438,12 @@ class GdhRunner:
 			also.append(own)
 		GdhShutdownWalk.hold(also)
 
+	func _ready() -> void:
+		super._ready()
+		if _executor != null:
+			var suite_stage: GdUnitTestSuiteExecutionStage = _executor._executeStage
+			suite_stage._stage_test = GdhFreshFrame.new(suite_stage._stage_test)
+
 	func get_cmdline_args() -> PackedStringArray:
 		if not given.is_empty():
 			var options: PackedStringArray = [TOOL]
@@ -617,12 +623,15 @@ class GdhRunner:
 	static func milliseconds(usec: int) -> int:
 		return roundi(usec / 1000.0)
 
-	## The orphans now that were not there in [param before] and no line has named yet.
+	## The orphans now that were not there in [param before] and no line has named yet, oldest
+	## first. The engine lists them in the order of its own table, which a frame more or less
+	## reshuffles, while an id grows with each object made.
 	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:
 		var found: Array[int] = []
 		for id: int in orphan_ids():
 			if not before.has(id) and not orphans_named.has(id):
 				found.append(id)
+		found.sort()
 		return found
 
 	## Prints the orphans [param ids] as left by [param during], under [constant ORPHANS_LEFT], once
@@ -687,6 +696,27 @@ class GdhRunner:
 	static func spelt(path: String) -> String:
 		var forward: String = path.replace("\\", "/")
 		return forward.to_lower() if OS.get_name() == "Windows" else forward
+
+
+## gdUnit4's stage running one case, begun on an engine frame of its own. gdUnit4 ends each case
+## with a deferred call, so without the wait a whole suite runs inside one flush of deferred calls.
+## A guard counting work per frame then sees every case's work in one frame, and charges a warning
+## to a later case than the one whose work it was.
+class GdhFreshFrame:
+	extends IGdUnitExecutionStage
+
+	var _case_stage: IGdUnitExecutionStage
+
+	func _init(case_stage: IGdUnitExecutionStage) -> void:
+		_case_stage = case_stage
+
+	func _execute(context: GdUnitExecutionContext) -> void:
+		await (Engine.get_main_loop() as SceneTree).process_frame
+		await _case_stage.execute(context)
+
+	func set_debug_mode(debug_mode: bool) -> void:
+		super.set_debug_mode(debug_mode)
+		_case_stage.set_debug_mode(debug_mode)
 
 
 ## The rows of one parameterised case an engine runs: those named, or every row but those.

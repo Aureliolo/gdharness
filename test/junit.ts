@@ -282,6 +282,41 @@ function testASecondFailedAssertionIsNotAHook(): void {
  *         print(empty["missing"])
  *         assert_int(1).is_equal(2)
  */
+/**
+ * The frames of gdharness's own runner, which stands under every case it starts, are left out of a
+ * report, wherever the runner was installed. A project's own script of the same name, and another
+ * script started by its full path, are kept.
+ */
+function testTheRunnersOwnFramesAreLeftOut(): void {
+  const frames = [
+    "\tat 'test_x' in res://tests/x_test.gd:5",
+    "\tat 'helper' in res://godot/tests/listed.gd:9",
+    "\tat '_execute' in X:/tools/gdharness/build/godot/tests/listed.gd:712",
+    "\tat 'tool' in X:/elsewhere/godot/tests/listed_more.gd:3",
+    "\tat '_execute' in /home/me/.npm/_npx/0a1b/node_modules/gdharness/build/godot/tests/listed.gd:712",
+  ];
+  const report = parseJUnit(`<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-12" name="report_1" tests="1" failures="1" skipped="0" flaky="0" time="0.000">
+\t<testsuite id="0" name="x_test" package="tests" tests="1" failures="1" errors="0" skipped="0" flaky="0" time="0.010">
+\t\t<testcase name="test_x" classname="x_test" time="0.010">
+\t\t\t<failure message="FAILED: res://tests/x_test.gd:5" type="FAILURE">
+<![CDATA[
+Expecting:
+ 2
+ but was
+ 1
+${frames.join('\n')}
+]]>
+\t\t\t</failure>
+\t\t</testcase>
+\t</testsuite>
+</testsuites>`);
+  assert.equal(
+    report.suites[0]?.cases[0]?.detail,
+    ['Expecting:\n 2\n but was\n 1', frames[0], frames[1], frames[3]].join('\n'),
+  );
+}
+
 function testEveryReportOfACaseIsKept(): void {
   const failure = (name: string, suite: string, line: number, expected: number, found: number): string =>
     `<failure message="FAILED: res://tests/${suite}.gd:${line}" type="FAILURE">\n<![CDATA[\nExpecting:\n ${expected}\n but was\n ${found}\n\tat '${name}' in res://tests/${suite}.gd:${line}\n]]>\n</failure>`;
@@ -1203,6 +1238,7 @@ Godot Runtime Error !
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
+testTheRunnersOwnFramesAreLeftOut();
 testARunawayCaseIsFoldedAndBounded();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
