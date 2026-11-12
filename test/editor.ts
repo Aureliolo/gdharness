@@ -5929,10 +5929,12 @@ async function testAChangedUidIsReadByTheRescan({ call, project }: Editor): Prom
 
   // The copy given a fresh UID of its own, which only its `.uid` says.
   writeFileSync(join(project, 'twin_b.gd.uid'), 'uid://twinuid12345\n');
+  writeFileSync(join(nested, 'twin_c.gd.uid'), 'uid://nestedtwin5678\n');
   const reread = await call('editor_rescan', { projectPath: project });
-  assert.ok(
-    asArray(get(reread, 'uidsReread')).includes('res://twin_b.gd'),
-    `the rescan reads the copy again: ${JSON.stringify(reread)}`,
+  assert.deepEqual(
+    get(reread, 'uidsReread'),
+    ['res://twin_b.gd'],
+    `the rescan reads the copy again and not the nested project's file: ${JSON.stringify(reread)}`,
   );
   assert.deepEqual(
     await duplicateWarnings(),

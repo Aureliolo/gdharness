@@ -3,6 +3,7 @@ extends Node
 ## The editor's view of the files on disk: scans, the reimports asked for, where each stands, and
 ## files moved under it.
 
+const GdhFileWalk = preload("../file_walk.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 
@@ -104,8 +105,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 ## Two files on disk naming one UID are left alone and named: reading them again cannot settle
 ## which of them owns it, and doing it on every scan would only move the UID between them.
 func _reread_changed_uids(filesystem: EditorFileSystem) -> Dictionary:
-	var sidecars: Array[String] = []
-	_uid_files("res://", sidecars)
+	var sidecars: Array[String] = GdhFileWalk.new().find_files("res://", ".uid", true)
 	var claimed: Dictionary = {}
 	for sidecar: String in sidecars:
 		var id: int = ResourceUID.text_to_id(FileAccess.get_file_as_string(sidecar).strip_edges())
@@ -130,25 +130,6 @@ func _reread_changed_uids(filesystem: EditorFileSystem) -> Dictionary:
 	reread.sort()
 	duplicated.sort()
 	return { "reread": reread, "duplicated": duplicated }
-
-
-## Every `.uid` under [param directory], skipping what the editor skips: hidden directories, any
-## holding a `.gdignore`, and any below the project's own that holds a `project.godot` of its own,
-## which the editor passes over as another project. A nested project's UIDs are never in the
-## editor's table, so without that last one its files would be read again on every rescan, and one
-## holding a copy of an outer file's `.uid` named as a duplicate on disk.
-func _uid_files(directory: String, found: Array[String]) -> void:
-	var listing: DirAccess = DirAccess.open(directory)
-	if listing == null or FileAccess.file_exists(directory.path_join(".gdignore")):
-		return
-	if directory != "res://" and FileAccess.file_exists(directory.path_join("project.godot")):
-		return
-	for child: String in listing.get_directories():
-		if not child.begins_with("."):
-			_uid_files(directory.path_join(child), found)
-	for file: String in listing.get_files():
-		if file.ends_with(".uid"):
-			found.append(directory.path_join(file))
 
 
 ## Whether the editor is scanning, and how long ago its last scan finished, without asking for one.

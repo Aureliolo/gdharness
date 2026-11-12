@@ -88167,6 +88167,9 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
   files['export/room.tscn'] = files['room.tscn'] ?? '';
   files['nested/project.godot'] = 'config_version=5\n';
   files['nested/room.tscn'] = files['room.tscn'] ?? '';
+  // A scene in an addon gdharness installed, which the engine loads and the walk takes in.
+  files['addons/ours/.gdharness-version'] = '0.0.0\n';
+  files['addons/ours/hall.tscn'] = files['long_desk.tscn'] ?? '';
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(project, path)), { recursive: true });
     writeFileSync(join(project, path), content);
@@ -88200,7 +88203,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.deepEqual(
       asArray(get(renamed, 'followed')).map(String).toSorted(),
-      ['res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
+      ['res://addons/ours/hall.tscn', 'res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
       JSON.stringify(renamed),
     );
     assert.deepEqual(

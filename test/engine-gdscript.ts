@@ -4264,6 +4264,135 @@ function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void 
   );
 }
 
+/**
+ * A folder below the project holding a `project.godot` of its own is another project to the
+ * engine, which steps over it and warns that it detected one. Every engine-side walk has to do the
+ * same, or its answers name files the engine never loads.
+ *
+ * Each half puts a visible file beside the nested one and counts it, because a walk that had
+ * stopped finding anything at all satisfies the absence just as well.
+ */
+function testANestedProjectStopsTheWalk(godotPath: string, projectDir: string): void {
+  const operation = (name: string, params: unknown): unknown =>
+    runOperation(godotPath, projectDir, name, params);
+  const nested = join(projectDir, 'game_copy');
+  const visible = [
+    join(projectDir, 'made', 'nested_errand.gd'),
+    join(projectDir, 'made', 'nested_loose.png'),
+  ];
+  mkdirSync(nested, { recursive: true });
+  mkdirSync(join(projectDir, 'made'), { recursive: true });
+  writeFileSync(join(nested, 'project.godot'), 'config_version=5\n');
+  try {
+    const scripts = (): number =>
+      asNumber(get(operation('get_project_health', {}), 'checks', 'scripts', 'total_scripts'));
+    const scriptsBefore = scripts();
+    writeFileSync(visible[0] ?? '', 'class_name FixtureNestedVisible\nextends Node\n');
+    writeFileSync(join(nested, 'stowaway.gd'), 'class_name FixtureNestedStowaway\nextends Node\n');
+    assert.equal(
+      scripts(),
+      scriptsBefore + 1,
+      'the visible script should count and the one in the nested project should not',
+    );
+
+    rmSync(join(projectDir, '.godot', 'global_script_class_cache.cfg'), { force: true });
+    const added = asArray(get(operation('refresh_class_cache', {}), 'added')).map((name) => asString(name));
+    assert.ok(
+      added.includes('FixtureNestedVisible'),
+      `the project's own classes are listed: ${added.join(', ')}`,
+    );
+    assert.ok(
+      !added.includes('FixtureNestedStowaway'),
+      `a class_name in a nested project is not a global class: ${added.join(', ')}`,
+    );
+
+    const importable = (): number =>
+      asNumber(get(operation('get_import_status', { include_up_to_date: true }), 'summary', 'total'));
+    const importableBefore = importable();
+    writeFileSync(visible[1] ?? '', 'fixture bytes, never decoded');
+    writeFileSync(join(nested, 'stowed.png'), 'fixture bytes, never decoded');
+    assert.equal(
+      importable(),
+      importableBefore + 1,
+      'the visible resource should be found and the nested one should not',
+    );
+    const one = get(
+      operation('get_import_status', { resource_path: 'game_copy/stowed.png' }),
+      'resources',
+      0,
+    );
+    assert.deepEqual(
+      [get(one, 'status'), get(one, 'reason')],
+      [
+        'not_imported',
+        'a project.godot in res://game_copy makes it a project of its own, which the engine does not import from here',
+      ],
+    );
+  } finally {
+    rmSync(nested, { recursive: true, force: true });
+    for (const file of visible) {
+      rmSync(file, { force: true });
+    }
+  }
+}
+
+/**
+ * The test runner lists the files the engine's own scan would, so a nested project's files are not
+ * among them. Its own project, because the runner extends gdUnit4's classes.
+ */
+function testTheRunnerListsNoFileOfANestedProject(godotPath: string): void {
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GDUNIT4_PATH names no gdUnit4.');
+    }
+    console.log('runner file list check skipped (GDUNIT4_PATH names no gdUnit4)');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-listed-files-'));
+  try {
+    cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
+    writeTreeAt(dir, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="GdharnessListedFiles"\n',
+      'scripts/visible.gd': 'extends Node\n',
+      'game_copy/project.godot': 'config_version=5\n',
+      'game_copy/stowaway.gd': 'extends Node\n',
+    });
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180000,
+    });
+    assert.equal(imported.status, 0, `${imported.stdout}${imported.stderr}`);
+    cpSync(join('test', 'support', 'gd', 'listed_files.gd'), join(dir, 'listed_files.gd'));
+    const run = runScript(godotPath, dir, join(dir, 'listed_files.gd'), [
+      '--',
+      resolve(join('src', 'godot', 'tests', 'listed.gd')),
+    ]);
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+    const files = asArray(get(lastJsonLine(run.stdout, 'listed_files'), 'files')).map((file) =>
+      asString(file),
+    );
+    assert.ok(
+      files.includes('res://scripts/visible.gd'),
+      `the runner lists the project's files: ${files.join(', ')}`,
+    );
+    assert.ok(
+      !files.some((file) => file.startsWith('res://game_copy/')),
+      `and none of the nested project's: ${files.join(', ')}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/** Writes [param files] under [param root], each folder made as it is needed. */
+function writeTreeAt(root: string, files: Readonly<Record<string, string>>): void {
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), content);
+  }
+}
+
 /** The one `godot.log` under `home`, which is wherever the engine decided `user://` was. */
 function benchLog(home: string): string | null {
   const look = (directory: string): string | null => {
@@ -6522,6 +6651,10 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   dependencyWalk: testDependencyWalk,
   operations: testOperations,
   gdignore: testAGdignoreStopsTheWalk,
+  nestedProject: testANestedProjectStopsTheWalk,
+  nestedProjectListed: (godotPath) => {
+    testTheRunnerListsNoFileOfANestedProject(godotPath);
+  },
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
   uidBeforeImport: testAUidIsFollowedBeforeAnyImport,

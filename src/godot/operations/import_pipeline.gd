@@ -575,6 +575,12 @@ func _never_imported(resource_path: String) -> String:
 	while folder.begins_with("res://"):
 		if _files.is_stepped_over(folder if folder.ends_with("/") else folder + "/"):
 			return "a .gdignore in " + folder + " keeps the engine from importing anything under it"
+		if folder != "res://" and _files.holds_a_project(folder + "/"):
+			return (
+				"a project.godot in "
+				+ folder
+				+ " makes it a project of its own, which the engine does not import from here"
+			)
 		if folder == "res://":
 			break
 		folder = folder.get_base_dir()
