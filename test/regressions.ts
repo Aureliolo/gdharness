@@ -73306,7 +73306,7 @@ function testEveryToolNamedInProseIsATool(): void {
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
+  // editor keeps its open scenes in, the file the editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
   // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
   // setting that turns that guess off, and the engine setting naming a file laid over the project's
   // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
@@ -73339,6 +73339,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'editor_data',
     'editor_doc_cache',
     'editor_script_doc_cache',
+    'editor_layout',
     'resource_name',
     'editor_servers',
     'scene_runner',
@@ -89322,7 +89323,23 @@ async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
     const shown = ['res://main.tscn', ['res://main.tscn', 'res://other.tscn']];
     assert.deepEqual(scenes(first), shown, JSON.stringify(first));
 
+    // A layout the editor wrote half a second after a change, before a switch of tabs it never
+    // writes. Past the write it makes once its restored scenes are open.
+    const layout = join(project, '.godot', 'editor', 'editor_layout.cfg');
+    await delay(2000);
+    const written = readFileSync(layout, 'utf8');
+    assert.match(
+      written,
+      /^current_scene="res:\/\/main\.tscn"$/m,
+      `the layout names the scene in front: ${written}`,
+    );
+    writeFileSync(layout, written.replace(/^current_scene=.*$/m, 'current_scene="res://other.tscn"'));
     await anUnusedEditorQuitsAndWritesItsRecord({ call, firstPid, record, editor });
+    assert.match(
+      readFileSync(layout, 'utf8'),
+      /^current_scene="res:\/\/main\.tscn"$/m,
+      'the editor quitting keeps the scene that was in front',
+    );
     const secondPid = await aSaveFromTheEditorIsTheFirstCallAfterTheQuit({
       call,
       project,
