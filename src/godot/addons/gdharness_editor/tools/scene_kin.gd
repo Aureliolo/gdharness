@@ -419,11 +419,17 @@ static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
 
 
 ## The text of every .tscn under [param directory] into [param texts], keyed by res:// path, leaving
-## out the engine's own folder and hidden ones.
+## out the folders the engine's scan steps over: hidden ones, the engine's own, one holding a
+## `.gdignore` and one holding a project of its own. A build's copies sit in such folders.
 static func _read_scenes(directory: String, texts: Dictionary) -> void:
 	for name: String in DirAccess.get_directories_at(directory):
-		if not name.begins_with("."):
-			_read_scenes(directory.path_join(name), texts)
+		var folder: String = directory.path_join(name)
+		if not (
+			name.begins_with(".")
+			or FileAccess.file_exists(folder.path_join(".gdignore"))
+			or FileAccess.file_exists(folder.path_join("project.godot"))
+		):
+			_read_scenes(folder, texts)
 	for name: String in DirAccess.get_files_at(directory):
 		if name.ends_with(".tscn"):
 			texts[directory.path_join(name)] = FileAccess.get_file_as_string(

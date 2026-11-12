@@ -87854,7 +87854,14 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       '[node name="Top" type="Node3D" parent="."]\n\n[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n\n' +
       '[node name="Bulb" parent="Top/DeskLamp"]\nlight_energy = 3.0\n\n[editable path="Top/DeskLamp"]\n',
   };
+  // Copies of room.tscn the engine never sees: one in a folder holding a .gdignore, as a build
+  // writes, and one inside a project of its own.
+  files['export/.gdignore'] = '';
+  files['export/room.tscn'] = files['room.tscn'] ?? '';
+  files['nested/project.godot'] = 'config_version=5\n';
+  files['nested/room.tscn'] = files['room.tscn'] ?? '';
   for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
     writeFileSync(join(project, path), content);
   }
   const server = new ServerProcess({
@@ -87924,6 +87931,9 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       fileOf('long_desk.tscn'),
     );
     assert.equal(fileOf('unrelated.tscn'), files['unrelated.tscn'], 'a scene instancing nothing that moved');
+    for (const copy of ['export/room.tscn', 'nested/room.tscn']) {
+      assert.equal(fileOf(copy), files[copy], `${copy} is left as it was, since the engine never sees it`);
+    }
 
     // The effect: the next save of each scene keeps the lights, which a lost editable path drops.
     await call('scene_node', {
