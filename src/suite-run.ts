@@ -333,7 +333,7 @@ function orderNamed(order: string | undefined, selected: readonly string[]): Run
   }
   if (order === 'named' && selected.length === 0) {
     throw new EngineUsageError(
-      '--order named runs the suites named in the order they are named, so it needs them named: gdharness test a_test.gd b_test.gd --order named.',
+      '--order named needs suites named on the command line: gdharness test a_test.gd b_test.gd --order named.',
     );
   }
   return order === 'reversed' || order === 'named' ? order : seedOf(order);

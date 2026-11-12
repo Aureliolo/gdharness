@@ -62191,10 +62191,7 @@ function testTheTestCommandReadsItsOwnOptions(): void {
       [['--slots', ''], /--slots needs a value/],
       [['--engines', '0'], /whole number above 0/],
       [['--order', 'sideways'], /reversed, named or a whole number/],
-      [
-        ['--order', 'named'],
-        /--order named runs the suites named in the order they are named, so it needs them named/,
-      ],
+      [['--order', 'named'], /--order named needs suites named on the command line/],
       [['../elsewhere.gd'], /is not inside the project/],
     ] as const) {
       assert.throws(
