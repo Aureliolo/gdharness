@@ -62648,81 +62648,85 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   );
   assert.deepEqual(sent, [5, 6, 7, 8]);
 
-  // A command hears a wait past two seconds once, however many of its lanes wait, and a take with a
-  // listener of its own says nothing to the command.
-  const lined = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-lines-'));
-  const lineHeld = join(lined, '0.lock');
-  const me = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /games/one' };
-  // Named as this process, since a holder that is the waiter itself is the thing to know about it.
-  const oneSlot = `the one engine slot on this machine (${lined}) is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back.`;
-  try {
-    writeFileSync(lineHeld, JSON.stringify(me));
-    const lines: string[] = [];
-    const lanes = new EngineSlots(lined, 1, me, (line) => {
-      lines.push(line);
-    });
-    const unheard: string[] = [];
-    const listened = new EngineSlots(lined, 1, me, (line) => {
-      unheard.push(line);
-    });
-    const told: number[] = [];
-    const takes = [
-      { slots: lanes, taking: lanes.take() },
-      { slots: lanes, taking: lanes.take() },
-      {
-        slots: listened,
-        taking: listened.take(undefined, (waitedMs) => {
-          told.push(waitedMs);
+  /** A command hears a wait past two seconds once, a short wait is unsaid, and a run behind its own engine says nothing. */
+  const aLongWaitIsHeardOnce = async (): Promise<void> => {
+    // A command hears a wait past two seconds once, however many of its lanes wait, and a take with a
+    // listener of its own says nothing to the command.
+    const lined = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-lines-'));
+    const lineHeld = join(lined, '0.lock');
+    const me = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /games/one' };
+    // Named as this process, since a holder that is the waiter itself is the thing to know about it.
+    const oneSlot = `the one engine slot on this machine (${lined}) is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back.`;
+    try {
+      writeFileSync(lineHeld, JSON.stringify(me));
+      const lines: string[] = [];
+      const lanes = new EngineSlots(lined, 1, me, (line) => {
+        lines.push(line);
+      });
+      const unheard: string[] = [];
+      const listened = new EngineSlots(lined, 1, me, (line) => {
+        unheard.push(line);
+      });
+      const told: number[] = [];
+      const takes = [
+        { slots: lanes, taking: lanes.take() },
+        { slots: lanes, taking: lanes.take() },
+        {
+          slots: listened,
+          taking: listened.take(undefined, (waitedMs) => {
+            told.push(waitedMs);
+          }),
+        },
+      ];
+      await delay(2600);
+      rmSync(lineHeld);
+      const taken = await Promise.all(
+        takes.map(async ({ slots, taking }) => {
+          const lock = await taking;
+          await delay(10);
+          slots.release(lock);
+          return lock;
         }),
-      },
-    ];
-    await delay(2600);
-    rmSync(lineHeld);
-    const taken = await Promise.all(
-      takes.map(async ({ slots, taking }) => {
-        const lock = await taking;
-        await delay(10);
-        slots.release(lock);
-        return lock;
-      }),
-    );
-    assert.deepEqual(taken, [lineHeld, lineHeld, lineHeld], 'every lane takes the slot in turn');
-    assert.equal(lines.length, 1, lines.join('\n'));
-    const waiting = lines[0] ?? '';
-    assert.match(waiting, /^Waiting [23] s so far for an engine: /, waiting);
-    assert.ok(waiting.endsWith(oneSlot), waiting);
-    assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
+      );
+      assert.deepEqual(taken, [lineHeld, lineHeld, lineHeld], 'every lane takes the slot in turn');
+      assert.equal(lines.length, 1, lines.join('\n'));
+      const waiting = lines[0] ?? '';
+      assert.match(waiting, /^Waiting [23] s so far for an engine: /, waiting);
+      assert.ok(waiting.endsWith(oneSlot), waiting);
+      assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
 
-    writeFileSync(lineHeld, JSON.stringify(me));
-    const brief: string[] = [];
-    const briefly = new EngineSlots(lined, 1, me, (line) => {
-      brief.push(line);
-    });
-    const shortTake = briefly.take();
-    await delay(500);
-    rmSync(lineHeld);
-    const shortLock = await shortTake;
-    briefly.release(shortLock);
-    assert.deepEqual([shortLock, brief], [lineHeld, []], 'a wait of half a second takes the slot unsaid');
+      writeFileSync(lineHeld, JSON.stringify(me));
+      const brief: string[] = [];
+      const briefly = new EngineSlots(lined, 1, me, (line) => {
+        brief.push(line);
+      });
+      const shortTake = briefly.take();
+      await delay(500);
+      rmSync(lineHeld);
+      const shortLock = await shortTake;
+      briefly.release(shortLock);
+      assert.deepEqual([shortLock, brief], [lineHeld, []], 'a wait of half a second takes the slot unsaid');
 
-    const queued: string[] = [];
-    const run = new EngineSlots(lined, 1, me, (line) => {
-      queued.push(line);
-    });
-    const first = await run.take();
-    const second = run.take();
-    await delay(2600);
-    run.release(first);
-    const secondLock = await second;
-    run.release(secondLock);
-    assert.deepEqual(
-      [first, secondLock, queued],
-      [lineHeld, lineHeld, []],
-      'a run waiting behind its own engine is held up by nobody else and says nothing',
-    );
-  } finally {
-    sweep(lined);
-  }
+      const queued: string[] = [];
+      const run = new EngineSlots(lined, 1, me, (line) => {
+        queued.push(line);
+      });
+      const first = await run.take();
+      const second = run.take();
+      await delay(2600);
+      run.release(first);
+      const secondLock = await second;
+      run.release(secondLock);
+      assert.deepEqual(
+        [first, secondLock, queued],
+        [lineHeld, lineHeld, []],
+        'a run waiting behind its own engine is held up by nobody else and says nothing',
+      );
+    } finally {
+      sweep(lined);
+    }
+  };
+  await aLongWaitIsHeardOnce();
 
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -62767,66 +62771,70 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
     });
 
-    await hold();
-    const classes = spawnHidden(process.execPath, ['build/cli.js', 'classes', project], {
-      env: { ...process.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let said = '';
-    classes.stdout.on('data', (chunk: Buffer) => {
-      said += String(chunk);
-    });
-    classes.stderr.on('data', (chunk: Buffer) => {
-      said += String(chunk);
-    });
-    const ended = new Promise<number | null>((resolveEnd) => {
-      classes.once('exit', (code) => {
-        resolveEnd(code);
+    /** The classes command waits behind the slot held, marks its wait, takes the slot given back and gives it up. */
+    const theCommandWaitsBehindTheSlotHeld = async (): Promise<void> => {
+      await hold();
+      const classes = spawnHidden(process.execPath, ['build/cli.js', 'classes', project], {
+        env: { ...process.env, ...env },
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
-    });
-    // Looked for rather than waited out: on a machine busy with other engines the command took more
-    // than three seconds to start and reach its wait.
-    for (
-      let looked = 0;
-      looked < 600 && classes.exitCode === null && leftInSlots(slots).length < 2;
-      looked += 1
-    ) {
-      await delay(100);
-    }
-    assert.deepEqual(
-      [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
-      [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
-      `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
-    );
-    // From the command's own start of its wait, which comes after it has found its engine.
-    for (let looked = 0; looked < 100 && !said.includes('for an engine'); looked += 1) {
-      await delay(100);
-    }
-    const waitLines = said.split('\n').filter((line) => line.includes('for an engine'));
-    assert.equal(waitLines.length, 1, said);
-    assert.match(
-      waitLines[0] ?? '',
-      /^gdharness: Waiting [23] s so far for an engine: the one engine slot on this machine \(/,
-      said,
-    );
-    assert.ok(
-      waitLines[0]
-        ?.trimEnd()
-        .endsWith(
-          `(${slots}) is in use, by the suite (pid ${String(process.pid)}), and the engine starts when it is given back.`,
-        ),
-      said,
-    );
-    rmSync(ours);
-    assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
-    assert.equal(lastTaker(), 'gdharness classes', 'naming itself in the lock');
-    assert.equal(await ended, 0, said);
-    assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
-    assert.deepEqual(
-      leftInSlots(slots),
-      [],
-      `and gives it back, its mark gone since it took the slot: ${said}`,
-    );
+      let said = '';
+      classes.stdout.on('data', (chunk: Buffer) => {
+        said += String(chunk);
+      });
+      classes.stderr.on('data', (chunk: Buffer) => {
+        said += String(chunk);
+      });
+      const ended = new Promise<number | null>((resolveEnd) => {
+        classes.once('exit', (code) => {
+          resolveEnd(code);
+        });
+      });
+      // Looked for rather than waited out: on a machine busy with other engines the command took more
+      // than three seconds to start and reach its wait.
+      for (
+        let looked = 0;
+        looked < 600 && classes.exitCode === null && leftInSlots(slots).length < 2;
+        looked += 1
+      ) {
+        await delay(100);
+      }
+      assert.deepEqual(
+        [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
+        [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
+        `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
+      );
+      // From the command's own start of its wait, which comes after it has found its engine.
+      for (let looked = 0; looked < 100 && !said.includes('for an engine'); looked += 1) {
+        await delay(100);
+      }
+      const waitLines = said.split('\n').filter((line) => line.includes('for an engine'));
+      assert.equal(waitLines.length, 1, said);
+      assert.match(
+        waitLines[0] ?? '',
+        /^gdharness: Waiting [23] s so far for an engine: the one engine slot on this machine \(/,
+        said,
+      );
+      assert.ok(
+        waitLines[0]
+          ?.trimEnd()
+          .endsWith(
+            `(${slots}) is in use, by the suite (pid ${String(process.pid)}), and the engine starts when it is given back.`,
+          ),
+        said,
+      );
+      rmSync(ours);
+      assert.ok(await heldBy(classes.pid, 30_000), `then takes the slot given back: ${said}`);
+      assert.equal(lastTaker(), 'gdharness classes', 'naming itself in the lock');
+      assert.equal(await ended, 0, said);
+      assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
+      assert.deepEqual(
+        leftInSlots(slots),
+        [],
+        `and gives it back, its mark gone since it took the slot: ${said}`,
+      );
+    };
+    await theCommandWaitsBehindTheSlotHeld();
 
     await hold();
     const server = new ServerProcess({ env });
@@ -63789,39 +63797,42 @@ async function testAnEngineIsSizedByWhatItWasSeenToHold(): Promise<void> {
     changing?.ended();
     going.ended();
 
-    // The first engine of a run starts whatever it needs.
-    const empty = gateOf(() => Promise.resolve(0));
-    const huge = await within(
-      asked(empty.gate, AbortSignal.timeout(2000), () => 64 * gib),
-      2000,
-    );
-    assert.notEqual(huge, undefined, 'a peak past the machine still runs alone');
-    huge?.ended();
+    /** The first engine of a run starts whatever it needs, and what the gate sums is taken before its memory read. */
+    const theFirstEngineStartsWhateverItNeeds = async (): Promise<void> => {
+      // The first engine of a run starts whatever it needs.
+      const empty = gateOf(() => Promise.resolve(0));
+      const huge = await within(
+        asked(empty.gate, AbortSignal.timeout(2000), () => 64 * gib),
+        2000,
+      );
+      assert.notEqual(huge, undefined, 'a peak past the machine still runs alone');
+      huge?.ended();
 
-    // What the gate sums is taken before its memory read, since a reading told while the read is out
-    // would otherwise count as owed no longer and as free memory too: 8 GiB in all, 4 kept, one
-    // going engine needing 3, a 1.5 GiB need.
-    let used = 1 * gib;
-    const ordered = gateOf(() => {
-      const free = 8 * gib - used;
-      return delay(10).then(() => free);
-    });
-    const growing = await asked(ordered.gate, caseOver.signal, () => 3 * gib);
-    growing.holds(used);
-    const late = asked(ordered.gate, caseOver.signal, () => 1.5 * gib);
-    setTimeout(() => {
-      used = 3 * gib;
+      // What the gate sums is taken before its memory read, since a reading told while the read is out
+      // would otherwise count as owed no longer and as free memory too: 8 GiB in all, 4 kept, one
+      // going engine needing 3, a 1.5 GiB need.
+      let used = 1 * gib;
+      const ordered = gateOf(() => {
+        const free = 8 * gib - used;
+        return delay(10).then(() => free);
+      });
+      const growing = await asked(ordered.gate, caseOver.signal, () => 3 * gib);
       growing.holds(used);
-    }, 5);
-    assert.equal(
-      await within(late, 200),
-      undefined,
-      'a reading told during the read is not counted twice as free: 1 GiB is left past what is kept',
-    );
-    growing.ended();
-    assert.notEqual(await within(late, 2000), undefined, 'and the wait ends once no engine is going');
-    (await late).ended();
-
+      const late = asked(ordered.gate, caseOver.signal, () => 1.5 * gib);
+      setTimeout(() => {
+        used = 3 * gib;
+        growing.holds(used);
+      }, 5);
+      assert.equal(
+        await within(late, 200),
+        undefined,
+        'a reading told during the read is not counted twice as free: 1 GiB is left past what is kept',
+      );
+      growing.ended();
+      assert.notEqual(await within(late, 2000), undefined, 'and the wait ends once no engine is going');
+      (await late).ended();
+    };
+    await theFirstEngineStartsWhateverItNeeds();
     // The lane in runShares waits on the share it would draw now.
     const suite = (path: string, windowed = false): DeclaredSuite => ({
       path,
@@ -63836,97 +63847,100 @@ async function testAnEngineIsSizedByWhatItWasSeenToHold(): Promise<void> {
       cases: { test_one: seconds },
       peak: peakGiB * gib,
     });
-    const dealtRun = async (times: SuiteTimes, free: number): Promise<string[]> => {
-      const paths = Object.keys(times);
-      const suites = paths.map((path) => suite(path));
-      const events: string[] = [];
-      let started = 0;
-      const run = async (plan: EnginePlan, index: number): Promise<{ index: number }> => {
-        const name = plan.suites.map((one) => one.path.replace('res://', '')).join('+');
-        events.push(`start ${name}`);
-        started += 1;
-        const mine = started;
-        const deadline = Date.now() + 2000;
-        const alone = (): boolean => started === mine;
-        while (alone() && Date.now() < deadline) {
-          await delay(5);
-        }
-        events.push(`end ${name}`);
-        return { index };
+    /** The lane in runShares waits on the share it would draw now, windowed units go first, and the start has its room. */
+    const theLaneInRunSharesWaitsOnItsShare = async (): Promise<void> => {
+      const dealtRun = async (times: SuiteTimes, free: number): Promise<string[]> => {
+        const paths = Object.keys(times);
+        const suites = paths.map((path) => suite(path));
+        const events: string[] = [];
+        let started = 0;
+        const run = async (plan: EnginePlan, index: number): Promise<{ index: number }> => {
+          const name = plan.suites.map((one) => one.path.replace('res://', '')).join('+');
+          events.push(`start ${name}`);
+          started += 1;
+          const mine = started;
+          const deadline = Date.now() + 2000;
+          const alone = (): boolean => started === mine;
+          while (alone() && Date.now() < deadline) {
+            await delay(5);
+          }
+          events.push(`end ${name}`);
+          return { index };
+        };
+        await runShares(
+          { take: () => Promise.reject(new Error('every lane holds a slot')), release: () => undefined },
+          unitsOf(suites, times),
+          new Map(suites.map((one) => [one.path, one.cases])),
+          2,
+          ['one', 'two'],
+          times,
+          run,
+          undefined,
+          gateOf(() => Promise.resolve(free * gib), 1).gate,
+        );
+        return events;
       };
-      await runShares(
-        { take: () => Promise.reject(new Error('every lane holds a slot')), release: () => undefined },
-        unitsOf(suites, times),
-        new Map(suites.map((one) => [one.path, one.cases])),
-        2,
-        ['one', 'two'],
-        times,
-        run,
-        undefined,
-        gateOf(() => Promise.resolve(free * gib), 1).gate,
+      const lightFirst = await dealtRun(
+        {
+          'res://s1_test.gd': timed(60, 0.5),
+          'res://s2_test.gd': timed(50, 0.5),
+          'res://h_test.gd': timed(10, 3),
+        },
+        6,
       );
-      return events;
+      assert.ok(
+        lightFirst.includes('start s2_test.gd') &&
+          lightFirst.indexOf('start s2_test.gd') < lightFirst.indexOf('end s1_test.gd'),
+        `the second light engine starts beside the first, not held by the heavy suite left: ${lightFirst.join(', ')}`,
+      );
+      assert.ok(lightFirst.includes('start h_test.gd'), 'and the heavy one runs in the end');
+      assert.deepEqual(
+        await dealtRun({ 'res://a_test.gd': timed(60, 0.5), 'res://b_test.gd': timed(40, 3) }, 6),
+        ['start a_test.gd', 'end a_test.gd', 'start b_test.gd', 'end b_test.gd'],
+        'a heavy share waits for the light one before it, sized by itself and not by the one drawn',
+      );
+
+      // What the next share is, drawing nothing: windowed units first, as next hands them.
+      const mixed = [suite('res://w_test.gd', true), suite('res://x_test.gd'), suite('res://y_test.gd')];
+      const mixedTimes: SuiteTimes = {
+        'res://w_test.gd': timed(40, 3),
+        'res://x_test.gd': timed(40, 0.5),
+        'res://y_test.gd': timed(40, 0.5),
+      };
+      const shares = new Shares(
+        unitsOf(mixed, mixedTimes),
+        new Map(mixed.map((one) => [one.path, one.cases])),
+        2,
+      );
+      assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'the windowed suite comes first');
+      assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'and looking hands out nothing');
+      assert.deepEqual(
+        shares.next(0)?.suites.map((one) => one.path),
+        ['res://w_test.gd'],
+        'next hands what peek listed',
+      );
+      const afterwards = shares.peek();
+      assert.deepEqual(afterwards, ['res://x_test.gd'], 'then the headless share');
+      assert.deepEqual(
+        shares.next(1)?.suites.map((one) => one.path),
+        afterwards,
+        'which next hands as peek listed it',
+      );
+
+      // The start's room and its line, with an engine's own size.
+      assert.deepEqual(
+        roomFor(2, 16, 8 * gib, 'of memory left to commit', undefined, {
+          bytes: 3 * gib,
+          said: 'taken for each engine, the most one holding these suites was seen to hold',
+        }),
+        {
+          engines: 1,
+          held: 'the machine has 8.0 GB of memory left to commit, 4.0 GB of it kept for everything else and 3.0 GB taken for each engine, the most one holding these suites was seen to hold',
+        },
+        'divided by what an engine needs, not by 1.5 GB',
+      );
     };
-    const lightFirst = await dealtRun(
-      {
-        'res://s1_test.gd': timed(60, 0.5),
-        'res://s2_test.gd': timed(50, 0.5),
-        'res://h_test.gd': timed(10, 3),
-      },
-      6,
-    );
-    assert.ok(
-      lightFirst.includes('start s2_test.gd') &&
-        lightFirst.indexOf('start s2_test.gd') < lightFirst.indexOf('end s1_test.gd'),
-      `the second light engine starts beside the first, not held by the heavy suite left: ${lightFirst.join(', ')}`,
-    );
-    assert.ok(lightFirst.includes('start h_test.gd'), 'and the heavy one runs in the end');
-    assert.deepEqual(
-      await dealtRun({ 'res://a_test.gd': timed(60, 0.5), 'res://b_test.gd': timed(40, 3) }, 6),
-      ['start a_test.gd', 'end a_test.gd', 'start b_test.gd', 'end b_test.gd'],
-      'a heavy share waits for the light one before it, sized by itself and not by the one drawn',
-    );
-
-    // What the next share is, drawing nothing: windowed units first, as next hands them.
-    const mixed = [suite('res://w_test.gd', true), suite('res://x_test.gd'), suite('res://y_test.gd')];
-    const mixedTimes: SuiteTimes = {
-      'res://w_test.gd': timed(40, 3),
-      'res://x_test.gd': timed(40, 0.5),
-      'res://y_test.gd': timed(40, 0.5),
-    };
-    const shares = new Shares(
-      unitsOf(mixed, mixedTimes),
-      new Map(mixed.map((one) => [one.path, one.cases])),
-      2,
-    );
-    assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'the windowed suite comes first');
-    assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'and looking hands out nothing');
-    assert.deepEqual(
-      shares.next(0)?.suites.map((one) => one.path),
-      ['res://w_test.gd'],
-      'next hands what peek listed',
-    );
-    const afterwards = shares.peek();
-    assert.deepEqual(afterwards, ['res://x_test.gd'], 'then the headless share');
-    assert.deepEqual(
-      shares.next(1)?.suites.map((one) => one.path),
-      afterwards,
-      'which next hands as peek listed it',
-    );
-
-    // The start's room and its line, with an engine's own size.
-    assert.deepEqual(
-      roomFor(2, 16, 8 * gib, 'of memory left to commit', undefined, {
-        bytes: 3 * gib,
-        said: 'taken for each engine, the most one holding these suites was seen to hold',
-      }),
-      {
-        engines: 1,
-        held: 'the machine has 8.0 GB of memory left to commit, 4.0 GB of it kept for everything else and 3.0 GB taken for each engine, the most one holding these suites was seen to hold',
-      },
-      'divided by what an engine needs, not by 1.5 GB',
-    );
-
+    await theLaneInRunSharesWaitsOnItsShare();
     // The most a share's suites were seen to hold, or the size taken for one with none.
     const peaks: SuiteTimes = {
       'res://big_test.gd': timed(1, 3),
@@ -65155,454 +65169,474 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       'and the suites each was handed',
     );
 
-    // A benchmark written as a suite reports by printing, which a passing run otherwise throws away.
-    writeTree(project, {
-      'tests/says_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_says() -> void:\n\tprint("frames per second: 4f2a")\n\tassert_bool(true).is_true()\n',
-    });
-    const quiet = test('tests/says_test.gd');
-    assert.equal(quiet.status, 0, quiet.said);
-    assert.deepEqual(
-      readRunResult(lastRunFile).suites.map((suite) => suite.path),
-      ['res://tests/says_test.gd'],
-      'a run given no --result keeps its result there too',
-    );
-    assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
-    assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
-    // The failed runs above keep their logs, so what this one leaves is read against them.
-    const runsOf = (): string[] =>
-      existsSync(join(state, 'test-runs')) ? readdirSync(join(state, 'test-runs')).toSorted() : [];
-    const before = runsOf();
-    const told = test('tests/says_test.gd', '--print-output');
-    assert.equal(told.status, 0, told.said);
-    assert.match(
-      told.said,
-      /^--- what engine \d+ printed, running res:\/\/tests\/says_test\.gd:\n[\s\S]*^frames per second: 4f2a$[\s\S]*^Passed: 1 case in 1 suite across 1 engine, /m,
-      told.said,
-    );
-    assert.ok(
-      !told.said.includes(String.fromCharCode(0x1b)),
-      'without the codes that clear the screen and colour the lines',
-    );
-    assert.deepEqual(runsOf(), before, 'and the run still keeps no logs once it has printed them');
+    /** A benchmark suite reports by printing, the engine named is held to its version, and an autoload that cannot start ends the run. */
+    const aBenchmarkSuiteTheEngineVersionAndAnAutoloadThatCannotStart = (): ReturnType<typeof test> => {
+      // A benchmark written as a suite reports by printing, which a passing run otherwise throws away.
+      writeTree(project, {
+        'tests/says_test.gd':
+          'extends GdUnitTestSuite\n\nfunc test_says() -> void:\n\tprint("frames per second: 4f2a")\n\tassert_bool(true).is_true()\n',
+      });
+      const quiet = test('tests/says_test.gd');
+      assert.equal(quiet.status, 0, quiet.said);
+      assert.deepEqual(
+        readRunResult(lastRunFile).suites.map((suite) => suite.path),
+        ['res://tests/says_test.gd'],
+        'a run given no --result keeps its result there too',
+      );
+      assert.match(quiet.said, /^Passed: 1 case in 1 suite across 1 engine, /m, quiet.said);
+      assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
+      // The failed runs above keep their logs, so what this one leaves is read against them.
+      const runsOf = (): string[] =>
+        existsSync(join(state, 'test-runs')) ? readdirSync(join(state, 'test-runs')).toSorted() : [];
+      const before = runsOf();
+      const told = test('tests/says_test.gd', '--print-output');
+      assert.equal(told.status, 0, told.said);
+      assert.match(
+        told.said,
+        /^--- what engine \d+ printed, running res:\/\/tests\/says_test\.gd:\n[\s\S]*^frames per second: 4f2a$[\s\S]*^Passed: 1 case in 1 suite across 1 engine, /m,
+        told.said,
+      );
+      assert.ok(
+        !told.said.includes(String.fromCharCode(0x1b)),
+        'without the codes that clear the screen and colour the lines',
+      );
+      assert.deepEqual(runsOf(), before, 'and the run still keeps no logs once it has printed them');
 
-    const reversed = test('tests/ok_test.gd', 'tests/declared_test.gd', '--order', 'reversed');
-    assert.match(reversed.said, /over 1 engine, in reverse order of path\.$/m, reversed.said);
-    const shuffled = test('tests/ok_test.gd', '--order', '7');
-    assert.match(
-      shuffled.said,
-      /over 1 engine, shuffled by 7\.$/m,
-      'the seed, so the order can be had again',
-    );
+      const reversed = test('tests/ok_test.gd', 'tests/declared_test.gd', '--order', 'reversed');
+      assert.match(reversed.said, /over 1 engine, in reverse order of path\.$/m, reversed.said);
+      const shuffled = test('tests/ok_test.gd', '--order', '7');
+      assert.match(
+        shuffled.said,
+        /over 1 engine, shuffled by 7\.$/m,
+        'the seed, so the order can be had again',
+      );
 
-    const timesFile = join(state, 'suite-times.json');
-    const timed = readFileSync(timesFile, 'utf8');
-    const slowTimes = JSON.stringify({
-      ...asObject(JSON.parse(timed), 'the times kept'),
-      'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
-    });
-    writeFileSync(timesFile, slowTimes);
-    const split = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2');
-    assert.equal(split.status, 0, split.said);
-    // Dealt over two engines whatever the memory. Two engines need about seven gigabytes free, which
-    // the macOS runner does not have, so there the run says memory had room for one at once.
-    assert.match(
-      split.said,
-      /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
-      split.said,
-    );
-    if (/^Memory had room for /m.test(split.said)) {
+      const timesFile = join(state, 'suite-times.json');
+      const timed = readFileSync(timesFile, 'utf8');
+      const slowTimes = JSON.stringify({
+        ...asObject(JSON.parse(timed), 'the times kept'),
+        'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
+      });
+      writeFileSync(timesFile, slowTimes);
+      const split = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2');
+      assert.equal(split.status, 0, split.said);
+      // Dealt over two engines whatever the memory. Two engines need about seven gigabytes free, which
+      // the macOS runner does not have, so there the run says memory had room for one at once.
       assert.match(
         split.said,
-        /^Memory had room for one of these 2 engines at once as the run began, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it\.$/m,
+        /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
         split.said,
       );
-    }
-    // The same run held to one processor starts one engine and says so. A machine short of memory
-    // for even one engine names that instead, since memory is what the room is checked against first.
-    // The split run kept what the suite took, so it is made slow again to want two engines.
-    writeFileSync(timesFile, slowTimes);
-    const cored = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2', '--cores', '1');
-    assert.equal(cored.status, 0, cored.said);
-    assert.match(
-      cored.said,
-      /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since (--cores holds it to 1 processor|the machine has \d+\.\d GB of memory free, .*)\.$/m,
-      cored.said,
-    );
-    assert.equal(
-      cored.said.includes('macOS offers no way to hold a process to some processors'),
-      process.platform === 'darwin',
-      cored.said,
-    );
+      if (/^Memory had room for /m.test(split.said)) {
+        assert.match(
+          split.said,
+          /^Memory had room for one of these 2 engines at once as the run began, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it\.$/m,
+          split.said,
+        );
+      }
+      // The same run held to one processor starts one engine and says so. A machine short of memory
+      // for even one engine names that instead, since memory is what the room is checked against first.
+      // The split run kept what the suite took, so it is made slow again to want two engines.
+      writeFileSync(timesFile, slowTimes);
+      const cored = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2', '--cores', '1');
+      assert.equal(cored.status, 0, cored.said);
+      assert.match(
+        cored.said,
+        /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since (--cores holds it to 1 processor|the machine has \d+\.\d GB of memory free, .*)\.$/m,
+        cored.said,
+      );
+      assert.equal(
+        cored.said.includes('macOS offers no way to hold a process to some processors'),
+        process.platform === 'darwin',
+        cored.said,
+      );
 
-    // The engine named on the command line, held to the version asked for by what it prints.
-    const version = spawnSyncHidden(godotPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
-    const minor = version.split('.').slice(0, 2).join('.');
-    assert.match(minor, /^\d+\.\d+$/, version);
-    const pinned = test('--godot', godotPath, '--godot-version', minor, 'tests/ok_test.gd');
-    assert.equal(pinned.status, 0, pinned.said);
-    assert.match(pinned.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, pinned.said);
-    const otherVersion = test('--godot', godotPath, '--godot-version', '3.0.0', 'tests/ok_test.gd');
-    assert.equal(otherVersion.status, 1, otherVersion.said);
-    assert.ok(
-      otherVersion.said.includes(
-        `  the engine that ran is Godot ${version}, not the 3.0.0 --godot-version asks for\n`,
-      ),
-      otherVersion.said,
-    );
-    const noEngine = test('--godot', join(project, 'no-godot.exe'), 'tests/ok_test.gd');
-    assert.equal(noEngine.status, 2, noEngine.said);
-    assert.ok(
-      noEngine.said.includes(`--godot names ${join(project, 'no-godot.exe')}, which does not exist.`),
-      noEngine.said,
-    );
-    const folderEngine = test('--godot', join(project, 'tests'), 'tests/ok_test.gd');
-    assert.equal(folderEngine.status, 2, folderEngine.said);
-    assert.ok(
-      folderEngine.said.includes(
-        `--godot names ${join(project, 'tests')}, which is a folder, not a program.`,
-      ),
-      folderEngine.said,
-    );
+      // The engine named on the command line, held to the version asked for by what it prints.
+      const version = spawnSyncHidden(godotPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+      const minor = version.split('.').slice(0, 2).join('.');
+      assert.match(minor, /^\d+\.\d+$/, version);
+      const pinned = test('--godot', godotPath, '--godot-version', minor, 'tests/ok_test.gd');
+      assert.equal(pinned.status, 0, pinned.said);
+      assert.match(pinned.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, pinned.said);
+      const otherVersion = test('--godot', godotPath, '--godot-version', '3.0.0', 'tests/ok_test.gd');
+      assert.equal(otherVersion.status, 1, otherVersion.said);
+      assert.ok(
+        otherVersion.said.includes(
+          `  the engine that ran is Godot ${version}, not the 3.0.0 --godot-version asks for\n`,
+        ),
+        otherVersion.said,
+      );
+      const noEngine = test('--godot', join(project, 'no-godot.exe'), 'tests/ok_test.gd');
+      assert.equal(noEngine.status, 2, noEngine.said);
+      assert.ok(
+        noEngine.said.includes(`--godot names ${join(project, 'no-godot.exe')}, which does not exist.`),
+        noEngine.said,
+      );
+      const folderEngine = test('--godot', join(project, 'tests'), 'tests/ok_test.gd');
+      assert.equal(folderEngine.status, 2, folderEngine.said);
+      assert.ok(
+        folderEngine.said.includes(
+          `--godot names ${join(project, 'tests')}, which is a folder, not a program.`,
+        ),
+        folderEngine.said,
+      );
 
-    // An autoload that cannot start makes every suite after it meaningless, so the run ends there
-    // rather than reporting cases that ran without it.
-    const godotFile = join(project, 'project.godot');
-    const projectText = readFileSync(godotFile, 'utf8');
-    writeTree(project, { 'broken.gd': 'extends RefCounted\n' });
-    writeFileSync(godotFile, `${projectText}\n[autoload]\n\nBroken="*res://broken.gd"\n`);
-    const noAutoload = test('tests/ok_test.gd');
-    writeFileSync(godotFile, projectText);
-    assert.match(
-      noAutoload.said,
-      /^ {2}an autoload did not start, so the engine was ended rather than run without it$/m,
-      noAutoload.said,
-    );
-    assert.equal(noAutoload.status, 1, noAutoload.said);
+      // An autoload that cannot start makes every suite after it meaningless, so the run ends there
+      // rather than reporting cases that ran without it.
+      const godotFile = join(project, 'project.godot');
+      const projectText = readFileSync(godotFile, 'utf8');
+      writeTree(project, { 'broken.gd': 'extends RefCounted\n' });
+      writeFileSync(godotFile, `${projectText}\n[autoload]\n\nBroken="*res://broken.gd"\n`);
+      const noAutoload = test('tests/ok_test.gd');
+      writeFileSync(godotFile, projectText);
+      assert.match(
+        noAutoload.said,
+        /^ {2}an autoload did not start, so the engine was ended rather than run without it$/m,
+        noAutoload.said,
+      );
+      assert.equal(noAutoload.status, 1, noAutoload.said);
 
-    // gdUnit4 failing the noisy case on its push_error, which it does only under its own setting.
-    writeFileSync(godotFile, `${projectText}\n[gdunit4]\n\nreport/godot/push_error=true\n`);
-    const pushed = test('tests/noisy_test.gd');
-    writeFileSync(godotFile, projectText);
-    assert.match(
-      pushed.said,
-      /^ {2}The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/tests\/noisy_test\.gd > test_noisy\. /m,
-      pushed.said,
-    );
-    assert.match(pushed.said, /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed$/m, pushed.said);
+      // gdUnit4 failing the noisy case on its push_error, which it does only under its own setting.
+      writeFileSync(godotFile, `${projectText}\n[gdunit4]\n\nreport/godot/push_error=true\n`);
+      const pushed = test('tests/noisy_test.gd');
+      writeFileSync(godotFile, projectText);
+      assert.match(
+        pushed.said,
+        /^ {2}The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/tests\/noisy_test\.gd > test_noisy\. /m,
+        pushed.said,
+      );
+      assert.match(pushed.said, /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed$/m, pushed.said);
 
-    // A suite standing a scene up through the scene runner and saying it runs headless is run
-    // headless, where the root viewport takes the size the suite gives it in the next frame.
-    writeTree(project, {
-      'stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
-      'tests/stood_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        'const GDHARNESS_NEEDS_WINDOW: bool = false',
-        '',
-        'func test_sized() -> void:',
-        '\tvar runner: GdUnitSceneRunner = scene_runner("res://stood.tscn")',
-        '\tassert_object(runner.scene()).is_not_null()',
-        '\tget_tree().root.size = Vector2i(1680, 720)',
-        '\tawait get_tree().process_frame',
-        '\tassert_str(DisplayServer.get_name()).is_equal("headless")',
-        '\tassert_vector(get_viewport().get_visible_rect().size).is_equal(Vector2(1680, 720))',
-        '',
-      ].join('\n'),
-    });
-    const stood = test('tests/stood_test.gd');
-    assert.equal(stood.status, 0, stood.said);
-    // One suite needs one engine, so even a runner short of memory has nothing to say of its room.
-    assert.match(stood.said, /^1 test function in 1 suite over 1 engine\.$/m, stood.said);
-    assert.doesNotMatch(stood.said, /windowed|with a window/, stood.said);
-
-    // The lock a suite's engine runs on names that engine beside the process holding it, so what
-    // the engine starts runs on its slot rather than taking a second.
-    writeTree(project, {
-      'tests/slot_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        'func test_slot() -> void:',
-        '\tvar lock: String = OS.get_environment("GODOT_ENGINE_HELD")',
-        '\tvar held: Variant = null',
-        '\tfor _look: int in 200:',
-        '\t\tvar parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(lock))',
-        '\t\tif parsed is Dictionary and (parsed as Dictionary).has("engine"):',
-        '\t\t\theld = parsed',
-        '\t\t\tbreak',
-        '\t\tawait get_tree().create_timer(0.1).timeout',
-        '\tvar seen: FileAccess = FileAccess.open("res://slot_seen.json", FileAccess.WRITE)',
-        '\tseen.store_string(JSON.stringify({"pid": OS.get_process_id(), "held": held}))',
-        '\tseen.close()',
-        '',
-      ].join('\n'),
-    });
-    const onSlot = test('tests/slot_test.gd');
-    for (const made of ['slot_test.gd', 'slot_test.gd.uid']) {
-      rmSync(join(project, 'tests', made), { force: true });
-    }
-    assert.equal(onSlot.status, 0, onSlot.said);
-    const seen = JSON.parse(readFileSync(join(project, 'slot_seen.json'), 'utf8')) as unknown;
-    rmSync(join(project, 'slot_seen.json'));
-    assert.deepEqual(
-      [get(seen, 'held', 'engine', 'pid'), get(seen, 'held', 'pid') === get(seen, 'pid')],
-      [get(seen, 'pid'), false],
-      `the lock names the suite's engine beside its holder: ${JSON.stringify(seen)}`,
-    );
-
-    const windowed = windowedRunRefused();
-    if (windowed === null) {
-      // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
-      // window draws nothing, so a suite rendering in it waited for a frame that never came. The
-      // second suite meets the window as the first one's end left it. The macOS runner's screen is
-      // small enough that the default window fills its usable part, which Godot reads as maximised
-      // even once minimised, so there a run's first suite meets the window gdUnit4's start left
-      // minimised under that reading.
-      const drawing = (name: string): string =>
-        [
+      // A suite standing a scene up through the scene runner and saying it runs headless is run
+      // headless, where the root viewport takes the size the suite gives it in the next frame.
+      writeTree(project, {
+        'stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
+        'tests/stood_test.gd': [
           'extends GdUnitTestSuite',
           '',
-          'const GDHARNESS_NEEDS_WINDOW: bool = true',
+          'const GDHARNESS_NEEDS_WINDOW: bool = false',
           '',
-          'var drawn: int = 0',
-          'var drawn_waiting: int = 0',
+          'func test_sized() -> void:',
+          '\tvar runner: GdUnitSceneRunner = scene_runner("res://stood.tscn")',
+          '\tassert_object(runner.scene()).is_not_null()',
+          '\tget_tree().root.size = Vector2i(1680, 720)',
+          '\tawait get_tree().process_frame',
+          '\tassert_str(DisplayServer.get_name()).is_equal("headless")',
+          '\tassert_vector(get_viewport().get_visible_rect().size).is_equal(Vector2(1680, 720))',
           '',
-          '',
-          `func test_${name}() -> void:`,
-          '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
-          '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
-          // On Windows the engine is on the hidden desktop, which has no refresh for vsync to wait on.
-          '\tif OS.get_name() == "Windows":',
-          '\t\tassert_int(DisplayServer.window_get_vsync_mode()).is_equal(DisplayServer.VSYNC_DISABLED)',
-          `\t\tassert_int(Engine.max_fps).is_equal(${String(HIDDEN_WINDOW_FPS)})`,
-          // In seconds rather than frames: on macOS the minimise and the way back are animations.
-          '\tvar waiting: Callable = func() -> void: drawn_waiting += 1',
-          '\tRenderingServer.frame_post_draw.connect(waiting)',
-          '\tawait get_tree().create_timer(1.5).timeout',
-          '\tRenderingServer.frame_post_draw.disconnect(waiting)',
-          '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
-          '\tvar counted: Callable = func() -> void: drawn += 1',
-          '\tRenderingServer.frame_post_draw.connect(counted)',
-          // Godot skips drawing while the desktop reports none of its windows can be seen, so a
-          // failure names the window's state.
-          '\tvar until: int = Time.get_ticks_msec() + 500',
-          '\twhile Time.get_ticks_msec() < until:',
-          '\t\tawait get_tree().process_frame',
-          '\tRenderingServer.frame_post_draw.disconnect(counted)',
-          '\tvar state: String = (',
-          '\t\t"window mode %d, drawable %s, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
-          '\t\t% [',
-          '\t\t\tDisplayServer.window_get_mode(),',
-          '\t\t\tDisplayServer.window_can_draw(),',
-          '\t\t\tDisplayServer.window_is_focused(),',
-          '\t\t\tdrawn_waiting,',
-          '\t\t\tDisplayServer.window_get_position(),',
-          '\t\t\tDisplayServer.window_get_size(),',
-          '\t\t\tDisplayServer.screen_get_usable_rect(),',
-          '\t\t]',
-          '\t)',
-          '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
-          '',
-        ].join('\n');
-      writeTree(project, {
-        'tests/window_test.gd': drawing('window'),
-        'tests/window_again_test.gd': drawing('window_again'),
+        ].join('\n'),
       });
-      const both = test('--engines', '1', 'tests/window_test.gd', 'tests/window_again_test.gd');
-      assert.equal(both.status, 0, both.said);
-      assert.match(both.said, /^Passed: \d+ cases in 2 suites/m, both.said);
-      rmSync(join(project, 'tests', 'window_again_test.gd'));
-      // The windowed engine runs only the suite needing it, and a headless engine follows it in its
-      // slot with the rest, one declaring nothing or one saying it runs headless alike, and with one
-      // slot as with four. stood_test.gd fails in a window, which shows the follower ran headless.
-      for (const args of [['--engines', '1'], []]) {
-        for (const other of ['tests/ok_test.gd', 'tests/stood_test.gd']) {
-          const run = test(...args, 'tests/window_test.gd', other);
-          assert.equal(run.status, 0, run.said);
-          assert.match(
-            run.said,
-            /in 2 suites over 2 engines, one of them windowed and followed in its slot by a headless one\.$/m,
-            run.said,
-          );
-          assert.match(run.said, /^Passed: \d+ cases in 2 suites across 2 engines/m, run.said);
-          assert.doesNotMatch(run.said, /runs with a window here/, run.said);
-        }
-      }
-      // An ordered run is one engine, so the suite has to share the window, and the run says so
-      // before it starts.
-      const shared = test('--order', 'reversed', 'tests/window_test.gd', 'tests/stood_test.gd');
-      assert.ok(
-        shared.said.includes(
-          'res://tests/stood_test.gd says it runs headless and runs with a window here, since an ordered run is one engine and a suite in it needs a window. Run it without the windowed suites to run it headless.',
-        ),
-        shared.said,
-      );
-      // A suite asking for the accessibility tree runs with it on. On Linux a window alone builds no
-      // tree, so the same case fails there. A GitHub Windows runner built it for a window alone.
-      writeTree(project, {
-        'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
-        'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
-      });
-      const tree = test('tests/tree_test.gd');
-      assert.equal(tree.status, 0, tree.said);
-      assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
-      const bare = test('tests/bare_test.gd');
-      assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
-      if (process.platform === 'linux') {
-        assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
-        assert.match(bare.said, /no accessibility element/, bare.said);
-      }
-      rmSync(join(project, 'tests', 'tree_test.gd'));
-      rmSync(join(project, 'tests', 'bare_test.gd'));
-    } else {
-      console.log(`test command windowed case skipped: ${windowed}`);
-    }
+      const stood = test('tests/stood_test.gd');
+      assert.equal(stood.status, 0, stood.said);
+      // One suite needs one engine, so even a runner short of memory has nothing to say of its room.
+      assert.match(stood.said, /^1 test function in 1 suite over 1 engine\.$/m, stood.said);
+      assert.doesNotMatch(stood.said, /windowed|with a window/, stood.said);
 
-    // A gate running in a worktree of the commit removes it once the run ends, and the logs with it,
-    // so a failed run's logs are copied beside the main checkout and named there.
-    const entry = join(checkouts, 'main', '.git', 'worktrees', 'gate');
-    mkdirSync(entry, { recursive: true });
-    writeFileSync(join(entry, 'commondir'), '../..\n');
-    writeTree(join(checkouts, 'main', 'game'), { 'project.godot': 'config_version=5\n' });
-    const gated = join(checkouts, 'gate', 'game');
-    cpSync(project, gated, { recursive: true, filter: (from) => !from.includes(`${sep}test-runs`) });
-    writeFileSync(join(checkouts, 'gate', '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
-    const inGate = spawnSyncHidden(
-      process.execPath,
-      ['build/cli.js', 'test', gated, '--slots', slots, 'tests/noisy_test.gd'],
-      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
-    );
-    const gateSaid = `${inGate.stdout}${inGate.stderr}`;
-    assert.equal(inGate.status, 1, gateSaid);
-    const keptUnder = /^Every engine's output is kept under (.+) until 5 later runs have failed\.$/m.exec(
-      gateSaid,
-    )?.[1];
-    const mainRuns = join(checkouts, 'main', 'game', '.godot', 'gdharness', 'test-runs');
-    assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
-    const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
-    assert.ok(namedLog.startsWith(keptUnder ?? '\0'), `and so is the engine's log: ${gateSaid}`);
-    // The worktree's own logs are named too, so the copy is not taken for logs written to the
-    // wrong project.
-    const wroteUnder =
-      /^That is a copy beside the main checkout\. The run wrote them under (.+) in this worktree, and they go with it when the worktree is removed\.$/m.exec(
+      return pushed;
+    };
+    const pushed = aBenchmarkSuiteTheEngineVersionAndAnAutoloadThatCannotStart();
+    /** The lock a suite's engine runs on names that engine beside the process holding it. */
+    const theLockOfASuitesEngine = (): void => {
+      // The lock a suite's engine runs on names that engine beside the process holding it, so what
+      // the engine starts runs on its slot rather than taking a second.
+      writeTree(project, {
+        'tests/slot_test.gd': [
+          'extends GdUnitTestSuite',
+          '',
+          'func test_slot() -> void:',
+          '\tvar lock: String = OS.get_environment("GODOT_ENGINE_HELD")',
+          '\tvar held: Variant = null',
+          '\tfor _look: int in 200:',
+          '\t\tvar parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(lock))',
+          '\t\tif parsed is Dictionary and (parsed as Dictionary).has("engine"):',
+          '\t\t\theld = parsed',
+          '\t\t\tbreak',
+          '\t\tawait get_tree().create_timer(0.1).timeout',
+          '\tvar seen: FileAccess = FileAccess.open("res://slot_seen.json", FileAccess.WRITE)',
+          '\tseen.store_string(JSON.stringify({"pid": OS.get_process_id(), "held": held}))',
+          '\tseen.close()',
+          '',
+        ].join('\n'),
+      });
+      const onSlot = test('tests/slot_test.gd');
+      for (const made of ['slot_test.gd', 'slot_test.gd.uid']) {
+        rmSync(join(project, 'tests', made), { force: true });
+      }
+      assert.equal(onSlot.status, 0, onSlot.said);
+      const seen = JSON.parse(readFileSync(join(project, 'slot_seen.json'), 'utf8')) as unknown;
+      rmSync(join(project, 'slot_seen.json'));
+      assert.deepEqual(
+        [get(seen, 'held', 'engine', 'pid'), get(seen, 'held', 'pid') === get(seen, 'pid')],
+        [get(seen, 'pid'), false],
+        `the lock names the suite's engine beside its holder: ${JSON.stringify(seen)}`,
+      );
+
+      const windowed = windowedRunRefused();
+      if (windowed === null) {
+        // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
+        // window draws nothing, so a suite rendering in it waited for a frame that never came. The
+        // second suite meets the window as the first one's end left it. The macOS runner's screen is
+        // small enough that the default window fills its usable part, which Godot reads as maximised
+        // even once minimised, so there a run's first suite meets the window gdUnit4's start left
+        // minimised under that reading.
+        const drawing = (name: string): string =>
+          [
+            'extends GdUnitTestSuite',
+            '',
+            'const GDHARNESS_NEEDS_WINDOW: bool = true',
+            '',
+            'var drawn: int = 0',
+            'var drawn_waiting: int = 0',
+            '',
+            '',
+            `func test_${name}() -> void:`,
+            '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
+            '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+            // On Windows the engine is on the hidden desktop, which has no refresh for vsync to wait on.
+            '\tif OS.get_name() == "Windows":',
+            '\t\tassert_int(DisplayServer.window_get_vsync_mode()).is_equal(DisplayServer.VSYNC_DISABLED)',
+            `\t\tassert_int(Engine.max_fps).is_equal(${String(HIDDEN_WINDOW_FPS)})`,
+            // In seconds rather than frames: on macOS the minimise and the way back are animations.
+            '\tvar waiting: Callable = func() -> void: drawn_waiting += 1',
+            '\tRenderingServer.frame_post_draw.connect(waiting)',
+            '\tawait get_tree().create_timer(1.5).timeout',
+            '\tRenderingServer.frame_post_draw.disconnect(waiting)',
+            '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
+            '\tvar counted: Callable = func() -> void: drawn += 1',
+            '\tRenderingServer.frame_post_draw.connect(counted)',
+            // Godot skips drawing while the desktop reports none of its windows can be seen, so a
+            // failure names the window's state.
+            '\tvar until: int = Time.get_ticks_msec() + 500',
+            '\twhile Time.get_ticks_msec() < until:',
+            '\t\tawait get_tree().process_frame',
+            '\tRenderingServer.frame_post_draw.disconnect(counted)',
+            '\tvar state: String = (',
+            '\t\t"window mode %d, drawable %s, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
+            '\t\t% [',
+            '\t\t\tDisplayServer.window_get_mode(),',
+            '\t\t\tDisplayServer.window_can_draw(),',
+            '\t\t\tDisplayServer.window_is_focused(),',
+            '\t\t\tdrawn_waiting,',
+            '\t\t\tDisplayServer.window_get_position(),',
+            '\t\t\tDisplayServer.window_get_size(),',
+            '\t\t\tDisplayServer.screen_get_usable_rect(),',
+            '\t\t]',
+            '\t)',
+            '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
+            '',
+          ].join('\n');
+        writeTree(project, {
+          'tests/window_test.gd': drawing('window'),
+          'tests/window_again_test.gd': drawing('window_again'),
+        });
+        const both = test('--engines', '1', 'tests/window_test.gd', 'tests/window_again_test.gd');
+        assert.equal(both.status, 0, both.said);
+        assert.match(both.said, /^Passed: \d+ cases in 2 suites/m, both.said);
+        rmSync(join(project, 'tests', 'window_again_test.gd'));
+        // The windowed engine runs only the suite needing it, and a headless engine follows it in its
+        // slot with the rest, one declaring nothing or one saying it runs headless alike, and with one
+        // slot as with four. stood_test.gd fails in a window, which shows the follower ran headless.
+        for (const args of [['--engines', '1'], []]) {
+          for (const other of ['tests/ok_test.gd', 'tests/stood_test.gd']) {
+            const run = test(...args, 'tests/window_test.gd', other);
+            assert.equal(run.status, 0, run.said);
+            assert.match(
+              run.said,
+              /in 2 suites over 2 engines, one of them windowed and followed in its slot by a headless one\.$/m,
+              run.said,
+            );
+            assert.match(run.said, /^Passed: \d+ cases in 2 suites across 2 engines/m, run.said);
+            assert.doesNotMatch(run.said, /runs with a window here/, run.said);
+          }
+        }
+        // An ordered run is one engine, so the suite has to share the window, and the run says so
+        // before it starts.
+        const shared = test('--order', 'reversed', 'tests/window_test.gd', 'tests/stood_test.gd');
+        assert.ok(
+          shared.said.includes(
+            'res://tests/stood_test.gd says it runs headless and runs with a window here, since an ordered run is one engine and a suite in it needs a window. Run it without the windowed suites to run it headless.',
+          ),
+          shared.said,
+        );
+        // A suite asking for the accessibility tree runs with it on. On Linux a window alone builds no
+        // tree, so the same case fails there. A GitHub Windows runner built it for a window alone.
+        writeTree(project, {
+          'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+          'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+        });
+        const tree = test('tests/tree_test.gd');
+        assert.equal(tree.status, 0, tree.said);
+        assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
+        const bare = test('tests/bare_test.gd');
+        assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
+        if (process.platform === 'linux') {
+          assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
+          assert.match(bare.said, /no accessibility element/, bare.said);
+        }
+        rmSync(join(project, 'tests', 'tree_test.gd'));
+        rmSync(join(project, 'tests', 'bare_test.gd'));
+      } else {
+        console.log(`test command windowed case skipped: ${windowed}`);
+      }
+    };
+    theLockOfASuitesEngine();
+    /** A gate in a worktree, and runs meeting slots someone else holds. */
+    const theLogsAndTheSlotsOfRunsInWorktrees = async (): Promise<void> => {
+      // A gate running in a worktree of the commit removes it once the run ends, and the logs with it,
+      // so a failed run's logs are copied beside the main checkout and named there.
+      const entry = join(checkouts, 'main', '.git', 'worktrees', 'gate');
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(entry, 'commondir'), '../..\n');
+      writeTree(join(checkouts, 'main', 'game'), { 'project.godot': 'config_version=5\n' });
+      const gated = join(checkouts, 'gate', 'game');
+      cpSync(project, gated, { recursive: true, filter: (from) => !from.includes(`${sep}test-runs`) });
+      writeFileSync(join(checkouts, 'gate', '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
+      const inGate = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', gated, '--slots', slots, 'tests/noisy_test.gd'],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      const gateSaid = `${inGate.stdout}${inGate.stderr}`;
+      assert.equal(inGate.status, 1, gateSaid);
+      const keptUnder = /^Every engine's output is kept under (.+) until 5 later runs have failed\.$/m.exec(
         gateSaid,
       )?.[1];
-    assert.equal(
-      wroteUnder,
-      join(gated, '.godot', 'gdharness', 'test-runs', basename(keptUnder ?? '')),
-      `the worktree's own named: ${gateSaid}`,
-    );
-    assert.match(
-      readFileSync(join(wroteUnder, relative(keptUnder ?? '', namedLog)), 'utf8'),
-      /nobody said this/,
-      'and the worktree holds them',
-    );
-    assert.doesNotMatch(pushed.said, /^That is a copy beside/m, 'a run in the main checkout names one place');
-    rmSync(join(checkouts, 'gate'), { recursive: true, force: true });
-    const keptLog = readFileSync(namedLog, 'utf8');
-    assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
-    assert.match(keptLog, /nobody said this/, 'and holds what the engine printed');
-    assert.deepEqual(
-      readdirSync(join(keptUnder ?? '', 'engine-0')).filter((name) => !name.endsWith('.log')),
-      [],
-      'only the logs are copied, not the engine user folder or the reports',
-    );
+      const mainRuns = join(checkouts, 'main', 'game', '.godot', 'gdharness', 'test-runs');
+      assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
+      const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
+      assert.ok(namedLog.startsWith(keptUnder ?? '\0'), `and so is the engine's log: ${gateSaid}`);
+      // The worktree's own logs are named too, so the copy is not taken for logs written to the
+      // wrong project.
+      const wroteUnder =
+        /^That is a copy beside the main checkout\. The run wrote them under (.+) in this worktree, and they go with it when the worktree is removed\.$/m.exec(
+          gateSaid,
+        )?.[1];
+      assert.equal(
+        wroteUnder,
+        join(gated, '.godot', 'gdharness', 'test-runs', basename(keptUnder ?? '')),
+        `the worktree's own named: ${gateSaid}`,
+      );
+      assert.match(
+        readFileSync(join(wroteUnder, relative(keptUnder ?? '', namedLog)), 'utf8'),
+        /nobody said this/,
+        'and the worktree holds them',
+      );
+      assert.doesNotMatch(
+        pushed.said,
+        /^That is a copy beside/m,
+        'a run in the main checkout names one place',
+      );
+      rmSync(join(checkouts, 'gate'), { recursive: true, force: true });
+      const keptLog = readFileSync(namedLog, 'utf8');
+      assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
+      assert.match(keptLog, /nobody said this/, 'and holds what the engine printed');
+      assert.deepEqual(
+        readdirSync(join(keptUnder ?? '', 'engine-0')).filter((name) => !name.endsWith('.log')),
+        [],
+        'only the logs are copied, not the engine user folder or the reports',
+      );
 
-    // A run held up by a slot someone else holds says so once, whatever its engines.
-    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
-    const heldUp = test('--slot-count', '1', 'tests/ok_test.gd', 'tests/declared_test.gd');
-    holder.kill();
-    assert.equal(heldUp.status, 0, heldUp.said);
-    assert.equal(
-      heldUp.said.split(/\r?\n/).filter((line) => line.includes('for an engine')).length,
-      1,
-      heldUp.said,
-    );
-    assert.match(
-      heldUp.said,
-      /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by pid \d+, and the engine starts when it is given back\.$/m,
-      heldUp.said,
-    );
+      // A run held up by a slot someone else holds says so once, whatever its engines.
+      const holder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
+      const heldUp = test('--slot-count', '1', 'tests/ok_test.gd', 'tests/declared_test.gd');
+      holder.kill();
+      assert.equal(heldUp.status, 0, heldUp.said);
+      assert.equal(
+        heldUp.said.split(/\r?\n/).filter((line) => line.includes('for an engine')).length,
+        1,
+        heldUp.said,
+      );
+      assert.match(
+        heldUp.said,
+        /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by pid \d+, and the engine starts when it is given back\.$/m,
+        heldUp.said,
+      );
 
-    // A run of two lanes meeting one of its two slots held elsewhere is handed out a share at a time.
-    // It needs room for two engines. A machine short of memory deals one lane, which has nothing to
-    // share, and the run line says why.
-    const timedAs = (seconds: number, suites: Record<string, readonly string[]>): void => {
-      writeFileSync(
-        join(state, 'suite-times.json'),
-        JSON.stringify(
-          Object.fromEntries(
-            Object.entries(suites).map(([path, cases]) => [
-              path,
-              { seconds, cases: Object.fromEntries(cases.map((name) => [name, seconds / cases.length])) },
-            ]),
+      // A run of two lanes meeting one of its two slots held elsewhere is handed out a share at a time.
+      // It needs room for two engines. A machine short of memory deals one lane, which has nothing to
+      // share, and the run line says why.
+      const timedAs = (seconds: number, suites: Record<string, readonly string[]>): void => {
+        writeFileSync(
+          join(state, 'suite-times.json'),
+          JSON.stringify(
+            Object.fromEntries(
+              Object.entries(suites).map(([path, cases]) => [
+                path,
+                { seconds, cases: Object.fromEntries(cases.map((name) => [name, seconds / cases.length])) },
+              ]),
+            ),
           ),
-        ),
-      );
-    };
-    writeTree(project, {
-      'tests/lane_a_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        '',
-        'func test_holds() -> void:',
-        '\tvar marker := FileAccess.open("res://lane_marker.txt", FileAccess.WRITE)',
-        '\tmarker.store_string("a")',
-        '\tmarker.close()',
-        '\tawait get_tree().create_timer(20.0).timeout',
-        '\tDirAccess.remove_absolute(ProjectSettings.globalize_path("res://lane_marker.txt"))',
-        '\tassert_bool(true).is_true()',
-        '',
-      ].join('\n'),
-      // Passes only beside the first suite's engine, so only when the late slot ran it.
-      'tests/lane_b_test.gd':
-        'extends GdUnitTestSuite\n\n\nfunc test_meets_a() -> void:\n\tassert_bool(FileAccess.file_exists("res://lane_marker.txt")).is_true()\n',
-    });
-    const roomHeld = /asked for, since|at a time, since|^Memory had room for /m;
-
-    // Everything in one share: the run ends without waiting on a slot it no longer needs, though the
-    // one its engine gives back goes to another run waiting, as one would on a busy machine.
-    timedAs(10, {
-      'res://tests/ok_test.gd': ['test_one', 'test_two'],
-      'res://tests/declared_test.gd': ['test_rows'],
-    });
-    const heldLock = join(slots, '0.lock');
-    const keeper = await slotHeldElsewhere(heldLock, 60_000);
-    const taker = await slotTakenWhenFreed(join(slots, '1.lock'), 60_000);
-    const oneShare = test('--slot-count', '2', 'tests/ok_test.gd', 'tests/declared_test.gd');
-    const stillKept = existsSync(heldLock);
-    keeper.kill();
-    taker.kill();
-    const runsLock = join(slots, '1.lock.seen');
-    const seenHeld = existsSync(runsLock) ? holderOf(readFileSync(runsLock, 'utf8')) : null;
-    for (const left of [heldLock, join(slots, '1.lock'), join(slots, '1.lock.start'), runsLock]) {
-      rmSync(left, { force: true });
-    }
-    assert.equal(oneShare.status, 0, oneShare.said);
-    assert.equal(seenHeld?.by, `gdharness test of ${project}`, 'the run names itself in the lock it takes');
-    assert.deepEqual(leftInSlots(slots), [], `the lane that stopped waiting left no mark: ${oneShare.said}`);
-    if (roomHeld.test(oneShare.said)) {
-      console.log(
-        `test command shares case not reached: the machine has room for one engine: ${oneShare.said}`,
-      );
-    } else {
-      assert.ok(oneShare.said.includes(sharesSaid(1, 2)), oneShare.said);
-      assert.match(oneShare.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, oneShare.said);
-      assert.ok(stillKept, `the run ended while the other slot was still held: ${oneShare.said}`);
-
-      // Two shares: the second goes to the slot given back while the first runs.
-      timedAs(40, {
-        'res://tests/lane_a_test.gd': ['test_holds'],
-        'res://tests/lane_b_test.gd': ['test_meets_a'],
+        );
+      };
+      writeTree(project, {
+        'tests/lane_a_test.gd': [
+          'extends GdUnitTestSuite',
+          '',
+          '',
+          'func test_holds() -> void:',
+          '\tvar marker := FileAccess.open("res://lane_marker.txt", FileAccess.WRITE)',
+          '\tmarker.store_string("a")',
+          '\tmarker.close()',
+          '\tawait get_tree().create_timer(20.0).timeout',
+          '\tDirAccess.remove_absolute(ProjectSettings.globalize_path("res://lane_marker.txt"))',
+          '\tassert_bool(true).is_true()',
+          '',
+        ].join('\n'),
+        // Passes only beside the first suite's engine, so only when the late slot ran it.
+        'tests/lane_b_test.gd':
+          'extends GdUnitTestSuite\n\n\nfunc test_meets_a() -> void:\n\tassert_bool(FileAccess.file_exists("res://lane_marker.txt")).is_true()\n',
       });
-      const late = await slotHeldElsewhere(heldLock, 8000);
-      const joined = test('--slot-count', '2', 'tests/lane_a_test.gd', 'tests/lane_b_test.gd');
-      late.kill();
-      assert.equal(joined.status, 0, joined.said);
-      assert.ok(joined.said.includes(sharesSaid(1, 2)), joined.said);
-      assert.match(joined.said, /^Passed: 2 cases in 2 suites across 2 engines, /m, joined.said);
-      assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
-    }
+      const roomHeld = /asked for, since|at a time, since|^Memory had room for /m;
+
+      // Everything in one share: the run ends without waiting on a slot it no longer needs, though the
+      // one its engine gives back goes to another run waiting, as one would on a busy machine.
+      timedAs(10, {
+        'res://tests/ok_test.gd': ['test_one', 'test_two'],
+        'res://tests/declared_test.gd': ['test_rows'],
+      });
+      const heldLock = join(slots, '0.lock');
+      const keeper = await slotHeldElsewhere(heldLock, 60_000);
+      const taker = await slotTakenWhenFreed(join(slots, '1.lock'), 60_000);
+      const oneShare = test('--slot-count', '2', 'tests/ok_test.gd', 'tests/declared_test.gd');
+      const stillKept = existsSync(heldLock);
+      keeper.kill();
+      taker.kill();
+      const runsLock = join(slots, '1.lock.seen');
+      const seenHeld = existsSync(runsLock) ? holderOf(readFileSync(runsLock, 'utf8')) : null;
+      for (const left of [heldLock, join(slots, '1.lock'), join(slots, '1.lock.start'), runsLock]) {
+        rmSync(left, { force: true });
+      }
+      assert.equal(oneShare.status, 0, oneShare.said);
+      assert.equal(seenHeld?.by, `gdharness test of ${project}`, 'the run names itself in the lock it takes');
+      assert.deepEqual(
+        leftInSlots(slots),
+        [],
+        `the lane that stopped waiting left no mark: ${oneShare.said}`,
+      );
+      if (roomHeld.test(oneShare.said)) {
+        console.log(
+          `test command shares case not reached: the machine has room for one engine: ${oneShare.said}`,
+        );
+      } else {
+        assert.ok(oneShare.said.includes(sharesSaid(1, 2)), oneShare.said);
+        assert.match(oneShare.said, /^Passed: 4 cases in 2 suites across 1 engine, /m, oneShare.said);
+        assert.ok(stillKept, `the run ended while the other slot was still held: ${oneShare.said}`);
+
+        // Two shares: the second goes to the slot given back while the first runs.
+        timedAs(40, {
+          'res://tests/lane_a_test.gd': ['test_holds'],
+          'res://tests/lane_b_test.gd': ['test_meets_a'],
+        });
+        const late = await slotHeldElsewhere(heldLock, 8000);
+        const joined = test('--slot-count', '2', 'tests/lane_a_test.gd', 'tests/lane_b_test.gd');
+        late.kill();
+        assert.equal(joined.status, 0, joined.said);
+        assert.ok(joined.said.includes(sharesSaid(1, 2)), joined.said);
+        assert.match(joined.said, /^Passed: 2 cases in 2 suites across 2 engines, /m, joined.said);
+        assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+      }
+    };
+    await theLogsAndTheSlotsOfRunsInWorktrees();
   } finally {
     sweep(project, slots, checkouts);
   }
@@ -67265,336 +67299,363 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
           `the declared error is not counted, and the warnings are no errors: ${said}`,
         );
 
-        // One past the most an answer names, each its own text.
-        writeTree(project, {
-          'many/many_test.gd':
-            'extends GdUnitTestSuite\n\n\nfunc test_says_a_lot() -> void:\n\tfor at: int in 21:\n\t\tpush_error("said %d" % at)\n\tassert_bool(true).is_true()\n',
-        });
-        const many = jsonOf(
-          await call('project_test', { projectPath: project, path: 'many' }, ENGINE_CALL_TIMEOUT_MS * 3),
-          'many',
-        );
-        assert.deepEqual(
-          [asArray(get(many, 'undeclaredErrors')).length, get(many, 'undeclaredErrorsOmitted')],
-          [20, 1],
-          JSON.stringify(many),
-        );
-        assert.match(
-          text(get(many, 'verdict')),
-          /^21 engine errors no suite declared$/,
-          JSON.stringify(many),
-        );
-        rmSync(join(project, 'many'), { recursive: true, force: true });
-
-        // A script error the case erred on is that case's failure, and nothing a suite declares.
-        writeTree(project, {
-          'erred/erred_test.gd':
-            'extends GdUnitTestSuite\n\n\nfunc test_null_call() -> void:\n\tvar kit: Object = null\n\tkit.call("add", 1, 2)\n\tassert_bool(true).is_true()\n',
-        });
-        const erred = jsonOf(
-          await call('project_test', { projectPath: project, path: 'erred' }, ENGINE_CALL_TIMEOUT_MS * 3),
-          'erred',
-        );
-        assert.deepEqual(
-          asArray(get(erred, 'failed')).map((entry) => [get(entry, 'name'), get(entry, 'status')]),
-          [['test_null_call', 'error']],
-          JSON.stringify(erred),
-        );
-        assert.deepEqual(
-          [get(erred, 'undeclaredErrors'), get(erred, 'errors')],
-          [undefined, 1],
-          `counted once, as the case's error: ${JSON.stringify(erred)}`,
-        );
-        assert.doesNotMatch(text(get(erred, 'verdict')), /no suite declared/, JSON.stringify(erred));
-        rmSync(join(project, 'erred'), { recursive: true, force: true });
-
-        // gdUnit4's own setting fails a case on what it prints, declared or not, unless an
-        // assert_error took it.
-        const settings = readFileSync(join(project, 'project.godot'), 'utf8');
-        writeTree(project, {
-          'project.godot': `${settings}\n[gdunit4]\n\nreport/godot/push_error=true\n`,
-          'pushed/pushed_test.gd': [
-            'extends GdUnitTestSuite',
-            '',
-            'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
-            '\t"test_bare": ["pushed bare"],',
-            '\t"test_taken": ["pushed and taken"],',
-            '}',
-            'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_warned": ["warned and taken"]}',
-            '',
-            '',
-            'func test_bare() -> void:',
-            '\tpush_error("pushed bare")',
-            '',
-            '',
-            'func test_taken() -> void:',
-            '\tassert_error(func() -> void: push_error("pushed and taken")).is_push_error("pushed and taken")',
-            '',
-            '',
-            'func test_warned() -> void:',
-            '\tassert_error(func() -> void: push_warning("warned and taken")).is_push_warning(',
-            '\t\t"warned and taken"',
-            '\t)',
-            '',
-          ].join('\n'),
-        });
-        const pushedSaid = await call(
-          'project_test',
-          { projectPath: project, path: 'pushed' },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const pushed = jsonOf(pushedSaid, 'pushed');
-        assert.deepEqual(
-          [
-            get(pushed, 'tests'),
-            get(pushed, 'errors'),
-            asArray(get(pushed, 'failed')).map((one) => get(one, 'name')),
-            get(pushed, 'undeclaredErrors'),
-          ],
-          [3, 1, ['test_bare'], undefined],
-          `gdUnit4 fails the bare one and passes the two an assert_error took: ${pushedSaid}`,
-        );
-        assert.match(
-          text(get(pushed, 'note')),
-          /The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/pushed\/pushed_test\.gd > test_bare\. A case that prints one on purpose does it inside assert_error\(\.\.\.\)\.is_push_error\(\.\.\.\) or is_push_warning\(\.\.\.\), which gdUnit4 passes, and declares it for gdharness all the same\./,
-          pushedSaid,
-        );
-        writeFileSync(join(project, 'project.godot'), settings);
-        rmSync(join(project, 'pushed'), { recursive: true, force: true });
-
-        // A declared text matches the whole error, so the start of one is never printed. Only the
-        // case that declared it can have printed it instead: test_silent declares the same text
-        // beside test_near printing the longer error, and test_far prints one that does not hold it.
-        writeTree(project, {
-          'near/near_test.gd': [
-            'extends GdUnitTestSuite',
-            '',
-            'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
-            '\t"test_near": ["the amount was refused"],',
-            '\t"test_silent": ["the amount was refused"],',
-            '\t"test_far": ["never said at all"],',
-            '}',
-            '',
-            '',
-            'func test_near() -> void:',
-            '\tpush_error("the amount was refused, got -1")',
-            '\tassert_bool(true).is_true()',
-            '',
-            '',
-            'func test_silent() -> void:',
-            '\tassert_bool(true).is_true()',
-            '',
-            '',
-            'func test_far() -> void:',
-            '\tpush_error("the amount was refused, got -2")',
-            '\tassert_bool(true).is_true()',
-            '',
-          ].join('\n'),
-        });
-        const near = jsonOf(
-          await call('project_test', { projectPath: project, path: 'near' }, ENGINE_CALL_TIMEOUT_MS * 3),
-          'near',
-        );
-        assert.deepEqual(
-          Object.fromEntries(
-            asArray(get(near, 'declaredNotPrinted')).map((missing) => [
-              text(get(missing, 'case')),
-              get(missing, 'printedInstead'),
-            ]),
-          ),
-          { test_far: undefined, test_near: 'the amount was refused, got -1', test_silent: undefined },
-          JSON.stringify(near),
-        );
-        rmSync(join(project, 'near'), { recursive: true, force: true });
-
-        // Godot writes an error raised while it prints another straight to stderr, past the log
-        // file the run is read from. gdUnit4's loggers raise two as the engine exits after a stack
-        // overflow, and they were counted under engineErrors and judged nowhere.
-        writeTree(project, {
-          'deep/deep_test.gd': [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func deeper(n: int) -> int:',
-            '\treturn deeper(n + 1) if n < 100000 else n',
-            '',
-            '',
-            'func test_recurses() -> void:',
-            '\tassert_int(deeper(0)).is_greater(0)',
-            '',
-          ].join('\n'),
-        });
-        const deep = jsonOf(
-          await call('project_test', { projectPath: project, path: 'deep' }, ENGINE_CALL_TIMEOUT_MS * 3),
-          'deep',
-        );
-        const undeclared = asArray(get(deep, 'undeclaredErrors'));
-        assert.equal(
-          undeclared.reduce((sum: number, error) => sum + asNumber(get(error, 'times') ?? 1), 0),
-          get(deep, 'engineErrors'),
-          `every error the run printed is judged: ${JSON.stringify(deep)}`,
-        );
-        assert.ok(
-          undeclared.some(
-            (error) =>
-              get(error, 'suite') === undefined && text(get(error, 'text')).startsWith('Stack overflow'),
-          ),
-          `the overflows printed past the log file belong to no suite: ${JSON.stringify(deep)}`,
-        );
-        rmSync(join(project, 'deep'), { recursive: true, force: true });
-
-        // A suite standing a scene up through the scene runner and declaring nothing is given a
-        // window, as gdharness test gives it one, and one declaring false beside it shares it.
-        writeTree(project, {
-          'win/stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
-          'win/shown_test.gd': [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_shown() -> void:',
-            '\tvar runner: GdUnitSceneRunner = scene_runner("res://win/stood.tscn")',
-            '\tassert_object(runner.scene()).is_not_null()',
-            '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
-            '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
-            '',
-          ].join('\n'),
-          'win/quiet_test.gd':
-            'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_bool(true).is_true()\n',
-        });
-        const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
-        const windowRefused = windowedRunRefused();
-        if (windowRefused === null || noDisplay) {
-          const shown = jsonOf(
-            await call('project_test', { projectPath: project, path: 'win' }, ENGINE_CALL_TIMEOUT_MS * 3),
-            'win',
-          );
-          const why =
-            'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
-          if (noDisplay) {
-            // Headless, where the case asserting a window fails, and the answer says why.
-            assert.deepEqual(
-              [get(shown, 'passed'), get(shown, 'tests'), get(shown, 'windowed'), get(shown, 'windowNote')],
-              [
-                false,
-                2,
-                false,
-                `res://win/shown_test.gd needs a window, as gdharness test reads it. This machine has no display, so the run was headless. Input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
-              ],
-              JSON.stringify(shown),
-            );
-          } else {
-            assert.deepEqual(
-              [get(shown, 'passed'), get(shown, 'tests'), get(shown, 'windowed'), get(shown, 'windowNote')],
-              [
-                true,
-                2,
-                true,
-                `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
-              ],
-              JSON.stringify(shown),
-            );
-            // A suite asking for the accessibility tree gets a window with the tree on, and its case
-            // sees the element the tree made for a Control. A window alone starts the engine without
-            // the flag. Only Linux shows that the flag is what builds the tree, since a GitHub
-            // Windows runner built it for a window alone.
-            writeTree(project, {
-              'tree/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
-              'bare/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
-            });
-            const tree = jsonOf(
-              await call('project_test', { projectPath: project, path: 'tree' }, ENGINE_CALL_TIMEOUT_MS * 3),
-              'tree',
-            );
-            assert.deepEqual(
-              [get(tree, 'passed'), get(tree, 'tests'), get(tree, 'windowed')],
-              [true, 1, true],
-              JSON.stringify(tree),
-            );
-            assert.ok(
-              text(get(tree, 'windowNote')).includes(
-                ' The engine also ran with --accessibility always, since res://tree/tree_test.gd declares GDHARNESS_ACCESSIBILITY.',
-              ),
-              JSON.stringify(tree),
-            );
-            const bare = jsonOf(
-              await call('project_test', { projectPath: project, path: 'bare' }, ENGINE_CALL_TIMEOUT_MS * 3),
-              'bare',
-            );
-            assert.equal(get(bare, 'windowed'), true, JSON.stringify(bare));
-            assert.doesNotMatch(text(get(bare, 'windowNote')), /--accessibility/, JSON.stringify(bare));
-            if (process.platform === 'linux') {
-              assert.equal(
-                get(bare, 'passed'),
-                false,
-                `a window alone builds no tree: ${JSON.stringify(bare)}`,
-              );
-            }
-            rmSync(join(project, 'tree'), { recursive: true, force: true });
-            rmSync(join(project, 'bare'), { recursive: true, force: true });
-          }
-        } else {
-          console.log(`project_test windowed case skipped: ${windowRefused}`);
-        }
-        // Alone, the suite declaring false runs headless, and the answer speaks of no window.
-        const quiet = jsonOf(
-          await call(
-            'project_test',
-            { projectPath: project, path: 'win/quiet_test.gd' },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-          'quiet',
-        );
-        assert.deepEqual(
-          [get(quiet, 'passed'), get(quiet, 'tests'), get(quiet, 'windowed'), get(quiet, 'windowNote')],
-          [true, 1, undefined, undefined],
-          JSON.stringify(quiet),
-        );
-        // Left out by ignore, the suite needing a window gives the run none.
-        const ignoring = jsonOf(
-          await call(
-            'project_test',
-            { projectPath: project, path: 'win', ignore: ['shown_test'] },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-          'ignoring',
-        );
-        assert.deepEqual(
-          [get(ignoring, 'passed'), get(ignoring, 'tests'), get(ignoring, 'windowed')],
-          [true, 1, undefined],
-          JSON.stringify(ignoring),
-        );
-        rmSync(join(project, 'win'), { recursive: true, force: true });
-
-        // Each on its own, since either fails the run and the run above holds both.
-        for (const [path, verdict] of [
-          ['tests/noisy_test.gd', 'one engine error no suite declared'],
-          ['tests/warned_test.gd', 'one engine warning no suite declared'],
-          ['tests/promised_test.gd', 'one declared error never printed; one declared warning never printed'],
-        ] as const) {
-          const alone = await call(
-            'project_test',
-            { projectPath: project, path },
-            ENGINE_CALL_TIMEOUT_MS * 3,
+        /** Past the most an answer names, a script error, gdUnit4's own setting, declarations never matched and overflows. */
+        const declaredAndUndeclaredErrorsOfOtherShapes = async (): Promise<void> => {
+          // One past the most an answer names, each its own text.
+          writeTree(project, {
+            'many/many_test.gd':
+              'extends GdUnitTestSuite\n\n\nfunc test_says_a_lot() -> void:\n\tfor at: int in 21:\n\t\tpush_error("said %d" % at)\n\tassert_bool(true).is_true()\n',
+          });
+          const many = jsonOf(
+            await call('project_test', { projectPath: project, path: 'many' }, ENGINE_CALL_TIMEOUT_MS * 3),
+            'many',
           );
           assert.deepEqual(
-            [get(jsonOf(alone, path), 'passed'), get(jsonOf(alone, path), 'verdict')],
-            [false, verdict],
-            alone,
+            [asArray(get(many, 'undeclaredErrors')).length, get(many, 'undeclaredErrorsOmitted')],
+            [20, 1],
+            JSON.stringify(many),
           );
-          if (path === 'tests/warned_test.gd') {
-            assert.match(
-              text(get(jsonOf(alone, path), 'note')),
-              /list its text under "test_warned" in the suite's GDHARNESS_EXPECTED_WARNINGS, once for each time it prints it\./,
-              `a warning alone is told where warnings are declared: ${alone}`,
+          assert.match(
+            text(get(many, 'verdict')),
+            /^21 engine errors no suite declared$/,
+            JSON.stringify(many),
+          );
+          rmSync(join(project, 'many'), { recursive: true, force: true });
+
+          // A script error the case erred on is that case's failure, and nothing a suite declares.
+          writeTree(project, {
+            'erred/erred_test.gd':
+              'extends GdUnitTestSuite\n\n\nfunc test_null_call() -> void:\n\tvar kit: Object = null\n\tkit.call("add", 1, 2)\n\tassert_bool(true).is_true()\n',
+          });
+          const erred = jsonOf(
+            await call('project_test', { projectPath: project, path: 'erred' }, ENGINE_CALL_TIMEOUT_MS * 3),
+            'erred',
+          );
+          assert.deepEqual(
+            asArray(get(erred, 'failed')).map((entry) => [get(entry, 'name'), get(entry, 'status')]),
+            [['test_null_call', 'error']],
+            JSON.stringify(erred),
+          );
+          assert.deepEqual(
+            [get(erred, 'undeclaredErrors'), get(erred, 'errors')],
+            [undefined, 1],
+            `counted once, as the case's error: ${JSON.stringify(erred)}`,
+          );
+          assert.doesNotMatch(text(get(erred, 'verdict')), /no suite declared/, JSON.stringify(erred));
+          rmSync(join(project, 'erred'), { recursive: true, force: true });
+
+          // gdUnit4's own setting fails a case on what it prints, declared or not, unless an
+          // assert_error took it.
+          const settings = readFileSync(join(project, 'project.godot'), 'utf8');
+          writeTree(project, {
+            'project.godot': `${settings}\n[gdunit4]\n\nreport/godot/push_error=true\n`,
+            'pushed/pushed_test.gd': [
+              'extends GdUnitTestSuite',
+              '',
+              'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
+              '\t"test_bare": ["pushed bare"],',
+              '\t"test_taken": ["pushed and taken"],',
+              '}',
+              'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_warned": ["warned and taken"]}',
+              '',
+              '',
+              'func test_bare() -> void:',
+              '\tpush_error("pushed bare")',
+              '',
+              '',
+              'func test_taken() -> void:',
+              '\tassert_error(func() -> void: push_error("pushed and taken")).is_push_error("pushed and taken")',
+              '',
+              '',
+              'func test_warned() -> void:',
+              '\tassert_error(func() -> void: push_warning("warned and taken")).is_push_warning(',
+              '\t\t"warned and taken"',
+              '\t)',
+              '',
+            ].join('\n'),
+          });
+          const pushedSaid = await call(
+            'project_test',
+            { projectPath: project, path: 'pushed' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const pushed = jsonOf(pushedSaid, 'pushed');
+          assert.deepEqual(
+            [
+              get(pushed, 'tests'),
+              get(pushed, 'errors'),
+              asArray(get(pushed, 'failed')).map((one) => get(one, 'name')),
+              get(pushed, 'undeclaredErrors'),
+            ],
+            [3, 1, ['test_bare'], undefined],
+            `gdUnit4 fails the bare one and passes the two an assert_error took: ${pushedSaid}`,
+          );
+          assert.match(
+            text(get(pushed, 'note')),
+            /The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/pushed\/pushed_test\.gd > test_bare\. A case that prints one on purpose does it inside assert_error\(\.\.\.\)\.is_push_error\(\.\.\.\) or is_push_warning\(\.\.\.\), which gdUnit4 passes, and declares it for gdharness all the same\./,
+            pushedSaid,
+          );
+          writeFileSync(join(project, 'project.godot'), settings);
+          rmSync(join(project, 'pushed'), { recursive: true, force: true });
+
+          // A declared text matches the whole error, so the start of one is never printed. Only the
+          // case that declared it can have printed it instead: test_silent declares the same text
+          // beside test_near printing the longer error, and test_far prints one that does not hold it.
+          writeTree(project, {
+            'near/near_test.gd': [
+              'extends GdUnitTestSuite',
+              '',
+              'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
+              '\t"test_near": ["the amount was refused"],',
+              '\t"test_silent": ["the amount was refused"],',
+              '\t"test_far": ["never said at all"],',
+              '}',
+              '',
+              '',
+              'func test_near() -> void:',
+              '\tpush_error("the amount was refused, got -1")',
+              '\tassert_bool(true).is_true()',
+              '',
+              '',
+              'func test_silent() -> void:',
+              '\tassert_bool(true).is_true()',
+              '',
+              '',
+              'func test_far() -> void:',
+              '\tpush_error("the amount was refused, got -2")',
+              '\tassert_bool(true).is_true()',
+              '',
+            ].join('\n'),
+          });
+          const near = jsonOf(
+            await call('project_test', { projectPath: project, path: 'near' }, ENGINE_CALL_TIMEOUT_MS * 3),
+            'near',
+          );
+          assert.deepEqual(
+            Object.fromEntries(
+              asArray(get(near, 'declaredNotPrinted')).map((missing) => [
+                text(get(missing, 'case')),
+                get(missing, 'printedInstead'),
+              ]),
+            ),
+            { test_far: undefined, test_near: 'the amount was refused, got -1', test_silent: undefined },
+            JSON.stringify(near),
+          );
+          rmSync(join(project, 'near'), { recursive: true, force: true });
+
+          // Godot writes an error raised while it prints another straight to stderr, past the log
+          // file the run is read from. gdUnit4's loggers raise two as the engine exits after a stack
+          // overflow, and they were counted under engineErrors and judged nowhere.
+          writeTree(project, {
+            'deep/deep_test.gd': [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func deeper(n: int) -> int:',
+              '\treturn deeper(n + 1) if n < 100000 else n',
+              '',
+              '',
+              'func test_recurses() -> void:',
+              '\tassert_int(deeper(0)).is_greater(0)',
+              '',
+            ].join('\n'),
+          });
+          const deep = jsonOf(
+            await call('project_test', { projectPath: project, path: 'deep' }, ENGINE_CALL_TIMEOUT_MS * 3),
+            'deep',
+          );
+          const undeclared = asArray(get(deep, 'undeclaredErrors'));
+          assert.equal(
+            undeclared.reduce((sum: number, error) => sum + asNumber(get(error, 'times') ?? 1), 0),
+            get(deep, 'engineErrors'),
+            `every error the run printed is judged: ${JSON.stringify(deep)}`,
+          );
+          assert.ok(
+            undeclared.some(
+              (error) =>
+                get(error, 'suite') === undefined && text(get(error, 'text')).startsWith('Stack overflow'),
+            ),
+            `the overflows printed past the log file belong to no suite: ${JSON.stringify(deep)}`,
+          );
+          rmSync(join(project, 'deep'), { recursive: true, force: true });
+        };
+        /** A suite standing a scene up through the scene runner is given a window, and one declaring false runs headless alone. */
+        const windowedSuites = async (): Promise<void> => {
+          // A suite standing a scene up through the scene runner and declaring nothing is given a
+          // window, as gdharness test gives it one, and one declaring false beside it shares it.
+          writeTree(project, {
+            'win/stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
+            'win/shown_test.gd': [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_shown() -> void:',
+              '\tvar runner: GdUnitSceneRunner = scene_runner("res://win/stood.tscn")',
+              '\tassert_object(runner.scene()).is_not_null()',
+              '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
+              '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+              '',
+            ].join('\n'),
+            'win/quiet_test.gd':
+              'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_bool(true).is_true()\n',
+          });
+          const noDisplay = resolveHeadless(undefined, {
+            platform: process.platform,
+            variables: process.env,
+          });
+          const windowRefused = windowedRunRefused();
+          if (windowRefused === null || noDisplay) {
+            const shown = jsonOf(
+              await call('project_test', { projectPath: project, path: 'win' }, ENGINE_CALL_TIMEOUT_MS * 3),
+              'win',
             );
-            assert.ok(
-              text(get(jsonOf(alone, path), 'note')).includes(
-                'does it as const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_warned":["a warning nobody declared"]},',
-              ),
-              `and how: ${alone}`,
-            );
+            const why =
+              'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+            if (noDisplay) {
+              // Headless, where the case asserting a window fails, and the answer says why.
+              assert.deepEqual(
+                [get(shown, 'passed'), get(shown, 'tests'), get(shown, 'windowed'), get(shown, 'windowNote')],
+                [
+                  false,
+                  2,
+                  false,
+                  `res://win/shown_test.gd needs a window, as gdharness test reads it. This machine has no display, so the run was headless. Input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
+                ],
+                JSON.stringify(shown),
+              );
+            } else {
+              assert.deepEqual(
+                [get(shown, 'passed'), get(shown, 'tests'), get(shown, 'windowed'), get(shown, 'windowNote')],
+                [
+                  true,
+                  2,
+                  true,
+                  `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
+                ],
+                JSON.stringify(shown),
+              );
+              const theTreeIsBuiltForAnAccessibilitySuite = async (): Promise<void> => {
+                // A suite asking for the accessibility tree gets a window with the tree on, and its case
+                // sees the element the tree made for a Control. A window alone starts the engine without
+                // the flag. Only Linux shows that the flag is what builds the tree, since a GitHub
+                // Windows runner built it for a window alone.
+                writeTree(project, {
+                  'tree/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+                  'bare/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+                });
+                const tree = jsonOf(
+                  await call(
+                    'project_test',
+                    { projectPath: project, path: 'tree' },
+                    ENGINE_CALL_TIMEOUT_MS * 3,
+                  ),
+                  'tree',
+                );
+                assert.deepEqual(
+                  [get(tree, 'passed'), get(tree, 'tests'), get(tree, 'windowed')],
+                  [true, 1, true],
+                  JSON.stringify(tree),
+                );
+                assert.ok(
+                  text(get(tree, 'windowNote')).includes(
+                    ' The engine also ran with --accessibility always, since res://tree/tree_test.gd declares GDHARNESS_ACCESSIBILITY.',
+                  ),
+                  JSON.stringify(tree),
+                );
+                const bare = jsonOf(
+                  await call(
+                    'project_test',
+                    { projectPath: project, path: 'bare' },
+                    ENGINE_CALL_TIMEOUT_MS * 3,
+                  ),
+                  'bare',
+                );
+                assert.equal(get(bare, 'windowed'), true, JSON.stringify(bare));
+                assert.doesNotMatch(text(get(bare, 'windowNote')), /--accessibility/, JSON.stringify(bare));
+                if (process.platform === 'linux') {
+                  assert.equal(
+                    get(bare, 'passed'),
+                    false,
+                    `a window alone builds no tree: ${JSON.stringify(bare)}`,
+                  );
+                }
+                rmSync(join(project, 'tree'), { recursive: true, force: true });
+                rmSync(join(project, 'bare'), { recursive: true, force: true });
+              };
+              await theTreeIsBuiltForAnAccessibilitySuite();
+            }
+          } else {
+            console.log(`project_test windowed case skipped: ${windowRefused}`);
           }
-        }
+          // Alone, the suite declaring false runs headless, and the answer speaks of no window.
+          const quiet = jsonOf(
+            await call(
+              'project_test',
+              { projectPath: project, path: 'win/quiet_test.gd' },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+            'quiet',
+          );
+          assert.deepEqual(
+            [get(quiet, 'passed'), get(quiet, 'tests'), get(quiet, 'windowed'), get(quiet, 'windowNote')],
+            [true, 1, undefined, undefined],
+            JSON.stringify(quiet),
+          );
+          // Left out by ignore, the suite needing a window gives the run none.
+          const ignoring = jsonOf(
+            await call(
+              'project_test',
+              { projectPath: project, path: 'win', ignore: ['shown_test'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+            'ignoring',
+          );
+          assert.deepEqual(
+            [get(ignoring, 'passed'), get(ignoring, 'tests'), get(ignoring, 'windowed')],
+            [true, 1, undefined],
+            JSON.stringify(ignoring),
+          );
+          rmSync(join(project, 'win'), { recursive: true, force: true });
+        };
+        /** Each undeclared error and warning fails a run on its own. */
+        const eachOnItsOwn = async (): Promise<void> => {
+          // Each on its own, since either fails the run and the run above holds both.
+          for (const [path, verdict] of [
+            ['tests/noisy_test.gd', 'one engine error no suite declared'],
+            ['tests/warned_test.gd', 'one engine warning no suite declared'],
+            [
+              'tests/promised_test.gd',
+              'one declared error never printed; one declared warning never printed',
+            ],
+          ] as const) {
+            const alone = await call(
+              'project_test',
+              { projectPath: project, path },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            );
+            assert.deepEqual(
+              [get(jsonOf(alone, path), 'passed'), get(jsonOf(alone, path), 'verdict')],
+              [false, verdict],
+              alone,
+            );
+            if (path === 'tests/warned_test.gd') {
+              assert.match(
+                text(get(jsonOf(alone, path), 'note')),
+                /list its text under "test_warned" in the suite's GDHARNESS_EXPECTED_WARNINGS, once for each time it prints it\./,
+                `a warning alone is told where warnings are declared: ${alone}`,
+              );
+              assert.ok(
+                text(get(jsonOf(alone, path), 'note')).includes(
+                  'does it as const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_warned":["a warning nobody declared"]},',
+                ),
+                `and how: ${alone}`,
+              );
+            }
+          }
+        };
+        await declaredAndUndeclaredErrorsOfOtherShapes();
+        await windowedSuites();
+        await eachOnItsOwn();
       },
       { GODOT_PATH: godotPath },
     );
@@ -67779,57 +67840,64 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
       ['Bun', process.execPath],
       ['Node', 'node'],
     ] as const) {
-      for (const kept of [true, false]) {
-        const what = `${runtimeName}, ${kept ? 'a run its keeper holds' : 'a launch nothing holds'}`;
-        const ready = join(scratch, `ready-${runtimeName}-${String(kept)}`);
-        const answer = join(scratch, `launched-${runtimeName}-${String(kept)}.json`);
-        const launcher = join(scratch, `launch-${runtimeName}-${String(kept)}.mjs`);
-        const spec = {
-          command: godotPath,
-          args: ['--headless', '--path', project, '-s', 'res://wait.gd'],
-          env: { ...process.env, GDHARNESS_ERROR_MODE_READY: ready },
-          ...(kept
-            ? {
-                run: {
-                  transcript: join(runtime, 'runs', `${runtimeName}.log`),
-                  startedAt: Date.now(),
-                  projectPath: project,
-                  debugged: false,
-                },
-              }
-            : {}),
-        };
-        writeFileSync(
-          launcher,
-          [
-            `import { writeFileSync } from 'node:fs';`,
-            `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
-            `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
-            `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
-          ].join('\n'),
-        );
-        const ran = spawnSyncHidden(interpreter, [launcher], {
-          encoding: 'utf8',
-          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
-          env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
-        });
-        const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
-        const pid = get(said, 'pid');
-        assert.ok(
-          typeof pid === 'number',
-          `${what}: launched ${JSON.stringify(said)} ${ran.stdout} ${ran.stderr}`,
-        );
-        await started.meet(pid);
-        assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
-        assertReportable(pid, what);
-        if (kept) {
-          await assertStartedBy(
-            pid,
-            runtimeName === 'Bun' ? /keeper\.js"? keep/ : /gdharness-desktop-[0-9a-f]{16}\.exe/i,
-            what,
+      /** An engine launched with its keeper holding the run, and one launched with nothing holding it. */
+      const launchedWithAndWithoutAKeeper = async (): Promise<void> => {
+        const launchOne = async (kept: boolean): Promise<void> => {
+          const what = `${runtimeName}, ${kept ? 'a run its keeper holds' : 'a launch nothing holds'}`;
+          const ready = join(scratch, `ready-${runtimeName}-${String(kept)}`);
+          const answer = join(scratch, `launched-${runtimeName}-${String(kept)}.json`);
+          const launcher = join(scratch, `launch-${runtimeName}-${String(kept)}.mjs`);
+          const spec = {
+            command: godotPath,
+            args: ['--headless', '--path', project, '-s', 'res://wait.gd'],
+            env: { ...process.env, GDHARNESS_ERROR_MODE_READY: ready },
+            ...(kept
+              ? {
+                  run: {
+                    transcript: join(runtime, 'runs', `${runtimeName}.log`),
+                    startedAt: Date.now(),
+                    projectPath: project,
+                    debugged: false,
+                  },
+                }
+              : {}),
+          };
+          writeFileSync(
+            launcher,
+            [
+              `import { writeFileSync } from 'node:fs';`,
+              `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+              `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+              `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+            ].join('\n'),
           );
+          const ran = spawnSyncHidden(interpreter, [launcher], {
+            encoding: 'utf8',
+            timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+            env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+          });
+          const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+          const pid = get(said, 'pid');
+          assert.ok(
+            typeof pid === 'number',
+            `${what}: launched ${JSON.stringify(said)} ${ran.stdout} ${ran.stderr}`,
+          );
+          await started.meet(pid);
+          assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
+          assertReportable(pid, what);
+          if (kept) {
+            await assertStartedBy(
+              pid,
+              runtimeName === 'Bun' ? /keeper\.js"? keep/ : /gdharness-desktop-[0-9a-f]{16}\.exe/i,
+              what,
+            );
+          }
+        };
+        for (const kept of [true, false]) {
+          await launchOne(kept);
         }
-      }
+      };
+      await launchedWithAndWithoutAKeeper();
 
       const what = `${runtimeName}, gdharness test`;
       const ready = join(scratch, `ready-test-${runtimeName}`);
@@ -68889,774 +68957,797 @@ async function testGdUnitRunner(): Promise<void> {
           'and so does the user data directory each run was given',
         );
 
-        // Nothing ran, two ways: every suite ignored, and a suite with no cases in it. Measured with the
-        // pinned gdUnit4 on 4.7.2, an ignored run writes no report, so it reaches the no-report answer.
-        // One with a report of no cases is refused as passed by the same rule should a runner write it.
-        // A suite with no cases named on its own is refused before an engine starts.
-        writeFileSync(join(projectDir, 'test', 'hollow_test.gd'), 'extends GdUnitTestSuite\n');
-        const ignored = await call(
-          'project_test',
-          {
-            projectPath: projectDir,
-            ignore: ['sums_test', 'summary_lies_test', 'quiet_test', 'hollow_test'],
-          },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const ignoredAnswer: unknown = JSON.parse(ignored.slice(ignored.indexOf('{')));
-        assert.match(ignored, /^No tests ran: no test cases found at /, ignored);
-        assert.equal(get(ignoredAnswer, 'passed'), false, `every suite ignored did not pass: ${ignored}`);
-        assert.equal(get(ignoredAnswer, 'tests'), 0, ignored);
-        const hollow = await call(
-          'project_test',
-          { projectPath: projectDir, path: 'test/hollow_test.gd' },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        assert.match(hollow, /^res:\/\/test\/hollow_test\.gd declares no case: /, hollow);
-        rmSync(join(projectDir, 'test', 'hollow_test.gd'));
-
-        writeFileSync(
-          join(projectDir, 'test', 'hooked_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc before() -> void:\n\tassert_bool(false).is_true()\n\n\nfunc test_after_a_failed_hook() -> void:\n\tassert_int(1).is_equal(1)\n',
-        );
-        writeFileSync(
-          join(projectDir, 'test', 'crashing_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_crashes() -> void:\n\tvar nothing: Node = null\n\tprint(nothing.get_name())\n\tassert_int(1).is_equal(1)\n',
-        );
-        // A before() that failed: gdUnit4 counts it on the suite and on no case, so it was answered as
-        // no failure and a passed suite beside exit 100. And a runtime error inside a case, which
-        // gdUnit4 does report as that case's error, held so it stays so.
-        const asked = async (suite: string): Promise<unknown> => {
-          const answer = JSON.parse(
-            await call(
-              'project_test',
-              { projectPath: projectDir, path: `test/${suite}.gd` },
-              ENGINE_CALL_TIMEOUT_MS * 3,
-            ),
-          ) as unknown;
-          rmSync(join(projectDir, 'test', `${suite}.gd`));
-          return answer;
-        };
-        const hooked = await asked('hooked_test');
-        assert.deepEqual(
-          [get(hooked, 'passed'), get(hooked, 'suitesPassed'), get(hooked, 'suites', 0, 'hookFailures')],
-          [false, 0, 1],
-          JSON.stringify(hooked, null, 2),
-        );
-        assert.deepEqual(
-          get(hooked, 'hookFailures'),
-          [
+        /** Nothing ran, two ways, and a run that stopped early. */
+        const nothingRanAndStoppedEarly = async (): Promise<void> => {
+          // Nothing ran, two ways: every suite ignored, and a suite with no cases in it. Measured with the
+          // pinned gdUnit4 on 4.7.2, an ignored run writes no report, so it reaches the no-report answer.
+          // One with a report of no cases is refused as passed by the same rule should a runner write it.
+          // A suite with no cases named on its own is refused before an engine starts.
+          writeFileSync(join(projectDir, 'test', 'hollow_test.gd'), 'extends GdUnitTestSuite\n');
+          const ignored = await call(
+            'project_test',
             {
-              suite: 'hooked_test',
-              hook: 'before',
-              path: 'res://test/hooked_test.gd',
-              line: 5,
-              message: "Expecting: 'true' but is 'false'",
+              projectPath: projectDir,
+              ignore: ['sums_test', 'summary_lies_test', 'quiet_test', 'hollow_test'],
             },
-          ],
-          JSON.stringify(hooked, null, 2),
-        );
-        // #800: a case failing two assertions, in a suite with no hooks. gdUnit4 counts each failed
-        // assertion on the suite, and the second was answered as a failed before().
-        writeFileSync(
-          join(projectDir, 'test', 'twice_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_two_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
-        );
-        const twice = await asked('twice_test');
-        assert.deepEqual(
-          [get(twice, 'failures'), get(twice, 'suites', 0, 'hookFailures'), get(twice, 'hookFailures')],
-          [1, undefined, undefined],
-          `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
-        );
-        assert.deepEqual(
-          asArray(get(twice, 'failed', 0, 'reports') ?? []).map((report) => get(report, 'message')),
-          ['FAILED: res://test/twice_test.gd:5', 'FAILED: res://test/twice_test.gd:6'],
-          `and both its failed assertions are named: ${JSON.stringify(get(twice, 'failed'), null, 2)}`,
-        );
-        // #1000: a case that fails an assertion and then hits a runtime error. gdUnit4 writes the
-        // error ahead of the failure, and the answer was the error alone with no failure counted.
-        writeFileSync(
-          join(projectDir, 'test', 'then_errors_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_fails_then_errors() -> void:\n\tassert_int(1).is_equal(2)\n\tvar empty: Dictionary[String, int] = {}\n\tprint(empty["missing"])\n',
-        );
-        const thenErrors = await asked('then_errors_test');
-        assert.deepEqual(
-          [
-            get(thenErrors, 'failures'),
-            get(thenErrors, 'errors'),
-            get(thenErrors, 'failed', 0, 'status'),
-            get(thenErrors, 'failed', 0, 'message'),
-            asArray(get(thenErrors, 'failed', 0, 'reports') ?? []).map((report) => [
-              get(report, 'kind'),
-              get(report, 'message'),
-            ]),
-          ],
-          [
-            1,
-            1,
-            'error',
-            'FAILED: res://test/then_errors_test.gd:5',
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const ignoredAnswer: unknown = JSON.parse(ignored.slice(ignored.indexOf('{')));
+          assert.match(ignored, /^No tests ran: no test cases found at /, ignored);
+          assert.equal(get(ignoredAnswer, 'passed'), false, `every suite ignored did not pass: ${ignored}`);
+          assert.equal(get(ignoredAnswer, 'tests'), 0, ignored);
+          const hollow = await call(
+            'project_test',
+            { projectPath: projectDir, path: 'test/hollow_test.gd' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          assert.match(hollow, /^res:\/\/test\/hollow_test\.gd declares no case: /, hollow);
+          rmSync(join(projectDir, 'test', 'hollow_test.gd'));
+
+          writeFileSync(
+            join(projectDir, 'test', 'hooked_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc before() -> void:\n\tassert_bool(false).is_true()\n\n\nfunc test_after_a_failed_hook() -> void:\n\tassert_int(1).is_equal(1)\n',
+          );
+          writeFileSync(
+            join(projectDir, 'test', 'crashing_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc test_crashes() -> void:\n\tvar nothing: Node = null\n\tprint(nothing.get_name())\n\tassert_int(1).is_equal(1)\n',
+          );
+          // A before() that failed: gdUnit4 counts it on the suite and on no case, so it was answered as
+          // no failure and a passed suite beside exit 100. And a runtime error inside a case, which
+          // gdUnit4 does report as that case's error, held so it stays so.
+          const asked = async (suite: string): Promise<unknown> => {
+            const answer = JSON.parse(
+              await call(
+                'project_test',
+                { projectPath: projectDir, path: `test/${suite}.gd` },
+                ENGINE_CALL_TIMEOUT_MS * 3,
+              ),
+            ) as unknown;
+            rmSync(join(projectDir, 'test', `${suite}.gd`));
+            return answer;
+          };
+          const hooked = await asked('hooked_test');
+          assert.deepEqual(
+            [get(hooked, 'passed'), get(hooked, 'suitesPassed'), get(hooked, 'suites', 0, 'hookFailures')],
+            [false, 0, 1],
+            JSON.stringify(hooked, null, 2),
+          );
+          assert.deepEqual(
+            get(hooked, 'hookFailures'),
             [
-              ['failure', 'FAILED: res://test/then_errors_test.gd:5'],
-              ['error', 'ERROR: res://test/then_errors_test.gd:7'],
+              {
+                suite: 'hooked_test',
+                hook: 'before',
+                path: 'res://test/hooked_test.gd',
+                line: 5,
+                message: "Expecting: 'true' but is 'false'",
+              },
             ],
-          ],
-          `the failed assertion is named and counted beside the error after it: ${JSON.stringify(thenErrors, null, 2)}`,
-        );
-        // The same failing suite, run again and again. Reported downstream on 1.1.22 as a hook count
-        // that changed between runs of one suite, which would be an earlier run's report being read
-        // as well as #800's arithmetic. The answer has to be this run's alone, and the same each time.
-        writeFileSync(
-          join(projectDir, 'test', 'thrice_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_three_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
-        );
-        const runs: unknown[] = [];
-        for (let attempt = 0; attempt < 4; attempt += 1) {
-          const answer = JSON.parse(
+            JSON.stringify(hooked, null, 2),
+          );
+          // #800: a case failing two assertions, in a suite with no hooks. gdUnit4 counts each failed
+          // assertion on the suite, and the second was answered as a failed before().
+          writeFileSync(
+            join(projectDir, 'test', 'twice_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc test_two_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
+          );
+          const twice = await asked('twice_test');
+          assert.deepEqual(
+            [get(twice, 'failures'), get(twice, 'suites', 0, 'hookFailures'), get(twice, 'hookFailures')],
+            [1, undefined, undefined],
+            `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
+          );
+          assert.deepEqual(
+            asArray(get(twice, 'failed', 0, 'reports') ?? []).map((report) => get(report, 'message')),
+            ['FAILED: res://test/twice_test.gd:5', 'FAILED: res://test/twice_test.gd:6'],
+            `and both its failed assertions are named: ${JSON.stringify(get(twice, 'failed'), null, 2)}`,
+          );
+          // #1000: a case that fails an assertion and then hits a runtime error. gdUnit4 writes the
+          // error ahead of the failure, and the answer was the error alone with no failure counted.
+          writeFileSync(
+            join(projectDir, 'test', 'then_errors_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc test_fails_then_errors() -> void:\n\tassert_int(1).is_equal(2)\n\tvar empty: Dictionary[String, int] = {}\n\tprint(empty["missing"])\n',
+          );
+          const thenErrors = await asked('then_errors_test');
+          assert.deepEqual(
+            [
+              get(thenErrors, 'failures'),
+              get(thenErrors, 'errors'),
+              get(thenErrors, 'failed', 0, 'status'),
+              get(thenErrors, 'failed', 0, 'message'),
+              asArray(get(thenErrors, 'failed', 0, 'reports') ?? []).map((report) => [
+                get(report, 'kind'),
+                get(report, 'message'),
+              ]),
+            ],
+            [
+              1,
+              1,
+              'error',
+              'FAILED: res://test/then_errors_test.gd:5',
+              [
+                ['failure', 'FAILED: res://test/then_errors_test.gd:5'],
+                ['error', 'ERROR: res://test/then_errors_test.gd:7'],
+              ],
+            ],
+            `the failed assertion is named and counted beside the error after it: ${JSON.stringify(thenErrors, null, 2)}`,
+          );
+          // The same failing suite, run again and again. Reported downstream on 1.1.22 as a hook count
+          // that changed between runs of one suite, which would be an earlier run's report being read
+          // as well as #800's arithmetic. The answer has to be this run's alone, and the same each time.
+          writeFileSync(
+            join(projectDir, 'test', 'thrice_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc test_three_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
+          );
+          const runs: unknown[] = [];
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            const answer = JSON.parse(
+              await call(
+                'project_test',
+                { projectPath: projectDir, path: 'test/thrice_test.gd' },
+                ENGINE_CALL_TIMEOUT_MS * 3,
+              ),
+            ) as unknown;
+            runs.push([
+              get(answer, 'failures'),
+              get(answer, 'suites', 0, 'hookFailures'),
+              get(answer, 'hookFailures'),
+            ]);
+          }
+          rmSync(join(projectDir, 'test', 'thrice_test.gd'));
+          assert.deepEqual(
+            runs,
+            Array.from({ length: 4 }, () => [1, undefined, undefined]),
+            `one case failing three times is one failure and no hook, on every run: ${JSON.stringify(runs)}`,
+          );
+          // Orphans left early in a run that prints a great deal after: counted off what was printed,
+          // they were lost with everything before the newest two hundred lines.
+          mkdirSync(join(projectDir, 'test', 'long'));
+          writeFileSync(
+            join(projectDir, 'test', 'long', 'a_leaves_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tvar beside: Node = Node.new()\n\tassert_object(kept).is_not_null()\n\tassert_object(beside).is_not_null()\n',
+          );
+          writeFileSync(
+            join(projectDir, 'test', 'long', 'z_talks_test.gd'),
+            'extends GdUnitTestSuite\n\n\nfunc test_talks() -> void:\n\tfor index: int in range(300):\n\t\tprint("line ", index)\n\tassert_int(1).is_equal(1)\n',
+          );
+          const long = JSON.parse(
             await call(
               'project_test',
-              { projectPath: projectDir, path: 'test/thrice_test.gd' },
+              { projectPath: projectDir, path: 'test/long' },
               ENGINE_CALL_TIMEOUT_MS * 3,
             ),
           ) as unknown;
-          runs.push([
-            get(answer, 'failures'),
-            get(answer, 'suites', 0, 'hookFailures'),
-            get(answer, 'hookFailures'),
-          ]);
-        }
-        rmSync(join(projectDir, 'test', 'thrice_test.gd'));
-        assert.deepEqual(
-          runs,
-          Array.from({ length: 4 }, () => [1, undefined, undefined]),
-          `one case failing three times is one failure and no hook, on every run: ${JSON.stringify(runs)}`,
-        );
-        // Orphans left early in a run that prints a great deal after: counted off what was printed,
-        // they were lost with everything before the newest two hundred lines.
-        mkdirSync(join(projectDir, 'test', 'long'));
-        writeFileSync(
-          join(projectDir, 'test', 'long', 'a_leaves_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tvar beside: Node = Node.new()\n\tassert_object(kept).is_not_null()\n\tassert_object(beside).is_not_null()\n',
-        );
-        writeFileSync(
-          join(projectDir, 'test', 'long', 'z_talks_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_talks() -> void:\n\tfor index: int in range(300):\n\t\tprint("line ", index)\n\tassert_int(1).is_equal(1)\n',
-        );
-        const long = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: 'test/long' },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        ) as unknown;
-        rmSync(join(projectDir, 'test', 'long'), { recursive: true, force: true });
-        // Three hundred lines printed and printed not asked for: none of them comes back.
-        assert.equal(get(long, 'printed'), undefined, 'a run says nothing of what it printed unless asked');
-        assert.deepEqual(
-          asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
-          ['res://test/long/a_leaves_test.gd'],
-          JSON.stringify(long, null, 2),
-        );
-        // gdUnit4's orphans are the nodes outside the tree, and the warning once called them the
-        // ones still in it. The case that left them is named however much was printed after it.
-        assert.match(
-          text(get(long, 'warnings', 0, 'message')),
-          /^res:\/\/test\/long\/a_leaves_test\.gd > test_leaves_a_node left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node, Node\. Free each one, or make it with auto_free\(\)/,
-          JSON.stringify(long, null, 2),
-        );
-
-        const crashed = await asked('crashing_test');
-        assert.deepEqual(
-          [get(crashed, 'passed'), get(crashed, 'errors'), get(crashed, 'failed', 0, 'status')],
-          [false, 1, 'error'],
-          JSON.stringify(crashed, null, 2),
-        );
-
-        // Nothing stopped early in the runs above, and the answer says so by leaving the field
-        // out. Asserted here so the presence of it below means something.
-        assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));
-
-        // gdUnit4 stops a suite at its first failing case unless it is told not to, and gdharness
-        // asks it not to unless `failFast` says otherwise. The counts are then of what ran, which
-        // an answer that reported the suite's own `tests` attribute contradicted: the totals said
-        // two ran while the suite beside them said nine tests and one failure, which reads as
-        // eight passes that never happened.
-        const stopped: unknown = JSON.parse(
-          await call('project_test', { projectPath: projectDir, failFast: true }, ENGINE_CALL_TIMEOUT_MS * 3),
-        );
-        assert.equal(get(stopped, 'passed'), false, JSON.stringify(stopped, null, 2));
-        // Read before it is a number, so a run that omitted the field fails saying that rather
-        // than failing inside asNumber about a type.
-        const left = get(stopped, 'notRun');
-        assert.ok(
-          typeof left === 'number' && left > 0,
-          `a run that stopped early says how many cases it left: ${JSON.stringify(stopped, null, 2)}`,
-        );
-        const leftOver = left;
-        assert.ok(
-          asNumber(get(stopped, 'tests')) < asNumber(get(run, 'tests')),
-          `and runs fewer than the whole set: ${JSON.stringify(stopped, null, 2)}`,
-        );
-        assert.match(text(get(stopped, 'note')), /never ran/, text(get(stopped, 'note')));
-        // The cases a failure stopped are counted under notRun, and not named as cases gdUnit4
-        // left out of a suite that passed.
-        assert.equal(get(stopped, 'testsNotRun'), undefined, JSON.stringify(stopped, null, 2));
-        // Every suite's own numbers count what ran, so the totals and the suites agree.
-        for (const suite of asArray(get(stopped, 'suites'))) {
-          const ran = asNumber(get(suite, 'tests'));
-          const missed = get(suite, 'notRun') === undefined ? 0 : asNumber(get(suite, 'notRun'));
-          assert.ok(
-            ran >= asNumber(get(suite, 'failures')) + asNumber(get(suite, 'errors')),
-            `a suite never reports more failures than cases it ran: ${JSON.stringify(suite)}`,
+          rmSync(join(projectDir, 'test', 'long'), { recursive: true, force: true });
+          // Three hundred lines printed and printed not asked for: none of them comes back.
+          assert.equal(get(long, 'printed'), undefined, 'a run says nothing of what it printed unless asked');
+          assert.deepEqual(
+            asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
+            ['res://test/long/a_leaves_test.gd'],
+            JSON.stringify(long, null, 2),
           );
-          assert.ok(missed >= 0, JSON.stringify(suite));
-        }
-        assert.equal(
-          asArray(get(stopped, 'suites')).reduce<number>(
-            (sum, suite) => sum + (get(suite, 'notRun') === undefined ? 0 : asNumber(get(suite, 'notRun'))),
-            0,
-          ),
-          leftOver,
-          'the total left behind is the sum of what each suite left',
-        );
-
-        // A path with nothing at it. gdUnit4 finds nothing, exits 0 and says why, so a verdict
-        // read off the exit code called this a pass: the one word a skimming reader must never
-        // be handed for a tier that never ran. Met in a project whose suites live in `tests`
-        // while the default here is `test`, which is one letter and a whole false green.
-        const nowhere = await call(
-          'project_test',
-          { projectPath: projectDir, path: 'res://tests' },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const note = nowhere.slice(0, nowhere.indexOf('{'));
-        assert.doesNotMatch(note, /passed/, note);
-        assert.match(note, /No tests ran/, note);
-        assert.match(note, /res:\/\/test\b/, note);
-        const empty: unknown = JSON.parse(nowhere.slice(nowhere.indexOf('{')));
-        assert.equal(get(empty, 'passed'), false, nowhere);
-        assert.equal(get(empty, 'verdict'), 'nothing at res://tests', nowhere);
-        assert.equal(get(empty, 'tests'), 0, nowhere);
-
-        // #875: a named set of suites in one run. Two of the three, as a list: both counted, each
-        // failure on its own suite, and the third not run.
-        const set: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: ['test/quiet_test.gd', 'res://test/summary_lies_test.gd'] },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        assert.deepEqual(
-          {
-            tests: get(set, 'tests'),
-            failures: get(set, 'failures'),
-            suitesPassed: get(set, 'suitesPassed'),
-            failedIn: [...new Set(asArray(get(set, 'failed')).map((entry) => get(entry, 'path')))],
-          },
-          { tests: 3, failures: 2, suitesPassed: 1, failedIn: ['res://test/summary_lies_test.gd'] },
-          JSON.stringify(set, null, 2),
-        );
-        // A suite named twice, and inside a directory also named, runs once: the whole directory's
-        // count, as the first run here had it.
-        const overlapping: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: ['test/sums_test.gd', 'test', 'res://test/sums_test.gd'] },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        assert.equal(get(overlapping, 'tests'), get(run, 'tests'), JSON.stringify(overlapping, null, 2));
-        // #898: entries not there among one that is. The one that is runs, the others are named,
-        // and a run of fewer paths than were asked for is not a pass even when all of it passed.
-        const partly: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: ['test/quiet_test.gd', 'test/gone_test.gd', 'gone'] },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        assert.deepEqual(
-          {
-            passed: get(partly, 'passed'),
-            verdict: get(partly, 'verdict'),
-            tests: get(partly, 'tests'),
-            suitesPassed: get(partly, 'suitesPassed'),
-            missing: get(partly, 'missing'),
-          },
-          {
-            passed: false,
-            verdict: 'nothing at res://test/gone_test.gd and res://gone',
-            tests: 1,
-            suitesPassed: 1,
-            missing: ['res://test/gone_test.gd', 'res://gone'],
-          },
-          JSON.stringify(partly, null, 2),
-        );
-        assert.match(
-          text(get(partly, 'note')),
-          /^Nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone, so they were left out and only res:\/\/test\/quiet_test\.gd ran/,
-          JSON.stringify(partly, null, 2),
-        );
-        // Every entry not there: nothing to run, refused before anything runs, and each named.
-        const none = await call(
-          'project_test',
-          { projectPath: projectDir, path: ['test/gone_test.gd', 'gone'] },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        assert.match(none, /^No tests ran: nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone\./, none);
-        const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
-        assert.deepEqual(
-          [get(noneAnswer, 'passed'), get(noneAnswer, 'tests'), get(noneAnswer, 'classes')],
-          [false, 0, undefined],
-          `refused before the class list was rebuilt for a run: ${none}`,
-        );
-
-        // A failing string's value, which gdUnit4 prints as a character diff against the expected
-        // one and writes into its report with the marks stripped, so both strings came back merged:
-        // an empty value read as the expected string in full. Each shape of diff once: all missing,
-        // one swapped, a shared line break, and a line break only the value had, which the diff
-        // spells as <LF>.
-        mkdirSync(join(projectDir, 'strings'));
-        writeFileSync(
-          join(projectDir, 'strings', 'words_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_nothing_said() -> void:',
-            '\tassert_str("").is_equal("abc")',
-            '',
-            '',
-            'func test_one_swapped() -> void:',
-            '\tassert_str("abXd").is_equal("abcd")',
-            '',
-            '',
-            'func test_a_second_line() -> void:',
-            '\tassert_str("one\\ntwo").is_equal("one\\nthree")',
-            '',
-            '',
-            'func test_a_break_only_it_had() -> void:',
-            '\tassert_str("a\\nb").is_equal("ab")',
-            '',
-          ].join('\n'),
-        );
-
-        // The same after an array equality, whose report ends in a table rather than a quote. The
-        // two sentences share an "s", so their merge reads as a word that neither of them has.
-        mkdirSync(join(projectDir, 'mixed'));
-        writeFileSync(
-          join(projectDir, 'mixed', 'mixed_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            'const WANTED: String = "for every Ostrakon you have kept"',
-            'const FOUND: String = "for every spell you have kept"',
-            '',
-            '',
-            'func test_a_array_failure_first() -> void:',
-            '\tassert_array([0, 55, 110]).is_equal([0, 75, 150])',
-            '',
-            '',
-            'func test_the_sentence_alone() -> void:',
-            '\tassert_str(FOUND).is_equal(WANTED)',
-            '',
-            '',
-            'func test_a_mismatch_string_first() -> void:',
-            '\tassert_str("wanted 25, got 15").is_empty()',
-            '',
-            '',
-            'func test_the_sentence_after_others() -> void:',
-            '\tassert_str(FOUND).is_equal(WANTED)',
-            '',
-          ].join('\n'),
-        );
-
-        // The other ways a string equality prints:
-        // - ignoring case, which writes a word after the value
-        // - BBCode in the value, which gdUnit4 masks on both sides
-        // - BBCode only in the expected string, which it renders away
-        // - a dictionary holding the mask, which is not a string and must be left alone.
-        mkdirSync(join(projectDir, 'shapes'));
-        writeFileSync(
-          join(projectDir, 'shapes', 'shapes_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_ignoring_case() -> void:',
-            '\tassert_str("for every spell").is_equal_ignoring_case("FOR EVERY GAME-B")',
-            '',
-            '',
-            'func test_bbcode() -> void:',
-            '\tassert_str("a [b]bold[/b] x").is_equal("a [b]bold[/b] y")',
-            '',
-            '',
-            'func test_bbcode_expected_only() -> void:',
-            '\tassert_str("plain").is_equal("[b]plain[/b]")',
-            '',
-            '',
-            'func test_dictionary() -> void:',
-            '\tassert_dict({"[lb]": 1}).is_equal({"[lb]": 2})',
-            '',
-          ].join('\n'),
-        );
-        // The three in one run, each case read by its own name, which no two of them share. Each diff
-        // is matched to its failure in the order the run met them, and the one pair whose merged text
-        // is the same is in one file, which a run of several suites does not reorder.
-        const worded: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: ['res://strings', 'res://mixed', 'res://shapes'] },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        const detailOf = (name: string): string =>
-          text(
-            get(
-              asArray(get(worded, 'failed')).find((entry) => get(entry, 'name') === name),
-              'detail',
-            ),
-          );
-        const found: [string, string][] = [
-          ['test_nothing_said', ''],
-          ['test_one_swapped', 'abXd'],
-          ['test_a_second_line', 'one\ntwo'],
-          ['test_a_break_only_it_had', 'a\nb'],
-        ];
-        for (const [name, value] of found) {
-          assert.ok(
-            detailOf(name).includes(` but was\n '${value}'\n\tat '${name}'`),
-            `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
-          );
-        }
-        for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
-          assert.ok(
-            detailOf(name).endsWith(
-              ` but was\n 'for every spell you have kept'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
-            ),
-            `${name} says the value it found: ${JSON.stringify(detailOf(name))}`,
-          );
-        }
-        assert.match(
-          detailOf('test_a_array_failure_first'),
-          /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
-        );
-        assert.ok(
-          detailOf('test_ignoring_case').includes(
-            " but was\n 'for every spell' (ignoring case)\n\tat 'test_ignoring_case'",
-          ),
-          JSON.stringify(detailOf('test_ignoring_case')),
-        );
-        assert.ok(
-          detailOf('test_bbcode').startsWith(
-            "Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'\n\tat 'test_bbcode'",
-          ),
-          JSON.stringify(detailOf('test_bbcode')),
-        );
-        assert.ok(
-          detailOf('test_bbcode_expected_only').endsWith(`\n${RENDERED_AWAY_NOTE}`),
-          JSON.stringify(detailOf('test_bbcode_expected_only')),
-        );
-        assert.ok(
-          detailOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
-          JSON.stringify(detailOf('test_dictionary')),
-        );
-        // Every failure of the three suites is in the one answer, so none was cut from a longer list.
-        assert.equal(asArray(get(worded, 'failed')).length, 12, JSON.stringify(get(worded, 'failed')));
-
-        // A passing suite whose numbers come back through printed, which a probe measuring
-        // something used to have to fail an assertion for.
-        mkdirSync(join(projectDir, 'probe'));
-        writeFileSync(
-          join(projectDir, 'probe', 'probe_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_measures() -> void:',
-            '\tprint("PROBE rounds=%d" % (6 * 7))',
-            '\tprint("an ordinary line")',
-            '\tassert_int(1).is_equal(1)',
-            '',
-          ].join('\n'),
-        );
-        const probed: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: 'res://probe', printed: 'probe rounds' },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        assert.equal(get(probed, 'passed'), true, JSON.stringify(probed));
-        assert.deepEqual(
-          get(probed, 'printed'),
-          ['PROBE rounds=42'],
-          'a passing run answers with the lines holding the marker, case aside, and no others',
-        );
-
-        // A directory where two suites do not load and one does. gdUnit4 stops at discovery and
-        // runs none of them, the good one included, which "script errors" alone did not say.
-        mkdirSync(join(projectDir, 'broken', 'deeper'), { recursive: true });
-        writeFileSync(
-          join(projectDir, 'broken', 'good_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_fine() -> void:',
-            '\tassert_int(1).is_equal(1)',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          join(projectDir, 'broken', 'parse_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_does_not_parse() -> void:',
-            '\tassert_int(undefined_thing).is_equal(1)',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          join(projectDir, 'broken', 'deeper', 'missing_base_test.gd'),
-          ['extends NoSuchBaseClass', '', '', 'func test_never() -> void:', '\tpass', ''].join('\n'),
-        );
-        const broken = await call(
-          'project_test',
-          { projectPath: projectDir, path: 'res://broken' },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const brokenNote = broken.slice(0, broken.indexOf('{'));
-        assert.match(
-          brokenNote,
-          /^No tests ran: gdUnit4 could not load 2 scripts while looking for suites/,
-          broken,
-        );
-        assert.match(
-          brokenNote,
-          /res:\/\/broken\/parse_test\.gd:5 Parse Error: Identifier "undefined_thing"/,
-          broken,
-        );
-        const brokenAnswer: unknown = JSON.parse(broken.slice(broken.indexOf('{')));
-        assert.equal(get(brokenAnswer, 'verdict'), 'script errors in 2 scripts, so no suite ran', broken);
-        assert.deepEqual(
-          asArray(get(brokenAnswer, 'scriptErrors')).map(
-            (error) => `${text(get(error, 'path'))}:${Number(get(error, 'line'))}`,
-          ),
-          ['res://broken/deeper/missing_base_test.gd:1', 'res://broken/parse_test.gd:5'],
-        );
-        // The entries beside them hold what the run printed apart from those errors, which the
-        // engine printed once with gdUnit4's frames under each and gdUnit4 listed again.
-        const brokenEntries = asArray(get(brokenAnswer, 'entries')).map((entry) => text(get(entry, 'text')));
-        assert.ok(
-          brokenEntries.some((line) => line.startsWith('Scanning for test suites in: res://broken')),
-          broken,
-        );
-        assert.deepEqual(
-          brokenEntries.filter((line) =>
-            /undefined_thing|NoSuchBaseClass|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
-              line,
-            ),
-          ),
-          [],
-          broken,
-        );
-        assert.equal(
-          get(brokenAnswer, 'failedThroughDependency'),
-          undefined,
-          'and none failed only through another',
-        );
-        // A run stopped before any suite still rebuilt the class list first, and what the rebuild
-        // found is what a caller reads when a class did not resolve. gdUnit4's classes are listed.
-        assert.ok(
-          Number(get(brokenAnswer, 'classes', 'classes')) > 0,
-          `classes holds the rebuild: ${broken}`,
-        );
-
-        // #900: a script with an error of its own and a suite that fails only for depending on it.
-        // The engine says the same line for each such script, and the answer gives them by path.
-        // game-b's shape: the script parses and fails to compile, on an unused parameter with
-        // that warning raised to an error. One that does not parse is a different line, "Could not
-        // resolve class", which the engine gives each suite as an error of its own.
-        const settingsBefore = readFileSync(join(projectDir, 'project.godot'), 'utf8');
-        writeFileSync(
-          join(projectDir, 'project.godot'),
-          `${settingsBefore}\n[debug]\n\ngdscript/warnings/unused_parameter=2\n`,
-        );
-        mkdirSync(join(projectDir, 'leaning'));
-        writeFileSync(
-          join(projectDir, 'leaning', 'core.gd'),
-          [
-            'class_name LeaningCore',
-            'extends RefCounted',
-            '',
-            '',
-            'func weight(last: int) -> int:',
-            '\treturn 1',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          join(projectDir, 'leaning', 'leans_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_leans() -> void:',
-            '\tassert_object(LeaningCore.new()).is_not_null()',
-            '',
-          ].join('\n'),
-        );
-        const leaning = await call(
-          'project_test',
-          { projectPath: projectDir, path: 'res://leaning' },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const leaningAnswer: unknown = JSON.parse(leaning.slice(leaning.indexOf('{')));
-        assert.deepEqual(
-          {
-            ownErrorsIn: [
-              ...new Set(
-                asArray(get(leaningAnswer, 'scriptErrors')).map((error) => text(get(error, 'path'))),
-              ),
-            ],
-            dependedLines: asArray(get(leaningAnswer, 'scriptErrors')).filter((error) =>
-              text(get(error, 'message')).includes('Failed to compile depended scripts'),
-            ).length,
-            failedThroughDependency: get(leaningAnswer, 'failedThroughDependency'),
-          },
-          {
-            ownErrorsIn: ['res://leaning/core.gd'],
-            dependedLines: 0,
-            failedThroughDependency: ['res://leaning/leans_test.gd'],
-          },
-          leaning,
-        );
-        rmSync(join(projectDir, 'leaning'), { recursive: true, force: true });
-        writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
-
-        // #908: game-b's shape, a colon missing from a static function in a class_name script.
-        // Every script using the class fails to resolve it and the engine prints nothing naming
-        // the script itself, so its path and line come from the engine's check of it. The engine
-        // places the error on the line after the missing colon, the first it could not parse.
-        mkdirSync(join(projectDir, 'pattern'));
-        writeFileSync(
-          join(projectDir, 'pattern', 'pattern.gd'),
-          [
-            'class_name RegressionPattern',
-            'extends RefCounted',
-            '',
-            '',
-            'static func plain(beats: int) -> int:',
-            '\treturn beats',
-            '',
-            '',
-            'static func doubled(beats: int) -> int',
-            '\treturn beats * 2',
-            '',
-          ].join('\n'),
-        );
-        writeFileSync(
-          join(projectDir, 'pattern', 'hearing.gd'),
-          [
-            'class_name RegressionHearing',
-            'extends RefCounted',
-            '',
-            '',
-            'func beats() -> int:',
-            '\treturn RegressionPattern.plain(2)',
-            '',
-            '',
-            'func twice() -> int:',
-            '\tvar pattern: RegressionPattern = RegressionPattern.new()',
-            '\treturn pattern.held() * 2',
-            '',
-          ].join('\n'),
-        );
-        // #912: with unsafe access raised to an error, as game-b's project has it, the class read
-        // as Variant gives this script errors that come only from the fault.
-        writeFileSync(
-          join(projectDir, 'project.godot'),
-          `${settingsBefore}\n[debug]\n\ngdscript/warnings/unsafe_method_access=2\n`,
-        );
-        writeFileSync(
-          join(projectDir, 'pattern', 'hearing_test.gd'),
-          [
-            'extends GdUnitTestSuite',
-            '',
-            '',
-            'func test_beats() -> void:',
-            '\tassert_int(RegressionHearing.new().beats()).is_equal(2)',
-            '',
-          ].join('\n'),
-        );
-        const pattern = await call(
-          'project_test',
-          { projectPath: projectDir, path: 'res://pattern/hearing_test.gd' },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const patternNote = pattern.slice(0, pattern.indexOf('{'));
-        const patternAnswer: unknown = JSON.parse(pattern.slice(pattern.indexOf('{')));
-        assert.deepEqual(
-          asArray(get(patternAnswer, 'scriptErrors'))[0],
-          {
-            path: 'res://pattern/pattern.gd',
-            line: 10,
-            message: 'Parse Error: Unexpected "Indent" in class body.',
-            declares: 'RegressionPattern',
-          },
-          pattern,
-        );
-        assert.match(
-          patternNote,
-          /^No tests ran: 3 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load\. It could not load 2 of them while looking for suites, and the one it did not name comes first\. res:\/\/pattern\/pattern\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionPattern\. The engine's own check of it found the error\. res:\/\/pattern\/hearing\.gd:6 could not resolve RegressionPattern because of it\. One more failed only because a script it depends on did: res:\/\/pattern\/hearing_test\.gd\. [\s\S]* more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved\.$/,
-          pattern,
-        );
-        // #911: one number for one run, in the head and in the verdict beside it.
-        assert.equal(get(patternAnswer, 'verdict'), 'script errors in 3 scripts, so no suite ran', pattern);
-        const followed = asArray(get(patternAnswer, 'followFromUnresolved'));
-        assert.ok(followed.length >= 2, pattern);
-        for (const error of followed) {
-          assert.equal(get(error, 'path'), 'res://pattern/hearing.gd', pattern);
+          // gdUnit4's orphans are the nodes outside the tree, and the warning once called them the
+          // ones still in it. The case that left them is named however much was printed after it.
           assert.match(
-            text(get(error, 'message')),
-            /inferred type "Variant"|Could not parse global class "RegressionPattern"/,
+            text(get(long, 'warnings', 0, 'message')),
+            /^res:\/\/test\/long\/a_leaves_test\.gd > test_leaves_a_node left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node, Node\. Free each one, or make it with auto_free\(\)/,
+            JSON.stringify(long, null, 2),
+          );
+
+          const crashed = await asked('crashing_test');
+          assert.deepEqual(
+            [get(crashed, 'passed'), get(crashed, 'errors'), get(crashed, 'failed', 0, 'status')],
+            [false, 1, 'error'],
+            JSON.stringify(crashed, null, 2),
+          );
+        };
+        /** The first failing case ends a suite unless told otherwise, a path with nothing at it, and a named set of suites. */
+        const pathsAndNamedSets = async (): Promise<void> => {
+          // Nothing stopped early in the runs above, and the answer says so by leaving the field
+          // out. Asserted here so the presence of it below means something.
+          assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));
+
+          // gdUnit4 stops a suite at its first failing case unless it is told not to, and gdharness
+          // asks it not to unless `failFast` says otherwise. The counts are then of what ran, which
+          // an answer that reported the suite's own `tests` attribute contradicted: the totals said
+          // two ran while the suite beside them said nine tests and one failure, which reads as
+          // eight passes that never happened.
+          const stopped: unknown = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, failFast: true },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          );
+          assert.equal(get(stopped, 'passed'), false, JSON.stringify(stopped, null, 2));
+          // Read before it is a number, so a run that omitted the field fails saying that rather
+          // than failing inside asNumber about a type.
+          const left = get(stopped, 'notRun');
+          assert.ok(
+            typeof left === 'number' && left > 0,
+            `a run that stopped early says how many cases it left: ${JSON.stringify(stopped, null, 2)}`,
+          );
+          const leftOver = left;
+          assert.ok(
+            asNumber(get(stopped, 'tests')) < asNumber(get(run, 'tests')),
+            `and runs fewer than the whole set: ${JSON.stringify(stopped, null, 2)}`,
+          );
+          assert.match(text(get(stopped, 'note')), /never ran/, text(get(stopped, 'note')));
+          // The cases a failure stopped are counted under notRun, and not named as cases gdUnit4
+          // left out of a suite that passed.
+          assert.equal(get(stopped, 'testsNotRun'), undefined, JSON.stringify(stopped, null, 2));
+          // Every suite's own numbers count what ran, so the totals and the suites agree.
+          for (const suite of asArray(get(stopped, 'suites'))) {
+            const ran = asNumber(get(suite, 'tests'));
+            const missed = get(suite, 'notRun') === undefined ? 0 : asNumber(get(suite, 'notRun'));
+            assert.ok(
+              ran >= asNumber(get(suite, 'failures')) + asNumber(get(suite, 'errors')),
+              `a suite never reports more failures than cases it ran: ${JSON.stringify(suite)}`,
+            );
+            assert.ok(missed >= 0, JSON.stringify(suite));
+          }
+          assert.equal(
+            asArray(get(stopped, 'suites')).reduce<number>(
+              (sum, suite) => sum + (get(suite, 'notRun') === undefined ? 0 : asNumber(get(suite, 'notRun'))),
+              0,
+            ),
+            leftOver,
+            'the total left behind is the sum of what each suite left',
+          );
+
+          // A path with nothing at it. gdUnit4 finds nothing, exits 0 and says why, so a verdict
+          // read off the exit code called this a pass: the one word a skimming reader must never
+          // be handed for a tier that never ran. Met in a project whose suites live in `tests`
+          // while the default here is `test`, which is one letter and a whole false green.
+          const nowhere = await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://tests' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const note = nowhere.slice(0, nowhere.indexOf('{'));
+          assert.doesNotMatch(note, /passed/, note);
+          assert.match(note, /No tests ran/, note);
+          assert.match(note, /res:\/\/test\b/, note);
+          const empty: unknown = JSON.parse(nowhere.slice(nowhere.indexOf('{')));
+          assert.equal(get(empty, 'passed'), false, nowhere);
+          assert.equal(get(empty, 'verdict'), 'nothing at res://tests', nowhere);
+          assert.equal(get(empty, 'tests'), 0, nowhere);
+
+          // #875: a named set of suites in one run. Two of the three, as a list: both counted, each
+          // failure on its own suite, and the third not run.
+          const set: unknown = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: ['test/quiet_test.gd', 'res://test/summary_lies_test.gd'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          );
+          assert.deepEqual(
+            {
+              tests: get(set, 'tests'),
+              failures: get(set, 'failures'),
+              suitesPassed: get(set, 'suitesPassed'),
+              failedIn: [...new Set(asArray(get(set, 'failed')).map((entry) => get(entry, 'path')))],
+            },
+            { tests: 3, failures: 2, suitesPassed: 1, failedIn: ['res://test/summary_lies_test.gd'] },
+            JSON.stringify(set, null, 2),
+          );
+          // A suite named twice, and inside a directory also named, runs once: the whole directory's
+          // count, as the first run here had it.
+          const overlapping: unknown = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: ['test/sums_test.gd', 'test', 'res://test/sums_test.gd'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          );
+          assert.equal(get(overlapping, 'tests'), get(run, 'tests'), JSON.stringify(overlapping, null, 2));
+          // #898: entries not there among one that is. The one that is runs, the others are named,
+          // and a run of fewer paths than were asked for is not a pass even when all of it passed.
+          const partly: unknown = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: ['test/quiet_test.gd', 'test/gone_test.gd', 'gone'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          );
+          assert.deepEqual(
+            {
+              passed: get(partly, 'passed'),
+              verdict: get(partly, 'verdict'),
+              tests: get(partly, 'tests'),
+              suitesPassed: get(partly, 'suitesPassed'),
+              missing: get(partly, 'missing'),
+            },
+            {
+              passed: false,
+              verdict: 'nothing at res://test/gone_test.gd and res://gone',
+              tests: 1,
+              suitesPassed: 1,
+              missing: ['res://test/gone_test.gd', 'res://gone'],
+            },
+            JSON.stringify(partly, null, 2),
+          );
+          assert.match(
+            text(get(partly, 'note')),
+            /^Nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone, so they were left out and only res:\/\/test\/quiet_test\.gd ran/,
+            JSON.stringify(partly, null, 2),
+          );
+          // Every entry not there: nothing to run, refused before anything runs, and each named.
+          const none = await call(
+            'project_test',
+            { projectPath: projectDir, path: ['test/gone_test.gd', 'gone'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          assert.match(
+            none,
+            /^No tests ran: nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone\./,
+            none,
+          );
+          const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
+          assert.deepEqual(
+            [get(noneAnswer, 'passed'), get(noneAnswer, 'tests'), get(noneAnswer, 'classes')],
+            [false, 0, undefined],
+            `refused before the class list was rebuilt for a run: ${none}`,
+          );
+        };
+        /** The reports of a failing string, an array and the other ways an equality prints, and a passing suite's numbers. */
+        const failingValuesAndTheirDiffs = async (): Promise<void> => {
+          // A failing string's value, which gdUnit4 prints as a character diff against the expected
+          // one and writes into its report with the marks stripped, so both strings came back merged:
+          // an empty value read as the expected string in full. Each shape of diff once: all missing,
+          // one swapped, a shared line break, and a line break only the value had, which the diff
+          // spells as <LF>.
+          mkdirSync(join(projectDir, 'strings'));
+          writeFileSync(
+            join(projectDir, 'strings', 'words_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_nothing_said() -> void:',
+              '\tassert_str("").is_equal("abc")',
+              '',
+              '',
+              'func test_one_swapped() -> void:',
+              '\tassert_str("abXd").is_equal("abcd")',
+              '',
+              '',
+              'func test_a_second_line() -> void:',
+              '\tassert_str("one\\ntwo").is_equal("one\\nthree")',
+              '',
+              '',
+              'func test_a_break_only_it_had() -> void:',
+              '\tassert_str("a\\nb").is_equal("ab")',
+              '',
+            ].join('\n'),
+          );
+
+          // The same after an array equality, whose report ends in a table rather than a quote. The
+          // two sentences share an "s", so their merge reads as a word that neither of them has.
+          mkdirSync(join(projectDir, 'mixed'));
+          writeFileSync(
+            join(projectDir, 'mixed', 'mixed_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              'const WANTED: String = "for every Ostrakon you have kept"',
+              'const FOUND: String = "for every spell you have kept"',
+              '',
+              '',
+              'func test_a_array_failure_first() -> void:',
+              '\tassert_array([0, 55, 110]).is_equal([0, 75, 150])',
+              '',
+              '',
+              'func test_the_sentence_alone() -> void:',
+              '\tassert_str(FOUND).is_equal(WANTED)',
+              '',
+              '',
+              'func test_a_mismatch_string_first() -> void:',
+              '\tassert_str("wanted 25, got 15").is_empty()',
+              '',
+              '',
+              'func test_the_sentence_after_others() -> void:',
+              '\tassert_str(FOUND).is_equal(WANTED)',
+              '',
+            ].join('\n'),
+          );
+
+          // The other ways a string equality prints:
+          // - ignoring case, which writes a word after the value
+          // - BBCode in the value, which gdUnit4 masks on both sides
+          // - BBCode only in the expected string, which it renders away
+          // - a dictionary holding the mask, which is not a string and must be left alone.
+          mkdirSync(join(projectDir, 'shapes'));
+          writeFileSync(
+            join(projectDir, 'shapes', 'shapes_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_ignoring_case() -> void:',
+              '\tassert_str("for every spell").is_equal_ignoring_case("FOR EVERY GAME-B")',
+              '',
+              '',
+              'func test_bbcode() -> void:',
+              '\tassert_str("a [b]bold[/b] x").is_equal("a [b]bold[/b] y")',
+              '',
+              '',
+              'func test_bbcode_expected_only() -> void:',
+              '\tassert_str("plain").is_equal("[b]plain[/b]")',
+              '',
+              '',
+              'func test_dictionary() -> void:',
+              '\tassert_dict({"[lb]": 1}).is_equal({"[lb]": 2})',
+              '',
+            ].join('\n'),
+          );
+          // The three in one run, each case read by its own name, which no two of them share. Each diff
+          // is matched to its failure in the order the run met them, and the one pair whose merged text
+          // is the same is in one file, which a run of several suites does not reorder.
+          const worded: unknown = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: ['res://strings', 'res://mixed', 'res://shapes'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          );
+          const detailOf = (name: string): string =>
+            text(
+              get(
+                asArray(get(worded, 'failed')).find((entry) => get(entry, 'name') === name),
+                'detail',
+              ),
+            );
+          const found: [string, string][] = [
+            ['test_nothing_said', ''],
+            ['test_one_swapped', 'abXd'],
+            ['test_a_second_line', 'one\ntwo'],
+            ['test_a_break_only_it_had', 'a\nb'],
+          ];
+          for (const [name, value] of found) {
+            assert.ok(
+              detailOf(name).includes(` but was\n '${value}'\n\tat '${name}'`),
+              `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
+            );
+          }
+          for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
+            assert.ok(
+              detailOf(name).endsWith(
+                ` but was\n 'for every spell you have kept'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
+              ),
+              `${name} says the value it found: ${JSON.stringify(detailOf(name))}`,
+            );
+          }
+          assert.match(
+            detailOf('test_a_array_failure_first'),
+            /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
+          );
+          assert.ok(
+            detailOf('test_ignoring_case').includes(
+              " but was\n 'for every spell' (ignoring case)\n\tat 'test_ignoring_case'",
+            ),
+            JSON.stringify(detailOf('test_ignoring_case')),
+          );
+          assert.ok(
+            detailOf('test_bbcode').startsWith(
+              "Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'\n\tat 'test_bbcode'",
+            ),
+            JSON.stringify(detailOf('test_bbcode')),
+          );
+          assert.ok(
+            detailOf('test_bbcode_expected_only').endsWith(`\n${RENDERED_AWAY_NOTE}`),
+            JSON.stringify(detailOf('test_bbcode_expected_only')),
+          );
+          assert.ok(
+            detailOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
+            JSON.stringify(detailOf('test_dictionary')),
+          );
+          // Every failure of the three suites is in the one answer, so none was cut from a longer list.
+          assert.equal(asArray(get(worded, 'failed')).length, 12, JSON.stringify(get(worded, 'failed')));
+
+          // A passing suite whose numbers come back through printed, which a probe measuring
+          // something used to have to fail an assertion for.
+          mkdirSync(join(projectDir, 'probe'));
+          writeFileSync(
+            join(projectDir, 'probe', 'probe_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_measures() -> void:',
+              '\tprint("PROBE rounds=%d" % (6 * 7))',
+              '\tprint("an ordinary line")',
+              '\tassert_int(1).is_equal(1)',
+              '',
+            ].join('\n'),
+          );
+          const probed: unknown = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: 'res://probe', printed: 'probe rounds' },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          );
+          assert.equal(get(probed, 'passed'), true, JSON.stringify(probed));
+          assert.deepEqual(
+            get(probed, 'printed'),
+            ['PROBE rounds=42'],
+            'a passing run answers with the lines holding the marker, case aside, and no others',
+          );
+        };
+        /** Directories where suites do not load, and scripts with errors of their own. */
+        const suitesThatDoNotLoad = async (): Promise<void> => {
+          // A directory where two suites do not load and one does. gdUnit4 stops at discovery and
+          // runs none of them, the good one included, which "script errors" alone did not say.
+          mkdirSync(join(projectDir, 'broken', 'deeper'), { recursive: true });
+          writeFileSync(
+            join(projectDir, 'broken', 'good_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_fine() -> void:',
+              '\tassert_int(1).is_equal(1)',
+              '',
+            ].join('\n'),
+          );
+          writeFileSync(
+            join(projectDir, 'broken', 'parse_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_does_not_parse() -> void:',
+              '\tassert_int(undefined_thing).is_equal(1)',
+              '',
+            ].join('\n'),
+          );
+          writeFileSync(
+            join(projectDir, 'broken', 'deeper', 'missing_base_test.gd'),
+            ['extends NoSuchBaseClass', '', '', 'func test_never() -> void:', '\tpass', ''].join('\n'),
+          );
+          const broken = await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://broken' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const brokenNote = broken.slice(0, broken.indexOf('{'));
+          assert.match(
+            brokenNote,
+            /^No tests ran: gdUnit4 could not load 2 scripts while looking for suites/,
+            broken,
+          );
+          assert.match(
+            brokenNote,
+            /res:\/\/broken\/parse_test\.gd:5 Parse Error: Identifier "undefined_thing"/,
+            broken,
+          );
+          const brokenAnswer: unknown = JSON.parse(broken.slice(broken.indexOf('{')));
+          assert.equal(get(brokenAnswer, 'verdict'), 'script errors in 2 scripts, so no suite ran', broken);
+          assert.deepEqual(
+            asArray(get(brokenAnswer, 'scriptErrors')).map(
+              (error) => `${text(get(error, 'path'))}:${Number(get(error, 'line'))}`,
+            ),
+            ['res://broken/deeper/missing_base_test.gd:1', 'res://broken/parse_test.gd:5'],
+          );
+          // The entries beside them hold what the run printed apart from those errors, which the
+          // engine printed once with gdUnit4's frames under each and gdUnit4 listed again.
+          const brokenEntries = asArray(get(brokenAnswer, 'entries')).map((entry) =>
+            text(get(entry, 'text')),
+          );
+          assert.ok(
+            brokenEntries.some((line) => line.startsWith('Scanning for test suites in: res://broken')),
+            broken,
+          );
+          assert.deepEqual(
+            brokenEntries.filter((line) =>
+              /undefined_thing|NoSuchBaseClass|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
+                line,
+              ),
+            ),
+            [],
+            broken,
+          );
+          assert.equal(
+            get(brokenAnswer, 'failedThroughDependency'),
+            undefined,
+            'and none failed only through another',
+          );
+          // A run stopped before any suite still rebuilt the class list first, and what the rebuild
+          // found is what a caller reads when a class did not resolve. gdUnit4's classes are listed.
+          assert.ok(
+            Number(get(brokenAnswer, 'classes', 'classes')) > 0,
+            `classes holds the rebuild: ${broken}`,
+          );
+
+          // #900: a script with an error of its own and a suite that fails only for depending on it.
+          // The engine says the same line for each such script, and the answer gives them by path.
+          // game-b's shape: the script parses and fails to compile, on an unused parameter with
+          // that warning raised to an error. One that does not parse is a different line, "Could not
+          // resolve class", which the engine gives each suite as an error of its own.
+          const settingsBefore = readFileSync(join(projectDir, 'project.godot'), 'utf8');
+          writeFileSync(
+            join(projectDir, 'project.godot'),
+            `${settingsBefore}\n[debug]\n\ngdscript/warnings/unused_parameter=2\n`,
+          );
+          mkdirSync(join(projectDir, 'leaning'));
+          writeFileSync(
+            join(projectDir, 'leaning', 'core.gd'),
+            [
+              'class_name LeaningCore',
+              'extends RefCounted',
+              '',
+              '',
+              'func weight(last: int) -> int:',
+              '\treturn 1',
+              '',
+            ].join('\n'),
+          );
+          writeFileSync(
+            join(projectDir, 'leaning', 'leans_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_leans() -> void:',
+              '\tassert_object(LeaningCore.new()).is_not_null()',
+              '',
+            ].join('\n'),
+          );
+          const leaning = await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://leaning' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const leaningAnswer: unknown = JSON.parse(leaning.slice(leaning.indexOf('{')));
+          assert.deepEqual(
+            {
+              ownErrorsIn: [
+                ...new Set(
+                  asArray(get(leaningAnswer, 'scriptErrors')).map((error) => text(get(error, 'path'))),
+                ),
+              ],
+              dependedLines: asArray(get(leaningAnswer, 'scriptErrors')).filter((error) =>
+                text(get(error, 'message')).includes('Failed to compile depended scripts'),
+              ).length,
+              failedThroughDependency: get(leaningAnswer, 'failedThroughDependency'),
+            },
+            {
+              ownErrorsIn: ['res://leaning/core.gd'],
+              dependedLines: 0,
+              failedThroughDependency: ['res://leaning/leans_test.gd'],
+            },
+            leaning,
+          );
+          rmSync(join(projectDir, 'leaning'), { recursive: true, force: true });
+          writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
+
+          // #908: game-b's shape, a colon missing from a static function in a class_name script.
+          // Every script using the class fails to resolve it and the engine prints nothing naming
+          // the script itself, so its path and line come from the engine's check of it. The engine
+          // places the error on the line after the missing colon, the first it could not parse.
+          mkdirSync(join(projectDir, 'pattern'));
+          writeFileSync(
+            join(projectDir, 'pattern', 'pattern.gd'),
+            [
+              'class_name RegressionPattern',
+              'extends RefCounted',
+              '',
+              '',
+              'static func plain(beats: int) -> int:',
+              '\treturn beats',
+              '',
+              '',
+              'static func doubled(beats: int) -> int',
+              '\treturn beats * 2',
+              '',
+            ].join('\n'),
+          );
+          writeFileSync(
+            join(projectDir, 'pattern', 'hearing.gd'),
+            [
+              'class_name RegressionHearing',
+              'extends RefCounted',
+              '',
+              '',
+              'func beats() -> int:',
+              '\treturn RegressionPattern.plain(2)',
+              '',
+              '',
+              'func twice() -> int:',
+              '\tvar pattern: RegressionPattern = RegressionPattern.new()',
+              '\treturn pattern.held() * 2',
+              '',
+            ].join('\n'),
+          );
+          // #912: with unsafe access raised to an error, as game-b's project has it, the class read
+          // as Variant gives this script errors that come only from the fault.
+          writeFileSync(
+            join(projectDir, 'project.godot'),
+            `${settingsBefore}\n[debug]\n\ngdscript/warnings/unsafe_method_access=2\n`,
+          );
+          writeFileSync(
+            join(projectDir, 'pattern', 'hearing_test.gd'),
+            [
+              'extends GdUnitTestSuite',
+              '',
+              '',
+              'func test_beats() -> void:',
+              '\tassert_int(RegressionHearing.new().beats()).is_equal(2)',
+              '',
+            ].join('\n'),
+          );
+          const pattern = await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://pattern/hearing_test.gd' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const patternNote = pattern.slice(0, pattern.indexOf('{'));
+          const patternAnswer: unknown = JSON.parse(pattern.slice(pattern.indexOf('{')));
+          assert.deepEqual(
+            asArray(get(patternAnswer, 'scriptErrors'))[0],
+            {
+              path: 'res://pattern/pattern.gd',
+              line: 10,
+              message: 'Parse Error: Unexpected "Indent" in class body.',
+              declares: 'RegressionPattern',
+            },
             pattern,
           );
-        }
-        assert.ok(
-          followed.some((error) => Number(get(error, 'line')) === 11),
-          `a line using a variable typed with the class, not only the line that failed to resolve it: ${pattern}`,
-        );
-        assert.deepEqual(
-          asArray(get(patternAnswer, 'scriptErrors'))
-            .map((error) => text(get(error, 'message')))
-            .filter((message) => /inferred type "Variant"|Could not parse global class/.test(message)),
-          [],
-          pattern,
-        );
-        // What the answer carries beside them: what the run printed, without the errors listed
-        // above it a second and third time.
-        const patternEntries = asArray(get(patternAnswer, 'entries')).map((entry) =>
-          text(get(entry, 'text')),
-        );
-        assert.ok(
-          patternEntries.some((line) => line.startsWith('Godot Engine v')),
-          pattern,
-        );
-        assert.deepEqual(
-          patternEntries.filter((line) =>
-            /Failed to compile depended scripts|Could not resolve class|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
-              line,
+          assert.match(
+            patternNote,
+            /^No tests ran: 3 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load\. It could not load 2 of them while looking for suites, and the one it did not name comes first\. res:\/\/pattern\/pattern\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionPattern\. The engine's own check of it found the error\. res:\/\/pattern\/hearing\.gd:6 could not resolve RegressionPattern because of it\. One more failed only because a script it depends on did: res:\/\/pattern\/hearing_test\.gd\. [\s\S]* more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved\.$/,
+            pattern,
+          );
+          // #911: one number for one run, in the head and in the verdict beside it.
+          assert.equal(get(patternAnswer, 'verdict'), 'script errors in 3 scripts, so no suite ran', pattern);
+          const followed = asArray(get(patternAnswer, 'followFromUnresolved'));
+          assert.ok(followed.length >= 2, pattern);
+          for (const error of followed) {
+            assert.equal(get(error, 'path'), 'res://pattern/hearing.gd', pattern);
+            assert.match(
+              text(get(error, 'message')),
+              /inferred type "Variant"|Could not parse global class "RegressionPattern"/,
+              pattern,
+            );
+          }
+          assert.ok(
+            followed.some((error) => Number(get(error, 'line')) === 11),
+            `a line using a variable typed with the class, not only the line that failed to resolve it: ${pattern}`,
+          );
+          assert.deepEqual(
+            asArray(get(patternAnswer, 'scriptErrors'))
+              .map((error) => text(get(error, 'message')))
+              .filter((message) => /inferred type "Variant"|Could not parse global class/.test(message)),
+            [],
+            pattern,
+          );
+          // What the answer carries beside them: what the run printed, without the errors listed
+          // above it a second and third time.
+          const patternEntries = asArray(get(patternAnswer, 'entries')).map((entry) =>
+            text(get(entry, 'text')),
+          );
+          assert.ok(
+            patternEntries.some((line) => line.startsWith('Godot Engine v')),
+            pattern,
+          );
+          assert.deepEqual(
+            patternEntries.filter((line) =>
+              /Failed to compile depended scripts|Could not resolve class|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
+                line,
+              ),
             ),
-          ),
-          [],
-          pattern,
-        );
-        rmSync(join(projectDir, 'pattern'), { recursive: true, force: true });
-        writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
+            [],
+            pattern,
+          );
+          rmSync(join(projectDir, 'pattern'), { recursive: true, force: true });
+          writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
+        };
+        await nothingRanAndStoppedEarly();
+        await pathsAndNamedSets();
+        await failingValuesAndTheirDiffs();
+        await suitesThatDoNotLoad();
       },
       { GODOT_PATH: godotPath },
     );
@@ -69934,97 +70025,110 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
       'a call with no progress token is sent no progress',
     );
 
-    // Cut off by its client: told through the long suite, and what it finished kept for the next run.
-    const id = server.nextRequestId;
-    void server
-      .request(
-        'tools/call',
-        {
-          name: 'project_test',
-          arguments: { projectPath: projectDir, path: [a, b, c] },
-          _meta: { progressToken: 'cut' },
-        },
-        ENGINE_CALL_TIMEOUT_MS * 4,
-      )
-      .catch(() => {
-        // A cancelled call is not answered. The next call is where its leftovers come back.
-      });
-    const inTheLongOne = (each: { message: string }): boolean =>
-      each.message.startsWith('2 suites have finished, 1 with failures, running res://test/c_test.gd');
-    for (
-      let waited = 0;
-      waited < 90_000 && progressFor('cut').filter(inTheLongOne).length < 2;
-      waited += 500
-    ) {
-      await delay(500);
-    }
-    assert.ok(
-      progressFor('cut').filter(inTheLongOne).length >= 2,
-      `told again through a suite that takes long, with nothing finishing: ${JSON.stringify(progressFor('cut'))}`,
-    );
-    server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
-    const keptAt = join(projectDir, '.godot', 'gdharness-reports', 'cut-run.json');
-    for (let waited = 0; waited < 20_000 && !existsSync(keptAt); waited += 250) {
-      await delay(250);
-    }
-    assert.ok(existsSync(keptAt), 'a cancelled run keeps what it finished in the project');
-    const next = answerOf(
-      await server.request(
-        'tools/call',
-        { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
-        ENGINE_CALL_TIMEOUT_MS * 3,
-      ),
-    );
-    const previous = get(next.json, 'previousRunCut');
-    assert.deepEqual(
-      {
-        paths: get(previous, 'paths'),
-        finished: get(previous, 'suitesFinished'),
-        failing: get(previous, 'suitesFailing'),
-        running: get(previous, 'suiteRunning'),
-      },
-      {
-        paths: [a, b, c],
-        finished: [a, b],
-        failing: [{ path: b, errors: 0, failures: 1, failed: ['test_fails'] }],
-        running: c,
-      },
-      next.note,
-    );
-    assert.match(
-      next.note,
-      /The test run before this one in this project, of res:\/\/test\/a_test\.gd, res:\/\/test\/b_test\.gd, res:\/\/test\/c_test\.gd, was cut off by its client at \S+ after 2 suites had finished, 1 of them with failures, while res:\/\/test\/c_test\.gd was running\. What it finished is under previousRunCut\.$/,
-    );
-    // A suite written since the last import, so it has no .uid sidecar, which a gate that tracks them
-    // fails on later. The runs above imported gdUnit4's icons first and gave every suite one then.
-    rmSync(join(projectDir, 'test', 'a_test.gd.uid'), { force: true });
-    const after = answerOf(
-      await server.request(
-        'tools/call',
-        { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
-        ENGINE_CALL_TIMEOUT_MS * 3,
-      ),
-    );
-    assert.equal(get(after.json, 'verdict'), 'passed', after.note);
-    assert.equal(get(after.json, 'previousRunCut'), undefined, 'handed back once');
-    // Nothing was behind, so nothing was imported: the run names it, and stops once the sidecar is
-    // there.
-    assert.equal(get(after.json, 'importedFirst'), undefined, after.note);
-    assert.deepEqual(get(after.json, 'uidsMissing'), [a], after.note);
-    writeFileSync(join(projectDir, 'test', 'a_test.gd.uid'), 'uid://b1gdharnesstest\n');
-    const minted = answerOf(
-      await server.request(
-        'tools/call',
-        { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
-        ENGINE_CALL_TIMEOUT_MS * 3,
-      ),
-    );
-    assert.equal(get(minted.json, 'verdict'), 'passed', minted.note);
-    assert.equal(get(minted.json, 'uidsMissing'), undefined, `and with the sidecar, nothing: ${minted.note}`);
+    await aRunCutOffByItsClientKeepsWhatItFinished({ server, projectDir, answerOf, progressFor, a, b, c });
   } finally {
     await server.stop();
     sweep(projectDir);
   }
+}
+
+/** What the test run progress case hands the stretch after the first two runs. */
+interface TestRunProgressFixture {
+  server: ServerProcess;
+  projectDir: string;
+  answerOf: (response: JsonRpcMessage) => { note: string; json: unknown };
+  progressFor: (token: string) => { progress: number; message: string }[];
+  a: string;
+  b: string;
+  c: string;
+}
+
+/** A run cut off by its client is told through the long suite, its finish is kept, and the next run carries it and the missing sidecar. */
+async function aRunCutOffByItsClientKeepsWhatItFinished(fixture: TestRunProgressFixture): Promise<void> {
+  const { server, projectDir, answerOf, progressFor, a, b, c } = fixture;
+  // Cut off by its client: told through the long suite, and what it finished kept for the next run.
+  const id = server.nextRequestId;
+  void server
+    .request(
+      'tools/call',
+      {
+        name: 'project_test',
+        arguments: { projectPath: projectDir, path: [a, b, c] },
+        _meta: { progressToken: 'cut' },
+      },
+      ENGINE_CALL_TIMEOUT_MS * 4,
+    )
+    .catch(() => {
+      // A cancelled call is not answered. The next call is where its leftovers come back.
+    });
+  const inTheLongOne = (each: { message: string }): boolean =>
+    each.message.startsWith('2 suites have finished, 1 with failures, running res://test/c_test.gd');
+  for (let waited = 0; waited < 90_000 && progressFor('cut').filter(inTheLongOne).length < 2; waited += 500) {
+    await delay(500);
+  }
+  assert.ok(
+    progressFor('cut').filter(inTheLongOne).length >= 2,
+    `told again through a suite that takes long, with nothing finishing: ${JSON.stringify(progressFor('cut'))}`,
+  );
+  server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+  const keptAt = join(projectDir, '.godot', 'gdharness-reports', 'cut-run.json');
+  for (let waited = 0; waited < 20_000 && !existsSync(keptAt); waited += 250) {
+    await delay(250);
+  }
+  assert.ok(existsSync(keptAt), 'a cancelled run keeps what it finished in the project');
+  const next = answerOf(
+    await server.request(
+      'tools/call',
+      { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    ),
+  );
+  const previous = get(next.json, 'previousRunCut');
+  assert.deepEqual(
+    {
+      paths: get(previous, 'paths'),
+      finished: get(previous, 'suitesFinished'),
+      failing: get(previous, 'suitesFailing'),
+      running: get(previous, 'suiteRunning'),
+    },
+    {
+      paths: [a, b, c],
+      finished: [a, b],
+      failing: [{ path: b, errors: 0, failures: 1, failed: ['test_fails'] }],
+      running: c,
+    },
+    next.note,
+  );
+  assert.match(
+    next.note,
+    /The test run before this one in this project, of res:\/\/test\/a_test\.gd, res:\/\/test\/b_test\.gd, res:\/\/test\/c_test\.gd, was cut off by its client at \S+ after 2 suites had finished, 1 of them with failures, while res:\/\/test\/c_test\.gd was running\. What it finished is under previousRunCut\.$/,
+  );
+  // A suite written since the last import, so it has no .uid sidecar, which a gate that tracks them
+  // fails on later. The runs above imported gdUnit4's icons first and gave every suite one then.
+  rmSync(join(projectDir, 'test', 'a_test.gd.uid'), { force: true });
+  const after = answerOf(
+    await server.request(
+      'tools/call',
+      { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    ),
+  );
+  assert.equal(get(after.json, 'verdict'), 'passed', after.note);
+  assert.equal(get(after.json, 'previousRunCut'), undefined, 'handed back once');
+  // Nothing was behind, so nothing was imported: the run names it, and stops once the sidecar is
+  // there.
+  assert.equal(get(after.json, 'importedFirst'), undefined, after.note);
+  assert.deepEqual(get(after.json, 'uidsMissing'), [a], after.note);
+  writeFileSync(join(projectDir, 'test', 'a_test.gd.uid'), 'uid://b1gdharnesstest\n');
+  const minted = answerOf(
+    await server.request(
+      'tools/call',
+      { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    ),
+  );
+  assert.equal(get(minted.json, 'verdict'), 'passed', minted.note);
+  assert.equal(get(minted.json, 'uidsMissing'), undefined, `and with the sidecar, nothing: ${minted.note}`);
 }
 
 /**
@@ -70604,46 +70708,75 @@ async function testTheAnswerFileKeepsAFloatAsItWas(): Promise<void> {
  * GDScript: brackets inside strings and comments are not counted, and neither are commas.
  */
 function gdscriptArguments(source: string, open: number): string[] {
-  const found: string[] = [];
-  let depth = 0;
-  let quote: string | null = null;
-  let current = '';
+  const scan: GdscriptArgumentScan = { found: [], depth: 0, quote: null, current: '' };
   for (let at = open + 1; at < source.length; at += 1) {
-    const char = source[at] ?? '';
-    if (quote !== null) {
-      current += char;
-      if (char === '\\') {
-        at += 1;
-        current += source[at] ?? '';
-      } else if (char === quote) {
-        quote = null;
-      }
-      continue;
+    const last = scanOneGdscriptCharacter(scan, source, at);
+    if (last === null) {
+      const final = scan.current.trim();
+      return final === '' ? scan.found : [...scan.found, final];
     }
-    if (char === '#') {
-      const end = source.indexOf('\n', at);
-      at = end === -1 ? source.length : end - 1;
-      continue;
-    }
-    if (char === ',' && depth === 0) {
-      found.push(current.trim());
-      current = '';
-      continue;
-    }
-    if ((char === ')' || char === ']' || char === '}') && depth === 0) {
-      const last = current.trim();
-      return last === '' ? found : [...found, last];
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === '(' || char === '[' || char === '{') {
-      depth += 1;
-    } else if (char === ')' || char === ']' || char === '}') {
-      depth -= 1;
-    }
-    current += char;
+    at = last;
   }
-  return found;
+  return scan.found;
+}
+
+/** Where the scan of a GDScript call's arguments stands. */
+interface GdscriptArgumentScan {
+  found: string[];
+  depth: number;
+  quote: string | null;
+  current: string;
+}
+
+/** Takes the character at [param at] into the scan and returns the last index it used, or null when the arguments close. */
+function scanOneGdscriptCharacter(scan: GdscriptArgumentScan, source: string, at: number): number | null {
+  const char = source[at] ?? '';
+  if (scan.quote !== null) {
+    const taken = takeInsideAGdscriptString(source, at, scan.quote);
+    scan.current += taken.text;
+    scan.quote = taken.closed ? null : scan.quote;
+    return taken.at;
+  }
+  if (char === '#') {
+    const end = source.indexOf('\n', at);
+    return end === -1 ? source.length : end - 1;
+  }
+  if (char === ',' && scan.depth === 0) {
+    scan.found.push(scan.current.trim());
+    scan.current = '';
+    return at;
+  }
+  if (scan.depth === 0 && gdscriptBracketDepthChange(char) < 0) {
+    return null;
+  }
+  if (char === '"' || char === "'") {
+    scan.quote = char;
+  } else {
+    scan.depth += gdscriptBracketDepthChange(char);
+  }
+  scan.current += char;
+  return at;
+}
+
+/** What one character inside a GDScript string adds to the argument, where the scan goes on, and whether it closed the string. */
+function takeInsideAGdscriptString(
+  source: string,
+  at: number,
+  quote: string,
+): { text: string; at: number; closed: boolean } {
+  const char = source[at] ?? '';
+  if (char === '\\') {
+    return { text: char + (source[at + 1] ?? ''), at: at + 1, closed: false };
+  }
+  return { text: char, at, closed: char === quote };
+}
+
+/** One for an opening bracket, minus one for a closing one, nothing for any other character. */
+function gdscriptBracketDepthChange(char: string): number {
+  if (char === '(' || char === '[' || char === '{') {
+    return 1;
+  }
+  return char === ')' || char === ']' || char === '}' ? -1 : 0;
 }
 
 /**
@@ -71558,6 +71691,11 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     );
   }
 
+  everyEditorCommandIsSentAndAnswered();
+}
+
+/** Every editor command the server sends is one the editor addon answers, and the other way round. */
+function everyEditorCommandIsSentAndAnswered(): void {
   const addon = namesIn(
     'src/godot/addons/gdharness_editor/tool_executor.gd',
     /^\t\t"([a-z_]+)": \[/gm,
@@ -71581,6 +71719,11 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     assert.ok(bridged.has(command), `the editor addon answers ${command}, which nothing sends`);
   }
 
+  everyRuntimeCommandIsSentAndAnswered();
+}
+
+/** Every runtime command the server sends is one the runtime addon answers, and the other way round. */
+function everyRuntimeCommandIsSentAndAnswered(): void {
   const runtimeDir = 'src/godot/addons/gdharness_runtime';
   const own = namesIn(
     `${runtimeDir}/runtime_autoload.gd`,
@@ -71752,10 +71895,6 @@ function testEveryToolIsDrivenSomewhere(): void {
 function testEveryToolParameterIsRead(): void {
   const named = new Set<string>();
   const snaked = new Set<string>();
-  const remember = (source: string, pattern: RegExp, into: Set<string>): void => {
-    for (const match of source.matchAll(pattern)) into.add(firstGroup(match));
-  };
-
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
@@ -71764,20 +71903,7 @@ function testEveryToolParameterIsRead(): void {
         continue;
       }
       if (path.endsWith('tool-definitions.ts')) continue;
-      const source = (): string => readFileSync(path, 'utf8');
-      // The addon is handed the arguments under the names the tool gave them. The headless
-      // operations are handed them snake_cased, and those are the only files where that
-      // spelling counts as a read.
-      if (path.endsWith('.gd')) {
-        remember(source(), /"([A-Za-z_]+)"/g, path.includes('operations') ? snaked : named);
-      }
-      if (path.endsWith('.ts')) {
-        const code = source();
-        remember(code, /read[A-Za-z]*\(\s*\w*[Aa]rgs\w*\s*,\s*'([A-Za-z]+)'/g, named);
-        remember(code, /\w*[Aa]rgs\w*\[\s*'([A-Za-z]+)'\s*\]/g, named);
-        remember(code, /\b(?:safeArgs|args|arguments_)\.([A-Za-z]+)\b/g, named);
-        remember(code, /\{\s*(?:[A-Za-z]+(?:: \w+)?,\s*)*([A-Za-z]+)(?:: \w+)?[^}]*\}\s*=\s*args/g, named);
-      }
+      rememberTheArgumentsAFileReads({ path, named, snaked });
     }
   };
   walk('src');
@@ -71797,6 +71923,34 @@ function testEveryToolParameterIsRead(): void {
     }
   }
   assert.ok(checked >= 60, `only ${checked} tool parameters were checked, so this proved little`);
+}
+
+/** Adds the first group of every match of the pattern in the source to the set. */
+function rememberMatches(source: string, pattern: RegExp, into: Set<string>): void {
+  for (const match of source.matchAll(pattern)) into.add(firstGroup(match));
+}
+
+/** Adds the arguments one source file reads: the names the addon is handed, and the snake-cased ones of the headless operations. */
+function rememberTheArgumentsAFileReads(read: {
+  path: string;
+  named: Set<string>;
+  snaked: Set<string>;
+}): void {
+  const { path, named, snaked } = read;
+  const source = (): string => readFileSync(path, 'utf8');
+  // The addon is handed the arguments under the names the tool gave them. The headless
+  // operations are handed them snake_cased, and those are the only files where that
+  // spelling counts as a read.
+  if (path.endsWith('.gd')) {
+    rememberMatches(source(), /"([A-Za-z_]+)"/g, path.includes('operations') ? snaked : named);
+  }
+  if (path.endsWith('.ts')) {
+    const code = source();
+    rememberMatches(code, /read[A-Za-z]*\(\s*\w*[Aa]rgs\w*\s*,\s*'([A-Za-z]+)'/g, named);
+    rememberMatches(code, /\w*[Aa]rgs\w*\[\s*'([A-Za-z]+)'\s*\]/g, named);
+    rememberMatches(code, /\b(?:safeArgs|args|arguments_)\.([A-Za-z]+)\b/g, named);
+    rememberMatches(code, /\{\s*(?:[A-Za-z]+(?:: \w+)?,\s*)*([A-Za-z]+)(?:: \w+)?[^}]*\}\s*=\s*args/g, named);
+  }
 }
 
 /**
@@ -72187,6 +72341,14 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
     'a pool that only repeats should fail rather than hand out a duplicate',
   );
 
+  await theRealReservationsComeFromTheBandAlongTheWalk();
+  await aListenerDeclinesAPortAlreadyHandedOut();
+  await unheldPortProvesFreeTheNumberItReturns();
+  thePortWalkWrapsAndEachProcessStartsItsOwn();
+}
+
+/** The real reservations are in the band and a few steps along the walk from the one before. */
+async function theRealReservationsComeFromTheBandAlongTheWalk(): Promise<void> {
   // The real one still answers, so what is asserted above is not the only thing that runs. Each
   // number is in the band and a few steps along the walk from the one before.
   const walked = [await reservePort(), await reservePort(), await reservePort()];
@@ -72202,7 +72364,10 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
       assert.ok(step >= 1 && step <= 200, `each follows the one before along the walk: ${walked.join(', ')}`);
     }
   }
+}
 
+/** A listener takes its port the same way, so it never sits on one a server has been given. */
+async function aListenerDeclinesAPortAlreadyHandedOut(): Promise<void> {
   // A listener takes its port the same way, so it never sits on one a server has been given: the
   // fake debug adapter on port zero took a reserved bridge port, and the fake editor dialling the
   // bridge reached the adapter and timed out. 1100 is handed out above, so it is declined here.
@@ -72233,7 +72398,10 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
       listener.close();
     }
   }
+}
 
+/** The proof binds the number itself, passes over what a bind or a dial refuses, and gives up on a band that gives nothing. */
+async function unheldPortProvesFreeTheNumberItReturns(): Promise<void> {
   const draws = (...numbers: number[]): (() => number) => {
     let position = 0;
     return () => numbers[Math.min(position++, numbers.length - 1)] ?? 0;
@@ -72334,7 +72502,10 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
       holder.close();
     }
   }
+}
 
+/** The walk wraps inside the band, a port zero starts above it, and each process starts its walk somewhere of its own. */
+function thePortWalkWrapsAndEachProcessStartsItsOwn(): void {
   const walk = bandWalk(29_998);
   assert.deepEqual([walk(), walk(), walk()], [29_998, 29_999, 10_000], 'the walk wraps inside the band');
 
@@ -72641,15 +72812,22 @@ function proseFaults(content: string, prose: boolean): string[] {
     if (!prose || fenced) {
       continue;
     }
-    const outsideCode = line.replace(/`[^`]*`/g, '');
-    if (outsideCode.includes(' -- ')) {
-      faults.push(`${at}: a double hyphen used as a dash`);
-    }
-    const lower = outsideCode.toLowerCase();
-    for (const phrase of HABIT_PHRASES) {
-      if (new RegExp(`\\b${phrase.replaceAll('-', '\\-')}`).test(lower)) {
-        faults.push(`${at}: "${phrase}"`);
-      }
+    faults.push(...proseOnlyFaultsOfALine(at, line));
+  }
+  return faults;
+}
+
+/** A double hyphen standing in for a dash outside backticks, and the habit phrases, in one line of prose. */
+function proseOnlyFaultsOfALine(at: string, line: string): string[] {
+  const faults: string[] = [];
+  const outsideCode = line.replace(/`[^`]*`/g, '');
+  if (outsideCode.includes(' -- ')) {
+    faults.push(`${at}: a double hyphen used as a dash`);
+  }
+  const lower = outsideCode.toLowerCase();
+  for (const phrase of HABIT_PHRASES) {
+    if (new RegExp(`\\b${phrase.replaceAll('-', '\\-')}`).test(lower)) {
+      faults.push(`${at}: "${phrase}"`);
     }
   }
   return faults;
@@ -72860,6 +73038,20 @@ function testEveryToolNamedInProseIsATool(): void {
   const wildcard = new RegExp(`\\b(${families.join('|')})_\\*`, 'g');
   const shaped = new RegExp(`\\b(${families.join('|')})_[a-z][a-z0-9_]*\\b`, 'g');
 
+  namedToolsInQuotedSources({ names, families, notTools, wildcard, shaped });
+}
+
+/** What the tool-name reading is given: the tools, their families, the words that are not tools and the patterns. */
+interface ToolMentionRules {
+  names: Set<string>;
+  families: (string | undefined)[];
+  notTools: Set<string>;
+  wildcard: RegExp;
+  shaped: RegExp;
+}
+
+/** Gathers what the server says in the tree, then reads it for tool names. */
+function namedToolsInQuotedSources(rules: ToolMentionRules): void {
   // What the server says, not what it is written with. A bare read of the file also sees its own
   // identifiers and the field names of the bridge protocol, which are the same shape as a tool and
   // are nobody's instruction to make a call.
@@ -72899,6 +73091,12 @@ function testEveryToolNamedInProseIsATool(): void {
     sources.push([`the skill: ${name}`, content]);
   }
 
+  namedToolsInSources({ ...rules, sources });
+}
+
+/** Every name shaped like a tool in the sources is a tool or vocabulary, and every family wildcard has tools. */
+function namedToolsInSources(read: ToolMentionRules & { sources: [string, string][] }): void {
+  const { names, families, notTools, wildcard, shaped, sources } = read;
   let seen = 0;
   const wrong: string[] = [];
   for (const [where, content] of sources) {
@@ -72916,14 +73114,39 @@ function testEveryToolNamedInProseIsATool(): void {
         wrong.push(`${where} names ${found[0]}, which is not a tool`);
       }
     }
-    for (const found of content.matchAll(wildcard)) {
-      seen += 1;
-      if (!families.includes(found[1] ?? '')) {
-        wrong.push(`${where} names the family ${found[0]}, which has no tools`);
-      }
-    }
+    seen += familyWildcardsRead({ where, content, wildcard, families, wrong });
   }
 
+  opsNamedInSources({ names, sources, wrong, seen });
+}
+
+/** Reads the family wildcards of one source, says those with no tools, and returns how many it read. */
+function familyWildcardsRead(read: {
+  where: string;
+  content: string;
+  wildcard: RegExp;
+  families: (string | undefined)[];
+  wrong: string[];
+}): number {
+  const { where, content, wildcard, families, wrong } = read;
+  let count = 0;
+  for (const found of content.matchAll(wildcard)) {
+    count += 1;
+    if (!families.includes(found[1] ?? '')) {
+      wrong.push(`${where} names the family ${found[0]}, which has no tools`);
+    }
+  }
+  return count;
+}
+
+/** The tool-and-op phrases of the sources, and the floors under what was read. */
+function opsNamedInSources(read: {
+  names: Set<string>;
+  sources: [string, string][];
+  wrong: string[];
+  seen: number;
+}): void {
+  const { names, sources, wrong, seen } = read;
   // An op named after its tool, which is how these sentences tell a caller what to do: the words
   // are next to each other because the call is `editor_run stop`. Only the ones carrying an
   // underscore, because a one-word op is the same shape as the next English word and `editor_status
@@ -74260,581 +74483,619 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       `OptionButton has no property Items. ${keptAs('item_count', 'items', 'popup/item_')}`,
     );
 
-    // An enum by the name of a value, as written and in another case, and by its number.
-    const potion = await written({ kind: 'POTION' });
-    assert.deepEqual(
-      get(potion, 'properties'),
-      { kind: 2 },
-      `the answer has what the engine kept: ${JSON.stringify(potion)}`,
-    );
-    assert.match(file(), /^kind = 2$/m, file());
-    await written({ kind: 'shield' });
-    assert.match(file(), /^kind = 1$/m, file());
-    const unknown = await refused({ kind: 'AXE' });
-    assert.match(
-      unknown,
-      /ItemData\.kind is an enum, and AXE is none of its values: send SWORD \(0\), SHIELD \(1\), POTION \(2\) by name or by number\.$/m,
-      unknown,
-    );
-    const misspelt = await refused({ kind: 'SHIELDS' });
-    assert.match(misspelt, /by name or by number\. The nearest is SHIELD\./, misspelt);
-    assert.match(file(), /^kind = 1$/m, 'a refused name leaves the file as it was');
-    const beyond = await written({ kind: 7 });
-    assert.deepEqual(
-      get(beyond, 'outsideDeclared'),
-      { kind: '7 is none of the values kind declares: SWORD (0), SHIELD (1), POTION (2).' },
-      JSON.stringify(beyond),
-    );
-    assert.match(file(), /^kind = 7$/m, 'a number outside the enum is still written as given');
-
-    // A number for text is refused rather than saved as the text of a double.
-    const listed = await refused({ tags: [1, 2] });
-    assert.match(
-      listed,
-      /ItemData\.tags is Array and item 0 of the list given is a number, not String\. Send text as a JSON string, "1", with no quote marks inside it\. Setting it would save a different value/,
-      listed,
-    );
-    const titled = await refused({ title: 5 });
-    assert.match(
-      titled,
-      /ItemData\.title is String and the value given is a number, which cannot become one\. Send text as a JSON string, "5", with no quote marks inside it\./,
-      titled,
-    );
-    await written({ tags: ['1', '2'] });
-    assert.match(file(), /^tags = Array\[String\]\(\["1", "2"\]\)$/m, file());
-
-    // A refusal of one of several says the others were not written either, and they were not.
-    const together = await refused({ title: 'Sword', kind: 'AXE' });
-    assert.match(together, / None of the 2 properties given was written\.$/m, together);
-    assert.doesNotMatch(file(), /^title = /m, file());
-    assert.doesNotMatch(
-      await refused({ kind: 'AXE' }),
-      /None of the/,
-      'one property refused alone says nothing of others',
-    );
-
-    // Past a range closed on that side is named. Past one open on it, or inside it, is not.
-    const ranged = await written({ rarity: 12, level: 40 });
-    assert.deepEqual(
-      get(ranged, 'outsideDeclared'),
-      {
-        rarity:
-          '12 is outside the range rarity declares, 0 to 10, which the inspector holds it to. The engine stores it as given.',
-      },
-      JSON.stringify(ranged),
-    );
-    assert.match(file(), /^rarity = 12$/m, file());
-    assert.equal(get(await written({ rarity: 4 }), 'outsideDeclared'), undefined);
-    // The inspector also rounds to a range's step, offers only the files a filter takes, and shows
-    // no alpha for a colour declared without one.
-    const besides = await written({
-      reach: 0.3,
-      art_path: 'res://sound.wav',
-      tint: { r: 1, g: 0.5, b: 0, a: 0.5 },
-    });
-    assert.deepEqual(
-      get(besides, 'outsideDeclared'),
-      {
-        reach:
-          '0.3 is not a step of 0.5 from 0, as reach declares, which the inspector rounds it to. The engine stores it as given.',
-        art_path:
-          '"res://sound.wav" is none of the files art_path takes, *.png, *.jpg, which the inspector\'s file dialog holds it to. The engine stores it as given.',
-        tint: 'tint is declared with no alpha, so the inspector neither shows nor sets one, and the colour given has alpha 0.5. The engine stores it as given.',
-      },
-      JSON.stringify(besides),
-    );
-    assert.equal(
-      get(
-        await written({ reach: 7.5, art_path: 'res://Art.PNG', tint: { r: 1, g: 0.5, b: 0, a: 1 } }),
-        'outsideDeclared',
-      ),
-      undefined,
-      'a step, a matching file and an opaque colour are noted for nothing',
-    );
-
-    // A picture that is there and never imported is told apart from one that is not there, and the
-    // remedy given makes the write go through.
-    const raw = await refused({ icon: 'res://icon.svg' });
-    assert.match(
-      raw,
-      /res:\/\/icon\.svg is there, but it has never been imported, so the engine has no resource to load from it for icon\. project_import reimport with resourcePath res:\/\/icon\.svg imports it\./,
-      raw,
-    );
-    assert.match(
-      await refused({ icon: 'res://nowhere.svg' }),
-      /No resource at res:\/\/nowhere\.svg for icon/,
-    );
-    const imported = await request('project_import', { op: 'reimport', resourcePath: 'res://icon.svg' });
-    assert.ok(existsSync(join(project, 'icon.svg.import')), textOf(imported) ?? JSON.stringify(imported));
-    await written({ icon: 'res://icon.svg' });
-    assert.match(file(), /path="res:\/\/icon\.svg"/, file());
-
-    const read = parseTextContent(
-      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
-    );
-    assert.deepEqual(
-      [get(read, 'resourceType'), get(read, 'scriptClass'), get(read, 'script')],
-      ['Resource', 'ItemData', 'res://item_data.gd'],
-      JSON.stringify(read),
-    );
-
-    // A ShaderMaterial's parameters are its shader's uniforms, so a name the shader does not
-    // declare is the shader's lack, and the refusal had said the material had no such property.
-    writeFileSync(
-      join(project, 'glow.gdshader'),
-      'shader_type canvas_item;\n\nuniform float glow_power : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
-    );
-    const material = async (
-      resourcePath: string,
-      properties: Record<string, unknown>,
-    ): Promise<JsonRpcMessage> => await request('resource_edit', { op: 'modify', resourcePath, properties });
-    for (const [resourcePath, shader] of [
-      ['res://glow.tres', { shader: 'res://glow.gdshader' }],
-      ['res://bare.tres', {}],
-    ] as const) {
-      const created = await request('resource_edit', {
-        op: 'create',
-        resourcePath,
-        resourceType: 'ShaderMaterial',
-        properties: shader,
-      });
-      assert.ok(parseTextContent(created) !== null, textOf(created) ?? JSON.stringify(created));
-    }
-    assert.equal(
-      textOf(await material('res://glow.tres', { 'shader_parameter/glow_powr': 1.5 })),
-      'res://glow.gdshader declares no uniform glow_powr, which shader_parameter/glow_powr would set. The nearest it has is glow_power.',
-    );
-    assert.equal(
-      textOf(await material('res://glow.tres', { 'shader_parameter/speed': 1.5 })),
-      'res://glow.gdshader declares no uniform speed, which shader_parameter/speed would set. It has glow_power, tint.',
-    );
-    assert.equal(
-      textOf(await material('res://bare.tres', { 'shader_parameter/glow_power': 1.5 })),
-      'The ShaderMaterial has no shader, so it has no parameter glow_power yet. Set shader first.',
-    );
-    const lit = await material('res://glow.tres', { 'shader_parameter/glow_power': 1.5 });
-    assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
-    assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
-    assert.equal(get(parseTextContent(lit), 'alsoSaved'), undefined, textOf(lit) ?? '');
-    // The engine loads only the uniforms the shader declares, so a renamed one's value is in the
-    // file and nowhere else, and the next save drops it.
-    writeFileSync(
-      join(project, 'glow.gdshader'),
-      'shader_type canvas_item;\n\nuniform float glow_strength : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
-    );
-    const stale = parseTextContent(
-      await request('resource_edit', { op: 'read', resourcePath: 'res://glow.tres' }),
-    );
-    assert.deepEqual(get(stale, 'notLoaded'), ['shader_parameter/glow_power'], JSON.stringify(stale));
-    // A uniform's bare name was refused as a property the class lacks, with the class's list to
-    // read, which holds no shader parameter.
-    assert.equal(
-      textOf(await material('res://glow.tres', { tint: { _type: 'Color', r: 1, g: 0, b: 0, a: 1 } })),
-      'ShaderMaterial has no property tint. Its shader declares the uniform tint, which shader_parameter/tint sets.',
-    );
-    // A string's later lines are not lines the file sets, though one can read like one.
-    writeFileSync(
-      join(project, 'note.tres'),
-      '[gd_resource type="Resource" format=3]\n\n[resource]\nresource_name = "first \\"\nhidden = 1"\n',
-    );
-    const note = parseTextContent(
-      await request('resource_edit', { op: 'read', resourcePath: 'res://note.tres' }),
-    );
-    assert.deepEqual(
-      [get(note, 'notLoaded'), get(note, 'properties', 'resource_name')],
-      [undefined, 'first "\nhidden = 1'],
-      JSON.stringify(note),
-    );
-    const tinted = await material('res://glow.tres', {
-      'shader_parameter/tint': { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
-    });
-    assert.deepEqual(
-      get(parseTextContent(tinted), 'alsoSaved'),
-      [{ property: 'shader_parameter/glow_power', was: '1.5' }],
-      textOf(tinted) ?? JSON.stringify(tinted),
-    );
-    assert.match(
-      readFileSync(join(project, 'glow.tres'), 'utf8'),
-      /^shader_parameter\/tint = Color\(1, 0, 0, 1\)$/m,
-    );
-
-    // A resource built into a file is a new object each time the file loads, and the check that a
-    // save kept what was set compared objects, so every one written into a resource file was
-    // refused as a property the file does not keep.
-    const point = { _type: 'Vector2', x: 0.5, y: 20 };
-    await written({ growth: { _type: 'Curve', max_value: 50, point_count: 1, 'point_0/position': point } });
-    assert.match(file(), /^growth = SubResource\("[^"]+"\)$/m);
-    assert.match(file(), /^_limits = \[0\.0, 50\.0, 0\.0, 1\.0\]$/m);
-    const grown = parseTextContent(
-      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
-    );
-    // In the inspector's names, which the write took, rather than the _limits and _data it stores.
-    const growth = {
-      _type: 'Curve',
-      max_value: 50,
-      point_count: 1,
-      'point_0/position': point,
-      'point_0/right_tangent': 0,
-      'point_0/right_mode': 0,
-    };
-    assert.deepEqual(get(grown, 'properties', 'growth'), growth, JSON.stringify(grown));
-    await written({ growth: { _type: 'Curve' } });
-    await written({ growth: get(grown, 'properties', 'growth') });
-    assert.deepEqual(
-      get(
-        parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' })),
-        'properties',
-        'growth',
-      ),
-      growth,
-      'and what was read writes back as it was',
-    );
-    const withDefaults = parseTextContent(
-      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres', includeDefaults: true }),
-    );
-    assert.deepEqual(
-      [
-        get(withDefaults, 'properties', 'growth', 'min_value'),
-        get(withDefaults, 'properties', 'growth', 'bake_resolution'),
-      ],
-      [0, 100],
-      `includeDefaults reaches into the Curve the file builds in: ${JSON.stringify(withDefaults)}`,
-    );
-    // So is a Curve read as a file of its own.
-    writeFileSync(
-      join(project, 'ease.tres'),
-      '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(1, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
-    );
-    assert.deepEqual(
-      get(
-        parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://ease.tres' })),
-        'properties',
-      ),
-      {
-        point_count: 2,
-        'point_0/position': { x: 0, y: 0, _type: 'Vector2' },
-        'point_0/right_tangent': 0,
-        'point_0/right_mode': 0,
-        'point_1/position': { x: 1, y: 1, _type: 'Vector2' },
-        'point_1/left_tangent': 0,
-        'point_1/left_mode': 0,
-      },
-      'a Curve file reads in the names a write takes',
-    );
-    rmSync(join(project, 'ease.tres'));
-    // What else a write changed is answered in those names too, and a point added changes only the
-    // list the file stores them in.
-    writeFileSync(
-      join(project, 'ramp.tres'),
-      '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
-    );
-    const pointAdded = await request('resource_edit', {
-      op: 'modify',
-      resourcePath: 'res://ramp.tres',
-      properties: { point_count: 3, 'point_2/position': { x: 1, y: 0.2 } },
-    });
-    assert.deepEqual(
-      [
-        get(parseTextContent(pointAdded), 'alsoChanged'),
-        readFileSync(join(project, 'ramp.tres'), 'utf8').split('[resource]\n')[1],
-      ],
-      [
-        undefined,
-        '_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.2), 0.0, 0.0, 0, 0]\npoint_count = 3\n',
-      ],
-      textOf(pointAdded) ?? JSON.stringify(pointAdded),
-    );
-    rmSync(join(project, 'ramp.tres'));
-    // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
-    // The check after the save compares the one set with the one the file loads, two objects that
-    // each hold themselves, which only a script can make: this one's setter links the ring to
-    // itself.
-    writeFileSync(join(project, 'link.gd'), 'extends Resource\n\n@export var next: Resource\n');
-    writeFileSync(
-      join(project, 'ring.gd'),
-      'extends Resource\n\n@export var label: String = "":\n\tset(value):\n\t\tlabel = value\n\t\tnext = self\n' +
-        '@export var next: Resource\n',
-    );
-    writeFileSync(
-      join(project, 'chain.tres'),
-      '[gd_resource type="Resource" load_steps=2 format=3]\n\n' +
-        '[ext_resource type="Script" path="res://link.gd" id="1_link"]\n\n' +
-        '[resource]\nscript = ExtResource("1_link")\n',
-    );
-    const ringed = await request('resource_edit', {
-      op: 'modify',
-      resourcePath: 'res://chain.tres',
-      properties: { next: { _type: 'Resource', script: 'res://ring.gd', label: 'ring' } },
-    });
-    assert.ok(parseTextContent(ringed) !== null, textOf(ringed) ?? JSON.stringify(ringed));
-    const chain = readFileSync(join(project, 'chain.tres'), 'utf8');
-    const ring = /^\[sub_resource type="Resource" id="([^"]+)"\]$/m.exec(chain)?.[1];
-    assert.ok(ring, chain);
-    assert.equal(chain.split(`next = SubResource("${ring}")`).length, 3, chain);
-
-    // Only a file resource with a script that declares a class names one. ItemData is below.
-    assert.deepEqual(get(grown, 'properties', 'icon'), {
-      path: 'res://icon.svg',
-      class: 'CompressedTexture2D',
-      _type: 'Resource',
-    });
-
-    // A refused value on a node whose script declares a class_name says only what was wrong with
-    // the value. The check for a script that does not compile compiled a copy of it, and a copy of
-    // a script with a class_name hides the global class the original declares, so every such
-    // script was said not to compile.
-    writeFileSync(
-      join(project, 'player.gd'),
-      'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n' +
-        '@export var pack: Array[ItemData]\n@export var named: Dictionary[String, ItemData]\n' +
-        '@export var mates: Array[Node]\n@export_enum("Day", "Night") var shift: String = "Day"\n' +
-        '@export var lives: int = 3:\n\tset(value):\n\t\tlives = clampi(value, 0, 9)\n',
-    );
-    writeFileSync(
-      join(project, 'hero.tscn'),
-      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1_player"]\n\n' +
-        '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n\n' +
-        '[node name="Buddy" type="Node2D" parent="."]\n',
-    );
-    const classes = await request('project_import', { op: 'refresh_classes' });
-    assert.match(
-      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
-      /"class": &"Player"/,
-      textOf(classes) ?? JSON.stringify(classes),
-    );
-    const hero = { scenePath: 'res://hero.tscn', nodePath: '.', op: 'set' };
-    assert.equal(
-      textOf(await request('scene_node', { ...hero, properties: { speed: 'fast' } })),
-      'Player.speed is float and the value given is String, which cannot become one. Setting it would save a different value than the one asked for.',
-    );
-    const fast = await request('scene_node', { ...hero, properties: { speed: 300 } });
-    assert.ok(parseTextContent(fast) !== null, textOf(fast) ?? JSON.stringify(fast));
-    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^speed = 300\.0$/m);
-
-    // An engine enum is written in scripts by its class's constant, which the hint does not give.
-    const floating = await request('scene_node', {
-      ...hero,
-      properties: { motion_mode: 'MOTION_MODE_FLOATING' },
-    });
-    assert.ok(parseTextContent(floating) !== null, textOf(floating) ?? JSON.stringify(floating));
-    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^motion_mode = 1$/m);
-    const glowing = await request('scene_node', {
-      ...hero,
-      properties: { material: { _type: 'CanvasItemMaterial', blend_mode: 'BLEND_MODE_ADD' } },
-    });
-    assert.ok(parseTextContent(glowing) !== null, textOf(glowing) ?? JSON.stringify(glowing));
-    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^blend_mode = 1$/m);
-    // A global enum's constants belong to no class, and VERTICAL_ALIGNMENT_BOTTOM was refused.
-    const bottom = await request('scene_node', {
-      scenePath: 'res://hero.tscn',
-      op: 'add',
-      nodeType: 'Label',
-      nodeName: 'Words',
-      properties: { vertical_alignment: 'VERTICAL_ALIGNMENT_BOTTOM' },
-    });
-    assert.ok(parseTextContent(bottom) !== null, textOf(bottom) ?? JSON.stringify(bottom));
-    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^vertical_alignment = 2$/m);
-    // In a project that makes untyped declarations errors, as strict games do, the line compiled to
-    // read the constant has to pass them too: HORIZONTAL_ALIGNMENT_CENTER was refused there.
-    const unstrict = readFileSync(join(project, 'project.godot'), 'utf8');
-    writeFileSync(
-      join(project, 'project.godot'),
-      `${unstrict}\n[debug]\n\ngdscript/warnings/untyped_declaration=2\ngdscript/warnings/inferred_declaration=2\n`,
-    );
-    const centred = await request('scene_node', {
-      scenePath: 'res://hero.tscn',
-      op: 'add',
-      nodeType: 'Label',
-      nodeName: 'Centred',
-      properties: { horizontal_alignment: 'HORIZONTAL_ALIGNMENT_CENTER' },
-    });
-    writeFileSync(join(project, 'project.godot'), unstrict);
-    assert.ok(parseTextContent(centred) !== null, textOf(centred) ?? JSON.stringify(centred));
-    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^horizontal_alignment = 1$/m);
-    await request('scene_node', { ...hero, op: 'delete', nodePath: 'Centred' });
-    assert.equal(
-      textOf(
-        await request('scene_node', {
-          ...hero,
-          nodePath: 'Words',
-          properties: { vertical_alignment: 'VERTICAL_ALIGNMENT_BOTOM' },
-        }),
-      ),
-      'Label.vertical_alignment is an enum, and VERTICAL_ALIGNMENT_BOTOM is none of its values: send Top (0), Center (1), Bottom (2), Fill (3) by name or by number.',
-    );
-    await request('scene_node', { ...hero, op: 'delete', nodePath: 'Words' });
-    assert.equal(
-      textOf(await request('scene_node', { ...hero, properties: { motion_mode: 'MOTION_MODE_FLYING' } })),
-      "Player.motion_mode is an enum, and MOTION_MODE_FLYING is none of its values: send Grounded (0), Floating (1) by name, by number or by the engine's constant, such as MOTION_MODE_GROUNDED. The nearest are MOTION_MODE_FLOATING, MOTION_MODE_GROUNDED.",
-    );
-    // A file resource says the class its script declares, which its own class, Resource, does not.
-    const held = parseTextContent(
-      await request('scene_node', { ...hero, properties: { item: 'res://sword.tres' } }),
-    );
-    assert.deepEqual(get(held, 'properties', 'item'), {
-      path: 'res://sword.tres',
-      class: 'Resource',
-      _type: 'Resource',
-      scriptClass: 'ItemData',
-    });
-
-    // A typed list or map of a script's class, and a list of nodes, on a node of a loaded scene,
-    // which holds an untyped list as empty. Each item may be a path, and a built one may name its
-    // script's class as its _type.
-    const packed = await request('scene_node', {
-      ...hero,
-      properties: {
-        pack: ['res://sword.tres', { _type: 'ItemData', title: 'Shield' }],
-        named: {
-          best: 'res://sword.tres',
-          spare: { _type: 'Resource', script: 'res://item_data.gd', title: 'Spare' },
-        },
-        mates: ['Buddy'],
-      },
-    });
-    assert.ok(parseTextContent(packed) !== null, textOf(packed) ?? JSON.stringify(packed));
-    const heroListed = readFileSync(join(project, 'hero.tscn'), 'utf8');
-    for (const line of [
-      /^pack = Array\[ExtResource\("[^"]+"\)\]\(\[ExtResource\("[^"]+"\), SubResource\("[^"]+"\)\]\)$/m,
-      /^named = Dictionary\[String, ExtResource\("[^"]+"\)\]\(\{\n"best": ExtResource\("[^"]+"\),\n"spare": SubResource\("[^"]+"\)\n\}\)$/m,
-      /^mates = \[NodePath\("Buddy"\)\]$/m,
-      /node_paths=PackedStringArray\("mates"\)/,
-      /^title = "Shield"$/m,
-      /^title = "Spare"$/m,
-    ]) {
-      assert.match(heroListed, line);
-    }
-    for (const [properties, refusal] of [
-      [{ pack: [{ _type: 'Curve' }] }, 'Player.pack holds ItemData, and item 0 of the list given is Curve.'],
-      [
-        { pack: ['res://nothing.tres'] },
-        "No resource at res://nothing.tres for item 0 of pack. The project's .tres files are res://bare.tres, res://chain.tres, res://default_bus_layout.tres, res://glow.tres, res://note.tres, res://sword.tres.",
-      ],
-      [{ named: { best: 'sword' } }, 'named["best"] takes a res:// or uid:// path, not sword'],
-      [{ mates: ['Nobody'] }, 'item 0 of mates names Nobody, and there is no node at that path from Hero.'],
-    ] as const) {
-      assert.equal(textOf(await request('scene_node', { ...hero, properties })), refusal);
-    }
-    assert.equal(
-      readFileSync(join(project, 'hero.tscn'), 'utf8'),
-      heroListed,
-      'and the refusals change nothing',
-    );
-    const night = parseTextContent(
-      await request('scene_node', { ...hero, properties: { shift: 'Evening' } }),
-    );
-    assert.deepEqual(get(night, 'outsideDeclared'), {
-      shift:
-        '"Evening" is none of the names shift lists: Day, Night, which the inspector holds it to. The engine stores it as given.',
-    });
-    const lived = textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })) ?? '';
-    const blocker = `editor_launch opens no editor here yet: the gdharness editor addon is not installed in ${project}.`;
-    assert.ok(lived.includes(blocker), lived);
-    assert.equal(
-      lived.split(blocker)[0],
-      "Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written. res://player.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game. An editor runs none and would have saved the value given. Open the project's editor (editor_launch with hidden: true) and ask again: the write then goes through it, and the editor runs no script that is not a tool.",
-    );
-
-    // A bus renamed takes its sends and the scenes naming it along, and a script naming it in a
-    // string is named. A player left on a bus the layout lacks says so instead of reading as Master.
-    const settings = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
-      await request('project_settings', args);
-    writeFileSync(join(project, 'jukebox.gd'), 'extends Node\n\nconst BUS := "Music"\n');
-    // Written by hand on a checkout with Windows line ends, with the bus as a plain string, both of
-    // which a scene loads as it would the engine's own spelling.
-    writeFileSync(
-      join(project, 'crlf.tscn'),
-      '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = "Music"\r\n',
-    );
-    await settings({ op: 'add_audio_bus', busName: 'Drums', parentBusIndex: 1 });
-    const renamed = parseTextContent(
-      await settings({ op: 'rename_audio_bus', busName: 'Music', newBusName: 'Score' }),
-    );
-    assert.deepEqual(get(renamed, 'renamed'), { from: 'Music', to: 'Score' }, JSON.stringify(renamed));
-    assert.deepEqual(get(renamed, 'resent'), ['Drums'], JSON.stringify(renamed));
-    assert.match(
-      readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'),
-      /^bus\/2\/send = &"Score"$/m,
-    );
-    assert.deepEqual(
-      get(renamed, 'rewritten'),
-      [
-        { file: 'res://crlf.tscn', lines: [4] },
-        { file: 'res://speaker.tscn', lines: [6] },
-      ],
-      JSON.stringify(renamed),
-    );
-    assert.equal(
-      readFileSync(join(project, 'crlf.tscn'), 'utf8'),
-      '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = &"Score"\r\n',
-    );
-    assert.deepEqual(
-      get(renamed, 'namedInScripts'),
-      [{ file: 'res://jukebox.gd', line: 3, text: 'const BUS := "Music"' }],
-      JSON.stringify(renamed),
-    );
-    assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Score"$/m);
-    assert.doesNotMatch(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /&"Music"/);
-    assert.match(
-      readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'),
-      /^bus\/1\/name = &"Score"$/m,
-    );
-    const kept = parseTextContent(
-      await request('scene_node', { op: 'get', scenePath: 'res://speaker.tscn', nodePath: 'BusMusic' }),
-    );
-    assert.equal(get(kept, 'properties', 'bus'), 'Score', JSON.stringify(kept));
-    assert.equal(get(kept, 'busNote'), undefined, JSON.stringify(kept));
-    for (const [args, said] of [
-      [
-        { busName: 'Master', newBusName: 'Main' },
-        'Master is the bus every other ends in, which the editor keeps under its name.',
-      ],
-      [{ busName: 'Score', newBusName: 'Master' }, 'A bus named Master already exists, at index 0'],
-      [{ busName: 'Musik', newBusName: 'Tunes' }, 'No bus named Musik. The buses are Master, Score, Drums.'],
-    ] as const) {
-      assert.equal(textOf(await settings({ op: 'rename_audio_bus', ...args })), said, JSON.stringify(args));
-    }
-
-    writeFileSync(
-      join(project, 'lost.tscn'),
-      '[gd_scene format=3]\n\n[node name="Lost" type="AudioStreamPlayer2D"]\nbus = &"Gone"\n',
-    );
-    const lost = parseTextContent(
-      await request('scene_node', { op: 'get', scenePath: 'res://lost.tscn', nodePath: '.' }),
-    );
-    assert.equal(get(lost, 'properties', 'bus'), 'Gone', JSON.stringify(lost));
-    assert.equal(
-      get(lost, 'busNote'),
-      "Lost names the bus Gone, which the project's bus layout does not have, so it plays on Master. The buses are Master, Score, Drums.",
-      JSON.stringify(lost),
-    );
-
-    // A send goes only to a bus before it.
-    const send = async (busIndex: number, sendTo: string): Promise<JsonRpcMessage> =>
-      await settings({ op: 'set_audio_bus_send', busIndex, sendTo });
-    for (const [busIndex, sendTo, said] of [
-      [
-        1,
-        'Drums',
-        'Score is bus 1 and Drums is bus 2: a bus sends only to one before it, which keeps sound from going round in a loop, so Score can send to Master.',
-      ],
-      [2, 'Drums', 'Drums cannot send to itself. It can send to Master, Score.'],
-      [2, 'Nope', 'No bus named Nope. The buses are Master, Score, Drums.'],
-      [0, 'Score', 'Master sends nowhere: it is the bus every other ends in.'],
-      [9, 'Master', 'No bus at index 9. The buses are 0 Master, 1 Score, 2 Drums.'],
-    ] as const) {
-      assert.equal(textOf(await send(busIndex, sendTo)), said, `${busIndex} to ${sendTo}`);
-    }
-    const sent = parseTextContent(await send(2, 'Master'));
-    assert.equal(get(sent, 'bus', 'send'), 'Master', JSON.stringify(sent));
-    assert.match(
-      readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'),
-      /^bus\/2\/send = &"Master"$/m,
-    );
+    const fixture: DeclaredValuesFixture = { request, modify, written, refused, file, project };
+    await declaredEnumsNumbersAndRanges(fixture);
+    await declaredPicturesAndShaderParameters(fixture);
+    const grown = await declaredResourcesBuiltIntoAFile(fixture);
+    const hero = await declaredClassNamesOnNodesAndResources(fixture, grown);
+    await declaredTypedListsOnNodesOfALoadedScene(fixture, hero);
+    await declaredBusesRenamedAndResent(fixture);
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
   }
+}
+
+/** What the declared values case shares once the engine is up. */
+interface DeclaredValuesFixture {
+  request: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  modify: (properties: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  written: (properties: Record<string, unknown>) => Promise<unknown>;
+  refused: (properties: Record<string, unknown>) => Promise<string>;
+  file: () => string;
+  project: string;
+}
+
+/** An enum by the name of a value or its number, text refused for a number, and values past a range. */
+async function declaredEnumsNumbersAndRanges(fixture: DeclaredValuesFixture): Promise<void> {
+  const { written, refused, file } = fixture;
+  // An enum by the name of a value, as written and in another case, and by its number.
+  const potion = await written({ kind: 'POTION' });
+  assert.deepEqual(
+    get(potion, 'properties'),
+    { kind: 2 },
+    `the answer has what the engine kept: ${JSON.stringify(potion)}`,
+  );
+  assert.match(file(), /^kind = 2$/m, file());
+  await written({ kind: 'shield' });
+  assert.match(file(), /^kind = 1$/m, file());
+  const unknown = await refused({ kind: 'AXE' });
+  assert.match(
+    unknown,
+    /ItemData\.kind is an enum, and AXE is none of its values: send SWORD \(0\), SHIELD \(1\), POTION \(2\) by name or by number\.$/m,
+    unknown,
+  );
+  const misspelt = await refused({ kind: 'SHIELDS' });
+  assert.match(misspelt, /by name or by number\. The nearest is SHIELD\./, misspelt);
+  assert.match(file(), /^kind = 1$/m, 'a refused name leaves the file as it was');
+  const beyond = await written({ kind: 7 });
+  assert.deepEqual(
+    get(beyond, 'outsideDeclared'),
+    { kind: '7 is none of the values kind declares: SWORD (0), SHIELD (1), POTION (2).' },
+    JSON.stringify(beyond),
+  );
+  assert.match(file(), /^kind = 7$/m, 'a number outside the enum is still written as given');
+
+  // A number for text is refused rather than saved as the text of a double.
+  const listed = await refused({ tags: [1, 2] });
+  assert.match(
+    listed,
+    /ItemData\.tags is Array and item 0 of the list given is a number, not String\. Send text as a JSON string, "1", with no quote marks inside it\. Setting it would save a different value/,
+    listed,
+  );
+  const titled = await refused({ title: 5 });
+  assert.match(
+    titled,
+    /ItemData\.title is String and the value given is a number, which cannot become one\. Send text as a JSON string, "5", with no quote marks inside it\./,
+    titled,
+  );
+  await written({ tags: ['1', '2'] });
+  assert.match(file(), /^tags = Array\[String\]\(\["1", "2"\]\)$/m, file());
+
+  // A refusal of one of several says the others were not written either, and they were not.
+  const together = await refused({ title: 'Sword', kind: 'AXE' });
+  assert.match(together, / None of the 2 properties given was written\.$/m, together);
+  assert.doesNotMatch(file(), /^title = /m, file());
+  assert.doesNotMatch(
+    await refused({ kind: 'AXE' }),
+    /None of the/,
+    'one property refused alone says nothing of others',
+  );
+
+  // Past a range closed on that side is named. Past one open on it, or inside it, is not.
+  const ranged = await written({ rarity: 12, level: 40 });
+  assert.deepEqual(
+    get(ranged, 'outsideDeclared'),
+    {
+      rarity:
+        '12 is outside the range rarity declares, 0 to 10, which the inspector holds it to. The engine stores it as given.',
+    },
+    JSON.stringify(ranged),
+  );
+  assert.match(file(), /^rarity = 12$/m, file());
+  assert.equal(get(await written({ rarity: 4 }), 'outsideDeclared'), undefined);
+  // The inspector also rounds to a range's step, offers only the files a filter takes, and shows
+  // no alpha for a colour declared without one.
+  const besides = await written({
+    reach: 0.3,
+    art_path: 'res://sound.wav',
+    tint: { r: 1, g: 0.5, b: 0, a: 0.5 },
+  });
+  assert.deepEqual(
+    get(besides, 'outsideDeclared'),
+    {
+      reach:
+        '0.3 is not a step of 0.5 from 0, as reach declares, which the inspector rounds it to. The engine stores it as given.',
+      art_path:
+        '"res://sound.wav" is none of the files art_path takes, *.png, *.jpg, which the inspector\'s file dialog holds it to. The engine stores it as given.',
+      tint: 'tint is declared with no alpha, so the inspector neither shows nor sets one, and the colour given has alpha 0.5. The engine stores it as given.',
+    },
+    JSON.stringify(besides),
+  );
+  assert.equal(
+    get(
+      await written({ reach: 7.5, art_path: 'res://Art.PNG', tint: { r: 1, g: 0.5, b: 0, a: 1 } }),
+      'outsideDeclared',
+    ),
+    undefined,
+    'a step, a matching file and an opaque colour are noted for nothing',
+  );
+}
+
+/** A picture never imported is told apart from one that is not there, and a shader's parameters are its uniforms. */
+async function declaredPicturesAndShaderParameters(fixture: DeclaredValuesFixture): Promise<void> {
+  const { request, written, refused, file, project } = fixture;
+  // A picture that is there and never imported is told apart from one that is not there, and the
+  // remedy given makes the write go through.
+  const raw = await refused({ icon: 'res://icon.svg' });
+  assert.match(
+    raw,
+    /res:\/\/icon\.svg is there, but it has never been imported, so the engine has no resource to load from it for icon\. project_import reimport with resourcePath res:\/\/icon\.svg imports it\./,
+    raw,
+  );
+  assert.match(await refused({ icon: 'res://nowhere.svg' }), /No resource at res:\/\/nowhere\.svg for icon/);
+  const imported = await request('project_import', { op: 'reimport', resourcePath: 'res://icon.svg' });
+  assert.ok(existsSync(join(project, 'icon.svg.import')), textOf(imported) ?? JSON.stringify(imported));
+  await written({ icon: 'res://icon.svg' });
+  assert.match(file(), /path="res:\/\/icon\.svg"/, file());
+
+  const read = parseTextContent(
+    await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
+  );
+  assert.deepEqual(
+    [get(read, 'resourceType'), get(read, 'scriptClass'), get(read, 'script')],
+    ['Resource', 'ItemData', 'res://item_data.gd'],
+    JSON.stringify(read),
+  );
+
+  // A ShaderMaterial's parameters are its shader's uniforms, so a name the shader does not
+  // declare is the shader's lack, and the refusal had said the material had no such property.
+  writeFileSync(
+    join(project, 'glow.gdshader'),
+    'shader_type canvas_item;\n\nuniform float glow_power : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
+  );
+  const material = async (
+    resourcePath: string,
+    properties: Record<string, unknown>,
+  ): Promise<JsonRpcMessage> => await request('resource_edit', { op: 'modify', resourcePath, properties });
+  for (const [resourcePath, shader] of [
+    ['res://glow.tres', { shader: 'res://glow.gdshader' }],
+    ['res://bare.tres', {}],
+  ] as const) {
+    const created = await request('resource_edit', {
+      op: 'create',
+      resourcePath,
+      resourceType: 'ShaderMaterial',
+      properties: shader,
+    });
+    assert.ok(parseTextContent(created) !== null, textOf(created) ?? JSON.stringify(created));
+  }
+  assert.equal(
+    textOf(await material('res://glow.tres', { 'shader_parameter/glow_powr': 1.5 })),
+    'res://glow.gdshader declares no uniform glow_powr, which shader_parameter/glow_powr would set. The nearest it has is glow_power.',
+  );
+  assert.equal(
+    textOf(await material('res://glow.tres', { 'shader_parameter/speed': 1.5 })),
+    'res://glow.gdshader declares no uniform speed, which shader_parameter/speed would set. It has glow_power, tint.',
+  );
+  assert.equal(
+    textOf(await material('res://bare.tres', { 'shader_parameter/glow_power': 1.5 })),
+    'The ShaderMaterial has no shader, so it has no parameter glow_power yet. Set shader first.',
+  );
+  const lit = await material('res://glow.tres', { 'shader_parameter/glow_power': 1.5 });
+  assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
+  assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
+  assert.equal(get(parseTextContent(lit), 'alsoSaved'), undefined, textOf(lit) ?? '');
+  // The engine loads only the uniforms the shader declares, so a renamed one's value is in the
+  // file and nowhere else, and the next save drops it.
+  writeFileSync(
+    join(project, 'glow.gdshader'),
+    'shader_type canvas_item;\n\nuniform float glow_strength : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
+  );
+  const stale = parseTextContent(
+    await request('resource_edit', { op: 'read', resourcePath: 'res://glow.tres' }),
+  );
+  assert.deepEqual(get(stale, 'notLoaded'), ['shader_parameter/glow_power'], JSON.stringify(stale));
+  // A uniform's bare name was refused as a property the class lacks, with the class's list to
+  // read, which holds no shader parameter.
+  assert.equal(
+    textOf(await material('res://glow.tres', { tint: { _type: 'Color', r: 1, g: 0, b: 0, a: 1 } })),
+    'ShaderMaterial has no property tint. Its shader declares the uniform tint, which shader_parameter/tint sets.',
+  );
+  // A string's later lines are not lines the file sets, though one can read like one.
+  writeFileSync(
+    join(project, 'note.tres'),
+    '[gd_resource type="Resource" format=3]\n\n[resource]\nresource_name = "first \\"\nhidden = 1"\n',
+  );
+  const note = parseTextContent(
+    await request('resource_edit', { op: 'read', resourcePath: 'res://note.tres' }),
+  );
+  assert.deepEqual(
+    [get(note, 'notLoaded'), get(note, 'properties', 'resource_name')],
+    [undefined, 'first "\nhidden = 1'],
+    JSON.stringify(note),
+  );
+  const tinted = await material('res://glow.tres', {
+    'shader_parameter/tint': { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
+  });
+  assert.deepEqual(
+    get(parseTextContent(tinted), 'alsoSaved'),
+    [{ property: 'shader_parameter/glow_power', was: '1.5' }],
+    textOf(tinted) ?? JSON.stringify(tinted),
+  );
+  assert.match(
+    readFileSync(join(project, 'glow.tres'), 'utf8'),
+    /^shader_parameter\/tint = Color\(1, 0, 0, 1\)$/m,
+  );
+}
+
+/** A resource built into a file is a new object each time the file loads. */
+async function declaredResourcesBuiltIntoAFile(fixture: DeclaredValuesFixture): Promise<unknown> {
+  const { request, written, file, project } = fixture;
+  // A resource built into a file is a new object each time the file loads, and the check that a
+  // save kept what was set compared objects, so every one written into a resource file was
+  // refused as a property the file does not keep.
+  const point = { _type: 'Vector2', x: 0.5, y: 20 };
+  await written({ growth: { _type: 'Curve', max_value: 50, point_count: 1, 'point_0/position': point } });
+  assert.match(file(), /^growth = SubResource\("[^"]+"\)$/m);
+  assert.match(file(), /^_limits = \[0\.0, 50\.0, 0\.0, 1\.0\]$/m);
+  const grown = parseTextContent(
+    await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' }),
+  );
+  // In the inspector's names, which the write took, rather than the _limits and _data it stores.
+  const growth = {
+    _type: 'Curve',
+    max_value: 50,
+    point_count: 1,
+    'point_0/position': point,
+    'point_0/right_tangent': 0,
+    'point_0/right_mode': 0,
+  };
+  assert.deepEqual(get(grown, 'properties', 'growth'), growth, JSON.stringify(grown));
+  await written({ growth: { _type: 'Curve' } });
+  await written({ growth: get(grown, 'properties', 'growth') });
+  assert.deepEqual(
+    get(
+      parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres' })),
+      'properties',
+      'growth',
+    ),
+    growth,
+    'and what was read writes back as it was',
+  );
+  const withDefaults = parseTextContent(
+    await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres', includeDefaults: true }),
+  );
+  assert.deepEqual(
+    [
+      get(withDefaults, 'properties', 'growth', 'min_value'),
+      get(withDefaults, 'properties', 'growth', 'bake_resolution'),
+    ],
+    [0, 100],
+    `includeDefaults reaches into the Curve the file builds in: ${JSON.stringify(withDefaults)}`,
+  );
+  // So is a Curve read as a file of its own.
+  writeFileSync(
+    join(project, 'ease.tres'),
+    '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(1, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
+  );
+  assert.deepEqual(
+    get(
+      parseTextContent(await request('resource_edit', { op: 'read', resourcePath: 'res://ease.tres' })),
+      'properties',
+    ),
+    {
+      point_count: 2,
+      'point_0/position': { x: 0, y: 0, _type: 'Vector2' },
+      'point_0/right_tangent': 0,
+      'point_0/right_mode': 0,
+      'point_1/position': { x: 1, y: 1, _type: 'Vector2' },
+      'point_1/left_tangent': 0,
+      'point_1/left_mode': 0,
+    },
+    'a Curve file reads in the names a write takes',
+  );
+  rmSync(join(project, 'ease.tres'));
+  // What else a write changed is answered in those names too, and a point added changes only the
+  // list the file stores them in.
+  writeFileSync(
+    join(project, 'ramp.tres'),
+    '[gd_resource type="Curve" format=3]\n\n[resource]\n_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0]\npoint_count = 2\n',
+  );
+  const pointAdded = await request('resource_edit', {
+    op: 'modify',
+    resourcePath: 'res://ramp.tres',
+    properties: { point_count: 3, 'point_2/position': { x: 1, y: 0.2 } },
+  });
+  assert.deepEqual(
+    [
+      get(parseTextContent(pointAdded), 'alsoChanged'),
+      readFileSync(join(project, 'ramp.tres'), 'utf8').split('[resource]\n')[1],
+    ],
+    [
+      undefined,
+      '_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(0.5, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.2), 0.0, 0.0, 0, 0]\npoint_count = 3\n',
+    ],
+    textOf(pointAdded) ?? JSON.stringify(pointAdded),
+  );
+  rmSync(join(project, 'ramp.tres'));
+  // Comparing built-in resources by what they hold meets one that holds itself, and has to end.
+  // The check after the save compares the one set with the one the file loads, two objects that
+  // each hold themselves, which only a script can make: this one's setter links the ring to
+  // itself.
+  writeFileSync(join(project, 'link.gd'), 'extends Resource\n\n@export var next: Resource\n');
+  writeFileSync(
+    join(project, 'ring.gd'),
+    'extends Resource\n\n@export var label: String = "":\n\tset(value):\n\t\tlabel = value\n\t\tnext = self\n' +
+      '@export var next: Resource\n',
+  );
+  writeFileSync(
+    join(project, 'chain.tres'),
+    '[gd_resource type="Resource" load_steps=2 format=3]\n\n' +
+      '[ext_resource type="Script" path="res://link.gd" id="1_link"]\n\n' +
+      '[resource]\nscript = ExtResource("1_link")\n',
+  );
+  const ringed = await request('resource_edit', {
+    op: 'modify',
+    resourcePath: 'res://chain.tres',
+    properties: { next: { _type: 'Resource', script: 'res://ring.gd', label: 'ring' } },
+  });
+  assert.ok(parseTextContent(ringed) !== null, textOf(ringed) ?? JSON.stringify(ringed));
+  const chain = readFileSync(join(project, 'chain.tres'), 'utf8');
+  const ring = /^\[sub_resource type="Resource" id="([^"]+)"\]$/m.exec(chain)?.[1];
+  assert.ok(ring, chain);
+  assert.equal(chain.split(`next = SubResource("${ring}")`).length, 3, chain);
+
+  return grown;
+}
+
+/** Only a file resource with a script that declares a class names one, and an engine enum is written by its class's constant. */
+async function declaredClassNamesOnNodesAndResources(
+  fixture: DeclaredValuesFixture,
+  grown: unknown,
+): Promise<{ scenePath: string; nodePath: string; op: string }> {
+  const { request, project } = fixture;
+  // Only a file resource with a script that declares a class names one. ItemData is below.
+  assert.deepEqual(get(grown, 'properties', 'icon'), {
+    path: 'res://icon.svg',
+    class: 'CompressedTexture2D',
+    _type: 'Resource',
+  });
+
+  // A refused value on a node whose script declares a class_name says only what was wrong with
+  // the value. The check for a script that does not compile compiled a copy of it, and a copy of
+  // a script with a class_name hides the global class the original declares, so every such
+  // script was said not to compile.
+  writeFileSync(
+    join(project, 'player.gd'),
+    'class_name Player\nextends CharacterBody2D\n\n@export var speed: float = 120.0\n@export var item: Resource\n' +
+      '@export var pack: Array[ItemData]\n@export var named: Dictionary[String, ItemData]\n' +
+      '@export var mates: Array[Node]\n@export_enum("Day", "Night") var shift: String = "Day"\n' +
+      '@export var lives: int = 3:\n\tset(value):\n\t\tlives = clampi(value, 0, 9)\n',
+  );
+  writeFileSync(
+    join(project, 'hero.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1_player"]\n\n' +
+      '[node name="Hero" type="CharacterBody2D"]\nscript = ExtResource("1_player")\n\n' +
+      '[node name="Buddy" type="Node2D" parent="."]\n',
+  );
+  const classes = await request('project_import', { op: 'refresh_classes' });
+  assert.match(
+    readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+    /"class": &"Player"/,
+    textOf(classes) ?? JSON.stringify(classes),
+  );
+  const hero = { scenePath: 'res://hero.tscn', nodePath: '.', op: 'set' };
+  assert.equal(
+    textOf(await request('scene_node', { ...hero, properties: { speed: 'fast' } })),
+    'Player.speed is float and the value given is String, which cannot become one. Setting it would save a different value than the one asked for.',
+  );
+  const fast = await request('scene_node', { ...hero, properties: { speed: 300 } });
+  assert.ok(parseTextContent(fast) !== null, textOf(fast) ?? JSON.stringify(fast));
+  assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^speed = 300\.0$/m);
+
+  // An engine enum is written in scripts by its class's constant, which the hint does not give.
+  const floating = await request('scene_node', {
+    ...hero,
+    properties: { motion_mode: 'MOTION_MODE_FLOATING' },
+  });
+  assert.ok(parseTextContent(floating) !== null, textOf(floating) ?? JSON.stringify(floating));
+  assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^motion_mode = 1$/m);
+  const glowing = await request('scene_node', {
+    ...hero,
+    properties: { material: { _type: 'CanvasItemMaterial', blend_mode: 'BLEND_MODE_ADD' } },
+  });
+  assert.ok(parseTextContent(glowing) !== null, textOf(glowing) ?? JSON.stringify(glowing));
+  assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^blend_mode = 1$/m);
+  // A global enum's constants belong to no class, and VERTICAL_ALIGNMENT_BOTTOM was refused.
+  const bottom = await request('scene_node', {
+    scenePath: 'res://hero.tscn',
+    op: 'add',
+    nodeType: 'Label',
+    nodeName: 'Words',
+    properties: { vertical_alignment: 'VERTICAL_ALIGNMENT_BOTTOM' },
+  });
+  assert.ok(parseTextContent(bottom) !== null, textOf(bottom) ?? JSON.stringify(bottom));
+  assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^vertical_alignment = 2$/m);
+  // In a project that makes untyped declarations errors, as strict games do, the line compiled to
+  // read the constant has to pass them too: HORIZONTAL_ALIGNMENT_CENTER was refused there.
+  const unstrict = readFileSync(join(project, 'project.godot'), 'utf8');
+  writeFileSync(
+    join(project, 'project.godot'),
+    `${unstrict}\n[debug]\n\ngdscript/warnings/untyped_declaration=2\ngdscript/warnings/inferred_declaration=2\n`,
+  );
+  const centred = await request('scene_node', {
+    scenePath: 'res://hero.tscn',
+    op: 'add',
+    nodeType: 'Label',
+    nodeName: 'Centred',
+    properties: { horizontal_alignment: 'HORIZONTAL_ALIGNMENT_CENTER' },
+  });
+  writeFileSync(join(project, 'project.godot'), unstrict);
+  assert.ok(parseTextContent(centred) !== null, textOf(centred) ?? JSON.stringify(centred));
+  assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^horizontal_alignment = 1$/m);
+  await request('scene_node', { ...hero, op: 'delete', nodePath: 'Centred' });
+  assert.equal(
+    textOf(
+      await request('scene_node', {
+        ...hero,
+        nodePath: 'Words',
+        properties: { vertical_alignment: 'VERTICAL_ALIGNMENT_BOTOM' },
+      }),
+    ),
+    'Label.vertical_alignment is an enum, and VERTICAL_ALIGNMENT_BOTOM is none of its values: send Top (0), Center (1), Bottom (2), Fill (3) by name or by number.',
+  );
+  await request('scene_node', { ...hero, op: 'delete', nodePath: 'Words' });
+  assert.equal(
+    textOf(await request('scene_node', { ...hero, properties: { motion_mode: 'MOTION_MODE_FLYING' } })),
+    "Player.motion_mode is an enum, and MOTION_MODE_FLYING is none of its values: send Grounded (0), Floating (1) by name, by number or by the engine's constant, such as MOTION_MODE_GROUNDED. The nearest are MOTION_MODE_FLOATING, MOTION_MODE_GROUNDED.",
+  );
+  // A file resource says the class its script declares, which its own class, Resource, does not.
+  const held = parseTextContent(
+    await request('scene_node', { ...hero, properties: { item: 'res://sword.tres' } }),
+  );
+  assert.deepEqual(get(held, 'properties', 'item'), {
+    path: 'res://sword.tres',
+    class: 'Resource',
+    _type: 'Resource',
+    scriptClass: 'ItemData',
+  });
+
+  return hero;
+}
+
+/** A typed list or map of a script's class, and a list of nodes, on a node of a loaded scene. */
+async function declaredTypedListsOnNodesOfALoadedScene(
+  fixture: DeclaredValuesFixture,
+  hero: { scenePath: string; nodePath: string; op: string },
+): Promise<void> {
+  const { request, project } = fixture;
+  // A typed list or map of a script's class, and a list of nodes, on a node of a loaded scene,
+  // which holds an untyped list as empty. Each item may be a path, and a built one may name its
+  // script's class as its _type.
+  const packed = await request('scene_node', {
+    ...hero,
+    properties: {
+      pack: ['res://sword.tres', { _type: 'ItemData', title: 'Shield' }],
+      named: {
+        best: 'res://sword.tres',
+        spare: { _type: 'Resource', script: 'res://item_data.gd', title: 'Spare' },
+      },
+      mates: ['Buddy'],
+    },
+  });
+  assert.ok(parseTextContent(packed) !== null, textOf(packed) ?? JSON.stringify(packed));
+  const heroListed = readFileSync(join(project, 'hero.tscn'), 'utf8');
+  for (const line of [
+    /^pack = Array\[ExtResource\("[^"]+"\)\]\(\[ExtResource\("[^"]+"\), SubResource\("[^"]+"\)\]\)$/m,
+    /^named = Dictionary\[String, ExtResource\("[^"]+"\)\]\(\{\n"best": ExtResource\("[^"]+"\),\n"spare": SubResource\("[^"]+"\)\n\}\)$/m,
+    /^mates = \[NodePath\("Buddy"\)\]$/m,
+    /node_paths=PackedStringArray\("mates"\)/,
+    /^title = "Shield"$/m,
+    /^title = "Spare"$/m,
+  ]) {
+    assert.match(heroListed, line);
+  }
+  for (const [properties, refusal] of [
+    [{ pack: [{ _type: 'Curve' }] }, 'Player.pack holds ItemData, and item 0 of the list given is Curve.'],
+    [
+      { pack: ['res://nothing.tres'] },
+      "No resource at res://nothing.tres for item 0 of pack. The project's .tres files are res://bare.tres, res://chain.tres, res://default_bus_layout.tres, res://glow.tres, res://note.tres, res://sword.tres.",
+    ],
+    [{ named: { best: 'sword' } }, 'named["best"] takes a res:// or uid:// path, not sword'],
+    [{ mates: ['Nobody'] }, 'item 0 of mates names Nobody, and there is no node at that path from Hero.'],
+  ] as const) {
+    assert.equal(textOf(await request('scene_node', { ...hero, properties })), refusal);
+  }
+  assert.equal(
+    readFileSync(join(project, 'hero.tscn'), 'utf8'),
+    heroListed,
+    'and the refusals change nothing',
+  );
+  const night = parseTextContent(await request('scene_node', { ...hero, properties: { shift: 'Evening' } }));
+  assert.deepEqual(get(night, 'outsideDeclared'), {
+    shift:
+      '"Evening" is none of the names shift lists: Day, Night, which the inspector holds it to. The engine stores it as given.',
+  });
+  const lived = textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })) ?? '';
+  const blocker = `editor_launch opens no editor here yet: the gdharness editor addon is not installed in ${project}.`;
+  assert.ok(lived.includes(blocker), lived);
+  assert.equal(
+    lived.split(blocker)[0],
+    "Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written. res://player.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game. An editor runs none and would have saved the value given. Open the project's editor (editor_launch with hidden: true) and ask again: the write then goes through it, and the editor runs no script that is not a tool.",
+  );
+}
+
+/** A bus renamed takes its sends and the scenes naming it along, and a send goes only to a bus before it. */
+async function declaredBusesRenamedAndResent(fixture: DeclaredValuesFixture): Promise<void> {
+  const { request, project } = fixture;
+  // A bus renamed takes its sends and the scenes naming it along, and a script naming it in a
+  // string is named. A player left on a bus the layout lacks says so instead of reading as Master.
+  const settings = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await request('project_settings', args);
+  writeFileSync(join(project, 'jukebox.gd'), 'extends Node\n\nconst BUS := "Music"\n');
+  // Written by hand on a checkout with Windows line ends, with the bus as a plain string, both of
+  // which a scene loads as it would the engine's own spelling.
+  writeFileSync(
+    join(project, 'crlf.tscn'),
+    '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = "Music"\r\n',
+  );
+  await settings({ op: 'add_audio_bus', busName: 'Drums', parentBusIndex: 1 });
+  const renamed = parseTextContent(
+    await settings({ op: 'rename_audio_bus', busName: 'Music', newBusName: 'Score' }),
+  );
+  assert.deepEqual(get(renamed, 'renamed'), { from: 'Music', to: 'Score' }, JSON.stringify(renamed));
+  assert.deepEqual(get(renamed, 'resent'), ['Drums'], JSON.stringify(renamed));
+  assert.match(readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'), /^bus\/2\/send = &"Score"$/m);
+  assert.deepEqual(
+    get(renamed, 'rewritten'),
+    [
+      { file: 'res://crlf.tscn', lines: [4] },
+      { file: 'res://speaker.tscn', lines: [6] },
+    ],
+    JSON.stringify(renamed),
+  );
+  assert.equal(
+    readFileSync(join(project, 'crlf.tscn'), 'utf8'),
+    '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = &"Score"\r\n',
+  );
+  assert.deepEqual(
+    get(renamed, 'namedInScripts'),
+    [{ file: 'res://jukebox.gd', line: 3, text: 'const BUS := "Music"' }],
+    JSON.stringify(renamed),
+  );
+  assert.match(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /^bus = &"Score"$/m);
+  assert.doesNotMatch(readFileSync(join(project, 'speaker.tscn'), 'utf8'), /&"Music"/);
+  assert.match(readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'), /^bus\/1\/name = &"Score"$/m);
+  const kept = parseTextContent(
+    await request('scene_node', { op: 'get', scenePath: 'res://speaker.tscn', nodePath: 'BusMusic' }),
+  );
+  assert.equal(get(kept, 'properties', 'bus'), 'Score', JSON.stringify(kept));
+  assert.equal(get(kept, 'busNote'), undefined, JSON.stringify(kept));
+  for (const [args, said] of [
+    [
+      { busName: 'Master', newBusName: 'Main' },
+      'Master is the bus every other ends in, which the editor keeps under its name.',
+    ],
+    [{ busName: 'Score', newBusName: 'Master' }, 'A bus named Master already exists, at index 0'],
+    [{ busName: 'Musik', newBusName: 'Tunes' }, 'No bus named Musik. The buses are Master, Score, Drums.'],
+  ] as const) {
+    assert.equal(textOf(await settings({ op: 'rename_audio_bus', ...args })), said, JSON.stringify(args));
+  }
+
+  writeFileSync(
+    join(project, 'lost.tscn'),
+    '[gd_scene format=3]\n\n[node name="Lost" type="AudioStreamPlayer2D"]\nbus = &"Gone"\n',
+  );
+  const lost = parseTextContent(
+    await request('scene_node', { op: 'get', scenePath: 'res://lost.tscn', nodePath: '.' }),
+  );
+  assert.equal(get(lost, 'properties', 'bus'), 'Gone', JSON.stringify(lost));
+  assert.equal(
+    get(lost, 'busNote'),
+    "Lost names the bus Gone, which the project's bus layout does not have, so it plays on Master. The buses are Master, Score, Drums.",
+    JSON.stringify(lost),
+  );
+
+  // A send goes only to a bus before it.
+  const send = async (busIndex: number, sendTo: string): Promise<JsonRpcMessage> =>
+    await settings({ op: 'set_audio_bus_send', busIndex, sendTo });
+  for (const [busIndex, sendTo, said] of [
+    [
+      1,
+      'Drums',
+      'Score is bus 1 and Drums is bus 2: a bus sends only to one before it, which keeps sound from going round in a loop, so Score can send to Master.',
+    ],
+    [2, 'Drums', 'Drums cannot send to itself. It can send to Master, Score.'],
+    [2, 'Nope', 'No bus named Nope. The buses are Master, Score, Drums.'],
+    [0, 'Score', 'Master sends nowhere: it is the bus every other ends in.'],
+    [9, 'Master', 'No bus at index 9. The buses are 0 Master, 1 Score, 2 Drums.'],
+  ] as const) {
+    assert.equal(textOf(await send(busIndex, sendTo)), said, `${busIndex} to ${sendTo}`);
+  }
+  const sent = parseTextContent(await send(2, 'Master'));
+  assert.equal(get(sent, 'bus', 'send'), 'Master', JSON.stringify(sent));
+  assert.match(readFileSync(join(project, 'default_bus_layout.tres'), 'utf8'), /^bus\/2\/send = &"Master"$/m);
 }
 
 /**
@@ -75562,6 +75823,28 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
   let step = 0;
   const told: string[] = [];
   let editor: WebSocket | null = null;
+  /** The editor's answer to files_moved, or null after it sent the busy answer itself. */
+  const answerFilesMoved = (socket: WebSocket, id: unknown): Record<string, unknown> | null => {
+    const busy = busyFor > 0 || Date.now() < busyUntil;
+    told.push(busy ? 'busy' : 'done');
+    if (!busy) {
+      return { retargetedTabs: [], reloadedScenes: ['res://stage.tscn'], unsavedScenes: [] };
+    }
+    busyFor -= 1;
+    step += moving ? 1 : 0;
+    socket.send(
+      JSON.stringify({
+        type: 'tool_result',
+        id,
+        success: false,
+        busy: true,
+        busyWith: 'running its task "Registering global classes"',
+        progress: `Registering global classes...\nGdhMany${String(step)}`,
+        error: 'The editor is running its task "Registering global classes", so files_moved was not run.',
+      }),
+    );
+    return null;
+  };
   try {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
@@ -75582,26 +75865,11 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
       if (tool === 'scan_status') {
         result = { scanning: false, importing: false, pending: false };
       } else if (tool === 'files_moved') {
-        const busy = busyFor > 0 || Date.now() < busyUntil;
-        told.push(busy ? 'busy' : 'done');
-        if (busy) {
-          busyFor -= 1;
-          step += moving ? 1 : 0;
-          socket.send(
-            JSON.stringify({
-              type: 'tool_result',
-              id: message['id'],
-              success: false,
-              busy: true,
-              busyWith: 'running its task "Registering global classes"',
-              progress: `Registering global classes...\nGdhMany${String(step)}`,
-              error:
-                'The editor is running its task "Registering global classes", so files_moved was not run.',
-            }),
-          );
+        const answered = answerFilesMoved(socket, message['id']);
+        if (answered === null) {
           return;
         }
-        result = { retargetedTabs: [], reloadedScenes: ['res://stage.tscn'], unsavedScenes: [] };
+        result = answered;
       }
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -76152,6 +76420,20 @@ async function testARescanWaitsOutTheEditorsImport(): Promise<void> {
     let busyUntil = 0;
     let beginsOnTheNextAsk = false;
     const scans = { started: 0, askedWhileBusy: 0 };
+    /** The answer to a scan asked for: refused while the editor imports, started otherwise. */
+    const answerAScanAsked = (): Record<string, unknown> => {
+      if (beginsOnTheNextAsk) {
+        beginsOnTheNextAsk = false;
+        busyUntil = Date.now() + 400;
+      }
+      const busy = Date.now() < busyUntil;
+      if (busy) {
+        scans.askedWhileBusy += 1;
+      } else {
+        scans.started += 1;
+      }
+      return { ok: true, started: !busy, scanning: false, importing: busy, pending: false };
+    };
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -76161,17 +76443,7 @@ async function testARescanWaitsOutTheEditorsImport(): Promise<void> {
       const args = isRecord(message['args']) ? message['args'] : {};
       let result: Record<string, unknown> = { ok: true, classes: [] };
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        if (beginsOnTheNextAsk) {
-          beginsOnTheNextAsk = false;
-          busyUntil = Date.now() + 400;
-        }
-        const busy = Date.now() < busyUntil;
-        if (busy) {
-          scans.askedWhileBusy += 1;
-        } else {
-          scans.started += 1;
-        }
-        result = { ok: true, started: !busy, scanning: false, importing: busy, pending: false };
+        result = answerAScanAsked();
       } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
         result = { ok: true, scanning: false, importing: Date.now() < busyUntil, pending: false };
       }
@@ -76440,13 +76712,11 @@ async function testARescanCountsNoSlowAnswerAsScanning(): Promise<void> {
       }
       return { scanning: scan !== null, importing: false, scansCompleted: completed };
     };
-    socket.on('message', (raw: Buffer) => {
-      const message: unknown = JSON.parse(String(raw));
-      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
-        return;
-      }
-      const tool = String(message['tool']);
-      const args = isRecord(message['args']) ? message['args'] : {};
+    /** The answer to one call and how long the editor holds it back. */
+    const answerAfterADelay = (
+      tool: string,
+      args: Record<string, unknown>,
+    ): { result: Record<string, unknown>; after: number } => {
       let result: Record<string, unknown> = { ok: true, classes: [] };
       let after = 0;
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
@@ -76464,6 +76734,16 @@ async function testARescanCountsNoSlowAnswerAsScanning(): Promise<void> {
           after = SLOW_MS;
         }
       }
+      return { result, after };
+    };
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      const { result, after } = answerAfterADelay(tool, args);
       setTimeout(() => {
         socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
       }, after);
@@ -77003,50 +77283,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       if (tool === 'reload_script') {
         const scriptPath = String(args['scriptPath']);
         reloadsAskedFor.push(scriptPath);
-        const refused = scriptPath === 'res://uses.gd';
-        const uncompiled = {
-          ok: true,
-          failed: 43,
-          failedAs: 'Parse error',
-          restored: true,
-          heldBefore: ['run_once'],
-          methods: ['run_once'],
-          heldConstantsBefore: ['MAX'],
-          constants: ['MAX'],
-        };
-        socket.send(
-          JSON.stringify(
-            refused
-              ? {
-                  type: 'tool_result',
-                  id: message['id'],
-                  success: false,
-                  error: 'the fixture editor refused it',
-                }
-              : {
-                  type: 'tool_result',
-                  id: message['id'],
-                  success: true,
-                  // base.gd refused as asked for without res://, the spelling reloadScript also takes.
-                  // And one in another case than the file, answered under the spelling on disk as
-                  // the editor addon answers it.
-                  result:
-                    scriptPath === 'res://refuses.gd' || scriptPath === 'base.gd'
-                      ? uncompiled
-                      : scriptPath === 'res://Planned_Test.gd'
-                        ? { ok: true, script: 'res://planned_test.gd', methods: ['run_once'] }
-                        : scriptPath === 'res://grown.gd'
-                          ? {
-                              ok: true,
-                              heldBefore: ['run_once'],
-                              methods: ['run_once', 'sell'],
-                              heldConstantsBefore: ['Effect.SPENDS', 'MAX'],
-                              constants: ['Effect.SPENDS', 'Effect.RESALE_GROWS', 'MAX'],
-                            }
-                          : { ok: true, methods: [] },
-                },
-          ),
-        );
+        socket.send(JSON.stringify(reloadScriptReply(scriptPath, message['id'])));
         return;
       }
       // Nothing held behind its file, as the editor addon answers for scripts it compiled from disk.
@@ -77340,6 +77577,41 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
   }
 }
 
+/** The fixture editor's answer to reload_script: refused, uncompiled, under the spelling on disk, grown or empty. */
+function reloadScriptReply(scriptPath: string, id: unknown): Record<string, unknown> {
+  const uncompiled = {
+    ok: true,
+    failed: 43,
+    failedAs: 'Parse error',
+    restored: true,
+    heldBefore: ['run_once'],
+    methods: ['run_once'],
+    heldConstantsBefore: ['MAX'],
+    constants: ['MAX'],
+  };
+  if (scriptPath === 'res://uses.gd') {
+    return { type: 'tool_result', id, success: false, error: 'the fixture editor refused it' };
+  }
+  // base.gd refused as asked for without res://, the spelling reloadScript also takes.
+  // And one in another case than the file, answered under the spelling on disk as
+  // the editor addon answers it.
+  let result: Record<string, unknown> = { ok: true, methods: [] };
+  if (scriptPath === 'res://refuses.gd' || scriptPath === 'base.gd') {
+    result = uncompiled;
+  } else if (scriptPath === 'res://Planned_Test.gd') {
+    result = { ok: true, script: 'res://planned_test.gd', methods: ['run_once'] };
+  } else if (scriptPath === 'res://grown.gd') {
+    result = {
+      ok: true,
+      heldBefore: ['run_once'],
+      methods: ['run_once', 'sell'],
+      heldConstantsBefore: ['Effect.SPENDS', 'MAX'],
+      constants: ['Effect.SPENDS', 'Effect.RESALE_GROWS', 'MAX'],
+    };
+  }
+  return { type: 'tool_result', id, success: true, result };
+}
+
 /**
  * A script that fails to compile against a class the editor holds behind its file has that class
  * reloaded first, and is tried again.
@@ -77394,6 +77666,62 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     let behindRefused = false;
     const reloadsAskedFor: string[] = [];
     const behindAskedOf: string[][] = [];
+    /** The answer to a reload of one script, which the manifest's own reload ends the wait on. */
+    const answerAReload = (scriptPath: string): Record<string, unknown> => {
+      reloadsAskedFor.push(scriptPath);
+      if (scriptPath === 'res://kit/manifest.gd') {
+        manifestBehind = false;
+        return {
+          ok: true,
+          script: scriptPath,
+          heldBefore: [],
+          methods: ['who_of'],
+          heldConstantsBefore: [],
+          constants: ['REFUSED'],
+        };
+      }
+      if (manifestBehind || loaderBroken) {
+        return {
+          ok: true,
+          script: scriptPath,
+          failed: 43,
+          failedAs: 'Parse error',
+          restored: true,
+          heldBefore: ['_ready'],
+          methods: ['_ready'],
+          heldConstantsBefore: [],
+          constants: [],
+        };
+      }
+      return { ok: true, script: scriptPath, heldBefore: ['_ready'], methods: ['_ready'] };
+    };
+    /** The answer to one call. A scan brings the menu class in and writes the cache from the list. */
+    const answerACall = (tool: string, args: Record<string, unknown>): Record<string, unknown> => {
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        holds = ['ToolManifest', 'ToolMenu'];
+        writeFileSync(
+          cache,
+          `list=[${entry('ToolManifest', 'res://kit/manifest.gd')}, ${entry('ToolMenu', 'res://kit/menu.gd')}]\n`,
+        );
+        return { ok: true, scanning: false, importing: false, pending: false };
+      }
+      if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        return { ok: true, scanning: false, importing: false, pending: false };
+      }
+      if (tool === 'scripts_behind') {
+        const asked = asArray(args['scriptPaths']).map(String);
+        behindAskedOf.push(asked);
+        return {
+          ok: true,
+          behind: manifestBehind ? asked.filter((path) => path === 'res://kit/manifest.gd') : [],
+          unsavedInEditor: [],
+        };
+      }
+      if (tool === 'reload_script') {
+        return answerAReload(String(args['scriptPath']));
+      }
+      return { ok: true, classes: holds };
+    };
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -77401,55 +77729,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
       }
       const tool = String(message['tool']);
       const args = isRecord(message['args']) ? message['args'] : {};
-      let result: Record<string, unknown>;
-      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        holds = ['ToolManifest', 'ToolMenu'];
-        writeFileSync(
-          cache,
-          `list=[${entry('ToolManifest', 'res://kit/manifest.gd')}, ${entry('ToolMenu', 'res://kit/menu.gd')}]\n`,
-        );
-        result = { ok: true, scanning: false, importing: false, pending: false };
-      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
-        result = { ok: true, scanning: false, importing: false, pending: false };
-      } else if (tool === 'scripts_behind') {
-        const asked = asArray(args['scriptPaths']).map(String);
-        behindAskedOf.push(asked);
-        result = {
-          ok: true,
-          behind: manifestBehind ? asked.filter((path) => path === 'res://kit/manifest.gd') : [],
-          unsavedInEditor: [],
-        };
-      } else if (tool === 'reload_script') {
-        const scriptPath = String(args['scriptPath']);
-        reloadsAskedFor.push(scriptPath);
-        if (scriptPath === 'res://kit/manifest.gd') {
-          manifestBehind = false;
-          result = {
-            ok: true,
-            script: scriptPath,
-            heldBefore: [],
-            methods: ['who_of'],
-            heldConstantsBefore: [],
-            constants: ['REFUSED'],
-          };
-        } else if (manifestBehind || loaderBroken) {
-          result = {
-            ok: true,
-            script: scriptPath,
-            failed: 43,
-            failedAs: 'Parse error',
-            restored: true,
-            heldBefore: ['_ready'],
-            methods: ['_ready'],
-            heldConstantsBefore: [],
-            constants: [],
-          };
-        } else {
-          result = { ok: true, script: scriptPath, heldBefore: ['_ready'], methods: ['_ready'] };
-        }
-      } else {
-        result = { ok: true, classes: holds };
-      }
+      const result = answerACall(tool, args);
       if (tool === 'scripts_behind' && behindRefused) {
         socket.send(
           JSON.stringify({
@@ -77799,6 +78079,58 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
         answerHeld();
       }
     };
+    /** How to answer a call that is no scan asked for. */
+    const respondToAnotherCall = (
+      tool: string,
+      args: Record<string, unknown>,
+      answer: (result: Record<string, unknown>) => void,
+    ): (() => void) => {
+      if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        return () => {
+          answer({ ok: true, scanning: false, importing: false, scansCompleted: completed });
+        };
+      }
+      if (tool === 'global_classes') {
+        return () => {
+          answer({ ok: true, classes: holds });
+        };
+      }
+      return () => {
+        if (tool === 'reload_script') {
+          reloadsAskedFor.push(String(args['scriptPath']));
+        }
+        answer({ ok: true, methods: [] });
+      };
+    };
+    /** Counts a scan asked for and returns how to answer it, or null after holding the answer for the import it begins. */
+    const respondToAScanAsked = (answer: (result: Record<string, unknown>) => void): (() => void) | null => {
+      startsAskedFor += 1;
+      const before = completed;
+      completed += 1;
+      const respond = (): void => {
+        answer({
+          ok: true,
+          started: true,
+          scanning: false,
+          importing: false,
+          scansCompletedBefore: before,
+          scansCompleted: before + 1,
+        });
+      };
+      const found = imports;
+      imports = null;
+      if (found === null) {
+        return respond;
+      }
+      importing = true;
+      held.push(respond);
+      if (Number.isFinite(found.ms)) {
+        setTimeout(() => {
+          finishImport(found.classes);
+        }, found.ms);
+      }
+      return null;
+    };
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -77811,46 +78143,13 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
       };
       let respond: () => void;
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        startsAskedFor += 1;
-        const before = completed;
-        completed += 1;
-        respond = () => {
-          answer({
-            ok: true,
-            started: true,
-            scanning: false,
-            importing: false,
-            scansCompletedBefore: before,
-            scansCompleted: before + 1,
-          });
-        };
-        const found = imports;
-        imports = null;
-        if (found !== null) {
-          importing = true;
-          held.push(respond);
-          if (Number.isFinite(found.ms)) {
-            setTimeout(() => {
-              finishImport(found.classes);
-            }, found.ms);
-          }
+        const scanRespond = respondToAScanAsked(answer);
+        if (scanRespond === null) {
           return;
         }
-      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
-        respond = () => {
-          answer({ ok: true, scanning: false, importing: false, scansCompleted: completed });
-        };
-      } else if (tool === 'global_classes') {
-        respond = () => {
-          answer({ ok: true, classes: holds });
-        };
+        respond = scanRespond;
       } else {
-        respond = () => {
-          if (tool === 'reload_script') {
-            reloadsAskedFor.push(String(args['scriptPath']));
-          }
-          answer({ ok: true, methods: [] });
-        };
+        respond = respondToAnotherCall(tool, args, answer);
       }
       if (importing) {
         held.push(respond);
@@ -78214,6 +78513,21 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
 
         // The editor holds Hero alone, so a scan writes a cache without Missing.
         const holds = ['Hero'];
+        /** The answer to one call: a scan writes the cache from what the editor holds. */
+        const answerAsAnEditorHoldingHeroAlone = (
+          tool: string,
+          args: Record<string, unknown>,
+        ): Record<string, unknown> => {
+          if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+            const entries = holds.map(
+              (name) => `{\n"class": &"${name}",\n"path": "res://${name.toLowerCase()}.gd"\n}`,
+            );
+            writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
+          }
+          return tool === 'rescan_filesystem'
+            ? { ok: true, scanning: false, importing: false, pending: false }
+            : { ok: true, classes: holds };
+        };
         const dialIn = async (server: ServerProcess, port: number, editorPid: number): Promise<void> => {
           const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
           sockets.push(socket);
@@ -78230,16 +78544,7 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
             }
             const tool = String(message['tool']);
             const args = isRecord(message['args']) ? message['args'] : {};
-            if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-              const entries = holds.map(
-                (name) => `{\n"class": &"${name}",\n"path": "res://${name.toLowerCase()}.gd"\n}`,
-              );
-              writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
-            }
-            const result =
-              tool === 'rescan_filesystem'
-                ? { ok: true, scanning: false, importing: false, pending: false }
-                : { ok: true, classes: holds };
+            const result = answerAsAnEditorHoldingHeroAlone(tool, args);
             socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
           });
           socket.send(JSON.stringify(greeting(project, { editor_pid: editorPid })));
@@ -81016,218 +81321,238 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     );
     assert.deepEqual(asArray(get(at(shallow, 'Pet'), 'children')), [], 'depth 1 stops at the root children');
 
-    const panel = parseTextContent(
-      await call('resource_edit', { op: 'read', resourcePath: 'res://panel.tres' }),
-    );
-    assert.equal(get(panel, 'resourceType'), 'StyleBoxFlat', JSON.stringify(panel));
-    assert.deepEqual(Object.keys(asObject(get(panel, 'properties'))).toSorted(), [
-      'bg_color',
-      'corner_radius_top_left',
-    ]);
-    assert.match(text(get(panel, 'readBy')), /headless engine/);
-    assert.deepEqual(
-      answerKeys(panel),
-      ['properties', 'readBy', 'resourcePath', 'resourceType'],
-      JSON.stringify(panel),
-    );
-
-    // The engine's JSON writer sorts keys unless told not to, so a map came back in another order
-    // than the file and the game keep it in.
-    const ledger = parseTextContent(
-      await call('resource_edit', { op: 'read', resourcePath: 'res://ledger.tres' }),
-    );
-    const entries = get(asObject(get(ledger, 'properties')), 'entries');
-    assert.deepEqual(Object.keys(asObject(entries)), ['zeta', 'alpha', 'mid'], JSON.stringify(ledger));
-
-    // Each read handed the other's file says which one reads it, where the scene read printed the
-    // loader's error and the resource read answered a scene's packed bundle as its properties.
-    const notAScene = textOf(await call('scene_tree', { scenePath: 'res://panel.tres' })) ?? '';
-    assert.match(
-      notAScene,
-      /res:\/\/panel\.tres is a StyleBoxFlat, not a scene: resource_edit read/,
-      notAScene,
-    );
-    assert.doesNotMatch(notAScene, /No loader found/, notAScene);
-    const notAResource =
-      textOf(await call('resource_edit', { op: 'read', resourcePath: 'world.tscn' })) ?? '';
-    assert.match(notAResource, /res:\/\/world\.tscn is a scene: scene_tree reads its nodes/, notAResource);
-    // A property given for a scene is one of its nodes', where the PackedScene has none to set.
-    const world = readFileSync(join(project, 'world.tscn'), 'utf8');
-    const notModified =
-      textOf(
-        await call('resource_edit', {
-          op: 'modify',
-          resourcePath: 'world.tscn',
-          properties: { visible: false },
-        }),
-      ) ?? '';
-    assert.equal(
-      notModified,
-      'res://world.tscn is a scene: scene_node set changes one node\'s properties, the root\'s at nodePath ".".',
-      notModified,
-    );
-    assert.equal(readFileSync(join(project, 'world.tscn'), 'utf8'), world, 'the scene is left as it was');
-
-    // The player's own script would write init_ran.txt when made.
-    const animations = parseTextContent(
-      await call('scene_animation', { op: 'read', scenePath: 'moves.tscn', playerNodePath: 'Anim' }),
-    );
-    assert.deepEqual(
-      asArray(get(animations, 'animations')).map(
-        (entry) =>
-          `${text(get(entry, 'animationName'))} ${String(get(entry, 'length'))} ${String(get(entry, 'tracks'))}`,
-      ),
-      ['idle 1 0', 'jump 0.5 1'],
-      JSON.stringify(animations),
-    );
-    assert.match(text(get(animations, 'readBy')), /headless engine, since no editor serves this project/);
-    assert.deepEqual(answerKeys(animations), ['animations', 'readBy'], JSON.stringify(animations));
-    const jump = parseTextContent(
-      await call('scene_animation', {
-        op: 'read',
-        scenePath: 'res://moves.tscn',
-        playerNodePath: 'Anim',
-        animationName: 'jump',
-      }),
-    );
-    assert.deepEqual(
-      get(jump, 'tracks'),
-      [
-        {
-          type: 'property',
-          nodePath: 'Sprite',
-          property: 'position',
-          update: 'continuous',
-          interpolation: 'cubic',
-          loopWrap: false,
-          keyframes: [
-            { time: 0, value: { x: 0, y: 0, _type: 'Vector2' } },
-            { time: 0.5, value: { x: 0, y: -40, _type: 'Vector2' } },
-          ],
-        },
-      ],
-      JSON.stringify(jump),
-    );
-    assert.deepEqual(
-      answerKeys(jump),
-      ['animationName', 'length', 'loopMode', 'readBy', 'step', 'tracks'],
-      JSON.stringify(jump),
-    );
-    // Laid through the instance, as scene_tree lays it.
-    const instanced = parseTextContent(
-      await call('scene_animation', { op: 'read', scenePath: 'stage.tscn', playerNodePath: 'Pet/Anim' }),
-    );
-    assert.deepEqual(
-      asArray(get(instanced, 'animations')).map((entry) => get(entry, 'animationName')),
-      ['idle', 'jump'],
-      JSON.stringify(instanced),
-    );
-    const noRun =
-      textOf(
-        await call('scene_animation', {
-          op: 'read',
-          scenePath: 'moves.tscn',
-          playerNodePath: 'Anim',
-          animationName: 'run',
-        }),
-      ) ?? '';
-    assert.match(noRun, /Anim has no animation run\. It has: idle, jump\./, noRun);
-    const notAPlayer =
-      textOf(
-        await call('scene_animation', { op: 'read', scenePath: 'moves.tscn', playerNodePath: 'Sprite' }),
-      ) ?? '';
-    assert.match(notAPlayer, /AnimationPlayer not found at: Sprite/, notAPlayer);
-    const machine = parseTextContent(
-      await call('scene_animation', { op: 'read_states', scenePath: 'moves.tscn', animTreePath: 'Tree' }),
-    );
-    assert.deepEqual(
-      asArray(get(machine, 'states'))
-        .filter((state) => get(state, 'animationName') !== undefined)
-        .map((state) => `${text(get(state, 'stateName'))} plays ${text(get(state, 'animationName'))}`),
-      ['idle plays idle', 'jump plays jump'],
-      JSON.stringify(machine),
-    );
-    assert.deepEqual(
-      get(machine, 'transitions'),
-      [
-        {
-          from: 'idle',
-          to: 'jump',
-          transitionType: 'immediate',
-          advanceMode: 'auto',
-          advanceCondition: 'jumped',
-        },
-        {
-          from: 'jump',
-          to: 'idle',
-          transitionType: 'immediate',
-          advanceMode: 'enabled',
-          advanceCondition: 'landed',
-          conditionNote:
-            'advanceMode is enabled, so landed never advances it: the engine checks a condition only on an auto transition, and travel() still takes this one. disconnect_states and connect_states again with the condition write it as auto',
-        },
-      ],
-      JSON.stringify(machine),
-    );
-    assert.deepEqual(answerKeys(machine), ['readBy', 'states', 'transitions'], JSON.stringify(machine));
-    const noMachine =
-      textOf(
-        await call('scene_animation', {
-          op: 'read_states',
-          scenePath: 'moves.tscn',
-          animTreePath: 'Tree',
-          stateMachinePath: 'ground',
-        }),
-      ) ?? '';
-    assert.match(
-      noMachine,
-      /The root state machine has no state ground\. Its states are: idle, jump\./,
-      noMachine,
-    );
-    assert.ok(!existsSync(join(project, 'init_ran.txt')), 'reading the animations ran the player script');
-
-    // A resource kept inside a file, by the path a read answers a property holding one with.
-    const kept = parseTextContent(
-      await call('resource_edit', { op: 'read', resourcePath: 'res://moves.tscn::Animation_jump' }),
-    );
-    assert.equal(get(kept, 'resourceType'), 'Animation', JSON.stringify(kept));
-    assert.equal(get(kept, 'resourcePath'), 'res://moves.tscn::Animation_jump', JSON.stringify(kept));
-    assert.equal(get(kept, 'properties', 'length'), 0.5, JSON.stringify(kept));
-    const transition = parseTextContent(
-      await call('resource_edit', {
-        op: 'read',
-        resourcePath: 'moves.tscn::AnimationNodeStateMachineTransition_up',
-      }),
-    );
-    assert.equal(get(transition, 'properties', 'advance_condition'), 'jumped', JSON.stringify(transition));
-    // stage.tscn holds moves.tscn, whose ids are moves.tscn's own and not stage.tscn's.
-    const elsewhere =
-      textOf(await call('resource_edit', { op: 'read', resourcePath: 'res://stage.tscn::Animation_jump' })) ??
-      '';
-    assert.match(elsewhere, /res:\/\/stage\.tscn keeps no resource with the id Animation_jump/, elsewhere);
-    const notAFile = textOf(await call('scene_tree', { scenePath: 'moves.tscn::Animation_jump' })) ?? '';
-    assert.match(
-      notAFile,
-      /names the resource Animation_jump kept inside moves\.tscn, not a file\. resource_edit read reads one/,
-      notAFile,
-    );
-
-    const missing = textOf(await call('scene_tree', { scenePath: 'res://nope.tscn' })) ?? '';
-    assert.match(missing, /Scene not found: res:\/\/nope\.tscn/, missing);
-    const misplaced = textOf(await call('scene_tree', { scenePath: 'res://scenes/moves.tscn' })) ?? '';
-    assert.match(
-      misplaced,
-      /^Scene not found: res:\/\/scenes\/moves\.tscn\. The nearest \.tscn file is res:\/\/moves\.tscn\./,
-      `a scene asked for in the wrong folder names where it is: ${misplaced}`,
-    );
-    const outside =
-      textOf(await call('resource_edit', { op: 'read', resourcePath: '../elsewhere.tres' })) ?? '';
-    assert.match(outside, /outside|inside the project/i, outside);
+    const fixture: ReadFromTheFileFixture = { call, project, answerKeys };
+    await resourcesReadWithNoEditorAndTheOtherKindRefused(fixture);
+    await animationsAndKeptResourcesReadWithNoEditor(fixture);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
     rmSync(runtimeDir, { recursive: true, force: true });
   }
+}
+
+/** What the read-from-the-file case shares once the engine is up. */
+interface ReadFromTheFileFixture {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  project: string;
+  answerKeys: (answer: unknown) => string[];
+}
+
+/** A resource read from its file, a map kept in its order, and each read refusing the other's file. */
+async function resourcesReadWithNoEditorAndTheOtherKindRefused(
+  fixture: ReadFromTheFileFixture,
+): Promise<void> {
+  const { call, project, answerKeys } = fixture;
+  const panel = parseTextContent(
+    await call('resource_edit', { op: 'read', resourcePath: 'res://panel.tres' }),
+  );
+  assert.equal(get(panel, 'resourceType'), 'StyleBoxFlat', JSON.stringify(panel));
+  assert.deepEqual(Object.keys(asObject(get(panel, 'properties'))).toSorted(), [
+    'bg_color',
+    'corner_radius_top_left',
+  ]);
+  assert.match(text(get(panel, 'readBy')), /headless engine/);
+  assert.deepEqual(
+    answerKeys(panel),
+    ['properties', 'readBy', 'resourcePath', 'resourceType'],
+    JSON.stringify(panel),
+  );
+
+  // The engine's JSON writer sorts keys unless told not to, so a map came back in another order
+  // than the file and the game keep it in.
+  const ledger = parseTextContent(
+    await call('resource_edit', { op: 'read', resourcePath: 'res://ledger.tres' }),
+  );
+  const entries = get(asObject(get(ledger, 'properties')), 'entries');
+  assert.deepEqual(Object.keys(asObject(entries)), ['zeta', 'alpha', 'mid'], JSON.stringify(ledger));
+
+  // Each read handed the other's file says which one reads it, where the scene read printed the
+  // loader's error and the resource read answered a scene's packed bundle as its properties.
+  const notAScene = textOf(await call('scene_tree', { scenePath: 'res://panel.tres' })) ?? '';
+  assert.match(
+    notAScene,
+    /res:\/\/panel\.tres is a StyleBoxFlat, not a scene: resource_edit read/,
+    notAScene,
+  );
+  assert.doesNotMatch(notAScene, /No loader found/, notAScene);
+  const notAResource = textOf(await call('resource_edit', { op: 'read', resourcePath: 'world.tscn' })) ?? '';
+  assert.match(notAResource, /res:\/\/world\.tscn is a scene: scene_tree reads its nodes/, notAResource);
+  // A property given for a scene is one of its nodes', where the PackedScene has none to set.
+  const world = readFileSync(join(project, 'world.tscn'), 'utf8');
+  const notModified =
+    textOf(
+      await call('resource_edit', {
+        op: 'modify',
+        resourcePath: 'world.tscn',
+        properties: { visible: false },
+      }),
+    ) ?? '';
+  assert.equal(
+    notModified,
+    'res://world.tscn is a scene: scene_node set changes one node\'s properties, the root\'s at nodePath ".".',
+    notModified,
+  );
+  assert.equal(readFileSync(join(project, 'world.tscn'), 'utf8'), world, 'the scene is left as it was');
+}
+
+/** Animations, state machines and resources kept inside a file, read from the file, and the refusals of a wrong path. */
+async function animationsAndKeptResourcesReadWithNoEditor(fixture: ReadFromTheFileFixture): Promise<void> {
+  const { call, project, answerKeys } = fixture;
+  // The player's own script would write init_ran.txt when made.
+  const animations = parseTextContent(
+    await call('scene_animation', { op: 'read', scenePath: 'moves.tscn', playerNodePath: 'Anim' }),
+  );
+  assert.deepEqual(
+    asArray(get(animations, 'animations')).map(
+      (entry) =>
+        `${text(get(entry, 'animationName'))} ${String(get(entry, 'length'))} ${String(get(entry, 'tracks'))}`,
+    ),
+    ['idle 1 0', 'jump 0.5 1'],
+    JSON.stringify(animations),
+  );
+  assert.match(text(get(animations, 'readBy')), /headless engine, since no editor serves this project/);
+  assert.deepEqual(answerKeys(animations), ['animations', 'readBy'], JSON.stringify(animations));
+  const jump = parseTextContent(
+    await call('scene_animation', {
+      op: 'read',
+      scenePath: 'res://moves.tscn',
+      playerNodePath: 'Anim',
+      animationName: 'jump',
+    }),
+  );
+  assert.deepEqual(
+    get(jump, 'tracks'),
+    [
+      {
+        type: 'property',
+        nodePath: 'Sprite',
+        property: 'position',
+        update: 'continuous',
+        interpolation: 'cubic',
+        loopWrap: false,
+        keyframes: [
+          { time: 0, value: { x: 0, y: 0, _type: 'Vector2' } },
+          { time: 0.5, value: { x: 0, y: -40, _type: 'Vector2' } },
+        ],
+      },
+    ],
+    JSON.stringify(jump),
+  );
+  assert.deepEqual(
+    answerKeys(jump),
+    ['animationName', 'length', 'loopMode', 'readBy', 'step', 'tracks'],
+    JSON.stringify(jump),
+  );
+  // Laid through the instance, as scene_tree lays it.
+  const instanced = parseTextContent(
+    await call('scene_animation', { op: 'read', scenePath: 'stage.tscn', playerNodePath: 'Pet/Anim' }),
+  );
+  assert.deepEqual(
+    asArray(get(instanced, 'animations')).map((entry) => get(entry, 'animationName')),
+    ['idle', 'jump'],
+    JSON.stringify(instanced),
+  );
+  const noRun =
+    textOf(
+      await call('scene_animation', {
+        op: 'read',
+        scenePath: 'moves.tscn',
+        playerNodePath: 'Anim',
+        animationName: 'run',
+      }),
+    ) ?? '';
+  assert.match(noRun, /Anim has no animation run\. It has: idle, jump\./, noRun);
+  const notAPlayer =
+    textOf(
+      await call('scene_animation', { op: 'read', scenePath: 'moves.tscn', playerNodePath: 'Sprite' }),
+    ) ?? '';
+  assert.match(notAPlayer, /AnimationPlayer not found at: Sprite/, notAPlayer);
+  const machine = parseTextContent(
+    await call('scene_animation', { op: 'read_states', scenePath: 'moves.tscn', animTreePath: 'Tree' }),
+  );
+  assert.deepEqual(
+    asArray(get(machine, 'states'))
+      .filter((state) => get(state, 'animationName') !== undefined)
+      .map((state) => `${text(get(state, 'stateName'))} plays ${text(get(state, 'animationName'))}`),
+    ['idle plays idle', 'jump plays jump'],
+    JSON.stringify(machine),
+  );
+  assert.deepEqual(
+    get(machine, 'transitions'),
+    [
+      {
+        from: 'idle',
+        to: 'jump',
+        transitionType: 'immediate',
+        advanceMode: 'auto',
+        advanceCondition: 'jumped',
+      },
+      {
+        from: 'jump',
+        to: 'idle',
+        transitionType: 'immediate',
+        advanceMode: 'enabled',
+        advanceCondition: 'landed',
+        conditionNote:
+          'advanceMode is enabled, so landed never advances it: the engine checks a condition only on an auto transition, and travel() still takes this one. disconnect_states and connect_states again with the condition write it as auto',
+      },
+    ],
+    JSON.stringify(machine),
+  );
+  assert.deepEqual(answerKeys(machine), ['readBy', 'states', 'transitions'], JSON.stringify(machine));
+  const noMachine =
+    textOf(
+      await call('scene_animation', {
+        op: 'read_states',
+        scenePath: 'moves.tscn',
+        animTreePath: 'Tree',
+        stateMachinePath: 'ground',
+      }),
+    ) ?? '';
+  assert.match(
+    noMachine,
+    /The root state machine has no state ground\. Its states are: idle, jump\./,
+    noMachine,
+  );
+  assert.ok(!existsSync(join(project, 'init_ran.txt')), 'reading the animations ran the player script');
+
+  // A resource kept inside a file, by the path a read answers a property holding one with.
+  const kept = parseTextContent(
+    await call('resource_edit', { op: 'read', resourcePath: 'res://moves.tscn::Animation_jump' }),
+  );
+  assert.equal(get(kept, 'resourceType'), 'Animation', JSON.stringify(kept));
+  assert.equal(get(kept, 'resourcePath'), 'res://moves.tscn::Animation_jump', JSON.stringify(kept));
+  assert.equal(get(kept, 'properties', 'length'), 0.5, JSON.stringify(kept));
+  const transition = parseTextContent(
+    await call('resource_edit', {
+      op: 'read',
+      resourcePath: 'moves.tscn::AnimationNodeStateMachineTransition_up',
+    }),
+  );
+  assert.equal(get(transition, 'properties', 'advance_condition'), 'jumped', JSON.stringify(transition));
+  // stage.tscn holds moves.tscn, whose ids are moves.tscn's own and not stage.tscn's.
+  const elsewhere =
+    textOf(await call('resource_edit', { op: 'read', resourcePath: 'res://stage.tscn::Animation_jump' })) ??
+    '';
+  assert.match(elsewhere, /res:\/\/stage\.tscn keeps no resource with the id Animation_jump/, elsewhere);
+  const notAFile = textOf(await call('scene_tree', { scenePath: 'moves.tscn::Animation_jump' })) ?? '';
+  assert.match(
+    notAFile,
+    /names the resource Animation_jump kept inside moves\.tscn, not a file\. resource_edit read reads one/,
+    notAFile,
+  );
+
+  const missing = textOf(await call('scene_tree', { scenePath: 'res://nope.tscn' })) ?? '';
+  assert.match(missing, /Scene not found: res:\/\/nope\.tscn/, missing);
+  const misplaced = textOf(await call('scene_tree', { scenePath: 'res://scenes/moves.tscn' })) ?? '';
+  assert.match(
+    misplaced,
+    /^Scene not found: res:\/\/scenes\/moves\.tscn\. The nearest \.tscn file is res:\/\/moves\.tscn\./,
+    `a scene asked for in the wrong folder names where it is: ${misplaced}`,
+  );
+  const outside =
+    textOf(await call('resource_edit', { op: 'read', resourcePath: '../elsewhere.tres' })) ?? '';
+  assert.match(outside, /outside|inside the project/i, outside);
 }
 
 /**
@@ -88409,60 +88734,8 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
       );
       return;
     }
-    assert.match(
-      textOf(captured) ?? '',
-      /^The editor's 2D view of res:\/\/sample\.tscn: \d+x\d+ png\. Saved to /,
-      textOf(captured) ?? '',
-    );
-    const images = asArray(get(captured.result, 'content')).filter((block) => get(block, 'type') === 'image');
-    assert.equal(images.length, 1, 'the picture comes back in the answer');
-    const view = readPng(readFileSync(picture));
-    let red = 0;
-    for (let y = 0; y < view.height; y += 4) {
-      for (let x = 0; x < view.width; x += 4) {
-        const [r, g, b] = view.pixel(x, y);
-        if (r > 200 && g < 60 && b < 60) {
-          red += 1;
-        }
-      }
-    }
-    assert.ok(
-      red > 100,
-      `what the script draws in the editor is in the view: ${String(red)} red samples of ${view.width}x${view.height}`,
-    );
-    const after = parseTextContent(await call('editor_status', {}));
-    assert.deepEqual(
-      shown(after),
-      ['res://other.tscn', ['res://other.tscn', 'res://third.tscn']],
-      `the editor shows the other scene again, with the captured one closed: ${JSON.stringify(after)}`,
-    );
-
-    const scaled = await call('editor_capture', {
-      projectPath: project,
-      scenePath: 'sample.tscn',
-      width: 120,
-      inline: false,
-      outputPath: join(saved, 'small.png'),
-    });
-    assert.match(
-      textOf(scaled) ?? '',
-      /: 120x\d+ png, scaled from \d+x\d+\. Saved to .*\. Not sent, as inline: false asked$/,
-      textOf(scaled) ?? '',
-    );
-    assert.equal(readPng(readFileSync(join(saved, 'small.png'))).width, 120);
-
-    const misplaced = textOf(
-      await call('editor_capture', {
-        projectPath: project,
-        scenePath: 'scenes/sample.tscn',
-        outputPath: join(saved, 'none.png'),
-      }),
-    );
-    assert.match(
-      misplaced ?? '',
-      /Scene not found: res:\/\/scenes\/sample\.tscn\. The nearest \.tscn file is res:\/\/sample\.tscn\.$/,
-      `a scene asked for in the wrong folder names where it is: ${misplaced ?? ''}`,
-    );
+    await theEditorsViewHoldsWhatTheScriptDrawsThere({ call, captured, picture, shown });
+    await theEditorsViewIsScaledAndAWrongFolderNamesTheScene({ call, project, saved });
   } finally {
     await call('editor_launch', { op: 'close' }).catch(() => undefined);
     await server.stop();
@@ -88472,6 +88745,81 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     rmSync(project, { recursive: true, force: true });
     rmSync(saved, { recursive: true, force: true });
   }
+}
+
+/** What the editor view case hands the checks of the picture it captured. */
+interface EditorViewCapture {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  captured: JsonRpcMessage;
+  picture: string;
+  shown: (said: unknown) => unknown[];
+}
+
+/** The capture answers with the picture, which shows the red the script draws, and the editor shows its scene again. */
+async function theEditorsViewHoldsWhatTheScriptDrawsThere(fixture: EditorViewCapture): Promise<void> {
+  const { call, captured, picture, shown } = fixture;
+  assert.match(
+    textOf(captured) ?? '',
+    /^The editor's 2D view of res:\/\/sample\.tscn: \d+x\d+ png\. Saved to /,
+    textOf(captured) ?? '',
+  );
+  const images = asArray(get(captured.result, 'content')).filter((block) => get(block, 'type') === 'image');
+  assert.equal(images.length, 1, 'the picture comes back in the answer');
+  const view = readPng(readFileSync(picture));
+  let red = 0;
+  for (let y = 0; y < view.height; y += 4) {
+    for (let x = 0; x < view.width; x += 4) {
+      const [r, g, b] = view.pixel(x, y);
+      if (r > 200 && g < 60 && b < 60) {
+        red += 1;
+      }
+    }
+  }
+  assert.ok(
+    red > 100,
+    `what the script draws in the editor is in the view: ${String(red)} red samples of ${view.width}x${view.height}`,
+  );
+  const after = parseTextContent(await call('editor_status', {}));
+  assert.deepEqual(
+    shown(after),
+    ['res://other.tscn', ['res://other.tscn', 'res://third.tscn']],
+    `the editor shows the other scene again, with the captured one closed: ${JSON.stringify(after)}`,
+  );
+}
+
+/** A capture asked for a width is scaled and not sent, and a scene in the wrong folder names where it is. */
+async function theEditorsViewIsScaledAndAWrongFolderNamesTheScene(fixture: {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  project: string;
+  saved: string;
+}): Promise<void> {
+  const { call, project, saved } = fixture;
+  const scaled = await call('editor_capture', {
+    projectPath: project,
+    scenePath: 'sample.tscn',
+    width: 120,
+    inline: false,
+    outputPath: join(saved, 'small.png'),
+  });
+  assert.match(
+    textOf(scaled) ?? '',
+    /: 120x\d+ png, scaled from \d+x\d+\. Saved to .*\. Not sent, as inline: false asked$/,
+    textOf(scaled) ?? '',
+  );
+  assert.equal(readPng(readFileSync(join(saved, 'small.png'))).width, 120);
+
+  const misplaced = textOf(
+    await call('editor_capture', {
+      projectPath: project,
+      scenePath: 'scenes/sample.tscn',
+      outputPath: join(saved, 'none.png'),
+    }),
+  );
+  assert.match(
+    misplaced ?? '',
+    /Scene not found: res:\/\/scenes\/sample\.tscn\. The nearest \.tscn file is res:\/\/sample\.tscn\.$/,
+    `a scene asked for in the wrong folder names where it is: ${misplaced ?? ''}`,
+  );
 }
 
 /**
@@ -88593,62 +88941,18 @@ async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
     const shown = ['res://main.tscn', ['res://main.tscn', 'res://other.tscn']];
     assert.deepEqual(scenes(first), shown, JSON.stringify(first));
 
-    // With no game running this call asks the editor nothing, so what keeps it open is the server's word.
-    for (let waited = 0; waited < 8000; waited += 400) {
-      assert.match(
-        textOf(await call('runtime_inspect', { op: 'tree' })) ?? '',
-        /^No game with the runtime addon/,
-      );
-      assert.ok(alive(firstPid) && !existsSync(record), `calls keep the editor open, at ${waited}ms`);
-      await delay(400);
-    }
-
-    // No call now: the editor writes its record and quits.
-    let quit = false;
-    for (let waited = 0; waited < 60_000 && !quit; waited += 250) {
-      quit = existsSync(record) && !alive(firstPid);
-      await delay(250);
-    }
-    assert.ok(quit, 'the unused editor wrote its record and quit');
-    const written: unknown = JSON.parse(readFileSync(record, 'utf8'));
-    assert.deepEqual(
-      [get(written, 'pid'), get(written, 'idleMinutes'), get(written, 'scenes')],
-      [firstPid, 0.05, ['res://main.tscn', 'res://other.tscn']],
-      JSON.stringify(written),
-    );
-    const gone = await editor();
-    assert.deepEqual(
-      [get(gone, 'connected'), get(gone, 'quitUnused', 'editorPid'), get(gone, 'quitUnused', 'scenes')],
-      [false, firstPid, ['res://main.tscn', 'res://other.tscn']],
-      JSON.stringify(gone),
-    );
-
-    const asked = await call('project_settings', {
-      op: 'get',
-      projectPath: project,
-      setting: 'application/config/name',
-      from: 'editor',
+    await anUnusedEditorQuitsAndWritesItsRecord({ call, firstPid, record, editor });
+    await theUnusedEditorOpensAgainAndAnUnsavedOneStays({
+      call,
+      project,
+      record,
+      editor,
+      connectedWithScenes,
+      scenes,
+      untouchedFor,
+      shown,
+      firstPid,
     });
-    assert.match(
-      textOf(asked) ?? '',
-      /IdleEditor/,
-      `the call that needed it opened it again: ${textOf(asked)}`,
-    );
-    const again = await connectedWithScenes();
-    const againPid = asNumber(get(again, 'editorPid'));
-    assert.notEqual(againPid, firstPid, JSON.stringify(again));
-    assert.equal(get(again, 'hidden'), true, `opened hidden again: ${JSON.stringify(again)}`);
-    assert.deepEqual(scenes(again), shown, `with the scenes it had open: ${JSON.stringify(again)}`);
-    assert.equal(existsSync(record), false, 'and the record gone');
-
-    writeFileSync(join(project, 'dirty.flag'), '');
-    assert.ok(await untouchedFor(8000, againPid), 'an editor with unsaved edits stays open');
-    const dirty = await editor();
-    assert.deepEqual(
-      [get(dirty, 'connected'), get(dirty, 'editorPid'), get(dirty, 'unsavedScenes')],
-      [true, againPid, ['res://main.tscn']],
-      `the edits that kept it: ${JSON.stringify(dirty)}`,
-    );
   } finally {
     await call('editor_launch', { op: 'close' }).catch(() => undefined);
     await server.stop();
@@ -88657,6 +88961,91 @@ async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
     }
     sweep(project);
   }
+}
+
+/** What the idle editor case hands its first stretch: the calls and the editor it opened. */
+interface IdleEditorFirstStretch {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  firstPid: number;
+  record: string;
+  editor: () => Promise<unknown>;
+}
+
+/** Calls that never reach the editor keep it open, and with none it writes its record and quits. */
+async function anUnusedEditorQuitsAndWritesItsRecord(fixture: IdleEditorFirstStretch): Promise<void> {
+  const { call, firstPid, record, editor } = fixture;
+  // With no game running this call asks the editor nothing, so what keeps it open is the server's word.
+  for (let waited = 0; waited < 8000; waited += 400) {
+    assert.match(
+      textOf(await call('runtime_inspect', { op: 'tree' })) ?? '',
+      /^No game with the runtime addon/,
+    );
+    assert.ok(alive(firstPid) && !existsSync(record), `calls keep the editor open, at ${waited}ms`);
+    await delay(400);
+  }
+
+  // No call now: the editor writes its record and quits.
+  let quit = false;
+  for (let waited = 0; waited < 60_000 && !quit; waited += 250) {
+    quit = existsSync(record) && !alive(firstPid);
+    await delay(250);
+  }
+  assert.ok(quit, 'the unused editor wrote its record and quit');
+  const written: unknown = JSON.parse(readFileSync(record, 'utf8'));
+  assert.deepEqual(
+    [get(written, 'pid'), get(written, 'idleMinutes'), get(written, 'scenes')],
+    [firstPid, 0.05, ['res://main.tscn', 'res://other.tscn']],
+    JSON.stringify(written),
+  );
+  const gone = await editor();
+  assert.deepEqual(
+    [get(gone, 'connected'), get(gone, 'quitUnused', 'editorPid'), get(gone, 'quitUnused', 'scenes')],
+    [false, firstPid, ['res://main.tscn', 'res://other.tscn']],
+    JSON.stringify(gone),
+  );
+}
+
+/** What the idle editor case hands its second stretch. */
+interface IdleEditorSecondStretch extends IdleEditorFirstStretch {
+  project: string;
+  connectedWithScenes: () => Promise<unknown>;
+  scenes: (status: unknown) => unknown[];
+  untouchedFor: (ms: number, pid: number) => Promise<boolean>;
+  shown: unknown[];
+}
+
+/** The call that needs the quit editor opens it again hidden, and an editor with unsaved edits stays open. */
+async function theUnusedEditorOpensAgainAndAnUnsavedOneStays(
+  fixture: IdleEditorSecondStretch,
+): Promise<void> {
+  const { call, project, record, editor, connectedWithScenes, scenes, untouchedFor, shown, firstPid } =
+    fixture;
+  const asked = await call('project_settings', {
+    op: 'get',
+    projectPath: project,
+    setting: 'application/config/name',
+    from: 'editor',
+  });
+  assert.match(
+    textOf(asked) ?? '',
+    /IdleEditor/,
+    `the call that needed it opened it again: ${textOf(asked)}`,
+  );
+  const again = await connectedWithScenes();
+  const againPid = asNumber(get(again, 'editorPid'));
+  assert.notEqual(againPid, firstPid, JSON.stringify(again));
+  assert.equal(get(again, 'hidden'), true, `opened hidden again: ${JSON.stringify(again)}`);
+  assert.deepEqual(scenes(again), shown, `with the scenes it had open: ${JSON.stringify(again)}`);
+  assert.equal(existsSync(record), false, 'and the record gone');
+
+  writeFileSync(join(project, 'dirty.flag'), '');
+  assert.ok(await untouchedFor(8000, againPid), 'an editor with unsaved edits stays open');
+  const dirty = await editor();
+  assert.deepEqual(
+    [get(dirty, 'connected'), get(dirty, 'editorPid'), get(dirty, 'unsavedScenes')],
+    [true, againPid, ['res://main.tscn']],
+    `the edits that kept it: ${JSON.stringify(dirty)}`,
+  );
 }
 
 /**
@@ -88734,79 +89123,14 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
     );
 
     const classes = 40;
-    mkdirSync(join(project, 'many'));
-    for (let at = 0; at < classes; at += 1) {
-      writeFileSync(
-        join(project, 'many', `many_${String(at)}.gd`),
-        `class_name GdhMany${String(at)}\nextends RefCounted\n\nvar held: int = ${String(at)}\n`,
-      );
-    }
-    // Each save has the editor scan, and the first scan finds the new classes and registers them.
-    // For a fixed time, since every save asks for another scan.
-    const until = Date.now() + 8000;
-    const added: string[][] = scenes.map(() => []);
-    const refused: string[] = [];
-    await Promise.all(
-      scenes.map(async (scene, which) => {
-        for (let at = 0; (Date.now() < until || at < 3) && refused.length === 0; at += 1) {
-          const name = `Added${String(at)}`;
-          const reply = await call('scene_node', {
-            projectPath: project,
-            scenePath: `res://${scene}`,
-            op: 'add',
-            nodeType: 'Node',
-            nodeName: name,
-          });
-          if (get(reply.result, 'isError') === true) {
-            refused.push(`${scene} ${name}: ${textOf(reply) ?? ''}`);
-          } else {
-            added[which]?.push(name);
-          }
-        }
-      }),
-    );
-    const log = readFileSync(join(project, '.godot', 'gdharness-editor.log'), 'utf8');
-    assert.doesNotMatch(
-      log,
-      /Task '\w+' already exists|Do not use progress dialog/,
-      `no call ran inside the editor's task: ${log.slice(0, 3000)}`,
-    );
-    const bridgeSaid = server.stderr
-      .split('\n')
-      .filter((line) => line.includes('GodotBridge'))
-      .join('\n');
-    assert.deepEqual(
-      refused,
-      [],
-      `every add was answered. The editor's log ends: ${log.slice(-4000)}\nThe bridge said: ${bridgeSaid.slice(-4000)}`,
-    );
-    let idle = false;
-    for (let waited = 0; waited < 120_000 && !idle; waited += 500) {
-      const scan = get(parseTextContent(await call('editor_status', {})), 'editor', 'scan');
-      idle = get(scan, 'scanning') === false && get(scan, 'importing') === false;
-      if (!idle) {
-        await delay(500);
-      }
-    }
-    assert.ok(idle, 'the editor finished scanning');
-    assert.ok(
-      added.every((names) => names.length >= 3),
-      `each scene took its adds: ${JSON.stringify(added)}`,
-    );
-    const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
-    assert.ok(
-      cache.includes(`GdhMany${String(classes - 1)}`),
-      'the editor registered the new classes, which is the task the adds met',
-    );
-    scenes.forEach((scene, which) => {
-      const saved = readFileSync(join(project, scene), 'utf8');
-      for (const name of added[which] ?? []) {
-        assert.ok(
-          saved.includes(`[node name="${name}" type="Node" parent="."`),
-          `${scene} holds ${name}: ${saved}`,
-        );
-      }
+    const added = await addsInFlightWhileTheEditorRegistersNewClasses({
+      call,
+      project,
+      scenes,
+      server,
+      classes,
     });
+    await theEditorFinishesScanningAndEachSceneKeptItsAdds({ call, project, scenes, added, classes });
   } finally {
     await call('editor_launch', { op: 'close' }).catch(() => undefined);
     await server.stop();
@@ -88815,6 +89139,102 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
     }
     sweep(project);
   }
+}
+
+/** What the progress task case hands the stretch that adds to scenes while the editor registers classes. */
+interface EditorTaskAdds {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  project: string;
+  scenes: string[];
+  classes: number;
+}
+
+/** Writes the new classes, keeps adds to every scene in flight, and returns the names each scene took. */
+async function addsInFlightWhileTheEditorRegistersNewClasses(
+  fixture: EditorTaskAdds & { server: ServerProcess },
+): Promise<string[][]> {
+  const { call, project, scenes, server, classes } = fixture;
+  mkdirSync(join(project, 'many'));
+  for (let at = 0; at < classes; at += 1) {
+    writeFileSync(
+      join(project, 'many', `many_${String(at)}.gd`),
+      `class_name GdhMany${String(at)}\nextends RefCounted\n\nvar held: int = ${String(at)}\n`,
+    );
+  }
+  // Each save has the editor scan, and the first scan finds the new classes and registers them.
+  // For a fixed time, since every save asks for another scan.
+  const until = Date.now() + 8000;
+  const added: string[][] = scenes.map(() => []);
+  const refused: string[] = [];
+  await Promise.all(
+    scenes.map(async (scene, which) => {
+      for (let at = 0; (Date.now() < until || at < 3) && refused.length === 0; at += 1) {
+        const name = `Added${String(at)}`;
+        const reply = await call('scene_node', {
+          projectPath: project,
+          scenePath: `res://${scene}`,
+          op: 'add',
+          nodeType: 'Node',
+          nodeName: name,
+        });
+        if (get(reply.result, 'isError') === true) {
+          refused.push(`${scene} ${name}: ${textOf(reply) ?? ''}`);
+        } else {
+          added[which]?.push(name);
+        }
+      }
+    }),
+  );
+  const log = readFileSync(join(project, '.godot', 'gdharness-editor.log'), 'utf8');
+  assert.doesNotMatch(
+    log,
+    /Task '\w+' already exists|Do not use progress dialog/,
+    `no call ran inside the editor's task: ${log.slice(0, 3000)}`,
+  );
+  const bridgeSaid = server.stderr
+    .split('\n')
+    .filter((line) => line.includes('GodotBridge'))
+    .join('\n');
+  assert.deepEqual(
+    refused,
+    [],
+    `every add was answered. The editor's log ends: ${log.slice(-4000)}\nThe bridge said: ${bridgeSaid.slice(-4000)}`,
+  );
+  return added;
+}
+
+/** The editor finishes scanning, registers the new classes, and every scene holds the nodes added to it. */
+async function theEditorFinishesScanningAndEachSceneKeptItsAdds(
+  fixture: EditorTaskAdds & { added: string[][] },
+): Promise<void> {
+  const { call, project, scenes, added, classes } = fixture;
+  let idle = false;
+  for (let waited = 0; waited < 120_000 && !idle; waited += 500) {
+    const scan = get(parseTextContent(await call('editor_status', {})), 'editor', 'scan');
+    idle = get(scan, 'scanning') === false && get(scan, 'importing') === false;
+    if (!idle) {
+      await delay(500);
+    }
+  }
+  assert.ok(idle, 'the editor finished scanning');
+  assert.ok(
+    added.every((names) => names.length >= 3),
+    `each scene took its adds: ${JSON.stringify(added)}`,
+  );
+  const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+  assert.ok(
+    cache.includes(`GdhMany${String(classes - 1)}`),
+    'the editor registered the new classes, which is the task the adds met',
+  );
+  scenes.forEach((scene, which) => {
+    const saved = readFileSync(join(project, scene), 'utf8');
+    for (const name of added[which] ?? []) {
+      assert.ok(
+        saved.includes(`[node name="${name}" type="Node" parent="."`),
+        `${scene} holds ${name}: ${saved}`,
+      );
+    }
+  });
 }
 
 /**
@@ -89965,102 +90385,121 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
     await call('project_settings', { op: 'unset', setting: 'autoload/Ghost' });
     await setting('application/run/main_scene', 'res://main.tscn');
 
-    // A setting the engine never loads at boot names a missing file without a boot report claimed:
-    // one only a tool reads, and the icon, which a headless boot leaves unread.
-    for (const [name, value, path] of [
-      ['gdharness/tests/not_searched', ['res://tests/nightly'], 'res://tests/nightly'],
-      ['application/config/icon', 'res://gone_icon.png', 'res://gone_icon.png'],
-    ] as const) {
-      const unread = await setting(name, value);
-      assert.deepEqual(get(parseTextContent(unread), 'missing_files'), [path], textOf(unread) ?? '');
-      assert.equal(get(parseTextContent(unread), 'note'), `${path} does not exist.`, textOf(unread) ?? '');
-      await call('project_settings', { op: 'unset', setting: name });
-    }
-    // A resource file not there yet is one resource_edit writes.
-    const layout = await setting('audio/buses/default_bus_layout', 'res://buses.tres');
-    assert.equal(
-      get(parseTextContent(layout), 'note'),
-      'res://buses.tres does not exist. resource_edit create makes res://buses.tres.',
-      textOf(layout) ?? '',
-    );
-    await call('project_settings', { op: 'unset', setting: 'audio/buses/default_bus_layout' });
-
-    assert.equal(get(await statusOf('res://text/strings.csv'), 'status'), 'needs_reimport');
-    const imported = await call('project_import', { op: 'reimport' });
-    assert.deepEqual(
-      get(parseTextContent(imported), 'reimported'),
-      ['res://shaders/blur.glsl', 'res://text/strings.csv'],
-      textOf(imported) ?? '',
-    );
-    assert.ok(
-      existsSync(join(project, 'text', 'strings.de.translation')),
-      'the import made the translations',
-    );
-    assert.deepEqual(await references(), [], 'and once they are made nothing is missing');
-    // An imported translation keeps a hash of each key, so a read listed no messages and named no
-    // file that holds them.
-    const translated = parseTextContent(
-      await call('resource_edit', { op: 'read', resourcePath: 'res://text/strings.de.translation' }),
-    );
-    assert.equal(
-      get(translated, 'messagesNote'),
-      'An OptimizedTranslation keeps a hash of each key rather than the key, so it lists no messages. res://text/strings.csv, which it was imported from, holds them.',
-      JSON.stringify(translated),
-    );
-
-    // One .blend with no Blender set and the engine imports nothing at all, the CSV beside it too.
-    rmSync(join(project, 'text', 'strings.csv.import'));
-    writeFileSync(join(project, 'model.blend'), 'not really a blend\n');
-    assert.equal(
-      get(await statusOf('res://model.blend'), 'reason'),
-      'the engine imports .blend files through Blender, which it finds through the editor setting filesystem/import/blender/blender_path. An editor with it set imports them on its scan. An import pass with it unset stops at the first one and imports nothing, and setting filesystem/import/blender/enabled to false has the engine leave them unimported',
-    );
-    const stopped = await call('project_import', { op: 'reimport' });
-    assert.ok(
-      (textOf(stopped) ?? '').includes(
-        'the import pass stopped at a .blend file and imported nothing: the engine imports .blend files through Blender, which the editor setting filesystem/import/blender/blender_path names, and here it names none. Set it in an editor, or set the project setting filesystem/import/blender/enabled to false with project_settings set, which has the engine leave .blend files unimported.',
-      ),
-      textOf(stopped) ?? '',
-    );
-    assert.ok(!existsSync(join(project, 'text', 'strings.csv.import')), 'and nothing was imported');
-    await setting('filesystem/import/blender/enabled', false);
-    const past = await call('project_import', { op: 'reimport' });
-    assert.deepEqual(
-      get(parseTextContent(past), 'reimported'),
-      ['res://text/strings.csv'],
-      textOf(past) ?? '',
-    );
-    assert.equal(
-      get(await statusOf('res://model.blend'), 'reason'),
-      'the project sets filesystem/import/blender/enabled to false, so the engine leaves them unimported',
-    );
-
-    await setting('layer_names/2d_physics/layer_1', 'World');
-    await setting('layer_names/2d_physics/layer_2', 'Player');
-    const node = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
-      await call('scene_node', { scenePath: 'res://main.tscn', nodePath: 'Hero', ...args });
-    await node({ op: 'set', properties: { collision_layer: 2, collision_mask: 5 } });
-    const read = await node({ op: 'get' });
-    assert.deepEqual(
-      get(parseTextContent(read), 'layers'),
-      {
-        collision_layer: [{ layer: 2, name: 'Player' }],
-        collision_mask: [{ layer: 1, name: 'World' }, { layer: 3 }],
-      },
-      textOf(read) ?? '',
-    );
-    const before = readFileSync(join(project, 'main.tscn'), 'utf8');
-    const past32 = await node({ op: 'set', properties: { collision_layer: 2 ** 32 } });
-    assert.equal(
-      textOf(past32),
-      'CharacterBody2D.collision_layer was given 4294967296 and holds 0 after it was set: it is a mask of the 2d_physics layers, one bit each from layer 1 (1) to layer 32 (2147483648), so it takes 0 to 4294967295 and the engine keeps only those bits. Nothing was written.',
-    );
-    assert.equal(readFileSync(join(project, 'main.tscn'), 'utf8'), before, 'and the scene is as it was');
+    const fixture: ProjectFilesFixture = { call, setting, references, statusOf, project };
+    await settingsThatNameFilesNotYetThere(fixture);
+    await aBlendFileStopsTheImportPassUntilItIsLeftOut(fixture);
+    await layerMasksReadWithTheProjectsLayerNames(fixture);
   } finally {
     await server.stop();
     sweep(project);
     sweep(runtimeDir);
   }
+}
+
+/** What the project files and layers case shares once the engine is up. */
+interface ProjectFilesFixture {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  setting: (name: string, value: unknown) => Promise<JsonRpcMessage>;
+  references: () => Promise<string[]>;
+  statusOf: (path: string) => Promise<unknown>;
+  project: string;
+}
+
+/** Settings that name files not there yet, the import that makes the translations, and the one that reads them. */
+async function settingsThatNameFilesNotYetThere(fixture: ProjectFilesFixture): Promise<void> {
+  const { call, setting, references, statusOf, project } = fixture;
+  // A setting the engine never loads at boot names a missing file without a boot report claimed:
+  // one only a tool reads, and the icon, which a headless boot leaves unread.
+  for (const [name, value, path] of [
+    ['gdharness/tests/not_searched', ['res://tests/nightly'], 'res://tests/nightly'],
+    ['application/config/icon', 'res://gone_icon.png', 'res://gone_icon.png'],
+  ] as const) {
+    const unread = await setting(name, value);
+    assert.deepEqual(get(parseTextContent(unread), 'missing_files'), [path], textOf(unread) ?? '');
+    assert.equal(get(parseTextContent(unread), 'note'), `${path} does not exist.`, textOf(unread) ?? '');
+    await call('project_settings', { op: 'unset', setting: name });
+  }
+  // A resource file not there yet is one resource_edit writes.
+  const layout = await setting('audio/buses/default_bus_layout', 'res://buses.tres');
+  assert.equal(
+    get(parseTextContent(layout), 'note'),
+    'res://buses.tres does not exist. resource_edit create makes res://buses.tres.',
+    textOf(layout) ?? '',
+  );
+  await call('project_settings', { op: 'unset', setting: 'audio/buses/default_bus_layout' });
+
+  assert.equal(get(await statusOf('res://text/strings.csv'), 'status'), 'needs_reimport');
+  const imported = await call('project_import', { op: 'reimport' });
+  assert.deepEqual(
+    get(parseTextContent(imported), 'reimported'),
+    ['res://shaders/blur.glsl', 'res://text/strings.csv'],
+    textOf(imported) ?? '',
+  );
+  assert.ok(existsSync(join(project, 'text', 'strings.de.translation')), 'the import made the translations');
+  assert.deepEqual(await references(), [], 'and once they are made nothing is missing');
+  // An imported translation keeps a hash of each key, so a read listed no messages and named no
+  // file that holds them.
+  const translated = parseTextContent(
+    await call('resource_edit', { op: 'read', resourcePath: 'res://text/strings.de.translation' }),
+  );
+  assert.equal(
+    get(translated, 'messagesNote'),
+    'An OptimizedTranslation keeps a hash of each key rather than the key, so it lists no messages. res://text/strings.csv, which it was imported from, holds them.',
+    JSON.stringify(translated),
+  );
+}
+
+/** A .blend file with no Blender set stops the import pass, and the setting that leaves it out lets it through. */
+async function aBlendFileStopsTheImportPassUntilItIsLeftOut(fixture: ProjectFilesFixture): Promise<void> {
+  const { call, setting, statusOf, project } = fixture;
+  // One .blend with no Blender set and the engine imports nothing at all, the CSV beside it too.
+  rmSync(join(project, 'text', 'strings.csv.import'));
+  writeFileSync(join(project, 'model.blend'), 'not really a blend\n');
+  assert.equal(
+    get(await statusOf('res://model.blend'), 'reason'),
+    'the engine imports .blend files through Blender, which it finds through the editor setting filesystem/import/blender/blender_path. An editor with it set imports them on its scan. An import pass with it unset stops at the first one and imports nothing, and setting filesystem/import/blender/enabled to false has the engine leave them unimported',
+  );
+  const stopped = await call('project_import', { op: 'reimport' });
+  assert.ok(
+    (textOf(stopped) ?? '').includes(
+      'the import pass stopped at a .blend file and imported nothing: the engine imports .blend files through Blender, which the editor setting filesystem/import/blender/blender_path names, and here it names none. Set it in an editor, or set the project setting filesystem/import/blender/enabled to false with project_settings set, which has the engine leave .blend files unimported.',
+    ),
+    textOf(stopped) ?? '',
+  );
+  assert.ok(!existsSync(join(project, 'text', 'strings.csv.import')), 'and nothing was imported');
+  await setting('filesystem/import/blender/enabled', false);
+  const past = await call('project_import', { op: 'reimport' });
+  assert.deepEqual(get(parseTextContent(past), 'reimported'), ['res://text/strings.csv'], textOf(past) ?? '');
+  assert.equal(
+    get(await statusOf('res://model.blend'), 'reason'),
+    'the project sets filesystem/import/blender/enabled to false, so the engine leaves them unimported',
+  );
+}
+
+/** A layer mask read with the names the project gives its layers, and one given a layer past 32. */
+async function layerMasksReadWithTheProjectsLayerNames(fixture: ProjectFilesFixture): Promise<void> {
+  const { call, setting, project } = fixture;
+  await setting('layer_names/2d_physics/layer_1', 'World');
+  await setting('layer_names/2d_physics/layer_2', 'Player');
+  const node = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await call('scene_node', { scenePath: 'res://main.tscn', nodePath: 'Hero', ...args });
+  await node({ op: 'set', properties: { collision_layer: 2, collision_mask: 5 } });
+  const read = await node({ op: 'get' });
+  assert.deepEqual(
+    get(parseTextContent(read), 'layers'),
+    {
+      collision_layer: [{ layer: 2, name: 'Player' }],
+      collision_mask: [{ layer: 1, name: 'World' }, { layer: 3 }],
+    },
+    textOf(read) ?? '',
+  );
+  const before = readFileSync(join(project, 'main.tscn'), 'utf8');
+  const past32 = await node({ op: 'set', properties: { collision_layer: 2 ** 32 } });
+  assert.equal(
+    textOf(past32),
+    'CharacterBody2D.collision_layer was given 4294967296 and holds 0 after it was set: it is a mask of the 2d_physics layers, one bit each from layer 1 (1) to layer 32 (2147483648), so it takes 0 to 4294967295 and the engine keeps only those bits. Nothing was written.',
+  );
+  assert.equal(readFileSync(join(project, 'main.tscn'), 'utf8'), before, 'and the scene is as it was');
 }
 
 /**
@@ -90372,150 +90811,175 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     const slid = await set('Slider', { value: 150, max_value: 200 });
     assert.equal(get(parseTextContent(slid), 'properties', 'value'), 150, textOf(slid) ?? '');
 
-    // Digits in quotes are a number, as everywhere else a float is written.
-    const quoted = await set('Walker', { position: ['1', 2] });
-    assert.deepEqual(get(parseTextContent(quoted), 'properties', 'position'), {
-      x: 1,
-      y: 2,
-      _type: 'Vector2',
-    });
-    const spelled = await set('Walker', { position: { x: 3, y: '4' } });
-    assert.deepEqual(get(parseTextContent(spelled), 'properties', 'position'), {
-      x: 3,
-      y: 4,
-      _type: 'Vector2',
-    });
-
-    const walled = await bake('walled.tscn', 'Region');
-    const saved = readFileSync(join(project, 'walled.tscn'), 'utf8');
-    assert.equal(get(parseTextContent(walled), 'savedTo'), 'res://walled.tscn', textOf(walled) ?? '');
-    const polygons = asNumber(get(parseTextContent(walled), 'polygons'));
-    // The square alone bakes to one polygon. The wall inside it splits that up.
-    assert.ok(polygons > 1, `the wall is carved out of the square: ${textOf(walled) ?? ''}`);
-    assert.equal(polygonsIn(saved, 'id="NavigationPolygon_a"'), polygons, 'the file holds what was answered');
-    assert.equal(existsSync(join(project, 'ran.txt')), false, "and the scene's script did not run for it");
-
-    // The outlines given as lists of places, which the property holds as a bare Array of typed ones.
-    const outlined = await set('Bare', { navigation_polygon: { _type: 'NavigationPolygon' } });
-    assert.equal(get(parseTextContent(outlined), 'nodePath'), 'Bare', textOf(outlined) ?? '');
-    const outlines = await set('Bare', {
-      'navigation_polygon/outlines': [
-        [
-          [0, 0],
-          [100, 0],
-          [100, 100],
-          [0, 100],
-        ],
-      ],
-    });
-    assert.deepEqual(
-      get(parseTextContent(outlines), 'properties', 'navigation_polygon/outlines', 0, 2),
-      { x: 100, y: 100, _type: 'Vector2' },
-      textOf(outlines) ?? '',
-    );
-    const plain = await bake('walled.tscn', 'Bare');
-    assert.deepEqual(
-      [get(parseTextContent(plain), 'polygons'), get(parseTextContent(plain), 'vertices')],
-      [1, 4],
-      textOf(plain) ?? '',
-    );
-    // Nothing read leaves the whole square walkable, which the counts alone do not tell from a bake
-    // that read the crate. The walls under the other regions are theirs and go unnamed.
-    assert.equal(
-      get(parseTextContent(plain), 'note'),
-      "No obstacle was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read. The bake reads a node elsewhere when it is in the group navigation_polygon_source_geometry_group and navigation_polygon/source_geometry_mode is SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN. It also reads a node moved under the region.",
-      textOf(plain) ?? '',
-    );
-    // The key and value the note names are ones a set takes as written.
-    const [, key, mode] =
-      / and (\S+) is (\S+)\. It also reads/.exec(String(get(parseTextContent(plain), 'note'))) ?? [];
-    assert.ok(key !== undefined && mode !== undefined, textOf(plain) ?? '');
-    const grouping = await set('Bare', { [key]: mode });
-    assert.notEqual(get(grouping, 'result', 'isError'), true, textOf(grouping) ?? '');
-    assert.match(
-      readFileSync(join(project, 'walled.tscn'), 'utf8'),
-      /^source_geometry_mode = 1$/m,
-      `the mode the note names is set: ${textOf(grouping) ?? ''}`,
-    );
-    assert.equal(get(parseTextContent(walled), 'note'), undefined, textOf(walled) ?? '');
-
-    const covered = await bake('walled.tscn', 'Covered');
-    assert.equal(
-      get(parseTextContent(covered), 'note'),
-      "Nothing was left to walk inside the outlines once the obstacles read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), and the agent_radius 10.0 kept from their edges, were taken out.",
-      textOf(covered) ?? '',
-    );
-
-    const grouped = await bake('grouped.tscn', 'Region');
-    assert.equal(get(parseTextContent(grouped), 'savedTo'), 'res://outline.tres', textOf(grouped) ?? '');
-    const kept = readFileSync(join(project, 'outline.tres'), 'utf8');
-    // A pillar in the group, outside the region, is carved out of it.
-    assert.ok(asNumber(get(parseTextContent(grouped), 'polygons')) > 1, textOf(grouped) ?? '');
-    assert.equal(polygonsIn(kept, '[resource]'), get(parseTextContent(grouped), 'polygons'), kept);
-    assert.doesNotMatch(
-      readFileSync(join(project, 'grouped.tscn'), 'utf8'),
-      /polygons/,
-      'the scene names the file',
-    );
-
-    const room = await bake('room.tscn', 'Region');
-    assert.ok(asNumber(get(parseTextContent(room), 'polygons')) > 0, textOf(room) ?? '');
-    assert.equal(
-      polygonsIn(readFileSync(join(project, 'room.tscn'), 'utf8'), 'id="NavigationMesh_a"'),
-      get(parseTextContent(room), 'polygons'),
-    );
-    const ledge = await bake('room.tscn', 'Ledge');
-    assert.deepEqual(
-      [get(parseTextContent(ledge), 'made'), get(parseTextContent(ledge), 'note')],
-      [
-        'Ledge held no navigation_mesh, so one was made and built into the scene, with the defaults.',
-        'The geometry read gave no floor an agent of agent_height 1.5 and agent_radius 0.5 can stand on.',
-      ],
-      textOf(ledge) ?? '',
-    );
-    const empty = await bake('room.tscn', 'Empty');
-    assert.equal(
-      get(parseTextContent(empty), 'note'),
-      "No geometry was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN) with geometry_parsed_geometry_type both, so there was nothing to bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of physics bodies on geometry_collision_mask, and both reads both.",
-      textOf(empty) ?? '',
-    );
-    assert.match(
-      readFileSync(join(project, 'room.tscn'), 'utf8'),
-      /\[node name="Empty"[^[]*navigation_mesh = SubResource/,
-    );
-
-    const blank = await bake('walled.tscn', 'Blank');
-    assert.deepEqual(
-      [get(parseTextContent(blank), 'made'), get(parseTextContent(blank), 'note')],
-      [
-        'Blank held no navigation_polygon, so one was made and built into the scene, with the defaults.',
-        'The NavigationPolygon has no outlines, and a 2D bake fills only the area its outlines enclose, less what the obstacles inside take. Give it outlines with scene_node set, such as navigation_polygon/outlines [[[0, 0], [512, 0], [512, 512], [0, 512]]], then bake again.',
-      ],
-      textOf(blank) ?? '',
-    );
-    assert.equal(
-      textOf(await bake('walled.tscn', 'Walker')),
-      "Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D. The scene's are at Region, Covered, Bare, Blank.",
-    );
-    const inheriting = readFileSync(join(project, 'inherits.tscn'), 'utf8');
-    const base = readFileSync(join(project, 'walled.tscn'), 'utf8');
-    assert.equal(
-      textOf(await bake('inherits.tscn', 'Region')),
-      'The NavigationPolygon Region holds is built into res://walled.tscn, and a bake here cannot save that file. Bake the region there, or save the NavigationPolygon to a file of its own.',
-    );
-    assert.deepEqual(
-      [
-        readFileSync(join(project, 'inherits.tscn'), 'utf8'),
-        readFileSync(join(project, 'walled.tscn'), 'utf8'),
-      ],
-      [inheriting, base],
-      'neither scene was written',
-    );
+    const fixture: NavigationBakeFixture = { set, bake, polygonsIn, project };
+    await bakeOfAWalledRegion(fixture);
+    await bakeOfCoveredGroupedAndRoomRegions(fixture);
+    await bakeOfAnEmptyRegionAndOfAnInheritedOne(fixture);
   } finally {
     await server.stop();
     sweep(project);
     sweep(runtimeDir);
   }
+}
+
+/** What the navigation bake cases share once the engine is up. */
+interface NavigationBakeFixture {
+  set: (nodePath: string, properties: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  bake: (scenePath: string, nodePath: string) => Promise<JsonRpcMessage>;
+  polygonsIn: (saved: string, after: string) => number;
+  project: string;
+}
+
+/** Numbers sent as words, the bake of a walled region, and one baked from outlines given as lists of places. */
+async function bakeOfAWalledRegion(fixture: NavigationBakeFixture): Promise<void> {
+  const { set, bake, polygonsIn, project } = fixture;
+  // Digits in quotes are a number, as everywhere else a float is written.
+  const quoted = await set('Walker', { position: ['1', 2] });
+  assert.deepEqual(get(parseTextContent(quoted), 'properties', 'position'), {
+    x: 1,
+    y: 2,
+    _type: 'Vector2',
+  });
+  const spelled = await set('Walker', { position: { x: 3, y: '4' } });
+  assert.deepEqual(get(parseTextContent(spelled), 'properties', 'position'), {
+    x: 3,
+    y: 4,
+    _type: 'Vector2',
+  });
+
+  const walled = await bake('walled.tscn', 'Region');
+  const saved = readFileSync(join(project, 'walled.tscn'), 'utf8');
+  assert.equal(get(parseTextContent(walled), 'savedTo'), 'res://walled.tscn', textOf(walled) ?? '');
+  const polygons = asNumber(get(parseTextContent(walled), 'polygons'));
+  // The square alone bakes to one polygon. The wall inside it splits that up.
+  assert.ok(polygons > 1, `the wall is carved out of the square: ${textOf(walled) ?? ''}`);
+  assert.equal(polygonsIn(saved, 'id="NavigationPolygon_a"'), polygons, 'the file holds what was answered');
+  assert.equal(existsSync(join(project, 'ran.txt')), false, "and the scene's script did not run for it");
+
+  // The outlines given as lists of places, which the property holds as a bare Array of typed ones.
+  const outlined = await set('Bare', { navigation_polygon: { _type: 'NavigationPolygon' } });
+  assert.equal(get(parseTextContent(outlined), 'nodePath'), 'Bare', textOf(outlined) ?? '');
+  const outlines = await set('Bare', {
+    'navigation_polygon/outlines': [
+      [
+        [0, 0],
+        [100, 0],
+        [100, 100],
+        [0, 100],
+      ],
+    ],
+  });
+  assert.deepEqual(
+    get(parseTextContent(outlines), 'properties', 'navigation_polygon/outlines', 0, 2),
+    { x: 100, y: 100, _type: 'Vector2' },
+    textOf(outlines) ?? '',
+  );
+  const plain = await bake('walled.tscn', 'Bare');
+  assert.deepEqual(
+    [get(parseTextContent(plain), 'polygons'), get(parseTextContent(plain), 'vertices')],
+    [1, 4],
+    textOf(plain) ?? '',
+  );
+  // Nothing read leaves the whole square walkable, which the counts alone do not tell from a bake
+  // that read the crate. The walls under the other regions are theirs and go unnamed.
+  assert.equal(
+    get(parseTextContent(plain), 'note'),
+    "No obstacle was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read. The bake reads a node elsewhere when it is in the group navigation_polygon_source_geometry_group and navigation_polygon/source_geometry_mode is SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN. It also reads a node moved under the region.",
+    textOf(plain) ?? '',
+  );
+  // The key and value the note names are ones a set takes as written.
+  const [, key, mode] =
+    / and (\S+) is (\S+)\. It also reads/.exec(String(get(parseTextContent(plain), 'note'))) ?? [];
+  assert.ok(key !== undefined && mode !== undefined, textOf(plain) ?? '');
+  const grouping = await set('Bare', { [key]: mode });
+  assert.notEqual(get(grouping, 'result', 'isError'), true, textOf(grouping) ?? '');
+  assert.match(
+    readFileSync(join(project, 'walled.tscn'), 'utf8'),
+    /^source_geometry_mode = 1$/m,
+    `the mode the note names is set: ${textOf(grouping) ?? ''}`,
+  );
+  assert.equal(get(parseTextContent(walled), 'note'), undefined, textOf(walled) ?? '');
+}
+
+/** The bakes that leave nothing to walk, take their obstacles from a group, and bake a 3D region. */
+async function bakeOfCoveredGroupedAndRoomRegions(fixture: NavigationBakeFixture): Promise<void> {
+  const { bake, polygonsIn, project } = fixture;
+  const covered = await bake('walled.tscn', 'Covered');
+  assert.equal(
+    get(parseTextContent(covered), 'note'),
+    "Nothing was left to walk inside the outlines once the obstacles read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), and the agent_radius 10.0 kept from their edges, were taken out.",
+    textOf(covered) ?? '',
+  );
+
+  const grouped = await bake('grouped.tscn', 'Region');
+  assert.equal(get(parseTextContent(grouped), 'savedTo'), 'res://outline.tres', textOf(grouped) ?? '');
+  const kept = readFileSync(join(project, 'outline.tres'), 'utf8');
+  // A pillar in the group, outside the region, is carved out of it.
+  assert.ok(asNumber(get(parseTextContent(grouped), 'polygons')) > 1, textOf(grouped) ?? '');
+  assert.equal(polygonsIn(kept, '[resource]'), get(parseTextContent(grouped), 'polygons'), kept);
+  assert.doesNotMatch(
+    readFileSync(join(project, 'grouped.tscn'), 'utf8'),
+    /polygons/,
+    'the scene names the file',
+  );
+
+  const room = await bake('room.tscn', 'Region');
+  assert.ok(asNumber(get(parseTextContent(room), 'polygons')) > 0, textOf(room) ?? '');
+  assert.equal(
+    polygonsIn(readFileSync(join(project, 'room.tscn'), 'utf8'), 'id="NavigationMesh_a"'),
+    get(parseTextContent(room), 'polygons'),
+  );
+  const ledge = await bake('room.tscn', 'Ledge');
+  assert.deepEqual(
+    [get(parseTextContent(ledge), 'made'), get(parseTextContent(ledge), 'note')],
+    [
+      'Ledge held no navigation_mesh, so one was made and built into the scene, with the defaults.',
+      'The geometry read gave no floor an agent of agent_height 1.5 and agent_radius 0.5 can stand on.',
+    ],
+    textOf(ledge) ?? '',
+  );
+  const empty = await bake('room.tscn', 'Empty');
+  assert.equal(
+    get(parseTextContent(empty), 'note'),
+    "No geometry was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN) with geometry_parsed_geometry_type both, so there was nothing to bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of physics bodies on geometry_collision_mask, and both reads both.",
+    textOf(empty) ?? '',
+  );
+  assert.match(
+    readFileSync(join(project, 'room.tscn'), 'utf8'),
+    /\[node name="Empty"[^[]*navigation_mesh = SubResource/,
+  );
+}
+
+/** The bakes of a region with no navigation resource, a node that is no region and an inherited one. */
+async function bakeOfAnEmptyRegionAndOfAnInheritedOne(fixture: NavigationBakeFixture): Promise<void> {
+  const { bake, project } = fixture;
+  const blank = await bake('walled.tscn', 'Blank');
+  assert.deepEqual(
+    [get(parseTextContent(blank), 'made'), get(parseTextContent(blank), 'note')],
+    [
+      'Blank held no navigation_polygon, so one was made and built into the scene, with the defaults.',
+      'The NavigationPolygon has no outlines, and a 2D bake fills only the area its outlines enclose, less what the obstacles inside take. Give it outlines with scene_node set, such as navigation_polygon/outlines [[[0, 0], [512, 0], [512, 512], [0, 512]]], then bake again.',
+    ],
+    textOf(blank) ?? '',
+  );
+  assert.equal(
+    textOf(await bake('walled.tscn', 'Walker')),
+    "Walker is a CharacterBody2D, not a NavigationRegion2D or a NavigationRegion3D. The scene's are at Region, Covered, Bare, Blank.",
+  );
+  const inheriting = readFileSync(join(project, 'inherits.tscn'), 'utf8');
+  const base = readFileSync(join(project, 'walled.tscn'), 'utf8');
+  assert.equal(
+    textOf(await bake('inherits.tscn', 'Region')),
+    'The NavigationPolygon Region holds is built into res://walled.tscn, and a bake here cannot save that file. Bake the region there, or save the NavigationPolygon to a file of its own.',
+  );
+  assert.deepEqual(
+    [
+      readFileSync(join(project, 'inherits.tscn'), 'utf8'),
+      readFileSync(join(project, 'walled.tscn'), 'utf8'),
+    ],
+    [inheriting, base],
+    'neither scene was written',
+  );
 }
 
 /**
@@ -91052,391 +91516,412 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       assert.match(corners, new RegExp(`\\bcorner_radius_${corner}\\b`), corners);
     }
 
-    writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
-    const tileset = {
-      op: 'create_tileset',
-      resourcePath: 'res://set.tres',
-      sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 2 } }],
-    };
-    assert.equal(
-      textOf(await call('resource_edit', tileset)),
-      'sources[0].texture: res://late.png has not been imported, so the engine has no texture for it yet. project_import reimport with resourcePath res://late.png imports it.',
-    );
-    assert.ok(!existsSync(join(project, 'set.tres')), 'and no tile set is written');
-    const reimported = await call('project_import', { op: 'reimport', resourcePath: 'res://late.png' });
-    assert.ok(existsSync(join(project, 'late.png.import')), textOf(reimported) ?? JSON.stringify(reimported));
-    const made = parseTextContent(await call('resource_edit', tileset));
-    assert.equal(asArray(get(made, 'sources')).length, 1, JSON.stringify(made));
-    // The file leaves the default 16 by 16 out, so the answer is where the size is said.
-    assert.deepEqual(get(made, 'tileSize'), { x: 2, y: 2 }, JSON.stringify(made));
-    const wide = parseTextContent(
-      await call('resource_edit', {
-        ...tileset,
-        resourcePath: 'res://wide.tres',
-        sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 1 } }],
-      }),
-    );
-    assert.deepEqual(get(wide, 'tileSize'), { x: 2, y: 1 }, JSON.stringify(wide));
-    assert.match(fileOf('set.tres'), /\[gd_resource type="TileSet"/);
-    assert.equal(
-      textOf(await call('resource_edit', tileset)),
-      'res://set.tres already exists, and create_tileset builds a whole new TileSet, which would replace everything in it, the tiles a scene paints with among them. Give resourcePath a path nothing is at.',
-    );
-
-    // A layer the TileSet has none of yet is made by writing to it, and so is a tile's polygon on
-    // it, reached in the atlas source the TileSet holds. One past the next is refused.
-    const set = { op: 'modify', resourcePath: 'res://set.tres' };
-    const square = [
-      [-1, -1],
-      [1, -1],
-      [1, 1],
-      [-1, 1],
-    ];
-    assert.equal(
-      textOf(await call('resource_edit', { ...set, properties: { 'physics_layer_1/collision_layer': 1 } })),
-      'TileSet has 0 physics layers, and a new one goes after the last, so physics_layer_1 cannot be written yet: write physics_layer_0 first.',
-    );
-    const layered = await call('resource_edit', {
-      ...set,
-      properties: {
-        'physics_layer_0/collision_layer': 2,
-        'sources/0/0:0/0/physics_layer_0/polygon_0/points': square,
-      },
-    });
-    assert.equal(get(parseTextContent(layered), 'resourcePath'), 'res://set.tres', textOf(layered) ?? '');
-    assert.match(fileOf('set.tres'), /^physics_layer_0\/collision_layer = 2$/m, fileOf('set.tres'));
-    assert.match(
-      fileOf('set.tres'),
-      /^0:0\/0\/physics_layer_0\/polygon_0\/points = PackedVector2Array\(-1, -1, 1, -1, 1, 1, -1, 1\)$/m,
-      fileOf('set.tres'),
-    );
-    // A custom data layer's type by its name, as the inspector lists it, and a tile's value on it.
-    await call('resource_edit', {
-      ...set,
-      properties: { 'custom_data_layer_0/name': 'damage', 'custom_data_layer_0/type': 'int' },
-    });
-    await call('resource_edit', { ...set, properties: { 'sources/0/1:0/0/custom_data_0': 5 } });
-    assert.match(fileOf('set.tres'), /^custom_data_layer_0\/type = 2$/m, fileOf('set.tres'));
-    // The atlas source read by its own path keeps what its tiles hold on the TileSet's layers, which
-    // went with the TileSet once the read let go of it.
-    const atlasId = /\[sub_resource type="TileSetAtlasSource" id="([^"]+)"\]/.exec(fileOf('set.tres'))?.[1];
-    const atlasRead = parseTextContent(
-      await call('resource_edit', { op: 'read', resourcePath: `res://set.tres::${atlasId}` }),
-    );
-    assert.deepEqual(
-      [
-        get(atlasRead, 'properties', '0:0/0/physics_layer_0/polygon_0/points', 0),
-        get(atlasRead, 'properties', '1:0/0/custom_data_0'),
-      ],
-      [{ x: -1, y: -1, _type: 'Vector2' }, 5],
-      JSON.stringify(atlasRead),
-    );
-    // A list inside a list grows through its own add method, given the index of the one around it.
-    const terrains = await call('resource_edit', {
-      ...set,
-      properties: { 'terrain_set_0/mode': 1, 'terrain_set_0/terrain_0/name': 'Grass' },
-    });
-    assert.equal(get(parseTextContent(terrains), 'resourcePath'), 'res://set.tres', textOf(terrains) ?? '');
-    assert.match(fileOf('set.tres'), /^terrain_set_0\/terrain_0\/name = "Grass"$/m, fileOf('set.tres'));
-    // A tile's properties are named with the colon of its atlas coordinates, which is no component
-    // path, so this was refused as "TileSetAtlasSource has no property 0".
-    const peering =
-      textOf(
-        await call('resource_edit', {
-          ...set,
-          properties: {
-            'sources/0/0:0/0/terrain_set': 0,
-            'sources/0/0:0/0/terrain_peering_bits/top_left_corner': 0,
-          },
-        }),
-      ) ?? '';
-    assert.match(
-      peering,
-      /^TileSetAtlasSource has no property 0:0\/0\/terrain_peering_bits\/top_left_corner\. The nearest it has (?:is|are) 0:0\/0\/terrains_peering_bit\/top_left_corner\b/,
-      peering,
-    );
-    assert.equal(
-      textOf(
-        await call('resource_edit', {
-          ...set,
-          properties: { 'sources/0/1:0/0/physics_layer_0/polygon_1/points': square },
-        }),
-      ),
-      '1:0/0/physics_layer_0 has 0 polygons, and a new one goes after the last, so 1:0/0/physics_layer_0/polygon_1 cannot be written yet: write 1:0/0/physics_layer_0/polygon_0 first.',
-    );
-
-    // A cell wholly transparent gets no tile, and a strip the tile size does not reach is in none,
-    // and the answer names both rather than leaving a count to be worked back.
-    writeFileSync(
-      join(project, 'atlas.png'),
-      pixelPng(10, 4, (x) => (x >= 4 && x < 8 ? [0, 0, 0, 0] : [200, 40, 40, 255])),
-    );
-    await call('project_import', { op: 'reimport', resourcePath: 'res://atlas.png' });
-    const spaced = parseTextContent(
-      await call('resource_edit', {
-        op: 'create_tileset',
-        resourcePath: 'res://spaced.tres',
-        sources: [{ texture: 'res://atlas.png', tileSize: { x: 4, y: 4 } }],
-      }),
-    );
-    assert.deepEqual(
-      get(spaced, 'sources', 0),
-      {
-        sourceId: 0,
-        texture: 'res://atlas.png',
-        tiles: 1,
-        leftBlank: [{ x: 1, y: 0 }],
-        notInAnyTile: 'res://atlas.png is 10 by 4, so 2 px on the right is in no 4 by 4 tile.',
-      },
-      JSON.stringify(spaced),
-    );
-    assert.equal(get(made, 'sources', 0, 'leftBlank'), undefined, 'a picture with no blank cell names none');
-    assert.equal(get(made, 'sources', 0, 'notInAnyTile'), undefined, 'and one the tiles divide has no strip');
-
-    // Every cell refused is named by where it is, and -1 erases one, as set_cell takes it.
-    writeFileSync(
-      join(project, 'map.tscn'),
-      '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
-        '[node name="Built" type="TileMapLayer" parent="."]\n\n[node name="Bare" type="TileMapLayer" parent="."]\n',
-    );
-    const bare = { scenePath: 'res://map.tscn', nodePath: 'Bare' };
-    const cell = { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } };
-    assert.equal(
-      textOf(await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] })),
-      'Bare has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": "res://..."} on Bare gives it one, a TileSet file such as resource_edit create_tileset makes.',
-    );
-    await call('scene_node', { ...bare, op: 'set', properties: { tile_set: 'res://set.tres' } });
-    const given = parseTextContent(
-      await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] }),
-    );
-    assert.equal(
-      get(given, 'placed'),
-      1,
-      `and the call it names lets the paint through: ${JSON.stringify(given)}`,
-    );
-    const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
-    await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
-    // A TileSet kept in its own file is written there, and one built into the scene through it.
-    assert.equal(
-      textOf(
-        await call('scene_node', {
-          ...map,
-          op: 'set',
-          properties: { 'tile_set/physics_layer_1/collision_layer': 4 },
-        }),
-      ),
-      'TileMapLayer.tile_set is res://set.tres, a file of its own, so physics_layer_1/collision_layer is written there, with resource_edit modify on res://set.tres.',
-    );
-    assert.equal(
-      textOf(
-        await call('scene_node', {
-          ...map,
-          op: 'set',
-          properties: { 'tile_set:physics_layer_1/collision_layer': 4 },
-        }),
-      ),
-      'TileMapLayer.tile_set is an Object, which a path does not step into: a path reaches the components of a vector, a colour, a rectangle or a transform. A property of the resource it holds is reached with a slash: tile_set/physics_layer_1/collision_layer.',
-    );
-    const built = { scenePath: 'res://map.tscn', nodePath: 'Built', op: 'set' };
-    await call('scene_node', { ...built, properties: { tile_set: { _type: 'TileSet' } } });
-    const reachedIn = await call('scene_node', {
-      ...built,
-      properties: { 'tile_set/physics_layer_0/collision_layer': 8 },
-    });
-    assert.deepEqual(
-      get(parseTextContent(reachedIn), 'properties'),
-      { 'tile_set/physics_layer_0/collision_layer': 8 },
-      textOf(reachedIn) ?? '',
-    );
-    assert.match(
-      fileOf('map.tscn'),
-      /\[sub_resource type="TileSet" id="[^"]+"\]\nphysics_layer_0\/collision_layer = 8\n/,
-      fileOf('map.tscn'),
-    );
-    const paint = async (cells: unknown[]): Promise<JsonRpcMessage> =>
-      await call('scene_node', { ...map, op: 'set_tilemap_cells', cells });
-    assert.equal(
-      textOf(
-        await paint([
-          { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
-          { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 5, y: 5 } },
-          { coords: { x: 2, y: -1 }, sourceId: 3, atlasCoords: { x: 0, y: 0 } },
-        ]),
-      ),
-      'cells[1] at (1, 0): source 0 has no tile at (5, 5). It has tiles at (0, 0), (0, 1), (1, 0), (1, 1). cells[2] at (2, -1) names source 3, and the TileSet has source 0. sourceId -1 erases a cell. Nothing was placed.',
-    );
-    const painted = parseTextContent(
-      await paint([
-        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
-        { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
-      ]),
-    );
-    assert.deepEqual([get(painted, 'placed'), get(painted, 'erased')], [2, 0], JSON.stringify(painted));
-    const erased = parseTextContent(await paint([{ coords: { x: 0, y: 0 }, sourceId: -1 }]));
-    assert.deepEqual([get(erased, 'placed'), get(erased, 'erased')], [0, 1], JSON.stringify(erased));
-    // A cell named twice ends as its last entry, which leaves the file as it was.
-    const twice = await paint([
-      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
-      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
-      { coords: { x: 2, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
-      { coords: { x: 2, y: 0 }, sourceId: -1 },
-    ]);
-    const ended = parseTextContent(twice);
-    assert.deepEqual([get(ended, 'placed'), get(ended, 'erased')], [1, 1], textOf(twice) ?? '');
-    // The format version, then the one cell left: (1, 0) from source 0 at (1, 1), alternative 0.
-    assert.ok(
-      fileOf('map.tscn').includes(
-        'tile_map_data = PackedByteArray(0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0)\n',
-      ),
-      `the erased cell is gone from the file, as the editor saves it: ${fileOf('map.tscn')}`,
-    );
-    const ground = parseTextContent(await call('scene_node', { ...map, op: 'get' }));
-    assert.deepEqual(
-      get(ground, 'cells'),
-      [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 }, alternativeTile: 0 }],
-      JSON.stringify(ground),
-    );
-    // The tree counts the cells the file keeps as packed bytes, and names the call that lists them.
-    const tree = parseTextContent(
-      await call('scene_tree', { scenePath: 'res://map.tscn', includeProperties: true }),
-    );
-    assert.deepEqual(
-      asArray(get(tree, 'tree', 'children')).map((child) => [
-        get(child, 'name'),
-        get(child, 'cellCount'),
-        get(child, 'cellsListedBy'),
-      ]),
-      [
-        [
-          'Ground',
-          1,
-          'scene_node get with nodePath Ground, which lists them as set_tilemap_cells takes them',
-        ],
-        ['Built', undefined, undefined],
-        ['Bare', 1, 'scene_node get with nodePath Bare, which lists them as set_tilemap_cells takes them'],
-      ],
-      JSON.stringify(tree),
-    );
-    // A TileMap keeps its cells in layers of its own, and drops an erased one only as they update too.
-    writeFileSync(
-      join(project, 'old.tscn'),
-      '[gd_scene format=3]\n\n[ext_resource type="TileSet" path="res://set.tres" id="1_set"]\n\n' +
-        '[node name="Old" type="TileMap"]\ntile_set = ExtResource("1_set")\n',
-    );
-    const old = { scenePath: 'res://old.tscn', nodePath: '.', op: 'set_tilemap_cells' };
-    await call('scene_node', {
-      ...old,
-      cells: [
-        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
-        { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
-      ],
-    });
-    const oldErased = parseTextContent(
-      await call('scene_node', { ...old, cells: [{ coords: { x: 0, y: 0 }, sourceId: -1 }] }),
-    );
-    assert.deepEqual([get(oldErased, 'placed'), get(oldErased, 'erased')], [0, 1], JSON.stringify(oldErased));
-    // (1, 0), then source 0 with the atlas column above it, then the atlas row with alternative 0.
-    assert.ok(
-      fileOf('old.tscn').includes('layer_0/tile_data = PackedInt32Array(1, 65536, 1)\n'),
-      `the erased cell is gone from the TileMap's file: ${fileOf('old.tscn')}`,
-    );
-    assert.equal(
-      textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
-      "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
-    );
-
-    // AudioBusLayout lists bus/1/name only once bus 1 exists, and setting it is what makes the bus.
-    // It declares bus/1/send a float and holds the name of the bus it sends to.
-    const buses = { resourcePath: 'res://buses.tres', op: 'modify' };
-    await call('resource_edit', { ...buses, op: 'create', resourceType: 'AudioBusLayout' });
-    const skipped =
-      textOf(await call('resource_edit', { ...buses, properties: { 'bus/2/name': 'Music' } })) ?? '';
-    assert.match(
-      skipped,
-      /^Setting bus\/2\/name would also make bus\/1, which nothing was given for: write bus\/1 first\./,
-      skipped,
-    );
-    const sfx =
-      textOf(
-        await call('resource_edit', {
-          ...buses,
-          properties: {
-            'bus/1/name': 'Sfx',
-            'bus/1/send': 'Master',
-            'bus/1/effect/0/effect': { _type: 'AudioEffectReverb' },
-            'bus/1/effect/0/enabled': true,
-          },
-        }),
-      ) ?? '';
-    assert.match(sfx, /^\{/, sfx);
-    const layout = fileOf('buses.tres');
-    for (const line of [
-      /\[sub_resource type="AudioEffectReverb" id="([^"]+)"\]/,
-      /\nbus\/1\/name = &"Sfx"\n/,
-      /\nbus\/1\/send = &"Master"\n/,
-      /\nbus\/1\/effect\/0\/effect = SubResource\("[^"]+"\)\n/,
-      /\nbus\/1\/effect\/0\/enabled = true\n/,
-    ]) {
-      assert.match(layout, line, layout);
-    }
-    assert.doesNotMatch(layout, /bus\/2\//, `the refused write made no bus 2: ${layout}`);
-
-    // SpriteFrames hands its animations back sorted by name with loop as a number, which read as a
-    // write the engine had changed.
-    const frames = { resourcePath: 'res://frames.tres', op: 'modify' };
-    await call('resource_edit', { ...frames, op: 'create', resourceType: 'SpriteFrames' });
-    const animated =
-      textOf(
-        await call('resource_edit', {
-          ...frames,
-          properties: {
-            animations: [
-              {
-                name: 'rest',
-                speed: 8,
-                loop: true,
-                frames: [{ texture: { _type: 'Resource', path: 'res://late.png' }, duration: 1 }],
-              },
-              { name: 'idle', speed: 5, loop: false, frames: [] },
-            ],
-          },
-        }),
-      ) ?? '';
-    assert.match(animated, /^\{/, animated);
-    assert.match(
-      fileOf('frames.tres'),
-      /"loop": 0,\n"name": &"idle",[\s\S]*"texture": ExtResource\("[^"]+"\)[\s\S]*"loop": 1,\n"name": &"rest",/,
-      fileOf('frames.tres'),
-    );
-    // A picture imported as Keep File has an import file and no resource to load.
-    writeFileSync(join(project, 'kept.png'), solidPng(4, 4, 4));
-    writeFileSync(join(project, 'kept.png.import'), '[remap]\n\nimporter="keep"\n');
-    const kept =
-      textOf(
-        await call('resource_edit', {
-          ...frames,
-          properties: {
-            animations: [
-              {
-                name: 'rest',
-                speed: 8,
-                loop: true,
-                frames: [{ texture: { _type: 'Resource', path: 'res://kept.png' } }],
-              },
-            ],
-          },
-        }),
-      ) ?? '';
-    assert.match(
-      kept,
-      /res:\/\/kept\.png is imported with importer keep, which makes no resource of it for the value\. Set importer in res:\/\/kept\.png\.import to the one wanted, such as texture for an image, then project_import reimport with resourcePath res:\/\/kept\.png imports it\./,
-      kept,
-    );
+    const fixture: ThemeEngineFixture = { call, fileOf, project };
+    const made = await themeEngineTileSets(fixture);
+    await themeEngineBlankCells(fixture, made);
+    await themeEngineTilemapCells(fixture);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
     rmSync(runtimeDir, { recursive: true, force: true });
   }
+}
+
+/** What the theme and tile set cases share once the engine is up. */
+interface ThemeEngineFixture {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  fileOf: (file: string) => string;
+  project: string;
+}
+
+/** The tile set cases: a texture not yet imported, a second source, layers and terrains written by path. */
+async function themeEngineTileSets(fixture: ThemeEngineFixture): Promise<unknown> {
+  const { call, fileOf, project } = fixture;
+  writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
+  const tileset = {
+    op: 'create_tileset',
+    resourcePath: 'res://set.tres',
+    sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 2 } }],
+  };
+  assert.equal(
+    textOf(await call('resource_edit', tileset)),
+    'sources[0].texture: res://late.png has not been imported, so the engine has no texture for it yet. project_import reimport with resourcePath res://late.png imports it.',
+  );
+  assert.ok(!existsSync(join(project, 'set.tres')), 'and no tile set is written');
+  const reimported = await call('project_import', { op: 'reimport', resourcePath: 'res://late.png' });
+  assert.ok(existsSync(join(project, 'late.png.import')), textOf(reimported) ?? JSON.stringify(reimported));
+  const made = parseTextContent(await call('resource_edit', tileset));
+  assert.equal(asArray(get(made, 'sources')).length, 1, JSON.stringify(made));
+  // The file leaves the default 16 by 16 out, so the answer is where the size is said.
+  assert.deepEqual(get(made, 'tileSize'), { x: 2, y: 2 }, JSON.stringify(made));
+  const wide = parseTextContent(
+    await call('resource_edit', {
+      ...tileset,
+      resourcePath: 'res://wide.tres',
+      sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 1 } }],
+    }),
+  );
+  assert.deepEqual(get(wide, 'tileSize'), { x: 2, y: 1 }, JSON.stringify(wide));
+  assert.match(fileOf('set.tres'), /\[gd_resource type="TileSet"/);
+  assert.equal(
+    textOf(await call('resource_edit', tileset)),
+    'res://set.tres already exists, and create_tileset builds a whole new TileSet, which would replace everything in it, the tiles a scene paints with among them. Give resourcePath a path nothing is at.',
+  );
+
+  // A layer the TileSet has none of yet is made by writing to it, and so is a tile's polygon on
+  // it, reached in the atlas source the TileSet holds. One past the next is refused.
+  const set = { op: 'modify', resourcePath: 'res://set.tres' };
+  const square = [
+    [-1, -1],
+    [1, -1],
+    [1, 1],
+    [-1, 1],
+  ];
+  assert.equal(
+    textOf(await call('resource_edit', { ...set, properties: { 'physics_layer_1/collision_layer': 1 } })),
+    'TileSet has 0 physics layers, and a new one goes after the last, so physics_layer_1 cannot be written yet: write physics_layer_0 first.',
+  );
+  const layered = await call('resource_edit', {
+    ...set,
+    properties: {
+      'physics_layer_0/collision_layer': 2,
+      'sources/0/0:0/0/physics_layer_0/polygon_0/points': square,
+    },
+  });
+  assert.equal(get(parseTextContent(layered), 'resourcePath'), 'res://set.tres', textOf(layered) ?? '');
+  assert.match(fileOf('set.tres'), /^physics_layer_0\/collision_layer = 2$/m, fileOf('set.tres'));
+  assert.match(
+    fileOf('set.tres'),
+    /^0:0\/0\/physics_layer_0\/polygon_0\/points = PackedVector2Array\(-1, -1, 1, -1, 1, 1, -1, 1\)$/m,
+    fileOf('set.tres'),
+  );
+  // A custom data layer's type by its name, as the inspector lists it, and a tile's value on it.
+  await call('resource_edit', {
+    ...set,
+    properties: { 'custom_data_layer_0/name': 'damage', 'custom_data_layer_0/type': 'int' },
+  });
+  await call('resource_edit', { ...set, properties: { 'sources/0/1:0/0/custom_data_0': 5 } });
+  assert.match(fileOf('set.tres'), /^custom_data_layer_0\/type = 2$/m, fileOf('set.tres'));
+  // The atlas source read by its own path keeps what its tiles hold on the TileSet's layers, which
+  // went with the TileSet once the read let go of it.
+  const atlasId = /\[sub_resource type="TileSetAtlasSource" id="([^"]+)"\]/.exec(fileOf('set.tres'))?.[1];
+  const atlasRead = parseTextContent(
+    await call('resource_edit', { op: 'read', resourcePath: `res://set.tres::${atlasId}` }),
+  );
+  assert.deepEqual(
+    [
+      get(atlasRead, 'properties', '0:0/0/physics_layer_0/polygon_0/points', 0),
+      get(atlasRead, 'properties', '1:0/0/custom_data_0'),
+    ],
+    [{ x: -1, y: -1, _type: 'Vector2' }, 5],
+    JSON.stringify(atlasRead),
+  );
+  // A list inside a list grows through its own add method, given the index of the one around it.
+  const terrains = await call('resource_edit', {
+    ...set,
+    properties: { 'terrain_set_0/mode': 1, 'terrain_set_0/terrain_0/name': 'Grass' },
+  });
+  assert.equal(get(parseTextContent(terrains), 'resourcePath'), 'res://set.tres', textOf(terrains) ?? '');
+  assert.match(fileOf('set.tres'), /^terrain_set_0\/terrain_0\/name = "Grass"$/m, fileOf('set.tres'));
+  // A tile's properties are named with the colon of its atlas coordinates, which is no component
+  // path, so this was refused as "TileSetAtlasSource has no property 0".
+  const peering =
+    textOf(
+      await call('resource_edit', {
+        ...set,
+        properties: {
+          'sources/0/0:0/0/terrain_set': 0,
+          'sources/0/0:0/0/terrain_peering_bits/top_left_corner': 0,
+        },
+      }),
+    ) ?? '';
+  assert.match(
+    peering,
+    /^TileSetAtlasSource has no property 0:0\/0\/terrain_peering_bits\/top_left_corner\. The nearest it has (?:is|are) 0:0\/0\/terrains_peering_bit\/top_left_corner\b/,
+    peering,
+  );
+  assert.equal(
+    textOf(
+      await call('resource_edit', {
+        ...set,
+        properties: { 'sources/0/1:0/0/physics_layer_0/polygon_1/points': square },
+      }),
+    ),
+    '1:0/0/physics_layer_0 has 0 polygons, and a new one goes after the last, so 1:0/0/physics_layer_0/polygon_1 cannot be written yet: write 1:0/0/physics_layer_0/polygon_0 first.',
+  );
+  return made;
+}
+
+/** The tile set that leaves a transparent cell blank and names the strip no tile reaches. */
+async function themeEngineBlankCells(fixture: ThemeEngineFixture, made: unknown): Promise<void> {
+  const { call, project } = fixture;
+  // A cell wholly transparent gets no tile, and a strip the tile size does not reach is in none,
+  // and the answer names both rather than leaving a count to be worked back.
+  writeFileSync(
+    join(project, 'atlas.png'),
+    pixelPng(10, 4, (x) => (x >= 4 && x < 8 ? [0, 0, 0, 0] : [200, 40, 40, 255])),
+  );
+  await call('project_import', { op: 'reimport', resourcePath: 'res://atlas.png' });
+  const spaced = parseTextContent(
+    await call('resource_edit', {
+      op: 'create_tileset',
+      resourcePath: 'res://spaced.tres',
+      sources: [{ texture: 'res://atlas.png', tileSize: { x: 4, y: 4 } }],
+    }),
+  );
+  assert.deepEqual(
+    get(spaced, 'sources', 0),
+    {
+      sourceId: 0,
+      texture: 'res://atlas.png',
+      tiles: 1,
+      leftBlank: [{ x: 1, y: 0 }],
+      notInAnyTile: 'res://atlas.png is 10 by 4, so 2 px on the right is in no 4 by 4 tile.',
+    },
+    JSON.stringify(spaced),
+  );
+  assert.equal(get(made, 'sources', 0, 'leftBlank'), undefined, 'a picture with no blank cell names none');
+  assert.equal(get(made, 'sources', 0, 'notInAnyTile'), undefined, 'and one the tiles divide has no strip');
+}
+
+/** The tile map cases of the theme and tile set fixture: cells refused, a tile set in a file and one built in. */
+async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf, project } = fixture;
+  // Every cell refused is named by where it is, and -1 erases one, as set_cell takes it.
+  writeFileSync(
+    join(project, 'map.tscn'),
+    '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
+      '[node name="Built" type="TileMapLayer" parent="."]\n\n[node name="Bare" type="TileMapLayer" parent="."]\n',
+  );
+  const bare = { scenePath: 'res://map.tscn', nodePath: 'Bare' };
+  const cell = { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } };
+  assert.equal(
+    textOf(await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] })),
+    'Bare has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": "res://..."} on Bare gives it one, a TileSet file such as resource_edit create_tileset makes.',
+  );
+  await call('scene_node', { ...bare, op: 'set', properties: { tile_set: 'res://set.tres' } });
+  const given = parseTextContent(
+    await call('scene_node', { ...bare, op: 'set_tilemap_cells', cells: [cell] }),
+  );
+  assert.equal(
+    get(given, 'placed'),
+    1,
+    `and the call it names lets the paint through: ${JSON.stringify(given)}`,
+  );
+  const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
+  await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
+  // A TileSet kept in its own file is written there, and one built into the scene through it.
+  assert.equal(
+    textOf(
+      await call('scene_node', {
+        ...map,
+        op: 'set',
+        properties: { 'tile_set/physics_layer_1/collision_layer': 4 },
+      }),
+    ),
+    'TileMapLayer.tile_set is res://set.tres, a file of its own, so physics_layer_1/collision_layer is written there, with resource_edit modify on res://set.tres.',
+  );
+  assert.equal(
+    textOf(
+      await call('scene_node', {
+        ...map,
+        op: 'set',
+        properties: { 'tile_set:physics_layer_1/collision_layer': 4 },
+      }),
+    ),
+    'TileMapLayer.tile_set is an Object, which a path does not step into: a path reaches the components of a vector, a colour, a rectangle or a transform. A property of the resource it holds is reached with a slash: tile_set/physics_layer_1/collision_layer.',
+  );
+  const built = { scenePath: 'res://map.tscn', nodePath: 'Built', op: 'set' };
+  await call('scene_node', { ...built, properties: { tile_set: { _type: 'TileSet' } } });
+  const reachedIn = await call('scene_node', {
+    ...built,
+    properties: { 'tile_set/physics_layer_0/collision_layer': 8 },
+  });
+  assert.deepEqual(
+    get(parseTextContent(reachedIn), 'properties'),
+    { 'tile_set/physics_layer_0/collision_layer': 8 },
+    textOf(reachedIn) ?? '',
+  );
+  assert.match(
+    fileOf('map.tscn'),
+    /\[sub_resource type="TileSet" id="[^"]+"\]\nphysics_layer_0\/collision_layer = 8\n/,
+    fileOf('map.tscn'),
+  );
+  const paint = async (cells: unknown[]): Promise<JsonRpcMessage> =>
+    await call('scene_node', { ...map, op: 'set_tilemap_cells', cells });
+  assert.equal(
+    textOf(
+      await paint([
+        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+        { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 5, y: 5 } },
+        { coords: { x: 2, y: -1 }, sourceId: 3, atlasCoords: { x: 0, y: 0 } },
+      ]),
+    ),
+    'cells[1] at (1, 0): source 0 has no tile at (5, 5). It has tiles at (0, 0), (0, 1), (1, 0), (1, 1). cells[2] at (2, -1) names source 3, and the TileSet has source 0. sourceId -1 erases a cell. Nothing was placed.',
+  );
+  const painted = parseTextContent(
+    await paint([
+      { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+    ]),
+  );
+  assert.deepEqual([get(painted, 'placed'), get(painted, 'erased')], [2, 0], JSON.stringify(painted));
+  const erased = parseTextContent(await paint([{ coords: { x: 0, y: 0 }, sourceId: -1 }]));
+  assert.deepEqual([get(erased, 'placed'), get(erased, 'erased')], [0, 1], JSON.stringify(erased));
+  // A cell named twice ends as its last entry, which leaves the file as it was.
+  const twice = await paint([
+    { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+    { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+    { coords: { x: 2, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+    { coords: { x: 2, y: 0 }, sourceId: -1 },
+  ]);
+  const ended = parseTextContent(twice);
+  assert.deepEqual([get(ended, 'placed'), get(ended, 'erased')], [1, 1], textOf(twice) ?? '');
+  // The format version, then the one cell left: (1, 0) from source 0 at (1, 1), alternative 0.
+  assert.ok(
+    fileOf('map.tscn').includes(
+      'tile_map_data = PackedByteArray(0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0)\n',
+    ),
+    `the erased cell is gone from the file, as the editor saves it: ${fileOf('map.tscn')}`,
+  );
+  const ground = parseTextContent(await call('scene_node', { ...map, op: 'get' }));
+  assert.deepEqual(
+    get(ground, 'cells'),
+    [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 }, alternativeTile: 0 }],
+    JSON.stringify(ground),
+  );
+  // The tree counts the cells the file keeps as packed bytes, and names the call that lists them.
+  const tree = parseTextContent(
+    await call('scene_tree', { scenePath: 'res://map.tscn', includeProperties: true }),
+  );
+  assert.deepEqual(
+    asArray(get(tree, 'tree', 'children')).map((child) => [
+      get(child, 'name'),
+      get(child, 'cellCount'),
+      get(child, 'cellsListedBy'),
+    ]),
+    [
+      ['Ground', 1, 'scene_node get with nodePath Ground, which lists them as set_tilemap_cells takes them'],
+      ['Built', undefined, undefined],
+      ['Bare', 1, 'scene_node get with nodePath Bare, which lists them as set_tilemap_cells takes them'],
+    ],
+    JSON.stringify(tree),
+  );
+  // A TileMap keeps its cells in layers of its own, and drops an erased one only as they update too.
+  writeFileSync(
+    join(project, 'old.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="TileSet" path="res://set.tres" id="1_set"]\n\n' +
+      '[node name="Old" type="TileMap"]\ntile_set = ExtResource("1_set")\n',
+  );
+  const old = { scenePath: 'res://old.tscn', nodePath: '.', op: 'set_tilemap_cells' };
+  await call('scene_node', {
+    ...old,
+    cells: [
+      { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+    ],
+  });
+  const oldErased = parseTextContent(
+    await call('scene_node', { ...old, cells: [{ coords: { x: 0, y: 0 }, sourceId: -1 }] }),
+  );
+  assert.deepEqual([get(oldErased, 'placed'), get(oldErased, 'erased')], [0, 1], JSON.stringify(oldErased));
+  // (1, 0), then source 0 with the atlas column above it, then the atlas row with alternative 0.
+  assert.ok(
+    fileOf('old.tscn').includes('layer_0/tile_data = PackedInt32Array(1, 65536, 1)\n'),
+    `the erased cell is gone from the TileMap's file: ${fileOf('old.tscn')}`,
+  );
+  assert.equal(
+    textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
+    "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
+  );
+
+  // AudioBusLayout lists bus/1/name only once bus 1 exists, and setting it is what makes the bus.
+  // It declares bus/1/send a float and holds the name of the bus it sends to.
+  const buses = { resourcePath: 'res://buses.tres', op: 'modify' };
+  await call('resource_edit', { ...buses, op: 'create', resourceType: 'AudioBusLayout' });
+  const skipped =
+    textOf(await call('resource_edit', { ...buses, properties: { 'bus/2/name': 'Music' } })) ?? '';
+  assert.match(
+    skipped,
+    /^Setting bus\/2\/name would also make bus\/1, which nothing was given for: write bus\/1 first\./,
+    skipped,
+  );
+  const sfx =
+    textOf(
+      await call('resource_edit', {
+        ...buses,
+        properties: {
+          'bus/1/name': 'Sfx',
+          'bus/1/send': 'Master',
+          'bus/1/effect/0/effect': { _type: 'AudioEffectReverb' },
+          'bus/1/effect/0/enabled': true,
+        },
+      }),
+    ) ?? '';
+  assert.match(sfx, /^\{/, sfx);
+  const layout = fileOf('buses.tres');
+  for (const line of [
+    /\[sub_resource type="AudioEffectReverb" id="([^"]+)"\]/,
+    /\nbus\/1\/name = &"Sfx"\n/,
+    /\nbus\/1\/send = &"Master"\n/,
+    /\nbus\/1\/effect\/0\/effect = SubResource\("[^"]+"\)\n/,
+    /\nbus\/1\/effect\/0\/enabled = true\n/,
+  ]) {
+    assert.match(layout, line, layout);
+  }
+  assert.doesNotMatch(layout, /bus\/2\//, `the refused write made no bus 2: ${layout}`);
+
+  // SpriteFrames hands its animations back sorted by name with loop as a number, which read as a
+  // write the engine had changed.
+  const frames = { resourcePath: 'res://frames.tres', op: 'modify' };
+  await call('resource_edit', { ...frames, op: 'create', resourceType: 'SpriteFrames' });
+  const animated =
+    textOf(
+      await call('resource_edit', {
+        ...frames,
+        properties: {
+          animations: [
+            {
+              name: 'rest',
+              speed: 8,
+              loop: true,
+              frames: [{ texture: { _type: 'Resource', path: 'res://late.png' }, duration: 1 }],
+            },
+            { name: 'idle', speed: 5, loop: false, frames: [] },
+          ],
+        },
+      }),
+    ) ?? '';
+  assert.match(animated, /^\{/, animated);
+  assert.match(
+    fileOf('frames.tres'),
+    /"loop": 0,\n"name": &"idle",[\s\S]*"texture": ExtResource\("[^"]+"\)[\s\S]*"loop": 1,\n"name": &"rest",/,
+    fileOf('frames.tres'),
+  );
+  // A picture imported as Keep File has an import file and no resource to load.
+  writeFileSync(join(project, 'kept.png'), solidPng(4, 4, 4));
+  writeFileSync(join(project, 'kept.png.import'), '[remap]\n\nimporter="keep"\n');
+  const kept =
+    textOf(
+      await call('resource_edit', {
+        ...frames,
+        properties: {
+          animations: [
+            {
+              name: 'rest',
+              speed: 8,
+              loop: true,
+              frames: [{ texture: { _type: 'Resource', path: 'res://kept.png' } }],
+            },
+          ],
+        },
+      }),
+    ) ?? '';
+  assert.match(
+    kept,
+    /res:\/\/kept\.png is imported with importer keep, which makes no resource of it for the value\. Set importer in res:\/\/kept\.png\.import to the one wanted, such as texture for an image, then project_import reimport with resourcePath res:\/\/kept\.png imports it\./,
+    kept,
+  );
 }
 
 /**
@@ -92569,56 +93054,16 @@ const TESTS: (() => void | Promise<void>)[] = [
  * fixture can be run on its own while it is being written.
  */
 async function main(): Promise<void> {
-  const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
-  const named =
-    wanted.length === 0
-      ? TESTS
-      : TESTS.filter((test) => wanted.some((word) => test.name.toLowerCase().includes(word)));
-  if (named.length === 0) {
-    console.error(`No regression is named ${process.argv.slice(2).join(' ')}.`);
-    process.exitCode = 2;
+  const named = regressionsNamedOnTheCommandLine();
+  if (named === null) {
     return;
   }
-  // One part of the list, for CI to run the parts on several machines at once: run one after
-  // another, the engine leg took fifteen minutes of a 23-minute run, nearly all of it waiting on
-  // Godot processes. Split by measured weight, so the parts finish together.
-  const shard = process.env['GDHARNESS_REGRESSION_SHARD'];
-  const part = shard === undefined ? null : /^(\d+)\/(\d+)$/.exec(shard);
-  if (shard !== undefined && (part === null || Number(part[1]) < 1 || Number(part[1]) > Number(part[2]))) {
-    console.error(`GDHARNESS_REGRESSION_SHARD is ${shard}; it takes k/n, the kth part of n, such as 1/2.`);
-    process.exitCode = 2;
+  const chosen = regressionsOfThisPart(named);
+  if (chosen === null) {
     return;
-  }
-  const inPart =
-    part === null
-      ? null
-      : new Set(
-          regressionPart(
-            named.map((test) => test.name),
-            Number(part[1]),
-            Number(part[2]),
-            secondsOn(),
-          ),
-        );
-  const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
-  if (part !== null) {
-    console.log(`part ${part[1]} of ${part[2]}: ${chosen.length} of ${named.length} regressions`);
   }
 
   const failed: string[] = [];
-  // An engine a fixture left running fails it, passed or not: it takes a core from every fixture
-  // after it, and a frame rate case run beside one read the machine rather than the code. Looked for
-  // at once after a failure or a directory left behind, since those are how it shows, and once more
-  // over the whole run, since on Linux and macOS a held directory is removed all the same.
-  const leftRunning = (engines: { pid: number; under: string; during: string | null }[]): void => {
-    for (const { pid, under, during } of engines) {
-      const name = during ?? 'a fixture';
-      console.error(`${name} left engine ${pid} running under ${under}; it has been ended`);
-      if (!failed.includes(name)) {
-        failed.push(name);
-      }
-    }
-  };
   // A regression that hangs fails by name rather than taking the leg's whole budget with it: a job
   // its own limit ends uploads no log, so nothing says which test it was. Five minutes is room for a
   // loaded runner, and a regression that comes near it on a CI leg is split.
@@ -92639,93 +93084,189 @@ async function main(): Promise<void> {
   const runEnds = Date.now() + budgetMs;
   const ranPast: string[] = [];
   const unreached: string[] = [];
+  const run: RegressionRun = { failed, ranPast, deadlineMs, budgetMs, runEnds };
   for (const [index, test] of chosen.entries()) {
     if (Date.now() >= runEnds) {
       unreached.push(...chosen.slice(index).map((left) => left.name));
       break;
     }
-    sweepingFor(test.name);
-    let passed = true;
-    const began = Date.now();
-    const allowedMs = Math.min(deadlineMs, runEnds - began);
-    let deadline: NodeJS.Timeout | undefined;
-    const running = Promise.resolve().then(() => test());
-    // A test that settles after its deadline has nobody waiting on it any more.
-    running.catch(() => undefined);
-    try {
-      await Promise.race([
-        running,
-        new Promise<never>((_resolve, reject) => {
-          deadline = setTimeout(() => {
-            ranPast.push(test.name);
-            const took = `${(allowedMs / 1000).toFixed(1)}s after it started`;
-            reject(
-              new Error(
-                allowedMs < deadlineMs
-                  ? `${test.name} was still running when the run's ${budgetMs / 1000}s ran out, ${took}`
-                  : `${test.name} was still running ${took}`,
-              ),
-            );
-          }, allowedMs);
-        }),
-      ]);
-    } catch (error) {
-      passed = false;
-      failed.push(test.name);
-      // A thrown event is not an Error and prints as "[object ErrorEvent]", so its message is added.
-      const said =
-        error instanceof Error
-          ? error.stack
-          : typeof error === 'object' && error !== null && 'message' in error
-            ? `${Object.prototype.toString.call(error)}: ${String(error.message)}`
-            : String(error);
-      console.error(`\n${test.name} failed\n${said}\n`);
-    } finally {
-      clearTimeout(deadline);
-    }
-    // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing,
-    // and so the weights the parts are split by (test/support/shards.ts) can be read off a run.
-    const took = Date.now() - began;
-    if (took >= 5_000) {
-      console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
-    }
-    if (ranPast.includes(test.name)) {
-      // Still running, it never reached its own stops and sweeps.
-      lookUnder(test.name, await stopServersOf(test.name));
-    }
-    if (!passed || leftBehindBy(test.name)) {
-      leftRunning(await endEnginesLeft(test.name));
-    }
+    await runOneRegression(test, run);
   }
   sweepingFor(null);
-  leftRunning(await endEnginesLeft());
+  recordEnginesLeftRunning(await endEnginesLeft(), failed);
 
   await reportUnswept();
 
   if (failed.length > 0 || unreached.length > 0) {
-    if (failed.length > 0) {
-      console.error(`${failed.length} of ${chosen.length} regressions failed:`);
-      for (const name of failed) {
-        console.error(`  ${name}`);
-      }
-    }
-    if (unreached.length > 0) {
-      console.error(
-        `${unreached.length} of ${chosen.length} regressions were not reached before the run's ${budgetMs / 1000}s ran out:`,
-      );
-      for (const name of unreached) {
-        console.error(`  ${name}`);
-      }
-    }
-    process.exitCode = 1;
-    // A test past its deadline is still running and holds whatever it opened, which would keep
-    // this process, and the job waiting on it, alive until the job's own limit.
-    if (ranPast.length > 0) {
-      process.exit(1);
-    }
+    reportRegressionFailures({ run, unreached, chosenCount: chosen.length });
     return;
   }
   console.log(`regression tests passed (${chosen.length})`);
+}
+
+/** One test of the list, as the runner takes it. */
+type RegressionCase = () => void | Promise<void>;
+
+/** What the runner keeps while it goes down the list. */
+interface RegressionRun {
+  failed: string[];
+  ranPast: string[];
+  deadlineMs: number;
+  budgetMs: number;
+  runEnds: number;
+}
+
+/** The tests the command line names, all of them when it names none, or null after saying none match. */
+function regressionsNamedOnTheCommandLine(): RegressionCase[] | null {
+  const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
+  const named =
+    wanted.length === 0
+      ? TESTS
+      : TESTS.filter((test) => wanted.some((word) => test.name.toLowerCase().includes(word)));
+  if (named.length === 0) {
+    console.error(`No regression is named ${process.argv.slice(2).join(' ')}.`);
+    process.exitCode = 2;
+    return null;
+  }
+  return named;
+}
+
+/** The tests of the part GDHARNESS_REGRESSION_SHARD names, or null after refusing it. */
+function regressionsOfThisPart(named: RegressionCase[]): RegressionCase[] | null {
+  // One part of the list, for CI to run the parts on several machines at once: run one after
+  // another, the engine leg took fifteen minutes of a 23-minute run, nearly all of it waiting on
+  // Godot processes. Split by measured weight, so the parts finish together.
+  const shard = process.env['GDHARNESS_REGRESSION_SHARD'];
+  const part = shard === undefined ? null : /^(\d+)\/(\d+)$/.exec(shard);
+  if (shard !== undefined && (part === null || Number(part[1]) < 1 || Number(part[1]) > Number(part[2]))) {
+    console.error(`GDHARNESS_REGRESSION_SHARD is ${shard}; it takes k/n, the kth part of n, such as 1/2.`);
+    process.exitCode = 2;
+    return null;
+  }
+  const inPart =
+    part === null
+      ? null
+      : new Set(
+          regressionPart(
+            named.map((test) => test.name),
+            Number(part[1]),
+            Number(part[2]),
+            secondsOn(),
+          ),
+        );
+  const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
+  if (part !== null) {
+    console.log(`part ${part[1]} of ${part[2]}: ${chosen.length} of ${named.length} regressions`);
+  }
+  return chosen;
+}
+
+/**
+ * Fails each fixture that left an engine running, passed or not: it takes a core from every fixture
+ * after it, and a frame rate case run beside one read the machine rather than the code. Looked for
+ * at once after a failure or a directory left behind, since those are how it shows, and once more
+ * over the whole run, since on Linux and macOS a held directory is removed all the same.
+ */
+function recordEnginesLeftRunning(
+  engines: { pid: number; under: string; during: string | null }[],
+  failed: string[],
+): void {
+  for (const { pid, under, during } of engines) {
+    const name = during ?? 'a fixture';
+    console.error(`${name} left engine ${pid} running under ${under}; it has been ended`);
+    if (!failed.includes(name)) {
+      failed.push(name);
+    }
+  }
+}
+
+/** What a rejection reads as in the log. */
+function saidOfAFailure(error: unknown): string | undefined {
+  // A thrown event is not an Error and prints as "[object ErrorEvent]", so its message is added.
+  return error instanceof Error
+    ? error.stack
+    : typeof error === 'object' && error !== null && 'message' in error
+      ? `${Object.prototype.toString.call(error)}: ${String(error.message)}`
+      : String(error);
+}
+
+/** Runs one test against its deadline, then sweeps the engines and servers it left. */
+async function runOneRegression(test: RegressionCase, run: RegressionRun): Promise<void> {
+  const { failed, ranPast, deadlineMs, budgetMs, runEnds } = run;
+  sweepingFor(test.name);
+  let passed = true;
+  const began = Date.now();
+  const allowedMs = Math.min(deadlineMs, runEnds - began);
+  let deadline: NodeJS.Timeout | undefined;
+  const running = Promise.resolve().then(() => test());
+  // A test that settles after its deadline has nobody waiting on it any more.
+  running.catch(() => undefined);
+  try {
+    await Promise.race([
+      running,
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => {
+          ranPast.push(test.name);
+          const took = `${(allowedMs / 1000).toFixed(1)}s after it started`;
+          reject(
+            new Error(
+              allowedMs < deadlineMs
+                ? `${test.name} was still running when the run's ${budgetMs / 1000}s ran out, ${took}`
+                : `${test.name} was still running ${took}`,
+            ),
+          );
+        }, allowedMs);
+      }),
+    ]);
+  } catch (error) {
+    passed = false;
+    failed.push(test.name);
+    console.error(`\n${test.name} failed\n${saidOfAFailure(error)}\n`);
+  } finally {
+    clearTimeout(deadline);
+  }
+  // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing,
+  // and so the weights the parts are split by (test/support/shards.ts) can be read off a run.
+  const took = Date.now() - began;
+  if (took >= 5_000) {
+    console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
+  }
+  if (ranPast.includes(test.name)) {
+    // Still running, it never reached its own stops and sweeps.
+    lookUnder(test.name, await stopServersOf(test.name));
+  }
+  if (!passed || leftBehindBy(test.name)) {
+    recordEnginesLeftRunning(await endEnginesLeft(test.name), failed);
+  }
+}
+
+/** Names every failed and unreached test and sets the exit code. */
+function reportRegressionFailures(report: {
+  run: RegressionRun;
+  unreached: string[];
+  chosenCount: number;
+}): void {
+  const { run, unreached, chosenCount } = report;
+  if (run.failed.length > 0) {
+    console.error(`${run.failed.length} of ${chosenCount} regressions failed:`);
+    for (const name of run.failed) {
+      console.error(`  ${name}`);
+    }
+  }
+  if (unreached.length > 0) {
+    console.error(
+      `${unreached.length} of ${chosenCount} regressions were not reached before the run's ${run.budgetMs / 1000}s ran out:`,
+    );
+    for (const name of unreached) {
+      console.error(`  ${name}`);
+    }
+  }
+  process.exitCode = 1;
+  // A test past its deadline is still running and holds whatever it opened, which would keep
+  // this process, and the job waiting on it, alive until the job's own limit.
+  if (run.ranPast.length > 0) {
+    process.exit(1);
+  }
 }
 
 await main();
