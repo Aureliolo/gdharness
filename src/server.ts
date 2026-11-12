@@ -4025,6 +4025,19 @@ function elsewhereIn(projectPath: string, asked: string): string {
   return near.length === 0 ? '' : ` The project does have ${there}.`;
 }
 
+const WINDOW_NEEDED_WHY =
+  'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+
+/** What a test run says about windowed suites on a machine with no display, where it ran headless. */
+function headlessWindowNote(needing: readonly string[], accessible: readonly string[]): string {
+  const one = needing.length === 1;
+  const noTree =
+    accessible.length === 0
+      ? ''
+      : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
+  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${WINDOW_NEEDED_WHY} Run under xvfb-run to give it a display.`;
+}
+
 /**
  * What a test run says about [param needing], the suites gdharness test would give a window: that
  * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
@@ -4036,14 +4049,9 @@ function windowNoteFor(
   accessible: readonly string[],
 ): string {
   const one = needing.length === 1;
-  const why =
-    'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+  const why = WINDOW_NEEDED_WHY;
   if (sharing === null) {
-    const noTree =
-      accessible.length === 0
-        ? ''
-        : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
-    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${why} Run under xvfb-run to give it a display.`;
+    return headlessWindowNote(needing, accessible);
   }
   const tree =
     accessible.length === 0
@@ -4087,12 +4095,26 @@ export function testPathsIn(
       reason: `${argument} is an empty list: name a suite file or a directory${argument === 'path' ? ', or leave path out for tests and test' : ''}.`,
     };
   }
+  const resolved = resolveTestEntries(projectPath, listed, argument, Array.isArray(entries));
+  if (!resolved.ok) {
+    return resolved;
+  }
+  return { ok: true, value: withoutNestedPaths(resolved.value) };
+}
+
+/** Each of [param listed] held inside the project as a path without a trailing slash, or the refusal. */
+function resolveTestEntries(
+  projectPath: string,
+  listed: readonly unknown[],
+  argument: 'path' | 'suites',
+  wasList: boolean,
+): { ok: true; value: string[] } | { ok: false; reason: string } {
   const resolved: string[] = [];
   for (const [index, entry] of listed.entries()) {
     if (typeof entry !== 'string' || entry.trim() === '') {
       return {
         ok: false,
-        reason: `${argument}${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
+        reason: `${argument}${wasList ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
     const location = resolveWithinProject(projectPath, entry);
@@ -4101,20 +4123,20 @@ export function testPathsIn(
     }
     resolved.push(location.relativePath.replace(/\/+$/, ''));
   }
+  return { ok: true, value: resolved };
+}
+
+/** [param resolved] as `res://` paths, without a repeat and without a suite inside a directory also given. */
+function withoutNestedPaths(resolved: readonly string[]): string[] {
   // Two spellings of one path are one suite on a file system that ignores case.
   const folded = (path: string): string =>
     process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
   const unique = resolved.filter(
     (path, at) => resolved.findIndex((one) => folded(one) === folded(path)) === at,
   );
-  return {
-    ok: true,
-    value: unique
-      .filter(
-        (path) => !unique.some((other) => other !== path && folded(path).startsWith(`${folded(other)}/`)),
-      )
-      .map((path) => `res://${path}`),
-  };
+  return unique
+    .filter((path) => !unique.some((other) => other !== path && folded(path).startsWith(`${folded(other)}/`)))
+    .map((path) => `res://${path}`);
 }
 
 /**
@@ -4152,34 +4174,51 @@ export function scriptsToDiagnose(
   const found: string[] = [];
   const empty: string[] = [];
   for (const [index, entry] of entries.entries()) {
-    if (typeof entry !== 'string' || entry.trim() === '') {
-      return {
-        ok: false,
-        reason: `scriptPath${listed ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
-      };
+    const named = scriptsNamedBy(projectPath, entry, listed ? `[${index}]` : '');
+    if (!named.ok) {
+      return named;
     }
-    const location = resolveWithinProject(projectPath, entry, { root: true });
-    if (!location.ok) {
-      return { ok: false, reason: location.reason };
-    }
-    const fromRoot = location.relativePath.replace(/\/+$/, '');
-    if (!isDirectory(location.absolutePath)) {
-      found.push(`res://${fromRoot}`);
-      continue;
-    }
-    const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
-      fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
-    );
-    if (inside.length === 0) {
-      empty.push(noScriptUnder(entry, location.absolutePath, fromRoot));
-    }
-    found.push(...inside);
+    found.push(...named.scripts);
+    empty.push(...named.empty);
   }
   const unique = [...new Set(found)];
   if (unique.length === 0) {
     return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/**
+ * The scripts one entry of a script_diagnostics call names: the script itself, or the `.gd` files of
+ * a folder, with a sentence for a folder that holds none. [param at] is the entry's place in a list.
+ */
+function scriptsNamedBy(
+  projectPath: string,
+  entry: unknown,
+  at: string,
+): { ok: true; scripts: string[]; empty: string[] } | { ok: false; reason: string } {
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    return {
+      ok: false,
+      reason: `scriptPath${at} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
+    };
+  }
+  const location = resolveWithinProject(projectPath, entry, { root: true });
+  if (!location.ok) {
+    return { ok: false, reason: location.reason };
+  }
+  const fromRoot = location.relativePath.replace(/\/+$/, '');
+  if (!isDirectory(location.absolutePath)) {
+    return { ok: true, scripts: [`res://${fromRoot}`], empty: [] };
+  }
+  const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
+    fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
+  );
+  return {
+    ok: true,
+    scripts: inside,
+    empty: inside.length === 0 ? [noScriptUnder(entry, location.absolutePath, fromRoot)] : [],
+  };
 }
 
 /**
@@ -4368,6 +4407,85 @@ const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
 
 /** A class cache rebuild's outcome: the classes it listed, or the engine's failure. */
 type ClassRebuild = { ok: true; listed: string[] } | { ok: false; outcome: HeadlessOutcome };
+
+/** What setting or removing one breakpoint is working on, passed from step to step. */
+interface BreakpointCall {
+  readonly op: string;
+  readonly args: OperationParams;
+  readonly project: { readonly value: { readonly path: string } };
+  readonly session: GodotDAPClient;
+  readonly located: { readonly relativePath: string; readonly absolutePath: string };
+  readonly scriptPath: string;
+  readonly line: number;
+}
+
+/** What a breakpoint answer says of the game this server started: not told, not taken, or taken. */
+function runningGameSaid(
+  told: NonNullable<Awaited<ReturnType<typeof askTheKeepersDebugger>>>,
+  op: string,
+  pid: number | string,
+): string {
+  if ('unreached' in told || typeof told['refused'] === 'string') {
+    return `The game this server started is running, and its debugger was not told: ${String('unreached' in told ? told.unreached : told['refused'])}. It takes the line when it is started again.`;
+  }
+  if (told['taken'] === false) {
+    return `Told to the running game (pid ${pid}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the change once that frame ends.`;
+  }
+  return op === 'set'
+    ? `Told to the running game (pid ${pid}), which this server started, and taken by it: anything it runs from now on stops there.`
+    : `Told to the running game (pid ${pid}), which this server started, and taken by it: it no longer stops on that line.`;
+}
+
+/** An editor command, and whether it only reads what the editor or the file holds or writes it. */
+type EditorCall = readonly [command: string, effect: 'reads' | 'writes'];
+
+/** The editor command each scene_node op runs. An op not listed is set_tilemap_cells. */
+const SCENE_NODE_CALLS = dictionary<EditorCall>({
+  add: ['add_node', 'writes'],
+  get: ['get_node_properties', 'reads'],
+  set: ['set_node_properties', 'writes'],
+  duplicate: ['duplicate_node', 'writes'],
+  reparent: ['reparent_node', 'writes'],
+  save_branch: ['save_branch', 'writes'],
+  delete: ['delete_node', 'writes'],
+  change_type: ['change_node_type', 'writes'],
+  bake_navigation: ['bake_navigation', 'writes'],
+});
+
+/** The editor command each scene_signal op runs. An op not listed is list_connections. */
+const SCENE_SIGNAL_CALLS = dictionary<EditorCall>({
+  connect: ['connect_signal', 'writes'],
+  disconnect: ['disconnect_signal', 'writes'],
+});
+
+/** The editor command each scene_animation op runs that is not a read. An op not listed is connect_animation_states. */
+const SCENE_ANIMATION_CALLS = dictionary<EditorCall>({
+  create: ['create_animation', 'writes'],
+  add_track: ['add_animation_track', 'writes'],
+  remove_track: ['remove_animation_track', 'writes'],
+  set: ['set_animation', 'writes'],
+  rename: ['rename_animation', 'writes'],
+  remove: ['remove_animation', 'writes'],
+  add_state: ['add_animation_state', 'writes'],
+  remove_state: ['remove_animation_state', 'writes'],
+  disconnect_states: ['disconnect_animation_states', 'writes'],
+});
+
+/** The editor command each resource_edit op runs that is not a move or a read. An op not listed is set_theme_font_size. */
+const RESOURCE_EDIT_CALLS = dictionary<EditorCall>({
+  create: ['create_resource', 'writes'],
+  modify: ['modify_resource', 'writes'],
+  create_shader: ['create_shader', 'writes'],
+  create_tileset: ['create_tileset', 'writes'],
+  set_theme_color: ['set_theme_color', 'writes'],
+  remove_theme_item: ['remove_theme_item', 'writes'],
+});
+
+/** The language server request and the word for it that each script_info op uses. An op not listed is hover. */
+const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>({
+  symbols: ['lsp_get_symbols', 'Symbols'],
+  completion: ['lsp_get_completions', 'Completion'],
+});
 
 class GodotServer {
   private stdio: StdioServerHandle | null = null;
@@ -5440,7 +5558,14 @@ class GodotServer {
         ),
       };
     }
+    return this.validateValues(spec, args);
+  }
 
+  /** The values of a call's arguments checked against their schemas, then the op and what it requires. */
+  private validateValues(
+    spec: ToolSpec,
+    args: OperationParams,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     const wrong = [
       ...wrongTypes(spec, args),
       ...outsideTheirLists(spec, args),
@@ -5449,7 +5574,14 @@ class GodotServer {
     if (wrong.length > 0) {
       return { ok: false, response: this.createErrorResponse(`${spec.name} takes ${wrong.join('; ')}.`) };
     }
+    return this.validateOp(spec, args);
+  }
 
+  /** The op a call asked for, or the tool's default, checked against the tool's ops. */
+  private validateOp(
+    spec: ToolSpec,
+    args: OperationParams,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     let op: string | null = null;
     if (spec.operations) {
       const valid = Object.keys(spec.operations);
@@ -5473,7 +5605,15 @@ class GodotServer {
         };
       }
     }
+    return this.validateOpArguments(spec, args, op);
+  }
 
+  /** The arguments of a call checked against what its op takes, then against what the op requires. */
+  private validateOpArguments(
+    spec: ToolSpec,
+    args: OperationParams,
+    op: string | null,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     // An argument named for a different op. The tool-level check above passes it, because the tool
     // does take it, and then the op reads nothing of the sort and answers as though it had: a limit
     // on a screen read, a property list on a find. That is the same fault as an argument nothing
@@ -5493,7 +5633,15 @@ class GodotServer {
         };
       }
     }
+    return this.validateRequired(spec, args, op);
+  }
 
+  /** The arguments the tool and its op require, each checked as present and not blank. */
+  private validateRequired(
+    spec: ToolSpec,
+    args: OperationParams,
+    op: string | null,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     const required = [...spec.requires, ...(op !== null ? (spec.operations?.[op]?.requires ?? []) : [])];
     const missing = required.filter((field) => {
       const value = Object.hasOwn(args, field) ? args[field] : undefined;
@@ -5531,6 +5679,11 @@ class GodotServer {
     if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
       await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + greetingWaitMs());
     }
+    return await this.dispatchPasses(tool, op, args);
+  }
+
+  /** The calls that run the engine over a project as a whole, before the headless operations are tried. */
+  private async dispatchPasses(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     if (ENGINE_PASSES[tool]?.includes(op) === true) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
     }
@@ -5551,6 +5704,11 @@ class GodotServer {
     if (tool === 'project_export' && op === 'remove_preset') {
       return await this.handleRemoveExportPreset(args);
     }
+    return await this.dispatchHeadless(tool, op, args);
+  }
+
+  /** A call to an operation the engine runs headless, or on to the tools that have none. */
+  private async dispatchHeadless(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
       // Asked of the editor instead, when the caller said so. The two are not the same reading and
@@ -5561,55 +5719,85 @@ class GodotServer {
       // know, which is the ambiguity the argument exists to remove.
       const { from: asked, ...answerable } = args;
       if (asked === 'editor') {
-        const editorSide = EDITOR_READS[tool]?.[op];
-        if (editorSide === undefined) {
-          return this.createErrorResponse(`${tool} ${op} cannot be read from the editor, only from disk.`, [
-            'Leave from unset, or pass from: "disk"',
-          ]);
-        }
-        if (!this.godotBridge.isConnected()) {
-          const refused = await this.noEditorYet(answerable, [
-            `${tool} ${op} was asked of the editor. from: "disk" reads the file instead`,
-          ]);
-          if (refused !== null) {
-            return refused;
-          }
-        }
-        const { op: _dropped, ...asks } = answerable;
-        const contained = this.containProjectFiles(asks);
-        return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
+        return await this.readHeadlessFromEditor(tool, op, answerable);
       }
-      if (headless === 'create_script') {
-        return await this.handleCreateScript(answerable);
+      return await this.dispatchHeadlessOperation(tool, headless, answerable, args);
+    }
+    return await this.dispatchTool(tool, op, args);
+  }
+
+  /** A headless operation asked of the editor with `from: "editor"`, refused where the editor cannot answer it. */
+  private async readHeadlessFromEditor(
+    tool: string,
+    op: string,
+    answerable: OperationParams,
+  ): Promise<ToolResponse> {
+    const editorSide = EDITOR_READS[tool]?.[op];
+    if (editorSide === undefined) {
+      return this.createErrorResponse(`${tool} ${op} cannot be read from the editor, only from disk.`, [
+        'Leave from unset, or pass from: "disk"',
+      ]);
+    }
+    if (!this.godotBridge.isConnected()) {
+      const refused = await this.noEditorYet(answerable, [
+        `${tool} ${op} was asked of the editor. from: "disk" reads the file instead`,
+      ]);
+      if (refused !== null) {
+        return refused;
       }
-      if (headless === 'modify_script') {
-        return await this.handleModifyScript(answerable);
-      }
-      if (tool === 'editor_classes') {
-        // A refusal names a class a script declares as the script's, and offers the nearest of them,
-        // from the scripts on disk: the engine knows them only from the class cache, which lags them.
-        const project = this.project(answerable);
-        if (!project.ok) {
-          return project.response;
-        }
-        const projectClasses = Object.fromEntries(declaredClassLines(project.value.path));
-        return await this.headless(headless, { ...answerable, projectClasses });
-      }
-      if (headless !== REFRESH_CLASS_CACHE) {
-        return await this.headless(headless, answerable);
-      }
+    }
+    const { op: _dropped, ...asks } = answerable;
+    const contained = this.containProjectFiles(asks);
+    return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
+  }
+
+  /** A headless operation read from disk: a script written, the class cache rebuilt, or the engine run. */
+  private async dispatchHeadlessOperation(
+    tool: string,
+    headless: string,
+    answerable: OperationParams,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    if (headless === 'create_script') {
+      return await this.handleCreateScript(answerable);
+    }
+    if (headless === 'modify_script') {
+      return await this.handleModifyScript(answerable);
+    }
+    if (tool === 'editor_classes') {
+      // A refusal names a class a script declares as the script's, and offers the nearest of them,
+      // from the scripts on disk: the engine knows them only from the class cache, which lags them.
       const project = this.project(answerable);
       if (!project.ok) {
         return project.response;
       }
-      const answered = this.answer(await this.rebuildClassCache(project.value.path));
-      // The one answer that reads most like a clean bill of health and is not: "added: []" means
-      // the file on disk was already right, which is exactly the state an editor goes blind in.
-      return this.godotBridge.isConnected()
-        ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
-        : answered;
+      const projectClasses = Object.fromEntries(declaredClassLines(project.value.path));
+      return await this.headless(headless, { ...answerable, projectClasses });
     }
+    if (headless !== REFRESH_CLASS_CACHE) {
+      return await this.headless(headless, answerable);
+    }
+    const project = this.project(answerable);
+    if (!project.ok) {
+      return project.response;
+    }
+    const answered = this.answer(await this.rebuildClassCache(project.value.path));
+    // The one answer that reads most like a clean bill of health and is not: "added: []" means
+    // the file on disk was already right, which is exactly the state an editor goes blind in.
+    return this.godotBridge.isConnected()
+      ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
+      : answered;
+  }
 
+  /** The two ways a tool's call reaches the editor: the bridge as it is, or the editor with the engine as the fallback. */
+  private editorCallers(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): {
+    bridge: (command: string, extra?: OperationParams) => Promise<ToolResponse>;
+    editorOrEngine: (command: string, effect: 'reads' | 'writes') => Promise<ToolResponse>;
+  } {
     const { op: _op, ...arguments_ } = args;
     const bridge = async (command: string, extra: OperationParams = {}): Promise<ToolResponse> => {
       const contained = this.containProjectFiles({ ...arguments_, ...extra });
@@ -5619,7 +5807,12 @@ class GodotServer {
     };
     const editorOrEngine = async (command: string, effect: 'reads' | 'writes'): Promise<ToolResponse> =>
       await this.editorOrEngine(command, arguments_, `${tool} ${op}`, effect);
+    return { bridge, editorOrEngine };
+  }
 
+  /** One tool call to the code that does it, for the project tools and for scene_create. */
+  private async dispatchTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { editorOrEngine } = this.editorCallers(tool, op, args);
     switch (tool) {
       case 'project_info':
         return await this.handleProjectInfo(args);
@@ -5639,6 +5832,15 @@ class GodotServer {
         return op === 'create'
           ? await editorOrEngine('create_scene', 'writes')
           : await editorOrEngine('save_scene', 'writes');
+      default:
+        return await this.dispatchSceneTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for the scene tree, nodes and signals. */
+  private async dispatchSceneTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    switch (tool) {
       case 'scene_tree': {
         // includeDefaults names which properties to list, so given alone it can mean only that the
         // properties are wanted: read without them, it answered the bare tree and said nothing.
@@ -5664,37 +5866,22 @@ class GodotServer {
         );
       }
       case 'scene_node':
-        switch (op) {
-          case 'add':
-            return await editorOrEngine('add_node', 'writes');
-          case 'get':
-            return await editorOrEngine('get_node_properties', 'reads');
-          case 'set':
-            return await editorOrEngine('set_node_properties', 'writes');
-          case 'duplicate':
-            return await editorOrEngine('duplicate_node', 'writes');
-          case 'reparent':
-            return await editorOrEngine('reparent_node', 'writes');
-          case 'save_branch':
-            return await editorOrEngine('save_branch', 'writes');
-          case 'delete':
-            return await editorOrEngine('delete_node', 'writes');
-          case 'change_type':
-            return await editorOrEngine('change_node_type', 'writes');
-          case 'bake_navigation':
-            return await editorOrEngine('bake_navigation', 'writes');
-          default:
-            return await editorOrEngine('set_tilemap_cells', 'writes');
-        }
+        return await editorOrEngine(...(SCENE_NODE_CALLS[op] ?? ['set_tilemap_cells', 'writes']));
       case 'scene_signal':
-        switch (op) {
-          case 'connect':
-            return await editorOrEngine('connect_signal', 'writes');
-          case 'disconnect':
-            return await editorOrEngine('disconnect_signal', 'writes');
-          default:
-            return await editorOrEngine('list_connections', 'reads');
-        }
+        return await editorOrEngine(...(SCENE_SIGNAL_CALLS[op] ?? ['list_connections', 'reads']));
+      default:
+        return await this.dispatchAnimationAndScriptTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for scene_animation and the script tools. */
+  private async dispatchAnimationAndScriptTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    switch (tool) {
       case 'scene_animation':
         switch (op) {
           case 'read':
@@ -5721,42 +5908,28 @@ class GodotServer {
               }),
               async () => await bridge('read_animation_states'),
             );
-          case 'create':
-            return await editorOrEngine('create_animation', 'writes');
-          case 'add_track':
-            return await editorOrEngine('add_animation_track', 'writes');
-          case 'remove_track':
-            return await editorOrEngine('remove_animation_track', 'writes');
-          case 'set':
-            return await editorOrEngine('set_animation', 'writes');
-          case 'rename':
-            return await editorOrEngine('rename_animation', 'writes');
-          case 'remove':
-            return await editorOrEngine('remove_animation', 'writes');
-          case 'add_state':
-            return await editorOrEngine('add_animation_state', 'writes');
-          case 'remove_state':
-            return await editorOrEngine('remove_animation_state', 'writes');
-          case 'disconnect_states':
-            return await editorOrEngine('disconnect_animation_states', 'writes');
           default:
-            return await editorOrEngine('connect_animation_states', 'writes');
+            return await editorOrEngine(
+              ...(SCENE_ANIMATION_CALLS[op] ?? ['connect_animation_states', 'writes']),
+            );
         }
 
       case 'script_edit':
         return await this.handleRenameSymbol(args);
       case 'script_info':
-        switch (op) {
-          case 'symbols':
-            return await this.askScriptInfo('lsp_get_symbols', 'Symbols', args);
-          case 'completion':
-            return await this.askScriptInfo('lsp_get_completions', 'Completion', args);
-          default:
-            return await this.askScriptInfo('lsp_get_hover', 'Hover', args);
-        }
+        return await this.askScriptInfo(...(SCRIPT_INFO_CALLS[op] ?? ['lsp_get_hover', 'Hover']), args);
       case 'script_diagnostics':
         return await this.handleScriptDiagnostics(args);
 
+      default:
+        return await this.dispatchResourceTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for resource_edit. */
+  private async dispatchResourceTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    switch (tool) {
       case 'resource_edit':
         switch (op) {
           case 'move':
@@ -5776,22 +5949,18 @@ class GodotServer {
               async () => await bridge('read_resource', kept),
             );
           }
-          case 'create':
-            return await editorOrEngine('create_resource', 'writes');
-          case 'modify':
-            return await editorOrEngine('modify_resource', 'writes');
-          case 'create_shader':
-            return await editorOrEngine('create_shader', 'writes');
-          case 'create_tileset':
-            return await editorOrEngine('create_tileset', 'writes');
-          case 'set_theme_color':
-            return await editorOrEngine('set_theme_color', 'writes');
-          case 'remove_theme_item':
-            return await editorOrEngine('remove_theme_item', 'writes');
           default:
-            return await editorOrEngine('set_theme_font_size', 'writes');
+            return await editorOrEngine(...(RESOURCE_EDIT_CALLS[op] ?? ['set_theme_font_size', 'writes']));
         }
 
+      default:
+        return await this.dispatchEditorTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for the tools that launch, run and read the editor. */
+  private async dispatchEditorTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    switch (tool) {
       case 'editor_launch':
         if (op === 'close') {
           return await this.handleCloseEditor();
@@ -5818,9 +5987,33 @@ class GodotServer {
       case 'editor_rescan':
         return await this.handleRescanFilesystem(args);
 
+      default:
+        return await this.dispatchCaptureAndInspectTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for editor_capture and runtime_inspect. */
+  private async dispatchCaptureAndInspectTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'editor_capture':
         return await this.handleEditorCapture(args);
 
+      default:
+        return await this.dispatchRuntimeInspectTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for runtime_inspect. */
+  private async dispatchRuntimeInspectTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_inspect': {
         const patience = readPositiveNumber(args, 'timeoutMs') ?? this.runtimeTimeoutMs();
         switch (op) {
@@ -5854,52 +6047,72 @@ class GodotServer {
               },
               { tool: 'runtime_inspect', op, patience },
             );
-          case 'rect':
-            return await this.handleRuntimeCommand(
-              'get_rect',
-              { ...whichGame(args), path: readNonEmptyString(args, 'nodePath') ?? '' },
-              { tool: 'runtime_inspect', op, patience },
-            );
-          case 'property':
-            return await this.handleRuntimeCommand(
-              'get_property',
-              {
-                ...whichGame(args),
-                path: readNonEmptyString(args, 'nodePath') ?? '',
-                property: readNonEmptyString(args, 'property') ?? '',
-              },
-              { tool: 'runtime_inspect', op, patience },
-            );
-          case 'accessibility':
-            // Starting PowerShell and walking the tree until it settles takes longer than a query: the
-            // game allows 45 s for a cold PowerShell and 15 s a window for the walks, and waiting
-            // that out answers a slow machine's read rather than a pending one.
-            return await this.handleRuntimeCommand(
-              'get_accessibility',
-              {
-                ...whichGame(args),
-                // Only what was given, so the game's defaults stay the game's.
-                ...withDefined({
-                  node_path: readNonEmptyString(args, 'nodePath'),
-                  says: readNonEmptyString(args, 'says'),
-                  properties: readStringArray(args, 'properties'),
-                  limit: readPositiveNumber(args, 'limit'),
-                }),
-              },
-              {
-                tool: 'runtime_inspect',
-                op,
-                patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(75_000, this.runtimeTimeoutMs()),
-              },
-            );
           default:
-            return await this.handleRuntimeCommand(
-              'get_metrics',
-              { ...whichGame(args), metrics: readArray(args, 'metrics') ?? [] },
-              { tool: 'runtime_inspect', op, patience },
-            );
+            return await this.inspectRuntimeMore(op, args, patience);
         }
       }
+      default:
+        return await this.dispatchRuntimeTool(tool, op, args);
+    }
+  }
+
+  /** The runtime_inspect ops that read one node or the game's metrics. */
+  private async inspectRuntimeMore(
+    op: string,
+    args: OperationParams,
+    patience: number,
+  ): Promise<ToolResponse> {
+    switch (op) {
+      case 'rect':
+        return await this.handleRuntimeCommand(
+          'get_rect',
+          { ...whichGame(args), path: readNonEmptyString(args, 'nodePath') ?? '' },
+          { tool: 'runtime_inspect', op, patience },
+        );
+      case 'property':
+        return await this.handleRuntimeCommand(
+          'get_property',
+          {
+            ...whichGame(args),
+            path: readNonEmptyString(args, 'nodePath') ?? '',
+            property: readNonEmptyString(args, 'property') ?? '',
+          },
+          { tool: 'runtime_inspect', op, patience },
+        );
+      case 'accessibility':
+        // Starting PowerShell and walking the tree until it settles takes longer than a query: the
+        // game allows 45 s for a cold PowerShell and 15 s a window for the walks, and waiting
+        // that out answers a slow machine's read rather than a pending one.
+        return await this.handleRuntimeCommand(
+          'get_accessibility',
+          {
+            ...whichGame(args),
+            // Only what was given, so the game's defaults stay the game's.
+            ...withDefined({
+              node_path: readNonEmptyString(args, 'nodePath'),
+              says: readNonEmptyString(args, 'says'),
+              properties: readStringArray(args, 'properties'),
+              limit: readPositiveNumber(args, 'limit'),
+            }),
+          },
+          {
+            tool: 'runtime_inspect',
+            op,
+            patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(75_000, this.runtimeTimeoutMs()),
+          },
+        );
+      default:
+        return await this.handleRuntimeCommand(
+          'get_metrics',
+          { ...whichGame(args), metrics: readArray(args, 'metrics') ?? [] },
+          { tool: 'runtime_inspect', op, patience },
+        );
+    }
+  }
+
+  /** One tool call to the code that does it, for the runtime tools that act on the running game. */
+  private async dispatchRuntimeTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_invoke': {
         if (op === 'result') {
           return this.handleLateAnswer(args);
@@ -5930,269 +6143,332 @@ class GodotServer {
               { tool: 'runtime_invoke', op, patience },
             );
       }
+      default:
+        return await this.dispatchRuntimeCaptureTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for runtime_capture and the tools after it. */
+  private async dispatchRuntimeCaptureTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_capture':
         return await this.handleRuntimeCommand(
           op === 'screenshot' ? 'capture_screenshot' : 'capture_viewport',
           args,
           { tool: 'runtime_capture', op },
         );
+      default:
+        return await this.dispatchRuntimeInputTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for runtime_input and runtime_wait. */
+  private async dispatchRuntimeInputTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_input':
         if (op === 'click') {
-          if (
-            readNonEmptyString(args, 'nodePath') === undefined &&
-            readNonEmptyString(args, 'says') === undefined
-          ) {
-            return this.createErrorResponse(
-              'runtime_input click needs nodePath, or says with the words on the control to click.',
-            );
-          }
-          return await this.handleRuntimeCommand(
-            'click',
-            {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              // As given, a number included: the addon names a button either way and refuses what is
-              // neither, and read as a string alone a right click given as 2 went as the left button.
-              button: args['button'] ?? 'left',
-              double: readBoolean(args, 'doubleClick') ?? false,
-              ...(readNonEmptyString(args, 'says') === undefined
-                ? {}
-                : { says: readNonEmptyString(args, 'says') }),
-              ...(args['index'] === undefined ? {} : { index: args['index'] }),
-              ...(args['x'] === undefined ? {} : { x: args['x'] }),
-              ...(args['y'] === undefined ? {} : { y: args['y'] }),
-            },
-            { tool: 'runtime_input', op },
-          );
+          return await this.clickInGame(op, args);
         }
-        if (op === 'choose') {
-          // `index` is passed on only when it was given, because the addon reads whether it is
-          // there as which of the two ways the caller named the item.
-          return await this.handleRuntimeCommand(
-            'choose',
-            {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              text: readString(args, 'text') ?? '',
-              ...(args['index'] === undefined ? {} : { index: args['index'] }),
-            },
-            { tool: 'runtime_input', op },
-          );
-        }
-        {
-          // A held press answers once it has let go, and a drag once its stroke is over, so each is
-          // given as long as a frames wait of the same length.
-          const holding =
-            op === 'mouse_drag' || op === 'touch_drag'
-              ? (readPositiveNumber(args, 'frames') ?? 1) + 2
-              : readPositiveNumber(args, 'holdFrames');
-          return await this.handleRuntimeCommand(`inject_${op}`, args, {
-            tool: 'runtime_input',
-            op,
-            ...(holding === undefined
-              ? {}
-              : { patience: patienceForFrames(holding, this.runtimeTimeoutMs()) }),
-          });
-        }
+        return await this.chooseOrInjectInput(op, args);
       case 'runtime_wait':
         return await this.handleRuntimeWait(op, args);
 
-      case 'debug_breakpoint': {
-        // The adapter names the file the way this machine spells it, not the way the project
-        // does, so the projectPath every other tool takes is what turns `res://main.gd` into one.
-        const project = this.project(args);
-        if (!project.ok) {
-          return project.response;
-        }
-        if (op === 'list') {
-          const session = this.dapHoldingBreakpointsOf(project.value.path);
-          const editor = this.godotBridge.isConnected();
-          return this.jsonTextResponse({
-            held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
-            ...(editor
-              ? {
-                  setInEditor: this.breakpointsAsProjectSpells(
-                    project.value.path,
-                    session.breakpointsInEditor(),
-                  ),
-                  ...this.breakpointsAtRisk(),
-                }
-              : {}),
-          });
-        }
-        const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
-        if (!located.ok) {
-          return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
-        }
-        // Resolved, because the adapter refuses a path that does not start with the project as
-        // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
-        // every /var/folders path is really /private/var/folders.
-        const session = this.dapHoldingBreakpointsOf(project.value.path);
-        const scriptPath = realAsFarAsItExists(located.absolutePath);
-        const line = readPositiveNumber(args, 'line');
-        if (line === undefined) {
-          return this.createErrorResponse('line is required: the one-based line to stop on.');
-        }
-        // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
-        // is kept in the project's set and never stops anything. Removing one is left alone, so a
-        // breakpoint on a script since deleted or shortened can still be taken off.
-        if (op === 'set') {
-          if (!existsSync(located.absolutePath)) {
-            return this.missingScript(project.value.path, located.relativePath);
-          }
-          const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
-          if (nothing !== null) {
-            return this.createErrorResponse(nothing);
-          }
-        }
-        const editor = this.godotBridge.isConnected();
-        let answer: Record<string, unknown>;
-        if (editor) {
-          const answered = await this.handleDAP(
-            op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint',
-            {
-              ...args,
-              scriptPath,
-            },
-          );
-          if (answered.isError === true) {
-            return answered;
-          }
-          answer = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
-        } else {
-          // Held here for whoever plays next: a game this server starts takes them as it starts, and
-          // an editor that connects is given them before its first play.
-          if (op === 'set') {
-            session.holdBreakpoints([{ scriptPath, lines: [line] }]);
-            answer = { set: true };
-          } else {
-            answer = session.forgetBreakpoint(scriptPath, line)
-              ? { removed: true }
-              : {
-                  removed: false,
-                  why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove. held lists the ones that are.`,
-                };
-          }
-        }
-        // Written after the adapter has taken it, so the note never claims a line the editor
-        // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
-        const held = session.breakpointsHeld();
-        writeBreakpointNote(project.value.path, held);
-        const kept = this.keptRun();
-        const told =
-          kept === null
-            ? null
-            : await askTheKeepersDebugger(
-                kept.keeper,
-                {
-                  op: 'breakpoint',
-                  script: projectSpelling(project.value.path, scriptPath),
-                  line,
-                  set: op === 'set',
-                },
-                KEEPER_DEBUG_MS,
-              );
-        return this.jsonTextResponse({
-          ...answer,
-          held: this.breakpointsAsProjectSpells(project.value.path, held),
-          // The editor's own, as it reported them to this session, so a caller reading the whole
-          // set sees the lines the user set by hand as well as the ones set here.
-          ...(editor
-            ? {
-                setInEditor: this.breakpointsAsProjectSpells(
-                  project.value.path,
-                  session.breakpointsInEditor(),
-                ),
-              }
-            : {}),
-          ...(told === null
-            ? {}
-            : 'unreached' in told || typeof told['refused'] === 'string'
-              ? {
-                  runningGame: `The game this server started is running, and its debugger was not told: ${String('unreached' in told ? told.unreached : told['refused'])}. It takes the line when it is started again.`,
-                }
-              : {
-                  runningGame:
-                    told['taken'] === false
-                      ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the change once that frame ends.`
-                      : op === 'set'
-                        ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: anything it runs from now on stops there.`
-                        : `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: it no longer stops on that line.`,
-                }),
-          note: editor
-            ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
-            : held.length === 0
-              ? 'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.'
-              : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
-          ...(editor ? this.breakpointsAtRisk() : {}),
-        });
-      }
-      case 'debug_control':
-      case 'debug_state': {
-        if (op === 'evaluate') {
-          for (const requestId of this.heldWhilePending) {
-            if (lateAnswer(requestId)?.state === 'waiting') {
-              this.evaluatedWhilePending.add(requestId);
-            }
-          }
-        }
-        // A game this server started has its keeper for a debugger, which answers everything the
-        // editor's adapter does and also breaks into a game and steps out of a function.
-        const kept = this.keptRun();
-        if (kept !== null) {
-          return await this.askTheKeptGame(
-            kept.keeper,
-            keptGameRequest(tool, op, args),
-            kept.projectPath ?? '',
-          );
-        }
-        // A kept game's console lived in its keeper, which ends with it. The adapter's buffer holds
-        // nothing of that run, so reading it answered no lines, or an earlier played run's.
-        const last = this.activeProcess;
-        if (
-          tool === 'debug_state' &&
-          op === 'output' &&
-          last !== null &&
-          !last.throughEditor &&
-          last.keeper !== undefined
-        ) {
-          return this.createErrorResponse(
-            'The game this server started has ended, and its debugger, which held its console output, ended with it.',
-            ['editor_output reads what the game printed, with the errors and warnings it reported'],
-          );
-        }
-        // The console the adapter buffered outlives the game it came from, so reading it needs
-        // no session. A stack, a scope and a step all need one, and one that is stopped.
-        if (tool === 'debug_state' && op === 'output') {
-          return await this.handleDAP('dap_get_output', args);
-        }
-        const played = this.activeProcess;
-        if ((op === 'pause' || op === 'step_out') && played?.throughEditor === true && !exited(played)) {
-          return this.createErrorResponse(
-            op === 'pause'
-              ? "A game the editor plays cannot be paused from here: Godot's debug adapter answers a pause by reporting the game stopped and leaving it running."
-              : "A game the editor plays cannot be stepped out of a function from here: Godot's debug adapter implements no stepOut.",
-            [
-              'Set a breakpoint where it should stop, then step over or into from there',
-              'A game this server starts, as editor_run start does with args, savesIn or env, has a debugger here that pauses and steps out',
-            ],
-          );
-        }
-        const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
-        if (!held.ok) {
-          return held.response;
-        }
-        if (tool === 'debug_state' && op === 'evaluate') {
-          return await this.evaluateInAPlayedGame(played?.throughEditor === true ? played : null, args);
-        }
-        return tool === 'debug_control'
-          ? await this.handleDAP(`dap_${op}`, args)
-          : await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
-      }
+      default:
+        return await this.dispatchDebugTool(tool, op, args);
+    }
+  }
 
+  /** A click in the running game, on a node or on the control that says the words given. */
+  private async clickInGame(op: string, args: OperationParams): Promise<ToolResponse> {
+    if (
+      readNonEmptyString(args, 'nodePath') === undefined &&
+      readNonEmptyString(args, 'says') === undefined
+    ) {
+      return this.createErrorResponse(
+        'runtime_input click needs nodePath, or says with the words on the control to click.',
+      );
+    }
+    return await this.handleRuntimeCommand(
+      'click',
+      {
+        ...whichGame(args),
+        path: readNonEmptyString(args, 'nodePath') ?? '',
+        // As given, a number included: the addon names a button either way and refuses what is
+        // neither, and read as a string alone a right click given as 2 went as the left button.
+        button: args['button'] ?? 'left',
+        double: readBoolean(args, 'doubleClick') ?? false,
+        ...(readNonEmptyString(args, 'says') === undefined ? {} : { says: readNonEmptyString(args, 'says') }),
+        ...(args['index'] === undefined ? {} : { index: args['index'] }),
+        ...(args['x'] === undefined ? {} : { x: args['x'] }),
+        ...(args['y'] === undefined ? {} : { y: args['y'] }),
+      },
+      { tool: 'runtime_input', op },
+    );
+  }
+
+  /** A runtime_input op that is not a click: choosing an item, or injecting a press, a stroke or a key. */
+  private async chooseOrInjectInput(op: string, args: OperationParams): Promise<ToolResponse> {
+    if (op === 'choose') {
+      // `index` is passed on only when it was given, because the addon reads whether it is
+      // there as which of the two ways the caller named the item.
+      return await this.handleRuntimeCommand(
+        'choose',
+        {
+          ...whichGame(args),
+          path: readNonEmptyString(args, 'nodePath') ?? '',
+          text: readString(args, 'text') ?? '',
+          ...(args['index'] === undefined ? {} : { index: args['index'] }),
+        },
+        { tool: 'runtime_input', op },
+      );
+    }
+    {
+      // A held press answers once it has let go, and a drag once its stroke is over, so each is
+      // given as long as a frames wait of the same length.
+      const holding =
+        op === 'mouse_drag' || op === 'touch_drag'
+          ? (readPositiveNumber(args, 'frames') ?? 1) + 2
+          : readPositiveNumber(args, 'holdFrames');
+      return await this.handleRuntimeCommand(`inject_${op}`, args, {
+        tool: 'runtime_input',
+        op,
+        ...(holding === undefined ? {} : { patience: patienceForFrames(holding, this.runtimeTimeoutMs()) }),
+      });
+    }
+  }
+
+  /** One tool call to the code that does it, for the debug tools. */
+  private async dispatchDebugTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    switch (tool) {
+      case 'debug_breakpoint':
+        return await this.handleDebugBreakpoint(op, args);
+      case 'debug_control':
+      case 'debug_state':
+        return await this.handleDebugSession(tool, op, args);
       default:
         throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
     }
+  }
+
+  /** The breakpoints of the debug adapter and of a game this server started, listed, set or removed. */
+  private async handleDebugBreakpoint(op: string, args: OperationParams): Promise<ToolResponse> {
+    // The adapter names the file the way this machine spells it, not the way the project
+    // does, so the projectPath every other tool takes is what turns `res://main.gd` into one.
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    if (op === 'list') {
+      const session = this.dapHoldingBreakpointsOf(project.value.path);
+      const editor = this.godotBridge.isConnected();
+      return this.jsonTextResponse({
+        held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
+        ...(editor
+          ? {
+              setInEditor: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsInEditor()),
+              ...this.breakpointsAtRisk(),
+            }
+          : {}),
+      });
+    }
+    return await this.setOrRemoveBreakpoint(op, args, project);
+  }
+
+  /** A breakpoint set on one line of a script, or taken off it. */
+  private async setOrRemoveBreakpoint(
+    op: string,
+    args: OperationParams,
+    project: { readonly value: { readonly path: string } },
+  ): Promise<ToolResponse> {
+    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
+    if (!located.ok) {
+      return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
+    }
+    // Resolved, because the adapter refuses a path that does not start with the project as
+    // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
+    // every /var/folders path is really /private/var/folders.
+    const session = this.dapHoldingBreakpointsOf(project.value.path);
+    const scriptPath = realAsFarAsItExists(located.absolutePath);
+    const line = readPositiveNumber(args, 'line');
+    if (line === undefined) {
+      return this.createErrorResponse('line is required: the one-based line to stop on.');
+    }
+    // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
+    // is kept in the project's set and never stops anything. Removing one is left alone, so a
+    // breakpoint on a script since deleted or shortened can still be taken off.
+    if (op === 'set') {
+      if (!existsSync(located.absolutePath)) {
+        return this.missingScript(project.value.path, located.relativePath);
+      }
+      const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
+      if (nothing !== null) {
+        return this.createErrorResponse(nothing);
+      }
+    }
+    return await this.applyBreakpoint({ op, args, project, session, located, scriptPath, line });
+  }
+
+  /** A breakpoint handed to the editor's adapter when one is connected, and otherwise held here. */
+  private async applyBreakpoint(call: BreakpointCall): Promise<ToolResponse> {
+    const { op, args, session, located, scriptPath, line } = call;
+    const editor = this.godotBridge.isConnected();
+    let answer: Record<string, unknown>;
+    if (editor) {
+      const answered = await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
+        ...args,
+        scriptPath,
+      });
+      if (answered.isError === true) {
+        return answered;
+      }
+      answer = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
+    } else {
+      // Held here for whoever plays next: a game this server starts takes them as it starts, and
+      // an editor that connects is given them before its first play.
+      if (op === 'set') {
+        session.holdBreakpoints([{ scriptPath, lines: [line] }]);
+        answer = { set: true };
+      } else {
+        answer = session.forgetBreakpoint(scriptPath, line)
+          ? { removed: true }
+          : {
+              removed: false,
+              why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove. held lists the ones that are.`,
+            };
+      }
+    }
+    return await this.breakpointResponse(call, editor, answer);
+  }
+
+  /** What a set or removed breakpoint answers: the adapter's answer, every breakpoint held and what a running game was told. */
+  private async breakpointResponse(
+    call: BreakpointCall,
+    editor: boolean,
+    answer: Record<string, unknown>,
+  ): Promise<ToolResponse> {
+    const { op, project, session, scriptPath, line } = call;
+    // Written after the adapter has taken it, so the note never claims a line the editor
+    // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
+    const held = session.breakpointsHeld();
+    writeBreakpointNote(project.value.path, held);
+    const kept = this.keptRun();
+    const told =
+      kept === null
+        ? null
+        : await askTheKeepersDebugger(
+            kept.keeper,
+            {
+              op: 'breakpoint',
+              script: projectSpelling(project.value.path, scriptPath),
+              line,
+              set: op === 'set',
+            },
+            KEEPER_DEBUG_MS,
+          );
+    return this.jsonTextResponse({
+      ...answer,
+      held: this.breakpointsAsProjectSpells(project.value.path, held),
+      // The editor's own, as it reported them to this session, so a caller reading the whole
+      // set sees the lines the user set by hand as well as the ones set here.
+      ...(editor
+        ? {
+            setInEditor: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsInEditor()),
+          }
+        : {}),
+      ...(told === null ? {} : { runningGame: runningGameSaid(told, op, kept?.pid ?? '?') }),
+      note: editor
+        ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
+        : held.length === 0
+          ? 'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.'
+          : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
+      ...(editor ? this.breakpointsAtRisk() : {}),
+    });
+  }
+
+  /** The debug controls and the debug state, answered by the game's keeper or by the editor's adapter. */
+  private async handleDebugSession(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    if (op === 'evaluate') {
+      for (const requestId of this.heldWhilePending) {
+        if (lateAnswer(requestId)?.state === 'waiting') {
+          this.evaluatedWhilePending.add(requestId);
+        }
+      }
+    }
+    // A game this server started has its keeper for a debugger, which answers everything the
+    // editor's adapter does and also breaks into a game and steps out of a function.
+    const kept = this.keptRun();
+    if (kept !== null) {
+      return await this.askTheKeptGame(kept.keeper, keptGameRequest(tool, op, args), kept.projectPath ?? '');
+    }
+    return await this.debugWithoutAKeptGame(tool, op, args);
+  }
+
+  /** A debug call when no game this server started is running: its console, or the editor's adapter. */
+  private async debugWithoutAKeptGame(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    // A kept game's console lived in its keeper, which ends with it. The adapter's buffer holds
+    // nothing of that run, so reading it answered no lines, or an earlier played run's.
+    const last = this.activeProcess;
+    if (
+      tool === 'debug_state' &&
+      op === 'output' &&
+      last !== null &&
+      !last.throughEditor &&
+      last.keeper !== undefined
+    ) {
+      return this.createErrorResponse(
+        'The game this server started has ended, and its debugger, which held its console output, ended with it.',
+        ['editor_output reads what the game printed, with the errors and warnings it reported'],
+      );
+    }
+    // The console the adapter buffered outlives the game it came from, so reading it needs
+    // no session. A stack, a scope and a step all need one, and one that is stopped.
+    if (tool === 'debug_state' && op === 'output') {
+      return await this.handleDAP('dap_get_output', args);
+    }
+    const played = this.activeProcess;
+    if ((op === 'pause' || op === 'step_out') && played?.throughEditor === true && !exited(played)) {
+      return this.createErrorResponse(
+        op === 'pause'
+          ? "A game the editor plays cannot be paused from here: Godot's debug adapter answers a pause by reporting the game stopped and leaving it running."
+          : "A game the editor plays cannot be stepped out of a function from here: Godot's debug adapter implements no stepOut.",
+        [
+          'Set a breakpoint where it should stop, then step over or into from there',
+          'A game this server starts, as editor_run start does with args, savesIn or env, has a debugger here that pauses and steps out',
+        ],
+      );
+    }
+    return await this.debugAnAdapterSession(tool, op, args, played);
+  }
+
+  /** A debug call to the editor's adapter, once a game is held stopped for it. */
+  private async debugAnAdapterSession(
+    tool: string,
+    op: string,
+    args: OperationParams,
+    played: GodotProcess | null,
+  ): Promise<ToolResponse> {
+    const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
+    if (!held.ok) {
+      return held.response;
+    }
+    if (tool === 'debug_state' && op === 'evaluate') {
+      return await this.evaluateInAPlayedGame(played?.throughEditor === true ? played : null, args);
+    }
+    return tool === 'debug_control'
+      ? await this.handleDAP(`dap_${op}`, args)
+      : await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
   }
 
   // -------------------------------------------------------------------------------------------
