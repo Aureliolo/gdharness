@@ -951,8 +951,13 @@ export class EngineSlots {
       taker === 'timing'
         ? this.drawn.numbers
         : await this.leftAfterThoseAhead(line ?? new SlotLine(taker, game), queued);
+    return await this.lockOneOf(tried, game);
+  }
+
+  /** Locks the first of [param slots] that is made fresh or taken over, and answers its path. */
+  private async lockOneOf(slots: readonly number[], game: boolean): Promise<string | null> {
     const holder: SlotHolder = game ? { ...this.holder, game: true } : this.holder;
-    for (const slot of tried) {
+    for (const slot of slots) {
       const lock = join(this.directory, `${String(slot)}.lock`);
       if (this.made(lock, holder) || (await this.takenOver(lock, holder))) {
         this.held.add(lock);

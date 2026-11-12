@@ -225,6 +225,32 @@ function absolutePathReason(trimmed: string, withoutScheme: string, root: string
   return `Path '${trimmed}' is absolute and outside the project. Give a path inside it, such as '${example}'.`;
 }
 
+/** Why a UID or another scheme's path is refused, or null when [param withoutScheme] is neither. */
+function schemeRefusal(trimmed: string, withoutScheme: string): string | null {
+  // A UID names a file in this project, and where it is on disk is known only to the engine that
+  // resolves it, so containment, which is a question about where, cannot be answered for one here.
+  if (withoutScheme.startsWith('uid://')) {
+    return `Path '${trimmed}' is a UID, and a file is judged here by where it is on disk, which a UID does not say. Give the file's res:// path.`;
+  }
+  const scheme = OTHER_SCHEME.exec(withoutScheme);
+  return scheme ? otherSchemeReason(trimmed, scheme[0]) : null;
+}
+
+/** Why a path with a colon is refused, or null when [param withoutScheme] has none. */
+function colonRefusal(trimmed: string, withoutScheme: string): string | null {
+  // Windows reads a colon as a drive (`C:name` is relative to that drive's current directory,
+  // which node:path resolves against the project instead) or as an alternate data stream
+  // (`script.gd:hidden` writes beside the file where nothing lists it), and Godot refuses one in
+  // any resource path, so nothing inside a project is ever spelled with it on any platform.
+  const kept = keptInside(trimmed);
+  if (kept.inner !== undefined) {
+    return `Path '${trimmed}' names the resource ${kept.inner} kept inside ${kept.file}, not a file. resource_edit read reads one by that path, and this argument takes a file.`;
+  }
+  return withoutScheme.includes(':')
+    ? `Path '${trimmed}' contains ':', which no file inside a project is named with.`
+    : null;
+}
+
 /**
  * A caller-supplied path read as a location inside the project.
  *
@@ -271,17 +297,9 @@ export function resolveWithinProject(
     ? trimmed.slice(RESOURCE_SCHEME.length)
     : (insideProject(root, trimmed) ?? trimmed);
 
-  // A UID names a file in this project, and where it is on disk is known only to the engine that
-  // resolves it, so containment, which is a question about where, cannot be answered for one here.
-  if (withoutScheme.startsWith('uid://')) {
-    return {
-      ok: false,
-      reason: `Path '${trimmed}' is a UID, and a file is judged here by where it is on disk, which a UID does not say. Give the file's res:// path.`,
-    };
-  }
-  const scheme = OTHER_SCHEME.exec(withoutScheme);
-  if (scheme) {
-    return { ok: false, reason: otherSchemeReason(trimmed, scheme[0]) };
+  const schemeReason = schemeRefusal(trimmed, withoutScheme);
+  if (schemeReason !== null) {
+    return { ok: false, reason: schemeReason };
   }
 
   // Refused here rather than left to the containment check below, which would accept a leading
@@ -290,22 +308,9 @@ export function resolveWithinProject(
     return { ok: false, reason: absolutePathReason(trimmed, withoutScheme, root) };
   }
 
-  // Windows reads a colon as a drive (`C:name` is relative to that drive's current directory,
-  // which node:path resolves against the project instead) or as an alternate data stream
-  // (`script.gd:hidden` writes beside the file where nothing lists it), and Godot refuses one in
-  // any resource path, so nothing inside a project is ever spelled with it on any platform.
-  const kept = keptInside(trimmed);
-  if (kept.inner !== undefined) {
-    return {
-      ok: false,
-      reason: `Path '${trimmed}' names the resource ${kept.inner} kept inside ${kept.file}, not a file. resource_edit read reads one by that path, and this argument takes a file.`,
-    };
-  }
-  if (withoutScheme.includes(':')) {
-    return {
-      ok: false,
-      reason: `Path '${trimmed}' contains ':', which no file inside a project is named with.`,
-    };
+  const colonReason = colonRefusal(trimmed, withoutScheme);
+  if (colonReason !== null) {
+    return { ok: false, reason: colonReason };
   }
 
   const absolutePath = resolve(root, withoutScheme);

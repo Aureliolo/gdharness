@@ -75,9 +75,7 @@ function debugRequestOf(asked: unknown): DebugRequest | null {
   const { op, script, line, set, how, frame, expression } = asked;
   switch (op) {
     case 'breakpoint':
-      return typeof script === 'string' && typeof line === 'number' && typeof set === 'boolean'
-        ? { op, script, line, set }
-        : null;
+      return breakpointRequestOf(script, line, set);
     case 'pause':
     case 'stack':
     case 'output':
@@ -93,6 +91,13 @@ function debugRequestOf(asked: unknown): DebugRequest | null {
     default:
       return null;
   }
+}
+
+/** The breakpoint request the three fields make, or null when any is the wrong type. */
+function breakpointRequestOf(script: unknown, line: unknown, set: unknown): DebugRequest | null {
+  return typeof script === 'string' && typeof line === 'number' && typeof set === 'boolean'
+    ? { op: 'breakpoint', script, line, set }
+    : null;
 }
 
 function errorText(error: unknown): string {

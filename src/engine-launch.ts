@@ -422,88 +422,18 @@ async function engineWatchedOnce(
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
   const output = openSync(log, 'w');
-  let child: ChildProcess;
-  let stop: () => void;
-  let piped: readonly Readable[] | null = null;
-  let helper: {
-    readonly error: string;
-    readonly how: string;
-    readonly pid: string;
-    readonly step: string;
-    readonly exit: string;
-  } | null = null;
-  try {
-    // On Windows every engine on a desktop of its own, headless too: an engine that fails to start
-    // shows a modal alert even with --headless, and on the desktop in use that takes the keyboard of
-    // whoever is working there. The helper also clears the bit that keeps a crash from being reported.
-    if (process.platform === 'win32') {
-      const where = 'on a desktop of its own';
-      const compiled = await ensureHelperCompiled();
-      if (compiled !== null) {
-        return { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` };
-      }
-      const stopFile = join(directory, 'stop');
-      const error = join(directory, 'error');
-      helper = {
-        error,
-        how: where,
-        pid: join(directory, 'pid'),
-        step: join(directory, 'step'),
-        exit: join(directory, 'exit'),
-      };
-      const how = {
-        desktop: HIDDEN_DESKTOP,
-        directory: launch.projectPath,
-        endsWithHelper: true,
-        ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
-      };
-      const wrapper = throughHelper(how, launch.godotPath, args, {
-        spec: join(directory, 'spec'),
-        pid: helper.pid,
-        error,
-        stop: stopFile,
-        step: helper.step,
-        exit: helper.exit,
-      });
-      // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
-      // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
-      // helper hands the engine its stdout for both streams, so their lines stay in order.
-      const helped = spawnHidden(wrapper.command, wrapper.args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
-        cwd: directory,
-      });
-      piped = [helped.stdout, helped.stderr];
-      child = helped;
-      stop = () => {
-        writeFileSync(stopFile, '');
-      };
-    } else {
-      const ending = endingWithRunner(launch.godotPath, args);
-      const held = heldToCores(launch.cores, ending.command, ending.args);
-      child = spawnHidden(held.command, held.args, {
-        stdio: ['ignore', output, output],
-        env,
-        cwd: launch.projectPath,
-        detached: true,
-      });
-      belowNormal(child);
-      stop = () => {
-        endTree(child);
-      };
-    }
-  } finally {
-    if (piped === null) {
-      closeSync(output);
-    }
+  const started = await startEngine({ launch, args, directory, output, env });
+  if (started.kind === 'refused') {
+    return started.end;
   }
+  const { child, stop, piped } = started;
   launch.running.add(stop);
-  let ended: string | null = null;
+  const outcome: { ended: string | null } = { ended: null };
   const exited = Promise.race([
     exitOf(child),
     new Promise<{ code: null; signal: null }>((settle) => {
       child.once('error', (error: Error) => {
-        ended ??= `the engine did not start: ${error.message}`;
+        outcome.ended ??= `the engine did not start: ${error.message}`;
         settle({ code: null, signal: null });
       });
     }),
@@ -513,112 +443,40 @@ async function engineWatchedOnce(
   void exited.then(() => {
     finished.now = true;
   });
-  // Read through a call, since the loop's own condition narrows the field for the code after an await.
-  const hasFinished = (): boolean => finished.now;
   const reading = openSync(log, 'r');
-  // The engine itself: the hidden desktop's helper starts it and writes its pid down.
-  const engineAt = (): number | undefined => {
-    if (helper === null) {
-      return child.pid;
-    }
-    return helperPid(helper.pid);
-  };
-  // Named in the lock as well, since the lock names this process, and what the engine starts runs on
-  // its slot only when the lock names the engine.
-  const found = (engine: number): void => {
-    watching(engine, true, true);
-    void nameSlotEngineOf(lock, process.pid, engine);
-  };
-  let pid = engineAt();
-  if (pid !== undefined) {
-    found(pid);
+  const engine = engineAt(started);
+  if (engine !== undefined) {
+    foundEngine(lock, engine);
   }
-  let peakBytes = 0;
+  let watch: Watch | undefined;
   try {
-    let size = 0;
     const sample = launch.sample ?? sampled;
     const first = await sample();
-    const running = new Spent(nowSeconds(), first, pid);
-    const quiet = new Spent(nowSeconds(), first, pid);
-    // The end of what was scanned, so a marker split between two reads is still found.
-    let carried = '';
-    // The silence allowed for what the log shows running, read once for each size it reaches.
-    let allowed = { size: -1, seconds: silenceSeconds };
+    watch = {
+      launch,
+      lock,
+      log,
+      started,
+      reading,
+      finished,
+      outcome,
+      silenceSeconds,
+      silenceIn,
+      holds,
+      sample,
+      running: new Spent(nowSeconds(), first, engine),
+      quiet: new Spent(nowSeconds(), first, engine),
+      pid: engine,
+      peakBytes: 0,
+      size: 0,
+      // The end of what was scanned, so a marker split between two reads is still found.
+      carried: '',
+      // The silence allowed for what the log shows running, read once for each size it reaches.
+      allowed: { size: -1, seconds: silenceSeconds },
+    };
     while (!finished.now) {
       await delay(LOOK_MS);
-      if (pid === undefined) {
-        pid = engineAt();
-        if (pid !== undefined) {
-          found(pid);
-        }
-      }
-      const taken = await sample();
-      const holding = pid === undefined ? undefined : taken.held?.get(pid);
-      if (holding !== undefined && holding > 0) {
-        peakBytes = Math.max(peakBytes, holding);
-        holds?.(holding);
-      }
-      running.counted(taken, pid);
-      quiet.counted(taken, pid);
-      const at = nowSeconds();
-      // An engine that exited while the sample was taken has no processor time left to read, so
-      // its last stretch counts by the clock and could put past a limit an engine that finished
-      // within it.
-      // The hidden desktop's helper exits a moment after the engine it started.
-      const gone = hasFinished() || (pid !== undefined && !alive(pid));
-      // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
-      const deadline = launch.deadlineSeconds;
-      const over = deadline === null || gone ? null : running.past(deadline, at);
-      if (ended === null && deadline !== null && over !== null) {
-        const stoppedIn = readRun(readLog(log)).stoppedIn;
-        ended = `the engine ran past the ${String(deadline)} s deadline${countedBy(running, over, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
-        stop();
-      }
-      const now = fstatSync(reading).size;
-      if (now > size) {
-        const chunk = Buffer.alloc(SCAN_BYTES);
-        for (let offset = size; offset < now; ) {
-          const got = readSync(reading, chunk, 0, Math.min(SCAN_BYTES, now - offset), offset);
-          if (got === 0) {
-            break;
-          }
-          const scanned = carried + chunk.toString('utf8', 0, got);
-          if (ended === null && scanned.includes(AUTOLOAD_FAILED)) {
-            ended = 'an autoload did not start, so the engine was ended rather than run without it';
-            stop();
-          }
-          carried = scanned.slice(-AUTOLOAD_FAILED.length);
-          offset += got;
-        }
-        size = now;
-        quiet.restart(at);
-        if (ended === null && size > LOG_LIMIT_BYTES) {
-          ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
-          stop();
-        }
-      } else if (ended === null && !gone && quiet.past(silenceSeconds, at) !== null) {
-        if (allowed.size !== size) {
-          allowed = {
-            size,
-            seconds:
-              silenceIn === undefined
-                ? silenceSeconds
-                : Math.max(silenceSeconds, silenceIn(readRun(readLog(log)))),
-          };
-        }
-        const silent = quiet.past(allowed.seconds, at);
-        if (silent === null) {
-          continue;
-        }
-        const { stoppedIn } = readRun(readLog(log));
-        // A helper that never wrote the pid never started the engine, which is a start that hung.
-        const unstarted =
-          helper !== null && !existsSync(helper.pid)
-            ? `, and it never started ${helper.how}: ${helperStep(helper.step)}`
-            : '';
-        ended = `the engine printed nothing for ${String(allowed.seconds)} s${countedBy(quiet, silent, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
-        stop();
-      }
+      await lookAtTheEngine(watch);
     }
   } catch (error) {
     // Ended before the failure goes on, since nothing else holds a way to end it once this returns.
@@ -627,11 +485,288 @@ async function engineWatchedOnce(
   } finally {
     closeSync(reading);
     launch.running.delete(stop);
+    const pid = watch?.pid ?? engine;
     if (pid !== undefined) {
       watching(pid, false);
     }
   }
-  const told = await exited;
+  return await endOfTheEngine({
+    started,
+    told: await exited,
+    copied,
+    output,
+    outcome,
+    peakBytes: watch.peakBytes,
+  });
+}
+
+/** The files the hidden desktop's helper leaves, and where it was asked to start the engine. */
+interface HelperFiles {
+  readonly error: string;
+  readonly how: string;
+  readonly pid: string;
+  readonly step: string;
+  readonly exit: string;
+}
+
+/** An engine as started: its process, how to end it, the streams to copy into the log and its helper. */
+interface StartedEngine {
+  readonly kind: 'started';
+  readonly child: ChildProcess;
+  readonly stop: () => void;
+  readonly piped: readonly Readable[] | null;
+  readonly helper: HelperFiles | null;
+}
+
+/** What starting an engine came to: a running engine, or the end it was refused with. */
+type Started = StartedEngine | { readonly kind: 'refused'; readonly end: EngineEnd };
+
+/** What starting an engine needs: its launch and arguments, the folder it works in and the log's handle. */
+interface EngineStart {
+  readonly launch: EngineLaunch;
+  readonly args: readonly string[];
+  readonly directory: string;
+  readonly output: number;
+  readonly env: NodeJS.ProcessEnv;
+}
+
+/** Starts the engine, closing the log's handle where nothing is left to write into it. */
+async function startEngine(start: EngineStart): Promise<Started> {
+  let started: Started | undefined;
+  try {
+    // On Windows every engine on a desktop of its own, headless too: an engine that fails to start
+    // shows a modal alert even with --headless, and on the desktop in use that takes the keyboard of
+    // whoever is working there. The helper also clears the bit that keeps a crash from being reported.
+    started = process.platform === 'win32' ? await startOnHiddenDesktop(start) : startOnThisDesktop(start);
+    return started;
+  } finally {
+    if (started?.kind !== 'started' || started.piped === null) {
+      closeSync(start.output);
+    }
+  }
+}
+
+/** The engine started through the helper, on a desktop of its own. */
+async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
+  const { launch, args, directory, env } = start;
+  const where = 'on a desktop of its own';
+  const compiled = await ensureHelperCompiled();
+  if (compiled !== null) {
+    return {
+      kind: 'refused',
+      end: { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` },
+    };
+  }
+  const stopFile = join(directory, 'stop');
+  const error = join(directory, 'error');
+  const helper: HelperFiles = {
+    error,
+    how: where,
+    pid: join(directory, 'pid'),
+    step: join(directory, 'step'),
+    exit: join(directory, 'exit'),
+  };
+  const how = {
+    desktop: HIDDEN_DESKTOP,
+    directory: launch.projectPath,
+    endsWithHelper: true,
+    ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
+  };
+  const wrapper = throughHelper(how, launch.godotPath, args, {
+    spec: join(directory, 'spec'),
+    pid: helper.pid,
+    error,
+    stop: stopFile,
+    step: helper.step,
+    exit: helper.exit,
+  });
+  // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
+  // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
+  // helper hands the engine its stdout for both streams, so their lines stay in order.
+  const helped = spawnHidden(wrapper.command, wrapper.args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
+    cwd: directory,
+  });
+  return {
+    kind: 'started',
+    child: helped,
+    stop: () => {
+      writeFileSync(stopFile, '');
+    },
+    piped: [helped.stdout, helped.stderr],
+    helper,
+  };
+}
+
+/** The engine started directly, its streams written to the log's handle. */
+function startOnThisDesktop(start: EngineStart): StartedEngine {
+  const { launch, args, output, env } = start;
+  const ending = endingWithRunner(launch.godotPath, args);
+  const held = heldToCores(launch.cores, ending.command, ending.args);
+  const child = spawnHidden(held.command, held.args, {
+    stdio: ['ignore', output, output],
+    env,
+    cwd: launch.projectPath,
+    detached: true,
+  });
+  belowNormal(child);
+  return {
+    kind: 'started',
+    child,
+    stop: () => {
+      endTree(child);
+    },
+    piped: null,
+    helper: null,
+  };
+}
+
+/** The engine itself: the hidden desktop's helper starts it and writes its pid down. */
+function engineAt(started: StartedEngine): number | undefined {
+  return started.helper === null ? started.child.pid : helperPid(started.helper.pid);
+}
+
+/**
+ * Names [param engine] in the lock as well, since the lock names this process, and what the engine
+ * starts runs on its slot only when the lock names the engine.
+ */
+function foundEngine(lock: string, engine: number): void {
+  watching(engine, true, true);
+  void nameSlotEngineOf(lock, process.pid, engine);
+}
+
+/** What the watch of one engine keeps from one look to the next. */
+interface Watch {
+  readonly launch: EngineLaunch;
+  readonly lock: string;
+  readonly log: string;
+  readonly started: StartedEngine;
+  /** The handle the log is read through. */
+  readonly reading: number;
+  readonly finished: { readonly now: boolean };
+  /** Why the watch ended the engine, once it has. */
+  readonly outcome: { ended: string | null };
+  readonly silenceSeconds: number;
+  readonly silenceIn: ((printed: RunPrinted) => number) | undefined;
+  readonly holds: ((bytes: number) => void) | undefined;
+  readonly sample: () => Promise<Sample>;
+  readonly running: Spent;
+  readonly quiet: Spent;
+  pid: number | undefined;
+  peakBytes: number;
+  size: number;
+  carried: string;
+  allowed: { size: number; seconds: number };
+}
+
+/** One look at the engine: its pid, what it holds, whether it is past a limit and what the log has gained. */
+async function lookAtTheEngine(watch: Watch): Promise<void> {
+  if (watch.pid === undefined) {
+    watch.pid = engineAt(watch.started);
+    if (watch.pid !== undefined) {
+      foundEngine(watch.lock, watch.pid);
+    }
+  }
+  const taken = await watch.sample();
+  const holding = watch.pid === undefined ? undefined : taken.held?.get(watch.pid);
+  if (holding !== undefined && holding > 0) {
+    watch.peakBytes = Math.max(watch.peakBytes, holding);
+    watch.holds?.(holding);
+  }
+  watch.running.counted(taken, watch.pid);
+  watch.quiet.counted(taken, watch.pid);
+  const at = nowSeconds();
+  // An engine that exited while the sample was taken has no processor time left to read, so
+  // its last stretch counts by the clock and could put past a limit an engine that finished
+  // within it.
+  // The hidden desktop's helper exits a moment after the engine it started.
+  const gone = watch.finished.now || (watch.pid !== undefined && !alive(watch.pid));
+  endIfPastTheDeadline(watch, gone, at);
+  const now = fstatSync(watch.reading).size;
+  if (now > watch.size) {
+    scanWhatTheLogGained(watch, now, at);
+  } else if (watch.outcome.ended === null && !gone && watch.quiet.past(watch.silenceSeconds, at) !== null) {
+    endIfSilent(watch, at);
+  }
+}
+
+/** Ends the engine once it has run past the run's deadline. */
+function endIfPastTheDeadline(watch: Watch, gone: boolean, at: number): void {
+  // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
+  const deadline = watch.launch.deadlineSeconds;
+  const over = deadline === null || gone ? null : watch.running.past(deadline, at);
+  if (watch.outcome.ended === null && deadline !== null && over !== null) {
+    const stoppedIn = readRun(readLog(watch.log)).stoppedIn;
+    watch.outcome.ended = `the engine ran past the ${String(deadline)} s deadline${countedBy(watch.running, over, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
+    watch.started.stop();
+  }
+}
+
+/** Reads what the log gained up to [param now], ending the engine on a failed autoload or an oversized log. */
+function scanWhatTheLogGained(watch: Watch, now: number, at: number): void {
+  const chunk = Buffer.alloc(SCAN_BYTES);
+  for (let offset = watch.size; offset < now; ) {
+    const got = readSync(watch.reading, chunk, 0, Math.min(SCAN_BYTES, now - offset), offset);
+    if (got === 0) {
+      break;
+    }
+    const scanned = watch.carried + chunk.toString('utf8', 0, got);
+    if (watch.outcome.ended === null && scanned.includes(AUTOLOAD_FAILED)) {
+      watch.outcome.ended = 'an autoload did not start, so the engine was ended rather than run without it';
+      watch.started.stop();
+    }
+    watch.carried = scanned.slice(-AUTOLOAD_FAILED.length);
+    offset += got;
+  }
+  watch.size = now;
+  watch.quiet.restart(at);
+  if (watch.outcome.ended === null && watch.size > LOG_LIMIT_BYTES) {
+    watch.outcome.ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
+    watch.started.stop();
+  }
+}
+
+/** Ends the engine once it has printed nothing for as long as what it was running is allowed. */
+function endIfSilent(watch: Watch, at: number): void {
+  if (watch.allowed.size !== watch.size) {
+    watch.allowed = {
+      size: watch.size,
+      seconds:
+        watch.silenceIn === undefined
+          ? watch.silenceSeconds
+          : Math.max(watch.silenceSeconds, watch.silenceIn(readRun(readLog(watch.log)))),
+    };
+  }
+  const silent = watch.quiet.past(watch.allowed.seconds, at);
+  if (silent === null) {
+    return;
+  }
+  const { stoppedIn } = readRun(readLog(watch.log));
+  const { helper } = watch.started;
+  // A helper that never wrote the pid never started the engine, which is a start that hung.
+  const unstarted =
+    helper !== null && !existsSync(helper.pid)
+      ? `, and it never started ${helper.how}: ${helperStep(helper.step)}`
+      : '';
+  watch.outcome.ended = `the engine printed nothing for ${String(watch.allowed.seconds)} s${countedBy(watch.quiet, silent, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
+  watch.started.stop();
+}
+
+/** What the end of one engine needs to be told. */
+interface EngineFinish {
+  readonly started: StartedEngine;
+  readonly told: { readonly code: number | null; readonly signal: NodeJS.Signals | null };
+  readonly copied: Promise<void> | null;
+  readonly output: number;
+  readonly outcome: { ended: string | null };
+  readonly peakBytes: number;
+}
+
+/** How the engine ended, once its process has exited and its streams are copied into the log. */
+async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
+  const { started, told, copied, output, outcome, peakBytes } = finish;
+  const { helper } = started;
   const code = helper === null ? told.code : helperExit(helper.exit, told.code);
   const { signal } = told;
   // Read as soon as it is known, while the machine is still as the engine left it.
@@ -643,12 +778,12 @@ async function engineWatchedOnce(
   // The helper's own failure reaches only its file, and the exit code it leaves says nothing.
   const failed = helper === null ? null : helperFailure(helper.error);
   if (failed !== null && helper !== null) {
-    ended ??= `the engine could not be started ${helper.how}: ${failed}`;
+    outcome.ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
   return {
     code,
     signal,
-    ended,
+    ended: outcome.ended,
     ...(freeBytes === undefined ? {} : { freeBytes }),
     ...(peakBytes > 0 ? { peakBytes } : {}),
   };

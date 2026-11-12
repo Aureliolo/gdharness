@@ -1106,6 +1106,61 @@ async function spread(): Promise<void> {
   process.exitCode = await runSpreadCommand(options, godotPath);
 }
 
+/** What the slot this process takes is called to whoever waits for it. */
+function slotTakerName(): string {
+  if (command !== undefined) {
+    return `gdharness ${command}`;
+  }
+  const served = process.env['GDHARNESS_PROJECT'];
+  return `a gdharness server${served === undefined || served === '' ? '' : ` of ${served}`}`;
+}
+
+/** Runs the commands that read their own options, and answers whether `command` was one of them. */
+async function ranOwnOptionsCommand(): Promise<boolean> {
+  if (command !== undefined && asksForHelp()) {
+    printHelp();
+    return true;
+  }
+  if (command === 'test') {
+    await test();
+    return true;
+  }
+  if (command === 'spread') {
+    await spread();
+    return true;
+  }
+  if (command === 'lsp') {
+    // Exited rather than returned: the standard input it piped holds the process open.
+    process.exit(await runLspBridge(lspOptionsOf(args.slice(1), process.cwd())));
+  }
+  if (command === 'editor') {
+    await editorOpen();
+    return true;
+  }
+  return false;
+}
+
+/** Runs the commands that only print, and answers whether [param name] was one of them. */
+function ranPrintingCommand(name: string): boolean {
+  switch (name) {
+    case 'harnesses':
+      printHarnesses();
+      return true;
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log(`gdharness v${getLocalVersion()}`);
+      return true;
+    case 'help':
+    case '--help':
+    case '-h':
+      printHelp();
+      return true;
+    default:
+      return false;
+  }
+}
+
 async function main(): Promise<void> {
   await letWindowsReportCrashes();
   await prepareWholeExits();
@@ -1115,30 +1170,8 @@ async function main(): Promise<void> {
       console.error(`gdharness: ${line}`);
     });
   }
-  const served = process.env['GDHARNESS_PROJECT'];
-  nameSlotTaker(
-    command !== undefined
-      ? `gdharness ${command}`
-      : `a gdharness server${served === undefined || served === '' ? '' : ` of ${served}`}`,
-  );
-  if (command !== undefined && asksForHelp()) {
-    printHelp();
-    return;
-  }
-  if (command === 'test') {
-    await test();
-    return;
-  }
-  if (command === 'spread') {
-    await spread();
-    return;
-  }
-  if (command === 'lsp') {
-    // Exited rather than returned: the standard input it piped holds the process open.
-    process.exit(await runLspBridge(lspOptionsOf(args.slice(1), process.cwd())));
-  }
-  if (command === 'editor') {
-    await editorOpen();
+  nameSlotTaker(slotTakerName());
+  if (await ranOwnOptionsCommand()) {
     return;
   }
   checkFlags();
@@ -1167,20 +1200,10 @@ async function main(): Promise<void> {
     case 'uninstall':
       await inOneSlot(uninstall);
       return;
-    case 'harnesses':
-      printHarnesses();
-      return;
-    case 'version':
-    case '--version':
-    case '-v':
-      console.log(`gdharness v${getLocalVersion()}`);
-      return;
-    case 'help':
-    case '--help':
-    case '-h':
-      printHelp();
-      return;
     default: {
+      if (ranPrintingCommand(command)) {
+        return;
+      }
       const [close] = nearest(command, [...COMMANDS]);
       const offered = close === undefined ? '' : ` Did you mean ${close}?`;
       throw new UsageError(`Unknown command: ${command}.${offered} Run gdharness help.`);
