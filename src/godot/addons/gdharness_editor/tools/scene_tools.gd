@@ -193,28 +193,10 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	scene.asked(root, ["script"])
 
 	if not script_path.is_empty():
-		var full_script_path: String = GdhSceneFile.res_path(script_path)
-		var found: Variant = GdhSceneFile.script_at(full_script_path)
-		if found is String:
+		var unusable: String = _script_on_root(root, GdhSceneFile.res_path(script_path))
+		if not unusable.is_empty():
 			root.free()
-			return { "ok": false, "error": found }
-		var script: Script = found
-		var uncompiled: String = GdhSceneFile.uncompiled(script, full_script_path)
-		if not uncompiled.is_empty():
-			root.free()
-			return { "ok": false, "error": uncompiled }
-		var base: String = str(script.get_instance_base_type())
-		if not ClassDB.is_parent_class(root_node_type, base):
-			root.free()
-			return {
-				"ok": false,
-				"error":
-				(
-					"%s extends %s, so it cannot be on a %s root."
-					% [full_script_path, base, root_node_type]
-				),
-			}
-		root.set_script(script)
+			return { "ok": false, "error": unusable }
 		# Named again, since a headless engine runs the script's _init as it is attached, and a
 		# node's name is no property the write compares.
 		root.name = root_node_name
@@ -243,6 +225,24 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	if not had_folder:
 		answer["madeFolder"] = scene_path.get_base_dir()
 	return answer
+
+
+## Puts the script at [param full_script_path] on the new scene's [param root]. Answers why it
+## cannot be, or "".
+static func _script_on_root(root: Node, full_script_path: String) -> String:
+	var found: Variant = GdhSceneFile.script_at(full_script_path)
+	if found is String:
+		return str(found)
+	var script: Script = found
+	var uncompiled: String = GdhSceneFile.uncompiled(script, full_script_path)
+	if not uncompiled.is_empty():
+		return uncompiled
+	var base: String = str(script.get_instance_base_type())
+	var root_type: String = root.get_class()
+	if not ClassDB.is_parent_class(root_type, base):
+		return "%s extends %s, so it cannot be on a %s root." % [full_script_path, base, root_type]
+	root.set_script(script)
+	return ""
 
 
 func list_scene_nodes(args: Dictionary) -> Dictionary:
@@ -278,15 +278,11 @@ func add_node(args: Dictionary) -> Dictionary:
 			"ok": false,
 			"error": "placeholder marks an instance of a scene, so add takes it with instancePath.",
 		}
-	var class_script: Script = null
-	if not node_type.is_empty() and not ClassDB.class_exists(node_type):
-		var declared: Dictionary = GdhSceneFile.script_class(node_type, "Node")
-		if declared.has("error"):
-			return { "ok": false, "error": declared["error"] }
-		var held: Variant = declared.get("script")
-		if held is Script:
-			class_script = held
-			node_type = str(declared["base"])
+	var resolved: Dictionary = _resolved_class(node_type)
+	if resolved.has("error"):
+		return { "ok": false, "error": resolved["error"] }
+	node_type = str(resolved["type"])
+	var class_script: Script = resolved["script"]
 	var making: Array = GdhPlacing.what_to_add(node_type, instance_path, scene_path)
 	var packed: PackedScene = making[0]
 	if not str(making[1]).is_empty():
@@ -300,20 +296,10 @@ func add_node(args: Dictionary) -> Dictionary:
 
 	var root: Node = scene.root
 	var parent: Node = GdhSceneFile.node_at(root, parent_node_path)
-	if not parent:
-		return scene.refuse(
-			scene.not_found("Parent node not found: " + parent_node_path, parent_node_path)
-		)
-	var foreign: String = scene.foreign(parent)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
-	var unusable: String = scene.unusable_name(parent, node_name)
-	if not unusable.is_empty():
-		return scene.refuse(unusable)
 	var place: Variant = args.get("index")
-	var unplaceable: String = GdhPlacing.unplaceable(parent, null, place)
-	if not unplaceable.is_empty():
-		return scene.refuse(unplaceable)
+	var barred: String = _barred_parent(scene, parent, parent_node_path, node_name, place)
+	if not barred.is_empty():
+		return scene.refuse(barred)
 
 	# In the tree before its properties, so a property holding a node can find it by path. The
 	# script goes on once the node is in place, as an add and then a set of the script would put
@@ -324,55 +310,27 @@ func add_node(args: Dictionary) -> Dictionary:
 	parent.add_child(new_node)
 	GdhPlacing.place(new_node, place)
 	GdhPlacing.own(new_node, root)
-	if placeholder:
-		new_node.set_scene_instance_load_placeholder(true)
-	if class_script != null:
-		scene.asked(new_node, ["script"])
-		new_node.set_script(class_script)
-		# The script's _init can name the node, and the call's name is the one kept.
-		new_node.name = node_name
+	_mark_added(scene, new_node, [class_script, placeholder, node_name])
 	var unsettled: String = scene.settle()
 	if not unsettled.is_empty():
 		return scene.refuse("Nothing was written: " + unsettled)
 	if GdhPlacing.cornered(new_node, packed):
 		scene.asked(new_node, ["layout_mode"])
 		new_node.set("layout_mode", GdhPlacing.ANCHORS_MODE)
-	scene.asked(new_node, properties.keys())
-	var unwritten: String = _properties.write_all(new_node, properties)
-	scene.asked(new_node, _properties.moved_by_engine.keys())
-	if not unwritten.is_empty():
-		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
-	if unwritten.is_empty():
-		unwritten = GdhGroups.change(scene, new_node, adding, [])
+	var unwritten: String = _write_added(scene, new_node, properties, adding)
 	if not unwritten.is_empty():
 		return scene.refuse(unwritten)
 
 	var new_path: String = scene.path_of(new_node)
 	# Read before the write, which frees the scene it was added to.
-	var answer: Dictionary = { "ok": true, "nodeName": node_name }
-	answer.merge(GdhSceneFile.class_of(new_node))
-	answer.merge({ "nodePath": new_path, "index": new_node.get_index() })
-	if not properties.is_empty():
-		var held: Dictionary = {}
-		for key: Variant in properties:
-			held[str(key)] = _readable(new_node, _properties.read_at(new_node, str(key)))
-		answer["properties"] = held
-	_properties.note_write(answer, new_node)
-	if not adding.is_empty():
-		answer.merge(GdhGroups.read_added(new_node, adding))
+	var answer: Dictionary = _added_answer(new_node, node_name, new_path, properties, adding)
 	var id: int = new_node.get_instance_id()
+	var kept_keys: Array = properties.keys() + (["script"] if class_script != null else [])
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
-			var unkept: String = _kept(
-				scene,
-				saved,
-				new_node,
-				properties.keys() + (["script"] if class_script != null else [])
-			)
-			if unkept.is_empty() and saved.get_node_or_null(new_path) != null:
-				unkept = GdhGroups.unkept(saved.get_node(new_path), adding, [])
-			if unkept.is_empty() and placeholder:
-				unkept = _placeholder_unkept(saved, new_path, true)
+			var unkept: String = _kept(scene, saved, new_node, kept_keys)
+			if unkept.is_empty():
+				unkept = _unkept_added(saved, new_path, adding, placeholder)
 			return unkept
 	)
 	if not written.is_empty():
@@ -384,6 +342,96 @@ func add_node(args: Dictionary) -> Dictionary:
 		answer["instanceOf"] = instance_path
 		answer["placeholder"] = placeholder
 	return answer
+
+
+## [param node_type] as an engine class, or as a class_name script's base class with that script,
+## as {type, script}. {error} says why a named class is neither. An empty type stays as it is.
+static func _resolved_class(node_type: String) -> Dictionary:
+	if node_type.is_empty() or ClassDB.class_exists(node_type):
+		return { "type": node_type, "script": null }
+	var declared: Dictionary = GdhSceneFile.script_class(node_type, "Node")
+	if declared.has("error"):
+		return { "error": declared["error"] }
+	var held: Variant = declared.get("script")
+	if held is Script:
+		return { "type": str(declared["base"]), "script": held }
+	return { "type": node_type, "script": null }
+
+
+## Why [param node_name] cannot be added at [param place] under [param parent] in [param scene], or
+## "". [param parent] is null when [param parent_path] names no node.
+func _barred_parent(
+	scene: GdhSceneFile, parent: Node, parent_path: String, node_name: String, place: Variant
+) -> String:
+	if not parent:
+		return scene.not_found("Parent node not found: " + parent_path, parent_path)
+	var foreign: String = scene.foreign(parent)
+	if not foreign.is_empty():
+		return foreign
+	var unusable: String = scene.unusable_name(parent, node_name)
+	if not unusable.is_empty():
+		return unusable
+	return GdhPlacing.unplaceable(parent, null, place)
+
+
+## Gives the added [param new_node] what [param marks] holds, as [class_name script or null,
+## placeholder mark, node name]. The script is taken as the call's own.
+static func _mark_added(scene: GdhSceneFile, new_node: Node, marks: Array) -> void:
+	var class_script: Script = marks[0]
+	var placeholder: bool = marks[1]
+	if placeholder:
+		new_node.set_scene_instance_load_placeholder(true)
+	if class_script != null:
+		scene.asked(new_node, ["script"])
+		new_node.set_script(class_script)
+		# The script's _init can name the node, and the call's name is the one kept.
+		new_node.name = str(marks[2])
+
+
+## Sets [param properties] and the groups [param adding] on the added [param new_node], taking each
+## as the call's own. Answers why one cannot be set, or "".
+func _write_added(
+	scene: GdhSceneFile, new_node: Node, properties: Dictionary, adding: Array
+) -> String:
+	scene.asked(new_node, properties.keys())
+	var unwritten: String = _properties.write_all(new_node, properties)
+	scene.asked(new_node, _properties.moved_by_engine.keys())
+	if not unwritten.is_empty():
+		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
+	if unwritten.is_empty():
+		unwritten = GdhGroups.change(scene, new_node, adding, [])
+	return unwritten
+
+
+## The answer to an add of [param new_node] at [param new_path]: what the node holds now.
+func _added_answer(
+	new_node: Node, node_name: String, new_path: String, properties: Dictionary, adding: Array
+) -> Dictionary:
+	var answer: Dictionary = { "ok": true, "nodeName": node_name }
+	answer.merge(GdhSceneFile.class_of(new_node))
+	answer.merge({ "nodePath": new_path, "index": new_node.get_index() })
+	if not properties.is_empty():
+		var held: Dictionary = {}
+		for key: Variant in properties:
+			held[str(key)] = _readable(new_node, _properties.read_at(new_node, str(key)))
+		answer["properties"] = held
+	_properties.note_write(answer, new_node)
+	if not adding.is_empty():
+		answer.merge(GdhGroups.read_added(new_node, adding))
+	return answer
+
+
+## Why the node added at [param new_path] would not load from [param saved], the scene as written,
+## with the groups [param adding] and the placeholder mark [param placeholder], or "".
+static func _unkept_added(
+	saved: Node, new_path: String, adding: Array, placeholder: bool
+) -> String:
+	var unkept: String = ""
+	if saved.get_node_or_null(new_path) != null:
+		unkept = GdhGroups.unkept(saved.get_node(new_path), adding, [])
+	if unkept.is_empty() and placeholder:
+		unkept = _placeholder_unkept(saved, new_path, true)
+	return unkept
 
 
 ## Why the node at [param at] in [param saved], the scene as written, would not load with
@@ -479,15 +527,11 @@ func change_node_type(args: Dictionary) -> Dictionary:
 	var node_type: String = str(args.get("nodeType", ""))
 	if node_type.is_empty():
 		return { "ok": false, "error": "change_type takes nodeType, the class to make the node." }
-	var class_script: Script = null
-	if not ClassDB.class_exists(node_type):
-		var declared: Dictionary = GdhSceneFile.script_class(node_type, "Node")
-		if declared.has("error"):
-			return { "ok": false, "error": declared["error"] }
-		var held: Variant = declared.get("script")
-		if held is Script:
-			class_script = held
-			node_type = str(declared["base"])
+	var resolved: Dictionary = _resolved_class(node_type)
+	if resolved.has("error"):
+		return { "ok": false, "error": resolved["error"] }
+	node_type = str(resolved["type"])
+	var class_script: Script = resolved["script"]
 	var making: Array = GdhPlacing.what_to_add(node_type, "", scene_path)
 	if not str(making[1]).is_empty():
 		return { "ok": false, "error": making[1] }
@@ -507,31 +551,11 @@ func change_node_type(args: Dictionary) -> Dictionary:
 	var attached: Variant = was.get_script()
 	var script: Script = attached if attached is Script else null
 	var given: String = str(args.get("nodeType", ""))
-	var clearing: String = 'scene_node set with properties {"script": null}'
 	if class_script == script:
 		class_script = null
-	if class_script != null and script != null:
-		return scene.refuse(
-			(
-				(
-					"%s has the script %s. The class_name %s brings its own. Clear the "
-					+ "script with %s first, or give nodeType an engine class to keep it."
-				)
-				% [at, script.resource_path, given, clearing]
-			)
-		)
-	var base: String = "" if script == null else str(script.get_instance_base_type())
-	if script != null and not ClassDB.is_parent_class(node_type, base):
-		return scene.refuse(
-			(
-				(
-					"%s has the script %s, which extends %s. A %s does not inherit %s. Change the "
-					+ "script's extends line to a class %s inherits, or clear the script with %s. "
-					+ "Then change the type."
-				)
-				% [at, script.resource_path, base, node_type, base, node_type, clearing]
-			)
-		)
+	var conflict: String = _script_conflict(at, script, class_script, node_type, given)
+	if not conflict.is_empty():
+		return scene.refuse(conflict)
 	if was.get_class() == node_type and class_script == null:
 		return scene.refuse("%s is a %s already." % [at, given])
 
@@ -559,13 +583,43 @@ func change_node_type(args: Dictionary) -> Dictionary:
 	}
 	if class_script != null:
 		answer["scriptClass"] = given
-	if not dropped.is_empty():
-		answer["dropped"] = dropped
-	if not cut.is_empty():
-		answer["connectionsRemoved"] = cut
-	if not unheld.is_empty():
-		answer["cleared"] = unheld
+	_answer_if_any(answer, "dropped", dropped)
+	_answer_if_any(answer, "connectionsRemoved", cut)
+	_answer_if_any(answer, "cleared", unheld)
 	return answer
+
+
+## Sets [param key] in [param answer] to [param found] when it holds anything.
+static func _answer_if_any(answer: Dictionary, key: String, found: Array) -> void:
+	if not found.is_empty():
+		answer[key] = found
+
+
+## Why the node at [param at], holding [param script], cannot be made a [param node_type], or "".
+## [param class_script] is the script a class_name [param given] brings, or null.
+static func _script_conflict(
+	at: String, script: Script, class_script: Script, node_type: String, given: String
+) -> String:
+	var clearing: String = 'scene_node set with properties {"script": null}'
+	if class_script != null and script != null:
+		return (
+			(
+				"%s has the script %s. The class_name %s brings its own. Clear the "
+				+ "script with %s first, or give nodeType an engine class to keep it."
+			)
+			% [at, script.resource_path, given, clearing]
+		)
+	var base: String = "" if script == null else str(script.get_instance_base_type())
+	if script != null and not ClassDB.is_parent_class(node_type, base):
+		return (
+			(
+				"%s has the script %s, which extends %s. A %s does not inherit %s. Change the "
+				+ "script's extends line to a class %s inherits, or clear the script with %s. "
+				+ "Then change the type."
+			)
+			% [at, script.resource_path, base, node_type, base, node_type, clearing]
+		)
+	return ""
 
 
 ## Why [param node]'s type cannot change in [param scene], or "": its type is another scene's,
@@ -692,29 +746,17 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 
 	var root: Node = scene.root
 	var source: Node = GdhSceneFile.node_at(root, node_path)
-	if not source:
-		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	if source == root:
-		return scene.refuse("The root of %s cannot be copied into its own scene." % scene_path)
-	var foreign: String = scene.foreign(source)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
+	var barred_source: String = _barred_source(scene, source, node_path)
+	if not barred_source.is_empty():
+		return scene.refuse(barred_source)
 
 	var target_parent: Node = source.get_parent()
 	if not parent_path.is_empty():
 		target_parent = GdhSceneFile.node_at(root, parent_path)
-	if not target_parent:
-		return scene.refuse(scene.not_found("Parent not found: " + parent_path, parent_path))
-	foreign = scene.foreign(target_parent)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
-	var unusable: String = scene.unusable_name(target_parent, new_name)
-	if not unusable.is_empty():
-		return scene.refuse(unusable)
 	var place: Variant = args.get("index")
-	var unplaceable: String = GdhPlacing.unplaceable(target_parent, null, place)
-	if not unplaceable.is_empty():
-		return scene.refuse(unplaceable)
+	var barred: String = _barred_copy_parent(scene, target_parent, parent_path, new_name, place)
+	if not barred.is_empty():
+		return scene.refuse(barred)
 	# The editor's Duplicate puts the copy right after the original.
 	if place == null and target_parent == source.get_parent():
 		place = source.get_index() + 1
@@ -728,15 +770,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	target_parent.add_child(duplicated_node)
 	GdhPlacing.place(duplicated_node, place)
 	var made: Dictionary = {}
-	# The original keeps its unique name, which a scene gives one node only. The engine took it off
-	# the copy with a warning saying the name was claimed, and the answer did not say so.
-	var plain: Array[Node] = []
-	for value: Variant in copies.values():
-		made[value] = true
-		var copy: Node = value
-		if copy.unique_name_in_owner:
-			copy.unique_name_in_owner = false
-			plain.append(copy)
+	var plain: Array[Node] = _without_unique_names(copies, made)
 	GdhPlacing.own(duplicated_node, root, made)
 	GdhPlacing.reconnect(copies, source)
 	scene.copied(copies)
@@ -776,6 +810,51 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	if not connected.is_empty():
 		answer["connectionsCopied"] = connected
 	return answer
+
+
+## Why the node [param source] at [param node_path] cannot be duplicated in [param scene], or "".
+## [param source] is null when the path names no node.
+static func _barred_source(scene: GdhSceneFile, source: Node, node_path: String) -> String:
+	if not source:
+		return scene.not_found("Node not found: " + node_path, node_path)
+	if source == scene.root:
+		return "The root of %s cannot be copied into its own scene." % scene.path
+	return scene.foreign(source)
+
+
+## Why a copy named [param new_name] cannot go at [param place] under [param target_parent] in
+## [param scene], or "". [param target_parent] is null when [param parent_path] names no node.
+func _barred_copy_parent(
+	scene: GdhSceneFile,
+	target_parent: Node,
+	parent_path: String,
+	new_name: String,
+	place: Variant,
+) -> String:
+	if not target_parent:
+		return scene.not_found("Parent not found: " + parent_path, parent_path)
+	var foreign: String = scene.foreign(target_parent)
+	if not foreign.is_empty():
+		return foreign
+	var unusable: String = scene.unusable_name(target_parent, new_name)
+	if not unusable.is_empty():
+		return unusable
+	return GdhPlacing.unplaceable(target_parent, null, place)
+
+
+## Takes the unique name off each copy in [param copies] and answers those that had one, and marks
+## each copy in [param made]. The original keeps its unique name, which a scene gives one node only.
+## The engine took it off the copy with a warning saying the name was claimed, and the answer did
+## not say so.
+static func _without_unique_names(copies: Dictionary, made: Dictionary) -> Array[Node]:
+	var plain: Array[Node] = []
+	for value: Variant in copies.values():
+		made[value] = true
+		var copy: Node = value
+		if copy.unique_name_in_owner:
+			copy.unique_name_in_owner = false
+			plain.append(copy)
+	return plain
 
 
 ## The connections the file held from [param at] or a node under it, as
@@ -823,37 +902,14 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	var root: Node = scene.root
 	var node: Node = GdhSceneFile.node_at(root, node_path)
 	var new_parent: Node = GdhSceneFile.node_at(root, new_parent_path)
-	if not node:
-		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	if not new_parent:
-		return scene.refuse(
-			scene.not_found("New parent not found: " + new_parent_path, new_parent_path)
-		)
-	var fixed: String = scene.fixed(node)
-	if not fixed.is_empty():
-		return scene.refuse(fixed)
-	# Removed first and then refused by add_child, the node and everything under it were saved as
-	# gone.
-	if new_parent == node or node.is_ancestor_of(new_parent):
-		return scene.refuse(
-			"%s cannot go under %s, which is itself or inside it." % [node_path, new_parent_path]
-		)
-	var foreign: String = scene.foreign(new_parent)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
-	var unusable: String = scene.unusable_name(new_parent, str(node.name), node)
-	if not unusable.is_empty():
-		return scene.refuse(unusable)
 	var place: Variant = args.get("index")
-	var unplaceable: String = GdhPlacing.unplaceable(new_parent, node, place)
-	if not unplaceable.is_empty():
-		return scene.refuse(unplaceable)
+	var barred: String = _barred_move(scene, node, new_parent, [node_path, new_parent_path], place)
+	if not barred.is_empty():
+		return scene.refuse(barred)
 
 	var old_path: String = scene.path_of(node)
 	var old_parent: Node = node.get_parent()
-	var drawn_at: Dictionary = {}
-	for property: String in GdhPlacing.placing(node):
-		drawn_at[property] = _properties.read_at(node, property)
+	var drawn_at: Dictionary = _drawn_at(node)
 	var held_at: Transform3D = (
 		(node as Node3D).transform if node is Node3D else Transform3D.IDENTITY
 	)
@@ -873,40 +929,8 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	var placed: Array[String] = GdhHeadlessCheck.differing(node, stored_before, {})
 	if not placed.is_empty():
 		scene.asked(node, placed)
-	var also_changed: Dictionary = {}
-	for property: String in drawn_at:
-		var now: Variant = _properties.read_at(node, property)
-		if not GdhSame.same(now, drawn_at[property]):
-			also_changed[property] = {
-				"was": _readable(node, drawn_at[property]), "now": _readable(node, now),
-			}
-	var drawn_in: Array[String] = GdhPlacing.placed_in(node)
-	for property: String in placed:
-		if property in drawn_in or also_changed.has(property):
-			continue
-		var was: Variant = (
-			stored_before[property]
-			if stored_before.has(property)
-			else GdhHeadlessCheck.default_of(node, property)
-		)
-		also_changed[property] = {
-			"was": _readable(node, was), "now": _readable(node, node.get(property)),
-		}
-	var sheared: String = ""
-	if node is Node3D and GdhPlacing.sheared((node as Node3D).basis):
-		var spatial: Node3D = node
-		also_changed["transform"] = {
-			"was": _readable(node, held_at), "now": _readable(node, spatial.transform),
-		}
-		sheared = (
-			(
-				"%s keeps where it is drawn under %s, which is scaled unevenly across the way it "
-				+ "is turned, so its basis is sheared: no position, rotation and scale describe "
-				+ "it, and transform is what it holds. keepGlobalTransform false keeps its own "
-				+ "transform instead."
-			)
-			% [str(node.name), new_parent_path]
-		)
+	var also_changed: Dictionary = _changed_by_move(node, drawn_at, placed, stored_before)
+	var sheared: String = _note_sheared(node, held_at, new_parent_path, also_changed)
 
 	var new_path: String = scene.path_of(node)
 	var index: int = node.get_index()
@@ -917,13 +941,9 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	)
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
-			var copy: Node = saved.get_node_or_null(new_path)
-			if copy == null:
-				return "%s would not be in the scene when it loads." % new_path
-			if old_path != new_path and saved.get_node_or_null(old_path) != null:
-				return "%s would still be in the scene as well when it loads." % old_path
-			if copy.get_index() != index:
-				return "%s would load at index %d, not %d." % [new_path, copy.get_index(), index]
+			var misplaced: String = _misplaced(saved, old_path, new_path, index)
+			if not misplaced.is_empty():
+				return misplaced
 			return _kept(scene, saved, node, also_changed.keys())
 	)
 	if not written.is_empty():
@@ -946,6 +966,105 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	return answer
 
 
+## Why [param node] cannot go under [param new_parent] at [param place] in [param scene], or "".
+## Either is null when its path names no node. [param paths] holds the node's path and the new
+## parent's, as the call gave them.
+func _barred_move(
+	scene: GdhSceneFile, node: Node, new_parent: Node, paths: Array[String], place: Variant
+) -> String:
+	if not node:
+		return scene.not_found("Node not found: " + paths[0], paths[0])
+	if not new_parent:
+		return scene.not_found("New parent not found: " + paths[1], paths[1])
+	var fixed: String = scene.fixed(node)
+	if not fixed.is_empty():
+		return fixed
+	# Removed first and then refused by add_child, the node and everything under it were saved as
+	# gone.
+	if new_parent == node or node.is_ancestor_of(new_parent):
+		return "%s cannot go under %s, which is itself or inside it." % [paths[0], paths[1]]
+	var foreign: String = scene.foreign(new_parent)
+	if not foreign.is_empty():
+		return foreign
+	var unusable: String = scene.unusable_name(new_parent, str(node.name), node)
+	if not unusable.is_empty():
+		return unusable
+	return GdhPlacing.unplaceable(new_parent, node, place)
+
+
+## The properties that place [param node] where it is drawn, as {property: value}.
+func _drawn_at(node: Node) -> Dictionary:
+	var drawn_at: Dictionary = {}
+	for property: String in GdhPlacing.placing(node):
+		drawn_at[property] = _properties.read_at(node, property)
+	return drawn_at
+
+
+## Why the moved node would not load at [param new_path] and [param index] from [param saved], the
+## scene as written, with nothing left at [param old_path], or "".
+static func _misplaced(saved: Node, old_path: String, new_path: String, index: int) -> String:
+	var copy: Node = saved.get_node_or_null(new_path)
+	if copy == null:
+		return "%s would not be in the scene when it loads." % new_path
+	if old_path != new_path and saved.get_node_or_null(old_path) != null:
+		return "%s would still be in the scene as well when it loads." % old_path
+	if copy.get_index() != index:
+		return "%s would load at index %d, not %d." % [new_path, copy.get_index(), index]
+	return ""
+
+
+## What a move of [param node] changed besides its parent, as {property: {was, now}}: the drawn
+## properties in [param drawn_at] that read differently now, and each of [param placed] the move
+## changed that its placement does not already account for. [param stored_before] holds what the
+## node stored before it moved.
+func _changed_by_move(
+	node: Node, drawn_at: Dictionary, placed: Array[String], stored_before: Dictionary
+) -> Dictionary:
+	var also_changed: Dictionary = {}
+	for property: String in drawn_at:
+		var now: Variant = _properties.read_at(node, property)
+		if not GdhSame.same(now, drawn_at[property]):
+			also_changed[property] = {
+				"was": _readable(node, drawn_at[property]), "now": _readable(node, now),
+			}
+	var drawn_in: Array[String] = GdhPlacing.placed_in(node)
+	for property: String in placed:
+		if property in drawn_in or also_changed.has(property):
+			continue
+		var was: Variant = (
+			stored_before[property]
+			if stored_before.has(property)
+			else GdhHeadlessCheck.default_of(node, property)
+		)
+		also_changed[property] = {
+			"was": _readable(node, was), "now": _readable(node, node.get(property)),
+		}
+	return also_changed
+
+
+## Where the move left [param node]'s basis sheared, under the parent at [param new_parent_path],
+## the transform is recorded in [param also_changed] as it was in [param held_at]. Answers why the
+## basis cannot be described otherwise, or "" when it is not sheared.
+func _note_sheared(
+	node: Node, held_at: Transform3D, new_parent_path: String, also_changed: Dictionary
+) -> String:
+	if not node is Node3D or not GdhPlacing.sheared((node as Node3D).basis):
+		return ""
+	var spatial: Node3D = node
+	also_changed["transform"] = {
+		"was": _readable(spatial, held_at), "now": _readable(spatial, spatial.transform),
+	}
+	return (
+		(
+			"%s keeps where it is drawn under %s, which is scaled unevenly across the way it "
+			+ "is turned, so its basis is sheared: no position, rotation and scale describe "
+			+ "it, and transform is what it holds. keepGlobalTransform false keeps its own "
+			+ "transform instead."
+		)
+		% [str(spatial.name), new_parent_path]
+	)
+
+
 ## Saves the branch at nodePath as a scene of its own at newScenePath and puts an instance of that
 ## scene where the branch was, as the editor's Save Branch as Scene does. The new file holds the
 ## branch's nodes, values, resources, groups and the connections among them, with its root's
@@ -957,23 +1076,9 @@ func save_branch(args: Dictionary) -> Dictionary:
 	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var branch_path: String = _new_scene_path(args, "newScenePath")
-	if node_path.is_empty() or node_path == ".":
-		return {
-			"ok": false,
-			"error":
-			"The root is the whole scene, which scene_create save_as copies to a new file.",
-		}
-	if branch_path.is_empty():
-		return { "ok": false, "error": "Missing newScenePath" }
-	if branch_path == scene_path:
-		return {
-			"ok": false, "error": "newScenePath is %s, the scene the branch is in." % scene_path,
-		}
-	if FileAccess.file_exists(branch_path):
-		return {
-			"ok": false,
-			"error": "%s already exists, and save_branch writes a new scene only." % branch_path,
-		}
+	var unbranchable: String = _unbranchable(scene_path, node_path, branch_path)
+	if not unbranchable.is_empty():
+		return { "ok": false, "error": unbranchable }
 
 	var opened: Array = _open(scene_path, true)
 	var scene: GdhSceneFile = opened[0]
@@ -982,39 +1087,22 @@ func save_branch(args: Dictionary) -> Dictionary:
 		return refused
 	var root: Node = scene.root
 	var top: Node = GdhSceneFile.node_at(root, node_path)
-	if top == null:
-		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	var fixed: String = scene.fixed(top)
-	if not fixed.is_empty():
-		return scene.refuse(fixed)
-	if not top.scene_file_path.is_empty():
-		return scene.refuse(
-			"%s is an instance of %s, its scene already." % [node_path, top.scene_file_path]
-		)
+	var barred: String = _barred_branch(scene, top, node_path)
+	if not barred.is_empty():
+		return scene.refuse(barred)
 
 	var at: String = scene.path_of(top)
 	var top_name: StringName = top.name
 	var parent: Node = top.get_parent()
 	var index: int = top.get_index()
 	var unique: bool = top.unique_name_in_owner
-	var placed_at: Dictionary = {}
-	if top is Node2D or top is Node3D:
-		for property: String in ["position", "rotation", "scale"]:
-			placed_at[property] = top.get(property)
-	var outside: Array[Node] = [root]
-	var inside: Array[Node] = [top]
-	for node: Node in root.find_children("*", "", true, false):
-		if node.owner == root and node != top:
-			if top.is_ancestor_of(node):
-				inside.append(node)
-			else:
-				outside.append(node)
+	var placed_at: Dictionary = _placement_of(top)
+	var sides: Array = _sides_of(root, top)
+	var outside: Array[Node] = sides[0]
+	var inside: Array[Node] = sides[1]
 
 	var answer: Dictionary = { "ok": true, "nodePath": at, "newScenePath": branch_path }
-	var enclosed: Dictionary = {}
-	for node: Node in inside:
-		if node != top and node.unique_name_in_owner:
-			enclosed[str(node.name)] = scene.path_of(node)
+	var enclosed: Dictionary = _enclosed_in(scene, inside, top)
 	var held: Array[Array] = _holding_the_branch(outside, top)
 	var crossing: Array[Array] = _crossing(outside, inside, top)
 	_named_outside(scene, inside, top, answer)
@@ -1023,41 +1111,20 @@ func save_branch(args: Dictionary) -> Dictionary:
 	var split: Array = scene.split_off(top, branch_path)
 	var branch: GdhSceneFile = split[0]
 	var crossing_unmade: Array[Dictionary] = split[1]
-	var editable: Array[Node] = []
-	for node: Node in inside:
-		if node != top and not node.scene_file_path.is_empty() and root.is_editable_instance(node):
-			editable.append(node)
+	var editable: Array[Node] = _editable_in(root, inside, top)
 	var below: Array[String] = []
 	for node: Node in inside:
 		below.append(str(top.get_path_to(node)))
 	branch.asked(top, ["unique_name_in_owner"] + placed_at.keys())
-	parent.remove_child(top)
-	top.unique_name_in_owner = false
-	top.owner = null
-	for node: Node in inside:
-		if node != top:
-			node.owner = top
-	for node: Node in editable:
-		top.set_editable_instance(node, true)
-	if top is Node2D:
-		(top as Node2D).position = Vector2.ZERO
-	elif top is Node3D:
-		(top as Node3D).position = Vector3.ZERO
+	_detach_branch(parent, top, inside, editable)
 	var written: Dictionary = branch.write(
-		func(saved: Node) -> String:
-			for one: String in below:
-				if saved.get_node_or_null(one) == null:
-					return "%s would not be in %s when it loads." % [one, branch_path]
-			return ""
+		func(saved: Node) -> String: return _missing_below(saved, below, branch_path)
 	)
 	if not written.is_empty():
 		scene.close()
 		return written
 
-	var packed: PackedScene = ResourceLoader.load(branch_path, "PackedScene") as PackedScene
-	var instance: Node = (
-		packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE) if packed != null else null
-	)
+	var instance: Node = _branch_instance(branch_path)
 	if instance == null:
 		return _unwritten(scene, branch_path, "%s did not instance once written." % branch_path)
 	instance.name = top_name
@@ -1085,13 +1152,7 @@ func save_branch(args: Dictionary) -> Dictionary:
 	var _rewritten: int = carried.carry_enclosed(scene, enclosed)
 
 	written = scene.write(
-		func(saved: Node) -> String:
-			var copy: Node = saved.get_node_or_null(at)
-			if copy == null or copy.scene_file_path != branch_path:
-				return "%s would not load as an instance of %s." % [at, branch_path]
-			if copy.get_index() != index:
-				return "%s would load at index %d, not %d." % [at, copy.get_index(), index]
-			return ""
+		func(saved: Node) -> String: return _instance_misplaced(saved, at, branch_path, index)
 	)
 	if not written.is_empty():
 		carried.put_back(scene_path)
@@ -1103,6 +1164,123 @@ func save_branch(args: Dictionary) -> Dictionary:
 		var naming: Array = answer.get_or_add("scriptsNaming", [])
 		naming.append_array(scripts_out)
 	return answer
+
+
+## Why a save_branch of the node at [param node_path] in the scene at [param scene_path] to
+## [param branch_path] cannot start, or "".
+static func _unbranchable(scene_path: String, node_path: String, branch_path: String) -> String:
+	if node_path.is_empty() or node_path == ".":
+		return "The root is the whole scene, which scene_create save_as copies to a new file."
+	if branch_path.is_empty():
+		return "Missing newScenePath"
+	if branch_path == scene_path:
+		return "newScenePath is %s, the scene the branch is in." % scene_path
+	if FileAccess.file_exists(branch_path):
+		return "%s already exists, and save_branch writes a new scene only." % branch_path
+	return ""
+
+
+## Why the node [param top] at [param node_path] in [param scene] cannot be saved as a branch, or
+## "".
+## [param top] is null when the path names no node.
+static func _barred_branch(scene: GdhSceneFile, top: Node, node_path: String) -> String:
+	if top == null:
+		return scene.not_found("Node not found: " + node_path, node_path)
+	var fixed: String = scene.fixed(top)
+	if not fixed.is_empty():
+		return fixed
+	if not top.scene_file_path.is_empty():
+		return "%s is an instance of %s, its scene already." % [node_path, top.scene_file_path]
+	return ""
+
+
+## The position, rotation and scale of [param top] when it is a 2D or 3D node, by property.
+static func _placement_of(top: Node) -> Dictionary:
+	var placed_at: Dictionary = {}
+	if top is Node2D or top is Node3D:
+		for property: String in ["position", "rotation", "scale"]:
+			placed_at[property] = top.get(property)
+	return placed_at
+
+
+## The nodes of the scene at [param root] that [param top]'s branch leaves out and holds, as
+## [outside, inside]. Each list starts with the node that roots it.
+static func _sides_of(root: Node, top: Node) -> Array:
+	var outside: Array[Node] = [root]
+	var inside: Array[Node] = [top]
+	for node: Node in root.find_children("*", "", true, false):
+		if node.owner == root and node != top:
+			if top.is_ancestor_of(node):
+				inside.append(node)
+			else:
+				outside.append(node)
+	return [outside, inside]
+
+
+## The unique names of the nodes [param inside] the branch at [param top], each with its path in
+## [param scene].
+static func _enclosed_in(scene: GdhSceneFile, inside: Array[Node], top: Node) -> Dictionary:
+	var enclosed: Dictionary = {}
+	for node: Node in inside:
+		if node != top and node.unique_name_in_owner:
+			enclosed[str(node.name)] = scene.path_of(node)
+	return enclosed
+
+
+## The instances [param inside] the branch at [param top] whose children are editable in
+## [param root]'s scene.
+static func _editable_in(root: Node, inside: Array[Node], top: Node) -> Array[Node]:
+	var editable: Array[Node] = []
+	for node: Node in inside:
+		if node != top and not node.scene_file_path.is_empty() and root.is_editable_instance(node):
+			editable.append(node)
+	return editable
+
+
+## Takes [param top] out of [param parent] as the root of a scene of its own, with the nodes
+## [param inside] under it and [param editable] of them editable, and its position reset.
+static func _detach_branch(
+	parent: Node, top: Node, inside: Array[Node], editable: Array[Node]
+) -> void:
+	parent.remove_child(top)
+	top.unique_name_in_owner = false
+	top.owner = null
+	for node: Node in inside:
+		if node != top:
+			node.owner = top
+	for node: Node in editable:
+		top.set_editable_instance(node, true)
+	if top is Node2D:
+		(top as Node2D).position = Vector2.ZERO
+	elif top is Node3D:
+		(top as Node3D).position = Vector3.ZERO
+
+
+## Why the branch scene written would not hold each of [param below], paths from its root, or "".
+static func _missing_below(saved: Node, below: Array[String], branch_path: String) -> String:
+	for one: String in below:
+		if saved.get_node_or_null(one) == null:
+			return "%s would not be in %s when it loads." % [one, branch_path]
+	return ""
+
+
+## The scene at [param branch_path] instanced as an instance of it, or null.
+static func _branch_instance(branch_path: String) -> Node:
+	var packed: PackedScene = ResourceLoader.load(branch_path, "PackedScene") as PackedScene
+	return packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE) if packed != null else null
+
+
+## Why the instance of [param branch_path] would not load at [param at] and [param index] from
+## [param saved], the scene as written, or "".
+static func _instance_misplaced(
+	saved: Node, at: String, branch_path: String, index: int
+) -> String:
+	var copy: Node = saved.get_node_or_null(at)
+	if copy == null or copy.scene_file_path != branch_path:
+		return "%s would not load as an instance of %s." % [at, branch_path]
+	if copy.get_index() != index:
+		return "%s would load at index %d, not %d." % [at, copy.get_index(), index]
+	return ""
 
 
 ## Removes the scene [method save_branch] wrote at [param branch_path] and answers [param why] as
@@ -1397,14 +1575,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var removing: Array = GdhGroups.asked(args, "removeGroups")
 	var placeholder: Variant = args.get("placeholder")
 	var unsetting: Array[String] = GdhUnset.asked(args)
-	if (
-		properties.is_empty()
-		and unsetting.is_empty()
-		and editable == null
-		and placeholder == null
-		and adding.is_empty()
-		and removing.is_empty()
-	):
+	if _sets_nothing(properties, unsetting, [editable, placeholder], [adding, removing]):
 		return {
 			"ok": false,
 			"error":
@@ -1421,83 +1592,21 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		return refused
 
 	var node: Node = GdhSceneFile.node_at(scene.root, node_path)
-	if not node:
-		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
-	# A rename is refused for the scene that makes the node before anything else, since editable
-	# children would let this scene keep values on it and still never rename it.
-	if properties.has("name") and node != scene.root:
-		var fixed: String = scene.fixed(node)
-		if not fixed.is_empty():
-			return scene.refuse(fixed)
-		var unusable: String = scene.unusable_name(node.get_parent(), str(properties["name"]), node)
-		if not unusable.is_empty():
-			return scene.refuse(unusable)
-	var foreign: String = scene.foreign(node)
-	if not foreign.is_empty():
-		return scene.refuse(foreign)
+	var barred: String = _barred_set(scene, node, node_path, properties)
+	if not barred.is_empty():
+		return scene.refuse(barred)
 
-	# A placeholder loads without its children, so the editor never keeps both settings on.
-	var wants_placeholder: bool = placeholder != null and GdhRead.as_bool(placeholder)
-	var wants_editable: bool = editable != null and GdhRead.as_bool(editable)
-	if wants_placeholder and wants_editable:
-		return scene.refuse(
-			(
-				"placeholder and editableChildren cannot both be true, "
-				+ "since a placeholder loads without its children."
-			)
-		)
-	# The engine asks the root whether it is an editable instance of itself only with an error.
-	var children_open: bool = node != scene.root and scene.root.is_editable_instance(node)
-	if wants_placeholder and editable == null and children_open:
-		return scene.refuse(
-			(
-				(
-					"%s has editable children, which a placeholder cannot keep. Pass "
-					+ "editableChildren false with placeholder true to drop their saved values."
-				)
-				% scene.path_of(node)
-			)
-		)
-	if wants_editable and placeholder == null and node.get_scene_instance_load_placeholder():
-		return scene.refuse(
-			(
-				(
-					"%s is a placeholder, which loads without its children. "
-					+ "Pass placeholder false with editableChildren true."
-				)
-				% scene.path_of(node)
-			)
-		)
+	var conflict: String = _instance_modes_conflict(scene, node, editable, placeholder)
+	if not conflict.is_empty():
+		return scene.refuse(conflict)
 
 	var dropped: Dictionary = {}
-	if editable != null:
-		var not_an_instance: String = GdhKin.set_editable(scene, node, GdhRead.as_bool(editable))
-		if not not_an_instance.is_empty():
-			return scene.refuse(not_an_instance)
-		if not GdhRead.as_bool(editable):
-			dropped = scene.held_under(scene.path_of(node))
-	if placeholder != null:
-		# The editor offers Load as Placeholder only on an instance this scene places itself.
-		if node == scene.root or node.owner != scene.root or node.scene_file_path.is_empty():
-			return scene.refuse(
-				(
-					"placeholder is a setting of an instance this scene places, and %s is not one."
-					% scene.path_of(node)
-				)
-			)
-		node.set_scene_instance_load_placeholder(GdhRead.as_bool(placeholder))
+	var unmodal: String = _apply_instance_modes(scene, node, editable, placeholder, dropped)
+	if not unmodal.is_empty():
+		return scene.refuse(unmodal)
 
 	var old_path: String = scene.path_of(node)
-	scene.asked(node, properties.keys())
-	var refused_property: String = _properties.write_all(node, properties)
-	scene.asked(node, _properties.moved_by_engine.keys())
-	if not refused_property.is_empty():
-		return scene.refuse(
-			GdhHeadlessCheck.setter_ran(
-				node, _properties.unheld, GdhSceneFile.missing_on(node, refused_property)
-			)
-		)
-	var ungrouped: String = GdhGroups.change(scene, node, adding, removing)
+	var ungrouped: String = _set_and_group(scene, node, properties, [adding, removing])
 	if not ungrouped.is_empty():
 		return scene.refuse(ungrouped)
 	var reverted: Dictionary = {}
@@ -1506,45 +1615,20 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not unrefused.is_empty():
 		return scene.refuse(unrefused)
 
-	var held: Dictionary = {}
-	var removed: Array[String] = _properties.metadata_removed.duplicate()
-	for key: Variant in properties:
-		if not removed.has(str(key)):
-			held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
-	var answer: Dictionary = { "ok": true, "nodePath": new_path, "properties": held }
+	var answer: Dictionary = {
+		"ok": true, "nodePath": new_path, "properties": _held_after(node, properties),
+	}
 	if not reverted.is_empty():
 		answer["unset"] = reverted
 	_properties.note_write(answer, node)
-	var shared: Dictionary = {}
-	for key: Variant in properties.keys() + unsetting:
-		var holders: Array[Dictionary] = GdhSceneSharing.holders(scene, node, str(key))
-		if not holders.is_empty():
-			shared[str(key)] = holders
-	if not shared.is_empty():
-		answer["sharedWith"] = shared
+	_note_shared(answer, scene, node, properties.keys() + unsetting)
 	if not adding.is_empty() or not removing.is_empty():
 		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
-	# What the node declares, not what it answers to: a MeshInstance3D reads any name under
-	# surface_material_override/0 as that slot, so a path into the slot's material read as the slot.
-	var declared_names: Dictionary = {}
-	for declared: Dictionary in node.get_property_list():
-		declared_names[str(declared.get("name", ""))] = true
-	var named: Array[String] = []
-	for key: Variant in properties:
-		var property: String = str(key).get_slice(":", 0)
-		if property != "name" and declared_names.has(property) and not named.has(property):
-			named.append(property)
+	var named: Array[String] = _named_properties(node, properties)
 	var source: String = scene.values_from(node, old_path)
 	# Read before the write, which frees the node.
-	var unsaved: Array[String] = []
-	for declared: Dictionary in node.get_property_list():
-		var declared_name: String = str(declared.get("name", ""))
-		if (
-			named.has(declared_name)
-			and not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE
-		):
-			unsaved.append(declared_name)
+	var unsaved: Array[String] = _unsaved_names(node, named)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(
 		scene,
@@ -1556,23 +1640,221 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 			var unkept: String = _kept(scene, saved, node, properties.keys() + unsetting)
 			if unkept.is_empty():
 				unkept = GdhGroups.unkept(saved.get_node(new_path), adding, removing)
-			if unkept.is_empty() and editable != null:
-				if (
-					saved.is_editable_instance(saved.get_node(new_path))
-					!= GdhRead.as_bool(editable)
-				):
-					return (
-						"%s would load with editableChildren %s."
-						% [new_path, not GdhRead.as_bool(editable)]
-					)
-			if unkept.is_empty() and placeholder != null:
-				unkept = _placeholder_unkept(saved, new_path, GdhRead.as_bool(placeholder))
+			if unkept.is_empty():
+				unkept = _modes_unkept(saved, new_path, editable, placeholder)
 			return unkept
 	)
 	if not written.is_empty():
 		carried.put_back(scene_path)
 		return written
 
+	_note_instance_modes(answer, editable, placeholder, dropped)
+	_note_put_back(answer, scene, id, new_path)
+	_note_loads_as(answer, scene, new_path)
+	_note_left_out(answer, scene.written_pack, new_path, named, unsaved, source)
+	_note_followed(answer, followed, source)
+	if new_path != old_path:
+		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
+	return answer
+
+
+## Whether a set gives nothing to do: no property, nothing to unset, neither of [param modes] (the
+## editable children and the placeholder mark) and none of [param groups] (those to add and those
+## to remove).
+static func _sets_nothing(
+	properties: Dictionary, unsetting: Array[String], modes: Array, groups: Array
+) -> bool:
+	var adding: Array = groups[0]
+	var removing: Array = groups[1]
+	return (
+		properties.is_empty()
+		and unsetting.is_empty()
+		and modes[0] == null
+		and modes[1] == null
+		and adding.is_empty()
+		and removing.is_empty()
+	)
+
+
+## Says in [param answer] that each of [param followed], the paths a set unset, now follows
+## [param source] rather than holding a value, when it names one.
+static func _note_followed(answer: Dictionary, followed: Array[String], source: String) -> void:
+	if not followed.is_empty() and not source.is_empty():
+		answer["unsetNote"] = (
+			"%s now %s what %s gives this node, and a change there reaches it."
+			% [", ".join(followed), "holds" if followed.size() == 1 else "hold", source]
+		)
+
+
+## Why [param properties] cannot be set on [param node] at [param node_path] in [param scene], or
+## "".
+## [param node] is null when the path names no node.
+func _barred_set(
+	scene: GdhSceneFile, node: Node, node_path: String, properties: Dictionary
+) -> String:
+	if not node:
+		return scene.not_found("Node not found: " + node_path, node_path)
+	# A rename is refused for the scene that makes the node before anything else, since editable
+	# children would let this scene keep values on it and still never rename it.
+	if properties.has("name") and node != scene.root:
+		var fixed: String = scene.fixed(node)
+		if not fixed.is_empty():
+			return fixed
+		var unusable: String = scene.unusable_name(node.get_parent(), str(properties["name"]), node)
+		if not unusable.is_empty():
+			return unusable
+	return scene.foreign(node)
+
+
+## Why [param editable] and [param placeholder], as a set gave them, cannot be put on [param node]
+## together or on top of what it holds, or "". Either is null when the call leaves it alone.
+func _instance_modes_conflict(
+	scene: GdhSceneFile, node: Node, editable: Variant, placeholder: Variant
+) -> String:
+	# A placeholder loads without its children, so the editor never keeps both settings on.
+	var wants_placeholder: bool = placeholder != null and GdhRead.as_bool(placeholder)
+	var wants_editable: bool = editable != null and GdhRead.as_bool(editable)
+	if wants_placeholder and wants_editable:
+		return (
+			"placeholder and editableChildren cannot both be true, "
+			+ "since a placeholder loads without its children."
+		)
+	# The engine asks the root whether it is an editable instance of itself only with an error.
+	var children_open: bool = node != scene.root and scene.root.is_editable_instance(node)
+	if wants_placeholder and editable == null and children_open:
+		return (
+			(
+				"%s has editable children, which a placeholder cannot keep. Pass "
+				+ "editableChildren false with placeholder true to drop their saved values."
+			)
+			% scene.path_of(node)
+		)
+	if wants_editable and placeholder == null and node.get_scene_instance_load_placeholder():
+		return (
+			(
+				"%s is a placeholder, which loads without its children. "
+				+ "Pass placeholder false with editableChildren true."
+			)
+			% scene.path_of(node)
+		)
+	return ""
+
+
+## Sets [param editable] and [param placeholder] on [param node], each only when the call gave it.
+## What dropping its editable children dropped goes into [param dropped]. Answers why one cannot
+## be set, or "".
+func _apply_instance_modes(
+	scene: GdhSceneFile, node: Node, editable: Variant, placeholder: Variant, dropped: Dictionary
+) -> String:
+	if editable != null:
+		var not_an_instance: String = GdhKin.set_editable(scene, node, GdhRead.as_bool(editable))
+		if not not_an_instance.is_empty():
+			return not_an_instance
+		if not GdhRead.as_bool(editable):
+			dropped.merge(scene.held_under(scene.path_of(node)))
+	if placeholder != null:
+		# The editor offers Load as Placeholder only on an instance this scene places itself.
+		if node == scene.root or node.owner != scene.root or node.scene_file_path.is_empty():
+			return (
+				"placeholder is a setting of an instance this scene places, and %s is not one."
+				% scene.path_of(node)
+			)
+		node.set_scene_instance_load_placeholder(GdhRead.as_bool(placeholder))
+	return ""
+
+
+## Sets [param properties] on [param node], and the groups in [param groups], as [adding, removing],
+## taking each as the call's own. Answers why one cannot be set, or "".
+func _set_and_group(
+	scene: GdhSceneFile, node: Node, properties: Dictionary, groups: Array
+) -> String:
+	scene.asked(node, properties.keys())
+	var refused_property: String = _properties.write_all(node, properties)
+	scene.asked(node, _properties.moved_by_engine.keys())
+	if not refused_property.is_empty():
+		return GdhHeadlessCheck.setter_ran(
+			node, _properties.unheld, GdhSceneFile.missing_on(node, refused_property)
+		)
+	var adding: Array = groups[0]
+	var removing: Array = groups[1]
+	return GdhGroups.change(scene, node, adding, removing)
+
+
+## What [param node] holds for each of [param properties] the call set, as the answer gives it.
+## A metadata entry the write removed is left out.
+func _held_after(node: Node, properties: Dictionary) -> Dictionary:
+	var held: Dictionary = {}
+	var removed: Array[String] = _properties.metadata_removed.duplicate()
+	for key: Variant in properties:
+		if not removed.has(str(key)):
+			held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
+	return held
+
+
+## Puts under sharedWith in [param answer] the scenes and resources that share a value of
+## [param node] set or unset by [param keys], by key.
+static func _note_shared(
+	answer: Dictionary, scene: GdhSceneFile, node: Node, keys: Array
+) -> void:
+	var shared: Dictionary = {}
+	for key: Variant in keys:
+		var holders: Array[Dictionary] = GdhSceneSharing.holders(scene, node, str(key))
+		if not holders.is_empty():
+			shared[str(key)] = holders
+	if not shared.is_empty():
+		answer["sharedWith"] = shared
+
+
+## The properties of [param node] that [param properties] set, without any path into one. It is
+## what the node declares, not what it answers to: a MeshInstance3D reads any name under
+## surface_material_override/0 as that slot, so a path into the slot's material read as the slot.
+static func _named_properties(node: Node, properties: Dictionary) -> Array[String]:
+	var declared_names: Dictionary = {}
+	for declared: Dictionary in node.get_property_list():
+		declared_names[str(declared.get("name", ""))] = true
+	var named: Array[String] = []
+	for key: Variant in properties:
+		var property: String = str(key).get_slice(":", 0)
+		if property != "name" and declared_names.has(property) and not named.has(property):
+			named.append(property)
+	return named
+
+
+## Each of [param named] that [param node] declares but never stores.
+static func _unsaved_names(node: Node, named: Array[String]) -> Array[String]:
+	var unsaved: Array[String] = []
+	for declared: Dictionary in node.get_property_list():
+		var declared_name: String = str(declared.get("name", ""))
+		if (
+			named.has(declared_name)
+			and not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE
+		):
+			unsaved.append(declared_name)
+	return unsaved
+
+
+## Why the node at [param new_path] would not load from [param saved], the scene as written, with
+## the editable children [param editable] and the placeholder mark [param placeholder] given, or "".
+## Either is null when the call left it alone.
+static func _modes_unkept(
+	saved: Node, new_path: String, editable: Variant, placeholder: Variant
+) -> String:
+	if editable != null:
+		if saved.is_editable_instance(saved.get_node(new_path)) != GdhRead.as_bool(editable):
+			return "%s would load with editableChildren %s." % [
+				new_path,
+				not GdhRead.as_bool(editable),
+			]
+	if placeholder != null:
+		return _placeholder_unkept(saved, new_path, GdhRead.as_bool(placeholder))
+	return ""
+
+
+## Puts the editable children and placeholder mark the call gave, and what dropping the children
+## dropped, in [param answer].
+static func _note_instance_modes(
+	answer: Dictionary, editable: Variant, placeholder: Variant, dropped: Dictionary
+) -> void:
 	if editable != null:
 		answer["editableChildren"] = GdhRead.as_bool(editable)
 	if placeholder != null:
@@ -1580,17 +1862,6 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
-	_note_put_back(answer, scene, id, new_path)
-	_note_loads_as(answer, scene, new_path)
-	_note_left_out(answer, scene.written_pack, new_path, named, unsaved, source)
-	if not followed.is_empty() and not source.is_empty():
-		answer["unsetNote"] = (
-			"%s now %s what %s gives this node, and a change there reaches it."
-			% [", ".join(followed), "holds" if followed.size() == 1 else "hold", source]
-		)
-	if new_path != old_path:
-		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
-	return answer
 
 
 ## Takes each of [param paths] on [param node] back to what it holds when no line of this file sets
@@ -1752,55 +2023,9 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	var here: Array = set_here.keys()
 	here.sort()
 	var answer: Dictionary = { "ok": true, "nodePath": at, "properties": props, "setHere": here }
-	# A Node3D stores only its transform, a matrix, while a set takes the position, rotation and
-	# scale the inspector shows, so a node turned 45 degrees down read back as nine numbers. A
-	# sheared one has no such three, and is left to its transform.
-	var placed: Node3D = node as Node3D
-	var rebuilt: Transform3D = Transform3D()
-	if placed != null:
-		var turned: Basis = Basis.from_euler(placed.rotation, placed.rotation_order)
-		rebuilt = Transform3D(turned * Basis.from_scale(placed.scale), placed.position)
-	if placed != null and props.has("transform") and rebuilt.is_equal_approx(placed.transform):
-		# Rounded, since a node never scaled came back with a scale of 0.99999994 out of the matrix.
-		# The transform beside it is exact.
-		var step: Vector3 = Vector3.ONE * 0.00001
-		answer["placement"] = {
-			"position": _readable(node, placed.position.snapped(step)),
-			"rotation_degrees": _readable(node, placed.rotation_degrees.snapped(step)),
-			"scale": _readable(node, placed.scale.snapped(step)),
-		}
-	# A player's getter answers Master for a bus the layout does not have, while the file keeps the
-	# name, so a player left on a renamed or removed bus read as one put on Master.
-	var bus: String = str(set_here.get("bus", ""))
-	var plays: bool = (
-		node is AudioStreamPlayer or node is AudioStreamPlayer2D or node is AudioStreamPlayer3D
-	)
-	if plays and not bus.is_empty() and AudioServer.get_bus_index(bus) == -1:
-		props["bus"] = bus
-		var buses: PackedStringArray = []
-		for index: int in AudioServer.bus_count:
-			var _added: bool = buses.append(AudioServer.get_bus_name(index))
-		answer["busNote"] = (
-			(
-				"%s names the bus %s, which the project's bus layout does not have, so it plays on "
-				+ "%s. The buses are %s."
-			)
-			% [
-				str(node.name) if at == "." else at,
-				bus,
-				AudioServer.get_bus_name(0),
-				", ".join(buses),
-			]
-		)
-	# A mask reads as a number, and which layers it holds, under the names the project gives them,
-	# is what a caller reads it for.
-	var layers: Dictionary = {}
-	for declared: Dictionary in node.get_property_list():
-		var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
-		var named: String = str(declared.get("name", ""))
-		var mask: Variant = node.get(named) if props.has(named) else null
-		if hint in GdhDeclared.LAYER_NAMES and mask is int:
-			layers[named] = GdhDeclared.layers_in(hint, GdhRead.as_int(mask))
+	_note_placement(answer, node, props)
+	_note_missing_bus(answer, node, props, set_here, at)
+	var layers: Dictionary = _layers_of(node, props)
 	if not layers.is_empty():
 		answer["layers"] = layers
 	answer.merge(GdhSceneFile.class_of(node))
@@ -1824,6 +2049,71 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 			+ "includeDefaults: true lists them all."
 		)
 	return answer
+
+
+## Puts the position, rotation and scale of [param node] in [param answer] when it is a Node3D whose
+## transform they describe, as [param props] holds it. A Node3D stores only its transform, a
+## matrix, while a set takes the position, rotation and scale the inspector shows, so a node turned
+## 45 degrees down read back as nine numbers. A sheared one has no such three, and is left to its
+## transform.
+func _note_placement(answer: Dictionary, node: Node, props: Dictionary) -> void:
+	var placed: Node3D = node as Node3D
+	var rebuilt: Transform3D = Transform3D()
+	if placed != null:
+		var turned: Basis = Basis.from_euler(placed.rotation, placed.rotation_order)
+		rebuilt = Transform3D(turned * Basis.from_scale(placed.scale), placed.position)
+	if placed != null and props.has("transform") and rebuilt.is_equal_approx(placed.transform):
+		# Rounded, since a node never scaled came back with a scale of 0.99999994 out of the matrix.
+		# The transform beside it is exact.
+		var step: Vector3 = Vector3.ONE * 0.00001
+		answer["placement"] = {
+			"position": _readable(node, placed.position.snapped(step)),
+			"rotation_degrees": _readable(node, placed.rotation_degrees.snapped(step)),
+			"scale": _readable(node, placed.scale.snapped(step)),
+		}
+
+
+## Notes in [param answer], and puts in [param props], a bus a player of [param node] names that
+## the project's layout does not have. A player's getter answers Master for one, while the file
+## keeps the name, so a player left on a renamed or removed bus read as one put on Master.
+## [param set_here] holds what the file sets, and [param at] is the node's path.
+func _note_missing_bus(
+	answer: Dictionary, node: Node, props: Dictionary, set_here: Dictionary, at: String
+) -> void:
+	var bus: String = str(set_here.get("bus", ""))
+	var plays: bool = (
+		node is AudioStreamPlayer or node is AudioStreamPlayer2D or node is AudioStreamPlayer3D
+	)
+	if plays and not bus.is_empty() and AudioServer.get_bus_index(bus) == -1:
+		props["bus"] = bus
+		var buses: PackedStringArray = []
+		for index: int in AudioServer.bus_count:
+			var _added: bool = buses.append(AudioServer.get_bus_name(index))
+		answer["busNote"] = (
+			(
+				"%s names the bus %s, which the project's bus layout does not have, so it plays on "
+				+ "%s. The buses are %s."
+			)
+			% [
+				str(node.name) if at == "." else at,
+				bus,
+				AudioServer.get_bus_name(0),
+				", ".join(buses),
+			]
+		)
+
+
+## The layers each mask of [param node] in [param props] holds, under the names the project gives
+## them. A mask reads as a number, and which layers it holds is what a caller reads it for.
+static func _layers_of(node: Node, props: Dictionary) -> Dictionary:
+	var layers: Dictionary = {}
+	for declared: Dictionary in node.get_property_list():
+		var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
+		var named: String = str(declared.get("name", ""))
+		var mask: Variant = node.get(named) if props.has(named) else null
+		if hint in GdhDeclared.LAYER_NAMES and mask is int:
+			layers[named] = GdhDeclared.layers_in(hint, GdhRead.as_int(mask))
+	return layers
 
 
 func bake_navigation(args: Dictionary) -> Dictionary:
