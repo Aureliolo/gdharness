@@ -125,46 +125,11 @@ func _atlas(entry: Variant, index: int) -> Array:
 	if not entry is Dictionary:
 		return [false, "sources[%d] must be an object with texture and tileSize" % index]
 	var source: Dictionary = entry
-	var texture_path: String = str(source.get("texture", ""))
-	if not texture_path.begins_with("res://") and not texture_path.begins_with("uid://"):
-		texture_path = _ensure_res_path(texture_path)
-	# Contained here as well as on the server: a relative path climbing out of the project became
-	# res://../../ and was loaded.
-	if texture_path.split("/").has(".."):
-		return [false, "sources[%d].texture leaves the project: %s" % [index, texture_path]]
-	if not ResourceLoader.exists(texture_path):
-		# An image the engine has not imported loads as nothing, where "no texture" would send a
-		# caller looking for a file that is there.
-		if (
-			FileAccess.file_exists(texture_path)
-			and not FileAccess.file_exists(texture_path + ".import")
-		):
-			return [
-				false,
-				(
-					(
-						"sources[%d].texture: %s has not been imported, so the engine has no "
-						+ "texture for it yet. project_import reimport with resourcePath %s "
-						+ "imports it."
-					)
-					% [index, texture_path, texture_path]
-				),
-			]
-		return [
-			false,
-			(
-				(
-					"sources[%d].texture: no texture at %s. A tile set takes an image the project "
-					+ "imports, such as a PNG, or a texture resource: "
-					+ "resource_edit create with resourceType PlaceholderTexture2D and properties "
-					+ '{"size": {"x": 64, "y": 32}} makes a stand-in of that size.'
-				)
-				% [index, texture_path]
-			),
-		]
-	var texture: Texture2D = load(texture_path) as Texture2D
-	if texture == null:
-		return [false, "sources[%d].texture: %s is not a texture" % [index, texture_path]]
+	var loaded: Array = _texture_for(source, index)
+	if loaded[0] == null:
+		return [false, loaded[1]]
+	var texture: Texture2D = loaded[0]
+	var texture_path: String = loaded[2]
 
 	var sized: Array = _xy(source.get("tileSize"), "sources[%d].tileSize" % index)
 	if not sized[0]:
@@ -196,7 +161,60 @@ func _atlas(entry: Variant, index: int) -> Array:
 				% [index, tile_size, texture_path, texture.get_size()]
 			),
 		]
-	var image: Image = texture.get_image()
+	var blank: Array = _make_tiles(atlas, texture.get_image(), grid)
+	var spare: String = _spare_said(texture, texture_path, atlas, grid)
+	return [true, atlas, blank, spare]
+
+
+## The texture of the atlas source [param source], entry [param index] of the sources, as
+## [texture, "", its path] or [null, why not].
+func _texture_for(source: Dictionary, index: int) -> Array:
+	var texture_path: String = str(source.get("texture", ""))
+	if not texture_path.begins_with("res://") and not texture_path.begins_with("uid://"):
+		texture_path = _ensure_res_path(texture_path)
+	# Contained here as well as on the server: a relative path climbing out of the project became
+	# res://../../ and was loaded.
+	if texture_path.split("/").has(".."):
+		return [null, "sources[%d].texture leaves the project: %s" % [index, texture_path]]
+	if not ResourceLoader.exists(texture_path):
+		# An image the engine has not imported loads as nothing, where "no texture" would send a
+		# caller looking for a file that is there.
+		if (
+			FileAccess.file_exists(texture_path)
+			and not FileAccess.file_exists(texture_path + ".import")
+		):
+			return [
+				null,
+				(
+					(
+						"sources[%d].texture: %s has not been imported, so the engine has no "
+						+ "texture for it yet. project_import reimport with resourcePath %s "
+						+ "imports it."
+					)
+					% [index, texture_path, texture_path]
+				),
+			]
+		return [
+			null,
+			(
+				(
+					"sources[%d].texture: no texture at %s. A tile set takes an image the project "
+					+ "imports, such as a PNG, or a texture resource: "
+					+ "resource_edit create with resourceType PlaceholderTexture2D and properties "
+					+ '{"size": {"x": 64, "y": 32}} makes a stand-in of that size.'
+				)
+				% [index, texture_path]
+			),
+		]
+	var texture: Texture2D = load(texture_path) as Texture2D
+	if texture == null:
+		return [null, "sources[%d].texture: %s is not a texture" % [index, texture_path]]
+	return [texture, "", texture_path]
+
+
+## Makes a tile in every cell of [param grid] on [param atlas] whose pixels in [param image] are not
+## all transparent, and answers the cells left without one.
+func _make_tiles(atlas: TileSetAtlasSource, image: Image, grid: Vector2i) -> Array:
 	var blank: Array = []
 	for y: int in grid.y:
 		for x: int in grid.x:
@@ -210,6 +228,15 @@ func _atlas(entry: Variant, index: int) -> Array:
 				blank.append({ "x": x, "y": y })
 				continue
 			atlas.create_tile(cell)
+	return blank
+
+
+## The sentence on the pixels of [param texture], at [param texture_path], that the [param grid] of
+## tiles of [param atlas] does not cover, or "" when it covers them all.
+func _spare_said(
+	texture: Texture2D, texture_path: String, atlas: TileSetAtlasSource, grid: Vector2i
+) -> String:
+	var tile_size: Vector2i = atlas.texture_region_size
 	var covered: Vector2i = (
 		atlas.margins + grid * tile_size + (grid - Vector2i.ONE) * atlas.separation
 	)
@@ -219,23 +246,20 @@ func _atlas(entry: Variant, index: int) -> Array:
 		var _right: bool = sides.append("%d px on the right" % left.x)
 	if left.y > 0:
 		var _bottom: bool = sides.append("%d px at the bottom" % left.y)
-	var spare: String = (
-		""
-		if sides.is_empty()
-		else (
-			"%s is %d by %d, so %s %s in no %d by %d tile."
-			% [
-				texture_path,
-				texture.get_width(),
-				texture.get_height(),
-				" and ".join(sides),
-				"is" if sides.size() == 1 else "are",
-				tile_size.x,
-				tile_size.y,
-			]
-		)
+	if sides.is_empty():
+		return ""
+	return (
+		"%s is %d by %d, so %s %s in no %d by %d tile."
+		% [
+			texture_path,
+			texture.get_width(),
+			texture.get_height(),
+			" and ".join(sides),
+			"is" if sides.size() == 1 else "are",
+			tile_size.x,
+			tile_size.y,
+		]
 	)
-	return [true, atlas, blank, spare]
 
 
 func _blank(image: Image, region: Rect2i) -> bool:
@@ -253,6 +277,39 @@ func _sources_of(tile_set: TileSet) -> String:
 	if ids.is_empty():
 		return "no sources"
 	return ("source " if ids.size() == 1 else "sources ") + ", ".join(ids)
+
+
+## Checks each of [param placed] against [param tile_set], as the cells [method _cell] answers and
+## the refusals of the ones that failed.
+func _checked_cells(placed: Array, tile_set: TileSet) -> Array:
+	var checked: Array = []
+	var refusals: PackedStringArray = []
+	for index: int in placed.size():
+		var cell: Array = _cell(placed[index], index, tile_set)
+		if not cell[0]:
+			var _named: bool = refusals.append(str(cell[1]))
+		checked.append(cell)
+	return [checked, refusals]
+
+
+## Sets each of [param checked] on [param layered], at [param layer], or on [param single] when
+## there is no TileMap, and answers what each cell was set to, by cell. A cell named twice ends as
+## its last entry, so that one alone is what the file must hold.
+static func _place_checked(
+	layered: TileMap, single: TileMapLayer, layer: int, checked: Array
+) -> Dictionary[Vector2i, Array]:
+	var wanted: Dictionary[Vector2i, Array] = {}
+	for cell: Array in checked:
+		var at: Vector2i = cell[1]
+		var source_id: int = cell[2]
+		var atlas_coords: Vector2i = cell[3]
+		var alternative: int = cell[4]
+		if layered != null:
+			layered.set_cell(layer, at, source_id, atlas_coords, alternative)
+		else:
+			single.set_cell(at, source_id, atlas_coords, alternative)
+		wanted[at] = [source_id, atlas_coords, alternative]
+	return wanted
 
 
 func set_tilemap_cells(args: Dictionary) -> Dictionary:
@@ -291,27 +348,12 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	scene.asked(node, ["layer_%d/tile_data" % layer if layered != null else "tile_map_data"])
 	# Every cell is checked before any is placed, and every one refused is named: stopping at the
 	# first left a caller fixing one cell a call.
-	var checked: Array = []
-	var refusals: PackedStringArray = []
-	for index: int in placed.size():
-		var cell: Array = _cell(placed[index], index, tile_set)
-		if not cell[0]:
-			var _named: bool = refusals.append(str(cell[1]))
-		checked.append(cell)
+	var checking: Array = _checked_cells(placed, tile_set)
+	var refusals: PackedStringArray = checking[1]
 	if not refusals.is_empty():
 		return scene.refuse("%s. Nothing was placed." % ". ".join(refusals))
-	# A cell named twice ends as its last entry, so that one alone is what the file must hold.
-	var wanted: Dictionary[Vector2i, Array] = {}
-	for cell: Array in checked:
-		var at: Vector2i = cell[1]
-		var source_id: int = cell[2]
-		var atlas_coords: Vector2i = cell[3]
-		var alternative: int = cell[4]
-		if layered != null:
-			layered.set_cell(layer, at, source_id, atlas_coords, alternative)
-		else:
-			single.set_cell(at, source_id, atlas_coords, alternative)
-		wanted[at] = [source_id, atlas_coords, alternative]
+	var checked: Array = checking[0]
+	var wanted: Dictionary[Vector2i, Array] = _place_checked(layered, single, layer, checked)
 	var erased: int = 0
 	for entry: Array in wanted.values():
 		if entry[0] == -1:

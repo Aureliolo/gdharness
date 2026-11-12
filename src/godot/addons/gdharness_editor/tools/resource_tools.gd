@@ -313,6 +313,63 @@ func _unkept_headless(
 	)
 
 
+## Why [param resource_type] is no class resource_edit can create a resource of, or "".
+static func _class_refusal(resource_type: String) -> String:
+	if not ClassDB.class_exists(resource_type):
+		return (
+			"%s is neither an engine class nor a class_name in the project's class list."
+			% resource_type
+		)
+	if (
+		not ClassDB.is_parent_class(resource_type, "Resource")
+		or not ClassDB.can_instantiate(resource_type)
+	):
+		return "%s is not a resource class that can be created." % resource_type
+	return ""
+
+
+## Puts the script at [param script_path] on [param resource], a [param resource_type], when there
+## is
+## one, and answers "" or why it cannot. A script that did not load was skipped, and a plain
+## resource
+## was saved in place of the custom one asked for.
+func _attach_script(resource: Resource, resource_type: String, script_path: String) -> String:
+	if script_path == "":
+		return ""
+	var script_file: String = _ensure_res_path(script_path)
+	var found: Variant = GdhSceneFile.script_at(script_file)
+	if found is String:
+		return str(found)
+	var script: Script = found
+	var uncompiled: String = GdhSceneFile.uncompiled(script, script_file)
+	if not uncompiled.is_empty():
+		return uncompiled
+	var base: String = str(script.get_instance_base_type())
+	if not ClassDB.is_parent_class(resource_type, base):
+		return "%s extends %s, so it cannot be on a %s." % [script_file, base, resource_type]
+	resource.set_script(script)
+	return ""
+
+
+## Why the engine cannot save [param resource], a [param resource_type], at [param res_path], or "".
+## The engine names the extensions it can save the resource as. Any other one failed with no more
+## than "File unrecognized", which named no way to save it.
+static func _extension_refusal(
+	resource: Resource, resource_type: String, res_path: String
+) -> String:
+	var extensions: PackedStringArray = ResourceSaver.get_recognized_extensions(resource)
+	if extensions.has(res_path.get_extension().to_lower()):
+		return ""
+	return (
+		"The engine saves %s as %s, not .%s. Give resourcePath one of those."
+		% [
+			GdhRead.with_article(resource_type),
+			", ".join(Array(extensions).map(func(one: String) -> String: return "." + one)),
+			res_path.get_extension(),
+		]
+	)
+
+
 func create_resource(args: Dictionary) -> Dictionary:
 	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	var resource_type: String = str(args.get("resourceType", "Resource"))
@@ -333,43 +390,14 @@ func create_resource(args: Dictionary) -> Dictionary:
 		return { "ok": false, "error": made["error"] }
 	resource_type = str(made["type"])
 	script_path = str(made["script"])
-	if not ClassDB.class_exists(resource_type):
-		return {
-			"ok": false,
-			"error":
-			(
-				"%s is neither an engine class nor a class_name in the project's class list."
-				% resource_type
-			),
-		}
-	if (
-		not ClassDB.is_parent_class(resource_type, "Resource")
-		or not ClassDB.can_instantiate(resource_type)
-	):
-		return {
-			"ok": false, "error": "%s is not a resource class that can be created." % resource_type,
-		}
+	var unmade: String = _class_refusal(resource_type)
+	if not unmade.is_empty():
+		return { "ok": false, "error": unmade }
 	var resource: Resource = ClassDB.instantiate(resource_type)
 
-	# A script that did not load was skipped, and a plain resource was saved in place of the custom
-	# one asked for.
-	if script_path != "":
-		var script_file: String = _ensure_res_path(script_path)
-		var found: Variant = GdhSceneFile.script_at(script_file)
-		if found is String:
-			return { "ok": false, "error": found }
-		var script: Script = found
-		var uncompiled: String = GdhSceneFile.uncompiled(script, script_file)
-		if not uncompiled.is_empty():
-			return { "ok": false, "error": uncompiled }
-		var base: String = str(script.get_instance_base_type())
-		if not ClassDB.is_parent_class(resource_type, base):
-			return {
-				"ok": false,
-				"error":
-				"%s extends %s, so it cannot be on a %s." % [script_file, base, resource_type],
-			}
-		resource.set_script(script)
+	var unscripted: String = _attach_script(resource, resource_type, script_path)
+	if not unscripted.is_empty():
+		return { "ok": false, "error": unscripted }
 
 	var properties: Dictionary = _parse_properties_dict(args.get("properties", {}))
 	var refused: String = _properties.write_all(resource, properties)
@@ -382,22 +410,9 @@ func create_resource(args: Dictionary) -> Dictionary:
 			),
 		}
 
-	# The engine names the extensions it can save the resource as. Any other one failed with no more
-	# than "File unrecognized", which named no way to save it.
-	var extensions: PackedStringArray = ResourceSaver.get_recognized_extensions(resource)
-	if not extensions.has(res_path.get_extension().to_lower()):
-		return {
-			"ok": false,
-			"error":
-			(
-				"The engine saves %s as %s, not .%s. Give resourcePath one of those."
-				% [
-					GdhRead.with_article(resource_type),
-					", ".join(Array(extensions).map(func(one: String) -> String: return "." + one)),
-					res_path.get_extension(),
-				]
-			),
-		}
+	var misnamed: String = _extension_refusal(resource, resource_type, res_path)
+	if not misnamed.is_empty():
+		return { "ok": false, "error": misnamed }
 	var folder: String = GdhSceneFile.make_folder_for(res_path)
 	if not folder.is_empty():
 		return { "ok": false, "error": folder }

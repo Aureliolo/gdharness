@@ -27,27 +27,7 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 	var at: String = scene.path_of(region)
 	var flat: bool = region is NavigationRegion2D
 	if not flat and not region is NavigationRegion3D:
-		var regions: PackedStringArray = []
-		for node: Node in _all_under(scene.root):
-			if node is NavigationRegion2D or node is NavigationRegion3D:
-				var _named: bool = regions.append(scene.path_of(node))
-		return (
-			scene
-			. refuse(
-				(
-					"%s is a %s, not a NavigationRegion2D or a NavigationRegion3D. %s."
-					% [
-						at,
-						region.get_class(),
-						(
-							"The scene has none, and scene_node add puts one in"
-							if regions.is_empty()
-							else "The scene's are at %s" % ", ".join(regions)
-						),
-					]
-				)
-			)
-		)
+		return _not_a_region(scene, region, at)
 	var property: String = "navigation_polygon" if flat else "navigation_mesh"
 	var held: Resource = region.get(property)
 	var made: bool = held == null
@@ -57,19 +37,9 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 			held = NavigationMesh.new()
 	var file: String = held.resource_path.get_slice("::", 0)
 	var embedded: bool = file.is_empty() or held.resource_path.contains("::")
-	if embedded and not file.is_empty() and file != scene.path:
-		return (
-			scene
-			. refuse(
-				(
-					(
-						"The %s %s holds is built into %s, and a bake here cannot save that file. "
-						+ "Bake the region there, or save the %s to a file of its own."
-					)
-					% [held.get_class(), at, file, held.get_class()]
-				)
-			)
-		)
+	var foreign: Dictionary = _foreign_file(scene, held, at, file, embedded)
+	if not foreign.is_empty():
+		return foreign
 
 	scene.asked(region, [property])
 	if made:
@@ -87,27 +57,10 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 			"%s held no %s, so one was made and built into the scene, with the defaults."
 			% [at, property]
 		)
-	if polygons == 0:
-		answer["note"] = _why_empty(held, flat, parsed)
-	elif flat and not parsed:
-		answer["note"] = _nothing_read(scene, held)
-	if not flat and not Engine.is_editor_hint() and _reads_meshes(region, held):
-		answer["meshesNote"] = (
-			"The engine's warning that it had to parse RenderingServer meshes at runtime is about "
-			+ "a game rebaking as it runs, where reading a mesh back from the GPU stalls a frame. "
-			+ "A headless engine gives it for any bake read from MeshInstance3D nodes. This one "
-			+ "ran once and is saved."
-		)
+	answer.merge(_bake_notes(scene, region, held, polygons, parsed))
 
 	if not embedded:
-		scene.close()
-		var saving: Error = GdhSceneUids.save_keeping_uid(held, file)
-		if saving != OK:
-			return { "ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)] }
-		if Engine.is_editor_hint():
-			EditorInterface.get_resource_filesystem().update_file(file)
-		answer["savedTo"] = file
-		return answer
+		return _save_to_file(scene, held, file, answer)
 
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
@@ -120,6 +73,89 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 	if not written.is_empty():
 		return written
 	answer["savedTo"] = scene.path
+	return answer
+
+
+## The refusal for [param region], which is no navigation region, with the regions [param scene]
+## has.
+static func _not_a_region(scene: GdhSceneFile, region: Node, at: String) -> Dictionary:
+	var regions: PackedStringArray = []
+	for node: Node in _all_under(scene.root):
+		if node is NavigationRegion2D or node is NavigationRegion3D:
+			var _named: bool = regions.append(scene.path_of(node))
+	return (
+		scene
+		. refuse(
+			(
+				"%s is a %s, not a NavigationRegion2D or a NavigationRegion3D. %s."
+				% [
+					at,
+					region.get_class(),
+					(
+						"The scene has none, and scene_node add puts one in"
+						if regions.is_empty()
+						else "The scene's are at %s" % ", ".join(regions)
+					),
+				]
+			)
+		)
+	)
+
+
+## The refusal when [param held] at [param at] is built into [param file], a file other than the
+## scene that a bake here cannot save, or an empty answer.
+static func _foreign_file(
+	scene: GdhSceneFile, held: Resource, at: String, file: String, embedded: bool
+) -> Dictionary:
+	if not (embedded and not file.is_empty() and file != scene.path):
+		return {}
+	return (
+		scene
+		. refuse(
+			(
+				(
+					"The %s %s holds is built into %s, and a bake here cannot save that file. "
+					+ "Bake the region there, or save the %s to a file of its own."
+				)
+				% [held.get_class(), at, file, held.get_class()]
+			)
+		)
+	)
+
+
+## The notes a bake of [param held] for [param region] adds to its answer, which gave
+## [param polygons] polygons and read geometry when [param parsed].
+static func _bake_notes(
+	scene: GdhSceneFile, region: Node, held: Resource, polygons: int, parsed: bool
+) -> Dictionary:
+	var flat: bool = region is NavigationRegion2D
+	var notes: Dictionary = {}
+	if polygons == 0:
+		notes["note"] = _why_empty(held, flat, parsed)
+	elif flat and not parsed:
+		notes["note"] = _nothing_read(scene, held)
+	if not flat and not Engine.is_editor_hint() and _reads_meshes(region, held):
+		notes["meshesNote"] = (
+			"The engine's warning that it had to parse RenderingServer meshes at runtime is about "
+			+ "a game rebaking as it runs, where reading a mesh back from the GPU stalls a frame. "
+			+ "A headless engine gives it for any bake read from MeshInstance3D nodes. This one "
+			+ "ran once and is saved."
+		)
+	return notes
+
+
+## Saves [param held] to [param file], which holds it outside the scene, and answers [param answer]
+## with where it went, or why it could not.
+static func _save_to_file(
+	scene: GdhSceneFile, held: Resource, file: String, answer: Dictionary
+) -> Dictionary:
+	scene.close()
+	var saving: Error = GdhSceneUids.save_keeping_uid(held, file)
+	if saving != OK:
+		return { "ok": false, "error": "Failed to save %s: %s" % [file, error_string(saving)] }
+	if Engine.is_editor_hint():
+		EditorInterface.get_resource_filesystem().update_file(file)
+	answer["savedTo"] = file
 	return answer
 
 
