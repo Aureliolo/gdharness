@@ -200,6 +200,7 @@ import {
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
 import {
+  heldBy as bytesHeldBy,
   countedBy,
   crowded,
   nowSeconds,
@@ -207,6 +208,8 @@ import {
   type Sample,
   Spent,
   STARVED,
+  sampled,
+  watching,
 } from '../src/engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
@@ -57577,6 +57580,161 @@ async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promis
 }
 
 /**
+ * What an engine holds is read at every sample of an engine watched for memory, on a quiet machine
+ * too, and the largest reading is what the engine ends with. The kernel's own reader is asked of a
+ * real process that fills memory, since a reader answering kilobytes or pages, or one that left out a
+ * pid it could not open, would pass a stand-in. The reading off Windows is `stat` or `ps`, and runs
+ * only where they exist.
+ */
+async function testAnEngineIsReadForWhatItHolds(): Promise<void> {
+  const MIB = 1024 * 1024;
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-'));
+  try {
+    // A sample whose held map draws its figure on the first ask and keeps it, so one that nobody
+    // asks draws nothing and one asked twice gives one figure.
+    const standIn = (draws: readonly number[]) => {
+      let drawn = 0;
+      const sample = (): Promise<Sample> => {
+        class Drawing extends Map<number, number> {
+          private figure: number | undefined;
+          override get(): number {
+            this.figure ??= draws[Math.min(drawn++, draws.length - 1)] ?? 0;
+            return this.figure;
+          }
+        }
+        return Promise.resolve({ at: nowSeconds(), machine: 0, processors: null, held: new Drawing() });
+      };
+      return sample;
+    };
+    const launch = (sample: () => Promise<Sample>) => ({
+      godotPath: process.execPath,
+      projectPath: scratch,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+      sample,
+    });
+    const idle = ['-e', 'setInterval(() => {}, 1000)'];
+
+    const rising = join(scratch, 'rising');
+    mkdirSync(rising);
+    const wanted = [100 * MIB, 700 * MIB, 300 * MIB];
+    const told: number[] = [];
+    const going = launch(standIn(wanted));
+    const ended = await Promise.race([
+      watchedEngine(
+        going,
+        join(scratch, '0.lock'),
+        idle,
+        rising,
+        join(rising, 'engine.log'),
+        60,
+        undefined,
+        (bytes) => {
+          told.push(bytes);
+          if (told.length === wanted.length) {
+            for (const stop of going.running) {
+              stop();
+            }
+          }
+        },
+      ),
+      delay(10_000).then(() => 'late' as const),
+    ]);
+    for (const stop of going.running) {
+      stop();
+    }
+    if (ended === 'late') {
+      assert.fail(`the engine ended once told three times: ${JSON.stringify(told)}`);
+    }
+    assert.deepEqual(told.slice(0, 3), wanted, 'each reading is told as taken');
+    assert.equal(told.at(-1), 300 * MIB, 'the last told is the last read, not the largest');
+    assert.equal(ended.peakBytes, 700 * MIB, 'the end is the largest reading');
+
+    const nothing = join(scratch, 'nothing');
+    mkdirSync(nothing);
+    const none: number[] = [];
+    const zero = await watchedEngine(
+      launch(standIn([0])),
+      join(scratch, '1.lock'),
+      ['-e', 'setTimeout(() => {}, 1500)'],
+      nothing,
+      join(nothing, 'engine.log'),
+      60,
+      undefined,
+      (bytes) => none.push(bytes),
+    );
+    assert.equal('peakBytes' in zero, false, `an engine read at 0 has no peak: ${JSON.stringify(zero)}`);
+    assert.deepEqual(none, [], 'and a reading of 0 is told to nobody');
+
+    const spawned = Date.now();
+    const child = spawnHidden(
+      process.execPath,
+      [
+        '-e',
+        "const held = Buffer.alloc(200 * 1024 * 1024, 1); console.log('ready ' + held.length); setInterval(() => held.length, 1000)",
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    try {
+      const filled = new Promise<void>((settle) => {
+        child.stdout.on('data', (chunk: Buffer) => {
+          if (chunk.toString().includes('ready')) {
+            settle();
+          }
+        });
+      });
+      await Promise.race([filled, delay(30_000)]);
+      const childPid = child.pid ?? 0;
+      assert.ok(childPid > 0, 'the stand-in started');
+      const read = await bytesHeldBy([childPid, 0x7ffffffe]);
+      assert.deepEqual(
+        [...read.keys()],
+        [childPid],
+        `a pid that cannot be read is left out: ${JSON.stringify([...read])}`,
+      );
+      assert.ok(
+        (read.get(childPid) ?? 0) > 200 * MIB,
+        `the child filling 200 MiB holds more than that, in bytes: ${String(read.get(childPid))}`,
+      );
+
+      // Read at each sample of an engine watched for memory, whether the machine is busy or not, and
+      // not for one watched for its processor time alone.
+      watching(process.pid, true);
+      watching(childPid, true, true);
+      try {
+        await delay(1100);
+        const first = await sampled();
+        await delay(1100);
+        const second = await sampled();
+        const share = (second.machine - first.machine) / ((second.at - first.at) * availableParallelism());
+        assert.ok(
+          (second.held?.get(childPid) ?? 0) > 200 * MIB,
+          `the sample holds the child's memory at a busy share of ${String(share)} between the samples: ${JSON.stringify([...(second.held ?? [])])}`,
+        );
+        assert.equal(second.held?.has(process.pid), false, 'and not a process watched for its time alone');
+      } finally {
+        watching(childPid, false);
+        watching(process.pid, false);
+      }
+
+      if (process.platform !== 'win32') {
+        const seconds = (await processorSecondsOf([childPid])).get(childPid);
+        assert.ok(
+          seconds !== undefined && Number.isFinite(seconds) && seconds <= (Date.now() - spawned) / 1000 + 5,
+          `the processor time stays a time with the memory column beside it: ${String(seconds)}`,
+        );
+      }
+    } finally {
+      child.kill('SIGKILL');
+      await exitOf(child);
+    }
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
  * A restart between two readings leaves the work done before it out of the new count. The first
  * stretch after it counts by the clock, so a second of work in the old count is not credited to a
  * tenth of a second in the new one.
@@ -90892,6 +91050,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testPrereleasesAndALeadingVOrderAsSemanticVersionsDo,
   testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer,
   testARegistryThatIsDownIsAskedOnADoublingWindow,
+  testAnEngineIsReadForWhatItHolds,
 ];
 
 /**

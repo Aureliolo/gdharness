@@ -372,6 +372,8 @@ export function endingWithRunner(
  * what it had printed. It is asked only once a silence passes [param silenceSeconds], since the log
  * is read again each time.
  *
+ * [param holds] is told each reading of what the engine holds.
+ *
  * An engine that dies as it starts, with a Windows exception status before printing a line, is
  * started again, as a headless call's is: a suite run failed on 0xC06D007F with every suite unrun.
  */
@@ -383,12 +385,13 @@ export async function watchedEngine(
   log: string,
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
+  holds?: (bytes: number) => void,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   seedPipelineCache(user, launch.projectPath, launch.godotPath);
   try {
     return await startedUntilItRuns(
-      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn),
+      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds),
       undefined,
       (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
     );
@@ -405,6 +408,7 @@ async function engineWatchedOnce(
   log: string,
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
+  holds?: (bytes: number) => void,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
@@ -513,13 +517,14 @@ async function engineWatchedOnce(
   // Named in the lock as well, since the lock names this process, and what the engine starts runs on
   // its slot only when the lock names the engine.
   const found = (engine: number): void => {
-    watching(engine, true);
+    watching(engine, true, true);
     void nameSlotEngineOf(lock, process.pid, engine);
   };
   let pid = engineAt();
   if (pid !== undefined) {
     found(pid);
   }
+  let peakBytes = 0;
   try {
     let size = 0;
     const sample = launch.sample ?? sampled;
@@ -539,6 +544,11 @@ async function engineWatchedOnce(
         }
       }
       const taken = await sample();
+      const holding = pid === undefined ? undefined : taken.held?.get(pid);
+      if (holding !== undefined && holding > 0) {
+        peakBytes = Math.max(peakBytes, holding);
+        holds?.(holding);
+      }
       running.counted(taken, pid);
       quiet.counted(taken, pid);
       const at = nowSeconds();
@@ -626,7 +636,13 @@ async function engineWatchedOnce(
   if (failed !== null && helper !== null) {
     ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
-  return { code, signal, ended, ...(freeBytes === undefined ? {} : { freeBytes }) };
+  return {
+    code,
+    signal,
+    ended,
+    ...(freeBytes === undefined ? {} : { freeBytes }),
+    ...(peakBytes > 0 ? { peakBytes } : {}),
+  };
 }
 
 /**
