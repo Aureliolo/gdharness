@@ -30704,8 +30704,6 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       script(path);
     }
     writeFileSync(join(project, 'scripts', 'ignored', '.gdignore'), '');
-    script('scripts/kit/e.gd');
-    writeFileSync(join(project, 'scripts', 'kit', 'project.godot'), 'config_version=5\n');
     writeFileSync(join(project, 'scripts', 'notes.txt'), 'not a script\n');
     mkdirSync(join(project, 'empty'));
     // An addon gdharness installed is stepped over as every other walk steps over it, and read when
@@ -30774,10 +30772,6 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       [
         ['scripts/ignored'],
         /^No \.gd script is under scripts\/ignored that a folder walk takes in: scripts\/ignored holds a \.gdignore, so the engine never loads what is under it, and a script there is checked when the script is named\.$/,
-      ],
-      [
-        ['scripts/kit'],
-        /^No \.gd script is under scripts\/kit that a folder walk takes in: scripts\/kit holds a project\.godot of its own, so the engine never loads what is under it as part of this project, and a script there is checked when the script is named\.$/,
       ],
       [
         ['kit', 'empty'],
@@ -30859,21 +30853,6 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               JSON.stringify(named),
             );
             assert.match(text(get(named, 'underGdignoreNote')), /^The engine never loads a script under/);
-          }
-          // And one in a project of its own the same way, under its own name.
-          for (const scriptPath of ['scripts/kit/e.gd', ['ui/shop.gd', 'res://scripts/kit/e.gd']]) {
-            const named = parseTextContent(
-              await server.request('tools/call', {
-                name: 'script_diagnostics',
-                arguments: { projectPath: project, scriptPath },
-              }),
-            );
-            assert.deepEqual(
-              [get(named, 'clean'), get(named, 'inNestedProject'), get(named, 'underGdignore')],
-              [true, ['res://scripts/kit/e.gd'], undefined],
-              JSON.stringify(named),
-            );
-            assert.match(text(get(named, 'inNestedProjectNote')), /a project\.godot of its own/);
           }
         } finally {
           await server.stop();
@@ -92913,26 +92892,19 @@ function testTheFileWalksStepOverAFolderHoldingAProject(): void {
       'the project files are its own, however deep a nested project lies',
     );
     assert.deepEqual(
-      folderFiles(join(project, 'scripts'), ['.gd'], false),
+      folderFiles(join(project, 'scripts'), ['.gd']),
       ['hero.gd'],
       'and so are those of a folder a caller named',
     );
-    assert.deepEqual(folderFiles(project, ['.gd'], true), ['scripts/hero.gd'], 'the project named is walked');
     assert.deepEqual(
-      folderFiles(join(project, 'game_copy'), ['.gd'], false),
-      [],
-      'a nested project named is stepped over as a .gdignore folder named is',
-    );
-    assert.deepEqual(
-      steppedOverIn(project, true),
+      steppedOverIn(project),
       [
         { folder: 'game_copy', why: 'project' },
         { folder: 'scripts/deep', why: 'project' },
       ],
       'the folder walk says a nested project is one',
     );
-    assert.deepEqual(steppedOverIn(join(project, 'scripts'), false), [{ folder: 'deep', why: 'project' }]);
-    assert.deepEqual(steppedOverIn(join(project, 'game_copy'), false), [{ folder: '', why: 'project' }]);
+    assert.deepEqual(steppedOverIn(join(project, 'scripts')), [{ folder: 'deep', why: 'project' }]);
   } finally {
     sweep(project);
   }

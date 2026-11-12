@@ -173,23 +173,8 @@ export function projectFiles(projectPath: string, extensions: readonly string[])
  * of its own here took in gdharness's addons, so a project's diagnostics checked fifty-five of
  * them beside its three scripts while every other answer called the three the project's.
  */
-export function folderFiles(
-  directory: string,
-  extensions: readonly string[],
-  isProjectRoot: boolean,
-): string[] {
-  return namedSteppedOver(directory, isProjectRoot) === null ? filesBelow(directory, extensions) : [];
-}
-
-/**
- * Why the engine's scan leaves out [param directory], a folder a caller named, or null when it walks
- * it. The project's own folder holds a `project.godot` too, so only another one counts.
- */
-function namedSteppedOver(directory: string, isProjectRoot: boolean): SteppedOver['why'] | null {
-  if (gdignored(directory)) {
-    return 'gdignore';
-  }
-  return !isProjectRoot && holdsAProject(directory) ? 'project' : null;
+export function folderFiles(directory: string, extensions: readonly string[]): string[] {
+  return gdignored(directory) ? [] : filesBelow(directory, extensions);
 }
 
 /**
@@ -197,25 +182,9 @@ function namedSteppedOver(directory: string, isProjectRoot: boolean): SteppedOve
  * `.gdignore`, which the engine never loads anything from.
  */
 export function underGdignore(projectPath: string, relativePath: string): boolean {
-  return someFolderAbove(projectPath, relativePath, gdignored);
-}
-
-/**
- * Whether [param relativePath], a project-relative path, is under a folder of the project holding a
- * `project.godot` of its own, which the engine loads nothing from as part of this project.
- */
-export function inNestedProject(projectPath: string, relativePath: string): boolean {
-  return someFolderAbove(projectPath, relativePath, holdsAProject);
-}
-
-function someFolderAbove(
-  projectPath: string,
-  relativePath: string,
-  holds: (folder: string) => boolean,
-): boolean {
   const folders = relativePath.split('/').slice(0, -1);
   for (let depth = 1; depth <= folders.length; depth += 1) {
-    if (holds(join(projectPath, ...folders.slice(0, depth)))) {
+    if (gdignored(join(projectPath, ...folders.slice(0, depth)))) {
       return true;
     }
   }
@@ -234,10 +203,9 @@ export interface SteppedOver {
  * no script it walks can say where its scripts are. `addons` holding only gdharness's addons was
  * answered as holding no .gd script, beside the seventy-three that naming each addon found.
  */
-export function steppedOverIn(directory: string, isProjectRoot: boolean): SteppedOver[] {
-  const itself = namedSteppedOver(directory, isProjectRoot);
-  if (itself !== null) {
-    return [{ folder: '', why: itself }];
+export function steppedOverIn(directory: string): SteppedOver[] {
+  if (gdignored(directory)) {
+    return [{ folder: '', why: 'gdignore' }];
   }
   const found: SteppedOver[] = [];
   const visit = (at: string, prefix: string): void => {

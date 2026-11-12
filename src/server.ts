@@ -265,7 +265,6 @@ import { ensureProcessTable } from './process-table.js';
 import { cpuSecondsOf } from './process-time.js';
 import {
   folderFiles,
-  inNestedProject,
   pathsInUidCache,
   projectFiles,
   projectStructure,
@@ -4213,7 +4212,7 @@ function scriptsNamedBy(
   if (!isDirectory(location.absolutePath)) {
     return { ok: true, scripts: [`res://${fromRoot}`], empty: [] };
   }
-  const inside = folderFiles(location.absolutePath, ['.gd'], fromRoot === '').map((script) =>
+  const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
     fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
   );
   return {
@@ -4256,37 +4255,22 @@ function missingScriptReason(projectPath: string, relativePath: string, said: st
 }
 
 /**
- * The scripts of [param scripts], project-relative or res:// paths, that sit under a `.gdignore` or
- * in a project of their own. Named on purpose they are checked like any other, and an error in one read as the project's,
+ * The scripts of [param scripts], project-relative or res:// paths, that sit under a `.gdignore`.
+ * Named on purpose they are checked like any other, and an error in one read as the project's,
  * although the engine never loads it: a class renamed elsewhere left one failing to compile.
  */
-function scriptsTheEngineNeverLoads(
-  projectPath: string,
-  scripts: readonly string[],
-): Record<string, unknown> {
-  const fromRoot = scripts.map((script) => script.replace(/^res:\/\//, ''));
-  const ignored = fromRoot
+function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): Record<string, unknown> {
+  const ignored = scripts
+    .map((script) => script.replace(/^res:\/\//, ''))
     .filter((script) => underGdignore(projectPath, script))
     .map((script) => `res://${script}`);
-  const nested = fromRoot
-    .filter((script) => inNestedProject(projectPath, script))
-    .map((script) => `res://${script}`);
-  return {
-    ...(ignored.length === 0
-      ? {}
-      : {
-          underGdignore: ignored,
-          underGdignoreNote:
-            'The engine never loads a script under a folder holding a .gdignore, so what is reported for these does not stop the project from compiling or running.',
-        }),
-    ...(nested.length === 0
-      ? {}
-      : {
-          inNestedProject: nested,
-          inNestedProjectNote:
-            'The engine never loads a script under a folder holding a project.godot of its own as part of this project, so what is reported for these does not stop it from compiling or running.',
-        }),
-  };
+  return ignored.length === 0
+    ? {}
+    : {
+        underGdignore: ignored,
+        underGdignoreNote:
+          'The engine never loads a script under a folder holding a .gdignore, so what is reported for these does not stop the project from compiling or running.',
+      };
 }
 
 /** Why a folder named gave no script, with each folder below it that the walk stepped over. */
@@ -4300,7 +4284,7 @@ function noScriptUnder(entry: string, absolute: string, fromRoot: string): strin
       ? `${folder} holds a project.godot of its own, so the engine never loads what is under it as part of this project, and a script there is checked when the script is named`
       : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
   };
-  const stepped = steppedOverIn(absolute, fromRoot === '');
+  const stepped = steppedOverIn(absolute);
   return stepped.length === 0
     ? `No .gd script is under ${entry}.`
     : `No .gd script is under ${entry} that a folder walk takes in: ${stepped.map(said).join('; ')}.`;
@@ -10503,7 +10487,7 @@ class GodotServer {
       if (!existsSync(location.absolutePath)) {
         return this.missingScript(project.value.path, location.relativePath);
       }
-      ignored = scriptsTheEngineNeverLoads(project.value.path, [location.relativePath]);
+      ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
     }
     const one = await this.diagnosticsOf(args);
     if ('noLanguageServer' in one) {
@@ -10594,7 +10578,7 @@ class GodotServer {
   ): ToolResponse {
     return this.jsonTextResponse({
       ...diagnosticsSummary(tally, scripts.length),
-      ...(project.ok ? scriptsTheEngineNeverLoads(project.value.path, scripts) : {}),
+      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts) : {}),
     });
   }
 
