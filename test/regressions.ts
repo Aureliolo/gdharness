@@ -277,7 +277,12 @@ import {
   scriptFault,
   withoutAsides,
 } from '../src/headless.js';
-import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headless-operations.js';
+import {
+  EDITOR_CALLS,
+  EDITOR_READS,
+  HEADLESS_OPERATIONS,
+  HEADLESS_TOOLS,
+} from '../src/headless-operations.js';
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
@@ -71573,7 +71578,15 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
       25,
     ),
     ...Object.values(EDITOR_READS).flatMap((ops) => Object.values(ops)),
+    ...Object.values(EDITOR_CALLS).flatMap((ops) => Object.values(ops).map(([command]) => command)),
   ]);
+  // The server answers the reads and the move from the file, and every other op through its table.
+  const fromTheFile = new Set(['read', 'read_states', 'move']);
+  for (const [tool, calls] of Object.entries(EDITOR_CALLS)) {
+    for (const op of Object.keys(toolSpec(tool)?.operations ?? {})) {
+      assert.ok(fromTheFile.has(op) || op in calls, `${tool} ${op} has no editor command`);
+    }
+  }
   for (const command of bridged) {
     assert.ok(addon.has(command), `the server sends ${command}, which the editor addon has not`);
   }

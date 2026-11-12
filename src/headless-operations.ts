@@ -86,3 +86,52 @@ export const HEADLESS_TOOLS: Readonly<Record<string, readonly string[]>> = dicti
 export const EDITOR_READS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
   project_settings: dictionary({ get: 'get_project_setting' }),
 });
+
+/** An editor command, and whether it only reads what the editor or the file holds or writes it. */
+type EditorCall = readonly [command: string, effect: 'reads' | 'writes'];
+
+/**
+ * The command each op of the scene and resource tools runs, in the open editor where there is one
+ * and in a headless engine where there is not. Every op those tools take is listed, apart from the
+ * reads and the move, which the server answers from the file itself.
+ */
+export const EDITOR_CALLS: Readonly<Record<string, Readonly<Record<string, EditorCall>>>> = dictionary({
+  scene_node: dictionary<EditorCall>({
+    add: ['add_node', 'writes'],
+    get: ['get_node_properties', 'reads'],
+    set: ['set_node_properties', 'writes'],
+    duplicate: ['duplicate_node', 'writes'],
+    reparent: ['reparent_node', 'writes'],
+    save_branch: ['save_branch', 'writes'],
+    delete: ['delete_node', 'writes'],
+    change_type: ['change_node_type', 'writes'],
+    bake_navigation: ['bake_navigation', 'writes'],
+    set_tilemap_cells: ['set_tilemap_cells', 'writes'],
+  }),
+  scene_signal: dictionary<EditorCall>({
+    connect: ['connect_signal', 'writes'],
+    disconnect: ['disconnect_signal', 'writes'],
+    list: ['list_connections', 'reads'],
+  }),
+  scene_animation: dictionary<EditorCall>({
+    create: ['create_animation', 'writes'],
+    add_track: ['add_animation_track', 'writes'],
+    remove_track: ['remove_animation_track', 'writes'],
+    set: ['set_animation', 'writes'],
+    rename: ['rename_animation', 'writes'],
+    remove: ['remove_animation', 'writes'],
+    add_state: ['add_animation_state', 'writes'],
+    remove_state: ['remove_animation_state', 'writes'],
+    connect_states: ['connect_animation_states', 'writes'],
+    disconnect_states: ['disconnect_animation_states', 'writes'],
+  }),
+  resource_edit: dictionary<EditorCall>({
+    create: ['create_resource', 'writes'],
+    modify: ['modify_resource', 'writes'],
+    create_shader: ['create_shader', 'writes'],
+    create_tileset: ['create_tileset', 'writes'],
+    set_theme_color: ['set_theme_color', 'writes'],
+    set_theme_font_size: ['set_theme_font_size', 'writes'],
+    remove_theme_item: ['remove_theme_item', 'writes'],
+  }),
+});

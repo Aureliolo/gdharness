@@ -174,6 +174,7 @@ import {
 } from './headless.js';
 import {
   DEPENDENCY_OPERATIONS,
+  EDITOR_CALLS,
   EDITOR_READS,
   ENGINE_PASSES,
   HEADLESS_OPERATIONS,
@@ -5006,51 +5007,6 @@ function runningGameSaid(
     : `Told to the running game (pid ${pid}), which this server started, and taken by it: it no longer stops on that line.`;
 }
 
-/** An editor command, and whether it only reads what the editor or the file holds or writes it. */
-type EditorCall = readonly [command: string, effect: 'reads' | 'writes'];
-
-/** The editor command each scene_node op runs. An op not listed is set_tilemap_cells. */
-const SCENE_NODE_CALLS = dictionary<EditorCall>({
-  add: ['add_node', 'writes'],
-  get: ['get_node_properties', 'reads'],
-  set: ['set_node_properties', 'writes'],
-  duplicate: ['duplicate_node', 'writes'],
-  reparent: ['reparent_node', 'writes'],
-  save_branch: ['save_branch', 'writes'],
-  delete: ['delete_node', 'writes'],
-  change_type: ['change_node_type', 'writes'],
-  bake_navigation: ['bake_navigation', 'writes'],
-});
-
-/** The editor command each scene_signal op runs. An op not listed is list_connections. */
-const SCENE_SIGNAL_CALLS = dictionary<EditorCall>({
-  connect: ['connect_signal', 'writes'],
-  disconnect: ['disconnect_signal', 'writes'],
-});
-
-/** The editor command each scene_animation op runs that is not a read. An op not listed is connect_animation_states. */
-const SCENE_ANIMATION_CALLS = dictionary<EditorCall>({
-  create: ['create_animation', 'writes'],
-  add_track: ['add_animation_track', 'writes'],
-  remove_track: ['remove_animation_track', 'writes'],
-  set: ['set_animation', 'writes'],
-  rename: ['rename_animation', 'writes'],
-  remove: ['remove_animation', 'writes'],
-  add_state: ['add_animation_state', 'writes'],
-  remove_state: ['remove_animation_state', 'writes'],
-  disconnect_states: ['disconnect_animation_states', 'writes'],
-});
-
-/** The editor command each resource_edit op runs that is not a move or a read. An op not listed is set_theme_font_size. */
-const RESOURCE_EDIT_CALLS = dictionary<EditorCall>({
-  create: ['create_resource', 'writes'],
-  modify: ['modify_resource', 'writes'],
-  create_shader: ['create_shader', 'writes'],
-  create_tileset: ['create_tileset', 'writes'],
-  set_theme_color: ['set_theme_color', 'writes'],
-  remove_theme_item: ['remove_theme_item', 'writes'],
-});
-
 /** The language server request and the word for it that each script_info op uses. An op not listed is hover. */
 const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>({
   symbols: ['lsp_get_symbols', 'Symbols'],
@@ -6367,6 +6323,7 @@ class GodotServer {
   ): {
     bridge: (command: string, extra?: OperationParams) => Promise<ToolResponse>;
     editorOrEngine: (command: string, effect: 'reads' | 'writes') => Promise<ToolResponse>;
+    editorCall: () => Promise<ToolResponse>;
   } {
     const { op: _op, ...arguments_ } = args;
     const bridge = async (command: string, extra: OperationParams = {}): Promise<ToolResponse> => {
@@ -6377,7 +6334,14 @@ class GodotServer {
     };
     const editorOrEngine = async (command: string, effect: 'reads' | 'writes'): Promise<ToolResponse> =>
       await this.editorOrEngine(command, arguments_, `${tool} ${op}`, effect);
-    return { bridge, editorOrEngine };
+    const editorCall = async (): Promise<ToolResponse> => {
+      const call = EDITOR_CALLS[tool]?.[op];
+      if (call === undefined) {
+        throw new Error(`${tool} ${op} has no editor command`);
+      }
+      return await editorOrEngine(...call);
+    };
+    return { bridge, editorOrEngine, editorCall };
   }
 
   /** One tool call to the code that does it, for the project tools and for scene_create. */
@@ -6409,7 +6373,7 @@ class GodotServer {
 
   /** One tool call to the code that does it, for the scene tree, nodes and signals. */
   private async dispatchSceneTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
-    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    const { bridge, editorCall } = this.editorCallers(tool, op, args);
     switch (tool) {
       case 'scene_tree': {
         // includeDefaults names which properties to list, so given alone it can mean only that the
@@ -6436,9 +6400,8 @@ class GodotServer {
         );
       }
       case 'scene_node':
-        return await editorOrEngine(...(SCENE_NODE_CALLS[op] ?? ['set_tilemap_cells', 'writes']));
       case 'scene_signal':
-        return await editorOrEngine(...(SCENE_SIGNAL_CALLS[op] ?? ['list_connections', 'reads']));
+        return await editorCall();
       default:
         return await this.dispatchAnimationAndScriptTool(tool, op, args);
     }
@@ -6450,7 +6413,7 @@ class GodotServer {
     op: string,
     args: OperationParams,
   ): Promise<ToolResponse> {
-    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    const { bridge, editorCall } = this.editorCallers(tool, op, args);
     switch (tool) {
       case 'scene_animation':
         switch (op) {
@@ -6479,9 +6442,7 @@ class GodotServer {
               async () => await bridge('read_animation_states'),
             );
           default:
-            return await editorOrEngine(
-              ...(SCENE_ANIMATION_CALLS[op] ?? ['connect_animation_states', 'writes']),
-            );
+            return await editorCall();
         }
 
       case 'script_edit':
@@ -6498,7 +6459,7 @@ class GodotServer {
 
   /** One tool call to the code that does it, for resource_edit. */
   private async dispatchResourceTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
-    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    const { bridge, editorCall } = this.editorCallers(tool, op, args);
     switch (tool) {
       case 'resource_edit':
         switch (op) {
@@ -6520,7 +6481,7 @@ class GodotServer {
             );
           }
           default:
-            return await editorOrEngine(...(RESOURCE_EDIT_CALLS[op] ?? ['set_theme_font_size', 'writes']));
+            return await editorCall();
         }
 
       default:
