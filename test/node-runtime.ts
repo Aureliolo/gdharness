@@ -12,29 +12,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { createServer } from 'node:net';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
 import { spawnHidden } from '../src/spawn.js';
+import { reservePort } from './support/server.js';
 import './support/slots.js';
 
 const HOST = '127.0.0.1';
 const ENTRY = 'build/cli.js';
-
-async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.once('error', reject);
-    probe.listen(0, HOST, () => {
-      const address = probe.address();
-      const port = typeof address === 'object' && address !== null ? address.port : 0;
-      probe.close(() => {
-        resolve(port);
-      });
-    });
-  });
-}
 
 function upgrades(port: number, path: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -56,7 +42,7 @@ function upgrades(port: number, path: string, timeoutMs: number): Promise<boolea
   });
 }
 
-const port = await freePort();
+const port = await reservePort();
 // stdin stays open: the server speaks MCP over stdio and stops the moment it reads EOF.
 const child = spawnHidden('node', [ENTRY], {
   env: { ...process.env, GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_BRIDGE_HOST: HOST },

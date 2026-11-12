@@ -29,6 +29,7 @@ var _client: GdhBridgeClient
 var _server: TCPServer = TCPServer.new()
 var _peer: WebSocketPeer = null
 var _port: int = 0
+var _marker_was: String = ""
 var _started: int = 0
 var _listening: bool = false
 var _connected: bool = false
@@ -57,9 +58,17 @@ func _process(_delta: float) -> bool:
 
 
 func _initialize() -> void:
-	_port = _free_port()
+	_marker_was = FileAccess.get_file_as_string(MARKER).strip_edges()
+	# The suite reserves this number. One the fixture picked for itself could be handed to another
+	# listener during the silence.
+	_port = GdhBridgeClient._asked_for("GDHARNESS_TEST_SHUT_PORT")
 	if _port == 0:
-		_stop("the fixture could not find a free port to keep shut")
+		_stop(
+			(
+				"GDHARNESS_TEST_SHUT_PORT names no port. Run the fixture with "
+				+ "bun test/engine-gdscript.ts fixture bridge_reconnect, which sets it."
+			)
+		)
 		return
 
 	_write_marker(WAS)
@@ -132,17 +141,6 @@ func _on_connected() -> void:
 	_connected = true
 
 
-## A port the operating system says is free and that nothing then listens on, which is what an
-## editor started ahead of its server is talking to.
-func _free_port() -> int:
-	var probe: TCPServer = TCPServer.new()
-	if probe.listen(0, "127.0.0.1") != OK:
-		return 0
-	var port: int = probe.get_local_port()
-	probe.stop()
-	return port
-
-
 func _write_marker(version: String) -> void:
 	var file: FileAccess = FileAccess.open(MARKER, FileAccess.WRITE)
 	if file == null:
@@ -167,9 +165,9 @@ func _finish(code: int) -> void:
 	if _client != null:
 		_client.disconnect_from_server()
 	_server.stop()
-	# Not checked: the marker is gone either way by the time this runs, and a fixture that tore
-	# itself down twice is not a failure to report.
-	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(MARKER))
+	# Put back as it was found. The project is the suite's, and its operations step over this addon
+	# only while the marker is there.
+	_write_marker(_marker_was)
 	if not failures.is_empty():
 		printerr("\n".join(failures))
 		quit(1)
@@ -181,6 +179,7 @@ func _finish(code: int) -> void:
 				"waited_msec": _reached_at,
 				"silence_msec": SILENCE_MSEC,
 				"arrivals": _arrivals,
+					"port": _port,
 			}
 		)
 	)

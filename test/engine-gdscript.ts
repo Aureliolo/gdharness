@@ -42,6 +42,7 @@ import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { containedEngine } from './support/contained-engine.js';
 import { asArray, asNumber, asObject, asString, get, lastJsonLine, text } from './support/json.js';
 import { solidPng } from './support/png.js';
+import { PORT_BAND, reservePort } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
 const tried: string[] = [];
@@ -315,6 +316,12 @@ const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
   // The parse error the refused reload is refused for.
   reload_script: [/^SCRIPT ERROR: Parse Error: Expected parameter name\.$/],
 };
+
+const SHUT_PORT = 'GDHARNESS_TEST_SHUT_PORT';
+// The port the reconnect fixture keeps shut and then listens on. Set here, before any engine
+// starts, so the leg and a fixture run by name give it the same reserved number: each engine
+// inherits the variables.
+process.env[SHUT_PORT] = String(await reservePort());
 
 /** Runs one of the fixture scripts in test/support/gd and returns the JSON it reported. */
 function runFixture(godotPath: string, projectDir: string, name: string): unknown {
@@ -6360,6 +6367,65 @@ function testTheProjectsClassesStandBesideTheEngines(godotPath: string): void {
   }
 }
 
+/**
+ * An editor opened before its server has to keep asking. The wait is read back rather than trusted:
+ * a client that connected before the fixture started listening would otherwise pass without ever
+ * having been refused.
+ */
+function testTheReconnectFixtureListensWhereItIsTold(godotPath: string, projectDir: string): void {
+  const markerPath = join(projectDir, 'addons', 'gdharness_editor', '.gdharness-version');
+  const markerBefore = readFileSync(markerPath, 'utf8');
+  const reconnect = runFixture(godotPath, projectDir, 'bridge_reconnect');
+  assert.ok(
+    asNumber(get(reconnect, 'waited_msec')) >= asNumber(get(reconnect, 'silence_msec')),
+    'the client should have been refused before anything answered it',
+  );
+  // Both arrivals, because the version it announces is only wrong on the second one: the upgrade
+  // happens under it between the two.
+  assert.equal(asNumber(get(reconnect, 'arrivals')), 2, 'the client should have arrived twice');
+  const port = asNumber(get(reconnect, 'port'));
+  assert.equal(port, Number(process.env[SHUT_PORT]), 'the fixture should listen on the reserved port');
+  assert.ok(
+    port >= PORT_BAND.first && port <= PORT_BAND.last,
+    `the reserved port ${port} should lie in the band`,
+  );
+  assert.equal(
+    readFileSync(markerPath, 'utf8'),
+    markerBefore,
+    'the fixture should leave the marker as found',
+  );
+
+  // The leg runs this through the loop over CASES, so it runs once and, being last, after every
+  // step that meets the project as createProject made it.
+  assert.equal(Object.keys(CASES).at(-1), 'reconnect', 'reconnect should be the last case');
+  const source = readFileSync(import.meta.filename, 'utf8');
+  const mainBody = source.slice(source.lastIndexOf('async function main'));
+  assert.ok(mainBody.includes('await main()'), 'the slice should hold main');
+  assert.ok(
+    !mainBody.includes("runFixture(godotPath, projectDir, 'bridge_" + "reconnect')"),
+    'main should not run the reconnect fixture itself',
+  );
+
+  const saved = process.env[SHUT_PORT];
+  process.env[SHUT_PORT] = 'none';
+  try {
+    const refused = runScript(godotPath, projectDir, join(projectDir, 'bridge_reconnect.gd'));
+    assert.equal(refused.status, 1, 'the fixture should refuse to run without a port');
+    assert.match(refused.stderr, /GDHARNESS_TEST_SHUT_PORT/);
+    assert.equal(
+      readFileSync(markerPath, 'utf8'),
+      markerBefore,
+      'a refused run should leave the marker as found',
+    );
+  } finally {
+    if (saved === undefined) {
+      delete process.env[SHUT_PORT];
+    } else {
+      process.env[SHUT_PORT] = saved;
+    }
+  }
+}
+
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   projectClasses: (godotPath) => {
     testTheProjectsClassesStandBesideTheEngines(godotPath);
@@ -6419,6 +6485,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   ourNames: (godotPath) => {
     testOurNamesStandAsideForAProjectsClasses(godotPath);
   },
+  reconnect: testTheReconnectFixtureListensWhereItIsTold,
 };
 
 async function main(): Promise<void> {
@@ -6530,19 +6597,8 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_lazy');
     runFixture(godotPath, projectDir, 'runtime_lazy_quit');
     runFixture(godotPath, projectDir, 'runtime_capture');
-    // An editor opened before its server has to keep asking. The wait is read back rather than
-    // trusted: a client that connected before the fixture started listening would otherwise
-    // pass this without ever having been refused.
-    const reconnect = runFixture(godotPath, projectDir, 'bridge_reconnect');
-    assert.ok(
-      asNumber(get(reconnect, 'waited_msec')) >= asNumber(get(reconnect, 'silence_msec')),
-      'the client should have been refused before anything answered it',
-    );
-    // Both arrivals, because the version it announces is only wrong on the second one: the
-    // upgrade happens under it between the two.
-    assert.equal(asNumber(get(reconnect, 'arrivals')), 2, 'the client should have arrived twice');
-    // And it goes where the project says the bridge is, and moves when that changes, which is
-    // what stops two projects wanting one port and an abandoned server keeping an editor.
+    // The editor's client goes where the project says the bridge is, and moves when that changes,
+    // which is what stops two projects wanting one port and an abandoned server keeping an editor.
     const follows = runFixture(godotPath, projectDir, 'bridge_follows');
     assert.equal(asNumber(get(follows, 'arrivals')), 2, 'the client should have greeted both servers');
     // And an announcement that does not answer is set aside rather than waited on for good.
