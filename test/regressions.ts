@@ -73019,7 +73019,7 @@ function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
 }
 
 /** How many files the prose gate below reads today, as a floor under its walk. */
-const PROSE_FILES_READ = 215;
+const PROSE_FILES_READ = 216;
 
 /**
  * The two dashes, by code point, so this file holds neither character: an editor or a tool that

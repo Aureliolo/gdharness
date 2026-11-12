@@ -5,6 +5,7 @@ extends EditorPlugin
 ## that keeps showing the old file is how a change reads as one that never happened. The
 ## files are polled once a second. The editor's own watcher only fires on window focus.
 
+const GdhShownScene = preload("../gdharness_editor/shown_scene.gd")
 const CHECK_INTERVAL_SECONDS: float = 1.0
 ## How long after a file's modification time its contents are compared as well. The time is in
 ## whole seconds, so a second write inside the second of the first leaves it as it was and changes
@@ -84,6 +85,10 @@ func _md5_of(path: String) -> String:
 
 
 func _check_for_changes() -> void:
+	# A call holds a scene in front over several frames, and a reload between them would change it
+	# under the call. The next poll sees the change.
+	if not GdhShownScene.doing().is_empty():
+		return
 	_update_watched_files()
 
 	var now: int = int(Time.get_unix_time_from_system())

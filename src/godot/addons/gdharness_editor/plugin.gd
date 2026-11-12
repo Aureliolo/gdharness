@@ -254,14 +254,14 @@ func _on_disconnected() -> void:
 ## Whether [param tool_name] waits for the editor to finish scanning or importing. A save during a
 ## scan updates the file list the scan's thread is writing out (see SceneFile.scan_later), and an
 ## import can run frames of the editor from inside itself, the one handling this call among them.
-## Every call waits out a capture, which shows a scene for frames before it reads the view.
+## Every call waits out a capture or a save that holds a scene in front for frames.
 ##
 ## A task in the editor's progress dialog runs frames of the editor from inside itself at every
 ## step, so a call handled then runs in the middle of that task. A save there asked for the script
 ## classes again while the editor was registering them, and the two registrations walked one list,
 ## which crashed the editor at its next scan.
 func turned_away(tool_name: String) -> bool:
-	if _tool_executor != null and _tool_executor.capturing():
+	if _tool_executor != null and not _tool_executor.showing().is_empty():
 		return true
 	if not ANSWERED_DURING_A_TASK.has(tool_name) and GdhSceneFile.in_a_task():
 		return true
@@ -276,8 +276,8 @@ func turned_away(tool_name: String) -> bool:
 ## as [what, mark]. The server keeps asking while the mark changes: registering forty classes in a
 ## hidden editor took over thirty seconds, every one of them a step.
 func busy_with() -> Array[String]:
-	if _tool_executor != null and _tool_executor.capturing():
-		return ["capturing its view", ""]
+	if _tool_executor != null and not _tool_executor.showing().is_empty():
+		return [_tool_executor.showing(), ""]
 	var labels: Array[String] = GdhSceneFile.task_labels()
 	if not labels.is_empty():
 		return ["running its task \"%s\"" % labels[0].trim_suffix("..."), "\n".join(labels)]

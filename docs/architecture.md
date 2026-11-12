@@ -1556,6 +1556,8 @@ not only the one in front.
 
 `scene_create save` of a scene open in the editor saves the editor's copy through the editor's own
 save. It brings that tab to the front for the save, then puts back the tab that was there.
+The editor gives each switch, save and close its frames, and saves only once the scene is the one
+in front. `auto_reload` skips its polls meanwhile.
 
 `scene_create` with `inherits` writes the new scene's text itself, as the editor's New Inherited
 Scene saves it. It does not pack an instance of the base. A headless engine instancing the base runs
