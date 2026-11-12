@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { EventEmitter, once as heardOnce } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import {
   chmodSync,
   closeSync,
@@ -704,12 +704,7 @@ import { WINDOWS_ASK_STAND_IN } from './support/windows-ask-stand-in.js';
 async function withOccupiedBridgePort<T>(run: (port: number) => Promise<T>): Promise<T> {
   const port = await reservePort();
   const blocker = createServer();
-  await new Promise<void>((settle, reject) => {
-    blocker.once('error', reject);
-    blocker.listen(port, '127.0.0.1', () => {
-      settle();
-    });
-  });
+  await once(blocker.listen(port, '127.0.0.1'), 'listening');
   try {
     return await run(port);
   } finally {
@@ -1345,10 +1340,10 @@ function testAnErrorOfSeveralLinesIsOneEntry(): void {
         const whole = `${lines.join(ending)}${ending}`;
         const expected = [{ severity: 'error', source, text: headline, detail, ...located }];
         const at = `${name} on ${source} ending in ${JSON.stringify(ending)}`;
-        const once = new GameLog();
-        once.append(source, whole);
-        once.finish();
-        assert.deepEqual(shape(once), expected, at);
+        const inOne = new GameLog();
+        inOne.append(source, whole);
+        inOne.finish();
+        assert.deepEqual(shape(inOne), expected, at);
         const cut = new GameLog();
         for (const character of whole) {
           cut.append(source, character);
@@ -4101,7 +4096,7 @@ async function withFakeLanguageServer<T>(
     });
   });
 
-  await new Promise<void>((ready) => server.listen(listenOn, '127.0.0.1', ready));
+  await once(server.listen(listenOn, '127.0.0.1'), 'listening');
 
   try {
     return await handler(portOf(server));
@@ -6692,10 +6687,7 @@ async function testEditorStatusPortConflict(): Promise<void> {
 async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
   const port = await reservePort();
   const blocker = createServer();
-  await new Promise<void>((settle, reject) => {
-    blocker.once('error', reject);
-    blocker.listen(port, '127.0.0.1', settle);
-  });
+  await once(blocker.listen(port, '127.0.0.1'), 'listening');
   let holding = true;
   const letGo = async (): Promise<void> => {
     if (!holding) {
@@ -6850,9 +6842,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-moved-bridge-'));
   const wanted = await reservePort();
   const holder = createServer();
-  await new Promise<void>((settle) => {
-    holder.listen(wanted, '127.0.0.1', settle);
-  });
+  await once(holder.listen(wanted, '127.0.0.1'), 'listening');
   // Each server is spawned after the announcement it is meant to meet, and only once the one before
   // it has answered: a server reads the announcement as its process starts and claims the project
   // then, initialised or not, and the one it replaces stops at its next successor check.
@@ -8314,9 +8304,7 @@ async function testAReplyOfTheWrongShapeIsRefusedAtOnce(): Promise<void> {
 async function testABridgeOnNoPortSaysSo(): Promise<void> {
   const port = await reservePort();
   const holder = createServer();
-  await new Promise<void>((settle) => {
-    holder.listen(port, '127.0.0.1', settle);
-  });
+  await once(holder.listen(port, '127.0.0.1'), 'listening');
   const project = mkdtempSync(join(tmpdir(), 'gdharness-no-port-'));
   const bridge = new GodotBridge(port, '127.0.0.1', 1000, project);
   try {
@@ -8351,9 +8339,7 @@ async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<v
   const project = mkdtempSync(join(tmpdir(), 'gdharness-held-over-'));
   const port = await reservePort();
   const holder = createServer();
-  await new Promise<void>((settle) => {
-    holder.listen(port, '127.0.0.1', settle);
-  });
+  await once(holder.listen(port, '127.0.0.1'), 'listening');
   mkdirSync(dirname(announcementPath(project)), { recursive: true });
   writeFileSync(
     announcementPath(project),
@@ -15840,10 +15826,10 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
 
   // A line printed once is not a burst: it is already in the entries, and a group of one would be
   // the same line said twice in one answer.
-  const once = new GameLog();
-  once.append('transcript', 'ERROR: something happened\nsomething else\n');
-  once.finish();
-  assert.deepEqual(bursts(once.everything(), 3), []);
+  const single = new GameLog();
+  single.append('transcript', 'ERROR: something happened\nsomething else\n');
+  single.finish();
+  assert.deepEqual(bursts(single.everything(), 3), []);
 
   // A read for one phrase carries the shapes holding it and no others. The groups are formed over
   // the whole console first, so the one kept is counted whole, with the same lines above it.
@@ -25773,7 +25759,7 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
     game.close();
     const refusedFirst = read();
     await delay(300);
-    game.listen(port, '127.0.0.1');
+    await once(game.listen(port, '127.0.0.1'), 'listening');
     const throughTheRefusal = await refusedFirst;
     assert.doesNotMatch(throughTheRefusal, /refused|not sent|ECONNREFUSED/, throughTheRefusal);
     assert.equal(
@@ -25791,7 +25777,7 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
       /The game \(.*\) is running but nothing answered on its port: it refused (all \d+ connections tried within 2000ms|(one connection|\d+ connections) and had not accepted the next when the wait ended, after 2000ms)\. Nothing listens there while a game is starting or shutting down, and the engine refuses connections while more are waiting for the game than the eight it queues, which several servers calling one game at once, or a long frame or a breakpoint holding it, can make it do\. Nothing was sent, so nothing ran\./,
       refusedThroughout,
     );
-    game.listen(port, '127.0.0.1');
+    await once(game.listen(port, '127.0.0.1'), 'listening');
 
     // A game in one long frame takes nothing, so the first four wait out their turn in its queue and
     // the fifth never gets a place.
@@ -29206,9 +29192,7 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
       const made = createServer((socket) => {
         socket.destroy();
       });
-      await new Promise<void>((settle) => {
-        made.listen(on, '127.0.0.1', settle);
-      });
+      await once(made.listen(on, '127.0.0.1'), 'listening');
       return made;
     };
     servers.push(await listen(dapPort));
@@ -29289,9 +29273,7 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
       const made = createServer((socket) => {
         socket.destroy();
       });
-      await new Promise<void>((settle) => {
-        made.listen(on, '127.0.0.1', settle);
-      });
+      await once(made.listen(on, '127.0.0.1'), 'listening');
       return made;
     };
     const asked: unknown[] = [];
@@ -35985,12 +35967,7 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
 
   const held = createServer();
   try {
-    await new Promise<void>((settle, reject) => {
-      held.once('error', reject);
-      held.listen(port, '127.0.0.1', () => {
-        settle();
-      });
-    });
+    await once(held.listen(port, '127.0.0.1'), 'listening');
     const askedAt = Date.now();
     const holder = await listeningPid(port);
     const took = Date.now() - askedAt;
@@ -36105,9 +36082,7 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
     const made = createServer((socket) => {
       socket.destroy();
     });
-    await new Promise<void>((settle) => {
-      made.listen(on, '127.0.0.1', settle);
-    });
+    await once(made.listen(on, '127.0.0.1'), 'listening');
     return made;
   };
   const listeners: Server[] = [await listener(lspPort)];
@@ -38742,9 +38717,9 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
     return { ran, starts, waits };
   };
   const answered = run(0, printed('Godot Engine v4.7.2.stable.official'));
-  const once = await sequence([run(0xc06d007f), answered]);
+  const crashedOnce = await sequence([run(0xc06d007f), answered]);
   assert.deepEqual(
-    [once.starts, once.waits, once.ran.exitCode, once.ran.crashedStarts],
+    [crashedOnce.starts, crashedOnce.waits, crashedOnce.ran.exitCode, crashedOnce.ran.crashedStarts],
     [2, [500], 0, 1],
     'a start crash is started again, and the run says how many crashed',
   );
@@ -47405,11 +47380,11 @@ async function testAPlayedGamesConsoleKeepsItsOrder(): Promise<void> {
           at('WARNING: a warning between two prints') < at('played game still going'),
         `the warning is between the prints it was raised between: ${JSON.stringify(lines)}`,
       );
-      for (const once of ['played game up', 'played game still going', CONSOLE_BOUNDARY]) {
+      for (const opening of ['played game up', 'played game still going', CONSOLE_BOUNDARY]) {
         assert.equal(
-          lines.filter((line) => line.startsWith(once)).length,
+          lines.filter((line) => line.startsWith(opening)).length,
           1,
-          `"${once}" is written once, from one stream: ${JSON.stringify(lines)}`,
+          `"${opening}" is written once, from one stream: ${JSON.stringify(lines)}`,
         );
       }
       assert.ok(
@@ -70765,7 +70740,7 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
   const hold = async (port: number, host: string): Promise<void> => {
     const holder = createServer();
     holders.push(holder);
-    await heardOnce(holder.listen(port, host), 'listening');
+    await once(holder.listen(port, host), 'listening');
   };
   try {
     // The proof binds the number itself: a holder on 1111 is passed over even when no dial sees it.
@@ -79267,7 +79242,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
     const silent = createServer((socket) => {
       held.add(socket);
     });
-    await new Promise<void>((ready) => silent.listen(lspPort, '127.0.0.1', ready));
+    await once(silent.listen(lspPort, '127.0.0.1'), 'listening');
     try {
       const busy = await said({ symbol: 'say', newName: 'utter' });
       assert.match(
@@ -80229,17 +80204,17 @@ async function testAReconnectKeepsBindsAndFlagsWithNoEditor(): Promise<void> {
           methodName,
           ...more,
         });
-      const once = await rewire('visibility_changed', 'take', { flags: 4 });
+      const rewired = await rewire('visibility_changed', 'take', { flags: 4 });
       assert.deepEqual(
         [
-          get(once, 'alreadyConnected'),
-          get(once, 'flagsBefore'),
-          get(once, 'binds'),
-          get(once, 'bindsBefore'),
-          get(once, 'argumentsFit'),
+          get(rewired, 'alreadyConnected'),
+          get(rewired, 'flagsBefore'),
+          get(rewired, 'binds'),
+          get(rewired, 'bindsBefore'),
+          get(rewired, 'argumentsFit'),
         ],
         [true, ['persist'], [5], undefined, true],
-        `a reconnect keeps the binds: ${JSON.stringify(once)}`,
+        `a reconnect keeps the binds: ${JSON.stringify(rewired)}`,
       );
       assert.equal(
         lineOf('visibility_changed', 'take'),

@@ -5,6 +5,7 @@
  * Godot on each side so that what is asserted is the relay and not the engine.
  */
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { accessSync, constants, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -89,6 +90,8 @@ interface MockRuntimeOptions {
   silent?: boolean;
   /** The runtime addon it says it loaded, by default this server's. */
   addon?: { version: string; digest: string };
+  /** Where the mock gets each number it tries, by default the reserved ones. */
+  offer?: () => Promise<number>;
 }
 
 interface MockRuntime {
@@ -228,43 +231,44 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
   });
 
   return new Promise<MockRuntime>((resolve, reject) => {
-    runtime.once('error', reject);
-    void listenOnAReservedPort(runtime).then(() => {
-      const address = runtime.address();
-      if (!address || typeof address === 'string') {
-        reject(new Error('the mock runtime has no port'));
-        return;
-      }
-      const announcement = join(directory, `runtime-${options.pid}.json`);
-      const addon = options.addon ?? { version: SERVER_VERSION, digest: shippedRuntimeDigest() };
-      writeFileSync(
-        announcement,
-        JSON.stringify({
-          protocol: RUNTIME_PROTOCOL,
-          pid: options.pid,
-          port: address.port,
-          address: '127.0.0.1',
-          project: { name: options.name, path: options.projectPath },
-          addon_version: addon.version,
-          addon_digest: addon.digest,
-        }),
-      );
-      resolve({
-        port: address.port,
-        announcement,
-        close: () =>
-          new Promise<void>((done, fail) => {
-            rmSync(announcement, { force: true });
-            for (const socket of open) {
-              socket.destroy();
-            }
-            runtime.close((error) => {
-              if (error) fail(error);
-              else done();
-            });
+    listenOnAReservedPort(runtime, '127.0.0.1', options.offer)
+      .then(() => {
+        const address = runtime.address();
+        if (!address || typeof address === 'string') {
+          reject(new Error('the mock runtime has no port'));
+          return;
+        }
+        const announcement = join(directory, `runtime-${options.pid}.json`);
+        const addon = options.addon ?? { version: SERVER_VERSION, digest: shippedRuntimeDigest() };
+        writeFileSync(
+          announcement,
+          JSON.stringify({
+            protocol: RUNTIME_PROTOCOL,
+            pid: options.pid,
+            port: address.port,
+            address: '127.0.0.1',
+            project: { name: options.name, path: options.projectPath },
+            addon_version: addon.version,
+            addon_digest: addon.digest,
           }),
-      });
-    }, reject);
+        );
+        resolve({
+          port: address.port,
+          announcement,
+          close: () =>
+            new Promise<void>((done, fail) => {
+              rmSync(announcement, { force: true });
+              for (const socket of open) {
+                socket.destroy();
+              }
+              runtime.close((error) => {
+                if (error) fail(error);
+                else done();
+              });
+            }),
+        });
+      })
+      .catch(reject);
   });
 }
 
@@ -339,6 +343,52 @@ async function main(): Promise<void> {
   };
 
   try {
+    // A mock runtime offered a number that something holds takes the next one, and one offered only
+    // numbers already handed out says so instead of never starting.
+    const takenPort = 1113;
+    const takenBy = createServer();
+    await once(takenBy.listen(takenPort, '127.0.0.1'), 'listening');
+    const offerDir = mkdtempSync(join(tmpdir(), 'gdharness-offer-'));
+    const offered = { pid: process.pid, projectPath, name: 'offered' };
+    try {
+      const numbers = [takenPort, takenPort + 1];
+      const moved = await startMockRuntime(offerDir, {
+        ...offered,
+        offer: () => Promise.resolve(numbers.shift() ?? 0),
+      });
+      try {
+        assert.equal(moved.port, takenPort + 1, 'a held number is passed over for the next one offered');
+      } finally {
+        await moved.close();
+      }
+      let timer: NodeJS.Timeout | undefined;
+      const outOfTime = new Promise<string>((settle) => {
+        timer = setTimeout(() => {
+          settle('unsettled');
+        }, 5000);
+      });
+      const refused = startMockRuntime(offerDir, {
+        ...offered,
+        offer: () => Promise.resolve(takenPort),
+      }).then(
+        async (started) => {
+          await started.close();
+          return 'started';
+        },
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      const outcome = await Promise.race([refused, outOfTime]);
+      clearTimeout(timer);
+      assert.match(outcome, /already offered/, `a number offered twice is refused: ${outcome}`);
+    } finally {
+      rmSync(offerDir, { recursive: true, force: true });
+      await new Promise<void>((done) => {
+        takenBy.close(() => {
+          done();
+        });
+      });
+    }
+
     // The protocol handshake.
     const init = await server.initialize('bridge-test');
     assert.equal(serverIdentity(init)['name'], 'gdharness', 'the opening names the server');
@@ -909,7 +959,7 @@ async function main(): Promise<void> {
     const dropping = createServer((socket: Socket) => {
       socket.destroy();
     });
-    await new Promise<void>((ready) => dropping.listen(lspPort, '127.0.0.1', ready));
+    await once(dropping.listen(lspPort, '127.0.0.1'), 'listening');
     const godot = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/godot`);
     try {
       // The three ports with it. Godot keeps one language server, one debug adapter and one
