@@ -584,6 +584,110 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 ## generated path copied whole, and a panel that rebuilt itself between them freed the button, so
 ## the click landed on nothing.
 func click(params: Dictionary) -> Dictionary:
+	var target: Dictionary = _click_target(params)
+	if target.has("message"):
+		return target
+	var node_path: String = target["path"]
+	var wanted: String = str(params.get("says", ""))
+	var found: Variant = target["found"]
+	var item: Variant = target["item"]
+
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
+	var named_point: Variant = GdhMouse.point_in(params, node, node_path, item != null)
+	if named_point is String:
+		return { "type": "error", "message": named_point }
+	if node is Node3D:
+		var spatial: Node3D = node
+		return await _click_in_the_world(node_path, spatial, params)
+	var refused: String = _click_refusal(node, node_path)
+	if not refused.is_empty():
+		return { "type": "error", "message": refused }
+	var control: Control = node
+
+	var aiming: Dictionary = await _click_aim(control, node_path, named_point, item, found, wanted)
+	if aiming.has("message"):
+		return aiming
+	var aim: Vector2 = aiming["aim"]
+
+	# In the control's own viewport first, which is the space its scrolling happens in.
+	var own: Viewport = control.get_viewport()
+	var item_scrolled: bool = aiming["scrolled"]
+	var at_centre: bool = aiming["at_centre"]
+	var scrolling: Dictionary = await _click_scrolled(control, node_path, aim, item_scrolled)
+	if scrolling.has("message"):
+		return scrolling
+	var scrolled: bool = scrolling["scrolled"]
+	var local: Vector2 = scrolling["local"]
+
+	# A control taller or wider than what shows it has its centre out of sight at every scroll, and
+	# a player clicks the part they can see. Refused, it was called a control nothing could click.
+	var on_part: bool = false
+	var middle: Variant = _middle_of_shown_part(control, own, local, at_centre)
+	if middle != null:
+		local = middle
+		on_part = true
+
+	var reached: Dictionary = GdhScreen.reach(own, local)
+	var viewport: Viewport = reached["viewport"]
+	var centre: Vector2 = reached["point"]
+	var position: Vector2 = viewport.get_final_transform() * centre
+	# The GUI only delivers to what is inside the viewport, so a centre outside it would be a click
+	# that silently reached nothing: outside the viewport it is drawn in, outside the one that shows
+	# that on the screen, or clipped away by a ScrollContainer that would not scroll it into view.
+	# Each is said of the viewport or container at fault, with its own rect and the point in it.
+	var aimed: String = (
+		"its centre" if named_point == null else "the point %s clicked" % [named_point]
+	)
+	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled, aimed)
+	if not out_there.is_empty():
+		return { "type": "error", "message": out_there }
+	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
+	if button < 0:
+		return GdhMouse.no_such_button(params.get("button"))
+	var double: bool = GdhRead.as_bool(params.get("double", false))
+
+	var arrival: Dictionary = _click_arrival(control, node_path, viewport, position, centre)
+	var gui: Viewport = control.get_viewport()
+	var focus_before: String = _focus_of(gui)
+	var watch: GdhClickWatch = GdhClickWatch.new(control)
+	var press: InputEventMouseButton = await _click_button(viewport, position, button, double)
+	# The release is what a button acts on, and a queue_free it causes lands at the end of
+	# this frame. The frame passes so the answer describes the control as the click left it.
+	await _host.get_tree().process_frame
+	watch.stop()
+
+	# What became of the control: still in the tree, taken out of it, or freed. A button that
+	# opened another screen is the second or the third, and the caller wants to hear that
+	# rather than guess it from a tree that has changed shape.
+	var afterwards: String = GdhValues.afterwards(control)
+
+	var answer: Dictionary = {
+		"type": "clicked",
+		"path": node_path,
+		"position": _values.serialize(position),
+		"button": button,
+		"double": double,
+		"hovered": arrival["hovered_path"],
+		"landed": arrival["landed"],
+		"actions": GdhValues.actions_of(press),
+		"control_afterwards": afterwards,
+		"scrolled_into_view": scrolled,
+	}
+	var why_not_landed: String = arrival["why_not_landed"]
+	_click_noted(answer, on_part, why_not_landed, found)
+	watch.describe(answer)
+	if not watch.links.is_empty():
+		answer["link_meta"] = _values.serialize(watch.links.back())
+	var supplied: bool = arrival["supplied"]
+	return _pointer_noted(_hover_noted(_focus_moved(answer, gui, focus_before), supplied))
+
+
+## Who a click is for: `{"path", "found", "item"}`, with the control `says` names found by its
+## words when that is given, or the refusal when there is none or the path is missing.
+func _click_target(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var wanted: String = str(params.get("says", ""))
 	var found: Variant = null
@@ -605,27 +709,27 @@ func click(params: Dictionary) -> Dictionary:
 			"type": "error",
 			"message": "click needs a path, or says to find the control by its words",
 		}
+	return { "path": node_path, "found": found, "item": item }
 
-	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
-	if standing.has("message"):
-		return standing
-	var node: Node = standing["node"]
-	var named_point: Variant = GdhMouse.point_in(params, node, node_path, item != null)
-	if named_point is String:
-		return { "type": "error", "message": named_point }
-	if node is Node3D:
-		var spatial: Node3D = node
-		return await _click_in_the_world(node_path, spatial, params)
+
+## Why [param node] cannot be clicked as a Control, or "" when it can.
+func _click_refusal(node: Node, node_path: String) -> String:
 	if not node is Control:
-		return {
-			"type": "error",
-			"message": "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()],
-		}
+		return "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()]
 	var control: Control = node
-	var unmoved: String = GdhMouse.takes_no_click(control, node_path, _host.get_tree().paused)
-	if not unmoved.is_empty():
-		return { "type": "error", "message": unmoved }
+	return GdhMouse.takes_no_click(control, node_path, _host.get_tree().paused)
 
+
+## Where in [param control] a click goes: `{"aim", "at_centre", "scrolled"}`, or the refusal
+## from placing an item of a list. `scrolled` is whether placing the item scrolled the list.
+func _click_aim(
+	control: Control,
+	node_path: String,
+	named_point: Variant,
+	item: Variant,
+	found: Variant,
+	wanted: String
+) -> Dictionary:
 	# Words that are part of a rich label are pressed where they are drawn, since its middle can be
 	# on other words, a link among them. Said either way, so a press on the middle is never read as
 	# one on the words.
@@ -656,8 +760,15 @@ func click(params: Dictionary) -> Dictionary:
 		elif placed.has("unplaced"):
 			found_here["pressedOn"] = "the middle of the label"
 			found_here["note"] = "%s, so the press went to the label's middle" % placed["unplaced"]
+	return { "aim": aim, "at_centre": at_centre, "scrolled": item_scrolled }
 
-	# In the control's own viewport first, which is the space its scrolling happens in.
+
+## Brings [param control] into sight when it is not, and answers `{"scrolled", "local"}`: whether
+## anything scrolled, and [param aim] in the control's own viewport. The refusal when the control
+## left the tree while it scrolled.
+func _click_scrolled(
+	control: Control, node_path: String, aim: Vector2, item_scrolled: bool
+) -> Dictionary:
 	var own: Viewport = control.get_viewport()
 	var local: Vector2 = control.get_global_transform_with_canvas() * aim
 
@@ -684,40 +795,34 @@ func click(params: Dictionary) -> Dictionary:
 				),
 			}
 		local = control.get_global_transform_with_canvas() * aim
+	return { "scrolled": scrolled, "local": local }
 
-	# A control taller or wider than what shows it has its centre out of sight at every scroll, and
-	# a player clicks the part they can see. Refused, it was called a control nothing could click.
-	var on_part: bool = false
-	if at_centre and not GdhScreen.in_sight(control, own, local):
-		var part: Variant = GdhScreen.shown_part(control)
-		if part is Rect2:
-			var seen: Rect2 = part
-			var middle: Vector2 = seen.get_center()
-			# The box of a turned control is wider than the control, so its middle may be off it.
-			var back: Vector2 = control.get_global_transform_with_canvas().affine_inverse() * middle
-			if seen.has_area() and Rect2(Vector2.ZERO, control.size).has_point(back):
-				local = middle
-				on_part = true
 
-	var reached: Dictionary = GdhScreen.reach(own, local)
-	var viewport: Viewport = reached["viewport"]
-	var centre: Vector2 = reached["point"]
-	var position: Vector2 = viewport.get_final_transform() * centre
-	# The GUI only delivers to what is inside the viewport, so a centre outside it would be a click
-	# that silently reached nothing: outside the viewport it is drawn in, outside the one that shows
-	# that on the screen, or clipped away by a ScrollContainer that would not scroll it into view.
-	# Each is said of the viewport or container at fault, with its own rect and the point in it.
-	var aimed: String = (
-		"its centre" if named_point == null else "the point %s clicked" % [named_point]
-	)
-	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled, aimed)
-	if not out_there.is_empty():
-		return { "type": "error", "message": out_there }
-	var button: int = GdhMouse.button_of(params.get("button", MOUSE_BUTTON_LEFT))
-	if button < 0:
-		return GdhMouse.no_such_button(params.get("button"))
-	var double: bool = GdhRead.as_bool(params.get("double", false))
+## The middle of the part of [param control] on screen, in the viewport [param own], when the click
+## is at its centre, the centre is out of sight at [param local] and that middle lies on the
+## control. Null otherwise.
+func _middle_of_shown_part(
+	control: Control, own: Viewport, local: Vector2, at_centre: bool
+) -> Variant:
+	if not at_centre or GdhScreen.in_sight(control, own, local):
+		return null
+	var part: Variant = GdhScreen.shown_part(control)
+	if not part is Rect2:
+		return null
+	var seen: Rect2 = part
+	var middle: Vector2 = seen.get_center()
+	# The box of a turned control is wider than the control, so its middle may be off it.
+	var back: Vector2 = control.get_global_transform_with_canvas().affine_inverse() * middle
+	if seen.has_area() and Rect2(Vector2.ZERO, control.size).has_point(back):
+		return middle
+	return null
 
+
+## Moves the pointer onto [param centre] in [param viewport] and reads what it landed on:
+## `{"supplied", "hovered_path", "landed", "why_not_landed"}`.
+func _click_arrival(
+	control: Control, node_path: String, viewport: Viewport, position: Vector2, centre: Vector2
+) -> Dictionary:
 	# Pushed into the viewport rather than through Input: Input accumulates events and flushes
 	# them at the next frame, so the hovered control read below would be the one from before
 	# the pointer moved. The viewport delivers it to the GUI the same way a real one arrives.
@@ -754,56 +859,22 @@ func click(params: Dictionary) -> Dictionary:
 		var cover: Node = GdhTargets.drawn_over(control)
 		if cover != null:
 			why_not_landed = "%s is drawn over it at the point clicked" % cover.get_path()
-
-	# The link a rich label says was pressed, which is its own word for what the press reached.
-	var links: Array = []
-	var heard: Callable = func(meta: Variant) -> void: links.append(meta)
-	# Read before the press, which may free the label.
-	var on_rich_text: bool = rich != null
-	if on_rich_text:
-		var _listening: int = rich.meta_clicked.connect(heard)
-	# A toggle's state either side of the press, since landing says nothing of it: a game clock's
-	# switch clicked three times answered clicked each time, and a wait for the clock to move then
-	# ran out on a clock left stopped. A click the game undid reads the same before and after.
-	var toggle: BaseButton = control as BaseButton
-	var was_pressed: Variant = null
-	if toggle != null and toggle.toggle_mode:
-		was_pressed = toggle.button_pressed
-	# Whether the button's own pressed signal came, which landing does not say either: a click that
-	# landed on Options answered nothing of whether the game heard it, and the panel it opened had
-	# closed again by the next read.
-	var fired: Array[bool] = [false]
-	var heard_press: Callable = func() -> void: fired[0] = true
-	if toggle != null:
-		var _hearing: int = toggle.pressed.connect(heard_press)
-	var gui: Viewport = control.get_viewport()
-	var focus_before: String = _focus_of(gui)
-	var press: InputEventMouseButton = await _click_button(viewport, position, button, double)
-	# The release is what a button acts on, and a queue_free it causes lands at the end of
-	# this frame. The frame passes so the answer describes the control as the click left it.
-	await _host.get_tree().process_frame
-	if rich != null and is_instance_valid(rich) and rich.meta_clicked.is_connected(heard):
-		rich.meta_clicked.disconnect(heard)
-	if toggle != null and is_instance_valid(toggle) and toggle.pressed.is_connected(heard_press):
-		toggle.pressed.disconnect(heard_press)
-
-	# What became of the control: still in the tree, taken out of it, or freed. A button that
-	# opened another screen is the second or the third, and the caller wants to hear that
-	# rather than guess it from a tree that has changed shape.
-	var afterwards: String = GdhValues.afterwards(control)
-
-	var answer: Dictionary = {
-		"type": "clicked",
-		"path": node_path,
-		"position": _values.serialize(position),
-		"button": button,
-		"double": double,
-		"hovered": hovered_path,
+	return {
+		"supplied": supplied,
+		"hovered_path": hovered_path,
 		"landed": landed,
-		"actions": GdhValues.actions_of(press),
-		"control_afterwards": afterwards,
-		"scrolled_into_view": scrolled,
+		"why_not_landed": why_not_landed,
 	}
+
+
+## Adds to a click's [param answer] the keys that only some clicks carry: where the press went when
+## it was not the centre, why it missed, and the words [param found] that named the control.
+func _click_noted(
+	answer: Dictionary,
+	on_part: bool,
+	why_not_landed: String,
+	found: Variant,
+) -> void:
 	if on_part:
 		answer["pressed_on"] = (
 			"the middle of the part on screen, since no scroll brings its centre into view"
@@ -812,20 +883,6 @@ func click(params: Dictionary) -> Dictionary:
 		answer["why_not_landed"] = why_not_landed
 	if found != null:
 		answer["found"] = found
-	if was_pressed != null:
-		var now_pressed: Variant = null
-		if is_instance_valid(toggle):
-			now_pressed = toggle.button_pressed
-		answer["pressed"] = { "before": was_pressed, "after": now_pressed }
-	if toggle != null:
-		answer["pressed_signal"] = fired[0]
-	# Whether a link was pressed apart from what it carries: a bare [url] reports an empty meta,
-	# and given as the meta alone that press read exactly like one that reached no link.
-	if on_rich_text:
-		answer["link_pressed"] = not links.is_empty()
-		if not links.is_empty():
-			answer["link_meta"] = _values.serialize(links.back())
-	return _pointer_noted(_hover_noted(_focus_moved(answer, gui, focus_before), supplied))
 
 
 ## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach
@@ -1059,3 +1116,70 @@ func _motion(position: Vector2, relative: Vector2, held: int = -1) -> InputEvent
 	event.screen_velocity = event.velocity
 	event.button_mask = Input.get_mouse_button_mask() if held < 0 else held
 	return event
+
+
+## What a click on one control heard: a link of a rich label, a toggle's state either side of the
+## press and its own pressed signal. It listens from construction until [method stop].
+class GdhClickWatch:
+	extends RefCounted
+
+	## The metas of the links pressed.
+	var links: Array = []
+	var _rich: RichTextLabel
+	var _toggle: BaseButton
+	var _was_pressed: Variant = null
+	var _fired: bool = false
+	# Read before the press, which may free the label.
+	var _on_rich_text: bool = false
+
+	func _init(control: Control) -> void:
+		# The link a rich label says was pressed, which is its own word for what the press reached.
+		_rich = control as RichTextLabel
+		_on_rich_text = _rich != null
+		if _on_rich_text:
+			var _listening: int = _rich.meta_clicked.connect(_heard_link)
+		# A toggle's state either side of the press, since landing says nothing of it: a game
+		# clock's switch clicked three times answered clicked each time, and a wait for the clock to
+		# move then ran out on a clock left stopped. A click the game undid reads the same before
+		# and after.
+		_toggle = control as BaseButton
+		if _toggle != null and _toggle.toggle_mode:
+			_was_pressed = _toggle.button_pressed
+		# Whether the button's own pressed signal came, which landing does not say either: a click
+		# that landed on Options answered nothing of whether the game heard it, and the panel it
+		# opened had closed again by the next read.
+		if _toggle != null:
+			var _hearing: int = _toggle.pressed.connect(_heard_press)
+
+	func _heard_link(meta: Variant) -> void:
+		links.append(meta)
+
+	func _heard_press() -> void:
+		_fired = true
+
+	## Stops listening, on whichever of the two is still there to be disconnected from.
+	func stop() -> void:
+		if (_rich != null
+				and is_instance_valid(_rich)
+				and _rich.meta_clicked.is_connected(_heard_link)):
+			_rich.meta_clicked.disconnect(_heard_link)
+		if (
+			_toggle != null
+			and is_instance_valid(_toggle)
+			and _toggle.pressed.is_connected(_heard_press)
+		):
+			_toggle.pressed.disconnect(_heard_press)
+
+	## Adds what was heard to a click's [param answer], in the keys it answers under.
+	func describe(answer: Dictionary) -> void:
+		if _was_pressed != null:
+			var now_pressed: Variant = null
+			if is_instance_valid(_toggle):
+				now_pressed = _toggle.button_pressed
+			answer["pressed"] = { "before": _was_pressed, "after": now_pressed }
+		if _toggle != null:
+			answer["pressed_signal"] = _fired
+		# Whether a link was pressed apart from what it carries: a bare [url] reports an empty meta,
+		# and given as the meta alone that press read exactly like one that reached no link.
+		if _on_rich_text:
+			answer["link_pressed"] = not links.is_empty()
