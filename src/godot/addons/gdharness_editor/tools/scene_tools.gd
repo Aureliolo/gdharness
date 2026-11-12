@@ -14,11 +14,14 @@ const GdhPlacing = preload("scene_placing.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhShownScene = preload("../shown_scene.gd")
 const GdhSceneSharing = preload("scene_sharing.gd")
 const GdhScriptPaths = preload("script_paths.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 const GdhTilesetTools = preload("tileset_tools.gd")
 const GdhUnset = preload("../unset_values.gd")
+## What the editor says it is doing while a save holds a scene in front.
+const SAVING: String = "saving a scene"
 
 var _editor_plugin: EditorPlugin = null
 var _values: GdhSerialisation = GdhSerialisation.new()
@@ -2157,15 +2160,12 @@ func save_scene(args: Dictionary) -> Dictionary:
 		if not unsaved.is_empty():
 			return { "ok": false, "error": unsaved }
 
-	var open_root: Node = null
-	var open_roots: Array[Node] = []
-	if Engine.is_editor_hint():
-		open_roots = EditorInterface.get_open_scene_roots()
-	for open: Node in open_roots:
-		if open.scene_file_path == scene_path:
-			open_root = open
-	if open_root != null and target_path == scene_path:
-		return _save_open_scene(scene_path)
+	var open_root: Node = _open_root(scene_path)
+	if target_path == scene_path and (open_root != null or _asked_of_the_editor(args)):
+		var unloaded: Dictionary = {} if open_root != null else GdhShownScene.loads(scene_path)
+		if not unloaded.is_empty():
+			return unloaded
+		return await _save_open_scene(scene_path)
 
 	# Of the editor's scene when it is open, since that is what a save means, and of the file as it
 	# loads otherwise. The editor's scene is packed where it is, as the editor's own save packs it.
@@ -2197,32 +2197,48 @@ func save_scene(args: Dictionary) -> Dictionary:
 	}
 
 
+## The root of [param scene_path] in the editor's tab for it, or null when no tab holds it.
+static func _open_root(scene_path: String) -> Node:
+	if not Engine.is_editor_hint():
+		return null
+	for open: Node in EditorInterface.get_open_scene_roots():
+		if open.scene_file_path == scene_path:
+			return open
+	return null
+
+
+## Whether [param args] ask for the editor's copy of a scene, which only an editor has.
+static func _asked_of_the_editor(args: Dictionary) -> bool:
+	return Engine.is_editor_hint() and str(args.get("from", "")) == "editor"
+
+
 ## Saves the editor's own copy of [param scene_path] through the editor, which is what its Save
-## does. Loading the file and writing it back, as this did, saved the disk version, and the reload
-## after it discarded every unsaved change in the editor.
+## does. Loading the file and writing it back saved the disk version, and the reload after it
+## discarded every unsaved change in the editor. A closed scene is opened for the save and closed
+## after it. Each step gets its frames.
 func _save_open_scene(scene_path: String) -> Dictionary:
-	var current: Node = EditorInterface.get_edited_scene_root()
-	var previous: String = current.scene_file_path if current != null else ""
-	if previous != scene_path:
-		EditorInterface.open_scene_from_path(scene_path)
-	var now: Node = EditorInterface.get_edited_scene_root()
-	if now == null or now.scene_file_path != scene_path:
-		return { "ok": false, "error": "The editor did not switch to %s to save it." % scene_path }
+	var was_open: bool = EditorInterface.get_open_scenes().has(scene_path)
+	var refusal: String = await GdhShownScene.show(scene_path, SAVING)
+	if not refusal.is_empty():
+		return { "ok": false, "error": refusal }
 	var saving: Error = EditorInterface.save_scene()
-	if not previous.is_empty() and previous != scene_path:
-		EditorInterface.open_scene_from_path(previous)
+	var unsaved: bool = GdhSceneFile.unsaved(scene_path)
+	var left: bool = await GdhShownScene.leave()
 	if saving != OK:
 		return {
 			"ok": false,
 			"error": "The editor failed to save %s: %s" % [scene_path, error_string(saving)],
 		}
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"scenePath": scene_path,
 		"savedPath": scene_path,
 		"from": "editor",
-		"unsavedInEditor": GdhSceneFile.unsaved(scene_path),
+		"unsavedInEditor": unsaved,
 	}
+	if not was_open:
+		answer["openedFirst" if left else "stillOpen"] = true
+	return answer
 
 
 ## A node of a branch being saved as its own scene, held by a property outside it, by its path from

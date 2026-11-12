@@ -8,15 +8,10 @@ extends Node
 const GdhRead = preload("../reading.gd")
 const GdhFileWalk = preload("../file_walk.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhShownScene = preload("../shown_scene.gd")
 const GdhPictures = preload("../picture_saves.gd")
 const HEADLESS_DISPLAY: String = "headless"
-## Frames let pass once the scene is shown: the first lays the screen out, and the next run the
-## redraws its @tool scripts queued as they entered the tree.
-const SETTLING_FRAMES: int = 3
 
-## Whether a capture is under way, during which the editor turns other calls away, since one that
-## switched scenes between the open and the read would be what was captured.
-var capturing: bool = false
 var _editor_plugin: EditorPlugin = null
 ## The main screen the editor shows, as it last said, or "" before it has said.
 var _screen: String = ""
@@ -43,22 +38,21 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 	if not unavailable.is_empty():
 		return unavailable
 	var view: String = str(args.get("view", ""))
-	var shown: Node = EditorInterface.get_edited_scene_root()
-	var previous: String = shown.scene_file_path if shown != null else ""
-	var was_open: bool = EditorInterface.get_open_scenes().has(scene_path)
 	var screen_before: String = _screen
 
-	capturing = true
-	EditorInterface.open_scene_from_path(scene_path)
-	var root: Node = EditorInterface.get_edited_scene_root()
-	if root == null or root.scene_file_path != scene_path:
-		capturing = false
-		return { "ok": false, "error": "The editor did not open %s." % scene_path }
+	var refusal: String = await GdhShownScene.show(scene_path, "capturing its view")
+	if not refusal.is_empty():
+		return { "ok": false, "error": refusal }
 	if view.is_empty():
-		view = "3d" if root is Node3D else "2d"
-	EditorInterface.set_main_screen_editor("3D" if view == "3d" else "2D")
-	for frame: int in SETTLING_FRAMES:
-		await get_tree().process_frame
+		view = "3d" if EditorInterface.get_edited_scene_root() is Node3D else "2d"
+	await _switch_view(view)
+	if not GdhShownScene.in_front(scene_path):
+		var kept_open: String = "" if await GdhShownScene.leave() else " It still holds it open."
+		_restore_screen(screen_before, view)
+		return {
+			"ok": false,
+			"error": "The editor did not keep %s in front.%s" % [scene_path, kept_open],
+		}
 	var viewport: SubViewport = (
 		EditorInterface.get_editor_viewport_3d(0)
 		if view == "3d"
@@ -67,10 +61,18 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 	var image: Image = viewport.get_texture().get_image()
 	var unsaved: bool = GdhSceneFile.unsaved(scene_path)
 
-	_restore_editor(scene_path, was_open, previous, screen_before, view)
-	capturing = false
+	var left: bool = await GdhShownScene.leave()
+	_restore_screen(screen_before, view)
+	if not left:
+		push_warning("gdharness: %s is still open after its capture" % scene_path)
 
 	return _save_capture(image, args, output_path, [scene_path, view], unsaved)
+
+
+## Sets the editor's main screen for [param view] and lets the screen draw.
+static func _switch_view(view: String) -> void:
+	EditorInterface.set_main_screen_editor("3D" if view == "3d" else "2D")
+	await GdhShownScene.settled()
 
 
 ## The refusal when no capture of [param scene_path] can be saved at [param output_path], or an
@@ -96,20 +98,8 @@ static func _capture_unavailable(output_path: String, scene_path: String) -> Dic
 	return {}
 
 
-## Leaves the editor as the capture of [param scene_path] found it: the scene closed unless it was
-## [param was_open], [param previous] shown again, and the screen [param screen_before] back, unless
-## it is the one [param view] needs.
-static func _restore_editor(
-	scene_path: String, was_open: bool, previous: String, screen_before: String, view: String
-) -> void:
-	if not was_open:
-		var closing: Error = EditorInterface.close_scene()
-		if closing != OK:
-			push_warning(
-				"gdharness: closing %s after its capture: %s" % [scene_path, error_string(closing)]
-			)
-	if not previous.is_empty() and previous != scene_path:
-		EditorInterface.open_scene_from_path(previous)
+## Puts the screen [param screen_before] back, unless it is the one [param view] needs.
+static func _restore_screen(screen_before: String, view: String) -> void:
 	if not screen_before.is_empty() and screen_before != ("3D" if view == "3d" else "2D"):
 		EditorInterface.set_main_screen_editor(screen_before)
 

@@ -5,6 +5,7 @@ extends Node
 ## instead of leaving a command silently unanswered.
 
 const GdhSceneFile = preload("scene_file.gd")
+const GdhShownScene = preload("shown_scene.gd")
 const GdhSceneTools = preload("tools/scene_tools.gd")
 const GdhSignalTools = preload("tools/signal_tools.gd")
 const GdhResourceTools = preload("tools/resource_tools.gd")
@@ -175,9 +176,9 @@ func _init_tools() -> void:
 	}
 
 
-## Whether a capture is waiting for the editor to draw, which another call must not move it from.
-func capturing() -> bool:
-	return _view_tools != null and _view_tools.capturing
+## What the editor holds a scene in front for, or "".
+func showing() -> String:
+	return GdhShownScene.doing()
 
 
 func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
@@ -193,7 +194,7 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 
 	GdhSceneFile.also_saved.clear()
 	GdhSceneFile.unmade_note = ""
-	# Awaited for the tools that wait for the editor to draw. The rest answer at once.
+	# Awaited for the tools that give the editor frames.
 	var result: Variant = await node.call(method, args)
 	if result is Dictionary:
 		var answered: Dictionary = result

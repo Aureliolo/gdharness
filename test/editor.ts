@@ -377,9 +377,23 @@ const HOOKS_GD = [
   'const ANSWER: String = "res://.hook/answer.json"',
   '',
   'var _held: Array[Resource] = []',
+  // What a save recorded of the editor's frames, and what the next save is to do meanwhile.
+  'var _trace: Array[Dictionary] = []',
+  'var _recording: bool = false',
+  'var _card: String = ""',
+  'var _base: String = ""',
+  'var _plan: Dictionary = {}',
+  'var _fired: int = 0',
+  'var _was: bool = false',
+  'var _due: bool = false',
+  'var _polled: Array[String] = []',
+  'var _screen_at: int = -1',
+  'var _gate: Node = null',
+  'var _executor: Node = null',
   '',
   '',
   'func _process(_delta: float) -> void:',
+  '\t_watch()',
   '\tif not FileAccess.file_exists(REQUEST):',
   '\t\treturn',
   '\tvar request: Variant = JSON.parse_string(FileAccess.get_file_as_string(REQUEST))',
@@ -390,7 +404,7 @@ const HOOKS_GD = [
   '\tvar removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(REQUEST))',
   '\tvar answer: Dictionary = {"removed": removed == OK}',
   '\tvar fields: Dictionary = request',
-  '\tanswer.merge(_answer(fields))',
+  '\tanswer.merge(await _answer(fields))',
   '\tanswer["op"] = str(fields.get("op", ""))',
   '\tvar file: FileAccess = FileAccess.open(ANSWER, FileAccess.WRITE)',
   '\tif file != null:',
@@ -540,7 +554,131 @@ const HOOKS_GD = [
   '\t\t\t\tif task != null:',
   '\t\t\t\t\ttask.free()',
   '\t\t\treturn {"inATask": scene_file.call("in_a_task")}',
+  // The addon's save of the editor's copy, called past the server with the frames of the editor
+  // recorded meanwhile. `from` empty leaves the argument out.
+  '\t\t"save_from_editor":',
+  '\t\t\t_begin(path)',
+  '\t\t\tvar given: Dictionary = {"scenePath": path}',
+  '\t\t\tvar source: String = str(fields.get("from", "editor"))',
+  '\t\t\tif not source.is_empty():',
+  '\t\t\t\tgiven["from"] = source',
+  '\t\t\tvar scenes: Node = _tool("SceneTools")',
+  '\t\t\tvar saved: Variant = await scenes.call("save_scene", given)',
+  '\t\t\t_recording = false',
+  '\t\t\tvar after: Array = _gate.call("busy_with")',
+  '\t\t\tvar fired: bool = _fired > 0',
+  '\t\t\t_plan = {}',
+  '\t\t\treturn {',
+  '\t\t\t\t"answer": saved,',
+  '\t\t\t\t"fired": fired,',
+  '\t\t\t\t"polled": _polled,',
+  '\t\t\t\t"away": _gate.call("turned_away", "add_node"),',
+  '\t\t\t\t"busy": after[0],',
+  '\t\t\t\t"showing": _executor.call("showing"),',
+  '\t\t\t}',
+  // What the next save does at the frame after its card first is in front, or after its file
+  // changes, and again each time the card comes back, `times` in all.
+  '\t\t"during":',
+  '\t\t\t_plan = {',
+  '\t\t\t\t"when": str(fields.get("when", "front")),',
+  '\t\t\t\t"act": str(fields.get("act", "open")),',
+  '\t\t\t\t"other": str(fields.get("other", "")),',
+  '\t\t\t\t"times": int(fields.get("times", 1)),',
+  '\t\t\t}',
+  '\t\t\t_fired = 0',
+  '\t\t\treturn {"armed": true}',
+  // Each frame of the last save: the scene in front, whether its file had changed, and what the
+  // addon's gate said.
+  '\t\t"trace":',
+  '\t\t\treturn {"trace": _trace}',
+  // The frames from asking the view tools for a screen to the editor saying it changed, and to the
+  // call returning.
+  '\t\t"view_frames":',
+  '\t\t\tEditorInterface.set_main_screen_editor("2D")',
+  '\t\t\tfor _settle: int in range(5):',
+  '\t\t\t\tawait get_tree().process_frame',
+  '\t\t\tif not main_screen_changed.is_connected(_on_screen):',
+  '\t\t\t\tvar _joined: int = main_screen_changed.connect(_on_screen)',
+  '\t\t\t_screen_at = -1',
+  '\t\t\tvar started: int = Engine.get_process_frames()',
+  '\t\t\tawait _tool("ViewTools").call("_switch_view", "3d")',
+  '\t\t\tvar returned: int = Engine.get_process_frames() - started',
+  '\t\t\tvar changed: int = _screen_at - started if _screen_at >= 0 else -1',
+  '\t\t\tEditorInterface.set_main_screen_editor("2D")',
+  '\t\t\treturn {"changedAfter": changed, "returnedAfter": returned}',
+  // Each AcceptDialog the editor shows, which it hides when asked.
+  '\t\t"dialogs":',
+  '\t\t\tvar shown: Array[String] = []',
+  '\t\t\tfor found: Node in EditorInterface.get_base_control().get_tree().root.find_children("*", "AcceptDialog", true, false):',
+  '\t\t\t\tvar dialog: AcceptDialog = found as AcceptDialog',
+  '\t\t\t\tif dialog != null and dialog.visible:',
+  '\t\t\t\t\tshown.append(dialog.dialog_text)',
+  '\t\t\t\t\tif bool(fields.get("hide", false)):',
+  '\t\t\t\t\t\tdialog.hide()',
+  '\t\t\treturn {"dialogs": shown}',
   '\treturn _report(path)',
+  '',
+  '',
+  'func _on_screen(_screen: String) -> void:',
+  '\t_screen_at = Engine.get_process_frames()',
+  '',
+  '',
+  'func _tool(named: String) -> Node:',
+  '\treturn EditorInterface.get_base_control().get_tree().root.find_child(named, true, false)',
+  '',
+  '',
+  'func _begin(path: String) -> void:',
+  '\t_card = path',
+  '\t_base = FileAccess.get_file_as_string(path)',
+  '\t_trace.clear()',
+  '\t_polled.clear()',
+  '\t_was = false',
+  '\t_due = false',
+  '\t_gate = _tool("GdharnessBridgeClient").get_parent()',
+  '\t_executor = _tool("GdharnessToolExecutor")',
+  '\t_recording = true',
+  '',
+  '',
+  'func _watch() -> void:',
+  '\tif not _recording:',
+  '\t\treturn',
+  '\tvar current: Node = EditorInterface.get_edited_scene_root()',
+  '\tvar front: String = current.scene_file_path if current != null else ""',
+  '\tvar changed: bool = FileAccess.get_file_as_string(_card) != _base',
+  '\tvar busy: Array = _gate.call("busy_with")',
+  '\t_trace.append({"front": front, "changed": changed, "away": _gate.call("turned_away", "add_node"), "busy": busy[0]})',
+  '\tvar now: bool = front == _card and (changed or str(_plan.get("when", "")) == "front")',
+  '\tif _due:',
+  '\t\t_due = false',
+  '\t\t_fired += 1',
+  '\t\t_perform()',
+  '\telif now and not _was and _fired < int(_plan.get("times", 0)):',
+  '\t\t_due = true',
+  '\t_was = now',
+  '',
+  '',
+  'func _perform() -> void:',
+  '\tif str(_plan.get("act", "")) == "poll":',
+  '\t\tvar busy: Array = _gate.call("busy_with")',
+  '\t\t_polled.append(str(busy[0]))',
+  '\t\t_auto_reload().call("_check_for_changes")',
+  '\t\treturn',
+  '\tEditorInterface.open_scene_from_path(str(_plan.get("other", "")))',
+  '\tvar root: Node = EditorInterface.get_edited_scene_root()',
+  '\tif root.get_node_or_null("Stray") == null:',
+  '\t\tvar stray: Node = Node.new()',
+  '\t\tstray.name = "Stray"',
+  '\t\troot.add_child(stray)',
+  '\t\tstray.owner = root',
+  '\t\tEditorInterface.mark_scene_as_unsaved()',
+  '',
+  '',
+  'func _auto_reload() -> Node:',
+  '\tfor found: Node in EditorInterface.get_base_control().get_tree().root.find_children("*", "EditorPlugin", true, false):',
+  '\t\tvar script: Script = found.get_script()',
+  '\t\tif script != null and script.resource_path.ends_with("auto_reload/auto_reload.gd"):',
+  '\t\t\treturn found',
+  '\treturn null',
   '',
   '',
   'func _code_of(path: String) -> CodeEdit:',
@@ -592,12 +730,62 @@ const HOOKS_GD = [
   '',
 ];
 
+/** How many closed cards `shown/` holds, one for each use of a save of a closed scene. */
+const SHOWN_CARDS = 7;
+
+/**
+ * Closed scenes for the save of the editor's copy: cards 400 by 300 whose Panel's @tool script
+ * stores its size at `_ready` and each time it is resized, as a card laying itself out does, and
+ * a scene the cases open over a card.
+ */
+function shownScenes(): Record<string, string[]> {
+  const card = [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://shown/card_frame.gd" id="1_frame"]',
+    '',
+    '[node name="Card" type="VBoxContainer"]',
+    'offset_right = 400.0',
+    'offset_bottom = 300.0',
+    '',
+    '[node name="Panel" type="Panel" parent="."]',
+    'layout_mode = 2',
+    'size_flags_vertical = 3',
+    'script = ExtResource("1_frame")',
+    '',
+  ];
+  const files: Record<string, string[]> = {
+    'shown/card_frame.gd': [
+      '@tool',
+      'extends Panel',
+      '',
+      '@export var shape: PackedVector2Array = PackedVector2Array()',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tvar _joined: int = resized.connect(_lay)',
+      '\t_lay()',
+      '',
+      '',
+      'func _lay() -> void:',
+      '\tshape = PackedVector2Array([Vector2.ZERO, size])',
+      '',
+    ],
+    'shown/other.tscn': ['[gd_scene format=3]', '', '[node name="Other" type="Node2D"]', ''],
+  };
+  for (let number = 1; number <= SHOWN_CARDS; number += 1) {
+    files[`shown/card_${number}.tscn`] = card;
+  }
+  return files;
+}
+
 /**
  * Scenes and resources for the cases on how a scene is written: one inheriting another, one
  * instancing another, one the editor holds, and an animation library kept in a file of its own.
  * Written as text because what is in them is the fixture, and no tool makes an inherited scene.
  */
 const SCENE_FILES: Record<string, string[]> = {
+  ...shownScenes(),
   'layers/base.tscn': [
     '[gd_scene format=3]',
     '',
@@ -5863,6 +6051,269 @@ async function testAutoReloadLeavesAGoneScene({ call, project, printed }: Editor
   }
 }
 
+/** One frame of the editor while a save held a scene, as the hook recorded it. */
+interface SaveFrame {
+  front: string;
+  changed: boolean;
+  away: boolean;
+  busy: string;
+}
+
+/**
+ * A scene the editor does not hold is saved as the editor holds it, with the frames the editor
+ * needs between each step.
+ *
+ * A card's @tool script lays out its Panel as it enters the tree and again each frame it is
+ * resized, so a card saved in the frame of its open stores a shape of `(0, 0, 0, 0)` where three
+ * frames later it stores the size the card has. The hook records the editor's frames meanwhile and,
+ * on request, switches the editor to another scene at the frame a save would rely on the card
+ * being in front, or calls auto_reload's poll there.
+ */
+async function testAShownSceneIsSavedAsTheEditorHoldsIt({ project, printed }: Editor): Promise<void> {
+  const mainScene = 'res://main.tscn';
+  const other = 'res://shown/other.tscn';
+  const shaped = /shape = PackedVector2Array\(0, 0, 400, 300\)/;
+  const card = (number: number): string => `res://shown/card_${number}.tscn`;
+  const cardFile = (number: number): string => fileText(project, `shown/card_${number}.tscn`);
+  const save = async (number: number, from = 'editor'): Promise<unknown> =>
+    await hook(project, { op: 'save_from_editor', path: card(number), from });
+  const during = async (request: Record<string, unknown>): Promise<void> => {
+    await hook(project, { op: 'during', other, ...request });
+  };
+  const tabs = async (): Promise<{ open: unknown[]; unsaved: unknown[]; current: unknown }> => {
+    const held = await hook(project, { op: 'report', path: '' });
+    return {
+      open: asArray(get(held, 'open')),
+      unsaved: asArray(get(held, 'unsaved')),
+      current: get(held, 'current'),
+    };
+  };
+  const frames = async (): Promise<SaveFrame[]> =>
+    asArray(get(await hook(project, { op: 'trace' }), 'trace')).map((frame) => ({
+      front: asString(get(frame, 'front'), 'front'),
+      changed: get(frame, 'changed') === true,
+      away: get(frame, 'away') === true,
+      busy: asString(get(frame, 'busy'), 'busy'),
+    }));
+  // The editor as the next case finds it: the main scene alone in front.
+  const reset = async (): Promise<void> => {
+    await hook(project, { op: 'close_all', path: '' });
+    await hook(project, { op: 'open', path: mainScene });
+  };
+  const answerOf = (saved: unknown): unknown => get(saved, 'answer');
+  const refusalOf = (saved: unknown): string => {
+    assert.equal(get(answerOf(saved), 'ok'), false, `the save should be refused: ${JSON.stringify(saved)}`);
+    return asString(get(answerOf(saved), 'error'), 'error');
+  };
+  const left = async (number: number): Promise<void> => {
+    const held = await tabs();
+    assert.ok(!held.open.includes(card(number)), `card ${number} is in no open tab: ${JSON.stringify(held)}`);
+    assert.equal(held.current, mainScene, `and the main scene is in front: ${JSON.stringify(held)}`);
+  };
+  const gateAfter = (saved: unknown): void => {
+    assert.equal(get(saved, 'away'), false, 'and the gate is open again');
+    assert.equal(get(saved, 'showing'), '', 'with nothing shown');
+  };
+
+  await reset();
+
+  // Left out: without `from` a closed scene is saved through its file, which runs no script.
+  const plain = await save(1, '');
+  assert.equal(
+    get(answerOf(plain), 'from'),
+    'file',
+    `a save without from is of the file: ${JSON.stringify(plain)}`,
+  );
+  assert.doesNotMatch(cardFile(1), shaped, 'and stores no laid out shape');
+
+  // Closed.
+  const closed = await save(1);
+  assert.equal(
+    get(answerOf(closed), 'from'),
+    'editor',
+    `a closed card is saved by the editor: ${JSON.stringify(closed)}`,
+  );
+  assert.equal(get(answerOf(closed), 'openedFirst'), true, 'which opened it first');
+  assert.match(cardFile(1), shaped, 'with the shape it has once laid out');
+  await left(1);
+  const run = await frames();
+  const inFront = run.filter((frame) => frame.front === card(1));
+  const before = inFront.filter((frame) => !frame.changed).length;
+  const after = inFront.filter((frame) => frame.changed).length;
+  assert.ok(
+    before >= 3 && after >= 3,
+    `the card is in front for frames either side of the save: ${before}, ${after}`,
+  );
+  assert.ok(
+    run.every((frame) => frame.away && frame.busy === 'saving a scene'),
+    `and every call is turned away throughout: ${JSON.stringify(run)}`,
+  );
+  gateAfter(closed);
+
+  // Second pass: the tab is the person's, so the save leaves it.
+  await hook(project, { op: 'open', path: card(1) });
+  await hook(project, { op: 'open', path: mainScene });
+  const open = await save(1);
+  assert.equal(
+    get(answerOf(open), 'openedFirst'),
+    undefined,
+    `an open card was not opened first: ${JSON.stringify(open)}`,
+  );
+  assert.equal(get(answerOf(open), 'stillOpen'), undefined, 'nor is it held open');
+  assert.ok((await tabs()).open.includes(card(1)), 'and its tab stays');
+  await reset();
+
+  // Switched over once, at the front: the save waits for the card to be back in front.
+  await during({ when: 'front', times: 1 });
+  const once = await save(2);
+  assert.equal(get(once, 'fired'), true, 'the editor was switched away');
+  assert.equal(
+    get(answerOf(once), 'from'),
+    'editor',
+    `and the save still came from the editor: ${JSON.stringify(once)}`,
+  );
+  assert.match(cardFile(2), shaped, 'of the card laid out');
+  const stray = await tabs();
+  assert.ok(
+    stray.unsaved.includes(other),
+    `the other scene's edit is still unsaved: ${JSON.stringify(stray)}`,
+  );
+  assert.doesNotMatch(fileText(project, 'shown/other.tscn'), /Stray/, 'and not saved with the card');
+  await reset();
+
+  // Switched over every time: the save is refused and the card closed again.
+  const untouched = cardFile(3);
+  await during({ when: 'front', times: 3 });
+  const never = await save(3);
+  assert.match(refusalOf(never), /did not keep res:\/\/shown\/card_3.tscn in front/);
+  assert.equal(cardFile(3), untouched, 'a refused save leaves the file');
+  const refused = await tabs();
+  assert.ok(!refused.open.includes(card(3)), `the card's tab is closed: ${JSON.stringify(refused)}`);
+  assert.ok(refused.open.includes(other), 'the other scene stays open');
+  assert.ok(refused.unsaved.includes(other), 'with its edit unsaved');
+  assert.equal(refused.current, mainScene, 'the main scene is in front');
+  gateAfter(never);
+  await reset();
+
+  // Switched over while the editor leaves.
+  await during({ when: 'changed', times: 1 });
+  const leaving = await save(4);
+  assert.equal(
+    get(answerOf(leaving), 'openedFirst'),
+    true,
+    `the card was closed: ${JSON.stringify(leaving)}`,
+  );
+  assert.match(cardFile(4), shaped, 'after its shape was saved');
+  await left(4);
+  const away = await tabs();
+  assert.ok(
+    away.open.includes(other) && away.unsaved.includes(other),
+    'the other scene is open with its edit',
+  );
+  const leave = await frames();
+  const last = leave.map((frame) => frame.front).lastIndexOf(card(4));
+  let reopened = last;
+  while (reopened > 0 && leave[reopened - 1]?.front === card(4)) {
+    reopened -= 1;
+  }
+  assert.equal(leave[reopened - 1]?.front, other, 'the run is of the card coming back after the switch');
+  assert.ok(
+    last - reopened + 1 >= 3,
+    `the card is in front for frames before it is closed: ${last - reopened + 1}`,
+  );
+  // The editor's own close puts the earlier tab back at once, so what is left to measure is that
+  // the call does not return in the close's frame.
+  const settled = leave.length - 1 - last;
+  assert.ok(settled >= 3, `and the call goes on for frames after the close: ${settled}`);
+  await reset();
+
+  // Kept open: the card is switched away from on every try, so it cannot be closed.
+  await during({ when: 'front', times: 6 });
+  const kept = await save(5);
+  assert.match(refusalOf(kept), /still holds res:\/\/shown\/card_5.tscn open/);
+  assert.ok((await tabs()).open.includes(card(5)), 'and its tab is open');
+  await reset();
+  await during({ when: 'changed', times: 4 });
+  const stuck = await save(6);
+  assert.equal(
+    get(answerOf(stuck), 'stillOpen'),
+    true,
+    `a card that cannot be closed is said to be open: ${JSON.stringify(stuck)}`,
+  );
+  assert.equal(get(answerOf(stuck), 'openedFirst'), undefined, 'and not to have been closed');
+  assert.ok((await tabs()).open.includes(card(6)), 'and its tab is open');
+  await reset();
+
+  // Polled: auto_reload's poll, a frame after the file changes, finds the save holding the card.
+  await during({ when: 'changed', act: 'poll', times: 1 });
+  const polled = await save(7);
+  assert.equal(get(polled, 'fired'), true, 'the poll ran');
+  assert.deepEqual(
+    get(polled, 'polled'),
+    ['saving a scene'],
+    `while the save held the card: ${JSON.stringify(polled)}`,
+  );
+  assert.doesNotMatch(printed(), /reloading: res:\/\/shown\/card_7\.tscn/, 'and reloaded nothing');
+  await reset();
+
+  // Screen: the view tools' switch lets the screen draw before it returns.
+  const screen = await hook(project, { op: 'view_frames' });
+  assert.equal(
+    get(screen, 'changedAfter'),
+    0,
+    `the editor changes screen as it is asked: ${JSON.stringify(screen)}`,
+  );
+  assert.ok(
+    asNumber(get(screen, 'returnedAfter'), 'returnedAfter') >= 3,
+    'and the call returns frames later',
+  );
+
+  // A scene that does not load is refused before the editor is asked, which puts up a dialog.
+  writeFileSync(
+    join(project, 'shown', 'broken.tscn'),
+    ['[gd_scene format=3]', '', '[node name="Broken" type="Node"', 'this line is no scene text', ''].join(
+      '\n',
+    ),
+  );
+  writeFileSync(
+    join(project, 'shown', 'missing.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="PackedScene" path="res://shown/gone.tscn" id="1_gone"]',
+      '',
+      '[node name="Missing" type="Node"]',
+      '',
+      '[node name="Gone" parent="." instance=ExtResource("1_gone")]',
+      '',
+    ].join('\n'),
+  );
+  const tabsBefore = await tabs();
+  const unloaded = async (name: string): Promise<string> =>
+    refusalOf(
+      await hook(project, { op: 'save_from_editor', path: `res://shown/${name}.tscn`, from: 'editor' }),
+    );
+  assert.match(await unloaded('broken'), /Failed to load/);
+  assert.match(await unloaded('missing'), /gone\.tscn/);
+  assert.match(await unloaded('absent'), /Scene not found/);
+  assert.deepEqual(await tabs(), tabsBefore, 'a refusal opens no tab');
+  assert.deepEqual(get(await hook(project, { op: 'dialogs' }), 'dialogs'), [], 'and puts up no dialog');
+  // What the editor would have done, for the case to know the hook sees it.
+  await hook(project, { op: 'open', path: 'res://shown/broken.tscn' });
+  let dialogs: unknown[] = [];
+  for (let attempt = 0; attempt < 40 && dialogs.length === 0; attempt += 1) {
+    await delay(250);
+    dialogs = asArray(get(await hook(project, { op: 'dialogs', hide: true }), 'dialogs'));
+  }
+  assert.equal(
+    dialogs.length,
+    1,
+    `the editor answers a broken scene with a dialog: ${JSON.stringify(dialogs)}`,
+  );
+  assert.deepEqual(get(await hook(project, { op: 'dialogs' }), 'dialogs'), [], 'which is hidden again');
+  await reset();
+}
+
 /**
  * auto_reload leaves a scene the editor holds unsaved changes to, and says so.
  *
@@ -8448,6 +8899,7 @@ async function main(): Promise<void> {
     ['testAutoReloadMissesNoWrite', testAutoReloadMissesNoWrite],
     ['testAutoReloadKeepsUnsavedEdits', testAutoReloadKeepsUnsavedEdits],
     ['testAutoReloadLeavesAGoneScene', testAutoReloadLeavesAGoneScene],
+    ['testAShownSceneIsSavedAsTheEditorHoldsIt', testAShownSceneIsSavedAsTheEditorHoldsIt],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
