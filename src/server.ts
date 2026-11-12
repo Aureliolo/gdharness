@@ -4680,6 +4680,255 @@ interface RunPlayed extends RunReady {
   profiled: boolean;
 }
 
+/** What every step of a test run knows once the project and the paths asked for are read. */
+interface TestBase {
+  args: OperationParams;
+  project: { value: { path: string; file: string } };
+  paths: string[];
+}
+
+/** A test run whose flags are checked and whose paths are sorted into present and missing. */
+interface TestFlags extends TestBase {
+  flags: Extract<Checked<readonly string[]>, { ok: true }>;
+  missing: string[];
+  scripts: ProjectScripts;
+  present: string[];
+  asked: ReturnType<ProjectScripts['searchedAsTold']>;
+}
+
+/** A test run whose paths hold no script that is no suite. */
+interface TestCollected extends TestFlags {
+  uncollected: ReturnType<ProjectScripts['uncollectedUnder']>;
+}
+
+/** A test run whose cases are chosen and whose engine is found. */
+interface TestEngine extends TestCollected {
+  selection: Extract<ReturnType<typeof selectTests>, { ok: true }>;
+  notSuites: string[];
+  leftOut: Set<string>;
+  needs: ReturnType<typeof windowNeedsOf>;
+  needing: string[];
+  accessible: string[];
+  windowed: boolean;
+  engine: Extract<EngineChoice, { ok: true }>;
+}
+
+/** A test run whose class cache is rebuilt and whose imports are done. */
+interface TestScanned extends TestEngine {
+  began: number;
+  classes: Extract<HeadlessOutcome, { ok: true }>;
+  rebuiltAt: number;
+  importedAt: number;
+  scanned: ReturnType<typeof scanWaitAnswer>;
+}
+
+/** The engine of a test run, with the way to wait for it and to stop it. */
+type SpawnedTest = SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void };
+
+/** What a test run ran as: the first of the reasons its result does not count, else the engine's own word. */
+function ranAsOf(facts: {
+  notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  cutShort: ReturnType<typeof timedOutVerdict> | null;
+  nothingRan: string | null | undefined;
+  brokenScripts: number;
+  uncaught: number;
+  exitCode: SpawnedTest['exitCode'];
+  verdicts: Readonly<Record<number, string>>;
+  run: SpawnedTest;
+}): string {
+  const { notCompiled, cutShort, nothingRan, brokenScripts, uncaught, exitCode, verdicts, run } = facts;
+  if (notCompiled !== null) {
+    return `the autoload ${notCompiled.name} (${notCompiled.path}) did not compile, so no result counts`;
+  }
+  if (cutShort !== null) {
+    return cutShort.verdict;
+  }
+  return (
+    nothingRan ??
+    (brokenScripts > 0
+      ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
+      : undefined) ??
+    (uncaught > 0
+      ? `${uncaught === 1 ? 'one script error' : `${uncaught} script errors`} that failed no case`
+      : undefined) ??
+    (exitCode === null ? undefined : verdicts[exitCode]) ??
+    howItExited(run)
+  );
+}
+
+/** The sentence a test run that wrote no report opens its answer with, by the first reason that holds. */
+function noReportWhy(facts: {
+  notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  scriptErrors: ScriptError[];
+  stoppedFor: boolean;
+  nothingRan: string | null | undefined;
+  printedErrors: ScriptError[];
+  declaring: Awaited<ReturnType<typeof originsOf>>;
+  reportProblem: string | null;
+  ranAs: string;
+  finished: number;
+  failing: number;
+  running: string | null;
+}): string {
+  const { notCompiled, scriptErrors, nothingRan, reportProblem, ranAs } = facts;
+  if (notCompiled !== null) {
+    return autoloadNotCompiledNote(notCompiled, foldedScriptErrors(scriptErrors), facts.stoppedFor);
+  }
+  if (nothingRan !== null) {
+    return `No tests ran: ${ranAs}.`;
+  }
+  if (scriptErrors.length > 0) {
+    return scriptErrorsNote(facts.printedErrors, facts.declaring);
+  }
+  if (reportProblem !== null) {
+    return `The test run's report could not be read (${reportProblem}). The engine's own verdict was ${ranAs}.`;
+  }
+  return `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(facts.finished, facts.failing, facts.running)}`;
+}
+
+/** The suites of the scripts and folders named, each folder as the suites gdharness test finds in it. */
+function suitesUnderPaths(scripts: ProjectScripts, paths: readonly string[]) {
+  return paths.flatMap((path) =>
+    path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
+  );
+}
+
+/** The engine arguments that choose a window at the project's size, or no window at all. */
+function displayArguments(windowed: boolean, viewport: { width: number; height: number } | null): string[] {
+  if (!windowed) {
+    return ['--headless'];
+  }
+  return viewport === null ? [] : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`];
+}
+
+/** A test run whose command line and files are made. */
+interface TestPrepared extends TestScanned {
+  ours: string;
+  ignored: string[];
+  declaredUnder: ReturnType<ProjectScripts['suitesUnder']>;
+  userData: string;
+  engineLog: string;
+  expectedFile: string;
+  windowSaid: { windowed?: boolean; windowNote?: string };
+  cmdArgs: string[];
+  timeoutMs: number;
+  helperFiles: HelperFiles;
+}
+
+/** A test run whose engine has ended. */
+interface TestRan extends TestPrepared {
+  run: SpawnedTest;
+  console: Buffer[];
+  timedOut: boolean;
+  silentForMs: number;
+  saidAnything: boolean;
+  autoloaded: ReturnType<typeof scriptsAutoloaded>;
+  stopped: { for: { name: string; path: string } | null };
+}
+
+/** A test run whose report and logs are read. */
+interface TestReadOut extends TestRan {
+  tookMs: number;
+  tookMsBy: {
+    classes: number;
+    import: number;
+    engine: number;
+    engineStart?: number | undefined;
+    engineCompile?: number | undefined;
+  };
+  casePrinted: ReturnType<typeof withNestedErrors>;
+  notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  report: TestReport | null;
+  reportProblem: string | null;
+  declaredErrors: ReturnType<typeof readExpected>;
+}
+
+/** A test run whose engine log is judged. */
+interface TestJudged extends TestReadOut {
+  engineEntries: ReturnType<typeof foldedRepeats>;
+  exitCode: SpawnedTest['exitCode'];
+  uncaught: SpawnedTest['log']['all'];
+  printed: SpawnedTest['log']['all'];
+  said: string[];
+  nothingRan: ReturnType<typeof whyNoReport> | null;
+  hung: boolean;
+  printedErrors: ScriptError[];
+  declaring: Awaited<ReturnType<typeof originsOf>>;
+  scriptErrors: ScriptError[];
+  ranAs: string;
+}
+
+/** A test run whose verdict is worded. */
+interface TestWorded extends TestJudged {
+  verdict: string;
+  missingNote: string | undefined;
+  savesNote: string | undefined;
+  printedLines: { printed?: string[]; printedOmitted?: number };
+}
+
+/** A test run that wrote a report. */
+interface TestWithReport extends TestWorded {
+  report: TestReport;
+}
+
+/** An engine error no suite declared, folded with how often it printed. */
+interface UndeclaredError {
+  suite: string | undefined;
+  case: string | undefined;
+  text: string;
+  warning: true | undefined;
+  times: number | undefined;
+}
+
+/** A declared engine error or warning the case never printed. */
+interface DeclaredNotPrinted {
+  suite: string;
+  case: string;
+  text: string;
+  warning: boolean | undefined;
+  printedInstead: string | undefined;
+}
+
+/** A test run whose printed engine errors are judged against what the suites declared. */
+interface TestErrorsJudged extends TestWithReport {
+  failed: ReturnType<typeof failedWithin>['failed'];
+  briefed: number;
+  orphans: ReturnType<typeof orphansPrinted>;
+  orphansIn: (path: string | null) => number;
+  warnings: Record<string, unknown>[];
+  judgedErrors: ReturnType<typeof unexpectedErrors>;
+  undeclaredPrinted: ReturnType<typeof unexpectedErrors>['printed'];
+  undeclaredAll: UndeclaredError[];
+  undeclaredErrors: UndeclaredError[];
+  leakedAtExit: string[];
+  walkStopped: boolean;
+  countedLeaks: string[];
+  heldNamed: string | undefined;
+  declaredNotPrinted: DeclaredNotPrinted[];
+  erring: (path: string | null) => { undeclared: number; notPrinted: number };
+}
+
+/** A test run with everything its answer is put together from. */
+interface TestAnswer extends TestErrorsJudged {
+  declaredAndPrinted: number;
+  ranIn: (suite: TestReport['suites'][number]) => number;
+  notRunIn: (suite: TestReport['suites'][number]) => number;
+  unclean: TestReport['suites'];
+  hookFailures: Record<string, unknown>[];
+  notRun: number;
+  uncaughtFolded: ReturnType<typeof foldedRepeats>;
+  listedAsUncaught: Set<number>;
+  notApplied: ReturnType<typeof ignoredYetRan>;
+  ignoreRead: ReturnType<typeof ignoredLeftOut>;
+  unmatched: string[];
+  testsNotRun: string[];
+  casesNotRun: string[];
+  declaredAs: string;
+  rowsMismatched: { test: string; reason: string }[];
+  casesUnrunnable: { test: string; reason: string }[];
+  engineEntriesShown: ReturnType<typeof foldedRepeats>;
+}
+
 /** What a reimport answers: the payload, or the refusal. */
 type ImportAnswer = { ok: true; payload: OperationParams } | { ok: false; response: ToolResponse };
 
@@ -8856,6 +9105,12 @@ class GodotServer {
         `Refused a run of ${folders.join(' and ')}: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. ${next}`,
       );
     }
+    return await this.testFlagsAndPaths({ args, project, paths: paths.value });
+  }
+
+  /** A test run's engine flags and the paths it was given, checked for what is there and what can run. */
+  private async testFlagsAndPaths(base: TestBase): Promise<ToolResponse> {
+    const { args, project, paths } = base;
     // Before any engine starts, the class rebuild's included: a refused flag costs nothing.
     const flags = this.engineArguments(args);
     if (!flags.ok) {
@@ -8870,41 +9125,19 @@ class GodotServer {
     // nothing: a set of suites named from memory met one wrong name four times in a day, and each
     // time the rest waited a round trip for it. Named in the answer, and never a pass, since a run
     // of fewer suites than were asked for is not the run asked for.
-    const missing = paths.value.filter(
+    const missing = paths.filter(
       (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
     );
     // gdUnit4 searches a directory it is handed itself, into the folders the project keeps out of
     // every search, so a directory holding one is handed as the suites gdharness test finds in it.
     const scripts = new ProjectScripts(project.value.path);
-    const present = paths.value.filter((path) => !missing.includes(path));
+    const present = paths.filter((path) => !missing.includes(path));
     const asked = scripts.searchedAsTold(present);
     const unusable = gdUnit4Unusable(project.value.path);
     // With nothing missing, an empty list is a directory whose suites all sit in folders the project
     // keeps out of the search, which the refusal below names.
     if (asked.length === 0 && missing.length > 0) {
-      const verdict = `nothing at ${missing.join(' and ')}`;
-      // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
-      // and the caller who wrote tests into it next would have been refused again for the runner.
-      const andNoRunner = unusable === null ? '' : `, and ${unusable.reason}`;
-      const runnerFrom = unusable === null ? '' : ` ${gdUnit4From(unusable.missing)}.`;
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(project.value.path, missing[0] ?? '')}${runnerFrom}`,
-          },
-          {
-            type: 'text',
-            text: answerJson({
-              passed: false,
-              verdict,
-              tests: 0,
-              ...(unusable?.missing === true ? { gdUnit4Installed: false } : {}),
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return this.nothingToTestAnswer(project.value.path, missing, unusable);
     }
     if (unusable !== null) {
       return this.createErrorResponse(`${unusable.reason}.`, [gdUnit4From(unusable.missing)]);
@@ -8916,6 +9149,43 @@ class GodotServer {
         `${caseless.join(' and ')} ${one ? 'declares' : 'declare'} no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and ${one ? 'it has' : 'they have'} none.`,
       );
     }
+    return await this.testSuiteChecks({ ...base, flags, missing, scripts, present, asked });
+  }
+
+  /** What a test run answers when every path it was given is missing, beside the runner if that is missing too. */
+  private nothingToTestAnswer(
+    projectPath: string,
+    missing: readonly string[],
+    unusable: ReturnType<typeof gdUnit4Unusable>,
+  ): ToolResponse {
+    const verdict = `nothing at ${missing.join(' and ')}`;
+    // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
+    // and the caller who wrote tests into it next would have been refused again for the runner.
+    const andNoRunner = unusable === null ? '' : `, and ${unusable.reason}`;
+    const runnerFrom = unusable === null ? '' : ` ${gdUnit4From(unusable.missing)}.`;
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(projectPath, missing[0] ?? '')}${runnerFrom}`,
+        },
+        {
+          type: 'text',
+          text: answerJson({
+            passed: false,
+            verdict,
+            tests: 0,
+            ...(unusable?.missing === true ? { gdUnit4Installed: false } : {}),
+          }),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  /** A test run's paths checked for suites: the scripts that are no suite, and the folders with none. */
+  private async testSuiteChecks(run: TestFlags): Promise<ToolResponse> {
+    const { scripts, present } = run;
     // gdUnit4 says nothing of a script that declares cases and is no suite, so a suite whose extends
     // named the wrong class passed with none of its cases run. Named in the answer, and never a pass.
     const uncollected = scripts.uncollectedUnder(present);
@@ -8948,6 +9218,12 @@ class GodotServer {
           .join(' '),
       );
     }
+    return await this.testSelected({ ...run, uncollected });
+  }
+
+  /** A test run's cases chosen, the window the suites need found and the engine and class cache made ready. */
+  private async testSelected(run: TestCollected): Promise<ToolResponse> {
+    const { args, project, scripts, asked, uncollected } = run;
     const selection = selectTests(project.value.path, asked, args['tests']);
     if (!selection.ok) {
       return this.createErrorResponse(selection.reason);
@@ -8977,6 +9253,22 @@ class GodotServer {
       }
     }
 
+    return await this.testRebuilt({
+      ...run,
+      selection,
+      notSuites,
+      leftOut,
+      needs,
+      needing,
+      accessible,
+      windowed,
+      engine,
+    });
+  }
+
+  /** A test run's class cache rebuilt and its imports brought up to date, before the engine starts. */
+  private async testRebuilt(run: TestEngine): Promise<ToolResponse> {
+    const { project } = run;
     // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
     // waited, and the engine below starts on the cache the rebuild left.
     const began = Date.now();
@@ -9004,6 +9296,25 @@ class GodotServer {
       ...(scanNote === undefined ? {} : { scanNote }),
     };
 
+    return await this.testPrepared({ ...run, began, classes, rebuiltAt, importedAt, scanned });
+  }
+
+  /** A test run's files and engine command line made, with the report directory under a name of its own. */
+  private async testPrepared(plan: TestScanned): Promise<ToolResponse> {
+    const {
+      args,
+      project,
+      flags,
+      scripts,
+      asked,
+      selection,
+      leftOut,
+      needs,
+      needing,
+      accessible,
+      windowed,
+      engine,
+    } = plan;
     // Under a name of this run's own. The directory is a path in the project rather than in this
     // process, so a second run against the same project wrote its report_1 beside the first's,
     // and the reading below takes the highest-numbered one it finds: whichever run finished first
@@ -9012,12 +9323,7 @@ class GodotServer {
     const ours = `gdharness-reports/${randomUUID()}`;
     const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
-    const declaredUnder =
-      ignored.length === 0
-        ? []
-        : asked.flatMap((path) =>
-            path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
-          );
+    const declaredUnder = ignored.length === 0 ? [] : suitesUnderPaths(scripts, asked);
     // The engine's application data directory, beside the folder user:// is made in, so the
     // lists are not among what a suite finds there.
     const userData = scratchDirectory('tests');
@@ -9041,11 +9347,7 @@ class GodotServer {
     const cmdArgs = [
       // The engine as gdharness test starts it: windowed at the project's viewport size, and
       // either way with no sound, since a suite can read the driver off the command line.
-      ...(windowed
-        ? viewport === null
-          ? []
-          : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]
-        : ['--headless']),
+      ...displayArguments(windowed, viewport),
       '--audio-driver',
       'Dummy',
       ...(windowed && accessible.length > 0 ? ['--accessibility', 'always'] : []),
@@ -9082,6 +9384,24 @@ class GodotServer {
       step: join(userData, 'step'),
       exit: join(userData, 'exit'),
     };
+    return await this.testRunning({
+      ...plan,
+      ours,
+      ignored,
+      declaredUnder,
+      userData,
+      engineLog,
+      expectedFile,
+      windowSaid,
+      cmdArgs,
+      timeoutMs,
+      helperFiles,
+    });
+  }
+
+  /** A test run's engine started and watched until it ends, is cut off or is stopped for an autoload. */
+  private async testRunning(prepared: TestPrepared): Promise<ToolResponse> {
+    const { project, needing, windowed, engine, cmdArgs, timeoutMs, ours, userData, helperFiles } = prepared;
     const onDesktop = windowed && process.platform === 'win32';
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
@@ -9157,6 +9477,33 @@ class GodotServer {
         `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
       );
     }
+    return await this.testRead({
+      ...prepared,
+      run,
+      console,
+      timedOut,
+      silentForMs,
+      saidAnything,
+      autoloaded,
+      stopped,
+    });
+  }
+
+  /** A test run's report, engine log and console read once the engine has ended. */
+  private async testRead(ran: TestRan): Promise<ToolResponse> {
+    const {
+      project,
+      began,
+      rebuiltAt,
+      importedAt,
+      run,
+      autoloaded,
+      stopped,
+      ours,
+      userData,
+      engineLog,
+      expectedFile,
+    } = ran;
     const endedAt = Date.now();
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
@@ -9216,6 +9563,46 @@ class GodotServer {
       }
     }
 
+    return await this.testJudged({
+      ...ran,
+      tookMs,
+      tookMsBy,
+      casePrinted,
+      notCompiled,
+      report,
+      reportProblem,
+      declaredErrors,
+    });
+  }
+
+  /** The files the script errors name, found only on a run that stopped on a class it could not resolve. */
+  private async declaringOrigins(
+    printedErrors: readonly ScriptError[],
+    projectPath: string,
+    engine: string,
+  ): Promise<Awaited<ReturnType<typeof originsOf>>> {
+    // So the engine is started again for nothing on any other answer.
+    if (!printedErrors.some((error) => unresolvedClassIn(error.message) !== null)) {
+      return { origins: [], unconfirmed: [] };
+    }
+    return await originsOf(printedErrors, declaredClasses(projectPath), checkWithEngine(engine, projectPath));
+  }
+
+  /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
+  private async testJudged(read: TestReadOut): Promise<ToolResponse> {
+    const {
+      flags,
+      run,
+      asked,
+      timeoutMs,
+      timedOut,
+      silentForMs,
+      saidAnything,
+      engine,
+      project,
+      notCompiled,
+      report,
+    } = read;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for.
     const engineEntries = foldedRepeats(
@@ -9227,7 +9614,6 @@ class GodotServer {
         })
         .entries.map(aboveTheRunner),
     );
-    const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: failedVerdict(report),
@@ -9274,31 +9660,37 @@ class GodotServer {
         : timedOut || exitCode !== 105
           ? []
           : scriptErrorsPrinted(said);
-    // Only on a run that stopped on a class it could not resolve, so the engine is started again
-    // for nothing on any other answer.
-    const declaring = printedErrors.some((error) => unresolvedClassIn(error.message) !== null)
-      ? await originsOf(
-          printedErrors,
-          declaredClasses(project.value.path),
-          checkWithEngine(engine.value, project.value.path),
-        )
-      : { origins: [], unconfirmed: [] };
+    const declaring = await this.declaringOrigins(printedErrors, project.value.path, engine.value);
     const scriptErrors: ScriptError[] = [...declaring.origins, ...printedErrors];
-    const brokenScripts = new Set(scriptErrors.map((error) => error.path)).size;
-    const ranAs =
-      notCompiled !== null
-        ? `the autoload ${notCompiled.name} (${notCompiled.path}) did not compile, so no result counts`
-        : cutShort !== null
-          ? cutShort.verdict
-          : (nothingRan ??
-            (brokenScripts > 0
-              ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
-              : undefined) ??
-            (uncaught.length > 0
-              ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
-              : undefined) ??
-            (exitCode === null ? undefined : verdicts[exitCode]) ??
-            howItExited(run));
+    const ranAs = ranAsOf({
+      notCompiled,
+      cutShort,
+      nothingRan,
+      brokenScripts: new Set(scriptErrors.map((error) => error.path)).size,
+      uncaught: uncaught.length,
+      exitCode,
+      verdicts,
+      run,
+    });
+    return this.testVerdict({
+      ...read,
+      engineEntries,
+      exitCode,
+      uncaught,
+      printed,
+      said,
+      nothingRan,
+      hung,
+      printedErrors,
+      declaring,
+      scriptErrors,
+      ranAs,
+    });
+  }
+
+  /** A test run's verdict worded beside what was missing, the saves and the lines it was asked to echo. */
+  private testVerdict(judged: TestJudged): ToolResponse {
+    const { args, project, asked, missing, run, nothingRan, ranAs } = judged;
     const nothingAt = missing.join(' and ');
     // gdUnit4's passed is about the paths that were there, and a run of fewer is not called one.
     const verdict =
@@ -9330,12 +9722,46 @@ class GodotServer {
             ...(echoed.omitted > 0 ? { printedOmitted: echoed.omitted } : {}),
           };
 
+    return this.testWithoutReport({ ...judged, verdict, missingNote, savesNote, printedLines });
+  }
+
+  /** The answer of a test run that wrote no report, or on to the one that did. */
+  private testWithoutReport(worded: TestWorded): ToolResponse {
+    const {
+      project,
+      asked,
+      missing,
+      run,
+      cmdArgs,
+      classes,
+      scanned,
+      windowSaid,
+      report,
+      notCompiled,
+      stopped,
+      declaring,
+      exitCode,
+      hung,
+      missingNote,
+      nothingRan,
+      printed,
+      printedErrors,
+      printedLines,
+      ranAs,
+      reportProblem,
+      said,
+      savesNote,
+      scriptErrors,
+      silentForMs,
+      timedOut,
+      tookMs,
+      tookMsBy,
+      verdict,
+    } = worded;
     // What finished before a run without a report ended, which only the console holds: a run cut
     // off by its timeout or by the client otherwise answers nothing of the suites it got through.
-    const sofar = report === null ? suitesPrinted(said) : null;
     if (report === null) {
-      const finished = sofar?.finished ?? [];
-      const running = sofar?.running ?? null;
+      const { finished, running } = suitesPrinted(said);
       const failing = finished.filter((suite) => suite.errors + suite.failures > 0);
       const atTheEnd = {
         ...nonEmpty({
@@ -9349,16 +9775,19 @@ class GodotServer {
         }),
         ...(running === null ? {} : { suiteRunning: running }),
       };
-      const why =
-        notCompiled !== null
-          ? autoloadNotCompiledNote(notCompiled, foldedScriptErrors(scriptErrors), stopped.for !== null)
-          : nothingRan !== null
-            ? `No tests ran: ${ranAs}.`
-            : scriptErrors.length > 0
-              ? scriptErrorsNote(printedErrors, declaring)
-              : reportProblem !== null
-                ? `The test run's report could not be read (${reportProblem}). The engine's own verdict was ${ranAs}.`
-                : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
+      const why = noReportWhy({
+        notCompiled,
+        scriptErrors,
+        stoppedFor: stopped.for !== null,
+        nothingRan,
+        printedErrors,
+        declaring,
+        reportProblem,
+        ranAs,
+        finished: finished.length,
+        failing: failing.length,
+        running,
+      });
       const note = missingNote === undefined ? why : `${why} ${missingNote}`;
       // Kept in the project when nobody is left to read the answer, for the next run there to
       // hand back: the client that cut this call off is the one that will ask again.
@@ -9404,6 +9833,12 @@ class GodotServer {
       };
     }
 
+    return this.testReported({ ...worded, report });
+  }
+
+  /** The answer of a test run that wrote a report, judged against what the engine printed. */
+  private testReported(reported: TestWithReport): ToolResponse {
+    const { run, console, report, casePrinted, declaredErrors, said, uncaught } = reported;
     const { failed, briefed } = failedWithin(
       failedCases(report, Buffer.concat(console).toString('utf8')),
       FAILED_BUDGET,
@@ -9514,6 +9949,45 @@ class GodotServer {
       undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,
       notPrinted: judgedErrors.neverPrinted.filter((unprinted) => unprinted.suite === path).length,
     });
+    return this.testReportAnswer({
+      ...reported,
+      failed,
+      briefed,
+      orphans,
+      orphansIn,
+      warnings,
+      judgedErrors,
+      undeclaredPrinted,
+      undeclaredAll,
+      undeclaredErrors,
+      leakedAtExit,
+      walkStopped,
+      countedLeaks,
+      heldNamed,
+      declaredNotPrinted,
+      erring,
+    });
+  }
+
+  /** The answer of a test run that wrote a report, from the cases it ran and the errors it printed. */
+  private testReportAnswer(judged: TestErrorsJudged): ToolResponse {
+    const {
+      asked,
+      scripts,
+      selection,
+      casePrinted,
+      declaredUnder,
+      engineEntries,
+      erring,
+      ignored,
+      judgedErrors,
+      orphansIn,
+      report,
+      said,
+      uncaught,
+      undeclaredErrors,
+    } = judged;
+    const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     // Errors only, since what this is taken from is the log's count of errors.
     const declaredAndPrinted =
       casePrinted.errors.filter((error) => !error.warning).length -
@@ -9622,8 +10096,61 @@ class GodotServer {
       test: `${one.suite} > ${one.name}`,
       reason: one.reason,
     }));
+    return this.reportAnswer({
+      ...judged,
+      declaredAndPrinted,
+      ranIn,
+      notRunIn,
+      unclean,
+      hookFailures,
+      notRun,
+      uncaughtFolded,
+      listedAsUncaught,
+      notApplied,
+      ignoreRead,
+      unmatched,
+      testsNotRun,
+      casesNotRun,
+      declaredAs,
+      rowsMismatched,
+      casesUnrunnable,
+      engineEntriesShown,
+    });
+  }
+
+  /** The answer of a test run that wrote a report, put together from what was judged. */
+  private reportAnswer(s: TestAnswer): ToolResponse {
     return this.jsonTextResponse({
-      engineNote: engine.note ?? undefined,
+      ...this.reportPassed(s),
+      ...this.reportVerdict(s),
+      ...this.reportLists(s),
+      ...this.reportCounts(s),
+      ...this.reportNote(s),
+      ...this.reportSuites(s),
+    });
+  }
+
+  /** Whether a test run passed, which every check below can fail. */
+  private reportPassed(s: TestAnswer): Record<string, unknown> {
+    const {
+      casesNotRun,
+      casesUnrunnable,
+      countedLeaks,
+      declaredNotPrinted,
+      exitCode,
+      hookFailures,
+      missing,
+      notSuites,
+      nothingRan,
+      report,
+      rowsMismatched,
+      testsNotRun,
+      timedOut,
+      uncaught,
+      undeclaredPrinted,
+    } = s;
+    return {
+      engineNote: s.engine.note ?? undefined,
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
       passed:
@@ -9633,17 +10160,36 @@ class GodotServer {
         report.tests > 0 &&
         report.failures === 0 &&
         report.errors === 0 &&
-        hookFailures.length === 0 &&
-        uncaught.length === 0 &&
-        undeclaredPrinted.length === 0 &&
-        declaredNotPrinted.length === 0 &&
-        countedLeaks.length === 0 &&
-        missing.length === 0 &&
-        testsNotRun.length === 0 &&
-        casesNotRun.length === 0 &&
-        rowsMismatched.length === 0 &&
-        casesUnrunnable.length === 0 &&
-        notSuites.length === 0,
+        [
+          hookFailures,
+          uncaught,
+          undeclaredPrinted,
+          declaredNotPrinted,
+          countedLeaks,
+          missing,
+          testsNotRun,
+          casesNotRun,
+          rowsMismatched,
+          casesUnrunnable,
+          notSuites,
+        ].every((found) => found.length === 0),
+    };
+  }
+
+  /** The verdict of a test run, with each kind of undeclared or missing result named once. */
+  private reportVerdict(s: TestAnswer): Record<string, unknown> {
+    const {
+      casesNotRun,
+      casesUnrunnable,
+      countedLeaks,
+      declaredNotPrinted,
+      notSuites,
+      rowsMismatched,
+      testsNotRun,
+      undeclaredPrinted,
+      verdict,
+    } = s;
+    return {
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
         verdict === 'passed' &&
@@ -9690,6 +10236,23 @@ class GodotServer {
       ]
         .filter((part) => part !== undefined)
         .join('; '),
+    };
+  }
+
+  /** The lists a test run names when something it was asked for did not run as asked. */
+  private reportLists(s: TestAnswer): Record<string, unknown> {
+    const {
+      casesNotRun,
+      casesUnrunnable,
+      hung,
+      missing,
+      notSuites,
+      rowsMismatched,
+      silentForMs,
+      testsNotRun,
+      timedOut,
+    } = s;
+    return {
       ...(missing.length > 0 ? { missing } : {}),
       ...(notSuites.length > 0 ? { notSuites } : {}),
       ...(testsNotRun.length + casesNotRun.length > 0
@@ -9698,6 +10261,37 @@ class GodotServer {
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
+    };
+  }
+
+  /** The counts of a test run, and what it failed, left behind or ignored. */
+  private reportCounts(s: TestAnswer): Record<string, unknown> {
+    const {
+      briefed,
+      declaredNotPrinted,
+      exitCode,
+      failed,
+      hookFailures,
+      ignoreRead,
+      leakedAtExit,
+      notApplied,
+      notRun,
+      orphans,
+      printedLines,
+      report,
+      run,
+      savesNote,
+      scanned,
+      tookMs,
+      tookMsBy,
+      uncaughtFolded,
+      undeclaredAll,
+      undeclaredErrors,
+      unmatched,
+      warnings,
+      windowSaid,
+    } = s;
+    return {
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
       tests: report.tests,
@@ -9730,61 +10324,121 @@ class GodotServer {
       savesNote,
       ...scanned,
       ...windowSaid,
+    };
+  }
+
+  /** The note of a test run, one sentence for each reason it is not a plain pass. */
+  private reportNote(s: TestAnswer): Record<string, unknown> {
+    return {
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
-        [
-          missingNote,
-          testsNotRun.length > 0
-            ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
-            : undefined,
-          casesNotRun.length > 0
-            ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
-            : undefined,
-          rowsMismatched.length > 0
-            ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first. Each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
-            : undefined,
-          casesUnrunnable.length > 0
-            ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
-            : undefined,
-          notSuites.length > 0
-            ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
-            : undefined,
-          briefed > 0
-            ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver. Pass one case's suite path to see its reports.`
-            : undefined,
-          notApplied.length > 0
-            ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
-            : undefined,
-          unmatched.length > 0
-            ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
-            : undefined,
-          uncaughtNote(uncaught),
-          undeclaredErrors.length > 0
-            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it. ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
-            : undefined,
-          declaredNotPrinted.length > 0
-            ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
-            : undefined,
-          gdUnitFailsOnPushErrors(project.value.path)
-            ? pushErrorsFailedSentence(failedOnPushErrors(casePrinted))
-            : undefined,
-          walkStopped ? WALK_STOPPED_SENTENCE : undefined,
-          countedLeaks.length > 0
-            ? [
-                heldNamed === undefined
-                  ? 'What the engine still held as it exited fails the run, as gdharness test judges it. engineArgs ["--verbose"] has the engine name what it held.'
-                  : `What the engine still held as it exited fails the run, as gdharness test judges it. ${heldNamed}`,
-                selfTypedSentence(projectSelfTypedExports(project.value.path)),
-              ]
-                .filter((part) => part !== undefined)
-                .join(' ')
-            : undefined,
-          ranAs.startsWith('warnings') && warnings.length === 0
-            ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
-            : notRunNote(notRun, readBoolean(args, 'failFast') === true),
-        ]
+        [...this.notRunNotes(s), ...this.ignoredNotes(s), ...this.engineNotes(s)]
           .filter((part) => part !== undefined)
           .join(' ') || undefined,
+    };
+  }
+
+  /** The sentences of a test run's note about what was asked for and did not run. */
+  private notRunNotes(s: TestAnswer): (string | undefined)[] {
+    const { casesNotRun, missingNote, rowsMismatched, testsNotRun } = s;
+    return [
+      missingNote,
+      testsNotRun.length > 0
+        ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
+        : undefined,
+      casesNotRun.length > 0
+        ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
+        : undefined,
+      rowsMismatched.length > 0
+        ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first. Each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
+        : undefined,
+    ];
+  }
+
+  /** The sentences of a test run's note about scripts that are no suite, cut reports and ignore entries. */
+  private ignoredNotes(s: TestAnswer): (string | undefined)[] {
+    const { briefed, casesUnrunnable, failed, notApplied, notSuites, uncaught, unmatched } = s;
+    return [
+      casesUnrunnable.length > 0
+        ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
+        : undefined,
+      notSuites.length > 0
+        ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
+        : undefined,
+      briefed > 0
+        ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver. Pass one case's suite path to see its reports.`
+        : undefined,
+      notApplied.length > 0
+        ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
+        : undefined,
+      unmatched.length > 0
+        ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
+        : undefined,
+      uncaughtNote(uncaught),
+    ];
+  }
+
+  /** The sentences of a test run's note about what the engine printed and what it still held. */
+  private engineNotes(s: TestAnswer): (string | undefined)[] {
+    const {
+      args,
+      casePrinted,
+      countedLeaks,
+      declaredAs,
+      declaredNotPrinted,
+      heldNamed,
+      notRun,
+      project,
+      ranAs,
+      undeclaredErrors,
+      walkStopped,
+      warnings,
+    } = s;
+    return [
+      undeclaredErrors.length > 0
+        ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it. ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
+        : undefined,
+      declaredNotPrinted.length > 0
+        ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
+        : undefined,
+      gdUnitFailsOnPushErrors(project.value.path)
+        ? pushErrorsFailedSentence(failedOnPushErrors(casePrinted))
+        : undefined,
+      walkStopped ? WALK_STOPPED_SENTENCE : undefined,
+      countedLeaks.length > 0
+        ? [
+            heldNamed === undefined
+              ? 'What the engine still held as it exited fails the run, as gdharness test judges it. engineArgs ["--verbose"] has the engine name what it held.'
+              : `What the engine still held as it exited fails the run, as gdharness test judges it. ${heldNamed}`,
+            selfTypedSentence(projectSelfTypedExports(project.value.path)),
+          ]
+            .filter((part) => part !== undefined)
+            .join(' ')
+        : undefined,
+      ranAs.startsWith('warnings') && warnings.length === 0
+        ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
+        : notRunNote(notRun, readBoolean(args, 'failFast') === true),
+    ];
+  }
+
+  /** The suites of a test run that were not clean, and what the engine itself printed. */
+  private reportSuites(s: TestAnswer): Record<string, unknown> {
+    const {
+      classes,
+      declaredAndPrinted,
+      engineEntries,
+      engineEntriesShown,
+      erring,
+      listedAsUncaught,
+      notRunIn,
+      orphansIn,
+      project,
+      ranIn,
+      report,
+      run,
+      unclean,
+    } = s;
+    return {
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
@@ -9818,7 +10472,7 @@ class GodotServer {
           ? engineEntries.length - engineEntriesShown.length
           : undefined,
       classes: withAddonClassesCounted(classes.payload, cachedClasses(project.value.path) ?? new Map()),
-    });
+    };
   }
 
   // -------------------------------------------------------------------------------------------
