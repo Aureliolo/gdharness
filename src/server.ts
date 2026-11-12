@@ -4174,12 +4174,12 @@ export function scriptsToDiagnose(
   const found: string[] = [];
   const empty: string[] = [];
   for (const [index, entry] of entries.entries()) {
-    const named = scriptsNamedBy(projectPath, entry, listed ? `[${index}]` : '');
-    if (!named.ok) {
-      return named;
+    const entryScripts = scriptsNamedBy(projectPath, entry, listed ? `[${index}]` : '');
+    if (!entryScripts.ok) {
+      return entryScripts;
     }
-    found.push(...named.scripts);
-    empty.push(...named.empty);
+    found.push(...entryScripts.scripts);
+    empty.push(...entryScripts.empty);
   }
   const unique = [...new Set(found)];
   if (unique.length === 0) {
@@ -4502,6 +4502,82 @@ interface ExportCall {
   readonly debug: boolean;
   readonly pack: boolean;
   readonly folder: string;
+}
+
+/** What a check of several scripts has found so far, added to as each script is answered. */
+interface DiagnosticsTally {
+  readonly reported: OperationParams[];
+  readonly nothingReported: string[];
+  errors: number;
+  warnings: number;
+  engineWarned: number | null;
+  unread: number;
+  byEngine: string | null;
+  rebuilt: string[];
+  byServer: number;
+}
+
+/** The answer of a check of several scripts, from what [param tally] found in [param checked] of them. */
+function diagnosticsSummary(tally: DiagnosticsTally, checked: number): Record<string, unknown> {
+  return {
+    clean: tally.errors === 0 && tally.unread === 0,
+    scriptsChecked: checked,
+    errors: tally.errors,
+    warnings: tally.engineWarned === null ? null : tally.warnings + tally.engineWarned,
+    ...(tally.unread > 0 ? { scriptsNotRead: tally.unread } : {}),
+    scripts: tally.reported,
+    nothingReported: tally.nothingReported,
+    ...(tally.byEngine === null ? { checkedBy: 'language server' } : engineChecked(tally.byEngine)),
+    ...nonEmpty({ classesRebuiltFirst: tally.rebuilt }),
+    ...(tally.byEngine !== null && tally.byServer > 0
+      ? { checkedBy: 'language server, then engine', checkedByLanguageServer: tally.byServer }
+      : {}),
+  };
+}
+
+/** A script the language server refused, counted as unread, or the refusal when it ends the whole check. */
+function tallyRefusedScript(
+  tally: DiagnosticsTally,
+  scriptPath: string,
+  one: { readonly refusal: ToolResponse; readonly perScript: boolean },
+): ToolResponse | null {
+  if (!one.perScript) {
+    return one.refusal;
+  }
+  tally.unread += 1;
+  tally.reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
+  return null;
+}
+
+/** What the language server said of one script, added to [param tally]. */
+function tallyLanguageServerAnswer(
+  tally: DiagnosticsTally,
+  scriptPath: string,
+  answer: OperationParams,
+): void {
+  tally.byServer += 1;
+  tally.errors += Number(answer['errors']);
+  tally.warnings += Number(answer['warnings']);
+  // Every note an answer can carry is about a diagnostic, so none means nothing else either.
+  if (readArray(answer, 'diagnostics')?.length === 0) {
+    tally.nothingReported.push(scriptPath);
+  } else {
+    tally.reported.push(answer);
+  }
+}
+
+/** What the engine said of one script, added to [param tally]. */
+function tallyEngineAnswer(tally: DiagnosticsTally, answer: OperationParams): void {
+  tally.errors += Number(answer['errors']);
+  tally.engineWarned =
+    answer['warnings'] === null || tally.engineWarned === null
+      ? null
+      : tally.engineWarned + Number(answer['warnings']);
+  if (readArray(answer, 'diagnostics')?.length === 0) {
+    tally.nothingReported.push(String(answer['scriptPath']));
+  } else {
+    tally.reported.push(answer);
+  }
 }
 
 /** What a reimport answers: the payload, or the refusal. */
@@ -9667,151 +9743,164 @@ class GodotServer {
       return this.createErrorResponse(scripts.reason);
     }
     if (scripts?.value == null) {
-      // Judged here rather than by whichever half answers, which named a missing script by its
-      // absolute path and refused a path outside the project with no remedy, while every other
-      // tool given either gave the res:// path and the remedies.
-      const asked = readString(args, 'scriptPath');
-      let ignored: Record<string, unknown> = {};
-      if (project.ok && asked !== undefined) {
-        const location = resolveWithinProject(project.value.path, asked);
-        if (!location.ok) {
-          return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
-        }
-        if (!existsSync(location.absolutePath)) {
-          return this.missingScript(project.value.path, location.relativePath);
-        }
-        ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
+      return await this.diagnoseOneScript(args, project);
+    }
+    return await this.diagnoseSeveralScripts(args, project, scripts.value);
+  }
+
+  /** The diagnostics of the one script a call names, or of the scripts it names none of. */
+  private async diagnoseOneScript(
+    args: OperationParams,
+    project: Checked<{ path: string; file: string }>,
+  ): Promise<ToolResponse> {
+    // Judged here rather than by whichever half answers, which named a missing script by its
+    // absolute path and refused a path outside the project with no remedy, while every other
+    // tool given either gave the res:// path and the remedies.
+    const asked = readString(args, 'scriptPath');
+    let ignored: Record<string, unknown> = {};
+    if (project.ok && asked !== undefined) {
+      const location = resolveWithinProject(project.value.path, asked);
+      if (!location.ok) {
+        return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
       }
-      const one = await this.diagnosticsOf(args);
-      if ('noLanguageServer' in one) {
-        const checked = project.ok
-          ? await this.engineDiagnostics(
-              project.value.path,
-              [readString(args, 'scriptPath') ?? ''],
-              one.noLanguageServer,
-            )
-          : { refusal: project.response };
-        return 'refusal' in checked
-          ? checked.refusal
-          : this.jsonTextResponse({
-              ...checked.answers[0],
-              ...engineChecked(one.noLanguageServer.reason),
-              ...nonEmpty({ classesRebuiltFirst: checked.classesRebuiltFirst }),
-              ...ignored,
-            });
+      if (!existsSync(location.absolutePath)) {
+        return this.missingScript(project.value.path, location.relativePath);
       }
-      return 'refusal' in one
-        ? one.refusal
+      ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
+    }
+    const one = await this.diagnosticsOf(args);
+    if ('noLanguageServer' in one) {
+      const checked = project.ok
+        ? await this.engineDiagnostics(
+            project.value.path,
+            [readString(args, 'scriptPath') ?? ''],
+            one.noLanguageServer,
+          )
+        : { refusal: project.response };
+      return 'refusal' in checked
+        ? checked.refusal
         : this.jsonTextResponse({
-            ...one.answer,
-            checkedBy: 'language server',
+            ...checked.answers[0],
+            ...engineChecked(one.noLanguageServer.reason),
+            ...nonEmpty({ classesRebuiltFirst: checked.classesRebuiltFirst }),
             ...ignored,
           });
     }
+    return 'refusal' in one
+      ? one.refusal
+      : this.jsonTextResponse({
+          ...one.answer,
+          checkedBy: 'language server',
+          ...ignored,
+        });
+  }
+
+  /** The diagnostics of each of several scripts, the rest handed to one engine when the language server stops answering. */
+  private async diagnoseSeveralScripts(
+    args: OperationParams,
+    project: Checked<{ path: string; file: string }>,
+    scripts: readonly string[],
+  ): Promise<ToolResponse> {
     const progress = callProgress();
     const cancelled = callSignal();
-    const reported: OperationParams[] = [];
-    const nothingReported: string[] = [];
-    let errors = 0;
-    let warnings = 0;
-    // The engine's count of the scripts it checked, null when its warnings could not be read.
-    let engineWarned: number | null = 0;
-    let unread = 0;
-    let byEngine: string | null = null;
-    let rebuilt: string[] = [];
-    // How many the language server answered before it stopped answering, if it did, so a check
-    // that went on in the engine does not call every script the engine's.
-    let byServer = 0;
-    for (const [at, scriptPath] of scripts.value.entries()) {
+    const tally: DiagnosticsTally = {
+      reported: [],
+      nothingReported: [],
+      errors: 0,
+      warnings: 0,
+      // The engine's count of the scripts it checked, null when its warnings could not be read.
+      engineWarned: 0,
+      unread: 0,
+      byEngine: null,
+      rebuilt: [],
+      // How many the language server answered before it stopped answering, if it did, so a check
+      // that went on in the engine does not call every script the engine's.
+      byServer: 0,
+    };
+    for (const [at, scriptPath] of scripts.entries()) {
       // Nobody is left to read the answer, and a folder can take minutes.
       if (cancelled?.aborted === true) {
-        return this.createErrorResponse(`Cancelled after ${at} of ${scripts.value.length} scripts.`);
+        return this.createErrorResponse(`Cancelled after ${at} of ${scripts.length} scripts.`);
       }
-      progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
+      progress?.(at + 1, `${at + 1} of ${scripts.length}: ${scriptPath}`);
       const unreadable = project.ok ? unreadableScript(project.value.path, scriptPath) : null;
       if (unreadable !== null) {
-        unread += 1;
-        reported.push({ scriptPath, error: unreadable });
+        tally.unread += 1;
+        tally.reported.push({ scriptPath, error: unreadable });
         continue;
       }
       const one = await this.diagnosticsOf({ ...args, scriptPath });
       if ('noLanguageServer' in one) {
-        // The rest in one engine, since what kept the language server from answering this script
-        // keeps it from answering the others. The engine answers a missing file as one it could
-        // not load, which reads as a broken script, so those are named as the language server
-        // names them.
-        const rest: string[] = [];
-        const refusedHere = new Map<string, string>();
-        for (const left of scripts.value.slice(at)) {
-          const refused = project.ok ? unreadableScript(project.value.path, left) : null;
-          if (refused === null) {
-            rest.push(left);
-          } else {
-            refusedHere.set(left, refused);
-          }
-        }
-        progress?.(at + 1, `${rest.length} script(s) left, compiled by a headless engine`);
-        const checked = await this.engineDiagnostics(
-          project.ok ? project.value.path : '',
-          rest,
+        const refusal = await this.diagnoseTheRestByEngine(
+          project,
+          scripts.slice(at),
           one.noLanguageServer,
+          tally,
+          at + 1,
         );
-        if ('refusal' in checked) {
-          return checked.refusal;
+        if (refusal !== null) {
+          return refusal;
         }
-        rebuilt = checked.classesRebuiltFirst;
-        for (const [left, error] of refusedHere) {
-          unread += 1;
-          reported.push({ scriptPath: left, error });
-        }
-        for (const answer of checked.answers) {
-          errors += Number(answer['errors']);
-          engineWarned =
-            answer['warnings'] === null || engineWarned === null
-              ? null
-              : engineWarned + Number(answer['warnings']);
-          if (readArray(answer, 'diagnostics')?.length === 0) {
-            nothingReported.push(String(answer['scriptPath']));
-          } else {
-            reported.push(answer);
-          }
-        }
-        byEngine = one.noLanguageServer.reason;
         break;
       }
       if ('refusal' in one) {
-        if (!one.perScript) {
-          return one.refusal;
+        const stop = tallyRefusedScript(tally, scriptPath, one);
+        if (stop !== null) {
+          return stop;
         }
-        unread += 1;
-        reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
         continue;
       }
-      byServer += 1;
-      errors += Number(one.answer['errors']);
-      warnings += Number(one.answer['warnings']);
-      // Every note an answer can carry is about a diagnostic, so none means nothing else either.
-      if (readArray(one.answer, 'diagnostics')?.length === 0) {
-        nothingReported.push(scriptPath);
-      } else {
-        reported.push(one.answer);
-      }
+      tallyLanguageServerAnswer(tally, scriptPath, one.answer);
     }
     return this.jsonTextResponse({
-      clean: errors === 0 && unread === 0,
-      scriptsChecked: scripts.value.length,
-      errors,
-      warnings: engineWarned === null ? null : warnings + engineWarned,
-      ...(unread > 0 ? { scriptsNotRead: unread } : {}),
-      scripts: reported,
-      nothingReported,
-      ...(byEngine === null ? { checkedBy: 'language server' } : engineChecked(byEngine)),
-      ...nonEmpty({ classesRebuiltFirst: rebuilt }),
-      ...(byEngine !== null && byServer > 0
-        ? { checkedBy: 'language server, then engine', checkedByLanguageServer: byServer }
-        : {}),
-      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts.value) : {}),
+      ...diagnosticsSummary(tally, scripts.length),
+      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts) : {}),
     });
+  }
+
+  /**
+   * The scripts [param left] checked in one engine, since what kept the language server from
+   * answering the first keeps it from answering the others, and their answers added to [param tally].
+   * The refusal when the engine could not run, else null.
+   */
+  private async diagnoseTheRestByEngine(
+    project: Checked<{ path: string; file: string }>,
+    left: readonly string[],
+    noLanguageServer: Parameters<GodotServer['engineDiagnostics']>[2],
+    tally: DiagnosticsTally,
+    position: number,
+  ): Promise<ToolResponse | null> {
+    // The engine answers a missing file as one it could not load, which reads as a broken script,
+    // so those are named as the language server names them.
+    const rest: string[] = [];
+    const refusedHere = new Map<string, string>();
+    for (const script of left) {
+      const refused = project.ok ? unreadableScript(project.value.path, script) : null;
+      if (refused === null) {
+        rest.push(script);
+      } else {
+        refusedHere.set(script, refused);
+      }
+    }
+    callProgress()?.(position, `${rest.length} script(s) left, compiled by a headless engine`);
+    const checked = await this.engineDiagnostics(
+      project.ok ? project.value.path : '',
+      rest,
+      noLanguageServer,
+    );
+    if ('refusal' in checked) {
+      return checked.refusal;
+    }
+    tally.rebuilt = checked.classesRebuiltFirst;
+    for (const [script, error] of refusedHere) {
+      tally.unread += 1;
+      tally.reported.push({ scriptPath: script, error });
+    }
+    for (const answer of checked.answers) {
+      tallyEngineAnswer(tally, answer);
+    }
+    tally.byEngine = noLanguageServer.reason;
+    return null;
   }
 
   /** The refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
