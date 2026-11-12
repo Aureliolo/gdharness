@@ -57667,6 +57667,40 @@ async function testAnEngineIsReadForWhatItHolds(): Promise<void> {
     assert.equal('peakBytes' in zero, false, `an engine read at 0 has no peak: ${JSON.stringify(zero)}`);
     assert.deepEqual(none, [], 'and a reading of 0 is told to nobody');
 
+    // The engine's own watch loop flags its pid for memory, so the shared sampler reads it.
+    const real = join(scratch, 'real');
+    mkdirSync(real);
+    const seen: number[] = [];
+    const sampling = launch(sampled);
+    const sharedEnd = await Promise.race([
+      watchedEngine(
+        sampling,
+        join(scratch, '2.lock'),
+        idle,
+        real,
+        join(real, 'engine.log'),
+        60,
+        undefined,
+        (bytes) => {
+          seen.push(bytes);
+          for (const stop of sampling.running) {
+            stop();
+          }
+        },
+      ),
+      delay(30_000).then(() => 'late' as const),
+    ]);
+    for (const stop of sampling.running) {
+      stop();
+    }
+    if (sharedEnd === 'late') {
+      assert.fail('an engine on the shared sampler is read for what it holds');
+    }
+    assert.ok(
+      (sharedEnd.peakBytes ?? 0) > MIB,
+      `and ends with what it held: ${JSON.stringify([sharedEnd, seen])}`,
+    );
+
     const spawned = Date.now();
     const child = spawnHidden(
       process.execPath,
