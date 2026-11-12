@@ -641,6 +641,8 @@ export interface EngineEnd {
   readonly freeBytes?: number;
   /** How many starts before this one died before printing a line, and were started again. */
   readonly crashedStarts?: number;
+  /** The most bytes the engine was read holding, above 0. Absent when no reading was. */
+  readonly peakBytes?: number;
 }
 
 export interface EngineVerdict {

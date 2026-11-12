@@ -6,7 +6,8 @@
  * WMI provider host, which walks every process and formats every property it was asked for, and a
  * machine running several servers, benches and a gate kept a whole core busy in wmiprvse for
  * listings nobody was waiting on. The kernel hands the same table over in one call, with the parent
- * links, start times and processor times in it. Only a command line takes a handle to its process.
+ * links, start times and processor times in it. A handle is opened only for a command line, a
+ * process's memory and the children `HoldChildren` keeps.
  */
 
 import { tmpdir } from 'node:os';
@@ -308,6 +309,45 @@ public static class GdhProcessTable
             {
                 said.Append(Number(entry.Pid)).Append(' ')
                     .Append((entry.Processor / 1e7).ToString("R", CultureInfo.InvariantCulture)).Append('\n');
+            }
+        }
+        return said.ToString();
+    }
+
+    private const int ProcessVmCounters = 3;
+
+    /// <summary>"pid bytes" on a line for each of the comma-separated pids that will open, the bytes it has committed.</summary>
+    public static string HeldBy(string pids)
+    {
+        StringBuilder said = new StringBuilder();
+        int size = 11 * IntPtr.Size;
+        foreach (int pid in Pids(pids))
+        {
+            IntPtr handle = OpenProcess(QueryLimitedInformation, false, pid);
+            if (handle == IntPtr.Zero)
+            {
+                continue;
+            }
+            try
+            {
+                IntPtr buffer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    int needed;
+                    if (NtQueryInformationProcess(handle, ProcessVmCounters, buffer, size, out needed) == 0)
+                    {
+                        long bytes = Marshal.ReadIntPtr(buffer, 9 * IntPtr.Size).ToInt64();
+                        said.Append(Number(pid)).Append(' ').Append(bytes.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            finally
+            {
+                CloseHandle(handle);
             }
         }
         return said.ToString();

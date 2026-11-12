@@ -52,9 +52,12 @@ export const SILENCE_FLOOR_SECONDS = 300;
 
 /** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
 export const WINDOWS_EXCEPTION = 0xc0000000;
-/** Memory left to the rest of the machine, and what each engine is taken to need. */
+/**
+ * Memory left to the rest of the machine, and what an engine is taken to need while no peak is kept
+ * for its suites.
+ */
 const MEMORY_KEPT = 4 * 1024 ** 3;
-const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
+export const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
 const LOOK_MS = 500;
 
 /** How long Windows is given to say how much it can still commit, on a machine the run may load. */
@@ -190,10 +193,13 @@ export function heldRunSaid(directory: string): string {
   return `left ${directory}, which another process holds, such as an engine of that run still going`;
 }
 
+/** [param bytes] as gigabytes to one decimal place. */
+export const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
 /**
  * How many of the [param most] engines asked for the machine has room for, given its [param
  * processors] and the memory [param available] past what it keeps, with what held it below
- * [param most] when something did.
+ * [param most] when something did, each taken at [param engine]'s bytes.
  */
 export function roomFor(
   most: number,
@@ -201,28 +207,31 @@ export function roomFor(
   available: number,
   said = 'of memory free',
   processorsSaid = `the machine has ${plural(processors, 'processor')}`,
+  engine: { readonly bytes: number; readonly said: string } = {
+    bytes: MEMORY_PER_ENGINE,
+    said: 'taken for each engine',
+  },
 ): { engines: number; held: string | undefined } {
-  const byMemory = Math.floor((available - MEMORY_KEPT) / MEMORY_PER_ENGINE);
+  const byMemory = Math.floor((available - MEMORY_KEPT) / engine.bytes);
   const engines = Math.max(1, Math.min(most, processors, byMemory));
   if (engines >= most) {
     return { engines, held: undefined };
   }
-  const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   return {
     engines,
     held:
       byMemory < processors
-        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
+        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(engine.bytes)} ${engine.said}`
         : processorsSaid,
   };
 }
 
 /**
- * Whether the memory [param available] has room for one more engine past what the machine keeps,
- * beside [param starting] engines started too lately for what they take to show in it yet.
+ * Whether the memory [param available] has room for an engine needing [param need], past what the
+ * machine keeps and the [param owed] bytes the going engines have yet to take.
  */
-export function roomForAnother(available: number, starting: number): boolean {
-  return available - MEMORY_KEPT - starting * MEMORY_PER_ENGINE >= MEMORY_PER_ENGINE;
+export function roomForAnother(available: number, owed: number, need: number): boolean {
+  return available - MEMORY_KEPT - owed >= need;
 }
 
 /** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
@@ -372,6 +381,8 @@ export function endingWithRunner(
  * what it had printed. It is asked only once a silence passes [param silenceSeconds], since the log
  * is read again each time.
  *
+ * [param holds] is told each reading of what the engine holds.
+ *
  * An engine that dies as it starts, with a Windows exception status before printing a line, is
  * started again, as a headless call's is: a suite run failed on 0xC06D007F with every suite unrun.
  */
@@ -383,12 +394,13 @@ export async function watchedEngine(
   log: string,
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
+  holds?: (bytes: number) => void,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   seedPipelineCache(user, launch.projectPath, launch.godotPath);
   try {
     return await startedUntilItRuns(
-      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn),
+      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds),
       undefined,
       (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
     );
@@ -405,6 +417,7 @@ async function engineWatchedOnce(
   log: string,
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
+  holds?: (bytes: number) => void,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
@@ -513,13 +526,14 @@ async function engineWatchedOnce(
   // Named in the lock as well, since the lock names this process, and what the engine starts runs on
   // its slot only when the lock names the engine.
   const found = (engine: number): void => {
-    watching(engine, true);
+    watching(engine, true, true);
     void nameSlotEngineOf(lock, process.pid, engine);
   };
   let pid = engineAt();
   if (pid !== undefined) {
     found(pid);
   }
+  let peakBytes = 0;
   try {
     let size = 0;
     const sample = launch.sample ?? sampled;
@@ -539,6 +553,11 @@ async function engineWatchedOnce(
         }
       }
       const taken = await sample();
+      const holding = pid === undefined ? undefined : taken.held?.get(pid);
+      if (holding !== undefined && holding > 0) {
+        peakBytes = Math.max(peakBytes, holding);
+        holds?.(holding);
+      }
       running.counted(taken, pid);
       quiet.counted(taken, pid);
       const at = nowSeconds();
@@ -626,7 +645,13 @@ async function engineWatchedOnce(
   if (failed !== null && helper !== null) {
     ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
-  return { code, signal, ended, ...(freeBytes === undefined ? {} : { freeBytes }) };
+  return {
+    code,
+    signal,
+    ended,
+    ...(freeBytes === undefined ? {} : { freeBytes }),
+    ...(peakBytes > 0 ? { peakBytes } : {}),
+  };
 }
 
 /**
