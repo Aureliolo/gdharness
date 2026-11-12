@@ -120,37 +120,52 @@ func _hover(viewport: Viewport, point: Vector2) -> void:
 	if over != null:
 		now = over.get_instance_id()
 	if now != was:
-		var common: int = 0
 		var entering: Array[int] = []
-		var walk: CanvasItem = over
-		while walk != null:
-			var control: Control = walk as Control
-			if control != null:
-				var filter: Control.MouseFilter = control.get_mouse_filter_with_override()
-				if filter != Control.MOUSE_FILTER_IGNORE:
-					if held.has(control.get_instance_id()):
-						common = control.get_instance_id()
-						break
-					entering.append(control.get_instance_id())
-				if filter == Control.MOUSE_FILTER_STOP:
-					break
-			if walk.top_level:
-				break
-			walk = _parent_item(walk)
-		_drop(viewport, common)
+		_drop(viewport, _first_held(over, held, entering))
 		if over != null:
-			var kept: Array = _supplied.get(id, [])
-			for index: int in range(entering.size() - 1, -1, -1):
-				var control: Control = instance_from_id(entering[index]) as Control
-				if control != null:
-					kept.append(entering[index])
-					control.notification(Control.NOTIFICATION_MOUSE_ENTER)
-					control.mouse_entered.emit()
-			_supplied[id] = kept
-			over.notification(Control.NOTIFICATION_MOUSE_ENTER_SELF)
+			_enter(id, over, entering)
 	var container: SubViewportContainer = over as SubViewportContainer
-	if container == null:
-		return
+	if container != null:
+		_hover_shown(container, point)
+
+
+## The id of the innermost holder of [param over] already in [param held], or 0 for none. Each
+## holder below it that takes the pointer goes into [param entering], innermost first.
+func _first_held(over: Control, held: Array, entering: Array[int]) -> int:
+	var walk: CanvasItem = over
+	while walk != null:
+		var control: Control = walk as Control
+		if control != null:
+			var filter: Control.MouseFilter = control.get_mouse_filter_with_override()
+			if filter != Control.MOUSE_FILTER_IGNORE:
+				if held.has(control.get_instance_id()):
+					return control.get_instance_id()
+				entering.append(control.get_instance_id())
+			if filter == Control.MOUSE_FILTER_STOP:
+				return 0
+		if walk.top_level:
+			return 0
+		walk = _parent_item(walk)
+	return 0
+
+
+## Enters each of [param entering], outermost first, and then [param over] itself, in the
+## viewport whose id is [param id].
+func _enter(id: int, over: Control, entering: Array[int]) -> void:
+	var kept: Array = _supplied.get(id, [])
+	for index: int in range(entering.size() - 1, -1, -1):
+		var control: Control = instance_from_id(entering[index]) as Control
+		if control != null:
+			kept.append(entering[index])
+			control.notification(Control.NOTIFICATION_MOUSE_ENTER)
+			control.mouse_entered.emit()
+	_supplied[id] = kept
+	over.notification(Control.NOTIFICATION_MOUSE_ENTER_SELF)
+
+
+## Hovers [param point] in each viewport [param container] shows, as the engine carries the
+## pointer there.
+func _hover_shown(container: SubViewportContainer, point: Vector2) -> void:
 	var inside: Vector2 = container.get_global_transform_with_canvas().affine_inverse() * point
 	if container.stretch:
 		inside /= container.stretch_shrink

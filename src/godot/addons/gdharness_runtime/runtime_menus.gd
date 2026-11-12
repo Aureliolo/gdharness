@@ -56,27 +56,44 @@ static func wanted_items(menu: PopupMenu, params: Dictionary) -> Array[int]:
 		shown.append(GdhWords.item_says(menu, index))
 		held.append(menu.get_item_text(index))
 	for words: Array[String] in [shown, held]:
-		for at: int in words.size():
-			if words[at] == wanted:
-				return _items([order[at]])
-		for at: int in words.size():
-			if GdhSays.spaced(words[at]).nocasecmp_to(GdhSays.spaced(wanted)) == 0:
-				return _items([order[at]])
+		var at: int = _said_in_full(words, wanted)
+		if at >= 0:
+			return _items([order[at]])
 	# Separators are left out here: a heading is refused when named in full, and a pattern that
 	# matched one beside the item it heads would tie the two.
 	for words: Array[String] in [shown, held]:
-		var matched: Array[int] = []
-		var enabled: Array[int] = []
-		for at: int in words.size():
-			var index: int = order[at]
-			if menu.is_item_separator(index) or not GdhSays.matches(words[at], wanted):
-				continue
-			matched.append(index)
-			if not menu.is_item_disabled(index):
-				enabled.append(index)
+		var matched: Array[int] = _matching(menu, order, words, wanted)
 		if not matched.is_empty():
-			return enabled if not enabled.is_empty() else matched
+			return matched
 	return _items([])
+
+
+## Where in [param words] [param wanted] stands in full, exactly before spaced and caseless, or -1.
+static func _said_in_full(words: Array[String], wanted: String) -> int:
+	var at: int = words.find(wanted)
+	if at >= 0:
+		return at
+	for index: int in words.size():
+		if GdhSays.spaced(words[index]).nocasecmp_to(GdhSays.spaced(wanted)) == 0:
+			return index
+	return -1
+
+
+## The items of [param menu], listed in [param order] and saying [param words], that the pattern
+## [param wanted] matches. Only the enabled ones when any is, and no separator.
+static func _matching(
+	menu: PopupMenu, order: Array[int], words: Array[String], wanted: String
+) -> Array[int]:
+	var matched: Array[int] = []
+	var enabled: Array[int] = []
+	for at: int in words.size():
+		var index: int = order[at]
+		if menu.is_item_separator(index) or not GdhSays.matches(words[at], wanted):
+			continue
+		matched.append(index)
+		if not menu.is_item_disabled(index):
+			enabled.append(index)
+	return enabled if not enabled.is_empty() else matched
 
 
 ## [param indices] as a list of item numbers: a literal list is untyped, and handed back where a

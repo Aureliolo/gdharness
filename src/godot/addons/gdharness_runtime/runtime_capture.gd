@@ -283,30 +283,9 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	if asked.has("message"):
 		return asked
 
-	# Godot draws nothing to a minimised window and nothing at all without one, and the
-	# texture keeps whatever was drawn last. A capture then comes back byte for byte the same
-	# every time, with a success payload, and a game running perfectly well reads as a game
-	# that has frozen. A frame nobody drew is not evidence of anything, so it is refused.
-	# Told apart, because the remedies are: a headless game told to restore its window had none.
-	if DisplayServer.get_name() == "headless":
-		return {
-			"type": "error",
-			"message":
-			(
-				"This game runs headless, so it has no window and draws nothing to capture. Start "
-				+ "it with a window (editor_run start with headless false) to capture it."
-			),
-		}
-	if not _host.get_tree().root.can_draw():
-		return {
-			"type": "error",
-			"message":
-			(
-				"Nothing is being drawn to the game's window because it is minimised. The texture "
-				+ "still holds the last frame that was drawn, so this and every capture after it "
-				+ "would be that frame. Restore the window and ask again."
-			),
-		}
+	var undrawn: Dictionary = _undrawn()
+	if not undrawn.is_empty():
+		return undrawn
 
 	# The game announces itself before its first frame, and until a frame has been drawn the texture
 	# holds nothing the game drew: blank on one machine, solid white on another, which a caller took
@@ -329,59 +308,16 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	var region: Variant = asked.get("region")
 	if asked.has("node_path"):
 		var node_path: String = asked["node_path"]
-		var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
-		if standing.has("message"):
-			return standing
-		var node: Node = standing["node"]
-		var placed: Variant = drawn_rect_of(node)
-		if placed is String:
-			var why: String = placed
-			return _refused(why)
-		region = placed
-		# A hidden node's rectangle is still a place, and what is drawn there is whatever is behind
-		# it.
-		if not GdhQueries.shown(node):
-			described["note"] = (
-				"%s is hidden, so this is what is drawn where it would be rather than the node"
-				% node_path
-			)
+		region = _node_region(node_path, described)
+		if region is Dictionary:
+			return region
 	if region != null:
-		var asked_region: Rect2 = region
-		var window: Vector2i = _host.get_tree().root.size
-		var picture_size: Vector2i = image.get_size()
-		var whole: Rect2i = widened(asked_region, window, picture_size)
-		var picture: Rect2i = whole.intersection(Rect2i(Vector2i.ZERO, picture_size))
-		if not picture.has_area():
-			return _refused(
-				(
-					(
-						"The region at %s, %s pixels across, is outside the window, which is %dx%d "
-						+ "pixels"
-					)
-					% [asked_region.position, asked_region.size, window.x, window.y]
-				)
-			)
-		image = cut(image, picture, 1)
-		described["region"] = in_window_pixels(picture, window, picture_size)
-		if picture != whole:
-			described["clipped"] = true
-		# The project draws at its own size and stretches that to the window, so the picture's
-		# pixels are not the window's: said, because a caller sizing a region by window pixels gets
-		# fewer.
-		if picture_size != window:
-			described["drawnAt"] = { "width": picture_size.x, "height": picture_size.y }
-
+		var picked: Variant = _cut_to(image, region, described)
+		if picked is Dictionary:
+			return picked
+		image = picked
 	var zoom: int = asked["zoom"]
-	if zoom > 1:
-		image = cut(image, Rect2i(Vector2i.ZERO, image.get_size()), zoom)
-		described["zoom"] = zoom
-	else:
-		var drawn: Vector2i = Vector2i(image.get_width(), image.get_height())
-		var target: Vector2i = GdhPictures.scaled_to(
-			drawn, GdhRead.as_int(params.get("width", 0)), GdhRead.as_int(params.get("height", 0))
-		)
-		if target != drawn:
-			image.resize(target.x, target.y)
+	image = _sized(image, zoom, params, described)
 
 	var screenshot_path: String = requested_path
 	if screenshot_path.begins_with("user://") or screenshot_path.begins_with("res://"):
@@ -402,3 +338,94 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	var answer: Dictionary = GdhPictures.saved(image, screenshot_path)
 	answer.merge(described)
 	return answer
+
+
+## The refusal of a capture when the game's window draws nothing, or an empty dictionary when it
+## draws. Godot draws nothing to a minimised window and nothing at all without one, and the texture
+## keeps whatever was drawn last. A capture then comes back byte for byte the same every time, with
+## a success payload, and a game running perfectly well reads as a game that has frozen. A frame
+## nobody drew is not evidence of anything, so it is refused. Told apart, because the remedies are:
+## a headless game told to restore its window had none.
+func _undrawn() -> Dictionary:
+	if DisplayServer.get_name() == "headless":
+		return {
+			"type": "error",
+			"message":
+			(
+				"This game runs headless, so it has no window and draws nothing to capture. Start "
+				+ "it with a window (editor_run start with headless false) to capture it."
+			),
+		}
+	if not _host.get_tree().root.can_draw():
+		return {
+			"type": "error",
+			"message":
+			(
+				"Nothing is being drawn to the game's window because it is minimised. The texture "
+				+ "still holds the last frame that was drawn, so this and every capture after it "
+				+ "would be that frame. Restore the window and ask again."
+			),
+		}
+	return {}
+
+
+## The rectangle the node at [param node_path] is drawn in, or the refusal when there is none. A
+## hidden node notes so in [param described].
+func _node_region(node_path: String, described: Dictionary) -> Variant:
+	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
+	var placed: Variant = drawn_rect_of(node)
+	if placed is String:
+		var why: String = placed
+		return _refused(why)
+	# A hidden node's rectangle is still a place, and what is drawn there is whatever is behind
+	# it.
+	if not GdhQueries.shown(node):
+		described["note"] = (
+			"%s is hidden, so this is what is drawn where it would be rather than the node"
+			% node_path
+		)
+	return placed
+
+
+## [param image] cut to [param region], a rectangle in window pixels, or the refusal for one
+## outside the window. What was cut goes into [param described].
+func _cut_to(image: Image, region: Variant, described: Dictionary) -> Variant:
+	var asked_region: Rect2 = region
+	var window: Vector2i = _host.get_tree().root.size
+	var picture_size: Vector2i = image.get_size()
+	var whole: Rect2i = widened(asked_region, window, picture_size)
+	var picture: Rect2i = whole.intersection(Rect2i(Vector2i.ZERO, picture_size))
+	if not picture.has_area():
+		return _refused(
+			(
+				"The region at %s, %s pixels across, is outside the window, which is %dx%d pixels"
+				% [asked_region.position, asked_region.size, window.x, window.y]
+			)
+		)
+	described["region"] = in_window_pixels(picture, window, picture_size)
+	if picture != whole:
+		described["clipped"] = true
+	# The project draws at its own size and stretches that to the window, so the picture's
+	# pixels are not the window's: said, because a caller sizing a region by window pixels gets
+	# fewer.
+	if picture_size != window:
+		described["drawnAt"] = { "width": picture_size.x, "height": picture_size.y }
+	return cut(image, picture, 1)
+
+
+## [param image] zoomed by [param zoom], or scaled to the width and height [param params] ask for.
+## A zoom goes into [param described].
+static func _sized(image: Image, zoom: int, params: Dictionary, described: Dictionary) -> Image:
+	if zoom > 1:
+		described["zoom"] = zoom
+		return cut(image, Rect2i(Vector2i.ZERO, image.get_size()), zoom)
+	var drawn: Vector2i = Vector2i(image.get_width(), image.get_height())
+	var target: Vector2i = GdhPictures.scaled_to(
+		drawn, GdhRead.as_int(params.get("width", 0)), GdhRead.as_int(params.get("height", 0))
+	)
+	if target != drawn:
+		image.resize(target.x, target.y)
+	return image

@@ -56,103 +56,135 @@ static func control_saying(
 	var reached: Dictionary = GdhValues.node_at(root, root_path)
 	if reached.has("message"):
 		return reached
-	var matched: Array[Control] = []
-	# The words of the control that matched, which a button pressed on a label's behalf has none of.
-	var said: Array[String] = []
-	var exact: Array[bool] = []
-	# Whether the words are only inside longer words there, "away" in "Faraway".
-	var inside: Array[bool] = []
-	var hidden: Array[Node] = []
-	# Controls saying exactly the words that a click cannot reach, kept to say what a match on
-	# screen that only says them as part of more stands in for.
-	var exact_out_of_reach: Array[Node] = []
-	var out_of_reach_as: Array[String] = []
-	# The item of a control drawing a list that matched, null for a control matched as a whole, and
-	# the point in the control a pointer would go to for it.
-	var items: Array = []
-	var aims: Array[Vector2] = []
-	var pending: Array[Node] = [reached["node"]]
+	var from: Node = reached["node"]
+	var said: GdhSayings = GdhSayings.new()
+	said.under = "" if root_path == "/root" else " under %s" % root_path
+	_collect_saying(from, wanted, said)
+	said.drawn = _pointer_takers(root)
+	said.areas = _areas_of(said.drawn)
+	_sort_reachable(said)
+	_arrange_open(said)
+
+	if said.targets.is_empty():
+		return _nothing_says(said, root, from, wanted)
+	var unclear: Dictionary = _unclear_refusal(said, wanted, which)
+	if unclear.has("message"):
+		return unclear
+	var index: int = 0 if which == null else GdhRead.as_int(which, -1)
+	if index < 0 or index >= said.targets.size():
+		return _index_refusal(said, wanted, which, index)
+	var stand_in: Dictionary = _stand_in_refusal(said, wanted, which, index)
+	if stand_in.has("message"):
+		return stand_in
+	return _chosen(said, wanted, which, index)
+
+
+## Adds to [param said] every control under [param start] that says [param wanted], and every
+## control that says it without being shown.
+static func _collect_saying(start: Node, wanted: String, said: GdhSayings) -> void:
+	var pending: Array[Node] = [start]
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
 		if node is Control and GdhSays.says(node, wanted):
-			if not GdhQueries.shown(node):
-				hidden.append(node)
-				if _says_exactly(GdhWords.said_by(node), wanted):
-					exact_out_of_reach.append(node)
-					out_of_reach_as.append("hidden")
-			elif GdhWords.draws_a_list(node):
-				# Each item a match of its own, so the words of one tab are matched as a whole and
-				# the index picks between two items saying them as it does between two buttons.
-				var drawing: Control = node
-				for entry: Dictionary in GdhWords.items_of(drawing):
-					var words: String = entry["says"]
-					if not GdhSays.matches(words, wanted):
-						continue
-					var whole: bool = _says_exactly(words, wanted)
-					var drawn_at_now: Rect2 = GdhItems.item_rect(drawing, entry["item"], wanted)
-					matched.append(drawing)
-					said.append(words)
-					exact.append(whole)
-					inside.append(not whole and _inside_a_word(words, wanted))
-					items.append(entry["item"])
-					# An item drawn nowhere yet, scrolled out of its list, is judged at the list's
-					# middle, which is where the click scrolls it towards.
-					aims.append(
-						(
-							drawing.size * 0.5
-							if drawn_at_now.size == Vector2.ZERO
-							else drawn_at_now.get_center()
-						)
-					)
-			else:
-				var control: Control = node
-				var target: Control = _pressed_through(control)
-				var words: String = GdhWords.said_by(node)
-				var whole: bool = _says_exactly(words, wanted)
-				var buried: bool = not whole and _inside_a_word(words, wanted)
-				var at: int = matched.find(target)
-				if at == -1:
-					matched.append(target)
-					said.append(words)
-					exact.append(whole)
-					inside.append(buried)
-					items.append(null)
-					aims.append(target.size * 0.5)
-				elif (whole and not exact[at]) or (inside[at] and not buried):
-					said[at] = words
-					exact[at] = whole
-					inside[at] = buried
+			_collect_match(node, wanted, said)
 		var children: Array[Node] = node.get_children(true)
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 
-	var drawn: Array[Node] = _pointer_takers(root)
-	var areas: Array[Rect2] = _areas_of(drawn)
-	var covered: int = 0
-	var cover: Node = null
-	var outside: int = 0
-	var open: Array[int] = []
-	for index: int in matched.size():
-		if _off_screen(matched[index], aims[index]):
-			outside += 1
-			if exact[index]:
-				exact_out_of_reach.append(matched[index])
-				out_of_reach_as.append("outside what the screen shows")
+
+## Files one control that says the words: hidden, a list drawing items, or a control as a whole.
+static func _collect_match(node: Node, wanted: String, said: GdhSayings) -> void:
+	if not GdhQueries.shown(node):
+		said.hidden.append(node)
+		if _says_exactly(GdhWords.said_by(node), wanted):
+			said.exact_out_of_reach.append(node)
+			said.out_of_reach_as.append("hidden")
+	elif GdhWords.draws_a_list(node):
+		_collect_items(node, wanted, said)
+	else:
+		_collect_control(node, wanted, said)
+
+
+## Files each item of a list [param node] draws that says the words as a match of its own.
+static func _collect_items(node: Node, wanted: String, said: GdhSayings) -> void:
+	# Each item a match of its own, so the words of one tab are matched as a whole and
+	# the index picks between two items saying them as it does between two buttons.
+	var drawing: Control = node
+	for entry: Dictionary in GdhWords.items_of(drawing):
+		var words: String = entry["says"]
+		if not GdhSays.matches(words, wanted):
 			continue
-		var over: Node = _cover_of(matched[index], drawn, areas, aims[index])
+		var whole: bool = _says_exactly(words, wanted)
+		var drawn_at_now: Rect2 = GdhItems.item_rect(drawing, entry["item"], wanted)
+		said.matched.append(drawing)
+		said.said.append(words)
+		said.exact.append(whole)
+		said.inside.append(not whole and _inside_a_word(words, wanted))
+		said.items.append(entry["item"])
+		# An item drawn nowhere yet, scrolled out of its list, is judged at the list's
+		# middle, which is where the click scrolls it towards.
+		said.aims.append(
+			(
+				drawing.size * 0.5
+				if drawn_at_now.size == Vector2.ZERO
+				else drawn_at_now.get_center()
+			)
+		)
+
+
+## Files [param node], which says the words, under the control a click on it presses. Two controls
+## pressed through the same one are one match, kept as the better of the two.
+static func _collect_control(node: Node, wanted: String, said: GdhSayings) -> void:
+	var control: Control = node
+	var target: Control = _pressed_through(control)
+	var words: String = GdhWords.said_by(node)
+	var whole: bool = _says_exactly(words, wanted)
+	var buried: bool = not whole and _inside_a_word(words, wanted)
+	var at: int = said.matched.find(target)
+	if at == -1:
+		said.matched.append(target)
+		said.said.append(words)
+		said.exact.append(whole)
+		said.inside.append(buried)
+		said.items.append(null)
+		said.aims.append(target.size * 0.5)
+	elif (whole and not said.exact[at]) or (said.inside[at] and not buried):
+		said.said[at] = words
+		said.exact[at] = whole
+		said.inside[at] = buried
+
+
+## Sorts the matches into those a pointer reaches, in `open`, and those it does not: outside what
+## the screen shows or under something drawn over them.
+static func _sort_reachable(said: GdhSayings) -> void:
+	for index: int in said.matched.size():
+		if _off_screen(said.matched[index], said.aims[index]):
+			said.outside += 1
+			if said.exact[index]:
+				said.exact_out_of_reach.append(said.matched[index])
+				said.out_of_reach_as.append("outside what the screen shows")
+			continue
+		var over: Node = _cover_of(said.matched[index], said.drawn, said.areas, said.aims[index])
 		if over == null:
-			open.append(index)
-		else:
-			covered += 1
-			if exact[index]:
-				exact_out_of_reach.append(matched[index])
-				out_of_reach_as.append("under %s, which is drawn over it" % over.get_path())
-			if cover == null:
-				cover = over
+			said.open.append(index)
+			continue
+		said.covered += 1
+		if said.exact[index]:
+			said.exact_out_of_reach.append(said.matched[index])
+			said.out_of_reach_as.append("under %s, which is drawn over it" % over.get_path())
+		if said.cover == null:
+			said.cover = over
+
+
+## Puts the reachable matches in the order a click prefers them, into `targets` with their ranks.
+static func _arrange_open(said: GdhSayings) -> void:
+	var matched: Array[Control] = said.matched
+	var exact: Array[bool] = said.exact
+	var inside: Array[bool] = said.inside
 	# Stable, so matches of one rank keep the order they are drawn in. Words only inside longer
 	# words come after everything else: ranked as a button saying them as part of more, a card was
 	# pressed over a control saying exactly the words, and spent something in the game.
-	open.sort_custom(
+	said.open.sort_custom(
 		func(a: int, b: int) -> bool:
 			if inside[a] != inside[b]:
 				return inside[b]
@@ -160,90 +192,97 @@ static func control_saying(
 			var second: int = _rank(matched[b], exact[b])
 			return first > second or (first == second and a < b)
 	)
-	var targets: Array[Control] = []
-	var ranks: Array[int] = []
-	var lines: Array[String] = []
-	var wholes: Array[bool] = []
-	var insides: Array[bool] = []
-	var picked_items: Array = []
-	for index: int in open:
-		targets.append(matched[index])
-		ranks.append(_rank(matched[index], exact[index]))
-		lines.append(said[index])
-		wholes.append(exact[index])
-		insides.append(inside[index])
-		picked_items.append(items[index])
+	for index: int in said.open:
+		said.targets.append(matched[index])
+		said.ranks.append(_rank(matched[index], exact[index]))
+		said.lines.append(said.said[index])
+		said.wholes.append(exact[index])
+		said.insides.append(inside[index])
+		said.picked_items.append(said.items[index])
 
-	var under: String = "" if root_path == "/root" else " under %s" % root_path
-	if targets.is_empty():
-		var from: Node = reached["node"]
-		return {
-			"type": "error",
-			"message":
-			(
-				'no control on screen%s says "%s", so nothing was clicked%s%s%s%s%s'
-				% [
-					under,
-					wanted,
-					_hidden_note(hidden),
-					_outside_note(outside, root),
-					_covered_note(covered, cover),
-					_open_menu_note(root, wanted),
-					_offered_note(from, drawn, areas),
-				]
-			),
-		}
+
+## The refusal for words nothing on screen says, with what was left out and why.
+static func _nothing_says(said: GdhSayings, root: Node, from: Node, wanted: String) -> Dictionary:
+	return {
+		"type": "error",
+		"message":
+		(
+			'no control on screen%s says "%s", so nothing was clicked%s%s%s%s%s'
+			% [
+				said.under,
+				wanted,
+				_hidden_note(said.hidden),
+				_outside_note(said.outside, root),
+				_covered_note(said.covered, said.cover),
+				_open_menu_note(root, wanted),
+				_offered_note(from, said.drawn, said.areas),
+			]
+		),
+	}
+
+
+## The refusal when several matches tie for best and no index was given, or an empty dictionary.
+static func _unclear_refusal(said: GdhSayings, wanted: String, which: Variant) -> Dictionary:
 	var best: int = 0
-	for at: int in targets.size():
-		if ranks[at] == ranks[0] and insides[at] == insides[0]:
+	for at: int in said.targets.size():
+		if said.ranks[at] == said.ranks[0] and said.insides[at] == said.insides[0]:
 			best += 1
-	if which == null and best > 1:
-		var order: String = "" if best == targets.size() else ", best matches first"
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s, so which to click is not clear. Pass index, counting from 0%s: %s"
-				% [_described(best, ranks[0], wanted, under), order, _candidates(targets, lines)]
-			),
-		}
-	var index: int = 0 if which == null else GdhRead.as_int(which, -1)
-	if index < 0 or index >= targets.size():
-		# A number arrives from JSON as a float, and 5 was quoted back as 5.0.
-		var given: String = str(index) if index >= 0 else str(which)
-		var among: String = (
-			'the only match on screen%s saying "%s" is index 0' % [under, wanted]
-			if targets.size() == 1
-			else (
-				'the %d matches on screen%s saying "%s" are 0 to %d'
-				% [targets.size(), under, wanted, targets.size() - 1]
-			)
+	if which != null or best <= 1:
+		return {}
+	var order: String = "" if best == said.targets.size() else ", best matches first"
+	return {
+		"type": "error",
+		"message":
+		(
+			"%s, so which to click is not clear. Pass index, counting from 0%s: %s"
+			% [
+				_described(best, said.ranks[0], wanted, said.under),
+				order,
+				_candidates(said.targets, said.lines),
+			]
+		),
+	}
+
+
+## The refusal for an index that picks none of the matches.
+static func _index_refusal(
+	said: GdhSayings, wanted: String, which: Variant, index: int
+) -> Dictionary:
+	# A number arrives from JSON as a float, and 5 was quoted back as 5.0.
+	var given: String = str(index) if index >= 0 else str(which)
+	var among: String = (
+		'the only match on screen%s saying "%s" is index 0' % [said.under, wanted]
+		if said.targets.size() == 1
+		else (
+			'the %d matches on screen%s saying "%s" are 0 to %d'
+			% [said.targets.size(), said.under, wanted, said.targets.size() - 1]
 		)
-		return {
-			"type": "error",
-			"message":
-			"index %s picks nothing: %s: %s" % [given, among, _candidates(targets, lines)],
-		}
-	# A match saying the words as part of more, while another control says exactly them, is a
-	# stand-in for that one, not the control meant: a tab reading "Away" sat in a collapsed drawer
-	# and a line saying somebody "went away for good" was pressed, and with the tab's own
-	# words on screen in a control that is not a button, a card reading "Faraway, 90" was. Pressed
-	# only when asked for by index, which is the caller saying the match is what they meant.
-	var exact_elsewhere: Array[Node] = exact_out_of_reach.duplicate()
-	var elsewhere_as: Array[String] = out_of_reach_as.duplicate()
-	# On screen only when it takes clicks itself: a heading saying exactly "Onward" beside a button
-	# saying "Onward now" is not what a click on "Onward" is for, and the button is pressed.
-	for other: int in targets.size():
-		var taking: bool = (
-			targets[other].get_mouse_filter_with_override() != Control.MOUSE_FILTER_IGNORE
-		)
-		if other != index and wholes[other] and taking:
-			exact_elsewhere.append(targets[other])
-			elsewhere_as.append("on screen, taking clicks but not an enabled button")
-	var best_one: String = (
-		"the one on screen," if targets.size() == 1 else "the best match on screen,"
 	)
-	if which == null and not wholes[index] and not exact_elsewhere.is_empty():
+	return {
+		"type": "error",
+		"message":
+		"index %s picks nothing: %s: %s" % [given, among, _candidates(said.targets, said.lines)],
+	}
+
+
+## The refusal when the match at [param index] only stands in for the control meant, or an empty
+## dictionary. Each stand-in is pressed only when asked for by index.
+static func _stand_in_refusal(
+	said: GdhSayings, wanted: String, which: Variant, index: int
+) -> Dictionary:
+	if which != null:
+		return {}
+	var target: Control = said.targets[index]
+	var best_one: String = (
+		"the one on screen," if said.targets.size() == 1 else "the best match on screen,"
+	)
+	var elsewhere: Dictionary = _exact_elsewhere(said, index)
+	var elsewhere_nodes: Array[Node] = elsewhere["nodes"]
+	if not said.wholes[index] and not elsewhere_nodes.is_empty():
+		var elsewhere_as: Array[String] = elsewhere["as"]
+		var kind: String = "control"
+		if elsewhere_nodes.size() > said.exact_out_of_reach.size():
+			kind = "button"
 		return {
 			"type": "error",
 			"message":
@@ -253,19 +292,19 @@ static func control_saying(
 					+ 'part of "%s", while %s. Pass index %d to press %s anyway'
 				)
 				% [
-					"button" if exact_elsewhere.size() > exact_out_of_reach.size() else "control",
-					under,
+					kind,
+					said.under,
 					wanted,
 					best_one,
-					targets[index].get_path(),
-					_shortened(lines[index]),
-					_out_of_reach_exactly(exact_elsewhere, elsewhere_as),
+					target.get_path(),
+					_shortened(said.lines[index]),
+					_out_of_reach_exactly(elsewhere_nodes, elsewhere_as),
 					index,
-					targets[index].get_path(),
+					target.get_path(),
 				]
 			),
 		}
-	if which == null and insides[index]:
+	if said.insides[index]:
 		return {
 			"type": "error",
 			"message":
@@ -276,13 +315,13 @@ static func control_saying(
 					+ "press %s anyway"
 				)
 				% [
-					under,
+					said.under,
 					wanted,
 					best_one,
-					targets[index].get_path(),
-					_shortened(lines[index]),
+					target.get_path(),
+					_shortened(said.lines[index]),
 					index,
-					targets[index].get_path(),
+					target.get_path(),
 				]
 			),
 		}
@@ -290,9 +329,8 @@ static func control_saying(
 	# under it, which is nothing the words name. A line saying what "is far away" was the best
 	# match left for "Away" once the cards saying "Faraway" were passed over.
 	if (
-		which == null
-		and not wholes[index]
-		and targets[index].get_mouse_filter_with_override() == Control.MOUSE_FILTER_IGNORE
+		not said.wholes[index]
+		and target.get_mouse_filter_with_override() == Control.MOUSE_FILTER_IGNORE
 	):
 		return {
 			"type": "error",
@@ -304,34 +342,63 @@ static func control_saying(
 					+ "it. Pass index %d to click there anyway"
 				)
 				% [
-					under,
+					said.under,
 					wanted,
 					best_one,
-					targets[index].get_path(),
-					_shortened(lines[index]),
+					target.get_path(),
+					_shortened(said.lines[index]),
 					index,
 				]
 			),
 		}
-	var found: Dictionary = { "says": wanted, "index": index, "of": targets.size() }
-	if not wholes[index]:
-		found["partOf"] = _shortened(lines[index])
-	if which == null and targets.size() > 1:
+	return {}
+
+
+## The controls saying exactly the words that the match at [param index] stands in for, as
+## `{"nodes", "as"}`: where each is and why a click would not go there.
+static func _exact_elsewhere(said: GdhSayings, index: int) -> Dictionary:
+	# A match saying the words as part of more, while another control says exactly them, is a
+	# stand-in for that one, not the control meant: a tab reading "Away" sat in a collapsed drawer
+	# and a line saying somebody "went away for good" was pressed, and with the tab's own
+	# words on screen in a control that is not a button, a card reading "Faraway, 90" was. Pressed
+	# only when asked for by index, which is the caller saying the match is what they meant.
+	var nodes: Array[Node] = said.exact_out_of_reach.duplicate()
+	var as_what: Array[String] = said.out_of_reach_as.duplicate()
+	# On screen only when it takes clicks itself: a heading saying exactly "Onward" beside a button
+	# saying "Onward now" is not what a click on "Onward" is for, and the button is pressed.
+	for other: int in said.targets.size():
+		var taking: bool = (
+			said.targets[other].get_mouse_filter_with_override() != Control.MOUSE_FILTER_IGNORE
+		)
+		if other != index and said.wholes[other] and taking:
+			nodes.append(said.targets[other])
+			as_what.append("on screen, taking clicks but not an enabled button")
+	return { "nodes": nodes, "as": as_what }
+
+
+## The control the match at [param index] presses, as `{"path", "found"}` with `item` as well when
+## the match is an item of a list.
+static func _chosen(said: GdhSayings, wanted: String, which: Variant, index: int) -> Dictionary:
+	var found: Dictionary = { "says": wanted, "index": index, "of": said.targets.size() }
+	if not said.wholes[index]:
+		found["partOf"] = _shortened(said.lines[index])
+	if which == null and said.targets.size() > 1:
 		var others: String = (
-			"the other one on screen %s" % _passed_over(ranks[0], ranks.slice(1), true)
-			if targets.size() == 2
+			"the other one on screen %s" % _passed_over(said.ranks[0], said.ranks.slice(1), true)
+			if said.targets.size() == 2
 			else (
 				"the other %d on screen %s"
-				% [targets.size() - 1, _passed_over(ranks[0], ranks.slice(1), false)]
+				% [said.targets.size() - 1, _passed_over(said.ranks[0], said.ranks.slice(1), false)]
 			)
 		)
-		found["picked"] = "%s, and %s" % [_described(1, ranks[0], wanted, under), others]
-	if covered > 0:
-		found["covered"] = covered
-	var answer: Dictionary = { "path": str(targets[index].get_path()), "found": found }
-	if picked_items[index] != null:
-		answer["item"] = picked_items[index]
-		found["item"] = GdhItems.item_named(targets[index], picked_items[index], lines[index])
+		found["picked"] = "%s, and %s" % [_described(1, said.ranks[0], wanted, said.under), others]
+	if said.covered > 0:
+		found["covered"] = said.covered
+	var target: Control = said.targets[index]
+	var answer: Dictionary = { "path": str(target.get_path()), "found": found }
+	if said.picked_items[index] != null:
+		answer["item"] = said.picked_items[index]
+		found["item"] = GdhItems.item_named(target, said.picked_items[index], said.lines[index])
 	return answer
 
 
@@ -1020,3 +1087,41 @@ static func why_it_does_not_process(control: Control, node_path: String) -> Stri
 	if deciding == control:
 		return "its process_mode is %s" % mode
 	return "%s inherits process_mode %s from %s" % [node_path, mode, deciding.get_path()]
+
+
+## What one search by words has found and ranked, from the walk to the choice.
+class GdhSayings:
+	extends RefCounted
+
+	## The control a click on each match goes to.
+	var matched: Array[Control] = []
+	## The words of the control that matched, which a button pressed on a label's behalf has none
+	## of.
+	var said: Array[String] = []
+	var exact: Array[bool] = []
+	## Whether the words are only inside longer words there, "away" in "Faraway".
+	var inside: Array[bool] = []
+	var hidden: Array[Node] = []
+	## Controls saying exactly the words that a click cannot reach, kept to say what a match on
+	## screen that only says them as part of more stands in for.
+	var exact_out_of_reach: Array[Node] = []
+	var out_of_reach_as: Array[String] = []
+	## The item of a control drawing a list that matched, null for a control matched as a whole, and
+	## the point in the control a pointer would go to for it.
+	var items: Array = []
+	var aims: Array[Vector2] = []
+	var drawn: Array[Node] = []
+	var areas: Array[Rect2] = []
+	var under: String = ""
+	var covered: int = 0
+	var cover: Node = null
+	var outside: int = 0
+	## The indexes of the matches a pointer reaches.
+	var open: Array[int] = []
+	## The reachable matches in the order a click prefers them, and what each says.
+	var targets: Array[Control] = []
+	var ranks: Array[int] = []
+	var lines: Array[String] = []
+	var wholes: Array[bool] = []
+	var insides: Array[bool] = []
+	var picked_items: Array = []
