@@ -3985,7 +3985,7 @@ async function withFakeLanguageServer<T>(
   publishesBeforeGoing = Number.POSITIVE_INFINITY,
 ): Promise<T> {
   const sockets = new Set<Socket>();
-  let published = 0;
+  const counter = { published: 0 };
 
   const server = createServer((socket) => {
     sockets.add(socket);
@@ -3996,106 +3996,32 @@ async function withFakeLanguageServer<T>(
       socket.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
     };
 
+    const connection: FakeLanguageServerConnection = {
+      socket,
+      send,
+      server,
+      sockets,
+      publishUri,
+      said,
+      serves,
+      initializeAfterMs,
+      symbols,
+      publishesBeforeGoing,
+      counter,
+    };
+
     socket.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
       for (;;) {
-        const headerEnd = buffer.indexOf('\r\n\r\n');
-        if (headerEnd === -1) return;
-        const length = Number(/content-length:\s*(\d+)/i.exec(buffer.slice(0, headerEnd))?.[1]);
-        if (!Number.isFinite(length)) return;
-        const start = headerEnd + 4;
-        if (buffer.length < start + length) return;
+        const frame = takeTextFrame(buffer);
+        if (frame === null) return;
 
-        const parsed: unknown = JSON.parse(buffer.slice(start, start + length));
-        buffer = buffer.slice(start + length);
+        const parsed: unknown = JSON.parse(frame.body);
+        buffer = frame.rest;
         if (!isRecord(parsed)) continue;
         const message: JsonRpcMessage = parsed;
         seen?.push(message);
-
-        if (message.method === 'initialize') {
-          // Godot's own comparison, measured on 4.7.2: a root that is not its project's, as a string
-          // with the separators turned and the case folded, gets told to change to its project,
-          // ahead of the answer.
-          const root = String(get(message.params, 'rootPath')).replaceAll('\\', '/').toLowerCase();
-          const own = serves?.();
-          if (own !== undefined && root !== own.toLowerCase()) {
-            send({
-              jsonrpc: '2.0',
-              method: 'window/showMessage',
-              params: {
-                type: 2,
-                message: 'The GDScript Language Server might not work correctly with other projects.',
-              },
-            });
-            send({ jsonrpc: '2.0', method: 'gdscript_client/changeWorkspace', params: { path: own } });
-          }
-          const answer = { jsonrpc: '2.0', id: message.id, result: { capabilities: {} } };
-          if (initializeAfterMs > 0) {
-            setTimeout(() => {
-              if (!socket.destroyed) send(answer);
-            }, initializeAfterMs);
-          } else {
-            send(answer);
-          }
-        } else if (message.method === 'textDocument/didOpen') {
-          const uri = publishUri(String(get(message.params, 'textDocument', 'uri')));
-          if (uri !== null) {
-            send({
-              jsonrpc: '2.0',
-              method: 'textDocument/publishDiagnostics',
-              params: {
-                uri,
-                diagnostics: said.map((entry) => {
-                  const one = typeof entry === 'string' ? { message: entry } : entry;
-                  const line = one.line ?? 0;
-                  return {
-                    code: 0,
-                    message: one.message,
-                    range: {
-                      start: { line, character: one.character ?? 0 },
-                      end: { line, character: one.endCharacter ?? 1 },
-                    },
-                    severity: one.severity ?? 1,
-                    source: 'gdscript',
-                  };
-                }),
-              },
-            });
-            published += 1;
-            // An editor closing partway through a call: nothing listens on the port after this.
-            if (published >= publishesBeforeGoing) {
-              server.close();
-              for (const open of sockets) open.destroy();
-            }
-          }
-        } else if (message.method === 'textDocument/documentSymbol') {
-          send({ jsonrpc: '2.0', id: message.id, result: symbols });
-        } else if (message.method === 'textDocument/hover') {
-          const position = get(message.params, 'position');
-          send({
-            jsonrpc: '2.0',
-            id: message.id,
-            result: {
-              contents: { kind: 'markdown', value: '\tvar count: int = 0' },
-              range: { start: position, end: position },
-            },
-          });
-        } else if (message.method === 'textDocument/completion') {
-          const position = get(message.params, 'position');
-          const textDocument = get(message.params, 'textDocument');
-          send({
-            jsonrpc: '2.0',
-            id: message.id,
-            result: [
-              {
-                data: { context: { triggerCharacter: '', triggerKind: 1 }, position, textDocument },
-                insertText: 'count',
-                kind: 10,
-                label: 'count',
-              },
-            ],
-          });
-        }
+        answerAsFakeLanguageServer(message, connection);
       }
     });
     socket.on('error', () => {
@@ -4114,6 +4040,134 @@ async function withFakeLanguageServer<T>(
         closed();
       }),
     );
+  }
+}
+
+/** The first whole Content-Length frame at the head of [buffer] (counted in characters), and what follows it. */
+function takeTextFrame(buffer: string): { readonly body: string; readonly rest: string } | null {
+  const headerEnd = buffer.indexOf('\r\n\r\n');
+  if (headerEnd === -1) return null;
+  const length = Number(/content-length:\s*(\d+)/i.exec(buffer.slice(0, headerEnd))?.[1]);
+  if (!Number.isFinite(length)) return null;
+  const start = headerEnd + 4;
+  if (buffer.length < start + length) return null;
+  return { body: buffer.slice(start, start + length), rest: buffer.slice(start + length) };
+}
+
+/** What one connection to the fake language server needs to answer a message. */
+interface FakeLanguageServerConnection {
+  readonly socket: Socket;
+  readonly send: (message: unknown) => void;
+  readonly server: Server;
+  readonly sockets: ReadonlySet<Socket>;
+  readonly publishUri: (uri: string) => string | null;
+  readonly said: readonly (string | FakeDiagnostic)[];
+  readonly serves: (() => string) | undefined;
+  readonly initializeAfterMs: number;
+  readonly symbols: readonly unknown[];
+  readonly publishesBeforeGoing: number;
+  readonly counter: { published: number };
+}
+
+/** Answers one request or notification the way the fake language server does. */
+function answerAsFakeLanguageServer(message: JsonRpcMessage, connection: FakeLanguageServerConnection): void {
+  const { send } = connection;
+  if (message.method === 'initialize') {
+    answerFakeLanguageServerInitialize(message, connection);
+  } else if (message.method === 'textDocument/didOpen') {
+    publishFakeDiagnostics(message, connection);
+  } else if (message.method === 'textDocument/documentSymbol') {
+    send({ jsonrpc: '2.0', id: message.id, result: connection.symbols });
+  } else if (message.method === 'textDocument/hover') {
+    const position = get(message.params, 'position');
+    send({
+      jsonrpc: '2.0',
+      id: message.id,
+      result: {
+        contents: { kind: 'markdown', value: '\tvar count: int = 0' },
+        range: { start: position, end: position },
+      },
+    });
+  } else if (message.method === 'textDocument/completion') {
+    const position = get(message.params, 'position');
+    const textDocument = get(message.params, 'textDocument');
+    send({
+      jsonrpc: '2.0',
+      id: message.id,
+      result: [
+        {
+          data: { context: { triggerCharacter: '', triggerKind: 1 }, position, textDocument },
+          insertText: 'count',
+          kind: 10,
+          label: 'count',
+        },
+      ],
+    });
+  }
+}
+
+/** The fake language server's answer to `initialize`, ahead of which it may tell the client to change workspace. */
+function answerFakeLanguageServerInitialize(
+  message: JsonRpcMessage,
+  { socket, send, serves, initializeAfterMs }: FakeLanguageServerConnection,
+): void {
+  // Godot's own comparison, measured on 4.7.2: a root that is not its project's, as a string
+  // with the separators turned and the case folded, gets told to change to its project,
+  // ahead of the answer.
+  const root = String(get(message.params, 'rootPath')).replaceAll('\\', '/').toLowerCase();
+  const own = serves?.();
+  if (own !== undefined && root !== own.toLowerCase()) {
+    send({
+      jsonrpc: '2.0',
+      method: 'window/showMessage',
+      params: {
+        type: 2,
+        message: 'The GDScript Language Server might not work correctly with other projects.',
+      },
+    });
+    send({ jsonrpc: '2.0', method: 'gdscript_client/changeWorkspace', params: { path: own } });
+  }
+  const answer = { jsonrpc: '2.0', id: message.id, result: { capabilities: {} } };
+  if (initializeAfterMs > 0) {
+    setTimeout(() => {
+      if (!socket.destroyed) send(answer);
+    }, initializeAfterMs);
+  } else {
+    send(answer);
+  }
+}
+
+/** The fake language server's publish after a document opens, and its closing of the port once it has published enough. */
+function publishFakeDiagnostics(message: JsonRpcMessage, connection: FakeLanguageServerConnection): void {
+  const { send, said, server, sockets, counter } = connection;
+  const uri = connection.publishUri(String(get(message.params, 'textDocument', 'uri')));
+  if (uri === null) return;
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/publishDiagnostics',
+    params: {
+      uri,
+      diagnostics: said.map((entry) => {
+        const one = typeof entry === 'string' ? { message: entry } : entry;
+        const line = one.line ?? 0;
+        return {
+          code: 0,
+          message: one.message,
+          range: {
+            start: { line, character: one.character ?? 0 },
+            end: { line, character: one.endCharacter ?? 1 },
+          },
+          severity: one.severity ?? 1,
+          source: 'gdscript',
+        };
+      }),
+    },
+  });
+  counter.published += 1;
+  // An editor closing partway through a call: nothing listens on the port after this.
+  if (counter.published >= connection.publishesBeforeGoing) {
+    server.close();
+    for (const open of sockets) open.destroy();
   }
 }
 
@@ -5094,21 +5148,16 @@ async function withFramedPeer<T>(
   const server = createServer((socket) => {
     sockets.add(socket);
     onConnect(socket);
-    let buffer = Buffer.alloc(0);
+    let buffer: Buffer = Buffer.alloc(0);
 
     socket.on('data', (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       for (;;) {
-        const headerEnd = buffer.indexOf('\r\n\r\n');
-        if (headerEnd === -1) return;
-        const header = buffer.toString('latin1', 0, headerEnd);
-        const length = Number(/content-length:\s*(\d+)/i.exec(header)?.[1]);
-        if (!Number.isFinite(length)) return;
-        const start = headerEnd + 4;
-        if (buffer.length < start + length) return;
+        const frame = takeByteFrame(buffer);
+        if (frame === null) return;
 
-        const message: unknown = JSON.parse(buffer.toString('utf8', start, start + length));
-        buffer = buffer.subarray(start + length);
+        const message: unknown = JSON.parse(frame.body);
+        buffer = frame.rest;
         onMessage(isRecord(message) ? message : {}, socket);
       }
     });
@@ -5129,6 +5178,18 @@ async function withFramedPeer<T>(
       }),
     );
   }
+}
+
+/** The first whole Content-Length frame at the head of [buffer] (counted in bytes), and what follows it. */
+function takeByteFrame(buffer: Buffer): { readonly body: string; readonly rest: Buffer } | null {
+  const headerEnd = buffer.indexOf('\r\n\r\n');
+  if (headerEnd === -1) return null;
+  const header = buffer.toString('latin1', 0, headerEnd);
+  const length = Number(/content-length:\s*(\d+)/i.exec(header)?.[1]);
+  if (!Number.isFinite(length)) return null;
+  const start = headerEnd + 4;
+  if (buffer.length < start + length) return null;
+  return { body: buffer.toString('utf8', start, start + length), rest: buffer.subarray(start + length) };
 }
 
 /**
@@ -5360,36 +5421,7 @@ async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
   const adapter =
     (scopes: readonly Record<string, unknown>[]): FramedPeerHandler =>
     (message, socket) => {
-      const command = String(message['command']);
-      const answer = (success: boolean, body: Record<string, unknown>): void => {
-        socket.write(
-          frameJsonRpc({
-            seq: 1,
-            type: 'response',
-            request_seq: message['seq'],
-            command,
-            success,
-            ...(success ? { body } : { message: 'unknown' }),
-          }),
-        );
-      };
-      const reference = get(message['arguments'], 'variablesReference');
-      if (command === 'threads') {
-        answer(true, { threads: [{ id: 1, name: 'Main' }] });
-      } else if (command === 'stackTrace') {
-        answer(true, {
-          stackFrames: [
-            { id: 0, name: '_ready', line: 3 },
-            { id: 1, name: '_enter', line: 9 },
-          ],
-        });
-      } else if (command === 'scopes') {
-        answer(true, { scopes });
-      } else if (command === 'variables') {
-        answer(reference === 1, reference === 1 ? { variables: [{ name: 'health', value: '3' }] } : {});
-      } else {
-        answer(true, {});
-      }
+      answerAVariablesReadRequest(message, socket, scopes);
     };
 
   const both = [
@@ -5435,6 +5467,54 @@ async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
   });
 }
 
+/** The stand-in adapter of the variables read: Locals answer, and any other reference is refused as unknown. */
+function answerAVariablesReadRequest(
+  message: Record<string, unknown>,
+  socket: Socket,
+  scopes: readonly Record<string, unknown>[],
+): void {
+  const command = String(message['command']);
+  const answer = (success: boolean, body: Record<string, unknown>): void => {
+    writeAdapterResponse(socket, message, success, body);
+  };
+  const reference = get(message['arguments'], 'variablesReference');
+  if (command === 'threads') {
+    answer(true, { threads: [{ id: 1, name: 'Main' }] });
+  } else if (command === 'stackTrace') {
+    answer(true, {
+      stackFrames: [
+        { id: 0, name: '_ready', line: 3 },
+        { id: 1, name: '_enter', line: 9 },
+      ],
+    });
+  } else if (command === 'scopes') {
+    answer(true, { scopes });
+  } else if (command === 'variables') {
+    answer(reference === 1, reference === 1 ? { variables: [{ name: 'health', value: '3' }] } : {});
+  } else {
+    answer(true, {});
+  }
+}
+
+/** Writes the response to [message] that a stand-in adapter gives: its body on success, otherwise the word unknown. */
+function writeAdapterResponse(
+  socket: Socket,
+  message: Record<string, unknown>,
+  success: boolean,
+  body: Record<string, unknown>,
+): void {
+  socket.write(
+    frameJsonRpc({
+      seq: 1,
+      type: 'response',
+      request_seq: message['seq'],
+      command: String(message['command']),
+      success,
+      ...(success ? { body } : { message: 'unknown' }),
+    }),
+  );
+}
+
 /**
  * An evaluate through the editor's adapter is asked only of a frame with an instance, and is asked
  * again until the game's answer has come (probe 159).
@@ -5475,25 +5555,10 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
         ],
       });
     } else if (command === 'variables') {
-      const reference = Number(get(args, 'variablesReference'));
-      answer({
-        variables:
-          reference === 1
-            ? [
-                { name: 'amount', value: '5' },
-                { name: '@counter_pos', value: '0' },
-              ]
-            : reference === 2
-              ? [{ name: 'self', value: 'Main' }]
-              : [],
-      });
+      answer({ variables: variablesOfAFrameOfTheStandIn(Number(get(args, 'variablesReference'))) });
     } else if (command === 'evaluate') {
       evaluated.push(Number(get(args, 'frameId')));
-      if (get(args, 'expression') === 'missing') {
-        answer({ result: '<null>', type: 'Nil', variablesReference: 0 });
-      } else if (evaluated.length > 2) {
-        answer({ result: '15', type: 'int', variablesReference: 0 });
-      }
+      answerAnEvaluateOfTheStandIn(args, evaluated.length, answer);
     } else {
       answer({});
     }
@@ -5539,6 +5604,30 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
       await client.abandon();
     }
   });
+}
+
+/** The variables the stand-in adapter holds under [reference]: frame 0's locals with a compiler local, or its members. */
+function variablesOfAFrameOfTheStandIn(reference: number): readonly Record<string, unknown>[] {
+  if (reference === 1) {
+    return [
+      { name: 'amount', value: '5' },
+      { name: '@counter_pos', value: '0' },
+    ];
+  }
+  return reference === 2 ? [{ name: 'self', value: 'Main' }] : [];
+}
+
+/** The stand-in adapter's answer to an evaluate: null for `missing`, the value from the third ask on, nothing before. */
+function answerAnEvaluateOfTheStandIn(
+  args: unknown,
+  asked: number,
+  answer: (body: Record<string, unknown>) => void,
+): void {
+  if (get(args, 'expression') === 'missing') {
+    answer({ result: '<null>', type: 'Nil', variablesReference: 0 });
+  } else if (asked > 2) {
+    answer({ result: '15', type: 'int', variablesReference: 0 });
+  }
 }
 
 /**
@@ -7456,27 +7545,13 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       'visible editor silence cases skipped: on Windows the stand-in would open on the desktop in use; GDHARNESS_ALLOW_WINDOWS runs them here',
     );
   }
-  const silence = (argv: readonly string[]): boolean => {
-    const at = argv.indexOf('--audio-driver');
-    return at >= 0 && argv[at + 1] === 'Dummy';
-  };
   // A hidden editor is headless, with no sound to turn off, except on Windows, where it draws on a
   // desktop of its own and is always started silent.
   const hiddenHeadless = process.platform !== 'win32';
   const hiddenSilent = !hiddenHeadless;
   // `was` is what the editor being restarted was started with, which a restart reads off its process
   // for whatever the call leaves out. null is a process gone before it is read.
-  const cases: readonly {
-    how: string;
-    act: 'open' | 'restart';
-    was?: readonly string[] | null;
-    args: Record<string, boolean>;
-    silent: boolean;
-    visible: boolean;
-    refused?: boolean;
-    /** The process the editor quits with, which comes back on the restarted one's command line. */
-    until?: number;
-  }[] = [
+  const cases: readonly SilenceCase[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
     { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: hiddenSilent, visible: false },
@@ -7578,197 +7653,256 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     if (one.visible && !visibleHere) {
       continue;
     }
-    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-editor-'));
-    writeFileSync(
-      join(project, 'project.godot'),
-      'config_version=5\n\n[application]\nconfig/name="Silent"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
-    );
-    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
-    const port = await reservePort();
-    const server = new ServerProcess({
-      env: {
-        GDHARNESS_PROJECT: project,
-        GDHARNESS_BRIDGE_PORT: String(port),
-        GODOT_PATH: standInEngine(),
-        GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
-      },
-    });
-    // The editor being restarted: a process that holds its pid until it is asked to go, carrying on
-    // its command line the arguments an editor would have been started with.
-    const holder =
-      one.act === 'restart'
-        ? spawnHidden(
-            process.execPath,
-            [
-              '-e',
-              one.was === null ? 'process.exit(0)' : 'setTimeout(() => {}, 120000)',
-              '--',
-              '-e',
-              ...(one.was ?? []),
-              '--path',
-              project,
-            ],
-            { detached: true, stdio: 'ignore' },
-          )
-        : null;
-    if (one.was === null && holder !== null && holder.exitCode === null) {
-      await new Promise((settle) => holder.once('exit', settle));
-    }
-    let quitAsked = false;
-    const sockets: WebSocket[] = [];
-    const connect = async (): Promise<WebSocket> => {
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-      sockets.push(socket);
-      await new Promise<void>((settle, reject) => {
-        socket.once('open', () => {
-          settle();
-        });
-        socket.once('error', reject);
-      });
-      return socket;
-    };
-    try {
-      await server.initialize('regression-test');
-      // A hidden editor asked for sound would play none, so the call is refused before anything starts.
-      const refusedForSound = (reply: JsonRpcMessage): void => {
-        const said = textOf(reply) ?? '';
-        assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
-        assert.match(
-          said,
-          /^A hidden editor plays no sound, so silent: false is refused with it\..*Pass hidden: false to hear the editor, or leave silent out/s,
-          `${one.how}: saying what to pass: ${said}`,
-        );
-      };
-      let answer: unknown;
-      if (one.act === 'open') {
-        const reply = await server.request('tools/call', {
-          name: 'editor_launch',
-          arguments: { op: 'open', projectPath: project, ...one.args },
-        });
-        if (one.refused === true) {
-          refusedForSound(reply);
-          const status = parseTextContent(
-            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
-          );
-          assert.equal(
-            get(status, 'editor', 'awaitingLaunchedEditor'),
-            undefined,
-            `${one.how}: and nothing was started: ${JSON.stringify(status)}`,
-          );
-          ran += 1;
-          continue;
-        }
-        answer = parseTextContent(reply);
-        assert.equal(get(answer, 'launched'), true, `${one.how}: ${JSON.stringify(answer)}`);
-      } else {
-        const first = await connect();
-        first.on('message', (data: Buffer) => {
-          const message: unknown = JSON.parse(data.toString('utf8'));
-          if (get(message, 'type') === 'tool_invoke' && get(message, 'tool') === 'quit_editor') {
-            quitAsked = true;
-            first.send(
-              JSON.stringify({
-                type: 'tool_result',
-                id: get(message, 'id'),
-                success: true,
-                result: { ok: true, quitting: true, saved: ['res://world.tscn'] },
-              }),
-            );
-            holder?.kill();
-            first.close();
-            // The editor the server starts is a stand-in that never dials in, so this one does, as
-            // the restarted editor would.
-            void delay(1000).then(async () => {
-              const again = await connect();
-              again.send(
-                JSON.stringify(greeting(project, { editor_pid: process.pid, opened_by_a_server: true })),
-              );
-            });
-          }
-        });
-        first.send(JSON.stringify(greeting(project, { editor_pid: holder?.pid, opened_by_a_server: true })));
-        let greeted = false;
-        for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
-          const status = parseTextContent(
-            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
-          );
-          greeted = get(status, 'editor', 'openedByAServer') === true;
-          if (!greeted) {
-            await delay(100);
-          }
-        }
-        assert.ok(greeted, `${one.how}: the editor being restarted greets as one a server opened`);
-        const reply = await server.request(
-          'tools/call',
-          { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
-          60_000,
-        );
-        if (one.refused === true) {
-          refusedForSound(reply);
-          assert.equal(quitAsked, false, `${one.how}: and the editor was not asked to go`);
-          ran += 1;
-          continue;
-        }
-        if (one.was === null) {
-          const said = textOf(reply) ?? '';
-          assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
-          assert.match(
-            said,
-            new RegExp(
-              `How the editor \\(pid ${holder?.pid}\\) was started could not be read .*Pass hidden: true`,
-              's',
-            ),
-            `${one.how}: naming the editor and what to pass: ${said}`,
-          );
-          assert.equal(quitAsked, false, `${one.how}: and the editor was not asked to go`);
-          ran += 1;
-          continue;
-        }
-        answer = parseTextContent(reply);
-        assert.equal(get(answer, 'restarted'), true, `${one.how}: ${JSON.stringify(answer)}`);
-        assert.equal(get(answer, 'hidden'), !one.visible, `${one.how}: saying which way it came back`);
-        // Carried through the quit and the launch: an editor this server opened is started again
-        // here, and its answer to the quit is the only account of what it saved.
-        assert.deepEqual(
-          get(answer, 'savedScenes'),
-          ['res://world.tscn'],
-          `${one.how}: with what it saved: ${JSON.stringify(answer)}`,
-        );
-      }
-      const argv = asArray(get(answer, 'arguments'), `${one.how}: the answer's arguments`).map(text);
-      assert.ok(
-        argv.includes('--path'),
-        `${one.how}: the answer carries what it was started with: ${JSON.stringify(answer)}`,
-      );
-      assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
-      assert.equal(
-        argv.includes('--headless'),
-        !one.visible && hiddenHeadless,
-        `${one.how}: headless ${String(!one.visible && hiddenHeadless)}: ${argv.join(' ')}`,
-      );
-      assert.equal(
-        argv.includes('--gdharness-hidden'),
-        !one.visible && !hiddenHeadless,
-        `${one.how}: on a desktop of its own ${String(!one.visible && !hiddenHeadless)}: ${argv.join(' ')}`,
-      );
-      assert.equal(
-        argv.includes(`--gdharness-until=${String(one.until ?? 4242)}`),
-        one.until !== undefined,
-        `${one.how}: held by ${String(one.until ?? 'nothing')}: ${argv.join(' ')}`,
-      );
-      ran += 1;
-    } finally {
-      for (const socket of sockets) {
-        socket.terminate();
-      }
-      if (holder?.pid !== undefined && alive(holder.pid)) {
-        holder.kill();
-      }
-      await server.stop();
-      sweep(project);
-    }
+    await runASilenceCase(one, hiddenHeadless);
+    ran += 1;
   }
   assert.ok(ran > 0, 'at least the hidden open ran');
+}
+
+/** One case of the silence matrix: what the call asks, what the editor being restarted was started with, and what must come out. */
+interface SilenceCase {
+  how: string;
+  act: 'open' | 'restart';
+  was?: readonly string[] | null;
+  args: Record<string, boolean>;
+  silent: boolean;
+  visible: boolean;
+  refused?: boolean;
+  /** The process the editor quits with, which comes back on the restarted one's command line. */
+  until?: number;
+}
+
+/** What a silence case holds while it runs: its server, the process standing for the editor being restarted, and its sockets. */
+interface SilenceRun {
+  readonly one: SilenceCase;
+  readonly project: string;
+  readonly port: number;
+  readonly server: ServerProcess;
+  readonly holder: ChildProcess | null;
+  readonly sockets: WebSocket[];
+  quitAsked: boolean;
+}
+
+/** Runs one case of the silence matrix against its own project and server. */
+async function runASilenceCase(one: SilenceCase, hiddenHeadless: boolean): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-editor-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Silent"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: standInEngine(),
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
+    },
+  });
+  const holder = spawnTheEditorBeingRestarted(one, project);
+  if (one.was === null && holder !== null && holder.exitCode === null) {
+    await new Promise((settle) => holder.once('exit', settle));
+  }
+  const run: SilenceRun = { one, project, port, server, holder, sockets: [], quitAsked: false };
+  try {
+    await server.initialize('regression-test');
+    const answer = one.act === 'open' ? await openASilentEditor(run) : await restartASilentEditor(run);
+    if (answer !== null) {
+      assertWhatASilentEditorWasStartedWith(one, answer, hiddenHeadless);
+    }
+  } finally {
+    for (const socket of run.sockets) {
+      socket.terminate();
+    }
+    if (holder?.pid !== undefined && alive(holder.pid)) {
+      holder.kill();
+    }
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * The editor being restarted: a process that holds its pid until it is asked to go, carrying on
+ * its command line the arguments an editor would have been started with.
+ */
+function spawnTheEditorBeingRestarted(one: SilenceCase, project: string): ChildProcess | null {
+  if (one.act !== 'restart') return null;
+  return spawnHidden(
+    process.execPath,
+    [
+      '-e',
+      one.was === null ? 'process.exit(0)' : 'setTimeout(() => {}, 120000)',
+      '--',
+      '-e',
+      ...(one.was ?? []),
+      '--path',
+      project,
+    ],
+    { detached: true, stdio: 'ignore' },
+  );
+}
+
+/** A hidden editor asked for sound would play none, so the call is refused before anything starts. */
+function assertRefusedForSound(one: SilenceCase, reply: JsonRpcMessage): void {
+  const said = textOf(reply) ?? '';
+  assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
+  assert.match(
+    said,
+    /^A hidden editor plays no sound, so silent: false is refused with it\..*Pass hidden: false to hear the editor, or leave silent out/s,
+    `${one.how}: saying what to pass: ${said}`,
+  );
+}
+
+/** Opens an editor as the case asks. Answers what the launch said, or null once a refusal has been checked. */
+async function openASilentEditor({ one, project, server }: SilenceRun): Promise<unknown> {
+  const reply = await server.request('tools/call', {
+    name: 'editor_launch',
+    arguments: { op: 'open', projectPath: project, ...one.args },
+  });
+  if (one.refused === true) {
+    assertRefusedForSound(one, reply);
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(status, 'editor', 'awaitingLaunchedEditor'),
+      undefined,
+      `${one.how}: and nothing was started: ${JSON.stringify(status)}`,
+    );
+    return null;
+  }
+  const answer = parseTextContent(reply);
+  assert.equal(get(answer, 'launched'), true, `${one.how}: ${JSON.stringify(answer)}`);
+  return answer;
+}
+
+/** Dials the server's bridge as an editor would, and keeps the socket for the case to close. */
+async function connectToTheBridgeOf(run: SilenceRun): Promise<WebSocket> {
+  const socket = new WebSocket(`ws://127.0.0.1:${run.port}/godot`);
+  run.sockets.push(socket);
+  await new Promise<void>((settle, reject) => {
+    socket.once('open', () => {
+      settle();
+    });
+    socket.once('error', reject);
+  });
+  return socket;
+}
+
+/** Connects the editor being restarted, which answers the quit it is asked for and is followed by a successor that dials in. */
+async function greetAsTheEditorBeingRestarted(run: SilenceRun): Promise<void> {
+  const { one, project, server, holder } = run;
+  const first = await connectToTheBridgeOf(run);
+  first.on('message', (data: Buffer) => {
+    const message: unknown = JSON.parse(data.toString('utf8'));
+    if (get(message, 'type') === 'tool_invoke' && get(message, 'tool') === 'quit_editor') {
+      run.quitAsked = true;
+      first.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: get(message, 'id'),
+          success: true,
+          result: { ok: true, quitting: true, saved: ['res://world.tscn'] },
+        }),
+      );
+      holder?.kill();
+      first.close();
+      // The editor the server starts is a stand-in that never dials in, so this one does, as
+      // the restarted editor would.
+      void delay(1000).then(async () => {
+        const again = await connectToTheBridgeOf(run);
+        again.send(JSON.stringify(greeting(project, { editor_pid: process.pid, opened_by_a_server: true })));
+      });
+    }
+  });
+  first.send(JSON.stringify(greeting(project, { editor_pid: holder?.pid, opened_by_a_server: true })));
+  let greeted = false;
+  for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    greeted = get(status, 'editor', 'openedByAServer') === true;
+    if (!greeted) {
+      await delay(100);
+    }
+  }
+  assert.ok(greeted, `${one.how}: the editor being restarted greets as one a server opened`);
+}
+
+/** Restarts the editor as the case asks. Answers what the restart said, or null once a refusal has been checked. */
+async function restartASilentEditor(run: SilenceRun): Promise<unknown> {
+  const { one, server, holder } = run;
+  await greetAsTheEditorBeingRestarted(run);
+  const reply = await server.request(
+    'tools/call',
+    { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
+    60_000,
+  );
+  if (one.refused === true) {
+    assertRefusedForSound(one, reply);
+    assert.equal(run.quitAsked, false, `${one.how}: and the editor was not asked to go`);
+    return null;
+  }
+  if (one.was === null) {
+    const said = textOf(reply) ?? '';
+    assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
+    assert.match(
+      said,
+      new RegExp(
+        `How the editor \\(pid ${holder?.pid}\\) was started could not be read .*Pass hidden: true`,
+        's',
+      ),
+      `${one.how}: naming the editor and what to pass: ${said}`,
+    );
+    assert.equal(run.quitAsked, false, `${one.how}: and the editor was not asked to go`);
+    return null;
+  }
+  const answer = parseTextContent(reply);
+  assert.equal(get(answer, 'restarted'), true, `${one.how}: ${JSON.stringify(answer)}`);
+  assert.equal(get(answer, 'hidden'), !one.visible, `${one.how}: saying which way it came back`);
+  // Carried through the quit and the launch: an editor this server opened is started again
+  // here, and its answer to the quit is the only account of what it saved.
+  assert.deepEqual(
+    get(answer, 'savedScenes'),
+    ['res://world.tscn'],
+    `${one.how}: with what it saved: ${JSON.stringify(answer)}`,
+  );
+  return answer;
+}
+
+/** Holds the arguments an editor was started with against what the case expects of silence, headlessness and a held process. */
+function assertWhatASilentEditorWasStartedWith(
+  one: SilenceCase,
+  answer: unknown,
+  hiddenHeadless: boolean,
+): void {
+  const silence = (argv: readonly string[]): boolean => {
+    const at = argv.indexOf('--audio-driver');
+    return at >= 0 && argv[at + 1] === 'Dummy';
+  };
+  const argv = asArray(get(answer, 'arguments'), `${one.how}: the answer's arguments`).map(text);
+  assert.ok(
+    argv.includes('--path'),
+    `${one.how}: the answer carries what it was started with: ${JSON.stringify(answer)}`,
+  );
+  assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
+  assert.equal(
+    argv.includes('--headless'),
+    !one.visible && hiddenHeadless,
+    `${one.how}: headless ${String(!one.visible && hiddenHeadless)}: ${argv.join(' ')}`,
+  );
+  assert.equal(
+    argv.includes('--gdharness-hidden'),
+    !one.visible && !hiddenHeadless,
+    `${one.how}: on a desktop of its own ${String(!one.visible && !hiddenHeadless)}: ${argv.join(' ')}`,
+  );
+  assert.equal(
+    argv.includes(`--gdharness-until=${String(one.until ?? 4242)}`),
+    one.until !== undefined,
+    `${one.how}: held by ${String(one.until ?? 'nothing')}: ${argv.join(' ')}`,
+  );
 }
 
 /**
@@ -8454,105 +8588,123 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
  */
 async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
   for (const opened of [true, false]) {
-    const port = await reservePort();
-    const server = new ServerProcess({
-      env: {
-        GDHARNESS_BRIDGE_PORT: String(port),
-        GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
-      },
-    });
-    let editor: WebSocket | null = null;
-    try {
-      await server.initialize('regression-test');
-      const opening = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-      editor = opening;
-      await new Promise<void>((settle, reject) => {
-        opening.once('open', () => {
-          settle();
-        });
-        opening.once('error', reject);
-      });
-
-      const asked: string[] = [];
-      opening.on('message', (data: Buffer) => {
-        const message: unknown = JSON.parse(data.toString('utf8'));
-        const tool = get(message, 'tool');
-        if (get(message, 'type') === 'tool_invoke' && typeof tool === 'string') {
-          asked.push(tool);
-        }
-      });
-      opening.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: opened })));
-
-      // The greeting goes over the socket and the call over stdio, so the server can answer the
-      // call before it has read the greeting: an editor it has not been told about is one it
-      // restarts the other way, and this fixture then asserts the wrong half. Asked rather than
-      // assumed, which is also what says the flag travelled.
-      let greeted: Record<string, unknown> | null = null;
-      for (let waited = 0; waited < 10_000; waited += 100) {
-        const status = parseTextContent(
-          await server.request('tools/call', { name: 'editor_status', arguments: {} }, 20_000),
-        );
-        const said = isRecord(status) ? status['editor'] : null;
-        if (isRecord(said) && typeof said['projectPath'] === 'string') {
-          greeted = said;
-          break;
-        }
-        await delay(100);
-      }
-      assert.ok(greeted, 'the server should read the greeting the editor sent');
-      assert.equal(greeted['openedByAServer'], opened, 'and take the editor at its word about it');
-
-      // An editor restarting itself comes back as it was, so hidden cannot be honoured there. It
-      // was accepted and the window came back.
-      if (!opened) {
-        // A restart that goes ahead waits for the editor to come back, which this one never does,
-        // so the wait is cut short and read as no answer rather than left to fail as a timeout.
-        const hidden =
-          textOf(
-            await server
-              .request(
-                'tools/call',
-                { name: 'editor_launch', arguments: { op: 'restart', hidden: true } },
-                5_000,
-              )
-              .catch(() => null),
-          ) ?? 'no answer: the restart went ahead';
-        assert.match(
-          hidden,
-          /opened by hand, and restarts itself as it was, so it cannot come back hidden/,
-          hidden,
-        );
-        assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
-      }
-
-      const restart = server
-        .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 20_000)
-        .catch(() => null);
-
-      if (opened) {
-        assert.match(
-          textOf(await restart) ?? '',
-          /GODOT_PATH is set to .*gdharness-no-such-engine, which does not exist/,
-          'an editor a server opened is started again, so it is the engine that stops it, and the refusal names the path this fixture set',
-        );
-        assert.equal(asked.includes('restart_editor'), false, 'and it is never asked to restart itself');
-        continue;
-      }
-
-      // The other way round waits for an editor to come back, which no fixture editor does, so the
-      // answer is never awaited: what was asked for has already gone down the socket.
-      let sent = false;
-      for (let waited = 0; waited < 10_000 && !sent; waited += 100) {
-        await delay(100);
-        sent = asked.includes('restart_editor');
-      }
-      assert.ok(sent, 'an editor opened by hand is asked to restart itself');
-      assert.equal(asked.includes('quit_editor'), false, 'and is never asked to go');
-    } finally {
-      editor?.terminate();
-      await server.stop();
-    }
+    await restartAnEditorOpenedByAServerOrNot(opened);
   }
+}
+
+/** Restarts a fake editor that says whether a server opened it, and holds which way the server went. */
+async function restartAnEditorOpenedByAServerOrNot(opened: boolean): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+    },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const opening = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = opening;
+    await new Promise<void>((settle, reject) => {
+      opening.once('open', () => {
+        settle();
+      });
+      opening.once('error', reject);
+    });
+
+    const asked: string[] = [];
+    opening.on('message', (data: Buffer) => {
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      const tool = get(message, 'tool');
+      if (get(message, 'type') === 'tool_invoke' && typeof tool === 'string') {
+        asked.push(tool);
+      }
+    });
+    opening.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: opened })));
+
+    const greeted = await readTheGreetingOfTheFakeEditor(server);
+    assert.ok(greeted, 'the server should read the greeting the editor sent');
+    assert.equal(greeted['openedByAServer'], opened, 'and take the editor at its word about it');
+
+    // An editor restarting itself comes back as it was, so hidden cannot be honoured there. It
+    // was accepted and the window came back.
+    if (!opened) {
+      await assertAHiddenRestartOfAnEditorOpenedByHandIsRefused(server, asked);
+    }
+
+    const restart = server
+      .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 20_000)
+      .catch(() => null);
+
+    if (opened) {
+      assert.match(
+        textOf(await restart) ?? '',
+        /GODOT_PATH is set to .*gdharness-no-such-engine, which does not exist/,
+        'an editor a server opened is started again, so it is the engine that stops it, and the refusal names the path this fixture set',
+      );
+      assert.equal(asked.includes('restart_editor'), false, 'and it is never asked to restart itself');
+      return;
+    }
+
+    // The other way round waits for an editor to come back, which no fixture editor does, so the
+    // answer is never awaited: what was asked for has already gone down the socket.
+    let sent = false;
+    for (let waited = 0; waited < 10_000 && !sent; waited += 100) {
+      await delay(100);
+      sent = asked.includes('restart_editor');
+    }
+    assert.ok(sent, 'an editor opened by hand is asked to restart itself');
+    assert.equal(asked.includes('quit_editor'), false, 'and is never asked to go');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+  }
+}
+
+/**
+ * The editor's status once the server has read its greeting, or null when it never has.
+ *
+ * The greeting goes over the socket and the call over stdio, so the server can answer the
+ * call before it has read the greeting: an editor it has not been told about is one it
+ * restarts the other way, and this fixture then asserts the wrong half. Asked rather than
+ * assumed, which is also what says the flag travelled.
+ */
+async function readTheGreetingOfTheFakeEditor(
+  server: ServerProcess,
+): Promise<Record<string, unknown> | null> {
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }, 20_000),
+    );
+    const said = isRecord(status) ? status['editor'] : null;
+    if (isRecord(said) && typeof said['projectPath'] === 'string') {
+      return said;
+    }
+    await delay(100);
+  }
+  return null;
+}
+
+/** A restart asked to come back hidden is refused for an editor opened by hand, and the editor is asked nothing. */
+async function assertAHiddenRestartOfAnEditorOpenedByHandIsRefused(
+  server: ServerProcess,
+  asked: readonly string[],
+): Promise<void> {
+  // A restart that goes ahead waits for the editor to come back, which this one never does,
+  // so the wait is cut short and read as no answer rather than left to fail as a timeout.
+  const hidden =
+    textOf(
+      await server
+        .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart', hidden: true } }, 5_000)
+        .catch(() => null),
+    ) ?? 'no answer: the restart went ahead';
+  assert.match(
+    hidden,
+    /opened by hand, and restarts itself as it was, so it cannot come back hidden/,
+    hidden,
+  );
+  assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
 }
 
 /**
@@ -8883,30 +9035,9 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   // on POSIX the first read once armed is held until a later one ends. Windows lists through its
   // own query, which is slow enough there that the race is met within the tries.
   const held = process.platform === 'win32' ? null : join(project, 'ps-held');
-  const shimCalls = (): string => {
-    const calls = held === null ? '' : join(held, 'calls');
-    return calls !== '' && existsSync(calls) ? readFileSync(calls, 'utf8') : '(none)';
-  };
+  const shimCalls = (): string => callsOfThePsShim(held);
   if (held !== null) {
-    mkdirSync(held);
-    writeTree(held, {
-      ps: [
-        '#!/bin/sh',
-        `held='${held}'`,
-        'echo "$$ armed=$([ -f "$held/armed" ] && echo yes || echo no) $*" >> "$held/calls"',
-        'if [ -f "$held/armed" ] && mkdir "$held/first" 2>/dev/null; then',
-        '  until [ -f "$held/released" ]; do sleep 0.01; done',
-        '  sleep 0.2',
-        '  exec /bin/ps "$@"',
-        'fi',
-        '/bin/ps "$@"',
-        'said=$?',
-        '[ -f "$held/armed" ] && touch "$held/released"',
-        'exit $said',
-        '',
-      ].join('\n'),
-    });
-    chmodSync(join(held, 'ps'), 0o755);
+    writeThePsShimThatHoldsTheFirstRead(held);
   }
   const port = await reservePort();
   const server = new ServerProcess({
@@ -8949,92 +9080,11 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     mark('initialised');
     // One try where the first read is held, since a held read meets the state on its first try or
     // says why it did not. Twenty tries of a hold that never took ran past a part's whole budget.
+    const arrival: StatusArrival = { project, port, held, server, lspPort, dapPort, mark, marked, shimCalls };
     for (; attempts < (held === null ? 20 : 1) && met === 0; attempts += 1) {
-      mark(`attempt ${String(attempts + 1)}`);
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-      await new Promise<void>((settle, reject) => {
-        socket.once('open', () => {
-          settle();
-        });
-        socket.once('error', reject);
-      });
-      socket.on('message', (raw: Buffer) => {
-        const message: unknown = JSON.parse(String(raw));
-        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
-          return;
-        }
-        const result =
-          message['tool'] === 'scan_status'
-            ? {
-                ok: true,
-                openScenes: ['res://shown.tscn'],
-                editedScene: 'res://shown.tscn',
-                unsavedScenes: [],
-                scanning: false,
-                importing: false,
-                sinceScanFinishedMs: 5,
-              }
-            : message['tool'] === 'playing_status'
-              ? { ok: true, playing: false, scenePath: '', debugPort: 0 }
-              : { ok: true };
-        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
-      });
-      const before = marked();
-      if (held !== null) {
-        rmSync(join(held, 'first'), { recursive: true, force: true });
-        rmSync(join(held, 'released'), { force: true });
-        writeFileSync(join(held, 'armed'), '');
-      }
-      const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
-      const askedAt = Date.now();
-      let holding = false;
-      if (held !== null) {
-        const first = join(held, 'first');
-        for (let waited = 0; !existsSync(first) && waited < 10_000; waited += 10) {
-          await delay(10);
-        }
-        holding = existsSync(first);
-      }
-      const greetedAfter = Date.now() - askedAt;
-      mark(holding ? 'first read held, greeting' : 'greeting');
-      socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
-      const answer = parseTextContent(await asking);
-      mark('status answered');
-      const editor = get(answer, 'editor');
-      if (held !== null) {
-        rmSync(join(held, 'armed'));
-        assert.ok(
-          holding,
-          `the status call ran no ps in ${String(greetedAfter)} ms, so the hold never took. The shim was called as:\n${shimCalls()}\nThe call answered: ${JSON.stringify(answer)}\n${server.stderr}`,
-        );
-      }
-      if (marked() > before) {
+      if (await attemptAStatusDuringArrival(arrival, attempts)) {
         met += 1;
-        assert.deepEqual(
-          [
-            get(editor, 'connected'),
-            get(editor, 'scan', 'finishedMsAgo'),
-            get(editor, 'openScenes'),
-            get(editor, 'lspListening'),
-            get(editor, 'dapListening'),
-          ],
-          [true, 5, ['res://shown.tscn'], true, false],
-          `connected during the call, and asked: ${JSON.stringify(editor)}`,
-        );
       }
-      socket.close();
-      // By the clock rather than by the delays, which leave out the status calls between them.
-      for (const until = Date.now() + 5000; Date.now() < until; ) {
-        const now = get(
-          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
-          'editor',
-        );
-        if (get(now, 'connected') === false && get(now, 'identifying') !== true) {
-          break;
-        }
-        await delay(50);
-      }
-      mark('closed');
     }
     // The state is a race between the greeting and the process table, so it is tried until met. A
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
@@ -9051,6 +9101,152 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     languageServer.close();
     rmSync(project, { recursive: true, force: true });
   }
+}
+
+/** What the `ps` shim logged, or (none) when there is no shim or nothing called it. */
+function callsOfThePsShim(held: string | null): string {
+  const calls = held === null ? '' : join(held, 'calls');
+  return calls !== '' && existsSync(calls) ? readFileSync(calls, 'utf8') : '(none)';
+}
+
+/** A `ps` that holds back the first read made once it is armed until a later one has ended. */
+function writeThePsShimThatHoldsTheFirstRead(held: string): void {
+  mkdirSync(held);
+  writeTree(held, {
+    ps: [
+      '#!/bin/sh',
+      `held='${held}'`,
+      'echo "$$ armed=$([ -f "$held/armed" ] && echo yes || echo no) $*" >> "$held/calls"',
+      'if [ -f "$held/armed" ] && mkdir "$held/first" 2>/dev/null; then',
+      '  until [ -f "$held/released" ]; do sleep 0.01; done',
+      '  sleep 0.2',
+      '  exec /bin/ps "$@"',
+      'fi',
+      '/bin/ps "$@"',
+      'said=$?',
+      '[ -f "$held/armed" ] && touch "$held/released"',
+      'exit $said',
+      '',
+    ].join('\n'),
+  });
+  chmodSync(join(held, 'ps'), 0o755);
+}
+
+/** What the attempts of the status-during-arrival case share. */
+interface StatusArrival {
+  readonly project: string;
+  readonly port: number;
+  readonly held: string | null;
+  readonly server: ServerProcess;
+  readonly lspPort: number;
+  readonly dapPort: number;
+  readonly mark: (what: string) => void;
+  readonly marked: () => number;
+  readonly shimCalls: () => string;
+}
+
+/** A fake editor that answers the server's scan and play questions with fixed readings. */
+async function dialAsAnEditorThatAnswersStatus(port: number): Promise<WebSocket> {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+  await new Promise<void>((settle, reject) => {
+    socket.once('open', () => {
+      settle();
+    });
+    socket.once('error', reject);
+  });
+  socket.on('message', (raw: Buffer) => {
+    const message: unknown = JSON.parse(String(raw));
+    if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+      return;
+    }
+    const result =
+      message['tool'] === 'scan_status'
+        ? {
+            ok: true,
+            openScenes: ['res://shown.tscn'],
+            editedScene: 'res://shown.tscn',
+            unsavedScenes: [],
+            scanning: false,
+            importing: false,
+            sinceScanFinishedMs: 5,
+          }
+        : message['tool'] === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: 0 }
+          : { ok: true };
+    socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+  });
+  return socket;
+}
+
+/** Waits until the shim's first read is held, which says whether the hold took. */
+async function waitForTheFirstReadToBeHeld(held: string): Promise<boolean> {
+  const first = join(held, 'first');
+  for (let waited = 0; !existsSync(first) && waited < 10_000; waited += 10) {
+    await delay(10);
+  }
+  return existsSync(first);
+}
+
+/** Polls the status until the editor reads as gone and no longer identifying. */
+async function waitForTheEditorToReadAsGone(server: ServerProcess): Promise<void> {
+  // By the clock rather than by the delays, which leave out the status calls between them.
+  for (const until = Date.now() + 5000; Date.now() < until; ) {
+    const now = get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    if (get(now, 'connected') === false && get(now, 'identifying') !== true) {
+      break;
+    }
+    await delay(50);
+  }
+}
+
+/** One try of the status-during-arrival race. Answers whether the server met the state, having held what it answered. */
+async function attemptAStatusDuringArrival(arrival: StatusArrival, attempts: number): Promise<boolean> {
+  const { project, port, held, server, lspPort, dapPort, mark, marked, shimCalls } = arrival;
+  mark(`attempt ${String(attempts + 1)}`);
+  const socket = await dialAsAnEditorThatAnswersStatus(port);
+  const before = marked();
+  if (held !== null) {
+    rmSync(join(held, 'first'), { recursive: true, force: true });
+    rmSync(join(held, 'released'), { force: true });
+    writeFileSync(join(held, 'armed'), '');
+  }
+  const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
+  const askedAt = Date.now();
+  const holding = held !== null && (await waitForTheFirstReadToBeHeld(held));
+  const greetedAfter = Date.now() - askedAt;
+  mark(holding ? 'first read held, greeting' : 'greeting');
+  socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
+  const answer = parseTextContent(await asking);
+  mark('status answered');
+  const editor = get(answer, 'editor');
+  if (held !== null) {
+    rmSync(join(held, 'armed'));
+    assert.ok(
+      holding,
+      `the status call ran no ps in ${String(greetedAfter)} ms, so the hold never took. The shim was called as:\n${shimCalls()}\nThe call answered: ${JSON.stringify(answer)}\n${server.stderr}`,
+    );
+  }
+  const met = marked() > before;
+  if (met) {
+    assert.deepEqual(
+      [
+        get(editor, 'connected'),
+        get(editor, 'scan', 'finishedMsAgo'),
+        get(editor, 'openScenes'),
+        get(editor, 'lspListening'),
+        get(editor, 'dapListening'),
+      ],
+      [true, 5, ['res://shown.tscn'], true, false],
+      `connected during the call, and asked: ${JSON.stringify(editor)}`,
+    );
+  }
+  socket.close();
+  await waitForTheEditorToReadAsGone(server);
+  mark('closed');
+  return met;
 }
 
 /**
@@ -11531,21 +11727,29 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
 function testEveryArgumentNamesOpsItsToolHas(): void {
   for (const spec of TOOL_SPECS) {
     const ops = new Set(Object.keys(spec.operations ?? {}));
-    for (const [name, schema] of Object.entries(spec.parameters)) {
-      const named = schema.ops;
-      if (named === undefined) {
-        continue;
-      }
-      assert.ok(ops.size > 0, `${spec.name} has no ops, so ${name} cannot name any`);
-      assert.ok(named.length > 0, `${spec.name}.${name} names an empty list of ops`);
-      for (const op of named) {
-        assert.ok(ops.has(op), `${spec.name}.${name} names op ${op}, which ${spec.name} has not`);
-      }
-    }
+    assertTheOpsItsArgumentsNameAreItsOwn(spec, ops);
     for (const op of ops) {
       for (const needed of spec.operations?.[op]?.requires ?? []) {
         assert.ok(opTakes(spec, op, needed), `${spec.name} ${op} requires ${needed} and does not take it`);
       }
+    }
+  }
+}
+
+/** Holds each op that an argument of [spec] names to be an op [spec] has. */
+function assertTheOpsItsArgumentsNameAreItsOwn(
+  spec: (typeof TOOL_SPECS)[number],
+  ops: ReadonlySet<string>,
+): void {
+  for (const [name, schema] of Object.entries(spec.parameters)) {
+    const named = schema.ops;
+    if (named === undefined) {
+      continue;
+    }
+    assert.ok(ops.size > 0, `${spec.name} has no ops, so ${name} cannot name any`);
+    assert.ok(named.length > 0, `${spec.name}.${name} names an empty list of ops`);
+    for (const op of named) {
+      assert.ok(ops.has(op), `${spec.name}.${name} names op ${op}, which ${spec.name} has not`);
     }
   }
 }
@@ -11786,27 +11990,37 @@ function testAnArgumentScopedInWordsIsScopedInItsSchema(): void {
     if (ops.length < 2) {
       continue;
     }
-    for (const [name, schema] of Object.entries(spec.parameters)) {
-      const said = typeof schema['description'] === 'string' ? schema['description'] : '';
-      const head = /^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1];
-      const named = head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
-      if (named.length === 0) {
-        continue;
-      }
-      read += 1;
-      assert.ok(
-        schema.ops !== undefined,
-        `${spec.name}.${name} says it is for ${named.join(', ')} and every op takes it`,
-      );
-      for (const op of named) {
-        assert.ok(
-          schema.ops.includes(op),
-          `${spec.name}.${name} says it is for ${op} and ${op} does not take it`,
-        );
-      }
-    }
+    read += assertArgumentsScopedInWordsAreScoped(spec, ops);
   }
   assert.equal(read, READ_IN_WORDS, 'the arguments whose descriptions open by naming their ops');
+}
+
+/** Holds each argument of [spec] whose description opens by naming ops to declare them. Answers how many it read. */
+function assertArgumentsScopedInWordsAreScoped(
+  spec: (typeof TOOL_SPECS)[number],
+  ops: readonly string[],
+): number {
+  let read = 0;
+  for (const [name, schema] of Object.entries(spec.parameters)) {
+    const said = typeof schema['description'] === 'string' ? schema['description'] : '';
+    const head = /^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1];
+    const named = head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
+    if (named.length === 0) {
+      continue;
+    }
+    read += 1;
+    assert.ok(
+      schema.ops !== undefined,
+      `${spec.name}.${name} says it is for ${named.join(', ')} and every op takes it`,
+    );
+    for (const op of named) {
+      assert.ok(
+        schema.ops.includes(op),
+        `${spec.name}.${name} says it is for ${op} and ${op} does not take it`,
+      );
+    }
+  }
+  return read;
 }
 
 /**
@@ -11902,34 +12116,43 @@ function testEveryPromptAsksForCallsTheToolsTake(): void {
     const declared = new Set(prompt.arguments.map((argument) => argument.name));
     assert.ok(prompt.steps.length > 0, `${prompt.name} asks for at least one call`);
     for (const step of prompt.steps) {
-      const call = `${prompt.name}: ${step.tool}${step.op === undefined ? '' : ` ${step.op}`}`;
-      const spec = toolSpec(step.tool);
-      assert.ok(spec !== undefined, `${call} names a tool there is`);
-      assert.ok(
-        step.op === undefined
-          ? spec.operations === undefined || spec.defaultOperation !== undefined
-          : step.op in (spec.operations ?? {}),
-        `${call} names an op the tool has, or none where the tool needs none`,
-      );
-      const op = step.op ?? spec.defaultOperation ?? '';
-      const takes = argumentsOf(spec, op);
-      const given = [...step.passes, ...Object.keys(step.fixed ?? {})];
-      for (const name of given) {
-        assert.ok(takes.includes(name), `${call} passes ${name}, which it takes`);
-      }
-      for (const name of step.passes) {
-        assert.ok(declared.has(name), `${call} passes ${name} on from an argument ${prompt.name} declares`);
-      }
-      const required = [...spec.requires, ...(spec.operations?.[op]?.requires ?? [])];
-      for (const name of required) {
-        const passedOnRequired =
-          step.passes.includes(name) && prompt.arguments.find((a) => a.name === name)?.required;
-        assert.ok(
-          passedOnRequired === true || name in (step.fixed ?? {}),
-          `${call} requires ${name}, so the prompt always passes it`,
-        );
-      }
+      assertAPromptStepIsACallTheToolTakes(prompt, step, declared);
     }
+  }
+}
+
+/** Holds one step of [prompt] to name a tool and op there are, to pass arguments the op takes, and to pass those it requires. */
+function assertAPromptStepIsACallTheToolTakes(
+  prompt: (typeof PROMPT_SPECS)[number],
+  step: (typeof PROMPT_SPECS)[number]['steps'][number],
+  declared: ReadonlySet<string>,
+): void {
+  const call = `${prompt.name}: ${step.tool}${step.op === undefined ? '' : ` ${step.op}`}`;
+  const spec = toolSpec(step.tool);
+  assert.ok(spec !== undefined, `${call} names a tool there is`);
+  assert.ok(
+    step.op === undefined
+      ? spec.operations === undefined || spec.defaultOperation !== undefined
+      : step.op in (spec.operations ?? {}),
+    `${call} names an op the tool has, or none where the tool needs none`,
+  );
+  const op = step.op ?? spec.defaultOperation ?? '';
+  const takes = argumentsOf(spec, op);
+  const given = [...step.passes, ...Object.keys(step.fixed ?? {})];
+  for (const name of given) {
+    assert.ok(takes.includes(name), `${call} passes ${name}, which it takes`);
+  }
+  for (const name of step.passes) {
+    assert.ok(declared.has(name), `${call} passes ${name} on from an argument ${prompt.name} declares`);
+  }
+  const required = [...spec.requires, ...(spec.operations?.[op]?.requires ?? [])];
+  for (const name of required) {
+    const passedOnRequired =
+      step.passes.includes(name) && prompt.arguments.find((a) => a.name === name)?.required;
+    assert.ok(
+      passedOnRequired === true || name in (step.fixed ?? {}),
+      `${call} requires ${name}, so the prompt always passes it`,
+    );
   }
 }
 
@@ -12330,6 +12553,16 @@ function testProjectPathsAreContained(): void {
   const onWindows = process.platform === 'win32';
   const root = onWindows ? 'C:\\game' : '/srv/game';
 
+  assertHostilePathsAreRefused(root, onWindows);
+  assertAUidIsRefusedForTheEngineToJudge(root);
+  assertAnAbsolutePathIsOfferedTheEndOfItsOwn(root, onWindows);
+  assertPathsBesideTheProjectAreRefused();
+  assertOrdinaryPathsAreContained(root, onWindows);
+  assertASiblingSharingTheProjectNameIsOutside(root, onWindows);
+}
+
+/** Every hostile spelling of a path, for each platform, is refused with a reason. */
+function assertHostilePathsAreRefused(root: string, onWindows: boolean): void {
   const refused = [
     '../../../../etc/passwd',
     'scenes/../../outside.tscn',
@@ -12364,7 +12597,10 @@ function testProjectPathsAreContained(): void {
       `${JSON.stringify(candidate)} should be refused with a reason that says why`,
     );
   }
+}
 
+/** A UID is refused for the engine to judge, and not as a place outside the project. */
+function assertAUidIsRefusedForTheEngineToJudge(root: string): void {
   // A UID names a file in this project, so it is not refused as somewhere else: it is refused because
   // where it is on disk is the engine's to say, and the remedy is the path.
   for (const uid of ['uid://bsrmp7ti1112c', 'res://uid://bsrmp7ti1112c']) {
@@ -12376,7 +12612,10 @@ function testProjectPathsAreContained(): void {
     );
     assert.doesNotMatch(answer.reason, /somewhere other than this project/);
   }
+}
 
+/** An absolute path outside the project is refused with an example made from the end of the path given. */
+function assertAnAbsolutePathIsOfferedTheEndOfItsOwn(root: string, onWindows: boolean): void {
   // The example offered is the end of the path given, so an export's .exe is not offered a scene.
   for (const [candidate, example] of [
     ['/home/me/builds/game.exe', 'builds/game.exe'],
@@ -12395,7 +12634,10 @@ function testProjectPathsAreContained(): void {
       `Path '${candidate}' is absolute and outside the project. Give a path inside it, such as '${example}'.`,
     );
   }
+}
 
+/** A path beside the project, or to a file that is there, is refused with the reason that fits it. */
+function assertPathsBesideTheProjectAreRefused(): void {
   // Beside the project, with its folder given through a link: a macOS temporary directory is given
   // under /var and holds a project whose real path is under /private/var.
   const holding = realpathSync(mkdtempSync(join(tmpdir(), 'gdharness-beside-')));
@@ -12424,7 +12666,10 @@ function testProjectPathsAreContained(): void {
   } finally {
     sweep(holding);
   }
+}
 
+/** The other half of the refusals: ordinary paths resolve to a project-relative path and an absolute one. */
+function assertOrdinaryPathsAreContained(root: string, onWindows: boolean): void {
   // The other half, or the fixture above passes against a function that refuses everything.
   const accepted: [string, string][] = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
@@ -12454,7 +12699,10 @@ function testProjectPathsAreContained(): void {
       `${JSON.stringify(candidate)} should resolve to the file under the project root`,
     );
   }
+}
 
+/** A sibling whose path begins with the project's text is outside it, and a file under the root is inside. */
+function assertASiblingSharingTheProjectNameIsOutside(root: string, onWindows: boolean): void {
   // A sibling directory whose path merely begins with the project's text is not inside it,
   // which is what a prefix comparison gets wrong and `relative` does not.
   assert.equal(
@@ -16205,90 +16453,117 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
     return;
   }
   for (const how of ['by a server', 'by an editor'] as const) {
-    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inherited-'));
-    const home = join(project, '.home');
-    mkdirSync(home, { recursive: true });
-    const [bridgePort, lspPort, dapPort] = [await reservePort(), await reservePort(), await reservePort()];
-    // The editor's own settings, runtime directory and user data, so nothing here is written into
-    // the machine's editor settings, which the addon writes one setting to as it loads.
-    const own = {
-      HOME: home,
-      USERPROFILE: home,
-      APPDATA: home,
-      LOCALAPPDATA: home,
-      XDG_CONFIG_HOME: home,
-      XDG_DATA_HOME: home,
-      XDG_CACHE_HOME: home,
-      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
-    };
-    const server = new ServerProcess({
-      env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project, ...own },
-    });
-    let editor: ChildProcess | null = null;
-    try {
-      installAddons(project);
-      writeFileSync(
-        join(project, 'project.godot'),
-        'config_version=5\n\n[application]\n\nconfig/name="Inherited"\n\n[editor_plugins]\n\n' +
-          'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
-      );
-      await server.initialize('regression-test');
-      const inherited = how === 'by an editor';
-      editor = spawnHidden(
-        godotPath,
-        [
-          '--editor',
-          '--headless',
-          '--path',
-          project,
-          // What a server passes and a Godot restart does not.
-          ...(inherited ? [] : ['--lsp-port', String(lspPort), '--dap-port', String(dapPort)]),
-        ],
-        {
-          env: {
-            ...process.env,
-            ...own,
-            GDHARNESS_BRIDGE_PORT: String(bridgePort),
-            GDHARNESS_LSP_PORT: String(lspPort),
-            GDHARNESS_DAP_PORT: String(dapPort),
-            GDHARNESS_OPENED_BY_A_SERVER: '1',
-            // Set by the addon of the editor before it, which a child started by that editor has.
-            ...(inherited ? { GDHARNESS_EDITOR_PID: String(process.pid) } : {}),
-          },
-          stdio: 'ignore',
+    await startAnEditorAndReadWhoStartedIt(godotPath, how);
+  }
+}
+
+/** Starts one real headless editor the way [how] says, and holds what it reports of who started it. */
+async function startAnEditorAndReadWhoStartedIt(
+  godotPath: string,
+  how: 'by a server' | 'by an editor',
+): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inherited-'));
+  const home = join(project, '.home');
+  mkdirSync(home, { recursive: true });
+  const [bridgePort, lspPort, dapPort] = [await reservePort(), await reservePort(), await reservePort()];
+  // The editor's own settings, runtime directory and user data, so nothing here is written into
+  // the machine's editor settings, which the addon writes one setting to as it loads.
+  const own = {
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: home,
+    LOCALAPPDATA: home,
+    XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+  };
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project, ...own },
+  });
+  let editor: ChildProcess | null = null;
+  try {
+    installAddons(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Inherited"\n\n[editor_plugins]\n\n' +
+        'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    await server.initialize('regression-test');
+    const inherited = how === 'by an editor';
+    editor = spawnHidden(
+      godotPath,
+      [
+        '--editor',
+        '--headless',
+        '--path',
+        project,
+        // What a server passes and a Godot restart does not.
+        ...(inherited ? [] : ['--lsp-port', String(lspPort), '--dap-port', String(dapPort)]),
+      ],
+      {
+        env: {
+          ...process.env,
+          ...own,
+          GDHARNESS_BRIDGE_PORT: String(bridgePort),
+          GDHARNESS_LSP_PORT: String(lspPort),
+          GDHARNESS_DAP_PORT: String(dapPort),
+          GDHARNESS_OPENED_BY_A_SERVER: '1',
+          // Set by the addon of the editor before it, which a child started by that editor has.
+          ...(inherited ? { GDHARNESS_EDITOR_PID: String(process.pid) } : {}),
         },
-      );
-      let greeted: unknown = null;
-      for (let waited = 0; waited < 60_000 && greeted === null; waited += 250) {
-        await delay(250);
-        const now = get(
-          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
-          'editor',
-        );
-        if (typeof get(now, 'projectPath') === 'string') {
-          greeted = now;
-        }
-      }
-      assert.ok(greeted !== null, `the ${how} editor should have greeted`);
-      const said = JSON.stringify(greeted);
-      assert.equal(get(greeted, 'editorPid'), editor.pid, `it is the editor started here: ${said}`);
-      if (inherited) {
-        assert.equal(get(greeted, 'startedByAnEditor'), true, `it says another editor started it: ${said}`);
-        assert.equal(get(greeted, 'openedByAServer'), false, `and not that a server did: ${said}`);
-        assert.notEqual(get(greeted, 'lspPort'), lspPort, `nor the port it never bound: ${said}`);
-        assert.notEqual(get(greeted, 'dapPort'), dapPort, said);
-        assert.match(text(get(greeted, 'startedByAnEditorNote')), /Another editor started this one/, said);
-      } else {
-        assert.equal(get(greeted, 'startedByAnEditor'), false, said);
-        assert.equal(get(greeted, 'openedByAServer'), true, said);
-        assert.equal(get(greeted, 'lspPort'), lspPort, `a server's editor serves what it was given: ${said}`);
-        assert.equal(get(greeted, 'dapPort'), dapPort, said);
-      }
-    } finally {
-      editor?.kill();
-      await server.stop();
-      sweep(project);
+        stdio: 'ignore',
+      },
+    );
+    const greeted = await waitForTheEditorToGreet(server);
+    assert.ok(greeted !== null, `the ${how} editor should have greeted`);
+    const said = JSON.stringify(greeted);
+    assert.equal(get(greeted, 'editorPid'), editor.pid, `it is the editor started here: ${said}`);
+    assertWhoStartedTheGreetingEditor(greeted, inherited, { lspPort, dapPort });
+  } finally {
+    editor?.kill();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/** The editor's status once it has greeted, or null when it has not within a minute. */
+async function waitForTheEditorToGreet(server: ServerProcess): Promise<unknown> {
+  for (let waited = 0; waited < 60_000; waited += 250) {
+    await delay(250);
+    const now = get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    if (typeof get(now, 'projectPath') === 'string') {
+      return now;
     }
+  }
+  return null;
+}
+
+/** Holds a greeting to say what started the editor: another editor, or a server with the ports it gave. */
+function assertWhoStartedTheGreetingEditor(
+  greeted: unknown,
+  inherited: boolean,
+  ports: { readonly lspPort: number; readonly dapPort: number },
+): void {
+  const said = JSON.stringify(greeted);
+  if (inherited) {
+    assert.equal(get(greeted, 'startedByAnEditor'), true, `it says another editor started it: ${said}`);
+    assert.equal(get(greeted, 'openedByAServer'), false, `and not that a server did: ${said}`);
+    assert.notEqual(get(greeted, 'lspPort'), ports.lspPort, `nor the port it never bound: ${said}`);
+    assert.notEqual(get(greeted, 'dapPort'), ports.dapPort, said);
+    assert.match(text(get(greeted, 'startedByAnEditorNote')), /Another editor started this one/, said);
+  } else {
+    assert.equal(get(greeted, 'startedByAnEditor'), false, said);
+    assert.equal(get(greeted, 'openedByAServer'), true, said);
+    assert.equal(
+      get(greeted, 'lspPort'),
+      ports.lspPort,
+      `a server's editor serves what it was given: ${said}`,
+    );
+    assert.equal(get(greeted, 'dapPort'), ports.dapPort, said);
   }
 }
 
@@ -16698,9 +16973,6 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
   if (inheritedCachePath !== undefined) {
     process.env[cachePathVariable] = inheritedCachePath;
   }
-  let pid = 0;
-  const met = new MetProcesses();
-  let socket: WebSocket | null = null;
   const sceneCreate = async (): Promise<JsonRpcMessage> =>
     await server.request(
       'tools/call',
@@ -16710,160 +16982,223 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
       },
       60_000,
     );
+  const run: AwaitedEditorRun = {
+    project,
+    port,
+    server,
+    met: new MetProcesses(),
+    waitMs,
+    windows,
+    temp,
+    workdir,
+    cachePathVariable,
+    inheritedCachePath,
+    sceneCreate,
+    pid: 0,
+    launchedAt: 0,
+    socket: null,
+  };
   try {
-    writeFileSync(
-      join(project, 'project.godot'),
-      'config_version=5\n\n[application]\nconfig/name="Awaited"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
-    );
-    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
-    await server.initialize('regression-test');
-    const launchedAt = Date.now();
-    const opened = parseTextContent(
-      await server.request('tools/call', {
-        name: 'editor_launch',
-        arguments: { op: 'open', projectPath: project, hidden: true },
-      }),
-    );
-    pid = asNumber(get(opened, 'pid'), 'pid');
-    await met.meet(pid);
-    assert.ok(alive(pid), `the fixture needs the opened editor running: ${JSON.stringify(opened)}`);
-    // The note beside its console says when it began, which tells a server reading that console
-    // after the editor has gone the editor from a later process given its pid. Here because this
-    // is the editor that lives long enough to be asked: a stand-in engine exits first.
-    const began = (await startTimesOf([pid])).get(pid);
-    const noted = readEditorLogNote(project);
-    assert.deepEqual([noted?.pid, noted?.processStartedAt], [pid, began], JSON.stringify(noted));
-
-    const asked = sceneCreate();
-    await delay(1_500);
-    const invoked: string[] = [];
-    const arriving = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-    socket = arriving;
-    await new Promise<void>((settle, reject) => {
-      arriving.once('open', () => {
-        settle();
-      });
-      arriving.once('error', reject);
-    });
-    arriving.on('message', (raw: Buffer) => {
-      const message: unknown = JSON.parse(String(raw));
-      if (isRecord(message) && message['type'] === 'tool_invoke') {
-        invoked.push(String(message['tool']));
-        arriving.send(
-          JSON.stringify({
-            type: 'tool_result',
-            id: message['id'],
-            success: true,
-            result: { scenePath: 'res://made.tscn' },
-          }),
-        );
-      }
-    });
-    arriving.send(JSON.stringify(greeting(project)));
-    const answered = await asked;
-    assert.notEqual(
-      get(answered.result, 'isError'),
-      true,
-      `the call made before the editor arrived waits for it: ${textOf(answered)}`,
-    );
-    assert.deepEqual(invoked, ['create_scene'], 'and is answered by the editor that arrived');
-
-    arriving.close();
-    socket = null;
-    for (let waited = 0; waited < 10_000; waited += 100) {
-      const status = parseTextContent(
-        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
-      );
-      if (get(status, 'editor', 'connected') === false) {
-        break;
-      }
-      await delay(100);
-    }
-    const refused = textOf(await sceneCreate()) ?? '';
-    assert.ok(
-      refused.startsWith(
-        `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge in the ${String(waitMs / 1000)}s this call waited.`,
-      ),
-      `one that does not arrive is named, and waited for as long as a restart waits: ${refused}`,
-    );
-    assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
-    // The calls below are asked again, and each waits for the same editor.
-    assert.match(
-      refused,
-      /- Ask again: the call waits for this editor rather than opening another\n/,
-      refused,
-    );
-
-    // The calls asked of the editor's language server rather than its bridge wait for it the same
-    // way. Until the editor says which port it serves, the default is all there is to ask on, and an
-    // editor opened beside another project's is moved off the default: a diagnostics call made
-    // straight after the open was asked of the other project's editor and refused for it.
-    writeFileSync(join(project, 'asked.gd'), 'extends Node\n\n\nfunc greet() -> void:\n\tpass\n');
-    const languageServerCalls: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
-      ['script_diagnostics', { scriptPath: 'res://asked.gd' }],
-      ['script_info', { op: 'symbols', scriptPath: 'res://asked.gd' }],
-      [
-        'script_edit',
-        { op: 'rename', scriptPath: 'res://asked.gd', symbol: 'greet', newName: 'welcome', preview: true },
-      ],
-    ];
-    const answers = new Map<string, string>();
-    for (const [name, asks] of languageServerCalls) {
-      const answer = await server.request(
-        'tools/call',
-        { name, arguments: { projectPath: project, ...asks } },
-        60_000,
-      );
-      answers.set(name, textOf(answer) ?? '');
-    }
-    const waiting = `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge`;
-    assert.deepEqual(
-      [...answers].filter(([, answer]) => !answer.startsWith(waiting)).map(([name]) => name),
-      [],
-      `each waits for the editor this server opened, and names it: ${JSON.stringify(Object.fromEntries(answers))}`,
-    );
-    // And a rebind, which was refused at once as though no editor were coming.
-    const rebind =
-      textOf(
-        await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'rebind' } }, 60_000),
-      ) ?? '';
-    assert.ok(rebind.startsWith(waiting), `a rebind waits for it as well: ${rebind}`);
-
-    if (windows) {
-      // Saved some thirteen seconds after a PowerShell first loads a module, measured here, so it is
-      // waited for while both are still running rather than assumed. Both save to the same place, so
-      // the first to save meets the positive. The wait runs on until the later of the two, the one
-      // that started the editor, has had its chance to save in the wrong place.
-      const cache = join(temp, 'Microsoft', 'Windows', 'PowerShell', 'ModuleAnalysisCache');
-      for (let waited = 0; waited < 40_000 && !existsSync(cache); waited += 250) {
-        await delay(250);
-      }
-      assert.ok(
-        existsSync(cache),
-        `the PowerShell the server runs saved its module cache in the temporary directory (the suite had ${cachePathVariable} ${inheritedCachePath === undefined ? 'unset' : `as ${inheritedCachePath}`}, which the server was not given)`,
-      );
-      await delay(Math.max(0, launchedAt + 25_000 - Date.now()));
-      assert.deepEqual(readdirSync(workdir), [], 'and nothing in the directory the server runs in');
-    }
-
-    const closed = parseTextContent(
-      await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }),
-    );
-    assert.equal(
-      get(closed, 'closed'),
-      true,
-      `close ends the editor that never connected: ${JSON.stringify(closed)}`,
-    );
-    assert.equal(get(closed, 'beforeConnecting'), true, JSON.stringify(closed));
-    assert.equal(get(closed, 'editorPid'), pid, JSON.stringify(closed));
-    assert.equal(await met.runs(pid), false, 'and its process is gone');
+    await openAnEditorThatNeverConnects(run);
+    await callWaitsForTheEditorThatArrives(run);
+    await assertACallToAnEditorThatNeverArrivesNamesIt(run);
+    await assertLanguageServerCallsWaitForTheOpenedEditor(run);
+    await assertThePowerShellSavedItsCacheInTheTemporaryDirectory(run);
+    await assertCloseEndsAnEditorThatNeverConnected(run);
   } finally {
-    socket?.close();
-    await met.end();
-    await met.gone(pid, 10_000);
+    run.socket?.close();
+    await run.met.end();
+    await run.met.gone(run.pid, 10_000);
     await server.stop();
     sweep(project);
   }
+}
+
+/** What the phases of the case of the awaited editor share. */
+interface AwaitedEditorRun {
+  readonly project: string;
+  readonly port: number;
+  readonly server: ServerProcess;
+  readonly met: MetProcesses;
+  readonly waitMs: number;
+  readonly windows: boolean;
+  readonly temp: string;
+  readonly workdir: string;
+  readonly cachePathVariable: string;
+  readonly inheritedCachePath: string | undefined;
+  readonly sceneCreate: () => Promise<JsonRpcMessage>;
+  pid: number;
+  launchedAt: number;
+  socket: WebSocket | null;
+}
+
+/** Opens a real headless editor that runs and never dials in, and checks the note kept beside its console. */
+async function openAnEditorThatNeverConnects(run: AwaitedEditorRun): Promise<void> {
+  const { project, server, met } = run;
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Awaited"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  await server.initialize('regression-test');
+  run.launchedAt = Date.now();
+  const opened = parseTextContent(
+    await server.request('tools/call', {
+      name: 'editor_launch',
+      arguments: { op: 'open', projectPath: project, hidden: true },
+    }),
+  );
+  const pid = asNumber(get(opened, 'pid'), 'pid');
+  run.pid = pid;
+  await met.meet(pid);
+  assert.ok(alive(pid), `the fixture needs the opened editor running: ${JSON.stringify(opened)}`);
+  // The note beside its console says when it began, which tells a server reading that console
+  // after the editor has gone the editor from a later process given its pid. Here because this
+  // is the editor that lives long enough to be asked: a stand-in engine exits first.
+  const began = (await startTimesOf([pid])).get(pid);
+  const noted = readEditorLogNote(project);
+  assert.deepEqual([noted?.pid, noted?.processStartedAt], [pid, began], JSON.stringify(noted));
+}
+
+/** A call needing the editor, made while the opened editor is on its way, waits for a fake editor that arrives. */
+async function callWaitsForTheEditorThatArrives(run: AwaitedEditorRun): Promise<void> {
+  const { project, port, server, sceneCreate } = run;
+  const asked = sceneCreate();
+  await delay(1_500);
+  const invoked: string[] = [];
+  const arriving = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+  run.socket = arriving;
+  await new Promise<void>((settle, reject) => {
+    arriving.once('open', () => {
+      settle();
+    });
+    arriving.once('error', reject);
+  });
+  arriving.on('message', (raw: Buffer) => {
+    const message: unknown = JSON.parse(String(raw));
+    if (isRecord(message) && message['type'] === 'tool_invoke') {
+      invoked.push(String(message['tool']));
+      arriving.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: message['id'],
+          success: true,
+          result: { scenePath: 'res://made.tscn' },
+        }),
+      );
+    }
+  });
+  arriving.send(JSON.stringify(greeting(project)));
+  const answered = await asked;
+  assert.notEqual(
+    get(answered.result, 'isError'),
+    true,
+    `the call made before the editor arrived waits for it: ${textOf(answered)}`,
+  );
+  assert.deepEqual(invoked, ['create_scene'], 'and is answered by the editor that arrived');
+
+  arriving.close();
+  run.socket = null;
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    if (get(status, 'editor', 'connected') === false) {
+      break;
+    }
+    await delay(100);
+  }
+}
+
+/** Once the editor has gone, a call meets one that does not arrive within the wait, and names it. */
+async function assertACallToAnEditorThatNeverArrivesNamesIt(run: AwaitedEditorRun): Promise<void> {
+  const { project, pid, waitMs, sceneCreate } = run;
+  const refused = textOf(await sceneCreate()) ?? '';
+  assert.ok(
+    refused.startsWith(
+      `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge in the ${String(waitMs / 1000)}s this call waited.`,
+    ),
+    `one that does not arrive is named, and waited for as long as a restart waits: ${refused}`,
+  );
+  assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
+  // The calls below are asked again, and each waits for the same editor.
+  assert.match(refused, /- Ask again: the call waits for this editor rather than opening another\n/, refused);
+}
+
+/** The calls asked of the language server, and a rebind, wait for the opened editor as the bridge's calls do. */
+async function assertLanguageServerCallsWaitForTheOpenedEditor(run: AwaitedEditorRun): Promise<void> {
+  const { project, server, pid } = run;
+  // The calls asked of the editor's language server rather than its bridge wait for it the same
+  // way. Until the editor says which port it serves, the default is all there is to ask on, and an
+  // editor opened beside another project's is moved off the default: a diagnostics call made
+  // straight after the open was asked of the other project's editor and refused for it.
+  writeFileSync(join(project, 'asked.gd'), 'extends Node\n\n\nfunc greet() -> void:\n\tpass\n');
+  const languageServerCalls: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ['script_diagnostics', { scriptPath: 'res://asked.gd' }],
+    ['script_info', { op: 'symbols', scriptPath: 'res://asked.gd' }],
+    [
+      'script_edit',
+      { op: 'rename', scriptPath: 'res://asked.gd', symbol: 'greet', newName: 'welcome', preview: true },
+    ],
+  ];
+  const answers = new Map<string, string>();
+  for (const [name, asks] of languageServerCalls) {
+    const answer = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...asks } },
+      60_000,
+    );
+    answers.set(name, textOf(answer) ?? '');
+  }
+  const waiting = `Editor not connected: the editor this server opened on ${project}, pid ${pid}, is still running and has not reached the bridge`;
+  assert.deepEqual(
+    [...answers].filter(([, answer]) => !answer.startsWith(waiting)).map(([name]) => name),
+    [],
+    `each waits for the editor this server opened, and names it: ${JSON.stringify(Object.fromEntries(answers))}`,
+  );
+  // And a rebind, which was refused at once as though no editor were coming.
+  const rebind =
+    textOf(
+      await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'rebind' } }, 60_000),
+    ) ?? '';
+  assert.ok(rebind.startsWith(waiting), `a rebind waits for it as well: ${rebind}`);
+}
+
+/** On Windows, the PowerShell the server runs saves its cache where the fixture said and leaves its directory empty. */
+async function assertThePowerShellSavedItsCacheInTheTemporaryDirectory(run: AwaitedEditorRun): Promise<void> {
+  const { windows, temp, workdir, launchedAt, cachePathVariable, inheritedCachePath } = run;
+  if (windows) {
+    // Saved some thirteen seconds after a PowerShell first loads a module, measured here, so it is
+    // waited for while both are still running rather than assumed. Both save to the same place, so
+    // the first to save meets the positive. The wait runs on until the later of the two, the one
+    // that started the editor, has had its chance to save in the wrong place.
+    const cache = join(temp, 'Microsoft', 'Windows', 'PowerShell', 'ModuleAnalysisCache');
+    for (let waited = 0; waited < 40_000 && !existsSync(cache); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(
+      existsSync(cache),
+      `the PowerShell the server runs saved its module cache in the temporary directory (the suite had ${cachePathVariable} ${inheritedCachePath === undefined ? 'unset' : `as ${inheritedCachePath}`}, which the server was not given)`,
+    );
+    await delay(Math.max(0, launchedAt + 25_000 - Date.now()));
+    assert.deepEqual(readdirSync(workdir), [], 'and nothing in the directory the server runs in');
+  }
+}
+
+/** Close ends the editor that never connected, and its process is gone. */
+async function assertCloseEndsAnEditorThatNeverConnected(run: AwaitedEditorRun): Promise<void> {
+  const { server, pid, met } = run;
+  const closed = parseTextContent(
+    await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'close' } }),
+  );
+  assert.equal(
+    get(closed, 'closed'),
+    true,
+    `close ends the editor that never connected: ${JSON.stringify(closed)}`,
+  );
+  assert.equal(get(closed, 'beforeConnecting'), true, JSON.stringify(closed));
+  assert.equal(get(closed, 'editorPid'), pid, JSON.stringify(closed));
+  assert.equal(await met.runs(pid), false, 'and its process is gone');
 }
 
 /**
