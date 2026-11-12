@@ -2,7 +2,7 @@ import { readlinkSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { linuxStartEarliest, linuxStartTimes } from './process-children.js';
+import { linuxStartEarliest, processTree, startTimesOf } from './process-children.js';
 import { loadingTheTable } from './process-table.js';
 import { runHidden, spawnHidden } from './spawn.js';
 
@@ -196,35 +196,6 @@ async function followOnWindows(
   return { successor, ended };
 }
 
-/** The processes `ps` printed as `pid args`, dated from /proc. */
-async function listedOnLinux(printed: string): Promise<ListedSuccessor[]> {
-  const listed: ListedSuccessor[] = [];
-  const commands = new Map<number, string>();
-  for (const line of printed.split('\n')) {
-    const fields = /^\s*(\d+)\s+(.*)$/.exec(line);
-    if (fields?.[1] !== undefined) {
-      commands.set(Number(fields[1]), (fields[2] ?? '').trim());
-    }
-  }
-  for (const [pid, startedAt] of await linuxStartTimes([...commands.keys()])) {
-    listed.push({ pid, startedAt, command: commands.get(pid) ?? '' });
-  }
-  return listed;
-}
-
-/** The processes `ps` printed as `pid lstart args`. */
-function listedOnMac(printed: string): ListedSuccessor[] {
-  const listed: ListedSuccessor[] = [];
-  for (const line of printed.split('\n')) {
-    const fields = /^\s*(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
-    const startedAt = Date.parse(fields?.[2] ?? '');
-    if (fields?.[1] !== undefined && !Number.isNaN(startedAt)) {
-      listed.push({ pid: Number(fields[1]), startedAt, command: (fields[3] ?? '').trim() });
-    }
-  }
-  return listed;
-}
-
 async function followOnPosix(
   exitedPid: number,
   engine: string,
@@ -236,18 +207,21 @@ async function followOnPosix(
   // seconds early. See linuxStartTimes. macOS's ps cuts it to the second.
   const linux = process.platform === 'linux';
   const early = linux ? await linuxStartEarliest() : 1000;
-  let printed: string;
-  try {
-    // In the C locale, since lstart is a date in words and the words are the ones Date.parse reads.
-    ({ stdout: printed } = await runHidden('ps', ['-e', '-o', linux ? 'pid=,args=' : 'pid=,lstart=,args='], {
-      timeout: LIST_WITHIN_MS,
-      maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, LC_ALL: 'C' },
-    }));
-  } catch {
+  const tree = await processTree();
+  if (tree === undefined) {
     return null;
   }
-  const listed = linux ? await listedOnLinux(printed) : listedOnMac(printed);
+  // Dated only for the engine's own processes, since each date is a look at another process.
+  const wanted = basename(engine.replaceAll('\\', '/'));
+  const runningEngine = [...tree].filter(([, one]) => executableOf(one.command) === wanted);
+  const dated = await startTimesOf(runningEngine.map(([pid]) => pid));
+  const listed: ListedSuccessor[] = [];
+  for (const [pid, one] of runningEngine) {
+    const startedAt = dated.get(pid);
+    if (startedAt !== undefined) {
+      listed.push({ pid, startedAt, command: one.command });
+    }
+  }
   // Asked of the engines that started in time only, since each answer is a look at another process.
   const timely = listed.filter(
     (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, early) !== null,

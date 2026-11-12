@@ -209,6 +209,7 @@ import {
   Spent,
   STARVED,
   sampled,
+  secondsFromClock,
   watching,
 } from '../src/engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
@@ -376,7 +377,6 @@ import {
   startTimesOf,
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
-import { cpuSecondsOf, secondsFromClock } from '../src/process-time.js';
 import {
   ignoredTexts,
   projectStructure,
@@ -19415,7 +19415,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
  * started before the game existed. Two candidates are one too many to choose between. On POSIX the
  * listing gives starts to the second, cut down, so a successor listed up to a second early is kept.
  */
-function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
+async function testASuccessorIsTheEngineStartedAsTheGameExited(): Promise<void> {
   const engine = process.platform === 'win32' ? 'C:\\Godot\\Godot_v4.exe' : '/opt/godot/godot';
   const run = (rest: string): string =>
     process.platform === 'win32' ? `"C:\\Godot\\Godot_v4.exe" ${rest}` : `/opt/godot/godot ${rest}`;
@@ -19504,6 +19504,50 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
     ticked,
     'is within the second and the tick that reading can be early by',
   );
+  if (process.platform === 'win32') {
+    console.log(
+      'successor listing regression skipped for the POSIX half (Windows lists it through the table)',
+    );
+    return;
+  }
+  // The listing itself: stand-ins of this runtime that write to the run's transcript, one of them
+  // older than the window, and each read through the process table and the dated starts.
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-successor-'));
+  const transcript = join(folder, 'transcript.log');
+  const output = openSync(transcript, 'w');
+  const standIns: ChildProcess[] = [];
+  const standIn = (): number => {
+    const child = spawnHidden(process.execPath, ['--eval', 'setInterval(() => undefined, 1000)'], {
+      stdio: ['ignore', output, 'ignore'],
+    });
+    standIns.push(child);
+    assert.ok(typeof child.pid === 'number', 'the stand-in engine started');
+    return child.pid;
+  };
+  try {
+    const earlier = standIn();
+    await delay(RESTARTED_WITHIN_MS + 1500);
+    const successor = standIn();
+    const leftAt = Date.now();
+    const followed = await followSuccessor(
+      process.pid,
+      process.execPath,
+      leftAt - 60_000,
+      leftAt,
+      transcript,
+    );
+    assert.equal(followed?.successor.pid, successor, 'the stand-in started as the game exited is followed');
+    assert.ok(followed.successor.command.includes('--eval'), 'with the command line it was started as');
+    const [began] = (await startTimesOf([successor])).values();
+    assert.equal(followed.successor.startedAt, began, 'and the start the table dates it by');
+    assert.notEqual(followed.successor.pid, earlier, 'the one started two seconds before the exit is not');
+  } finally {
+    for (const child of standIns) {
+      child.kill();
+    }
+    closeSync(output);
+    rmSync(folder, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -50499,7 +50543,7 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
     assert.equal(tree.get(probe.pid)?.parent, process.pid, 'the child names this process as its parent');
 
     const before = process.cpuUsage();
-    const seconds = await cpuSecondsOf(process.pid);
+    const seconds = (await processorSecondsOf([process.pid], 6_000)).get(process.pid);
     const after = process.cpuUsage();
     const of = (usage: NodeJS.CpuUsage): number => (usage.user + usage.system) / 1e6;
     assert.ok(
@@ -50507,7 +50551,7 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
       `the processor time is the one Node reads: ${String(seconds)} between ${of(before)} and ${of(after)}`,
     );
     assert.equal(
-      await cpuSecondsOf(probe.pid + 999_999),
+      (await processorSecondsOf([probe.pid + 999_999], 6_000)).get(probe.pid + 999_999),
       undefined,
       'and none is given for a process not running',
     );
@@ -72752,6 +72796,107 @@ function testProcessorTimeIsReadOffEveryClockFormat(): void {
   assert.equal(secondsFromClock('0:01,23'), 1.23);
   assert.equal(secondsFromClock('1-00:00:00'), 86_400);
   assert.equal(secondsFromClock(' 00:12'), 12, 'a clock padded by the column is read');
+  assert.equal(secondsFromClock('01:02'), 62);
+  assert.equal(secondsFromClock('1-02:03:04'), 93_784);
+  assert.equal(secondsFromClock('0:00,50'), 0.5, 'a comma is the point of another locale');
+  assert.equal(secondsFromClock('-'), undefined, 'a dash is no clock and not zero');
+}
+
+/**
+ * A pid's processor seconds are read one way for one pid or many, to the tenth of a second.
+ *
+ * `ps` prints whole seconds where `/proc` counts ticks, so a process that has used 400 ms read as
+ * zero. A pid that has gone is left out of the answer, never read as zero, and never costs the
+ * others theirs.
+ */
+async function testProcessorSecondsAreReadOneWay(): Promise<void> {
+  const child = spawnHidden(
+    process.execPath,
+    [
+      '--eval',
+      "const until = process.cpuUsage(); while ((process.cpuUsage().user - until.user) < 400_000) {} console.log('spun'); setInterval(() => undefined, 1000);",
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  const gone = spawnHidden(process.execPath, ['--eval', '0'], { stdio: 'ignore' });
+  try {
+    assert.ok(typeof child.pid === 'number' && typeof gone.pid === 'number', 'the fixtures started');
+    await new Promise<void>((spun, reject) => {
+      let said = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        said += chunk.toString('utf8');
+        if (said.includes('spun')) {
+          spun();
+        }
+      });
+      child.once('error', reject);
+      child.once('close', () => {
+        reject(new Error('the spinning child ended before it said so'));
+      });
+    });
+    await new Promise<void>((exited) => {
+      if (gone.exitCode !== null) {
+        exited();
+      }
+      gone.once('close', () => {
+        exited();
+      });
+    });
+    const spent = (await processorSecondsOf([child.pid])).get(child.pid);
+    assert.ok(
+      spent !== undefined && spent >= 0.2 && spent <= 5,
+      `a child that spun for 400 ms has used between 0.2 and 5 s: ${String(spent)}`,
+    );
+    const some = await processorSecondsOf([process.pid, gone.pid]);
+    assert.deepEqual([...some.keys()], [process.pid], 'a pid that has gone is left out, not read as zero');
+    assert.equal((await processorSecondsOf([])).size, 0, 'no pid is no answer');
+    assert.equal((await processorSecondsOf([gone.pid])).size, 0, 'a gone pid alone is no answer');
+    if (process.platform === 'win32') {
+      const first = (await processorSecondsOf([child.pid], 6_000)).get(child.pid);
+      await delay(500);
+      const second = (await processorSecondsOf([child.pid], 6_000)).get(child.pid);
+      assert.ok(
+        first !== undefined && second !== undefined && second >= first,
+        `the second read is no smaller: ${String(first)}, then ${String(second)}`,
+      );
+    } else {
+      console.log('processor seconds wait regression skipped for the Windows half (only it asks a table)');
+    }
+  } finally {
+    child.kill();
+    gone.kill();
+  }
+}
+
+/**
+ * Each read of the operating system's process table has one home: the listing and the `ps` of
+ * starts in `process-children.ts`, the processor seconds in `engine-spent.ts`.
+ *
+ * Two modules asking their own way gave two answers on one machine, `ps` rounding to whole seconds
+ * where `/proc` did not. Walked, so a second ask added later in any file is found.
+ */
+function testEveryProcessTableReadIsOne(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+    .map((entry) => join('src', entry).replaceAll('\\', '/'));
+  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
+  const holding = (word: string): string[] =>
+    files.filter((file) => readFileSync(file, 'utf8').includes(word)).toSorted();
+  // Built from parts, so that this file is not one that holds them.
+  const everything = ["'", 'ps', "'"].join('');
+  const listing = files.filter((file) => {
+    const source = readFileSync(file, 'utf8');
+    return source.includes(everything) && new RegExp(`${everything}\\s*,\\s*\\[?\\s*'-e'`).test(source);
+  });
+  assert.deepEqual(listing, ['src/process-children.ts'], 'the whole table is listed in one file');
+  assert.deepEqual(holding(['l', 'start'].join('')), ['src/process-children.ts'], 'starts are read in one');
+  assert.deepEqual(
+    holding(['time', '='].join('')),
+    ['src/engine-spent.ts'],
+    'processor seconds are read by ps in one',
+  );
+  assert.deepEqual(holding(['ProcessorSeconds', '(int'].join('')), [], 'the table reads seconds one way');
 }
 
 /**
@@ -93107,6 +93252,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryFileArgumentIsContained,
   testAnUnknownArgumentSaysWhichServerSaysSo,
   testProcessorTimeIsReadOffEveryClockFormat,
+  testProcessorSecondsAreReadOneWay,
+  testEveryProcessTableReadIsOne,
   testAWaitOfNothingIsAWaitOfNothing,
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
   testEveryShippedAddonIsInstalled,

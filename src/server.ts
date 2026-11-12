@@ -137,6 +137,7 @@ import {
 } from './engine-leaks.js';
 import { CONSOLE_CLOSED, type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
+import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -262,7 +263,6 @@ import {
   whyTheProcessTreeFailed,
 } from './process-children.js';
 import { ensureProcessTable } from './process-table.js';
-import { cpuSecondsOf } from './process-time.js';
 import {
   folderFiles,
   pathsInUidCache,
@@ -16649,8 +16649,11 @@ class GodotServer {
     const processToAsk = wanted
       ? (announced ?? (stillRunning(run) ? await this.gameProcessOf(run) : undefined) ?? run.pid ?? null)
       : null;
+    // Six seconds, since a loaded machine is the one whose run somebody is watching for a stall.
     const cpuSeconds =
-      wanted && processToAsk !== null && stillRunning(run) ? await cpuSecondsOf(processToAsk) : undefined;
+      wanted && processToAsk !== null && stillRunning(run)
+        ? (await processorSecondsOf([processToAsk], 6_000)).get(processToAsk)
+        : undefined;
     return { processToAsk, cpuSeconds };
   }
 

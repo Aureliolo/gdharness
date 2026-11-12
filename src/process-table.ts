@@ -277,19 +277,6 @@ public static class GdhProcessTable
         return "";
     }
 
-    /// <summary>The processor seconds the pid has used; empty when it is not running.</summary>
-    public static string ProcessorSeconds(int pid)
-    {
-        foreach (Entry entry in Snapshot())
-        {
-            if (entry.Pid == pid)
-            {
-                return (entry.Processor / 1e7).ToString("R", CultureInfo.InvariantCulture);
-            }
-        }
-        return "";
-    }
-
     /// <summary>"pid seconds" on a line for each running one of the comma-separated pids, from one snapshot.</summary>
     public static string ProcessorSecondsOf(string pids)
     {
