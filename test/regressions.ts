@@ -3617,10 +3617,25 @@ function testARealIsShownAsTheEngineHoldsIt(): void {
   );
 }
 
-/** A command carries a number as the number it is: past 64 bits, or a negative zero, it is a float. */
+/**
+ * A command carries a number as the number it is: past 2^53, or a negative zero, it is a float, and
+ * only a bigint is an int that large.
+ */
 function testACommandCarriesANumberAsItIs(): void {
   const read = new DebuggerStream().push(
-    framedCommand('m', [1e300, -0, 2 ** 63, 2 ** 53 + 2, -(2 ** 63), 2 ** 31, -(2 ** 31), 2.5, 7]),
+    framedCommand('m', [
+      1e300,
+      -0,
+      2 ** 63,
+      2 ** 53 + 2,
+      -(2 ** 63),
+      2 ** 31,
+      -(2 ** 31),
+      2.5,
+      7,
+      2n ** 53n + 3n,
+      -(2n ** 63n),
+    ]),
   );
   const [first] = read;
   assert.deepEqual(
@@ -3629,12 +3644,14 @@ function testACommandCarriesANumberAsItIs(): void {
       1e300,
       -0,
       2 ** 63,
-      { kind: 'int', values: ['9007199254740994'] },
-      { kind: 'int', values: ['-9223372036854775808'] },
+      2 ** 53 + 2,
+      -(2 ** 63),
       2 ** 31,
       -(2 ** 31),
       2.5,
       7,
+      { kind: 'int', values: ['9007199254740995'] },
+      { kind: 'int', values: ['-9223372036854775808'] },
     ],
     'each comes back as it was sent',
   );
