@@ -91360,6 +91360,7 @@ async function testADanglingLinkOutLeavesTheFollowerWorking(): Promise<void> {
       const renamed = await renameTheTop(at);
       assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
       assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'engine_messages'), undefined, 'the walk opens no folder that is gone');
     },
   );
 }

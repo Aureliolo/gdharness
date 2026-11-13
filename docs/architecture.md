@@ -1507,8 +1507,8 @@ instance.
 A reparent also drops the ids saved beside each rewritten path. They run through the old parent,
 which still exists for a recovery to find. A rename keeps every id. A scene that does not load, or
 that the editor holds unsaved changes to, is left as it was and named under `notFollowed`. A link
-that leads out of the project is named there too. No scene behind it is read, and no scene or
-animation file behind it is rewritten.
+that leads out of the project to a folder or a scene file is named there too. No scene behind a
+link out is read, and no scene or animation file behind one is rewritten.
 
 ### Node paths a move leaves behind
 
