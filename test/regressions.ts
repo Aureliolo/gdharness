@@ -93577,6 +93577,43 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
+
+  // The parts CI runs fit the time each part's run is given, by the platform's own figures, with a
+  // fifth to spare: five Windows parts by stale figures came to 830 seconds and ran one part out of
+  // its 1200. Read from the workflows, so a part count or a budget changed there is held here too.
+  const workflows = join(process.cwd(), '.github', 'workflows');
+  const budgetSaid = /GDHARNESS_REGRESSION_BUDGET_MS: '(\d+)'/.exec(
+    readFileSync(join(workflows, 'engine.yml'), 'utf8'),
+  )?.[1];
+  assert.ok(budgetSaid, 'engine.yml gives the regressions their run time');
+  const budgetSeconds = Number(budgetSaid) / 1000;
+  const ci = readFileSync(join(workflows, 'ci.yml'), 'utf8');
+  for (const [job, platform] of [
+    ['engine-linux-parts', 'linux'],
+    ['engine-windows-parts', 'win32'],
+    ['engine-macos-parts', 'darwin'],
+  ] as const) {
+    const block = ci.slice(ci.indexOf(`  ${job}:`));
+    const said = /regression-parts: '(\[[^']*\])'/.exec(block)?.[1];
+    assert.ok(said, `ci.yml names the parts of ${job}`);
+    const named: unknown = JSON.parse(said);
+    assert.ok(Array.isArray(named), said);
+    const parts = named.length;
+    assert.deepEqual(
+      named,
+      Array.from({ length: parts }, (_unused, at) => `${at + 1}/${parts}`),
+      `${job} names every part of ${parts} once`,
+    );
+    const seconds = REGRESSION_SECONDS[platform];
+    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
+    const loads = Array.from({ length: parts }, (_unused, at) =>
+      regressionPart(names, at + 1, parts, seconds).reduce((total, name) => total + weight(name), 0),
+    );
+    assert.ok(
+      Math.max(...loads) <= budgetSeconds * 0.8,
+      `${platform}'s ${parts} parts fit four fifths of ${budgetSeconds}s: ${loads.join(', ')}`,
+    );
+  }
 }
 
 /**
