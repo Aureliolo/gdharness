@@ -97255,6 +97255,294 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
   }
 }
 
+/** A value that makes an argument of the type [parameter] present, for a call refused before it is read. */
+function placeholderFor(parameter: object | undefined): unknown {
+  const choices: unknown = parameter === undefined ? undefined : Reflect.get(parameter, 'enum');
+  if (Array.isArray(choices)) {
+    return choices[0];
+  }
+  switch (parameter === undefined ? undefined : Reflect.get(parameter, 'type')) {
+    case 'object':
+      return {};
+    case 'array':
+      return [];
+    case 'integer':
+    case 'number':
+      return 0;
+    case 'boolean':
+      return true;
+    default:
+      return 'x';
+  }
+}
+
+/** What an `outside` folder holds, file by file, to compare before and after a refused write. */
+function holdingOf(folder: string): string {
+  return JSON.stringify(
+    readdirSync(folder, { recursive: true })
+      .map(String)
+      .toSorted()
+      .map((entry) => [
+        entry,
+        statSync(join(folder, entry)).isFile() ? readFileSync(join(folder, entry), 'utf8') : null,
+      ]),
+  );
+}
+
+/** Each op that writes a scene or a resource, with the arguments it needs, naming [scene] or [resource]. */
+function writingCallsBehindTheLink(scene: string, resource: string): [string, Record<string, unknown>][] {
+  const calls: [string, Record<string, unknown>][] = [];
+  for (const [tool, ops] of Object.entries(EDITOR_CALLS)) {
+    const spec = TOOL_SPECS.find((one) => one.name === tool);
+    assert.ok(spec, `${tool} is a tool`);
+    for (const [op] of Object.entries(ops).filter(([, [, effect]]) => effect === 'writes')) {
+      const given: Record<string, unknown> = { op };
+      for (const name of [...spec.requires, ...(spec.operations?.[op]?.requires ?? [])]) {
+        given[name] = valueOfARequiredArgument(name, spec.parameters[name], { scene, resource });
+      }
+      delete given['projectPath'];
+      calls.push([tool, given]);
+    }
+  }
+  return calls;
+}
+
+/** The value a call gives the required argument [name]: the file it writes, or a placeholder. */
+function valueOfARequiredArgument(
+  name: string,
+  parameter: object | undefined,
+  files: { scene: string; resource: string },
+): unknown {
+  if (name === 'scenePath') {
+    return files.scene;
+  }
+  return name === 'resourcePath' ? files.resource : placeholderFor(parameter);
+}
+
+/** A scene file that is itself a link out, and a project named through a link or in another case, are refused alike. */
+async function theSameRefusalForAFileLinkAndANamedProject(
+  call: ToolCall,
+  where: { sandbox: string; project: string; fileLink: boolean },
+): Promise<void> {
+  const { sandbox, project, fileLink } = where;
+  if (fileLink) {
+    const said = await call('scene_create', {
+      op: 'save',
+      projectPath: project,
+      scenePath: 'res://linked.tscn',
+    });
+    assert.ok(said.includes('through the link res://linked.tscn'), said);
+  }
+  const roots = [join(sandbox, 'alias')];
+  if (process.platform === 'win32') {
+    roots.push(project.toUpperCase());
+  }
+  for (const root of roots) {
+    const said = await call('scene_create', {
+      op: 'create',
+      projectPath: root,
+      scenePath: 'res://shared/s.tscn',
+    });
+    assert.ok(said.includes('through the link res://shared/'), `${root}: ${said}`);
+  }
+}
+
+/**
+ * Calls that name a file behind a link out only to read it, or a link back into the project, reach
+ * the engine, which the stand-in engine's own refusal shows.
+ */
+async function theGatePassesWhatIsOnlyRead(call: ToolCall, project: string): Promise<void> {
+  const add = { op: 'add', nodeName: 'N', nodeType: 'Node3D' };
+  const passed: [string, Record<string, unknown>][] = [
+    ['scene_create', { op: 'save_as', scenePath: 'res://shared/s.tscn', newPath: 'res://copy.tscn' }],
+    ['scene_node', { ...add, scenePath: 'res://a.tscn', instancePath: 'res://shared/s.tscn' }],
+    ['scene_node', { ...add, scenePath: 'res://link/in.tscn' }],
+    ['scene_node', { ...add, scenePath: 'res://shared/back/in.tscn' }],
+  ];
+  for (const [name, args] of passed) {
+    const said = await call(name, { projectPath: project, ...args });
+    assert.match(said, /run_editor_tool failed/, `${name} ${JSON.stringify(args)}: ${said}`);
+    assert.doesNotMatch(said, /through the link|does not take/, said);
+  }
+}
+
+/**
+ * Every op that writes a scene or a resource, and the script and import writes, are refused for a
+ * file behind a link out of the project with no editor serving it, and every file outside is left
+ * as it was. What a write only reads, and a link back into the project, pass.
+ */
+async function testAWriteBehindALinkOutIsRefused(): Promise<void> {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-write-link-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  const scene = '[gd_scene format=3]\n\n[node name="A" type="Node3D"]\n';
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'a.tscn': scene,
+    'real/in.tscn': scene,
+  });
+  writeTree(outside, {
+    's.tscn': scene,
+    'r.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+    'o.gd': 'extends Node\n',
+    'i.png': 'not a picture',
+  });
+  linkTo(outside, join(project, 'shared'));
+  linkTo(join(project, 'real'), join(project, 'link'));
+  linkTo(join(outside, 'later'), join(project, 'later'));
+  linkTo(outside, join(project, 'my shared'));
+  linkTo(join(project, 'real'), join(outside, 'back'));
+  linkTo(project, join(sandbox, 'alias'));
+  const fileLink = linkTo(join(outside, 's.tscn'), join(project, 'linked.tscn'), 'file');
+  const kept = holdingOf(outside);
+  try {
+    await withStdioServer(
+      async (call) => {
+        const refused = async (name: string, args: Record<string, unknown>, link: string): Promise<void> => {
+          const said = await call(name, { projectPath: project, ...args });
+          assert.ok(said.includes(`through the link ${link}`), `${name} ${JSON.stringify(args)}: ${said}`);
+          assert.doesNotMatch(said, /does not take/, said);
+        };
+        for (const [tool, given] of writingCallsBehindTheLink('res://shared/s.tscn', 'res://shared/r.tres')) {
+          await refused(tool, given, 'res://shared/');
+        }
+        await refused('scene_create', { op: 'create', scenePath: 'res://shared/new.tscn' }, 'res://shared/');
+        await refused('scene_create', { op: 'create', scenePath: 'res://later/new.tscn' }, 'res://later/');
+        await refused('scene_create', { op: 'save', scenePath: 'res://shared/s.tscn' }, 'res://shared/');
+        await refused(
+          'script_edit',
+          { op: 'modify', scriptPath: 'res://shared/o.gd', modifications: [] },
+          'res://shared/',
+        );
+        await refused('script_edit', { op: 'create', scriptPath: 'res://shared/new.gd' }, 'res://shared/');
+        await refused(
+          'project_import',
+          { op: 'set_options', resourcePath: 'res://shared/i.png', options: { mipmaps: true } },
+          'res://shared/',
+        );
+        await refused(
+          'scene_node',
+          {
+            op: 'save_branch',
+            scenePath: 'res://a.tscn',
+            nodePath: '.',
+            newScenePath: 'res://shared/b.tscn',
+          },
+          'res://shared/',
+        );
+        await refused(
+          'scene_create',
+          { op: 'save_as', scenePath: 'res://a.tscn', newPath: 'res://shared/copy.tscn' },
+          'res://shared/',
+        );
+        // The same file named another way: relative, through a space, a file link, and a project named
+        // through a link or in another case.
+        await refused(
+          'scene_create',
+          { op: 'create', scenePath: 'shared/../shared/s.tscn' },
+          'res://shared/',
+        );
+        await refused(
+          'scene_create',
+          { op: 'create', scenePath: 'res://my shared/s.tscn' },
+          'res://my shared/',
+        );
+        await theSameRefusalForAFileLinkAndANamedProject(call, { sandbox, project, fileLink });
+        await theGatePassesWhatIsOnlyRead(call, project);
+      },
+      { GODOT_PATH: standInEngine() },
+    );
+    assert.equal(holdingOf(outside), kept, 'nothing outside was written');
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/** An AnimationLibrary kept in a .tres of its own, holding the animation walk. */
+const WALK_LIBRARY =
+  '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_walk"]\n' +
+  'resource_name = "walk"\nlength = 1.0\n\n[resource]\n_data = {\n&"walk": SubResource("Animation_walk")\n}\n';
+
+/** A scene whose AnimationPlayer Player plays the library kept at [library]. */
+function playerOf(library: string): string {
+  return (
+    `[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="${library}" id="1_lib"]\n\n` +
+    '[node name="A" type="Node3D"]\n\n[node name="Player" type="AnimationPlayer" parent="."]\n' +
+    'libraries = {&"": ExtResource("1_lib")}\n'
+  );
+}
+
+/**
+ * A file the scene keeps beside it is not saved behind a link out, whether it is an animation
+ * library or a navigation mesh, and the scene and the file are left as they were. Behind a link
+ * into the project it is saved.
+ */
+async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void> {
+  const nav =
+    '[gd_scene format=3]\n\n[ext_resource type="NavigationMesh" path="res://shared/mesh.tres" id="1_mesh"]\n\n' +
+    '[node name="Nav" type="Node3D"]\n\n[node name="Region" type="NavigationRegion3D" parent="."]\n' +
+    'navigation_mesh = ExtResource("1_mesh")\n';
+  const mesh = '[gd_resource type="NavigationMesh" format=3]\n\n[resource]\n';
+  await withLinksOut(
+    'file beside the scene behind a link out',
+    {
+      files: {
+        'a.tscn': playerOf('res://shared/anims.tres'),
+        'b.tscn': playerOf('res://link/anims.tres'),
+        'nav.tscn': nav,
+        'real/anims.tres': WALK_LIBRARY,
+      },
+      outside: { 'anims.tres': WALK_LIBRARY, 'mesh.tres': mesh },
+    },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(real, 'link')),
+    async (at) => {
+      const addTrack = async (scenePath: string): Promise<unknown> =>
+        await at.call('scene_animation', {
+          op: 'add_track',
+          scenePath,
+          playerNodePath: 'Player',
+          animationName: 'walk',
+          track: {
+            type: 'property',
+            nodePath: '.',
+            property: 'position',
+            keyframes: [{ time: 0, value: { x: 1, y: 2, z: 3 } }],
+          },
+        });
+      const scene = at.fileOf('a.tscn');
+      const refusedTrack = await addTrack('res://a.tscn');
+      assert.equal(get(refusedTrack, 'ok'), false, JSON.stringify(refusedTrack));
+      assert.ok(
+        String(get(refusedTrack, 'error')).includes(
+          behindTheLink('res://shared/anims.tres', 'res://shared/'),
+        ),
+        JSON.stringify(refusedTrack),
+      );
+      assert.equal(readFileSync(join(at.outside, 'anims.tres'), 'utf8'), WALK_LIBRARY);
+      assert.equal(at.fileOf('a.tscn'), scene);
+
+      const navScene = at.fileOf('nav.tscn');
+      const baked = await at.call('scene_node', {
+        op: 'bake_navigation',
+        scenePath: 'res://nav.tscn',
+        nodePath: 'Region',
+      });
+      assert.equal(get(baked, 'ok'), false, JSON.stringify(baked));
+      assert.ok(
+        String(get(baked, 'error')).includes(behindTheLink('res://shared/mesh.tres', 'res://shared/')),
+        JSON.stringify(baked),
+      );
+      assert.equal(readFileSync(join(at.outside, 'mesh.tres'), 'utf8'), mesh);
+      assert.equal(at.fileOf('nav.tscn'), navScene);
+
+      const inside = await addTrack('res://b.tscn');
+      assert.equal(get(inside, 'ok'), true, JSON.stringify(inside));
+      assert.ok(at.fileOf('real/anims.tres').includes('tracks/0/path'), at.fileOf('real/anims.tres'));
+    },
+  );
+}
+
 /**
  * A breakpoint on a script behind a link out of the project is held without the script being read,
  * the answer says the line went unchecked and names the link, and the script is spelt as the engine
@@ -98011,6 +98299,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveIntoAFolderHoldingAProjectIsRefused,
   testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
   testANamedPathBehindALinkOutIsRefused,
+  testAWriteBehindALinkOutIsRefused,
+  testAFileBesideTheSceneBehindALinkOutIsNotWritten,
   testABreakpointBehindALinkOutIsSetUnchecked,
   testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,

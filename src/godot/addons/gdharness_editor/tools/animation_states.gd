@@ -206,7 +206,12 @@ func _machine_at(args: Dictionary) -> Array:
 	if opened[1] == null:
 		return [scene, null, {}, opened[2]]
 	var anim_tree: AnimationTree = opened[1]
-	var machine: Array = _machine(scene, anim_tree, str(args.get("stateMachinePath", "")))
+	var machine: Array = _machine(
+		scene,
+		anim_tree,
+		str(args.get("stateMachinePath", "")),
+		GdhSceneFile.links_out_in(args)
+	)
 	if machine[0] == null:
 		return [scene, null, {}, scene.refuse(str(machine[2]))]
 	return [scene, machine[0], machine[1], {}, anim_tree]

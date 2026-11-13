@@ -52,7 +52,9 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	var player: AnimationPlayer = opened[1]
 	var anim: Animation = player.get_animation(StringName(animation_name))
 	var homes: Array = _homes(
-		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
+		scene,
+		[[_library_of(player, animation_name), "animation library"], [anim, "animation"]],
+		GdhSceneFile.links_out_in(args)
 	)
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
@@ -659,7 +661,9 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 	var player: AnimationPlayer = found[1]
 	var anim: Animation = player.get_animation(StringName(animation_name))
 	var homes: Array = _homes(
-		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
+		scene,
+		[[_library_of(player, animation_name), "animation library"], [anim, "animation"]],
+		GdhSceneFile.links_out_in(args)
 	)
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))

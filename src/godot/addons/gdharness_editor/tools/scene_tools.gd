@@ -2142,7 +2142,7 @@ func bake_navigation(args: Dictionary) -> Dictionary:
 	var foreign: String = scene.foreign(node)
 	if not foreign.is_empty():
 		return scene.refuse(foreign)
-	return GdhNavigationBake.bake(scene, node)
+	return GdhNavigationBake.bake(scene, node, GdhSceneFile.links_out_in(args))
 
 
 func save_scene(args: Dictionary) -> Dictionary:

@@ -443,15 +443,41 @@ const TYPE_ARGUMENTS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The editor commands that follow a node into the scenes naming it, which are handed the project's
- * links out as `linksOut`. The addon cannot tell a link from a folder, and writes nothing behind one.
+ * The editor commands that follow a node into the scenes naming it, or save a file the scene keeps
+ * beside it, which are handed the project's links out as `linksOut`. The addon cannot tell a link
+ * from a folder, and writes nothing behind one.
  */
 const LINKS_OUT_COMMANDS: ReadonlySet<string> = new Set([
   'delete_node',
   'reparent_node',
   'set_node_properties',
   'save_branch',
+  'bake_navigation',
+  ...Object.values(EDITOR_CALLS['scene_animation'] ?? {})
+    .filter(([, effect]) => effect === 'writes')
+    .map(([command]) => command),
 ]);
+
+/** The arguments of a writing call that name a file it writes, apart from the ones it only reads. */
+const WRITTEN_FILE_ARGUMENTS: readonly string[] = ['scenePath', 'resourcePath', 'newPath', 'newScenePath'];
+
+/**
+ * The arguments of [param command] that name a file it writes, none for a call that [param effect]
+ * says only reads. A save to a `newPath` only reads the scene it copies, so that one is judged by
+ * `newPath` alone.
+ */
+function writtenFilesOf(
+  command: string,
+  args: OperationParams,
+  effect: 'reads' | 'writes',
+): readonly string[] {
+  if (effect === 'reads') {
+    return [];
+  }
+  return command === 'save_scene' && readNonEmptyString(args, 'newPath') !== undefined
+    ? ['newPath']
+    : WRITTEN_FILE_ARGUMENTS;
+}
 
 /**
  * How many answers pass between one update notice and the next.
@@ -7969,6 +7995,10 @@ class GodotServer {
       timeoutMs: _timeoutMs,
       ...params
     } = contained.value;
+    const behindALink = this.writtenOutThroughALink(project.value.path, contained.value, ['resourcePath']);
+    if (behindALink !== null) {
+      return behindALink;
+    }
     const given = readNonEmptyString(contained.value, 'resourcePath') ?? '';
     const resource = given.startsWith('res://') ? given : `res://${given}`;
     const sidecar = join(project.value.path, `${resource.slice('res://'.length)}.import`);
@@ -18557,6 +18587,10 @@ class GodotServer {
     if (!contained.ok) {
       return contained.response;
     }
+    const behindALink = this.writtenOutThroughALink(project.value.path, contained.value, ['scriptPath']);
+    if (behindALink !== null) {
+      return behindALink;
+    }
     const { op: _op, projectPath: _projectPath, ...params } = contained.value;
     const created = await this.operation('create_script', params, project.value.path);
     const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
@@ -18658,6 +18692,16 @@ class GodotServer {
    */
   private async handleModifyScript(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
+    if (project.ok) {
+      const contained = this.containProjectFiles(args);
+      if (!contained.ok) {
+        return contained.response;
+      }
+      const behindALink = this.writtenOutThroughALink(project.value.path, contained.value, ['scriptPath']);
+      if (behindALink !== null) {
+        return behindALink;
+      }
+    }
     const written = await this.headless('modify_script', args);
     const scriptPath = readNonEmptyString(args, 'scriptPath');
     if (
@@ -19008,6 +19052,9 @@ class GodotServer {
    * An editor of the project that is running and has not reached this server holds its own copy of
    * any scene it has open, and a save there would put back what the engine wrote, so a write is
    * refused until that editor connects.
+   *
+   * A write to a file that leads out of the project through a link is refused before either is
+   * asked, since the call describes what is written.
    */
   private async editorOrEngine(
     command: string,
@@ -19024,6 +19071,14 @@ class GodotServer {
       return project.response;
     }
     const projectPath = project.value.path;
+    const behindALink = this.writtenOutThroughALink(
+      projectPath,
+      contained.value,
+      writtenFilesOf(command, contained.value, effect),
+    );
+    if (behindALink !== null) {
+      return behindALink;
+    }
     const asked: OperationParams = LINKS_OUT_COMMANDS.has(command)
       ? { ...contained.value, linksOut: linksOut(projectPath) }
       : contained.value;
@@ -19052,6 +19107,29 @@ class GodotServer {
         ? resolveWithinProject(projectPath, written, { forTheEngine: true })
         : null;
     return target?.ok === true ? await inTurnFor(projectPath, target.absolutePath, run) : await run();
+  }
+
+  /**
+   * The refusal of a write to a file that leads out of the project through a link, or null. Each of
+   * [param names] that [param args] gives is judged by where its file really is, and the first
+   * refused is answered. A file that is not there yet is judged by the folder it would land in.
+   */
+  private writtenOutThroughALink(
+    projectPath: string,
+    args: OperationParams,
+    names: readonly string[],
+  ): ToolResponse | null {
+    for (const name of names) {
+      const given = readNonEmptyString(args, name);
+      if (given === undefined) {
+        continue;
+      }
+      const location = resolveWithinProject(projectPath, given);
+      if (!location.ok && location.link !== undefined) {
+        return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
+      }
+    }
+    return null;
   }
 
   /** An editor tool asked of the editor serving the project, with the note a class missing from the cache calls for. */
@@ -19088,6 +19166,14 @@ class GodotServer {
     const command = EDITOR_ANSWERS['scene_create']?.['save'];
     if (command === undefined) {
       throw new Error('scene_create save has no editor command');
+    }
+    const behindALink = this.writtenOutThroughALink(
+      project.value.path,
+      contained.value,
+      writtenFilesOf(command, contained.value, 'writes'),
+    );
+    if (behindALink !== null) {
+      return behindALink;
     }
     if (!this.godotBridge.isConnected()) {
       const refused = await this.noEditorYet(contained.value, [
