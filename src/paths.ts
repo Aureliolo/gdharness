@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
@@ -50,6 +50,8 @@ type Containment =
       readonly reason: string;
       /** The `res://` link the path leaves the project through, where that is why it is refused. */
       readonly link?: string;
+      /** Whether anything is there through that link, which a link whose target is gone lacks. */
+      readonly reached?: boolean;
     };
 
 /**
@@ -429,6 +431,7 @@ export function resolveWithinProject(
       ok: false,
       reason: `Path '${trimmed}' leads out of the project through the link ${link}, and only what is inside the project is taken here.`,
       link,
+      reached: existsSync(absolutePath),
     };
   }
 

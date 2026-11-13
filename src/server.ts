@@ -808,9 +808,12 @@ function keptGameRequest(tool: string, op: string, args: OperationParams): Debug
 const OWN_DEBUGGER =
   ' Its debugger is the keeper holding it rather than the editor, so the debug_* tools answer for it all the same: breakpoints stop it, and debug_control pause breaks into it wherever it is, which the editor offers no way to do.';
 
-/** The gate's refusal of a path, with what to do instead added where the path leads out through a link. */
-function withRemedyBehindALink(refused: { reason: string; link?: string }, remedy: string): string {
-  return refused.link === undefined ? refused.reason : `${refused.reason} ${remedy}`;
+/**
+ * The gate's refusal of a path, with what to do instead added where the path leads out through a
+ * link to something that is there.
+ */
+function withRemedyBehindALink(refused: { reason: string; reached?: boolean }, remedy: string): string {
+  return refused.reached === true ? `${refused.reason} ${remedy}` : refused.reason;
 }
 
 /**

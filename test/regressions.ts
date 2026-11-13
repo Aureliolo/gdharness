@@ -97096,6 +97096,30 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
           fromBehind[1]?.includes('Rename it in the project that holds the script.'),
           String(fromBehind[1]),
         );
+        // Nothing is there through a link whose target is gone, so no remedy points at it.
+        const fromGone = [
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://later/x.gd',
+            newPath: 'res://moved.gd',
+          }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://later/x.gd',
+            symbol: 'X',
+            newName: 'Y',
+          }),
+        ];
+        for (const said of fromGone) {
+          assert.ok(
+            said.endsWith(
+              "Path 'res://later/x.gd' leads out of the project through the link res://later/, and only what is inside the project is taken here.",
+            ),
+            said,
+          );
+        }
         const breakpoint = await call('debug_breakpoint', {
           op: 'set',
           projectPath: project,
