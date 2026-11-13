@@ -169,8 +169,7 @@ export function keepPipelineCache(
   const left = join(user, where);
   try {
     const bytes = bytesIn(left);
-    const record = keptRecord(kept);
-    if (bytes === 0 || (record?.engine === engine && bytes <= record.bytes)) {
+    if (bytes === 0 || keptHolds(kept, engine, bytes)) {
       return;
     }
     // Built beside the kept one and swapped in whole, so a run seeding from it meanwhile copies
@@ -180,15 +179,72 @@ export function keepPipelineCache(
     cpSync(left, join(building, NAME), { recursive: true });
     const made: Kept = { project: resolve(projectPath), engine, where: where.split(sep).join('/'), bytes };
     writeFileSync(join(building, RECORD), JSON.stringify(made));
-    rmSync(kept, { recursive: true, force: true });
-    try {
-      renameSync(building, kept);
-    } catch {
+    // The copy takes a while and runs go side by side, so the kept one is read again under the lock
+    // the swap holds: a smaller cache that finished last would otherwise replace a larger one.
+    const swapped = underLock(`${kept}.lock`, () => {
+      if (keptHolds(kept, engine, bytes)) {
+        return false;
+      }
+      rmSync(kept, { recursive: true, force: true });
+      try {
+        renameSync(building, kept);
+      } catch {
+        return false;
+      }
+      return true;
+    });
+    if (swapped !== true) {
       rmSync(building, { recursive: true, force: true });
     }
     forgetGoneProjects(home);
   } catch {
     // Not kept, so the next run builds its pipelines again.
+  }
+}
+
+/** Whether the cache kept in [param kept] is from [param engine] and holds at least [param bytes]. */
+function keptHolds(kept: string, engine: string, bytes: number): boolean {
+  const record = keptRecord(kept);
+  return record?.engine === engine && bytes <= record.bytes;
+}
+
+/** How long a keep waits for another's swap, which takes milliseconds, before leaving its copy unkept. */
+const LOCK_WAIT_MS = 10_000;
+
+/** A lock older than this was left by a keep that died inside its swap. */
+const LOCK_ABANDONED_MS = 30_000;
+
+/**
+ * Runs [param swap] holding the lock file [param lock], and answers what it did, or null when the
+ * lock could not be had in time. The wait blocks, since a keep runs after its engine has ended.
+ */
+function underLock<T>(lock: string, swap: () => T): T | null {
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      writeFileSync(lock, String(process.pid), { flag: 'wx' });
+      break;
+    } catch {
+      if (Date.now() > deadline) {
+        return null;
+      }
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_ABANDONED_MS) {
+          rmSync(lock, { force: true });
+          continue;
+        }
+      } catch {
+        // Given back since it was found, which the next try takes.
+        continue;
+      }
+      Atomics.wait(pause, 0, 0, 10);
+    }
+  }
+  try {
+    return swap();
+  } finally {
+    rmSync(lock, { force: true });
   }
 }
 

@@ -40,9 +40,35 @@ export function writeLockOf(projectPath: string, file: string): string {
  * server's or another's, and holds the turn until it ends however it ends. A lock whose holder has
  * gone is taken over under its steal file, as an engine slot's is, so a lock another waiter has just
  * made in its place is never removed.
+ *
+ * Writes from this server to one file run in the order they asked, since a client sends a later
+ * call while an earlier one is still queued and the file must end as the later call left it. Across
+ * servers the lock is polled, so whichever looks first after the turn is given back takes it.
  */
 export async function inTurnFor<T>(projectPath: string, file: string, write: () => Promise<T>): Promise<T> {
   const lock = writeLockOf(projectPath, file);
+  const before = queueTails.get(lock) ?? Promise.resolve();
+  let release = (): void => undefined;
+  const mine = new Promise<void>((done) => {
+    release = done;
+  });
+  const tail = before.then(() => mine);
+  queueTails.set(lock, tail);
+  await before;
+  try {
+    return await takeTurn(projectPath, file, lock, write);
+  } finally {
+    release();
+    if (queueTails.get(lock) === tail) {
+      queueTails.delete(lock);
+    }
+  }
+}
+
+/** The last write this server has queued for each lock, which the next one waits behind. */
+const queueTails = new Map<string, Promise<void>>();
+
+async function takeTurn<T>(projectPath: string, file: string, lock: string, write: () => Promise<T>): Promise<T> {
   mkdirSync(join(projectPath, '.godot', WRITES_FOLDER), { recursive: true });
   const holder = JSON.stringify({ pid: process.pid, started: await ownStart(), file });
   const starts = new Map<number, number | undefined>();

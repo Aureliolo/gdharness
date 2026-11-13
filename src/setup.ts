@@ -15,6 +15,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   rmSync,
   statSync,
@@ -321,27 +322,64 @@ function somethingAt(path: string): boolean {
   }
 }
 
-/** Each addon copied whole into the project's addons/, over whatever was there. */
+/** Where an install keeps the addons it replaces until it has finished, a folder Godot does not scan. */
+const PREVIOUS_FOLDER = '.gdharness-previous';
+
+/**
+ * Each addon copied whole into the project's addons/, over whatever was there. An install that
+ * fails leaves the project as it found it: an editor addon with its markers beside a runtime addon
+ * that never arrived is called current by one reader and refused by another.
+ */
 export function installAddons(
   projectPath: string,
   from: string = shippedAddonsDirectory(),
 ): InstalledAddon[] {
-  const installed: InstalledAddon[] = [];
   for (const name of ADDONS) {
     const source = join(from, name);
     if (!existsSync(join(source, addonMarking(name)))) {
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
-    const target = join(projectPath, 'addons', name);
-    const replaced = somethingAt(target);
-    rmSync(target, { recursive: true, force: true });
-    mkdirSync(dirname(target), { recursive: true });
-    cpSync(source, target, { recursive: true });
-    writeFileSync(join(target, VERSION_MARKER), `${SERVER_VERSION}\n`);
-    installed.push({ name, path: target, replaced });
   }
-  writeFileSync(join(projectPath, 'addons', ADDONS[0], DIGEST_MARKER), `${editorAddonDigest(from)}\n`);
-  writeFileSync(join(projectPath, 'addons', RUNTIME_ADDON, DIGEST_MARKER), `${runtimeAddonDigest(from)}\n`);
+  const addons = join(projectPath, 'addons');
+  const addonsExisted = somethingAt(addons);
+  const previous = join(addons, PREVIOUS_FOLDER);
+  rmSync(previous, { recursive: true, force: true });
+  const installed: InstalledAddon[] = [];
+  // The addons whose folder this install has taken over, which a failure puts back.
+  const taken: { readonly name: string; readonly kept: boolean }[] = [];
+  try {
+    for (const name of ADDONS) {
+      const target = join(addons, name);
+      const replaced = somethingAt(target);
+      if (replaced) {
+        mkdirSync(previous, { recursive: true });
+        renameSync(target, join(previous, name));
+      }
+      taken.push({ name, kept: replaced });
+      mkdirSync(addons, { recursive: true });
+      cpSync(join(from, name), target, { recursive: true });
+      installed.push({ name, path: target, replaced });
+    }
+    writeFileSync(join(addons, ADDONS[0], DIGEST_MARKER), `${editorAddonDigest(from)}\n`);
+    writeFileSync(join(addons, RUNTIME_ADDON, DIGEST_MARKER), `${runtimeAddonDigest(from)}\n`);
+    for (const name of ADDONS) {
+      writeFileSync(join(addons, name, VERSION_MARKER), `${SERVER_VERSION}\n`);
+    }
+  } catch (error) {
+    for (const { name, kept } of taken) {
+      rmSync(join(addons, name), { recursive: true, force: true });
+      if (kept) {
+        renameSync(join(previous, name), join(addons, name));
+      }
+    }
+    rmSync(previous, { recursive: true, force: true });
+    if (!addonsExisted && existsSync(addons) && readdirSync(addons).length === 0) {
+      rmdirSync(addons);
+    }
+    throw error;
+  } finally {
+    rmSync(previous, { recursive: true, force: true });
+  }
   return installed;
 }
 

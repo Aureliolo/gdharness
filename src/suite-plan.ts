@@ -887,12 +887,17 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
   ];
 }
 
-/** Slowest first, a tie in cost going to the suite first by path, then by case and row. */
+/** Orders two strings by code unit, as every other by-path order here does and whatever the locale. */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Slowest first, a tie in cost going to the suite first by path, then by case and row, all by code unit. */
 function slowestFirst(a: Unit, b: Unit): number {
   return (
     b.cost - a.cost ||
-    a.suite.localeCompare(b.suite) ||
-    (a.cases[0] ?? '').localeCompare(b.cases[0] ?? '') ||
+    byCodeUnit(a.suite, b.suite) ||
+    byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? '') ||
     (a.row?.index ?? 0) - (b.row?.index ?? 0)
   );
 }

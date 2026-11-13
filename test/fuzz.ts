@@ -16,16 +16,35 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
-import { GameLog } from '../src/game-log.js';
+import { answersTo, GameLog, type Severity } from '../src/game-log.js';
+import {
+  type DebuggerMessage,
+  DebuggerStream,
+  decodeVariant,
+  framedCommand,
+  type SentValue,
+} from '../src/godot-variant.js';
+import { VERSION_MARKER } from '../src/project-walk.js';
+import { SERVER_VERSION } from '../src/server-version.js';
+import { discardUsing } from '../src/scratch.js';
+import {
+  ADDONS,
+  installAddons,
+  installedEditorDigest,
+  installedRuntimeDigest,
+} from '../src/setup.js';
+import { inTurnFor } from '../src/write-turns.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
@@ -42,8 +61,10 @@ import {
 import {
   type CasesBySuite,
   type DeclaredSuite,
+  dealt,
   peakOf,
   type SuiteTimes,
+  type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
@@ -1480,6 +1501,599 @@ function theWalkGivesOnlyWhatItHolds(): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Writes to one file, taken in turn
+// ---------------------------------------------------------------------------------------------
+
+interface Writer {
+  readonly file: 0 | 1;
+  readonly holdMs: number;
+  readonly fails: boolean;
+}
+
+/**
+ * Writers to a path, asked in any order and to either of two files, run one at a time per file and
+ * in the order they asked. A writer that throws gives its turn back, so the ones behind it still run.
+ */
+async function writersTakeTurnsInTheOrderTheyAsked(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(
+        fc.record({
+          file: fc.constantFrom<0 | 1>(0, 1),
+          holdMs: fc.integer({ min: 0, max: 3 }),
+          fails: fc.boolean(),
+        }),
+        { minLength: 1, maxLength: 7 },
+      ),
+      async (writers: readonly Writer[]) => {
+        const project = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-turns-'));
+        try {
+          const files = [join(project, 'a.tscn'), join(project, 'b.tscn')];
+          const events: string[] = [];
+          const asked = writers.map((writer, index) =>
+            inTurnFor(project, files[writer.file] ?? '', async () => {
+              events.push(`start ${String(index)}`);
+              await new Promise((resolve) => setTimeout(resolve, writer.holdMs));
+              events.push(`end ${String(index)}`);
+              if (writer.fails) {
+                throw new Error(`writer ${String(index)} failed`);
+              }
+              return index;
+            }).then(
+              (value) => ({ value }),
+              (error: unknown) => ({ error }),
+            ),
+          );
+          const answers = await Promise.all(asked);
+          for (const file of [0, 1] as const) {
+            const mine = writers.flatMap((writer, index) => (writer.file === file ? [index] : []));
+            const seen = events.filter((event) => mine.includes(Number(event.split(' ')[1])));
+            assert.deepEqual(
+              seen,
+              mine.flatMap((index) => [`start ${String(index)}`, `end ${String(index)}`]),
+              `writers to file ${String(file)} ran one at a time, in the order asked`,
+            );
+          }
+          for (const [index, answer] of answers.entries()) {
+            assert.ok(writers[index]?.fails === true ? 'error' in answer : 'value' in answer, 'each outcome is its own');
+          }
+          assert.deepEqual(readdirSync(join(project, '.godot', 'gdharness-writes')), [], 'every lock was given back');
+        } finally {
+          sweep(project);
+        }
+      },
+    ),
+    { numRuns: 30 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The order a plan deals in
+// ---------------------------------------------------------------------------------------------
+
+const PLAN_SUITES = [
+  'res://a_test.gd',
+  'res://a-b_test.gd',
+  'res://a_b_test.gd',
+  'res://ab_test.gd',
+  'res://B_test.gd',
+  'res://z_test.gd',
+  'res://Z_test.gd',
+  'res://ä_test.gd',
+  'res://a/x_test.gd',
+];
+
+const planUnits = fc.uniqueArray(
+  fc.record({
+    suite: fc.constantFrom(...PLAN_SUITES),
+    func: fc.constantFrom('test_a', 'test_b', 'test_c'),
+    cost: fc.constantFrom(1, 2, 2, 5),
+  }),
+  { selector: (unit) => `${unit.suite}:${unit.func}`, maxLength: 12 },
+);
+
+function asUnit(unit: { suite: string; func: string; cost: number }): Unit {
+  return {
+    suite: unit.suite,
+    cases: [unit.func],
+    cost: unit.cost,
+    timed: true,
+    windowed: false,
+    accessible: false,
+    headless: false,
+  };
+}
+
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Units are dealt slowest first, ties by path then case, all by code unit, so the plan is a function
+ * of the units alone: not of the order they were listed in, nor of the machine's locale.
+ */
+function aPlanDependsOnItsUnitsAlone(): void {
+  fc.assert(
+    fc.property(planUnits, fc.array(fc.nat(), { maxLength: 12 }), fc.integer({ min: 1, max: 4 }), (drawn, keys, most) => {
+      const units = drawn.map(asUnit);
+      const declared: CasesBySuite = new Map(PLAN_SUITES.map((path) => [path, ['test_a', 'test_b', 'test_c']]));
+      const shuffled = units
+        .map((unit, index) => ({ unit, key: keys[index] ?? 0, index }))
+        .toSorted((a, b) => a.key - b.key || a.index - b.index)
+        .map((entry) => entry.unit);
+      assert.deepEqual(dealt(shuffled, declared, most), dealt(units, declared, most));
+
+      const one = dealt(units, declared, 1);
+      const expected = units
+        .toSorted(
+          (a, b) =>
+            b.cost - a.cost || byCodeUnit(a.suite, b.suite) || byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
+        )
+        .map((unit) => unit.suite);
+      assert.deepEqual(
+        one.flatMap((plan) => plan.suites.map((suite) => suite.path)),
+        [...new Set(expected)],
+        'in one engine the suites come in the order of their slowest unit, ties by code unit',
+      );
+      assert.equal(
+        one.reduce((sum, plan) => sum + plan.suites.reduce((count, suite) => count + suite.cases.length, 0), 0),
+        units.length,
+        'every unit is dealt once',
+      );
+    }),
+    { numRuns: 300 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The kept pipeline cache
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Runs that finish together each keep the cache they left, and the larger one stays whichever
+ * process swaps last.
+ */
+async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
+  const child = resolve(import.meta.dir, 'support', 'keep-cache.ts');
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(fc.integer({ min: 1, max: 80 }), { minLength: 2, maxLength: 4 }),
+      async (counts) => {
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-keep-'));
+        try {
+          const home = join(root, 'home');
+          const project = join(root, 'project');
+          mkdirSync(project);
+          const start = join(root, 'start');
+          const exits = counts.map((files, index) => {
+            const folder = join(root, `user-${String(index)}`, 'Godot', 'app_userdata', 'game', 'shader_cache');
+            mkdirSync(folder, { recursive: true });
+            for (let file = 0; file < files; file += 1) {
+              writeFileSync(join(folder, `${String(file)}.bin`), 'x'.repeat(100));
+            }
+            const run = spawn(
+              process.execPath,
+              [child, join(root, `user-${String(index)}`), project, process.execPath, home, start],
+              { stdio: 'ignore' },
+            );
+            return new Promise<number | null>((done) => run.once('exit', done));
+          });
+          writeFileSync(start, '');
+          assert.deepEqual(await Promise.all(exits), counts.map(() => 0));
+          const kept = readdirSync(join(home, 'pipeline-caches'));
+          assert.deepEqual(kept.length, 1, `one kept cache and nothing left building or locked: ${kept.join(' ')}`);
+          const folder = join(home, 'pipeline-caches', kept[0] ?? '');
+          const record: unknown = JSON.parse(readFileSync(join(folder, 'kept.json'), 'utf8'));
+          assert.equal((record as { bytes: number }).bytes, Math.max(...counts) * 100);
+          assert.equal(readdirSync(join(folder, 'shader_cache')).length, Math.max(...counts));
+        } finally {
+          sweep(root);
+        }
+      },
+    ),
+    { numRuns: 8 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Installing the addons
+// ---------------------------------------------------------------------------------------------
+
+type InstallFailure =
+  | { readonly at: 'none' }
+  | { readonly at: 'missing' | 'version'; readonly addon: number }
+  | { readonly at: 'digest'; readonly addon: 0 | 1 };
+
+const MARKINGS = ['plugin.cfg', 'runtime_autoload.gd', 'plugin.cfg', 'share.gd'];
+
+/** A package of the four addons, each with its marking file and one more, holding [param body]. */
+function fakePackage(root: string, body: string, failure: InstallFailure): string {
+  const from = join(root, `package-${body}-${failure.at}`);
+  for (const [index, name] of ADDONS.entries()) {
+    if (failure.at === 'missing' && failure.addon === index) {
+      continue;
+    }
+    mkdirSync(join(from, name, 'inner'), { recursive: true });
+    writeFileSync(join(from, name, MARKINGS[index] ?? ''), `${name} ${body}`);
+    writeFileSync(join(from, name, 'inner', 'file.gd'), `${body} ${name}`);
+    if (failure.at === 'version' && failure.addon === index) {
+      mkdirSync(join(from, name, VERSION_MARKER));
+    }
+  }
+  if (failure.at === 'digest') {
+    mkdirSync(join(from, failure.addon === 0 ? ADDONS[0] : 'gdharness_runtime', '.gdharness-digest'));
+  }
+  return from;
+}
+
+/** Every folder and file under [param folder], with its content, so two trees can be compared. */
+function treeOf(folder: string): string[] {
+  if (!existsSync(folder)) {
+    return ['(absent)'];
+  }
+  return readdirSync(folder, { recursive: true, withFileTypes: true })
+    .map((entry) => {
+      const path = join(entry.parentPath, entry.name);
+      return entry.isDirectory() ? `d ${relative(folder, path)}` : `f ${relative(folder, path)} ${readFileSync(path, 'utf8')}`;
+    })
+    .toSorted();
+}
+
+/**
+ * An install either puts all four addons in with their markers, or leaves the project's addons as
+ * it found them, whichever step fails: a missing addon, a version marker or a digest marker that
+ * cannot be written. A half install is read as current by one reader and refused by another.
+ */
+function aFailedInstallLeavesTheProjectAsItWas(): void {
+  const failures = fc.oneof(
+    fc.constant<InstallFailure>({ at: 'none' }),
+    fc.record({ at: fc.constantFrom('missing' as const, 'version' as const), addon: fc.integer({ min: 0, max: 3 }) }),
+    fc.record({ at: fc.constant('digest' as const), addon: fc.constantFrom<0 | 1>(0, 1) }),
+  );
+  fc.assert(
+    fc.property(fc.boolean(), fc.boolean(), failures, (earlier, hadAddonsFolder, failure) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-install-'));
+      try {
+        const project = join(root, 'project');
+        mkdirSync(project);
+        if (hadAddonsFolder) {
+          mkdirSync(join(project, 'addons', 'other'), { recursive: true });
+        }
+        if (earlier) {
+          installAddons(project, fakePackage(root, 'old', { at: 'none' }));
+        }
+        const before = treeOf(join(project, 'addons'));
+        const from = fakePackage(root, 'new', failure);
+        if (failure.at === 'none') {
+          const installed = installAddons(project, from);
+          assert.deepEqual(
+            installed.map((addon) => [addon.name, addon.replaced]),
+            ADDONS.map((name) => [name, earlier]),
+          );
+          for (const name of ADDONS) {
+            assert.equal(readFileSync(join(project, 'addons', name, VERSION_MARKER), 'utf8').trim(), SERVER_VERSION);
+          }
+          assert.notEqual(installedEditorDigest(project), null);
+          assert.notEqual(installedRuntimeDigest(project), null);
+        } else {
+          assert.throws(() => installAddons(project, from));
+          assert.deepEqual(treeOf(join(project, 'addons')), before, 'the addons are as the failed install found them');
+        }
+        assert.equal(existsSync(join(project, 'addons', '.gdharness-previous')), false);
+      } finally {
+        sweep(root);
+      }
+    }),
+    { numRuns: 60 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Giving back a scratch folder
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The tries a removal gets, by the clock: the first at once, then after each wait of the schedule,
+ * a second call for a path already waiting adding a try of its own and no second schedule, and none
+ * after one has worked.
+ */
+function theRetryScheduleHoldsWhateverFails(): void {
+  const waits = [250, 500, 1000, 2000, 4000, 8000, 16000];
+  const triesBy = (failures: number, calls: readonly number[], until: number): number => {
+    let tries = 0;
+    let left = failures;
+    let waiting = false;
+    let due = 0;
+    let step = 0;
+    const attempt = (): boolean => {
+      tries += 1;
+      if (left > 0) {
+        left -= 1;
+        return false;
+      }
+      return true;
+    };
+    let next = 0;
+    for (;;) {
+      const call = calls[next] ?? Number.POSITIVE_INFINITY;
+      const timer = waiting ? due : Number.POSITIVE_INFINITY;
+      const at = Math.min(call, timer);
+      if (at > until) {
+        return tries;
+      }
+      if (timer < call) {
+        if (attempt()) {
+          waiting = false;
+        } else {
+          step += 1;
+          const after = waits[step];
+          if (after === undefined) {
+            waiting = false;
+          } else {
+            due += after;
+          }
+        }
+      } else {
+        next += 1;
+        if (!attempt() && !waiting) {
+          waiting = true;
+          step = 0;
+          due = at + (waits[0] ?? 0);
+        }
+      }
+    }
+  };
+  return fc.assert(
+    fc.property(
+      fc.integer({ min: 0, max: 10 }),
+      fc.uniqueArray(fc.integer({ min: 0, max: 20000 }), { maxLength: 4 }),
+      fc.uniqueArray(fc.integer({ min: 0, max: 80000 }), { maxLength: 6 }),
+      (failures, firstCalls, probes) => {
+        const calls = [0, ...firstCalls.map((at) => at * 2 + 1)].toSorted((a, b) => a - b);
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-scratch-'));
+        const path = join(root, 'held');
+        mkdirSync(path);
+        let tries = 0;
+        let left = failures;
+        const remove = (target: string): void => {
+          tries += 1;
+          if (left > 0) {
+            left -= 1;
+            throw new Error('busy');
+          }
+          rmSync(target, { recursive: true, force: true });
+        };
+        jest.useFakeTimers();
+        try {
+          const points = [...new Set([...calls, ...probes.map((at) => at * 2 + 1), 100_000])].toSorted((a, b) => a - b);
+          let clock = 0;
+          for (const point of points) {
+            jest.advanceTimersByTime(point - clock);
+            clock = point;
+            if (calls.includes(point)) {
+              discardUsing(remove, [path]);
+            }
+            assert.equal(tries, triesBy(failures, calls, point), `tries by ${String(point)} ms`);
+          }
+        } finally {
+          jest.useRealTimers();
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    ),
+    { numRuns: 100 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The game log, read as it is written
+// ---------------------------------------------------------------------------------------------
+
+type LogStep =
+  | { readonly kind: 'write'; readonly source: 'stdout' | 'stderr' | 'transcript'; readonly cut: number }
+  | { readonly kind: 'record'; readonly severity: Severity; readonly text: string }
+  | { readonly kind: 'read'; readonly mode: 'since' | 'all' | 'contains'; readonly limit: number };
+
+/** The log text of three streams, each with its own line ending and a tail that may lack one. */
+const streamText = fc
+  .tuple(
+    fc.array(logLine, { maxLength: 14 }),
+    fc.constantFrom('\n', '\r\n'),
+    fc.constantFrom('', 'ERROR: tail', 'WARNING: tail\r', 'plain tail', '\r', '   at: tail'),
+  )
+  .map(([lines, ending, tail]) => ({ ending, text: `${lines.map((line) => `${line}${ending}`).join('')}${tail}` }));
+
+/**
+ * Three streams interleaved and cut anywhere, a text that ends with no line ending or between CR
+ * and LF included, each stream reads as if it had arrived whole, and every non-blank line is in one
+ * entry. Reads between the writes show each entry once, and the three marks never move for a search.
+ */
+function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
+  const streams = ['stdout', 'stderr', 'transcript'] as const;
+  const steps = fc.array(
+    fc.oneof(
+      fc.record({ kind: fc.constant('write' as const), source: fc.constantFrom(...streams), cut: fc.nat({ max: 60 }) }),
+      fc.record({
+        kind: fc.constant('record' as const),
+        severity: fc.constantFrom<Severity>('error', 'warning', 'info'),
+        text: fc.constantFrom('stopped at a breakpoint', 'Invalid call', ''),
+      }),
+      fc.record({
+        kind: fc.constant('read' as const),
+        mode: fc.constantFrom('since' as const, 'all' as const, 'contains' as const),
+        limit: fc.constantFrom(1, 3, Number.POSITIVE_INFINITY),
+      }),
+    ),
+    { maxLength: 30 },
+  );
+  fc.assert(
+    fc.property(
+      fc.tuple(streamText, streamText, streamText),
+      steps,
+      fc.constantFrom<Severity>('error', 'warning', 'info'),
+      (texts, program: LogStep[], floor) => {
+        const log = new GameLog();
+        const left = texts.map((entry) => Buffer.from(entry.text, 'utf8'));
+        const marked = { at: 0 };
+        const admitted = (entry: { severity: Severity }): boolean =>
+          floor === 'info' || entry.severity === 'error' || (floor === 'warning' && entry.severity === 'warning');
+        for (const step of program) {
+          if (step.kind === 'write') {
+            const index = streams.indexOf(step.source);
+            const bytes = left[index] ?? Buffer.alloc(0);
+            const take = Math.min(bytes.length, step.cut);
+            log.append(step.source, bytes.subarray(0, take));
+            left[index] = bytes.subarray(take);
+          } else if (step.kind === 'record') {
+            log.record(step.severity, step.text);
+          } else if (step.mode === 'contains') {
+            const found = log.select({ severity: floor, sinceLastCall: false, contains: 'error', limit: step.limit });
+            const matching = log.all.filter((entry) => answersTo(entry, floor, 'error'));
+            assert.deepEqual(found.entries, matching.slice(Math.max(0, matching.length - step.limit)));
+          } else {
+            const since = step.mode === 'since';
+            const found = log.select({ severity: floor, sinceLastCall: since, limit: step.limit });
+            const matching = log.all.slice(since ? marked.at : 0).filter(admitted);
+            const omitted = Math.max(0, matching.length - step.limit);
+            assert.deepEqual(found, { entries: matching.slice(omitted), omitted });
+            marked.at = log.all.length;
+          }
+        }
+        for (const [index, bytes] of left.entries()) {
+          log.append(streams[index] ?? 'stdout', bytes);
+        }
+        log.finish();
+
+        const whole = new GameLog();
+        for (const [index, entry] of texts.entries()) {
+          whole.append(streams[index] ?? 'stdout', entry.text);
+        }
+        whole.finish();
+        // An entry from another stream between a headline's unindented lines and its `at:` line keeps
+        // those lines out of its detail, so the lines of a stream are compared by content.
+        for (const source of streams) {
+          const linesOf = (entries: readonly { source: string; text: string; detail: readonly string[] }[]): string[] =>
+            entries
+              .filter((entry) => entry.source === source)
+              .flatMap((entry) => [entry.text, ...entry.detail])
+              .toSorted();
+          assert.deepEqual(linesOf(log.all), linesOf(whole.all), `${source} holds the same lines as if it had arrived whole`);
+        }
+        const said = texts.reduce(
+          (sum, entry) =>
+            sum + entry.text.split('\n').filter((line) => line.replace(/\r$/, '').trim() !== '').length,
+          0,
+        );
+        const kept = whole.all.reduce((sum, entry) => sum + 1 + entry.detail.length, 0);
+        assert.equal(kept, said, 'every non-blank line is in exactly one entry, the unfinished last one too');
+      },
+    ),
+    { numRuns: 200 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The debugger stream
+// ---------------------------------------------------------------------------------------------
+
+const sentValue: fc.Arbitrary<SentValue> = fc.letrec<{ value: SentValue }>((tie) => ({
+  value: fc.oneof(
+    { depthSize: 'small', maxDepth: 3 },
+    fc.constant(null),
+    fc.boolean(),
+    fc.integer({ min: Number.MIN_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER }),
+    // A whole number past what a double holds exactly goes out as a 64-bit int, which reads back digit by digit.
+    fc.double().filter((value) => !(Number.isInteger(value) && !Number.isSafeInteger(value) && Math.abs(value) < 2 ** 63)),
+    fc.string({ unit: 'grapheme', maxLength: 12 }),
+    fc.array(tie('value'), { maxLength: 4 }),
+  ),
+})).value;
+
+const sentCommand = fc.record({
+  message: fc.string({ unit: 'grapheme-ascii', minLength: 1, maxLength: 12 }),
+  thread: fc.integer({ min: 0, max: 2 ** 31 - 1 }),
+  data: fc.array(sentValue, { maxLength: 4 }),
+});
+
+/** Every message a stream gives for [param pieces], and whether it was out of step after them. */
+function streamed(pieces: readonly Uint8Array[]): { messages: DebuggerMessage[]; lost: boolean } {
+  const stream = new DebuggerStream();
+  const messages: DebuggerMessage[] = [];
+  let lost = false;
+  try {
+    for (const piece of pieces) {
+      messages.push(...stream.push(piece));
+    }
+    stream.push(new Uint8Array(0));
+  } catch (error) {
+    assert.ok(error instanceof RangeError);
+    lost = true;
+  }
+  return { messages, lost };
+}
+
+/**
+ * Commands of any values, joined and cut anywhere down to single bytes, come out as the commands
+ * that went in. Arbitrary bytes, with lengths at the engine's limit, are read the same whole or in
+ * pieces, and fail only with a RangeError.
+ */
+function theDebuggerStreamIsCutProof(): void {
+  fc.assert(
+    fc.property(fc.array(sentCommand, { maxLength: 4 }), cuts, fc.boolean(), (commands, points, bytewise) => {
+      const all = Buffer.concat(commands.map((c) => framedCommand(c.message, c.data, c.thread)));
+      const pieces = bytewise ? chunked(all, Array.from({ length: all.length }, (_, at) => at)) : chunked(all, points);
+      const { messages, lost } = streamed(pieces);
+      assert.equal(lost, false);
+      assert.deepEqual(
+        messages,
+        commands.map((c) => ({ message: c.message, thread: c.thread, data: c.data })),
+      );
+    }),
+    { numRuns: 150 },
+  );
+  const length = fc.constantFrom(0, 1, 3, 4, 7, 12, (8 << 20) + 4, (8 << 20) + 5, 0xff_ff_ff_ff);
+  const garbage = fc.array(
+    fc.oneof(
+      fc.tuple(length, fc.uint8Array({ maxLength: 24 })).map(([n, body]) => {
+        const header = Buffer.alloc(4);
+        header.writeUInt32LE(n);
+        return Buffer.concat([header, body]);
+      }),
+      fc.uint8Array({ maxLength: 24 }).map((bytes) => Buffer.from(bytes)),
+      sentCommand.map((c) => Buffer.from(framedCommand(c.message, c.data, c.thread))),
+      sentCommand.chain((c) =>
+        fc.nat().map((at) => {
+          const framed = Buffer.from(framedCommand(c.message, c.data, c.thread));
+          const flipped = 4 + (at % Math.max(1, framed.length - 4));
+          framed.writeUInt8((framed.readUInt8(flipped) ^ 0xff) & 0xff, flipped);
+          return framed;
+        }),
+      ),
+    ),
+    { maxLength: 5 },
+  );
+  fc.assert(
+    fc.property(garbage, cuts, (parts, points) => {
+      const all = Buffer.concat(parts);
+      const whole = streamed([all]);
+      const pieces = streamed(chunked(all, points));
+      assert.deepEqual(pieces, whole);
+    }),
+    { numRuns: 300 },
+  );
+  fc.assert(
+    fc.property(fc.uint8Array({ maxLength: 40 }), (bytes) => {
+      try {
+        decodeVariant(bytes);
+      } catch (error) {
+        assert.ok(error instanceof RangeError, 'bytes that are no value are refused with a RangeError');
+      }
+    }),
+    { numRuns: 500 },
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -1501,5 +2115,26 @@ junkIsNeverAReport();
 await noOrderOfSlotAndMemoryWaitsHangsARun();
 await noOrderOfRisesLosesASuite();
 await theWalkGivesOnlyWhatItHolds();
+console.time('turns');
+await writersTakeTurnsInTheOrderTheyAsked();
+console.timeEnd('turns');
+console.time('plan');
+aPlanDependsOnItsUnitsAlone();
+console.timeEnd('plan');
+console.time('keep');
+await theLargerKeptCacheSurvivesConcurrentKeeps();
+console.timeEnd('keep');
+console.time('install');
+aFailedInstallLeavesTheProjectAsItWas();
+console.timeEnd('install');
+console.time('scratch');
+theRetryScheduleHoldsWhateverFails();
+console.timeEnd('scratch');
+console.time('log');
+aGameLogReadsTheSameWhenInterleavedAndRead();
+console.timeEnd('log');
+console.time('variant');
+theDebuggerStreamIsCutProof();
+console.timeEnd('variant');
 
 console.log('fuzz properties held');
