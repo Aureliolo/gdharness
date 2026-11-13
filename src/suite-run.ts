@@ -1186,7 +1186,9 @@ async function ranEngines(
  * failed engine run again by [param runAgain], one after another in the order they ran.
  */
 export async function rerunAfterStarving<
-  T extends Pick<EngineRan, 'index' | 'peakBytes'> & { readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'> },
+  T extends Pick<EngineRan, 'index' | 'peakBytes'> & {
+    readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'>;
+  },
 >(ran: readonly T[], say: (line: string) => void, runAgain: (engine: T) => Promise<T>): Promise<T[]> {
   if (!ran.some((engine) => engine.verdict.starved) || ran.every((engine) => engine.verdict.passed)) {
     return [...ran];

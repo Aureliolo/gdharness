@@ -23,10 +23,10 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { connect as connectTo, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
-
 import { extract } from '../scripts/install-godot.js';
 import { EngineSlots, ownStart, takenOverUnderSteal } from '../src/engine-slots.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
@@ -39,20 +39,8 @@ import {
   type SentValue,
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
-import { connect as connectTo, createServer, type Server, type Socket } from 'node:net';
-import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
-import {
-  CONFIRMED_FOR_MS,
-  JUDGED_AFTER_MS,
-  lateAnswer,
-  RUNTIME_PROTOCOL,
-  type RuntimeEndpoint,
-  runtimeRequest,
-  STARTED_AFTER_ANNOUNCING_MS,
-  strangersAmong,
-  untilJudged,
-} from '../src/runtime-client.js';
 import { listenForTheServer } from '../src/keeper-channel.js';
+import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
 import { isRecord } from '../src/records.js';
@@ -67,6 +55,17 @@ import {
   sweepTranscripts,
   writeRunRecord,
 } from '../src/run-record.js';
+import {
+  CONFIRMED_FOR_MS,
+  JUDGED_AFTER_MS,
+  lateAnswer,
+  RUNTIME_PROTOCOL,
+  type RuntimeEndpoint,
+  runtimeRequest,
+  STARTED_AFTER_ANNOUNCING_MS,
+  strangersAmong,
+  untilJudged,
+} from '../src/runtime-client.js';
 import { discardUsing } from '../src/scratch.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { ADDONS, installAddons, installedEditorDigest, installedRuntimeDigest } from '../src/setup.js';
@@ -80,7 +79,14 @@ import {
   type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
-import { MemoryGate, HandedSlot, ordered, type RunOrder, rerunAfterStarving, runShares } from '../src/suite-run.js';
+import {
+  HandedSlot,
+  MemoryGate,
+  ordered,
+  type RunOrder,
+  rerunAfterStarving,
+  runShares,
+} from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
@@ -2451,33 +2457,17 @@ function aSuiteOrderKeepsEveryUnitAndRepeats(): void {
   fc.assert(
     fc.property(orderUnits, orderSeed, entriesOf, fc.nat(), (listed, seed, selected, turn) => {
       const units = listed.map(asUnit);
-      const turned = [...units.slice(turn % (units.length + 1)), ...units.slice(0, turn % (units.length + 1))];
+      const turned = [
+        ...units.slice(turn % (units.length + 1)),
+        ...units.slice(0, turn % (units.length + 1)),
+      ];
       const orders: RunOrder[] = ['reversed', 'named', seed];
       for (const order of orders) {
         const result = ordered(units, order, selected);
         assert.deepEqual(keysOf(result), keysOf(units), `${String(order)} keeps every unit once`);
         assert.deepEqual(ordered(units, order, selected), result, `${String(order)} repeats`);
         const suites = result.map((unit) => unit.suite);
-        if (order === 'reversed') {
-          for (let at = 1; at < suites.length; at += 1) {
-            assert.ok((suites[at - 1] ?? '') >= (suites[at] ?? ''), `reversed by code unit: ${suites.join()}`);
-          }
-        }
-        if (order === 'named') {
-          const rank = (suite: string): number =>
-            selected.findIndex((entry) => {
-              const path = /^(.+\.gd):[^/]*$/.exec(entry)?.[1] ?? entry;
-              return path === suite || suite.startsWith(path.endsWith('/') ? path : `${path}/`);
-            });
-          for (let at = 1; at < suites.length; at += 1) {
-            const before = suites[at - 1] ?? '';
-            const here = suites[at] ?? '';
-            assert.ok(
-              rank(before) < rank(here) || (rank(before) === rank(here) && before <= here),
-              `named: ${before} then ${here}`,
-            );
-          }
-        }
+        suitesFollowTheOrder(order, suites, selected);
         // The suites come out in one order whatever order the units were listed in.
         assert.deepEqual(
           ordered(turned, order, selected).map((unit) => unit.suite),
@@ -2488,6 +2478,29 @@ function aSuiteOrderKeepsEveryUnitAndRepeats(): void {
     }),
     { numRuns: 200 },
   );
+}
+
+/** Reversed runs from the last path to the first, and named by where the entries first name a suite. */
+function suitesFollowTheOrder(order: RunOrder, suites: readonly string[], selected: readonly string[]): void {
+  const rank = (suite: string): number =>
+    order === 'named'
+      ? selected.findIndex((entry) => {
+          const path = /^(.+\.gd):[^/]*$/.exec(entry)?.[1] ?? entry;
+          return path === suite || suite.startsWith(path.endsWith('/') ? path : `${path}/`);
+        })
+      : 0;
+  if (typeof order !== 'string') {
+    return;
+  }
+  for (let at = 1; at < suites.length; at += 1) {
+    const before = suites[at - 1] ?? '';
+    const here = suites[at] ?? '';
+    const holds: boolean =
+      order === 'reversed'
+        ? before >= here
+        : rank(before) < rank(here) || (rank(before) === rank(here) && before <= here);
+    assert.ok(holds, `${order}: ${before} then ${here}`);
+  }
 }
 
 interface FinishedEngine {
@@ -2626,7 +2639,10 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
     fc.asyncProperty(fc.array(round, { minLength: 1, maxLength: 4 }), async (rounds) => {
       const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-inherit-'));
       try {
-        const slots = new EngineSlots(join(root, 'slots'), 8, { pid: process.pid, started: await ownStart() });
+        const slots = new EngineSlots(join(root, 'slots'), 8, {
+          pid: process.pid,
+          started: await ownStart(),
+        });
         let turns: number[] = [];
         Reflect.set(slots, 'inheritedLock', async (): Promise<string | null> => {
           for (let tick = 0; tick < (turns.shift() ?? 0); tick += 1) {
@@ -2669,6 +2685,27 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
   );
 }
 
+/** Leaves a steal file as another taker's, made just now or long ago. */
+function placeStealFile(steal: string, kind: 'none' | 'fresh' | 'old'): void {
+  if (kind === 'none') {
+    return;
+  }
+  writeFileSync(steal, '');
+  if (kind === 'old') {
+    const longAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(steal, longAgo, longAgo);
+  }
+}
+
+function madeAsOurs(path: string): boolean {
+  try {
+    writeFileSync(path, 'mine', { flag: 'wx' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A take-over reads the lock again under the steal file. A lock replaced by a live holder between
  * the first look and the steal file is left alone, a steal file another taker holds blocks it, and
@@ -2687,13 +2724,7 @@ async function aTakeOverRereadsTheLockUnderTheStealFile(): Promise<void> {
         const lock = join(root, 'held.lock');
         const steal = `${lock}.steal`;
         writeFileSync(lock, 'stale');
-        if (stealBefore !== 'none') {
-          writeFileSync(steal, '');
-          if (stealBefore === 'old') {
-            const longAgo = new Date(Date.now() - 3_600_000);
-            utimesSync(steal, longAgo, longAgo);
-          }
-        }
+        placeStealFile(steal, stealBefore);
         let looks = 0;
         const taken = await takenOverUnderSteal(
           lock,
@@ -2706,31 +2737,17 @@ async function aTakeOverRereadsTheLockUnderTheStealFile(): Promise<void> {
             }
             return Promise.resolve(stale);
           },
-          (path) => {
-            try {
-              writeFileSync(path, 'mine', { flag: 'wx' });
-              return true;
-            } catch {
-              return false;
-            }
-          },
+          madeAsOurs,
           retake,
         );
         const expected = stealBefore === 'none' && !replacedBeforeSteal;
         assert.equal(taken, expected, JSON.stringify({ looks, stealBefore, replacedBeforeSteal }));
-        if (stealBefore !== 'none') {
-          // A steal file another taker holds blocks this one. One left long ago is removed, and the
-          // take is left to the next look.
-          assert.equal(existsSync(steal), stealBefore === 'fresh', `the ${stealBefore} steal file`);
-          assert.equal(readFileSync(lock, 'utf8'), replacedBeforeSteal ? 'fresh' : 'stale');
-        } else if (replacedBeforeSteal) {
-          assert.equal(readFileSync(lock, 'utf8'), 'fresh', 'a lock made fresh since the look stays');
-        } else {
-          assert.equal(existsSync(lock) ? readFileSync(lock, 'utf8') : null, retake ? 'mine' : null);
-        }
-        if (stealBefore === 'none') {
-          assert.equal(existsSync(steal), false, 'the steal file is given back');
-        }
+        const left = existsSync(lock) ? readFileSync(lock, 'utf8') : null;
+        // A steal file another taker holds blocks this one. One left long ago is removed, and the
+        // take is left to the next look. A lock made fresh since the look stays.
+        const wanted = replacedBeforeSteal ? 'fresh' : stealBefore === 'none' && retake ? 'mine' : 'stale';
+        assert.equal(left, stealBefore === 'none' && !replacedBeforeSteal && !retake ? null : wanted);
+        assert.equal(existsSync(steal), stealBefore === 'fresh', `the ${stealBefore} steal file`);
       } finally {
         sweep(root);
       }
@@ -2756,6 +2773,23 @@ function welcome(protocol = RUNTIME_PROTOCOL): string {
   return `${JSON.stringify({ type: 'welcome', protocol })}\n`;
 }
 
+/** What a fake game does with request [param id] once it has read it. */
+function gameRespondsTo(socket: Socket, mode: GameMode, id: number): void {
+  const say = (message: Record<string, unknown>): void => {
+    socket.write(`${JSON.stringify(message)}\n`);
+  };
+  if (mode === 'closes') {
+    socket.destroy();
+  } else if (mode === 'answers') {
+    // Another request's reply first, and a second reply to this one after the first.
+    say({ id: id + 1000, type: 'result' });
+    say({ id, type: 'result', value: id });
+    say({ id, type: 'result', value: 'again' });
+  } else if (mode === 'errors') {
+    say({ id, type: 'error', message: 'no such command' });
+  }
+}
+
 /** A listener that speaks as a game does, in the way [param mode] says. */
 async function fakeGame(mode: GameMode, pid: number): Promise<FakeGame> {
   const held: { socket: Socket; id: number }[] = [];
@@ -2779,14 +2813,7 @@ async function fakeGame(mode: GameMode, pid: number): Promise<FakeGame> {
       const parsed: unknown = JSON.parse(line);
       const id = isRecord(parsed) && typeof parsed['id'] === 'number' ? parsed['id'] : -1;
       held.push({ socket, id });
-      if (mode === 'closes') {
-        socket.destroy();
-      } else if (mode === 'answers') {
-        socket.write(`${JSON.stringify({ id: id + 1000, type: 'result' })}\n${JSON.stringify({ id, type: 'result', value: id })}\n`);
-        socket.write(`${JSON.stringify({ id, type: 'result', value: 'again' })}\n`);
-      } else if (mode === 'errors') {
-        socket.write(`${JSON.stringify({ id, type: 'error', message: 'no such command' })}\n`);
-      }
+      gameRespondsTo(socket, mode, id);
     });
   });
   await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening));
@@ -2807,7 +2834,9 @@ async function fakeGame(mode: GameMode, pid: number): Promise<FakeGame> {
         for (const socket of sockets) {
           socket.destroy();
         }
-        server.close(() => closed());
+        server.close(() => {
+          closed();
+        });
       }),
   };
 }
@@ -2838,19 +2867,7 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   await fc.assert(
     fc.asyncProperty(scene, async (drawn) => {
       if (drawn.kind === 'closedPort') {
-        const game = await fakeGame('silent', drawn.alive ? process.pid : DEAD_PID);
-        await game.close();
-        const began = Date.now();
-        const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
-        assert.equal(reply.ok, false);
-        if (!reply.ok) {
-          assert.equal(reply.reason, 'refused');
-          assert.match(
-            reply.message,
-            drawn.alive ? /is running but nothing answered on its port: it refused/ : /has ended: its port refused/,
-          );
-        }
-        assert.ok(drawn.alive ? Date.now() - began >= SHORT_WAIT_MS - 20 : Date.now() - began < SHORT_WAIT_MS);
+        await aClosedPortIsSaid(drawn.alive);
         return;
       }
       const mode = drawn.kind === 'mode' ? drawn.mode : 'silent';
@@ -2869,16 +2886,35 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   );
 }
 
+/** A port nobody listens on is a game that has ended once its process is gone, and is dialled for the wait while it lives. */
+async function aClosedPortIsSaid(processLives: boolean): Promise<void> {
+  const game = await fakeGame('silent', processLives ? process.pid : DEAD_PID);
+  await game.close();
+  const began = Date.now();
+  const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
+  if (reply.ok) {
+    assert.fail('a port nobody listens on answered');
+  }
+  assert.equal(reply.reason, 'refused');
+  assert.match(
+    reply.message,
+    processLives ? /is running but nothing answered on its port: it refused/ : /has ended: its port refused/,
+  );
+  const took = Date.now() - began;
+  assert.ok(processLives ? took >= SHORT_WAIT_MS - 20 : took < SHORT_WAIT_MS, `${String(took)}ms`);
+}
+
 async function modeIsSaid(game: FakeGame, mode: GameMode): Promise<void> {
   const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
   if (mode === 'answers') {
-    assert.equal(reply.ok, true, 'another id is skipped and the reply to this one is taken');
-    assert.equal(reply.ok && reply.payload['value'], game.held[0]?.id, 'the reply carries this request id');
+    if (!reply.ok) {
+      assert.fail(`another id is skipped and the reply to this one is taken: ${reply.message}`);
+    }
+    assert.equal(reply.payload['value'], game.held[0]?.id, 'the reply carries this request id');
     return;
   }
-  assert.equal(reply.ok, false);
   if (reply.ok) {
-    return;
+    assert.fail(`${mode} was answered`);
   }
   const said = {
     errors: ['error', /no such command/],
@@ -2903,9 +2939,8 @@ async function lateAnswerIsKept(game: FakeGame, how: 'keep' | 'function', end: E
     SHORT_WAIT_MS,
     how === 'keep' ? 'keep' : (late) => handed.push(late),
   );
-  assert.equal(reply.ok, false);
   if (reply.ok) {
-    return;
+    assert.fail('a request the wait ran out on was answered');
   }
   assert.equal(reply.reason, 'busy');
   assert.equal(reply.stillWithTheGame === true, how === 'function');
@@ -2916,37 +2951,48 @@ async function lateAnswerIsKept(game: FakeGame, how: 'keep' | 'function', end: E
     assert.equal(reply.requestId, id);
     assert.equal(lateAnswer(id)?.state, 'waiting');
   }
-  if (end === 'answers') {
-    held.socket.write(`${JSON.stringify({ id, type: 'result', value: 1 })}\n`);
-  } else if (end === 'errors') {
-    held.socket.write(`${JSON.stringify({ id, type: 'error', message: 'boom' })}\n`);
-  } else {
-    held.socket.destroy();
-  }
-  await until(() => (how === 'keep' ? lateAnswer(id)?.state !== 'waiting' : handed.length > 0));
+  gameEnds(held.socket, id, end);
+  await eventually(() => (how === 'keep' ? lateAnswer(id)?.state !== 'waiting' : handed.length > 0));
   const got = how === 'keep' ? lateAnswer(id) : undefined;
   const late = how === 'keep' ? (got?.state === 'answered' ? got.reply : undefined) : handed[0];
-  if (end === 'closes') {
-    if (how === 'keep') {
-      assert.equal(got?.state, 'never', 'a close before the answer ends the wait for good');
-    } else {
-      assert.equal(late?.ok, false);
-      assert.match(late?.ok === false ? late.message : '', /closed the connection before answering 'slow'/);
-    }
+  if (end !== 'closes') {
+    lateReplyIs(late, end);
+  } else if (how === 'keep') {
+    assert.equal(got?.state, 'never', 'a close before the answer ends the wait for good');
   } else {
-    assert.equal(late?.ok, end === 'answers');
-    if (late?.ok === false) {
-      assert.equal(late.reason, 'error');
-      assert.match(late.message, /boom/);
-    }
+    assert.match(late?.ok === false ? late.message : '', /closed the connection before answering 'slow'/);
   }
   await new Promise((settle) => setTimeout(settle, 5));
   assert.equal(handed.length, how === 'function' ? 1 : 0, 'a late answer is handed over once');
 }
 
+/** The game answers request [param id], answers it with an error, or drops the connection. */
+function gameEnds(socket: Socket, id: number, end: Ended): void {
+  if (end === 'closes') {
+    socket.destroy();
+    return;
+  }
+  const message =
+    end === 'answers' ? { id, type: 'result', value: 1 } : { id, type: 'error', message: 'boom' };
+  socket.write(`${JSON.stringify(message)}\n`);
+}
+
+/** The late reply a game's answer or error leaves. */
+function lateReplyIs(late: RuntimeReplyOf | undefined, end: 'answers' | 'errors'): void {
+  assert.ok(late !== undefined, 'a late reply came');
+  if (end === 'answers') {
+    assert.ok(late.ok, 'the answer is taken');
+  } else if (late.ok) {
+    assert.fail('an error was taken as an answer');
+  } else {
+    assert.equal(late.reason, 'error');
+    assert.match(late.message, /boom/);
+  }
+}
+
 type RuntimeReplyOf = Awaited<ReturnType<typeof runtimeRequest>>;
 
-async function until(done: () => boolean): Promise<void> {
+async function eventually(done: () => boolean): Promise<void> {
   const deadline = Date.now() + 5000;
   while (!done()) {
     assert.ok(Date.now() < deadline, 'the wait ended');
@@ -2972,15 +3018,18 @@ async function onlyTheFiftyLastLateAnswersAreKept(): Promise<void> {
           );
           const ids = replies.map((reply) => (reply.ok ? -1 : (reply.requestId ?? -1)));
           assert.ok(!ids.includes(-1), 'every wait ran out on a game holding the request');
-          await until(() => game.held.length === answerOrder.length);
+          await eventually(() => game.held.length === answerOrder.length);
           for (const at of answerOrder) {
             const held = game.held.find((one) => one.id === ids[at]);
             held?.socket.write(`${JSON.stringify({ id: held.id, type: 'result' })}\n`);
-            await until(() => lateAnswer(ids[at] ?? -1)?.state === 'answered');
+            await eventually(() => lateAnswer(ids[at] ?? -1)?.state === 'answered');
           }
           const kept = ids.filter((id) => lateAnswer(id) !== undefined);
           const last = answerOrder.slice(-50).map((at) => ids[at]);
-          assert.deepEqual(kept.toSorted((a, b) => a - b), last.toSorted((a, b) => (a ?? 0) - (b ?? 0)));
+          assert.deepEqual(
+            kept.toSorted((a, b) => a - b),
+            last.toSorted((a, b) => (a ?? 0) - (b ?? 0)),
+          );
         } finally {
           await game.close();
         }
@@ -2994,16 +3043,20 @@ async function onlyTheFiftyLastLateAnswersAreKept(): Promise<void> {
 function answeredTo(address: string, pieces: readonly string[], cutOffAfterMs: number): Promise<string> {
   return new Promise((settle) => {
     let read = '';
-    const socket = connectTo(address);
+    const socket = connectTo({ path: address, allowHalfOpen: true });
     const timer = setTimeout(() => {
-      socket.destroy();
       settle(`no answer in ${String(cutOffAfterMs)}ms`);
+      socket.destroy();
     }, cutOffAfterMs);
     socket.setEncoding('utf8');
     socket.on('connect', () => {
-      for (const piece of pieces) {
-        socket.write(piece);
-      }
+      // A gap between pieces makes each its own read at the keeper.
+      void (async (): Promise<void> => {
+        for (const piece of pieces) {
+          socket.write(piece);
+          await new Promise((gap) => setTimeout(gap, 3));
+        }
+      })();
     });
     socket.on('data', (chunk: string) => {
       read += chunk;
@@ -3012,8 +3065,19 @@ function answeredTo(address: string, pieces: readonly string[], cutOffAfterMs: n
       clearTimeout(timer);
       settle(read);
     };
+    // Held open for every piece, so the answer is read when the keeper ends its side.
+    socket.on('end', () => {
+      over();
+      socket.destroy();
+    });
     socket.on('close', over);
-    socket.on('error', over);
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      // A piece written after the keeper has answered and gone has nowhere to land.
+      if (error.code !== 'EPIPE' && error.code !== 'ECONNRESET') {
+        read += `error ${error.message}`;
+      }
+      over();
+    });
   });
 }
 
@@ -3035,38 +3099,33 @@ async function theKeeperAnswersEachConnectionOnce(): Promise<void> {
       fc.boolean(),
       async (connections, endsWith, halfLine) => {
         let ended = 0;
-        const listening = await listenForTheServer(
-          () => {
-            ended += 1;
-            if (endsWith === 'throws') {
-              throw new Error('could not kill');
-            }
-            return endsWith;
-          },
-          null,
-        );
+        const listening = await listenForTheServer(() => {
+          ended += 1;
+          if (endsWith === 'throws') {
+            throw new Error('could not kill');
+          }
+          return endsWith;
+        }, null);
         assert.ok(listening !== null, 'the keeper listens');
         try {
           const half = halfLine ? answeredTo(listening.address, ['sto'], 150) : Promise.resolve('');
           const answers = await Promise.all(
             connections.map((one) => {
-              const text = `${one.line}\n${one.after}`;
-              const cuts = [...new Set(one.cuts.map((cut) => cut % (text.length + 1)))].toSorted((a, b) => a - b);
-              const pieces = chunkedText(text, cuts);
-              return answeredTo(listening.address, pieces, 3000);
+              return answeredTo(listening.address, piecesOf(one), 3000);
             }),
           );
           for (const [at, one] of connections.entries()) {
-            const said = one.line.startsWith('debug ')
-              ? '{"refused":"This run has no debugger."}'
-              : one.line === 'stop'
-                ? endsWith === 'throws'
-                  ? 'could not end it: could not kill'
-                  : endsWith
-                : 'unknown';
-            assert.equal(answers[at], `${said}\n`, `connection ${String(at)}: ${JSON.stringify(one)}`);
+            assert.equal(
+              answers[at],
+              `${keeperSays(one.line, endsWith)}\n`,
+              `connection ${String(at)}: ${JSON.stringify(one)}`,
+            );
           }
-          assert.equal(ended, connections.filter((one) => one.line === 'stop').length, 'a stop is acted on once');
+          assert.equal(
+            ended,
+            connections.filter((one) => one.line === 'stop').length,
+            'a stop is acted on once',
+          );
           assert.equal(await half, halfLine ? 'no answer in 150ms' : '', 'half a line gets no answer');
         } finally {
           listening.close();
@@ -3077,10 +3136,30 @@ async function theKeeperAnswersEachConnectionOnce(): Promise<void> {
   );
 }
 
-function chunkedText(text: string, cuts: readonly number[]): string[] {
+/** A line and what follows it, cut where it says and always after the line. */
+function piecesOf(one: { line: string; cuts: readonly number[]; after: string }): string[] {
+  const text = `${one.line}\n${one.after}`;
+  const points = [...new Set([one.line.length + 1, ...one.cuts.map((cut) => cut % (text.length + 1))])]
+    .filter((cut) => one.after !== '' || cut !== one.line.length + 1)
+    .toSorted((a, b) => a - b);
+  return chunkedText(text, points);
+}
+
+/** What the keeper answers a first line with, for a run without a debugger whose end does [param endsWith]. */
+function keeperSays(line: string, endsWith: 'signalled' | 'gone' | 'throws'): string {
+  if (line.startsWith('debug ')) {
+    return '{"refused":"This run has no debugger."}';
+  }
+  if (line !== 'stop') {
+    return 'unknown';
+  }
+  return endsWith === 'throws' ? 'could not end it: could not kill' : endsWith;
+}
+
+function chunkedText(text: string, points: readonly number[]): string[] {
   const pieces: string[] = [];
   let from = 0;
-  for (const cut of [...cuts, text.length]) {
+  for (const cut of [...points, text.length]) {
     pieces.push(text.slice(from, cut));
     from = cut;
   }
@@ -3088,6 +3167,48 @@ function chunkedText(text: string, cuts: readonly number[]): string[] {
 }
 
 let strangerRuns = 0;
+
+interface JudgedFile {
+  readonly writtenAt: number;
+  readonly judgedAt: number;
+  readonly stranger: boolean;
+}
+
+/** Whether an announcement is asked about: a minute old, and new, rewritten or a confirmed one gone stale. */
+function needsJudging(
+  had: JudgedFile | undefined,
+  one: { readonly writtenAt: number },
+  now: number,
+): boolean {
+  return (
+    now - one.writtenAt >= JUDGED_AFTER_MS &&
+    (had === undefined ||
+      had.writtenAt !== one.writtenAt ||
+      (!had.stranger && now - had.judgedAt > CONFIRMED_FOR_MS))
+  );
+}
+
+/** The operating system's answer for a judgement: each process began [param starts] after its file was written, or not at all. */
+function platformSaying(
+  step: { readonly fails: boolean; readonly starts: readonly (number | undefined)[] },
+  toJudge: readonly { readonly pid: number; readonly writtenAt: number }[],
+  asked: Promise<void>,
+): (pids: readonly number[]) => Promise<Map<number, number>> {
+  return async (pids) => {
+    await asked;
+    if (step.fails) {
+      throw new Error('the platform would not say');
+    }
+    const began = new Map<number, number>();
+    for (const pid of pids) {
+      const offset = step.starts[pid - 100];
+      if (offset !== undefined) {
+        began.set(pid, (toJudge.find((one) => one.pid === pid)?.writtenAt ?? 0) + offset);
+      }
+    }
+    return began;
+  };
+}
 
 /**
  * Whether an announced process is its game is asked once an announcement is a minute old, in one
@@ -3098,91 +3219,77 @@ async function aStrangerIsJudgedOnceAndForTheFileAsWritten(): Promise<void> {
   const ask = fc.record({
     kind: fc.constantFrom('ask', 'ask', 'land'),
     now: fc.constantFrom(10_000, 61_000, 62_000, 62_001, 121_999, 122_001, 122_002, 300_000),
-    files: fc.array(
-      fc.record({ slot: fc.constantFrom(0, 1, 2), writtenAt: fc.constantFrom(1000, 2000) }),
-      { maxLength: 3 },
-    ),
+    files: fc.array(fc.record({ slot: fc.constantFrom(0, 1, 2), writtenAt: fc.constantFrom(1000, 2000) }), {
+      maxLength: 3,
+    }),
     starts: fc.array(fc.constantFrom(undefined, 0, 1999, 2000, 2001, 90_000), { minLength: 3, maxLength: 3 }),
     fails: fc.boolean(),
   });
   await fc.assert(
-    fc.asyncProperty(fc.array(ask, { maxLength: 12 }), async (steps) => {
+    fc.asyncProperty(fc.array(ask, { maxLength: 16 }), async (steps) => {
       strangerRuns += 1;
       const name = (slot: number): string => `run-${String(strangerRuns)}-file-${String(slot)}`;
-      type Verdict = { writtenAt: number; judgedAt: number; stranger: boolean };
-      const known = new Map<string, Verdict>();
+      const known = new Map<string, JudgedFile>();
       let pending: (() => void) | null = null;
-      let release: () => void = () => undefined;
-      for (const step of steps) {
-        if (step.kind === 'land') {
-          release();
-          await untilJudged();
-          pending?.();
-          pending = null;
-          continue;
+      const releasers: (() => void)[] = [];
+      const release = (): void => {
+        for (const one of releasers.splice(0)) {
+          one();
         }
-        const candidates = step.files
-          .filter((one, at, all) => all.findIndex((other) => other.slot === one.slot) === at)
-          .map((one) => ({ file: name(one.slot), pid: 100 + one.slot, writtenAt: one.writtenAt }));
-        const toJudge = candidates.filter((one) => {
-          const had = known.get(one.file);
-          return (
-            step.now - one.writtenAt >= JUDGED_AFTER_MS &&
-            (had === undefined ||
-              had.writtenAt !== one.writtenAt ||
-              (!had.stranger && step.now - had.judgedAt > CONFIRMED_FOR_MS))
+      };
+      try {
+        for (const step of steps) {
+          if (step.kind === 'land') {
+            release();
+            await untilJudged();
+            pending?.();
+            pending = null;
+            continue;
+          }
+          const candidates = step.files
+            .filter((one, at, all) => all.findIndex((other) => other.slot === one.slot) === at)
+            .map((one) => ({ file: name(one.slot), pid: 100 + one.slot, writtenAt: one.writtenAt }));
+          const toJudge = candidates.filter((one) => needsJudging(known.get(one.file), one, step.now));
+          const expected = candidates
+            .filter((one) => {
+              const had = known.get(one.file);
+              return had?.stranger === true && had.writtenAt === one.writtenAt;
+            })
+            .map((one) => one.file);
+          const startsNow = pending === null && toJudge.length > 0;
+          const asked = new Promise<void>((landed) => {
+            releasers.push(landed);
+          });
+          const startTimes = platformSaying(step, toJudge, asked);
+          const got = strangersAmong(candidates, step.now, startTimes);
+          assert.deepEqual(
+            [...got].toSorted(),
+            expected.toSorted(),
+            JSON.stringify({ step, known: [...known] }),
           );
-        });
-        const expected = candidates
-          .filter((one) => {
-            const had = known.get(one.file);
-            return had?.stranger === true && had.writtenAt === one.writtenAt;
-          })
-          .map((one) => one.file);
-        const judgingNow = pending !== null;
-        const startsNow = !judgingNow && toJudge.length > 0;
-        const asked = new Promise<void>((landed) => {
           if (startsNow) {
-            release = landed;
+            pending = () => {
+              if (step.fails) {
+                return;
+              }
+              for (const one of toJudge) {
+                const offset = step.starts[one.pid - 100];
+                known.set(one.file, {
+                  writtenAt: one.writtenAt,
+                  judgedAt: step.now,
+                  stranger: offset !== undefined && offset > STARTED_AFTER_ANNOUNCING_MS,
+                });
+              }
+            };
           }
-        });
-        const startTimes = async (pids: readonly number[]): Promise<Map<number, number>> => {
-          await asked;
-          if (step.fails) {
-            throw new Error('the platform would not say');
-          }
-          const began = new Map<number, number>();
-          for (const pid of pids) {
-            const offset = step.starts[pid - 100];
-            const written = toJudge.find((one) => one.pid === pid)?.writtenAt ?? 0;
-            if (offset !== undefined) {
-              began.set(pid, written + offset);
-            }
-          }
-          return began;
-        };
-        const got = strangersAmong(candidates, step.now, startTimes);
-        assert.deepEqual([...got].toSorted(), expected.toSorted(), JSON.stringify({ step, known: [...known] }));
-        if (startsNow) {
-          pending = () => {
-            if (step.fails) {
-              return;
-            }
-            for (const one of toJudge) {
-              const offset = step.starts[one.pid - 100];
-              known.set(one.file, {
-                writtenAt: one.writtenAt,
-                judgedAt: step.now,
-                stranger: offset !== undefined && offset > STARTED_AFTER_ANNOUNCING_MS,
-              });
-            }
-          };
         }
+      } finally {
+        // A run that failed leaves no judgement waiting for the next.
+        release();
+        await untilJudged();
       }
-      release();
-      await untilJudged();
     }),
-    { numRuns: 150 },
+    { numRuns: 1500 },
   );
 }
 
