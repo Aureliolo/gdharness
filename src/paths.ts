@@ -83,9 +83,33 @@ export function realAsFarAsItExists(path: string): string {
 }
 
 /**
+ * The entry of [param names] that [param step], a Windows 8.3 short name in [param folder], stands
+ * for, or undefined where it is not one. A step that is a link itself is left, since its real name
+ * is its target's.
+ */
+function longNameOfShort(folder: string, step: string, names: readonly string[]): string | undefined {
+  if (!step.includes('~')) {
+    return undefined;
+  }
+  try {
+    if (lstatSync(join(folder, step)).isSymbolicLink()) {
+      return undefined;
+    }
+    const real = realpathSync.native(join(folder, step));
+    const name = basename(real);
+    return relative(realpathSync.native(folder), dirname(real)) === '' && names.includes(name)
+      ? name
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * [param relativePath], forward slashes, as the folders under [param root] list its steps, each in
  * the disk's case. A step is the entry of that name, else the one entry equal to it with case
- * ignored. A step no entry matches, or several do, keeps its spelling and so do the steps after it.
+ * ignored, else the entry a Windows 8.3 short name stands for. A step no entry matches, or several
+ * do, keeps its spelling and so do the steps after it.
  *
  * No link is followed, since the engine loads a script by the path through the link. A folder that
  * cannot be listed (a file, or a ring of links) matches nothing, and only names are read.
@@ -102,7 +126,11 @@ export function listedSpelling(root: string, relativePath: string): string {
     }
     const lower = step.toLowerCase();
     const same = names.filter((name) => name.toLowerCase() === lower);
-    const found = names.includes(step) ? step : same.length === 1 ? same[0] : undefined;
+    const found = names.includes(step)
+      ? step
+      : same.length === 1
+        ? same[0]
+        : longNameOfShort(join(root, ...spelt), step, names);
     if (found === undefined) {
       return [...spelt, ...steps.slice(index)].join('/');
     }
@@ -318,8 +346,28 @@ function insideProject(root: string, candidate: string): string | null {
   }
   return (
     relativeWithin(root, candidate) ??
+    belowTheProjectByAnotherName(root, candidate) ??
     relativeWithin(realAsFarAsItExists(root), realAsFarAsItExists(resolve(candidate)))
   );
+}
+
+/**
+ * [param candidate] below [param root] as written, where a leading part of it names the project
+ * another way (a link to it, a short name, a macOS /private path), or null where none does. The
+ * rest keeps its own steps, so a link on it is still seen by the gate.
+ */
+function belowTheProjectByAnotherName(root: string, candidate: string): string | null {
+  const realRoot = realAsFarAsItExists(root);
+  const tail: string[] = [];
+  let at = resolve(candidate);
+  for (let parent = dirname(at); parent !== at; parent = dirname(at)) {
+    tail.unshift(basename(at));
+    at = parent;
+    if (relative(realAsFarAsItExists(at), realRoot) === '') {
+      return tail.join('/');
+    }
+  }
+  return null;
 }
 
 /** Why a path starting with the scheme [param scheme] is refused. */

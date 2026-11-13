@@ -369,6 +369,7 @@ import {
   isSameDirectory,
   isWithinRoot,
   linkOutOf,
+  listedSpelling,
   notAGodotProject,
   realAsFarAsItExists,
   relativeWithin,
@@ -97274,6 +97275,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
   });
   // A folder named like a script, so that any read of it throws.
   mkdirSync(join(outside, 'o.gd'), { recursive: true });
+  mkdirSync(join(project, 'dir.gd'));
   writeTree(outside, { 'f.gd': lines(2) });
   const junction = (target: string, at: string): void => {
     symlinkSync(target, at, 'junction');
@@ -97299,6 +97301,12 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
   const linkOutAnswer = (script: string, link: string, line: number): string =>
     `Line ${line} of ${script} was not checked, since the script lies behind the link ${link}, which leads out of the project.`;
   try {
+    // A short name is the long one, read on the system drive, which is where 8.3 names are made.
+    if (process.platform === 'win32' && existsSync('C:\\PROGRA~1')) {
+      assert.equal(listedSpelling('C:\\', 'PROGRA~1/Common Files'), 'Program Files/Common Files');
+    } else {
+      console.log('  skipped the short name: no 8.3 names here');
+    }
     await withStdioServer(
       async (call) => {
         const answer = async (
@@ -97448,6 +97456,24 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
           );
           assert.equal(readFileSync(breakpointNotePath(project), 'utf8'), noteBefore, root);
         }
+        // An absolute path spelt through the project's other name answers as the res:// spelling does.
+        for (const [projectPath, script] of [
+          [alias, join(project, 'shared', 'o.gd')],
+          [project, join(alias, 'shared', 'o.gd')],
+        ] as const) {
+          const mixed = await answer(script, 2, 'set', projectPath);
+          assert.equal(
+            get(parsed(mixed), 'lineNotChecked'),
+            linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+            `${projectPath} ${script}`,
+          );
+        }
+        const backIn = await answer(join(alias, 'link', 'r.gd'), 1, 'set', project);
+        assert.ok(heldIn(backIn).includes('res://link/r.gd:1'), backIn);
+        assert.ok(!heldIn(backIn).includes('res://real/r.gd:1'), backIn);
+
+        // A folder named like a script is no script.
+        assert.equal(await answer('res://dir.gd', 1), 'res://dir.gd is a folder, not a script.');
         assert.ok(existsSync(join(project, 'a.gd')), 'the project is intact');
       },
       { GODOT_PATH: standInEngine() },

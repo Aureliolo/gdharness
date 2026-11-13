@@ -6915,6 +6915,11 @@ class GodotServer {
       return { refusal: this.missingScript(projectPath, located.relativePath) };
     }
     if (link === null) {
+      if (statSync(located.absolutePath, { throwIfNoEntry: false })?.isDirectory() === true) {
+        return {
+          refusal: this.createErrorResponse(`res://${located.relativePath} is a folder, not a script.`),
+        };
+      }
       const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
       return nothing === null ? {} : { refusal: this.createErrorResponse(nothing) };
     }
