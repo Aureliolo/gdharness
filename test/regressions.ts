@@ -97368,6 +97368,7 @@ async function theGatePassesWhatIsOnlyRead(call: ToolCall, project: string): Pro
     ['scene_node', { ...add, scenePath: 'res://a.tscn', instancePath: 'res://shared/s.tscn' }],
     ['scene_node', { ...add, scenePath: 'res://link/in.tscn' }],
     ['scene_node', { ...add, scenePath: 'res://shared/back/in.tscn' }],
+    ['scene_node', { op: 'get', scenePath: 'res://shared/s.tscn', nodePath: '.' }],
   ];
   for (const [name, args] of passed) {
     const said = await call(name, { projectPath: project, ...args });
@@ -97473,6 +97474,9 @@ const WALK_LIBRARY =
   '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_walk"]\n' +
   'resource_name = "walk"\nlength = 1.0\n\n[resource]\n_data = {\n&"walk": SubResource("Animation_walk")\n}\n';
 
+/** An AnimationNodeStateMachine kept in a .tres of its own. */
+const STATE_MACHINE = '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n';
+
 /** A scene whose AnimationPlayer Player plays the library kept at [library]. */
 function playerOf(library: string): string {
   return (
@@ -97500,9 +97504,12 @@ async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void
         'a.tscn': playerOf('res://shared/anims.tres'),
         'b.tscn': playerOf('res://link/anims.tres'),
         'nav.tscn': nav,
+        'sm.tscn':
+          '[gd_scene format=3]\n\n[ext_resource type="AnimationNodeStateMachine" path="res://shared/sm.tres" id="1_sm"]\n\n' +
+          '[node name="A" type="Node3D"]\n\n[node name="Tree" type="AnimationTree" parent="."]\ntree_root = ExtResource("1_sm")\n',
         'real/anims.tres': WALK_LIBRARY,
       },
-      outside: { 'anims.tres': WALK_LIBRARY, 'mesh.tres': mesh },
+      outside: { 'anims.tres': WALK_LIBRARY, 'mesh.tres': mesh, 'sm.tres': STATE_MACHINE },
     },
     (real, outside) =>
       linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(real, 'link')),
@@ -97526,6 +97533,29 @@ async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void
         refusedTrack,
       );
       assert.equal(readFileSync(join(at.outside, 'anims.tres'), 'utf8'), WALK_LIBRARY);
+      assert.equal(at.fileOf('a.tscn'), scene);
+
+      const walk = { scenePath: 'res://a.tscn', playerNodePath: 'Player', animationName: 'walk' };
+      const library = behindTheLink('res://shared/anims.tres', 'res://shared/');
+      for (const args of [
+        { op: 'create', ...walk, animationName: 'run' },
+        { op: 'set', ...walk, length: 2 },
+        { op: 'rename', ...walk, newName: 'stroll' },
+        { op: 'remove', ...walk },
+        { op: 'remove_track', ...walk, track: { type: 'property', nodePath: '.', property: 'position' } },
+      ]) {
+        const said = await at.say('scene_animation', args);
+        assert.ok(said.includes(library), `${args.op}: ${said}`);
+      }
+      const machine = await at.say('scene_animation', {
+        op: 'add_state',
+        scenePath: 'res://sm.tscn',
+        animTreePath: 'Tree',
+        stateName: 'Walk',
+        animationName: 'walk',
+      });
+      assert.ok(machine.includes(behindTheLink('res://shared/sm.tres', 'res://shared/')), machine);
+      assert.equal(readFileSync(join(at.outside, 'sm.tres'), 'utf8'), STATE_MACHINE);
       assert.equal(at.fileOf('a.tscn'), scene);
 
       const navScene = at.fileOf('nav.tscn');
