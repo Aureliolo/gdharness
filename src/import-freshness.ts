@@ -296,8 +296,8 @@ function recordedSourceMd5(projectPath: string, resPath: string): string {
 
 /**
  * Every file under [param projectPath] whose import is behind it, walked as the engine's scan walks,
- * less the addons gdharness installed. A file with an importable extension and no import file has
- * not been imported. A sidecar whose source has gone is left to `project_import status`, since no
+ * less the addons gdharness installed, which is how `project_import status` walks too. A file with an
+ * importable extension and no import file has not been imported. A sidecar whose source has gone is left to `project_import status`, since no
  * import can bring it back.
  */
 export function staleImports(projectPath: string): StaleImport[] {
