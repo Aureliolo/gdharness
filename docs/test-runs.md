@@ -203,6 +203,10 @@ must also cost more than an engine's even share of the run. That share is the co
 over the engines there is room for. An engine holding part of such a suite skips the rest. The run
 names each suite it dealt out that way.
 
+A run following a gate's lanes file takes that share over the pool's lock count where it is above
+the engines there is room for, and never over more than its processors. A few long suites then have
+the units the run grows on.
+
 A suite within its share is balanced by the rest.
 
 ### Splitting a parameterised case

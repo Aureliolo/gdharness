@@ -918,6 +918,28 @@ function roomFinder(
         );
 }
 
+/**
+ * The engines to cut a run's units for. A run following a gate's lanes file may rise to the pool's
+ * lock count, within its [param processors], so it cuts for that where it is above [param engines].
+ * Cut for fewer, a few long suites would stay whole and leave it nothing to grow on. Every other
+ * run cuts for [param engines].
+ */
+export function enginesCutFor(
+  engines: number,
+  processors: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (envValue(LANES_VARIABLE, env) === undefined) {
+    return engines;
+  }
+  return Math.max(engines, Math.min(poolCount(env) ?? engines, processors));
+}
+
+/** [param engines] as the run cuts its units for them: an ordered run follows nothing. */
+function cutFor(options: TestOptions, engines: number): number {
+  return options.order === null ? enginesCutFor(engines, options.cores ?? availableParallelism()) : engines;
+}
+
 /** Sizes the engines of the run by the memory there is and deals the suites over them. */
 async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): Promise<Deal> {
   const { options, declared } = context;
@@ -934,7 +956,7 @@ async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): 
   // start for the whole of it, so one engine was dealt nearly everything while memory freed beside
   // it. Held by memory, the run is dealt for these and its engines start as memory has room.
   const unheld = roomWith(Number.POSITIVE_INFINITY);
-  const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, unheld.engines));
+  const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, cutFor(options, unheld.engines)));
   const heldLanes = lanesOf(dealt(unheldUnits, declared, unheld.engines));
   const memoryHeld = options.order === null && byMemory.engines < heldLanes;
   const room = memoryHeld ? unheld : byMemory;
@@ -943,7 +965,7 @@ async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): 
       'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
     );
   }
-  const splitPast = splitPastFor(suites, times, room.engines);
+  const splitPast = splitPastFor(suites, times, cutFor(options, room.engines));
   const units = memoryHeld ? unheldUnits : unitsOf(suites, times, splitPast);
   const plans =
     options.order === null
@@ -957,7 +979,7 @@ function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: D
   const { options, declared } = context;
   const { times, room, plans } = deal;
   // Cut for the engines asked: held to fewer, the share grows and keeps whole what they would split.
-  const asked = unitsOf(suites, times, splitPastFor(suites, times, options.engines));
+  const asked = unitsOf(suites, times, splitPastFor(suites, times, cutFor(options, options.engines)));
   const how =
     options.order === null
       ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`

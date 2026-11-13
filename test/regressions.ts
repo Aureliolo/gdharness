@@ -666,6 +666,7 @@ import {
   type Admitted,
   acrossSaid,
   engineSaid,
+  enginesCutFor,
   importEnd,
   importFault,
   importNeeded,
@@ -65999,6 +66000,65 @@ async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
   });
   const idleRan = await endsWithin(idleRun, 'the run with no work for an added lane');
   assert.equal(idleRan.length, 2, 'two engines, with no bound of its own');
+
+  // The units are cut for the pool's count where the run follows a lanes file.
+  const following = (count: string | undefined, file: string | undefined): NodeJS.ProcessEnv => ({
+    ...(count === undefined ? {} : { [SHARE_COUNT_VARIABLE]: count }),
+    ...(file === undefined ? {} : { [LANES_VARIABLE]: file }),
+  });
+  assert.equal(enginesCutFor(2, 16, following('9', 'lanes.json')), 9, 'the pool count over the engines');
+  assert.equal(enginesCutFor(2, 4, following('9', 'lanes.json')), 4, 'within the processors');
+  assert.equal(enginesCutFor(2, 16, following('9', undefined)), 2, 'a run with no file follows nothing');
+  assert.equal(enginesCutFor(2, 16, following('9', '')), 2, 'an empty variable names no file');
+  assert.equal(enginesCutFor(2, 16, following(undefined, 'lanes.json')), 2, 'no count cuts for the engines');
+  assert.equal(
+    enginesCutFor(2, 16, following('1', 'lanes.json')),
+    2,
+    'a count below the engines lowers nothing',
+  );
+  assert.throws(
+    () => enginesCutFor(2, 16, following('x', 'lanes.json')),
+    (error: unknown) => error instanceof EngineUsageError && error.message.includes(SHARE_COUNT_VARIABLE),
+    'a wrong count is refused by name',
+  );
+  assert.equal(enginesCutFor(2, 16, following('x', undefined)), 2, 'and read by no run that follows nothing');
+
+  // A few long suites have the units to grow on only when cut for the pool's count.
+  const longPaths = ['res://long_a_test.gd', 'res://long_b_test.gd'];
+  const longCases = ['test_a', 'test_b', 'test_c', 'test_d'];
+  const longSuites: DeclaredSuite[] = longPaths.map((path) => ({
+    path,
+    cases: longCases,
+    windowed: false,
+    headless: false,
+    together: false,
+    accessible: false,
+  }));
+  const longTimes: SuiteTimes = Object.fromEntries(
+    longPaths.map((path) => [
+      path,
+      { seconds: 80, cases: Object.fromEntries(longCases.map((name) => [name, 20])), peak: gib },
+    ]),
+  );
+  const longDeclared = new Map(longPaths.map((path) => [path, [...longCases]]));
+  const cutFor = (engines: number): ReturnType<typeof unitsOf> =>
+    unitsOf(longSuites, longTimes, splitPastFor(longSuites, longTimes, engines));
+  const forCount = cutFor(enginesCutFor(2, 16, following('4', 'lanes.json')));
+  assert.equal(forCount.length, 8, 'cut for four lanes, eight units');
+  assert.equal(cutFor(enginesCutFor(2, 16, following('4', undefined))).length, 2, 'cut for two, two units');
+  const longRising = risingEngines();
+  const longRaised = raisedTo(4, () => longRising.started() >= 2, 4);
+  const longRun = startedRun(longRising, longRaised.raised, undefined, {
+    units: forCount,
+    declared: longDeclared,
+    times: longTimes,
+  });
+  await untilItHolds('four engines on a few long suites', () => longRising.started() >= 4);
+  assert.equal(longRising.most(), 4, 'four engines go at once');
+  longRising.going.forEach((engine) => {
+    engine.end();
+  });
+  await endAsTheyCome(longRising, longRun);
 }
 
 /**
@@ -66245,10 +66305,44 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
       'no lane is added',
     );
     assert.doesNotMatch(held.said, /raised this run from/, 'and nothing is said of a rise');
+    assert.doesNotMatch(
+      held.said,
+      /Dealt out case by case/,
+      'the units are cut for the two processors, so neither suite is dealt out',
+    );
     assert.ok(
       listed().every((one) => one.mark === null && one.names.every((name) => !name.endsWith(FOLLOWS_SUFFIX))),
       'no mark stood at any listing',
     );
+
+    // Two long suites, whole for two engines, are cut for the pool's four so the run has units to grow on.
+    if (availableParallelism() < 3) {
+      console.log('gate lanes few-long-suites case skipped: under three processors cannot raise two lanes');
+    } else {
+      writeTree(project, {
+        'tests/a_lane_test.gd': suiteOf([3, 3, 3, 3]),
+        'tests/b_lane_test.gd': suiteOf([3, 3, 3, 3]),
+      });
+      await standsIn('onMark', 4);
+      const grown = runWith(file, 4, '--engines', '2', '--slot-count', '8');
+      stands();
+      assert.equal(grown.status, 0, grown.said);
+      assert.match(
+        grown.said,
+        /Dealt out case by case.*a_lane_test\.gd.*b_lane_test\.gd|Dealt out case by case.*b_lane_test\.gd.*a_lane_test\.gd/,
+        `both suites are dealt out: ${grown.said}`,
+      );
+      const grownResult = readRunResult(resultFile);
+      assert.ok(
+        grownResult.dealing.includes(lanesSaid(2, Math.min(4, availableParallelism()))),
+        `the rise is said: ${grown.said}`,
+      );
+      assert.ok(
+        grownResult.engines.some((engine) => engine.lane === 2),
+        `an engine ran in an added lane: ${JSON.stringify(grownResult.engines)}`,
+      );
+      assert.equal(existsSync(mark), false, 'no mark is left');
+    }
 
     // An ordered run cannot grow, so it makes no mark.
     keep(fourTimed);
