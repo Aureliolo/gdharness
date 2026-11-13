@@ -95827,6 +95827,35 @@ function testALinkInsideAMovedFolderMovesWithIt(): void {
   }
 }
 
+/**
+ * A script only links reach resolves its relative paths against the path the engine loads it by.
+ * Moved, `preload("h.gd")` names a path the walk reaches, not one under the `.gdignore`.
+ */
+function testAMovedScriptKeepsItsRelativePathsOnAWalkedRoute(): void {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  writeTree(project, {
+    'project.godot': '',
+    'kit/.gdignore': '',
+    'kit/sub/s.gd': 'extends Node\nconst H = preload("h.gd")\n',
+    'kit/sub/h.gd': 'extends Node\n',
+  });
+  try {
+    const made = [
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via1')),
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via2')),
+    ];
+    assert.ok(!made.includes(false), 'the platform makes a link to a folder');
+    const outcome = planFileMove(project, join(project, 'via2', 's.gd'), join(project, 'gear.gd'));
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const after = outcome.moved.find((file) => file.from === 'res://kit/sub/s.gd')?.text?.after ?? '';
+    assert.match(after, /preload\("via[12]\/h\.gd"\)/, after);
+    assert.ok(!after.includes('kit/'), `no path under the .gdignore: ${after}`);
+  } finally {
+    sweep(root);
+  }
+}
+
 /** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
 function projectWithTwoPaths(): { root: string; project: string } {
   const root = tmpDir();
@@ -96015,6 +96044,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveFollowsEveryPathItsFileIsReachedBy,
   testAMovedBinaryIsNamedByEveryPathItIsReachedBy,
   testALinkInsideAMovedFolderMovesWithIt,
+  testAMovedScriptKeepsItsRelativePathsOnAWalkedRoute,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,

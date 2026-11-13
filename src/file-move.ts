@@ -362,15 +362,13 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: collision };
   }
 
-  const scanned = scanProject(projectPath);
-  const texts = scanned.texts.map((file) =>
-    file.realPath !== undefined && moves.has(file.realPath) && !moves.has(file.path)
-      ? { ...file, path: file.realPath }
-      : file,
-  );
+  const { texts, reach } = scanProject(projectPath);
   const scripts = scriptsOf(texts);
-  // The files that move on disk stay those of `moves`.
-  const references = referencesOf(scanned.reach, moves, isDirectory ? { from, to } : null);
+  // The files that move on disk stay those of `moves`. A text keeps the path the walk reached it by,
+  // which the engine resolves its relative paths against, and `references` says where it goes.
+  const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
+  const placeOf = new Map(texts.map((file) => [file.path, file.realPath ?? file.path]));
+  const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);
   let plan = planMove(
     {
       texts,
@@ -383,7 +381,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   );
   plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from], linksOut(projectPath));
   const binaries = binaryMentions(projectPath, references);
-  const afterwards = (path: string): string => moves.get(path) ?? path;
+  const afterwards = (path: string): string => references.get(path) ?? path;
   const rewrites = rewritesOf(plan, texts, null);
   // A rewrite is written as UTF-8 text, so a file holding any other byte would lose it silently.
   for (const rewrite of rewrites) {
@@ -405,7 +403,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     [from, ...moves.keys()].flatMap((path) => [path, path.replace(/^res:\/\//, '')]),
   );
   const absoluteOf = (path: string): string => join(projectPath, path.slice('res://'.length));
-  const rewritten = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite]));
+  const rewritten = new Map(rewrites.map((rewrite) => [placeOf.get(rewrite.path) ?? rewrite.path, rewrite]));
   const moved: MovedFile[] = [...moves].map(([source, target]) => {
     const rewrite = rewritten.get(source);
     return {
@@ -416,7 +414,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       text: rewrite === undefined ? null : { before: rewrite.before, after: rewrite.after },
     };
   });
-  const inPlace = rewrites.filter((rewrite) => !moves.has(rewrite.path));
+  const inPlace = rewrites.filter((rewrite) => !movesText(rewrite.path));
 
   const graph = new ClassGraph(scripts, declaredIn(scripts));
   const scriptsInOrder = rewrites
