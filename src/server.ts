@@ -264,6 +264,7 @@ import {
 import { ensureProcessTable } from './process-table.js';
 import {
   folderFiles,
+  linksOut,
   pathsInUidCache,
   projectFiles,
   projectStructure,
@@ -438,6 +439,17 @@ const TYPE_ARGUMENTS: Readonly<Record<string, string>> = {
   create_resource: 'resourceType',
   create_scene: 'rootNodeType',
 };
+
+/**
+ * The editor commands that follow a node into the scenes naming it, which are handed the project's
+ * links out as `linksOut`. The addon cannot tell a link from a folder, and writes nothing behind one.
+ */
+const LINKS_OUT_COMMANDS: ReadonlySet<string> = new Set([
+  'delete_node',
+  'reparent_node',
+  'set_node_properties',
+  'save_branch',
+]);
 
 /**
  * How many answers pass between one update notice and the next.
@@ -18953,6 +18965,9 @@ class GodotServer {
       return project.response;
     }
     const projectPath = project.value.path;
+    const asked: OperationParams = LINKS_OUT_COMMANDS.has(command)
+      ? { ...contained.value, linksOut: linksOut(projectPath) }
+      : contained.value;
     const typeArgument = TYPE_ARGUMENTS[command];
     const typeName = typeArgument === undefined ? '' : (readString(contained.value, typeArgument) ?? '');
     const waited = await this.waitForTheEditorOpenedHere(contained.value, []);
@@ -18960,7 +18975,7 @@ class GodotServer {
       return await this.editorToolThroughTheEditor(
         projectPath,
         { command, askedAs, effect, typeName },
-        contained.value,
+        asked,
       );
     }
     if (effect === 'writes') {
@@ -18970,12 +18985,7 @@ class GodotServer {
       }
     }
     const run = async (): Promise<ToolResponse> =>
-      await this.runEditorToolHeadless(
-        projectPath,
-        { command, arguments: contained.value },
-        effect,
-        typeName,
-      );
+      await this.runEditorToolHeadless(projectPath, { command, arguments: asked }, effect, typeName);
     const written =
       readNonEmptyString(contained.value, 'scenePath') ?? readNonEmptyString(contained.value, 'resourcePath');
     const target =
