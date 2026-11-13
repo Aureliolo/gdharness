@@ -10,7 +10,6 @@
 
 import { jest } from 'bun:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -57,6 +56,7 @@ import {
 import { discardUsing } from '../src/scratch.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { ADDONS, installAddons, installedEditorDigest, installedRuntimeDigest } from '../src/setup.js';
+import { spawnHidden } from '../src/spawn.js';
 import {
   type CasesBySuite,
   type DeclaredSuite,
@@ -1713,7 +1713,7 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
             for (let file = 0; file < files; file += 1) {
               writeFileSync(join(folder, `${String(file)}.bin`), 'x'.repeat(100));
             }
-            const run = spawn(
+            const run = spawnHidden(
               process.execPath,
               [child, join(root, `user-${String(index)}`), project, process.execPath, home, start],
               { stdio: 'ignore' },
