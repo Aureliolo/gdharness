@@ -2139,6 +2139,36 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
   );
 }
 
+/**
+ * An error of two lines printed every frame beside a print on stdout folds at the same cost each
+ * frame: 20,000 frames take about 0.15 s, where a fold that scans the whole log took 11 s. The
+ * bound is checked as the frames go, so a slow fold fails after seconds and not minutes.
+ */
+function aFoldedErrorCostsTheSameAtEveryFrame(): void {
+  const frames = 20_000;
+  const bound = 4000;
+  const log = new GameLog();
+  const began = performance.now();
+  for (let frame = 0; frame < frames; frame += 1) {
+    log.append('stdout', `frame ${String(frame)}\n`);
+    log.append(
+      'stderr',
+      `ERROR: bad value\nsecond line ${String(frame)}\n   at: push_error (core/variant/variant_utility.cpp:1024)\n`,
+    );
+    if (frame % 1000 === 999) {
+      assert.ok(
+        performance.now() - began < bound,
+        `${String(frame + 1)} frames took over ${String(bound)} ms`,
+      );
+    }
+  }
+  assert.equal(log.all.length, 2 * frames);
+  assert.deepEqual(log.all.at(-1)?.detail, [
+    `second line ${String(frames - 1)}`,
+    'at: push_error (core/variant/variant_utility.cpp:1024)',
+  ]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The debugger stream
 // ---------------------------------------------------------------------------------------------
@@ -2285,6 +2315,7 @@ await exactlyOneTakerHoldsAStaleLock();
 aFailedInstallLeavesTheProjectAsItWas();
 theRetryScheduleHoldsWhateverFails();
 aGameLogReadsTheSameWhenInterleavedAndRead();
+aFoldedErrorCostsTheSameAtEveryFrame();
 theDebuggerStreamIsCutProof();
 
 console.log('fuzz properties held');

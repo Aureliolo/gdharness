@@ -564,7 +564,7 @@ export class GameLog {
 
   /** Moves the lines that followed [param owner]'s headline, now known to be its message, into its detail. */
   private takeLooseLines(owner: Headed): void {
-    const taken = owner.loose.filter((entry) => this.entries.includes(entry));
+    const taken = owner.loose.filter((entry) => this.entries[entry.index] === entry);
     owner.loose = [];
     if (taken.length === 0) {
       return;
@@ -576,21 +576,21 @@ export class GameLog {
   /**
    * Takes [param gone] out of the entries, wherever other streams and the debugger have put entries
    * between them, and renumbers what follows: an index is a position, and the script-error set, each
-   * stream's last headline and the read marks all count positions.
+   * stream's last headline and the read marks all count positions. Only what follows the first
+   * removed entry moves, which is nothing but the removed lines when they are the newest, as they
+   * are unless another stream has printed since. A run of per-frame errors costs the same each frame.
    */
   private removeEntries(gone: readonly LogEntry[]): void {
     const dropped = new Set(gone.map((entry) => entry.index));
-    const shifted = (position: number): number => {
-      let before = 0;
-      for (const index of dropped) {
-        before += index < position ? 1 : 0;
-      }
-      return position - before;
-    };
-    const scripts = [...this.byScript].filter((index) => !dropped.has(index)).map(shifted);
-    this.byScript.clear();
-    for (const index of scripts) {
-      this.byScript.add(index);
+    const first = Math.min(...dropped);
+    const before = [...dropped].toSorted((a, b) => a - b);
+    const shifted = (position: number): number =>
+      position - before.filter((index) => index < position).length;
+    const moved = this.entries.splice(first);
+    const kept = moved.filter((entry) => !dropped.has(entry.index));
+    const scripts = kept.filter((entry) => this.byScript.has(entry.index));
+    for (const entry of moved) {
+      this.byScript.delete(entry.index);
     }
     for (const source of STREAMS) {
       const headline = this.lastHeadline[source];
@@ -601,11 +601,12 @@ export class GameLog {
     for (const severity of SEVERITIES) {
       this.seen[severity] = shifted(this.seen[severity]);
     }
-    const kept = this.entries.filter((entry) => !dropped.has(entry.index));
-    this.entries.length = 0;
-    for (const [at, entry] of kept.entries()) {
-      entry.index = at;
+    for (const entry of kept) {
+      entry.index = this.entries.length;
       this.entries.push(entry);
+    }
+    for (const entry of scripts) {
+      this.byScript.add(entry.index);
     }
   }
 
