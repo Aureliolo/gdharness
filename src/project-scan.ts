@@ -3,17 +3,20 @@
  * kinds of file it holds, and where a piece of text occurs.
  */
 
-import { type Dirent, existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
+import { type LeftOut, leftOutAt, leftOutsOnPath, VERSION_MARKER, walkProject } from './project-walk.js';
 import { uidCacheEntries } from './uid-cache.js';
+
+export { VERSION_MARKER };
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
 const SKIPPED = new Set(['node_modules']);
 
-/** Whether this entry is one both walks here step over, so that they cannot disagree. */
+/** Whether the text readers step over this entry. */
 function skipped(name: string): boolean {
   return name.startsWith('.') || SKIPPED.has(name);
 }
@@ -22,9 +25,6 @@ function skipped(name: string): boolean {
 function extensionOf(name: string): string {
   return extname(name).slice(1).toLowerCase();
 }
-
-/** Written into each addon gdharness installs, so it can be told from one the project wrote. */
-export const VERSION_MARKER = '.gdharness-version';
 
 /**
  * A directory holding a `.gdignore` is stepped over, because the engine steps over it.
@@ -115,34 +115,17 @@ function kindOfFile(extension: string): keyof ProjectStructure | null {
   return ASSET_EXTENSIONS.has(extension) ? 'assets' : 'other';
 }
 
-function countFilesIn(structure: ProjectStructure, directory: string): void {
-  if (steppedOver(directory)) {
-    return;
-  }
-  for (const entry of entriesOf(directory)) {
-    if (skipped(entry.name)) {
-      continue;
-    }
-    if (entry.isDirectory()) {
-      countFilesIn(structure, join(directory, entry.name));
-    } else if (entry.isFile()) {
-      const kind = kindOfFile(extensionOf(entry.name));
+export function projectStructure(projectPath: string): ProjectStructure {
+  const structure: ProjectStructure = { scenes: 0, scripts: 0, assets: 0, other: 0 };
+  for (const folder of walkProject(projectPath, { inside: projectPath }).folders) {
+    for (const file of folder.files) {
+      const kind = file.twin ? null : kindOfFile(extensionOf(file.name));
       if (kind !== null) {
         structure[kind] += 1;
       }
     }
   }
-}
-
-export function projectStructure(projectPath: string): ProjectStructure {
-  const structure: ProjectStructure = { scenes: 0, scripts: 0, assets: 0, other: 0 };
-  countFilesIn(structure, projectPath);
   return structure;
-}
-
-/** The path of [param name] under [param prefix], a folder spelled with forward slashes or empty. */
-function spelledUnder(prefix: string, name: string): string {
-  return prefix === '' ? name : `${prefix}/${name}`;
 }
 
 /**
@@ -150,7 +133,35 @@ function spelledUnder(prefix: string, name: string): string {
  * project-relative with forward slashes and sorted. The walk steps over what the engine steps over.
  */
 export function projectFiles(projectPath: string, extensions: readonly string[]): string[] {
-  return filesBelow(projectPath, extensions);
+  return filesIn(walkProject(projectPath, { inside: projectPath }), (name) =>
+    extensions.includes(extname(name).toLowerCase()),
+  );
+}
+
+/** The sorted paths, relative to the walk's start, of the files [param wanted] takes that no twin stands for. */
+function filesIn(walk: ReturnType<typeof walkProject>, wanted: (name: string) => boolean): string[] {
+  const found: string[] = [];
+  for (const folder of walk.folders) {
+    for (const file of folder.files) {
+      if (!file.twin && wanted(file.name)) {
+        found.push(folder.folder === '' ? file.name : `${folder.folder}/${file.name}`);
+      }
+    }
+  }
+  return found.toSorted();
+}
+
+/**
+ * The folder [param directory] itself, when the scan leaves it out as holding a `.gdignore` or a
+ * project of its own. What lies above it does not matter: naming a folder asks for it.
+ */
+function leftOutItself(projectPath: string, directory: string): LeftOut | null {
+  const inside = relativeWithin(projectPath, directory);
+  if (inside === null || inside === '') {
+    return null;
+  }
+  const own = leftOutsOnPath(projectPath, inside).find((left) => left.folder === inside);
+  return own === undefined || own.why === 'gdharness' ? null : own;
 }
 
 /**
@@ -160,8 +171,13 @@ export function projectFiles(projectPath: string, extensions: readonly string[])
  * of its own here took in gdharness's addons, so a project's diagnostics checked fifty-five of
  * them beside its three scripts while every other answer called the three the project's.
  */
-export function folderFiles(directory: string, extensions: readonly string[]): string[] {
-  return gdignored(directory) ? [] : filesBelow(directory, extensions);
+export function folderFiles(projectPath: string, directory: string, extensions: readonly string[]): string[] {
+  if (leftOutItself(projectPath, directory) !== null) {
+    return [];
+  }
+  return filesIn(walkProject(directory, { inside: projectPath }), (name) =>
+    extensions.includes(extname(name).toLowerCase()),
+  );
 }
 
 /**
@@ -169,20 +185,8 @@ export function folderFiles(directory: string, extensions: readonly string[]): s
  * `.gdignore`, which the engine never loads anything from.
  */
 export function underGdignore(projectPath: string, relativePath: string): boolean {
-  const folders = relativePath.split('/').slice(0, -1);
-  for (let depth = 1; depth <= folders.length; depth += 1) {
-    if (gdignored(join(projectPath, ...folders.slice(0, depth)))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** A folder [method folderFiles] steps over, and why. */
-export interface SteppedOver {
-  /** Relative to the folder walked, with forward slashes. Empty for that folder itself. */
-  readonly folder: string;
-  readonly why: 'gdignore' | 'gdharness';
+  const folders = relativePath.split('/').slice(0, -1).join('/');
+  return leftOutAt(projectPath, folders)?.why === 'gdignore';
 }
 
 /**
@@ -190,63 +194,15 @@ export interface SteppedOver {
  * no script it walks can say where its scripts are. `addons` holding only gdharness's addons was
  * answered as holding no .gd script, beside the seventy-three that naming each addon found.
  */
-export function steppedOverIn(directory: string): SteppedOver[] {
-  if (gdignored(directory)) {
-    return [{ folder: '', why: 'gdignore' }];
+export function steppedOverIn(projectPath: string, directory: string): LeftOut[] {
+  const itself = leftOutItself(projectPath, directory);
+  if (itself !== null) {
+    return [{ folder: '', why: itself.why }];
   }
-  const found: SteppedOver[] = [];
-  const visit = (at: string, prefix: string): void => {
-    for (const entry of entriesOf(at)) {
-      if (!entry.isDirectory() || skipped(entry.name)) {
-        continue;
-      }
-      const spelled = spelledUnder(prefix, entry.name);
-      const path = join(at, entry.name);
-      const why = whySteppedOver(path);
-      if (why === null) {
-        visit(path, spelled);
-      } else {
-        found.push({ folder: spelled, why });
-      }
-    }
-  };
-  visit(directory, '');
-  return found.toSorted((a, b) => a.folder.localeCompare(b.folder));
-}
-
-/** Why [method steppedOverIn] steps over [param directory], or null when it walks it. */
-function whySteppedOver(directory: string): SteppedOver['why'] | null {
-  if (gdignored(directory)) {
-    return 'gdignore';
-  }
-  return installedByUs(directory) ? 'gdharness' : null;
-}
-
-/** Whether [param entry] is a file with one of [param extensions] (with the dot, lower case). */
-function isWantedFile(entry: Dirent, extensions: readonly string[]): boolean {
-  return entry.isFile() && extensions.includes(extname(entry.name).toLowerCase());
-}
-
-function filesBelow(root: string, extensions: readonly string[]): string[] {
-  const found: string[] = [];
-  const visit = (directory: string, prefix: string): void => {
-    for (const entry of entriesOf(directory)) {
-      if (skipped(entry.name)) {
-        continue;
-      }
-      const spelled = spelledUnder(prefix, entry.name);
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!steppedOver(path)) {
-          visit(path, spelled);
-        }
-      } else if (isWantedFile(entry, extensions)) {
-        found.push(spelled);
-      }
-    }
-  };
-  visit(root, '');
-  return found.toSorted();
+  const walk = walkProject(directory, { inside: projectPath });
+  // The left-out folders are whole once the walk has been read to its end.
+  Array.from(walk.folders);
+  return walk.leftOut.toSorted((a, b) => a.folder.localeCompare(b.folder));
 }
 
 /** The extensions Godot mints a `.uid` sidecar for. */
@@ -262,27 +218,17 @@ const CARRIES_A_UID = new Set(['gd', 'shader', 'gdshader']);
  */
 export function scriptsWithoutUid(projectPath: string): string[] {
   const found: string[] = [];
-  const lacksItsUid = (directory: string, entry: Dirent): boolean =>
-    entry.isFile() &&
-    CARRIES_A_UID.has(extensionOf(entry.name)) &&
-    !existsSync(join(directory, `${entry.name}.uid`));
-  const visit = (directory: string, prefix: string): void => {
-    if (steppedOver(directory)) {
-      return;
-    }
-    for (const entry of entriesOf(directory)) {
-      if (skipped(entry.name)) {
-        continue;
-      }
-      const spelled = spelledUnder(prefix, entry.name);
-      if (entry.isDirectory()) {
-        visit(join(directory, entry.name), spelled);
-      } else if (lacksItsUid(directory, entry)) {
-        found.push(spelled);
+  for (const folder of walkProject(projectPath, { inside: projectPath }).folders) {
+    for (const file of folder.files) {
+      if (
+        !file.twin &&
+        CARRIES_A_UID.has(extensionOf(file.name)) &&
+        !existsSync(join(folder.path, `${file.name}.uid`))
+      ) {
+        found.push(folder.folder === '' ? file.name : `${folder.folder}/${file.name}`);
       }
     }
-  };
-  visit(projectPath, '');
+  }
   return found.toSorted();
 }
 
@@ -372,30 +318,37 @@ export interface SearchResult {
  */
 function steppedOverAround(projectPath: string, place: string): { folder: string; why: string } | null {
   let at = projectPath;
-  for (const step of relative(projectPath, place)
+  const steps = relative(projectPath, place)
     .split(sep)
-    .filter((part) => part !== '')) {
+    .filter((part) => part !== '');
+  for (const [index, step] of steps.entries()) {
     at = join(at, step);
     if (!statSync(at).isDirectory()) {
       break;
     }
-    const why = whyAWholeSearchSkips(step, at);
-    if (why !== null) {
-      return { folder: `res://${relative(projectPath, at).split(sep).join('/')}/`, why };
+    const folder = steps.slice(0, index + 1).join('/');
+    if (step.startsWith('.')) {
+      return { folder: `res://${folder}/`, why: 'its name starts with a dot' };
+    }
+    const left = leftOutAt(projectPath, folder);
+    if (left !== null) {
+      return { folder: `res://${left.folder}/`, why: whyAWholeSearchSkips(left.why) };
     }
   }
   return null;
 }
 
-/** Why a whole-project search steps over the folder [param at], named [param step], or null. */
-function whyAWholeSearchSkips(step: string, at: string): string | null {
-  if (skipped(step)) {
-    return step.startsWith('.') ? 'its name starts with a dot' : `it is ${step}`;
-  }
-  if (gdignored(at)) {
-    return 'it holds a .gdignore';
-  }
-  return installedByUs(at) ? 'gdharness installed it' : null;
+/** Why a whole-project search steps over a folder the scan leaves out for [param why]. */
+const SEARCH_SKIPS: Readonly<Record<LeftOut['why'], string>> = {
+  gdignore: 'it holds a .gdignore',
+  project: 'it holds a project.godot of its own, which makes it another project',
+  gdharness: 'gdharness installed it',
+  link: 'it is a link back up the tree or to nothing',
+  outside: 'it is a link out of the project',
+};
+
+function whyAWholeSearchSkips(why: LeftOut['why']): string {
+  return SEARCH_SKIPS[why];
 }
 
 /** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
@@ -605,6 +558,7 @@ interface SearchRun {
    * empty search, it read as a project where nothing held the query.
    */
   readonly met: Set<string>;
+  readonly projectPath: string;
   readonly within: string;
   /** Everything the walk meets is below where it starts, so only the start is measured against the project. */
   readonly start: string[];
@@ -672,24 +626,23 @@ function searchFile(run: SearchRun, entryPath: string, name: string): void {
   }
 }
 
-function searchDirectory(run: SearchRun, directory: string, named = false): void {
-  if (!named && steppedOver(directory)) {
-    if (gdignored(directory)) {
-      run.notSearched.push(`res://${resPathOf(run, directory)}/`);
+/**
+ * Searches the folder the walk starts in, in the editor's order so that the matches a search cut at
+ * its limit shows are the same on every file system. A folder left out is named, except gdharness's
+ * addons, which are no part of the project.
+ */
+function searchDirectory(run: SearchRun, directory: string): void {
+  const walk = walkProject(directory, { inside: run.projectPath });
+  for (const folder of walk.folders) {
+    for (const file of folder.files) {
+      if (!file.twin) {
+        searchFile(run, join(folder.path, file.name), file.name);
+      }
     }
-    return;
   }
-  // By name, so the matches a search cut at its limit shows are the same on every file system
-  // rather than whichever the directory lists first.
-  for (const entry of entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (skipped(entry.name)) {
-      continue;
-    }
-    const entryPath = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      searchDirectory(run, entryPath);
-    } else if (entry.isFile()) {
-      searchFile(run, entryPath, entry.name);
+  for (const left of walk.leftOut) {
+    if (left.why !== 'gdharness') {
+      run.notSearched.push(`res://${resPathOf(run, join(directory, left.folder))}/`);
     }
   }
 }
@@ -724,6 +677,7 @@ function startSearch(projectPath: string, options: SearchOptions): SearchRun {
     shown: 0,
     notSearched: [],
     met: new Set(),
+    projectPath,
     within,
     start,
   };
@@ -749,7 +703,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   const run = startSearch(projectPath, options);
   const { within, result } = run;
   if (statSync(within).isDirectory()) {
-    searchDirectory(run, within, true);
+    searchDirectory(run, within);
   } else {
     searchFile(run, within, basename(within));
   }

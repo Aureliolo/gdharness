@@ -380,7 +380,9 @@ import {
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
 import {
+  folderFiles,
   ignoredTexts,
+  projectFiles,
   projectStructure,
   projectTexts,
   type SearchOptions,
@@ -388,8 +390,17 @@ import {
   SHOWN_OF_A_LINE,
   scriptsWithoutUid,
   searchProject,
+  steppedOverIn,
   VERSION_MARKER,
 } from '../src/project-scan.js';
+import {
+  type LeftOut,
+  leftOutAt,
+  type WalkedFile,
+  type WalkedFolder,
+  type WalkOptions,
+  walkProject,
+} from '../src/project-walk.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
 import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
@@ -13405,7 +13416,7 @@ function testASearchReadsWhatItSaysItReads(): void {
     writeFileSync(join(sandbox, 'Zed.txt'), 'cutword\n');
     assert.deepEqual(
       search('cutword', { maxResults: 1 }).results.map((entry) => entry.file),
-      ['res://Zed.txt'],
+      ['res://alpha.txt'],
       'a cut search shows the same file on every file system',
     );
   } finally {
@@ -93579,8 +93590,267 @@ function testAnUpgradeRestartsOnlyAnEditorThatIsOpen(): void {
   );
 }
 
+function walkSandbox(): string {
+  return mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-walk-'));
+}
+
+interface ReadWalk {
+  folders: WalkedFolder[];
+  files: (WalkedFile & { path: string })[];
+  scripts: string[];
+  leftOut: LeftOut[];
+}
+
+function readWalk(start: string, options: WalkOptions = {}): ReadWalk {
+  const walk = walkProject(start, options);
+  const folders = [...walk.folders];
+  const files = folders.flatMap((from) => {
+    const prefix = from.folder === '' ? '' : `${from.folder}/`;
+    return from.files.map((file) => ({ ...file, path: `${prefix}${file.name}` }));
+  });
+  const scripts = files.map((file) => file.path).filter((path) => path.endsWith('.gd'));
+  const leftOut = walk.leftOut.toSorted((a, b) => a.folder.localeCompare(b.folder));
+  return { folders, files, scripts, leftOut };
+}
+
+function linkTo(target: string, path: string, kind: 'junction' | 'file' = 'junction'): boolean {
+  try {
+    symlinkSync(target, path, kind);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function testOneWalkStepsOverWhatTheEngineDoes(): void {
+  const project = walkSandbox();
+  const gd = '';
+  try {
+    const addon = 'addons/gdharness_editor';
+    writeTree(project, { 'project.godot': '', 'a.gd': gd, '.hidden/h.gd': gd, '.godot/g.gd': gd });
+    writeTree(project, { 'kit/.gdignore': '', 'kit/k.gd': gd, 'demo/project.godot': '', 'demo/d.gd': gd });
+    writeTree(project, { [`${addon}/.gdharness-version`]: '', [`${addon}/e.gd`]: gd });
+    const ours = { folder: addon, why: 'gdharness' };
+    const nested = { folder: 'demo', why: 'project' };
+    const ignored = { folder: 'kit', why: 'gdignore' };
+    assert.deepEqual(readWalk(project).scripts, ['a.gd']);
+    assert.deepEqual(readWalk(project).leftOut, [ours, nested, ignored]);
+    assert.deepEqual(readWalk(project, { withOurs: true }).scripts.toSorted(), ['a.gd', `${addon}/e.gd`]);
+    const demo = join(project, 'demo');
+    assert.deepEqual(readWalk(demo).scripts, ['d.gd']);
+    const named = (directory: string): string[] => folderFiles(project, directory, ['.gd']);
+    assert.deepEqual([named(demo), named(join(project, 'kit')), named(project)], [[], [], ['a.gd']]);
+    assert.deepEqual(steppedOverIn(project, demo), [{ folder: '', why: 'project' }]);
+    assert.deepEqual(steppedOverIn(project, project), [ours, nested, ignored]);
+    assert.deepEqual(leftOutAt(project, 'demo/sub/x.gd'), nested);
+    assert.deepEqual(leftOutAt(project, 'kit/k.gd'), ignored);
+    assert.equal(leftOutAt(project, ''), null);
+
+    writeTree(project, { 'fake/f.gd': gd, 'fake/project.godot/x': '' });
+    writeTree(project, { 'odd/o.gd': gd, 'odd/.gdignore/x': '' });
+    const marked = readWalk(project);
+    assert.deepEqual(
+      marked.scripts.filter((name) => /^(fake|odd)/.test(name)),
+      ['fake/f.gd', 'odd/o.gd'],
+    );
+    assert.deepEqual([marked.leftOut, leftOutAt(project, 'odd/o.gd')], [[ours, nested, ignored], null]);
+
+    writeTree(project, { 'node_modules/pkg/m.gd': gd, 'godot/x.gd': gd });
+    assert.ok(projectFiles(project, ['.gd']).includes('node_modules/pkg/m.gd'));
+    assert.ok(readWalk(project).scripts.includes('godot/x.gd'));
+    const hidden = '[application]\n\nconfig/use_hidden_project_data_directory=false\n';
+    writeTree(project, { 'project.godot': hidden });
+    const visible = readWalk(project);
+    assert.deepEqual(
+      [visible.scripts.includes('godot/x.gd'), visible.leftOut.some((left) => left.folder === 'godot')],
+      [false, false],
+    );
+
+    writeTree(project, { 'folders/Zeta/z.gd': gd, 'folders/alpha/a.gd': gd, 'folders/b.gd': gd });
+    const forward = readWalk(project);
+    const backward = readWalk(project, { reversed: true });
+    const under = (read: ReadWalk): string[] =>
+      read.folders.map((folder) => folder.folder).filter((folder) => folder.startsWith('folders'));
+    assert.deepEqual(under(forward), ['folders/alpha', 'folders/Zeta', 'folders']);
+    assert.deepEqual(under(backward), ['folders', 'folders/Zeta', 'folders/alpha']);
+    assert.deepEqual(
+      backward.files.map((file) => file.path),
+      forward.files.map((file) => file.path).toReversed(),
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+function testASearchCutAtItsLimitFollowsTheScanOrder(): void {
+  withANestedOne({ 'a.gd': '#x', 'z/y.gd': '#x' }, (project) => {
+    const found = searchProject(project, { query: 'x', regex: false, caseSensitive: false, maxResults: 1 });
+    const { total_matches: total, truncated } = found.summary;
+    assert.deepEqual(
+      [found.results.map((entry) => entry.file), total, truncated],
+      [['res://z/y.gd'], 2, true],
+    );
+  });
+}
+
+function testAWalkFollowsLinksAndMarksTheOnesThatLeave(): void {
+  const base = walkSandbox();
+  const project = join(base, 'project');
+  const outside = join(base, 'outside');
+  const p = (...steps: string[]): string => join(project, ...steps);
+  const gd = '# needle\n';
+  try {
+    writeTree(project, { 'project.godot': '', 'real/r.gd': gd, 'sub/keep.txt': '' });
+    writeTree(outside, { 'o.gd': '# outsider\n' });
+    linkTo(p('real'), p('link'));
+    const walked = readWalk(project);
+    const at = (read: ReadWalk, path: string): ReadWalk['files'][number] | undefined =>
+      read.files.find((file) => file.path === path);
+    const via = at(walked, 'link/r.gd');
+    const direct = at(walked, 'real/r.gd');
+    assert.deepEqual(
+      [via?.twin, direct?.twin, via?.real === direct?.real, walked.leftOut],
+      [true, false, true, []],
+    );
+    assert.equal(projectStructure(project).scripts, 1);
+    const search = (query: string, more: Partial<SearchOptions> = {}): SearchResult =>
+      searchProject(project, { query, regex: false, caseSensitive: false, maxResults: 100, ...more });
+    const files = (found: SearchResult): string[] => found.results.map((entry) => entry.file);
+    assert.deepEqual(
+      [search('needle').summary.total_matches, files(search('needle'))],
+      [1, ['res://real/r.gd']],
+    );
+    assert.deepEqual(scriptsToDiagnose(project, 'res://'), { ok: true, value: ['res://real/r.gd'] });
+    assert.deepEqual(scriptsToDiagnose(project, 'res://link'), { ok: true, value: ['res://link/r.gd'] });
+    assert.deepEqual(files(search('needle', { within: p('link') })), ['res://link/r.gd']);
+
+    writeTree(project, { 'kit/.gdignore': '', 'kit/sub/s.gd': gd });
+    linkTo(p('kit', 'sub'), p('via1'));
+    linkTo(p('kit', 'sub'), p('via2'));
+    const twice = readWalk(project);
+    assert.deepEqual([at(twice, 'via1/s.gd')?.twin, at(twice, 'via2/s.gd')?.twin], [false, true]);
+
+    if (existsSync(p('REAL')) && linkTo(p('REAL'), p('Upper'))) {
+      const cased = readWalk(project);
+      assert.equal(at(cased, 'Upper/r.gd')?.real, at(cased, 'real/r.gd')?.real);
+    }
+
+    linkTo(outside, p('shared'));
+    const fileLinked = linkTo(join(outside, 'o.gd'), p('linked.gd'), 'file');
+    assert.ok(readWalk(project).scripts.includes('shared/o.gd'));
+    const held = readWalk(project, { inside: project });
+    assert.deepEqual(
+      [held.scripts.includes('shared/o.gd'), held.scripts.includes('linked.gd')],
+      [false, false],
+    );
+    const out = held.leftOut.filter((left) => left.why === 'outside').map((left) => left.folder);
+    assert.deepEqual(out, fileLinked ? ['linked.gd', 'shared'] : ['shared']);
+    const outsider = search('outsider');
+    assert.deepEqual([outsider.results, outsider.not_searched?.includes('res://shared/')], [[], true]);
+    assert.deepEqual(folderFiles(project, p('shared'), ['.gd']), []);
+    assert.deepEqual(steppedOverIn(project, p('shared')), [{ folder: '', why: 'outside' }]);
+    assert.deepEqual(readWalk(outside, { inside: project }).leftOut, [{ folder: '', why: 'outside' }]);
+
+    linkTo(p('real'), p('sub', 'l'));
+    assert.deepEqual(folderFiles(project, p('sub'), ['.gd']), ['l/r.gd']);
+
+    mkdirSync(p('tmp'));
+    linkTo(project, p('loop'));
+    linkTo(project, p('real', 'up'));
+    linkTo(p('tmp'), p('gone'));
+    rmSync(p('tmp'), { recursive: true });
+    const ended = readWalk(project, { inside: project }).leftOut.filter((left) => left.why === 'link');
+    const folders = ['gone', 'link/up', 'loop', 'real/up'];
+    assert.deepEqual(
+      ended.filter((left) => folders.includes(left.folder)),
+      folders.map((folder) => ({ folder, why: 'link' })),
+    );
+    const skipped = search('needle').not_searched ?? [];
+    assert.deepEqual(
+      folders.map((f) => skipped.includes(`res://${f}/`)),
+      [true, true, true, true],
+    );
+  } finally {
+    sweep(base);
+  }
+}
+
+function withANestedOne(files: Record<string, string>, body: (project: string) => void): void {
+  const project = walkSandbox();
+  try {
+    writeTree(project, { 'project.godot': '', 'game_copy/project.godot': '', ...files });
+    body(project);
+  } finally {
+    sweep(project);
+  }
+}
+
+function testAFolderHoldingAProjectIsNotCounted(): void {
+  const files = {
+    'scenes/main.tscn': '',
+    'scripts/hero.gd': '',
+    'game_copy/level.tscn': '',
+    'game_copy/a.png': '',
+  };
+  withANestedOne(files, (project) => {
+    assert.deepEqual(projectStructure(project), { scenes: 1, scripts: 1, assets: 0, other: 1 });
+  });
+}
+
+function testTheFileWalksStepOverAFolderHoldingAProject(): void {
+  const files = {
+    'scripts/hero.gd': '',
+    'scripts/deep/project.godot': '',
+    'scripts/deep/h.gd': '',
+    'game_copy/o.gd': '',
+  };
+  withANestedOne(files, (project) => {
+    const scripts = join(project, 'scripts');
+    const copy = join(project, 'game_copy');
+    assert.deepEqual(projectFiles(project, ['.gd']), ['scripts/hero.gd']);
+    assert.deepEqual(folderFiles(project, scripts, ['.gd']), ['hero.gd']);
+    assert.deepEqual(folderFiles(project, project, ['.gd']), ['scripts/hero.gd']);
+    assert.deepEqual(folderFiles(project, copy, ['.gd']), []);
+    const nested = ['game_copy', 'scripts/deep'].map((folder) => ({ folder, why: 'project' }));
+    assert.deepEqual(steppedOverIn(project, project), nested);
+    assert.deepEqual(steppedOverIn(project, scripts), [{ folder: 'deep', why: 'project' }]);
+    assert.deepEqual(steppedOverIn(project, copy), [{ folder: '', why: 'project' }]);
+  });
+}
+
+function testScriptsWithoutAUidStepOverAFolderHoldingAProject(): void {
+  withANestedOne({ 'scripts/hero.gd': '', 'game_copy/other.gd': '' }, (project) => {
+    assert.deepEqual(scriptsWithoutUid(project), ['scripts/hero.gd']);
+  });
+}
+
+function testASearchStepsOverAFolderHoldingAProject(): void {
+  withANestedOne({ 'scripts/hero.gd': '#find', 'game_copy/other.gd': '#find' }, (project) => {
+    const options = { query: 'find', regex: false, caseSensitive: false, maxResults: 100 };
+    const found = searchProject(project, options);
+    const named = searchProject(project, { ...options, within: join(project, 'game_copy') });
+    assert.deepEqual(
+      [found.results.map((entry) => entry.file), found.not_searched, found.summary.files_searched],
+      [['res://scripts/hero.gd'], ['res://game_copy/'], 2],
+    );
+    assert.deepEqual(
+      named.results.map((entry) => entry.file),
+      ['res://game_copy/other.gd'],
+    );
+    assert.ok(named.note?.startsWith('res://game_copy/ is searched because path names it.'));
+    assert.ok(named.note?.endsWith('it holds a project.godot of its own, which makes it another project.'));
+  });
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testRegressionPartsCoverEveryTestOnceAndBalance,
+  testOneWalkStepsOverWhatTheEngineDoes,
+  testASearchCutAtItsLimitFollowsTheScanOrder,
+  testAWalkFollowsLinksAndMarksTheOnesThatLeave,
+  testAFolderHoldingAProjectIsNotCounted,
+  testTheFileWalksStepOverAFolderHoldingAProject,
+  testScriptsWithoutAUidStepOverAFolderHoldingAProject,
+  testASearchStepsOverAFolderHoldingAProject,
   testAnUpgradeRestartsOnlyAnEditorThatIsOpen,
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,

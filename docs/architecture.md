@@ -1638,12 +1638,16 @@ and the scene's own `uid=`. That would delete the very references the op exists 
 
 ## What a project walk skips
 
-Every walk over a project directory stops at the same three things. That holds whether the engine
+Every walk over a project directory stops at the same four things. That holds whether the engine
 walks or the server reads the directory itself.
 
 - A name starting with a dot.
-- `node_modules`.
+- The project data folder, which is `godot` where `project.godot` turns the hidden folder off.
 - A directory holding a `.gdignore`.
+- A directory holding a `project.godot` of its own.
+
+A link is followed, but gdharness's own readers enter none that leads out of the project. The
+server's walks go through `walkProject`, which names each folder it left out.
 
 That is what the engine steps over. So nothing under one is imported. What is in there is not a
 resource, a dependency, a global class or a search result.

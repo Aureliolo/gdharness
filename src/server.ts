@@ -267,12 +267,12 @@ import {
   pathsInUidCache,
   projectFiles,
   projectStructure,
-  type SteppedOver,
   scriptsWithoutUid,
   searchProject,
   steppedOverIn,
   underGdignore,
 } from './project-scan.js';
+import type { LeftOut } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
@@ -4211,13 +4211,13 @@ function scriptsNamedBy(
   if (!isDirectory(location.absolutePath)) {
     return { ok: true, scripts: [`res://${fromRoot}`], empty: [] };
   }
-  const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
+  const inside = folderFiles(projectPath, location.absolutePath, ['.gd']).map((script) =>
     fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
   );
   return {
     ok: true,
     scripts: inside,
-    empty: inside.length === 0 ? [noScriptUnder(entry, location.absolutePath, fromRoot)] : [],
+    empty: inside.length === 0 ? [noScriptUnder(projectPath, entry, location.absolutePath, fromRoot)] : [],
   };
 }
 
@@ -4273,14 +4273,20 @@ function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): 
 }
 
 /** Why a folder named gave no script, with each folder below it that the walk stepped over. */
-function noScriptUnder(entry: string, absolute: string, fromRoot: string): string {
-  const said = (stepped: SteppedOver): string => {
+function noScriptUnder(projectPath: string, entry: string, absolute: string, fromRoot: string): string {
+  const said = (stepped: LeftOut): string => {
     const folder = [fromRoot, stepped.folder].filter((step) => step !== '').join('/') || entry;
-    return stepped.why === 'gdharness'
-      ? `${folder} is an addon gdharness installed, whose scripts are checked when it is named`
-      : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
+    const checkedWhenNamed = 'and a script there is checked when the script is named';
+    const reasons: Record<LeftOut['why'], string> = {
+      gdharness: `is an addon gdharness installed, whose scripts are checked when it is named`,
+      project: `holds a project.godot of its own, so the engine never loads what is under it as part of this project, ${checkedWhenNamed}`,
+      link: 'is a link back up the tree or to nothing, which the walk does not enter',
+      outside: 'is a link out of the project, which the walk does not enter',
+      gdignore: `holds a .gdignore, so the engine never loads what is under it, ${checkedWhenNamed}`,
+    };
+    return `${folder} ${reasons[stepped.why]}`;
   };
-  const stepped = steppedOverIn(absolute);
+  const stepped = steppedOverIn(projectPath, absolute);
   return stepped.length === 0
     ? `No .gd script is under ${entry}.`
     : `No .gd script is under ${entry} that a folder walk takes in: ${stepped.map(said).join('; ')}.`;
@@ -8559,8 +8565,8 @@ class GodotServer {
     if (place !== null && !existsSync(place.absolutePath)) {
       return this.createErrorResponse(nothingToSearchAt(project.value.path, place.relativePath));
     }
-    // The walk steps over links, but the place asked for is opened through them, so a link inside
-    // the project naming a folder outside it would be searched whole.
+    // The search reads nothing behind a link out of the project, but the place asked for is opened through one,
+    // so a link inside the project naming a folder outside it would be searched whole.
     if (
       place !== null &&
       !isWithinRoot(realpathSync.native(project.value.path), realpathSync.native(place.absolutePath))
