@@ -187,7 +187,9 @@ interface Planned {
 }
 
 /** The refusal for a request that cannot be a rename, or where the declaring script is and where it moves. */
-function checkedRename(request: RenameRequest): Refused | { declaringPath: string; moveTo: string | null } {
+function checkedRename(
+  request: RenameRequest,
+): Refused | { declaringPath: string; named: string | null; moveTo: string | null } {
   const { projectPath, symbol, newName } = request;
   if (!isIdentifier(newName)) {
     return {
@@ -223,7 +225,12 @@ function checkedRename(request: RenameRequest): Refused | { declaringPath: strin
       return { ok: false, reason: `${moveTo} already exists, so the script cannot be moved there.` };
     }
   }
-  return { declaringPath, moveTo };
+  const asGiven = relativeWithin(projectPath, request.scriptPath);
+  return {
+    declaringPath,
+    named: asGiven === null || asGiven === '' ? null : `res://${asGiven}`,
+    moveTo,
+  };
 }
 
 export async function renameSymbol(request: RenameRequest, services: RenameServices): Promise<RenameOutcome> {
@@ -232,10 +239,12 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   if ('ok' in checked) {
     return checked;
   }
-  const { declaringPath, moveTo } = checked;
+  const { named, moveTo } = checked;
 
-  const texts = projectTexts(projectPath);
+  const texts = projectTexts(projectPath, named === null ? [] : [named]);
   const scripts = scriptsOf(texts);
+  const declaringText = texts.find((file) => (file.realPath ?? file.path) === checked.declaringPath);
+  const declaringPath = declaringText?.path ?? checked.declaringPath;
   const declaring = scripts.get(declaringPath);
   if (declaring === undefined) {
     return {
@@ -582,6 +591,7 @@ async function resolveMember(
     projectPath,
     scripts,
     absoluteOf: new Map(texts.map((file) => [file.path, file.absolute])),
+    keptUnder: new Map(texts.map((file) => [file.realPath ?? file.path, file.path])),
     services,
     took,
   };
@@ -664,6 +674,8 @@ interface Asking {
   readonly projectPath: string;
   readonly scripts: ReadonlyMap<string, Script>;
   readonly absoluteOf: ReadonlyMap<string, string>;
+  /** The path each text is kept under, by the real place the language server spells it with. */
+  readonly keptUnder: ReadonlyMap<string, string>;
   readonly services: RenameServices;
   readonly took: LanguageServerTook;
 }
@@ -678,7 +690,8 @@ function soleDefinition(declared: readonly Resolved[]): Resolved | undefined {
 
 /** [param located] as a place in a script of the project, or null when it is elsewhere. */
 function resolvedPlace(asking: Asking, located: Located): Resolved | null {
-  const file = resourcePathOf(asking.projectPath, located.file);
+  const real = resourcePathOf(asking.projectPath, located.file);
+  const file = real === null ? null : (asking.keptUnder.get(real) ?? null);
   const offset = file === null ? null : asking.scripts.get(file)?.lines.offsetOf(located);
   return file === null || offset === null || offset === undefined ? null : { file, offset };
 }

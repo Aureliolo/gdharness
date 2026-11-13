@@ -385,6 +385,7 @@ import {
 import {
   folderFiles,
   ignoredTexts,
+  linksOut,
   projectFiles,
   projectStructure,
   projectTexts,
@@ -94256,6 +94257,207 @@ function testTheExtensionListStepsOverAFolderHoldingAProject(): void {
   );
 }
 
+function testTheTextsStepOverAFolderHoldingAProject(): void {
+  inNested({ 'scripts/hero.gd': '', 'game_copy/copy.gd': '' }, (project) => {
+    const gd = (path: string): boolean => path.endsWith('.gd');
+    assert.deepEqual(
+      projectTexts(project)
+        .map((file) => file.path)
+        .filter(gd),
+      ['res://scripts/hero.gd'],
+    );
+    assert.deepEqual(
+      ignoredTexts(project)
+        .filter((file) => gd(file.path))
+        .map((file) => [file.path, file.why, file.folder]),
+      [['res://game_copy/copy.gd', 'project', 'res://game_copy/']],
+    );
+  });
+}
+
+const HERO = 'class_name Hero\nextends Node\n\nvar speed: int = 1\n';
+const USES_HERO = (head: string): string =>
+  `${head}extends Node\n\nvar h: Hero = Hero.new()\n\n\nfunc f() -> int:\n\treturn h.speed\n`;
+
+const KIT_HEAD = 'class_name Kit\nconst SELF := preload("res://kit/sub/s.gd")\n';
+
+/** The paths of the files a rename reported as changed. */
+function filesReported(report: Record<string, unknown>): string[] {
+  const lines = renameReadings(report).changed;
+  return [...new Set(lines.map((line) => line.slice(0, line.lastIndexOf(':'))))].toSorted();
+}
+
+/** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
+function projectWithTwoPaths(): { root: string; project: string } {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  writeTree(project, {
+    'project.godot': '',
+    'hero.gd': HERO,
+    'real/r.gd': USES_HERO(''),
+    'kit/.gdignore': '',
+    'kit/sub/s.gd': USES_HERO(KIT_HEAD),
+    'other/.gdignore': '',
+    'other/x.gd': 'extends Node\n# Hero\n',
+    'kit/deep/project.godot': '',
+    'kit/deep/d.gd': 'extends Node\n',
+  });
+  writeTree(root, { 'outside/o.gd': USES_HERO('') });
+  const made = [
+    linkTo(join(project, 'real'), join(project, 'link')),
+    linkTo(join(project, 'kit', 'sub'), join(project, 'via1')),
+    linkTo(join(project, 'kit', 'sub'), join(project, 'via2')),
+    linkTo(join(project, 'other'), join(project, 'kit', 'lnk')),
+    linkTo(join(project, 'kit'), join(project, 'other', 'back')),
+    linkTo(join(project, 'other'), join(project, 'aaa')),
+    linkTo(join(root, 'outside'), join(project, 'shared')),
+    linkTo(join(root, 'outside'), join(project, 'kit', 'far')),
+  ];
+  assert.ok(!made.includes(false), 'the platform makes a link to a folder');
+  return { root, project };
+}
+
+async function renamedIn(
+  project: string,
+  request: { script: string; symbol: string; to: string },
+  services: Pick<RenameServices, 'references' | 'definitions'> = NO_LANGUAGE_SERVER,
+): Promise<Extract<Awaited<ReturnType<typeof renameSymbol>>, { ok: true }>> {
+  const outcome = await renameSymbol(
+    {
+      projectPath: project,
+      scriptPath: request.script,
+      symbol: request.symbol,
+      newName: request.to,
+      newScriptPath: null,
+    },
+    { namesTaken: engineSaying(), ...services },
+  );
+  assert.ok(outcome.ok, `the rename of ${request.symbol} was refused: ${JSON.stringify(outcome)}`);
+  return outcome;
+}
+
+/** A language server that answers the references of `Hero.speed` with a place in each of three files. */
+function referencesToSpeed(project: string): Pick<RenameServices, 'references' | 'definitions'> {
+  const place = (file: string, source: string): { file: string; line: number; character: number } => {
+    const lines = source.split('\n');
+    const line = lines.findIndex((one) => one.includes('speed'));
+    return { file, line, character: lines[line]?.indexOf('speed') ?? 0 };
+  };
+  const answer = [
+    place(join(project, 'hero.gd'), HERO),
+    place(join(project, 'real', 'r.gd'), USES_HERO('')),
+    place(join(project, 'kit', 'sub', 's.gd'), USES_HERO(KIT_HEAD)),
+  ];
+  return {
+    references: async () => await Promise.resolve(answer),
+    definitions: async () => await Promise.resolve([]),
+  };
+}
+
+async function testAFileTwoPathsReachIsRenamedOnce(): Promise<void> {
+  const { root, project } = projectWithTwoPaths();
+  try {
+    const kitPath = (spelling: string): string => join(project, spelling, 's.gd');
+    const kitRename = async (script: string): Promise<string[]> =>
+      filesReported((await renamedIn(project, { script, symbol: 'Kit', to: 'Gear' })).report);
+
+    // A file two paths reach is one text, under the path the caller named or its own.
+    assert.deepEqual(
+      [
+        projectTexts(project).find((file) => file.path === 'res://real/r.gd')?.realPath,
+        projectTexts(project).some((file) => file.path === 'res://link/r.gd'),
+      ],
+      [undefined, false],
+      'the file under its own path, and not under the link',
+    );
+    const named = projectTexts(project, ['res://link/r.gd']);
+    assert.deepEqual(
+      [
+        named.find((file) => file.path === 'res://link/r.gd')?.realPath,
+        named.some((file) => file.path === 'res://real/r.gd'),
+      ],
+      ['res://real/r.gd', false],
+      'the file under the path named, which says where it lives',
+    );
+
+    // A file only links reach, named through one of them or by its real place.
+    assert.deepEqual(await kitRename(kitPath('via2')), ['res://via2/s.gd'], 'the path the caller gave');
+    assert.deepEqual(
+      await kitRename(join(project, 'kit', 'sub', 's.gd')),
+      ['res://via1/s.gd'],
+      'the first link path when the caller named the real one',
+    );
+    const viaOne = projectTexts(project).find((file) => file.path === 'res://via1/s.gd');
+    assert.equal(viaOne?.realPath, 'res://kit/sub/s.gd');
+    assert.ok(
+      !ignoredTexts(project).some((file) => file.path === 'res://kit/sub/s.gd'),
+      'a file the project reaches is no copy left alone',
+    );
+
+    // Where the file system ignores case, a name in another case stands for the path the walk holds.
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      assert.deepEqual(await kitRename(kitPath('Via2')), ['res://via2/s.gd']);
+      assert.ok(
+        projectTexts(project, ['res://Via2/s.gd']).some((file) => file.path === 'res://via2/s.gd'),
+        'the walk spells the path, not the caller',
+      );
+    } else {
+      console.log('skipped: this file system tells case apart, so no path in another case opens');
+    }
+
+    // A member rename, whose places the language server spells by the real path.
+    const member = await renamedIn(
+      project,
+      { script: join(project, 'hero.gd'), symbol: 'speed', to: 'pace' },
+      referencesToSpeed(project),
+    );
+    assert.deepEqual(filesReported(member.report), ['res://hero.gd', 'res://real/r.gd', 'res://via1/s.gd']);
+
+    // Nothing behind a link out is read, and the left-out copies are listed once.
+    const files = [...projectTexts(project), ...ignoredTexts(project)].map((file) => file.path);
+    assert.ok(!files.some((path) => path.endsWith('/o.gd')), `nothing outside is read: ${files.join(', ')}`);
+    assert.deepEqual(
+      ignoredTexts(project)
+        .filter((file) => file.path.endsWith('x.gd') || file.path.endsWith('d.gd'))
+        .map((file) => [file.path, file.why, file.folder]),
+      [
+        ['res://other/x.gd', 'gdignore', 'res://other/'],
+        ['res://kit/deep/d.gd', 'gdignore', 'res://kit/'],
+      ],
+      'each copy once, with the topmost left-out folder above it and its reason',
+    );
+    writeTree(root, { 'outside/f.gd': '' });
+    const fileLinked = linkTo(join(root, 'outside', 'f.gd'), join(project, 'flink.gd'), 'file');
+    assert.deepEqual(linksOut(project), fileLinked ? ['res://flink.gd', 'res://shared/'] : ['res://shared/']);
+    if (!fileLinked) {
+      console.log('skipped: this platform refuses a link to a file');
+    }
+
+    // A move spells its source by the real path, and a file only a link reaches is the file it moves.
+    const moved = planFileMove(project, join(project, 'kit', 'sub', 's.gd'), join(project, 't.gd'));
+    assert.ok(moved.ok, JSON.stringify(moved));
+    assert.deepEqual(
+      [moved.inPlace.length, filesReported(moved.report), moved.moved.map((one) => one.to)],
+      [0, ['res://t.gd'], ['res://t.gd']],
+    );
+
+    // The class rename, last since it writes: the file two paths reach is changed and counted once.
+    const outcome = await renamedIn(project, {
+      script: join(project, 'hero.gd'),
+      symbol: 'Hero',
+      to: 'Champion',
+    });
+    const left = JSON.stringify(get(outcome.report, 'leftAlone') ?? []);
+    assert.deepEqual(filesReported(outcome.report), ['res://hero.gd', 'res://real/r.gd', 'res://via1/s.gd']);
+    assert.equal(get(get(outcome.report, 'summary'), 'filesChanged'), 3);
+    assert.ok(!/real\/r\.gd|link\/r\.gd/.test(left), `left alone names neither path: ${left}`);
+    applyRewrites(outcome.rewrites);
+    assert.match(readFileSync(join(project, 'real', 'r.gd'), 'utf8'), /var h: Champion = Champion\.new\(\)/);
+  } finally {
+    sweep(root);
+  }
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testRegressionPartsCoverEveryTestOnceAndBalance,
   testTheClassCacheStepsOverAFolderHoldingAProject,
@@ -94263,6 +94465,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveListsNoBinaryResourceOfAFolderHoldingAProject,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,
+  testTheTextsStepOverAFolderHoldingAProject,
+  testAFileTwoPathsReachIsRenamedOnce,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,

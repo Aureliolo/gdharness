@@ -318,7 +318,11 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: collision };
   }
 
-  const texts = projectTexts(projectPath);
+  const texts = projectTexts(projectPath).map((file) =>
+    file.realPath !== undefined && moves.has(file.realPath) && !moves.has(file.path)
+      ? { ...file, path: file.realPath }
+      : file,
+  );
   const scripts = scriptsOf(texts);
   let plan = planMove(
     {
