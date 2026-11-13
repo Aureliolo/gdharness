@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync
 import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
 import { LSPTimeout } from './lsp_client.js';
-import { linkOutOf, relativeWithin } from './paths.js';
+import { relativeWithin } from './paths.js';
 import { ignoredTexts, linksOut, type ProjectText, type Reach, scanProject } from './project-scan.js';
 import {
   ClassGraph,
@@ -211,14 +211,7 @@ function checkedRename(
   }
   const declaringPath = resourcePathOf(projectPath, request.scriptPath);
   if (declaringPath === null) {
-    const link = linkOutOf(projectPath, request.scriptPath);
-    return {
-      ok: false,
-      reason:
-        link === null
-          ? `${request.scriptPath} is not inside the project.`
-          : `${request.scriptPath} is behind the link ${link}, which leads out of the project, so ${symbol} is not renamed from here. Rename it in the project that holds the script.`,
-    };
+    return { ok: false, reason: `${request.scriptPath} is not inside the project.` };
   }
   let moveTo: string | null = null;
   if (request.newScriptPath !== null) {

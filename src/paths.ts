@@ -45,7 +45,12 @@ type Containment =
       /** The same file as the project names it: forward slashes, no leading separator. */
       readonly relativePath: string;
     }
-  | { readonly ok: false; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      /** The `res://` link the path leaves the project through, where that is why it is refused. */
+      readonly link?: string;
+    };
 
 /**
  * [param path] with the links in whatever part of it exists resolved, and the rest as written.
@@ -90,7 +95,9 @@ function linkTarget(at: string): string | null {
  * Where [param path] leads: `realAsFarAsItExists`, except that a climb stopping at a name that is a
  * link goes on from the link's target, which `realpath` cannot do for a link whose target is gone.
  * A write through such a link makes the file at its target, so that is where the path leads. After
- * [constant MOST_LINKS] links the path is answered as written, since nothing opens through a ring.
+ * [constant MOST_LINKS] links the path is answered as far as it exists, since nothing opens through
+ * a ring. That spelling has the project's own links resolved, so a ring inside a project named
+ * through a link compares inside it.
  */
 function whereItLeads(path: string): string {
   let current = resolve(path);
@@ -104,7 +111,7 @@ function whereItLeads(path: string): string {
       } catch {
         const parent = dirname(at);
         if (parent === at) {
-          return resolve(path);
+          return realAsFarAsItExists(resolve(path));
         }
         missing.unshift(basename(at));
         at = parent;
@@ -121,7 +128,7 @@ function whereItLeads(path: string): string {
     }
     current = join(resolve(dirname(link), target), ...rest);
   }
-  return resolve(path);
+  return realAsFarAsItExists(resolve(path));
 }
 
 /**
@@ -153,7 +160,13 @@ function isFolderAt(part: string, hasMore: boolean): boolean {
   if (hasMore) {
     return true;
   }
-  const found = statSync(part, { throwIfNoEntry: false });
+  let found: ReturnType<typeof statSync>;
+  try {
+    found = statSync(part, { throwIfNoEntry: false });
+  } catch {
+    // A ring of links has no target to stat.
+    found = undefined;
+  }
   return found === undefined ? !/.\.[^.]+$/.test(basename(part)) : found.isDirectory();
 }
 
@@ -415,6 +428,7 @@ export function resolveWithinProject(
     return {
       ok: false,
       reason: `Path '${trimmed}' leads out of the project through the link ${link}, and only what is inside the project is taken here.`,
+      link,
     };
   }
 

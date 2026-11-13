@@ -275,7 +275,13 @@ import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
-import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
+import {
+  type NameTaken,
+  type RenameOutcome,
+  renameSymbol,
+  resourcePathOf,
+  writeLeftAloneDetail,
+} from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -801,6 +807,11 @@ function keptGameRequest(tool: string, op: string, args: OperationParams): Debug
 /** What a run this server starts has instead of the editor's debugger, said where one is started. */
 const OWN_DEBUGGER =
   ' Its debugger is the keeper holding it rather than the editor, so the debug_* tools answer for it all the same: breakpoints stop it, and debug_control pause breaks into it wherever it is, which the editor offers no way to do.';
+
+/** The gate's refusal of a path, with what to do instead added where the path leads out through a link. */
+function withRemedyBehindALink(refused: { reason: string; link?: string }, remedy: string): string {
+  return refused.link === undefined ? refused.reason : `${refused.reason} ${remedy}`;
+}
 
 /**
  * A file under the project as the project spells it, which is how a caller names it.
@@ -6842,9 +6853,7 @@ class GodotServer {
     args: OperationParams,
     project: { readonly value: { readonly path: string } },
   ): Promise<ToolResponse> {
-    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '', {
-      forTheEngine: true,
-    });
+    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
     if (!located.ok) {
       return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
     }
@@ -10742,7 +10751,7 @@ class GodotServer {
     why: Unanswered,
   ): Promise<{ answers: OperationParams[]; classesRebuiltFirst: string[] } | { refusal: ToolResponse }> {
     const resPaths = scripts.map((script) => {
-      const contained = resolveWithinProject(projectPath, script, { forTheEngine: true });
+      const contained = resolveWithinProject(projectPath, script);
       return contained.ok ? `res://${contained.relativePath}` : script;
     });
     const checked = await this.compileScripts(projectPath, resPaths);
@@ -18646,7 +18655,9 @@ class GodotServer {
     const projectPath = project.value.path;
     const scriptPath = resolveWithinProject(projectPath, readNonEmptyString(args, 'scriptPath') ?? '');
     if (!scriptPath.ok) {
-      return this.createErrorResponse(scriptPath.reason);
+      return this.createErrorResponse(
+        withRemedyBehindALink(scriptPath, 'Rename it in the project that holds the script.'),
+      );
     }
     if (!existsSync(scriptPath.absolutePath)) {
       return this.missingScript(projectPath, scriptPath.relativePath);
@@ -18897,8 +18908,8 @@ class GodotServer {
    * is no engine to boot a second beside. One that never connects leaves the file to read all the
    * same.
    *
-   * The engine is handed the path as the caller wrote it, so a file behind a link is read where the
-   * link leads.
+   * A file inside the project is handed to the engine in the disk's spelling, and one behind a link
+   * out as the caller wrote it, so it is read where the link leads.
    */
   private async readFromFile(
     args: OperationParams,
@@ -18922,7 +18933,10 @@ class GodotServer {
     if (!where.ok) {
       return this.createErrorResponse(where.reason);
     }
-    const outcome = await this.operation(operation, paramsFor(`res://${where.relativePath}`), projectPath);
+    // The engine opens a file inside the project by the spelling the disk holds, and what lies behind
+    // a link out has no place in the project, so it is handed over as written.
+    const file = resourcePathOf(projectPath, where.absolutePath) ?? `res://${where.relativePath}`;
+    const outcome = await this.operation(operation, paramsFor(file), projectPath);
     if (!outcome.ok) {
       return this.answer(outcome);
     }
@@ -19145,7 +19159,7 @@ class GodotServer {
     const projectPath = project.value.path;
     const from = resolveWithinProject(projectPath, readNonEmptyString(args, 'resourcePath') ?? '');
     if (!from.ok) {
-      return this.createErrorResponse(from.reason);
+      return this.createErrorResponse(withRemedyBehindALink(from, 'Move it in the folder it lives in.'));
     }
     const to = resolveWithinProject(projectPath, readNonEmptyString(args, 'newPath') ?? '');
     if (!to.ok) {

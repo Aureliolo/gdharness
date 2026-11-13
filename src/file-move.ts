@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { linkOutOf, relativeWithin } from './paths.js';
+import { relativeWithin } from './paths.js';
 import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
@@ -187,12 +187,11 @@ function checkedMove(projectPath: string, absoluteFrom: string, absoluteTo: stri
   const from = resourcePathOf(projectPath, absoluteFrom);
   const to = targetPathOf(projectPath, absoluteTo);
   if (from === null) {
-    const link = linkOutOf(projectPath, absoluteFrom);
     return {
       reason:
-        link === null
+        relativeWithin(projectPath, absoluteFrom) === ''
           ? 'The project directory itself cannot be moved. Give a file or a directory in it.'
-          : `${absoluteFrom} is behind the link ${link}, which leads out of the project, so it is not moved from here. Move it in the folder it lives in.`,
+          : `${absoluteFrom} is not inside the project.`,
     };
   }
   if (to === null) {

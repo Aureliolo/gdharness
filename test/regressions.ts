@@ -96858,7 +96858,7 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
 
     const behind = planFileMove(project, join(project, 'shared', 'o.gd'), join(project, 'o.gd'));
     assert.ok(!behind.ok, 'a file behind a link is not moved');
-    assert.match(behind.reason, /is behind the link res:\/\/shared\//);
+    assert.match(behind.reason, /shared[\\/]o\.gd is not inside the project\./);
     assert.ok(existsSync(join(outside, 'o.gd')), 'and stays where it is');
     const own = planFileMove(project, project, join(project, 'elsewhere'));
     assert.ok(
@@ -96877,7 +96877,7 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
     );
     assert.ok(!symbol.ok, 'a script behind a link is not renamed');
-    assert.match(symbol.reason, /is behind the link res:\/\/shared\//);
+    assert.match(symbol.reason, /shared[\\/]o\.gd is not inside the project\./);
     assert.doesNotMatch(symbol.reason, /\.gdignore|project\.godot|starts with a dot/);
     assert.equal(before('o.gd'), kept.o);
 
@@ -96924,7 +96924,11 @@ function namedPathProject(): { project: string; outside: string; fileLinks: bool
   junction(join(outside, 'later'), 'later');
   junction(join(project, 'ring2'), 'ring1');
   junction(join(project, 'ring1'), 'ring2');
+  junction(join(project, 'real'), 'my link');
+  junction(outside, 'out link');
   symlinkSync(join(project, 'real'), join(outside, 'back'), 'junction');
+  // The project named through a link of its own.
+  symlinkSync(project, join(sandbox, 'alias'), 'junction');
   mkdirSync(join(project, 'addons'));
   junction(join(outside, 'tool'), join('addons', 'tool'));
   let fileLinks = true;
@@ -96975,6 +96979,29 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
     assert.equal(linkOutOf(project, join(project, 'later', 'x.gd')), 'res://later/');
     assert.equal(resolveWithinProject(project, 'res://ring1/x.gd').ok, true, 'a ring of links');
     assert.equal(resolveWithinProject(project, 'res://shared/back/r.gd').ok, true, 'out and back in');
+    assert.equal(resolveWithinProject(project, 'res://my link/r.gd').ok, true, 'a link with a space');
+    assert.equal(reasonOf('res://out link/o.gd'), refusal('res://out link/o.gd', 'res://out link/'));
+
+    // The project named through a link, and on Windows in another case, answers as under its real path.
+    const named = [join(dirname(project), 'alias')];
+    if (process.platform === 'win32') {
+      named.push(project.toUpperCase());
+    }
+    for (const root of named) {
+      for (const [given, options] of [
+        ['res://ring1/x.gd', undefined],
+        ['res://ring1', { root: true }],
+        ['res://link/r.gd', undefined],
+        ['res://gone/x.gd', undefined],
+        ['res://shared/back/r.gd', undefined],
+        ['res://my link/r.gd', undefined],
+      ] as const) {
+        const found = resolveWithinProject(root, given, options);
+        assert.ok(found.ok, `${root} ${given}: ${JSON.stringify(found)}`);
+      }
+      const refused = resolveWithinProject(root, 'res://shared/o.gd');
+      assert.ok(!refused.ok && refused.reason.includes('through the link res://shared/'), root);
+    }
 
     for (const given of ['res://shared/o.gd', 'res://later/x.gd', 'addons/tool/plugin.cfg']) {
       const found = resolveWithinProject(project, given, { forTheEngine: true });
@@ -97041,6 +97068,34 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
           const said = String(moves[at]);
           assert.ok(said.includes(`through the link ${link}`), said);
         }
+        const fromBehind = [
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://shared/o.gd',
+            newPath: 'res://moved.gd',
+          }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://shared/o.gd',
+            symbol: 'Shared',
+            newName: 'Common',
+          }),
+        ];
+        assert.ok(fromBehind[0]?.includes('through the link res://shared/'), String(fromBehind[0]));
+        assert.ok(fromBehind[0]?.endsWith('Move it in the folder it lives in.'), String(fromBehind[0]));
+        assert.ok(
+          fromBehind[1]?.includes('Rename it in the project that holds the script.'),
+          String(fromBehind[1]),
+        );
+        const breakpoint = await call('debug_breakpoint', {
+          op: 'set',
+          projectPath: project,
+          scriptPath: 'res://shared/o.gd',
+          line: 1,
+        });
+        assert.ok(breakpoint.includes('through the link res://shared/'), breakpoint);
         assert.ok(existsSync(join(project, 'a.gd')), 'a.gd stays where it was');
         assert.deepEqual(readdirSync(outside).toSorted(), kept, 'nothing was written outside');
         assert.deepEqual(kept, ['back', 'o.gd', 'tool']);
@@ -97096,6 +97151,7 @@ async function aFileBehindALinkIsReadByTheEngine(project: string, outside: strin
       'tree_root = SubResource("AnimationNodeStateMachine_a")\nanim_player = NodePath("../Player")\n',
     'r.tres': '[gd_resource type="Gradient" format=3]\n\n[resource]\n',
   });
+  writeTree(project, { 'real/Level.tscn': '[gd_scene format=3]\n\n[node name="L" type="Node2D"]\n' });
   const imported = await runImport(godotPath, project);
   assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
   const server = new ServerProcess({
@@ -97114,6 +97170,12 @@ async function aFileBehindALinkIsReadByTheEngine(project: string, outside: strin
     const refused = 'must name a file inside the project';
     const tree = parseTextContent(await call('scene_tree', { scenePath: 'res://shared/s.tscn' }));
     assert.equal(get(tree, 'tree', 'name'), 'S', JSON.stringify(tree));
+    if (process.platform === 'win32') {
+      // The disk keeps its own case, and the engine warns of a path opened in another one.
+      const cased = parseTextContent(await call('scene_tree', { scenePath: 'res://REAL/level.tscn' }));
+      assert.equal(get(cased, 'tree', 'name'), 'L', JSON.stringify(cased));
+      assert.equal(get(cased, 'engine_messages'), undefined, JSON.stringify(cased));
+    }
     const resource = parseTextContent(
       await call('resource_edit', { op: 'read', resourcePath: 'res://shared/r.tres' }),
     );
