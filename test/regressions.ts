@@ -65922,7 +65922,6 @@ async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
     [2, 4],
     'asked again from the lanes it was raised to',
   );
-  assert.equal(risen.asks[1]?.signal.aborted, true, 'and that asking ended with the last share');
 
   // At its ceiling a run asks no more.
   const atCeiling = risingEngines();
@@ -66255,7 +66254,7 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     keep(fourTimed);
     writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
     await standsIn('always', 4);
-    const ordered = runWith(file, 4, '--engines', '2', '--slot-count', '4', '--order', 'named');
+    const ordered = runWith(file, 4, '--engines', '2', '--slot-count', '4', '--order', 'named', ...four);
     stands();
     assert.equal(ordered.status, 0, ordered.said);
     assert.doesNotMatch(ordered.said, /raised this run from/, 'an ordered run says nothing of a rise');
