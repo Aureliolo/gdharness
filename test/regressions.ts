@@ -60130,10 +60130,12 @@ async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> 
   let suitesRun = 0;
   let running = 0;
   let mostRunning = 0;
+  let lastStart = Date.now();
   const run = (plan: EnginePlan, index: number): Promise<{ index: number }> =>
     new Promise((done) => {
       suitesRun += plan.suites.length;
       running += 1;
+      lastStart = Date.now();
       mostRunning = Math.max(mostRunning, running);
       ends.push(() => {
         running -= 1;
@@ -60144,11 +60146,14 @@ async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> 
   const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
   try {
     const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
-    for (let round = 0; round < 400; round += 1) {
-      for (const end of ends.splice(0)) {
-        end();
+    // Engines end once no other has started for a while, so every lane that is to run has begun.
+    for (let round = 0; round < 1000; round += 1) {
+      if (Date.now() - lastStart >= 600) {
+        for (const end of ends.splice(0)) {
+          end();
+        }
       }
-      if (await Promise.race([pending.then(() => true), delay(5).then(() => false)])) {
+      if (await Promise.race([pending.then(() => true), delay(20).then(() => false)])) {
         break;
       }
     }
