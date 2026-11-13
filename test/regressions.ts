@@ -18608,11 +18608,20 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
     return { pid: asNumber(get(launched, 'pid')), said: said.trim() };
   };
   try {
+    // The desktop in use is the one this process is on, asked the same way: a session or a queue
+    // can run the tests on a desktop other than Default.
+    const own = spawnSyncHidden(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(probe, 'utf16le').toString('base64')],
+      { encoding: 'utf8', timeout: 90_000 },
+    );
+    const inUse = / desktop=(\S+)$/.exec(own.stdout.trim())?.[1];
+    assert.ok(inUse, `the probe should name this process's desktop: ${own.stdout} ${own.stderr}`);
     const control = await where('control', undefined, 'transcript');
     assert.match(
       control.said,
-      /desktop=Default$/,
-      `the probe should read the desktop in use: ${control.said}`,
+      new RegExp(` desktop=${inUse.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`),
+      `the probe should read the desktop in use, ${inUse}: ${control.said}`,
     );
     // A desktop of each case's own, so nothing but its own launch can be holding it open.
     for (const read of ['file', 'transcript'] as const) {
