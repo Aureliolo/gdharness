@@ -461,26 +461,39 @@ export function decodeVariant(bytes: Uint8Array, faithful = false): GodotValue {
   return value;
 }
 
-/** What a command can carry. A whole number is sent as an INT, any other as a 64-bit FLOAT. */
-export type SentValue = null | boolean | number | string | readonly SentValue[];
+/**
+ * What a command can carry. A number that is a whole safe integer is sent as an INT, any other as a
+ * 64-bit FLOAT. A bigint is always an INT, for a whole number past what a double holds exactly.
+ */
+export type SentValue = null | boolean | number | bigint | string | readonly SentValue[];
 
 function pushU32(out: number[], value: number): void {
   out.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
 }
 
-function encodeNumber(out: number[], value: number): void {
+function encodeInt(out: number[], value: bigint): void {
+  if (value < -(2n ** 63n) || value >= 2n ** 63n) {
+    throw new RangeError(`${value} does not fit a 64-bit int`);
+  }
   const view = new DataView(new ArrayBuffer(8));
-  // A negative zero and a whole number past 64 bits are floats: an INT would send another number.
-  const whole = Number.isInteger(value) && !Object.is(value, -0);
-  if (whole && value >= -0x80000000 && value <= 0x7fffffff) {
+  if (value >= -0x80000000n && value <= 0x7fffffffn) {
     pushU32(out, INT);
-    view.setInt32(0, value, true);
+    view.setInt32(0, Number(value), true);
     out.push(...new Uint8Array(view.buffer, 0, 4));
-  } else if (whole && value >= -(2 ** 63) && value < 2 ** 63) {
-    pushU32(out, INT | FLAG_64);
-    view.setBigInt64(0, BigInt(value), true);
-    out.push(...new Uint8Array(view.buffer));
   } else {
+    pushU32(out, INT | FLAG_64);
+    view.setBigInt64(0, value, true);
+    out.push(...new Uint8Array(view.buffer));
+  }
+}
+
+function encodeNumber(out: number[], value: number): void {
+  // A negative zero is a float, which an INT would send as another number. So is a whole number past
+  // 2^53, which a double only approximates: the sender meant a float, and an int is a bigint.
+  if (Number.isSafeInteger(value) && !Object.is(value, -0)) {
+    encodeInt(out, BigInt(value));
+  } else {
+    const view = new DataView(new ArrayBuffer(8));
     pushU32(out, FLOAT | FLAG_64);
     view.setFloat64(0, value, true);
     out.push(...new Uint8Array(view.buffer));
@@ -502,6 +515,8 @@ function encodeInto(out: number[], value: SentValue): void {
     pushU32(out, value ? 1 : 0);
   } else if (typeof value === 'number') {
     encodeNumber(out, value);
+  } else if (typeof value === 'bigint') {
+    encodeInt(out, value);
   } else if (typeof value === 'string') {
     encodeString(out, value);
   } else {

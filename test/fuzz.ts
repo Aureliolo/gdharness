@@ -34,6 +34,7 @@ import {
   DebuggerStream,
   decodeVariant,
   framedCommand,
+  type GodotValue,
   type SentValue,
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
@@ -2158,12 +2159,12 @@ const sentValue: fc.Arbitrary<SentValue> = fc.letrec<{ value: SentValue }>((tie)
     fc.constant(null),
     fc.boolean(),
     fc.integer({ min: Number.MIN_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER }),
-    // A whole number past what a double holds exactly goes out as a 64-bit int, which reads back digit by digit.
-    fc
-      .double()
-      .filter(
-        (value) => !(Number.isInteger(value) && !Number.isSafeInteger(value) && Math.abs(value) < 2 ** 63),
-      ),
+    fc.double(),
+    // A whole double past what it holds exactly is a float still, and so is one a 64-bit int could hold.
+    fc.double({ min: 2 ** 53, max: 2 ** 63, noNaN: true }),
+    fc.double({ min: -(2 ** 63), max: -(2 ** 53), noNaN: true }),
+    // A bigint is an int whatever its size, and reads back as digits once a double cannot hold it.
+    fc.bigInt({ min: -(2n ** 63n), max: 2n ** 63n - 1n }),
     fc.string({ unit: 'grapheme', maxLength: 12 }),
     fc.array(tie('value'), { maxLength: 4 }),
   ),
@@ -2174,6 +2175,14 @@ const sentCommand = fc.record({
   thread: fc.integer({ min: 0, max: 2 ** 31 - 1 }),
   data: fc.array(sentValue, { maxLength: 4 }),
 });
+
+/** What the reader makes of a sent value: a bigint as a number while one holds it, else its digits. */
+function readBack(value: SentValue): GodotValue {
+  if (typeof value === 'bigint') {
+    return Number.isSafeInteger(Number(value)) ? Number(value) : { kind: 'int', values: [value.toString()] };
+  }
+  return Array.isArray(value) ? value.map(readBack) : (value as GodotValue);
+}
 
 /** Every message a stream gives for [param pieces], and whether it was out of step after them. */
 function streamed(pieces: readonly Uint8Array[]): { messages: DebuggerMessage[]; lost: boolean } {
@@ -2211,7 +2220,7 @@ function theDebuggerStreamIsCutProof(): void {
       assert.equal(lost, false);
       assert.deepEqual(
         messages,
-        commands.map((c) => ({ message: c.message, thread: c.thread, data: c.data })),
+        commands.map((c) => ({ message: c.message, thread: c.thread, data: c.data.map(readBack) })),
       );
     }),
     { numRuns: 150 },
