@@ -955,8 +955,18 @@ static func out_through_link(file: String, links_out: PackedStringArray) -> Stri
 	for link: String in links_out:
 		var held: String = link.to_lower() if any_case else link
 		if lowered == held or (held.ends_with("/") and lowered.begins_with(held)):
-			if _ends_inside(file, any_case):
+			var ends: String = _ends_at(file, any_case)
+			if ends == "inside":
 				return ""
+			if ends == "unknown":
+				return (
+					(
+						"%s runs through links that cannot be followed to the end (more than %d, a "
+						+ "ring, or one that cannot be read), so whether it leads out of the "
+						+ "project is not known, and it is not written here."
+					)
+					% [file, MOST_LINKS]
+				)
 			return (
 				(
 					"%s leads out of the project through the link %s, and only what is inside "
@@ -967,18 +977,41 @@ static func out_through_link(file: String, links_out: PackedStringArray) -> Stri
 	return ""
 
 
-## Whether [param file], a res:// path, ends inside the project once each link on it is followed,
-## as a path out through one link and back in through another does. A ring, or a path that runs out
-## of the project at its end, is not inside. Only link targets are read, never file contents.
-static func _ends_inside(file: String, any_case: bool) -> bool:
-	var inside: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+## The disk file [param file], a res:// path, is, spelt so that two paths naming one file give the
+## same text, or [param file] itself when its links cannot be followed.
+static func disk_file_of(file: String) -> String:
+	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
+	var led: String = _followed(ProjectSettings.globalize_path(file))
+	if led.is_empty():
+		return file
+	return led.to_lower() if any_case else led
+
+
+## Whether [param file], a res:// path, is reached without passing through a link, so that the
+## path is the file's own name in the project.
+static func reached_directly(file: String) -> bool:
+	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
+	var inside: String = _followed(ProjectSettings.globalize_path("res://"))
 	var led: String = _followed(ProjectSettings.globalize_path(file))
 	if inside.is_empty() or led.is_empty():
 		return false
+	var own: String = inside + "/" + file.trim_prefix("res://")
+	return led.to_lower() == own.to_lower() if any_case else led == own
+
+
+## Where [param file], a res:// path, ends once each link on it is followed: "inside" the project,
+## as a path out through one link and back in through another does, "outside" it, or "unknown"
+## when a ring, more than [constant MOST_LINKS] links or a link that cannot be read stops the
+## following. Only link targets are read, never file contents.
+static func _ends_at(file: String, any_case: bool) -> String:
+	var inside: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	var led: String = _followed(ProjectSettings.globalize_path(file))
+	if inside.is_empty() or led.is_empty():
+		return "unknown"
 	if any_case:
 		inside = inside.to_lower()
 		led = led.to_lower()
-	return led == inside or led.begins_with(inside + "/")
+	return "inside" if led == inside or led.begins_with(inside + "/") else "outside"
 
 
 ## Where the absolute path [param given] leads, each link on it followed in turn, or "" after

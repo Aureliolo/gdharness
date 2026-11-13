@@ -339,14 +339,20 @@ function isLocalFile(path: string): boolean {
  * it is not one inside [param root]. Judged as written first. A spelling that is text-wise elsewhere
  * is judged again with the links in both resolved, since a `\\?\` prefix, a Windows short name or a
  * linked folder above the project each name a file of the project that the text does not show.
+ * Where [param namesInAnyCase] (Windows and macOS) the path as written is spelt as the folders list
+ * it, and elsewhere it keeps its spelling, since another case there is another file.
  */
-function insideProject(root: string, candidate: string): string | null {
+export function insideProject(
+  root: string,
+  candidate: string,
+  namesInAnyCase: boolean = process.platform === 'win32' || process.platform === 'darwin',
+): string | null {
   if (!isAbsolute(candidate)) {
     return null;
   }
   const written = relativeWithin(root, candidate);
   return (
-    (written === null ? null : listedSpelling(realAsFarAsItExists(root), written)) ??
+    (written === null || !namesInAnyCase ? written : listedSpelling(realAsFarAsItExists(root), written)) ??
     belowTheProjectByAnotherName(root, candidate) ??
     relativeWithin(realAsFarAsItExists(root), realAsFarAsItExists(resolve(candidate)))
   );

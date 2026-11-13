@@ -461,10 +461,23 @@ static func _resolved(path: String, scene_path: String) -> String:
 ## The text of every .tscn the engine scans into [param texts], keyed by res:// path. The shared
 ## walk leaves out the folders the engine steps over, so a build's copies are not read, and takes in
 ## the addons gdharness installed, which the engine loads. That less the scenes behind a link of
-## [param links_out].
+## [param links_out]. One file on disk is one scene, read and written once: where links give it
+## several paths, it keeps the one that passes through no link, else the first the walk found.
 static func _read_scenes(texts: Dictionary, links_out: PackedStringArray) -> void:
+	var kept: Array[String] = []
+	var owner_of: Dictionary = {}
 	for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
-		if GdhSceneFile.out_through_link(path, links_out).is_empty():
+		if not GdhSceneFile.out_through_link(path, links_out).is_empty():
+			continue
+		kept.append(path)
+		var key: String = GdhSceneFile.disk_file_of(path)
+		if not owner_of.has(key) or (
+			GdhSceneFile.reached_directly(path)
+			and not GdhSceneFile.reached_directly(str(owner_of[key]))
+		):
+			owner_of[key] = path
+	for path: String in kept:
+		if owner_of[GdhSceneFile.disk_file_of(path)] == path:
 			texts[path] = FileAccess.get_file_as_string(path)
 
 

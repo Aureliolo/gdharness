@@ -365,6 +365,7 @@ import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from
 import {
   commandProjectRefusal,
   exportedBuild,
+  insideProject,
   isGodotProject,
   isSameDirectory,
   isWithinRoot,
@@ -91741,6 +91742,113 @@ function testTheAddonJudgesALinkChainByWhereItEnds(): void {
 }
 
 /**
+ * A path that runs through more links than the addon follows is refused for that reason, not as one
+ * that leads out, whether it would have ended inside the project or outside. At the limit it is judged.
+ */
+function testALinkChainTooLongToFollowIsNotSaidToLeadOut(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('long link chain regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-chain-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  try {
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'real/a.tres': '' });
+    writeTree(outside, { 'c.tres': '' });
+    // shared leads out, and self in outside leads back to the project, so each pair is two links.
+    symlinkSync(outside, join(project, 'shared'), 'junction');
+    symlinkSync(project, join(outside, 'self'), 'junction');
+    symlinkSync(project, join(project, 'loopback'), 'junction');
+    const pairs = (count: number): string => 'shared/self/'.repeat(count);
+    const paths = [
+      `res://${pairs(20)}real/a.tres`,
+      `res://loopback/${pairs(20)}real/a.tres`,
+      `res://${pairs(20)}shared/c.tres`,
+      `res://${pairs(1)}shared/c.tres`,
+    ];
+    writeFileSync(
+      join(project, 'runner.gd'),
+      [
+        'extends SceneTree',
+        '',
+        'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar links: PackedStringArray = ["res://shared/", "res://loopback/"]',
+        `\tvar paths: Array[String] = ${JSON.stringify(paths)}`,
+        '\tvar said: Array[String] = []',
+        '\tfor given: String in paths:',
+        '\t\tsaid.append(GdhSceneFile.out_through_link(given, links))',
+        '\tprint("LONG " + JSON.stringify(said))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+      encoding: 'utf8',
+      timeout: 120000,
+    });
+    const output = `${run.stdout}\n${run.stderr}`;
+    const answered = /LONG (\[.*\])/.exec(output)?.[1];
+    assert.ok(answered !== undefined, output);
+    const said = asArray(JSON.parse(answered)).map(String);
+    // 40 links ending inside: judged and kept. 41 ending inside: too long, and not said to lead out.
+    assert.equal(said[0], '', output);
+    assert.match(said[1] ?? '', /cannot be followed to the end/, `41 links ending inside: ${said[1]}`);
+    assert.doesNotMatch(said[1] ?? '', /leads out of the project/, said[1] ?? '');
+    assert.match(said[2] ?? '', /cannot be followed to the end/, `41 links ending outside: ${said[2]}`);
+    assert.match(
+      said[3] ?? '',
+      /leads out of the project through the link/,
+      `3 links ending outside: ${said[3]}`,
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A scene that links give two paths, one through a link out that comes back in, is followed once
+ * under the path that passes through no link: named once in followed, its dropped value listed once.
+ */
+async function testASceneReachedByTwoPathsThroughALinkBackInIsFollowedOnce(): Promise<void> {
+  await withLinksOut(
+    'scene reached by two paths',
+    { files: { 'real/room.tscn': deskKin('Room') } },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(outside, 'back')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://real/room.tscn'], JSON.stringify(renamed));
+      assert.ok(
+        at.fileOf('real/room.tscn').includes('[node name="Lamp" parent="Desk/Surface"]'),
+        at.fileOf('real/room.tscn'),
+      );
+      const deleted = await at.call('scene_node', {
+        op: 'delete',
+        scenePath: 'desk.tscn',
+        nodePath: 'Surface',
+      });
+      assert.deepEqual(get(deleted, 'followed'), ['res://real/room.tscn'], JSON.stringify(deleted));
+      assert.deepEqual(
+        asArray(get(deleted, 'dropped')).map((row) => [get(row, 'scenePath'), get(row, 'entry')]),
+        [['res://real/room.tscn', 'values']],
+        JSON.stringify(deleted),
+      );
+    },
+  );
+}
+
+/**
  * A node renamed or deleted in a scene is followed into a scene instancing one that inherits it,
  * where the instance's root is the changed scene's root under another scene's name.
  */
@@ -97618,6 +97726,34 @@ function testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt(): void {
   }
 }
 
+/**
+ * A plain absolute path is respelt as the folders list it only where the platform names files in
+ * any case. Elsewhere another case is another file, so a folder that is not there keeps the path as given.
+ */
+function testAnAbsolutePathIsRespeltOnlyWhereCaseIsIgnored(): void {
+  const project = tmpDir();
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'Real/r.gd': 'extends Node\n' });
+    const folderIgnoresCase = existsSync(join(project, 'real'));
+    // Present with exactly this case: the same answer on both branches.
+    for (const ignoring of [true, false]) {
+      assert.equal(insideProject(project, join(project, 'Real', 'r.gd'), ignoring), 'Real/r.gd');
+    }
+    assert.equal(
+      insideProject(project, join(project, 'real', 'new.gd'), false),
+      'real/new.gd',
+      'where case matters, a folder of another case is not the one named',
+    );
+    if (folderIgnoresCase) {
+      assert.equal(insideProject(project, join(project, 'real', 'new.gd'), true), 'Real/new.gd');
+    } else {
+      console.log('  skipped the respelling branch: this disk tells names apart by case');
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
 /** A scene whose AnimationPlayer Player plays the library kept at [library]. */
 function playerOf(library: string): string {
   return (
@@ -98637,6 +98773,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnimationReachedByALinkBackInIsSaved,
   testTheAddonJudgesALinkChainByWhereItEnds,
   testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt,
+  testAnAbsolutePathIsRespeltOnlyWhereCaseIsIgnored,
+  testALinkChainTooLongToFollowIsNotSaidToLeadOut,
+  testASceneReachedByTwoPathsThroughALinkBackInIsFollowedOnce,
   testAMoveIsFollowedThroughAnInheritedInstance,
   testAMovedNodeKeepsThePathsNamingIt,
   testADeleteDropsWhatOtherScenesKeptBelowIt,
