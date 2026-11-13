@@ -90902,7 +90902,8 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
  * A scene naming the changed one by a path relative to its own folder is followed too, since the
  * engine loads such a path against that folder. den.tscn instances desk.tscn as `../desk.tscn` and
  * keeps its lamp editable. study.tscn inherits it as `../desk.tscn`. far.tscn names a desk.tscn of
- * its own folder, which is another scene.
+ * its own folder, which is another scene. hall.tscn and annex.tscn name desk.tscn by its uid beside
+ * a stale path, and the engine loads a known uid first.
  */
 async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -90916,12 +90917,15 @@ async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-relative-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-relative-rt-'));
   const relativeDesk = '[ext_resource type="PackedScene" path="../desk.tscn" id="1_desk"]';
+  const staleDesk =
+    '[ext_resource type="PackedScene" uid="uid://cdeskrel01" path="res://old/desk.tscn" id="1_desk"]';
   const files: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="FollowRelative"\n',
     'lamp.tscn':
       '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n\n[node name="Bulb" type="OmniLight3D" parent="."]\n',
     'desk.tscn':
-      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://lamp.tscn" id="1_lamp"]\n\n' +
+      '[gd_scene format=3 uid="uid://cdeskrel01"]\n\n' +
+      '[ext_resource type="PackedScene" path="res://lamp.tscn" id="1_lamp"]\n\n' +
       '[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
       '[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n',
     'rooms/den.tscn':
@@ -90931,6 +90935,13 @@ async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
       '[editable path="Desk/Top/DeskLamp"]\n',
     'rooms/study.tscn':
       `[gd_scene format=3]\n\n${relativeDesk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
+      '[node name="Top" parent="."]\nvisible = false\n',
+    'rooms/hall.tscn':
+      `[gd_scene format=3]\n\n${staleDesk}\n\n[node name="Hall" type="Node3D"]\n\n` +
+      '[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="DeskLamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n',
+    'rooms/annex.tscn':
+      `[gd_scene format=3]\n\n${staleDesk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
       '[node name="Top" parent="."]\nvisible = false\n',
     'rooms/far/desk.tscn': '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n',
     'rooms/far/far.tscn':
@@ -90974,8 +90985,16 @@ async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
     );
     assert.deepEqual(
       asArray(get(renamed, 'followed')).map(String).toSorted(),
-      ['res://rooms/den.tscn', 'res://rooms/study.tscn'],
+      ['res://rooms/annex.tscn', 'res://rooms/den.tscn', 'res://rooms/hall.tscn', 'res://rooms/study.tscn'],
       JSON.stringify(renamed),
+    );
+    assert.ok(
+      fileOf('rooms/hall.tscn').includes('[node name="DeskLamp" parent="Desk/Surface"]'),
+      fileOf('rooms/hall.tscn'),
+    );
+    assert.ok(
+      fileOf('rooms/annex.tscn').includes('[node name="Surface" parent="."]'),
+      fileOf('rooms/annex.tscn'),
     );
     const den = fileOf('rooms/den.tscn');
     assert.ok(den.includes('[node name="Bulb" parent="Desk/Surface/DeskLamp"]'), den);
@@ -91327,16 +91346,71 @@ async function testRelativePathsBehindALinkOutAreLeft(): Promise<void> {
   );
 }
 
-/** A junction whose target is gone leaves the follower working, and is named as the walk names it. */
+/**
+ * A junction whose target is gone leaves the follower working. It holds no scene, so only the live
+ * link beside it is named.
+ */
 async function testADanglingLinkOutLeavesTheFollowerWorking(): Promise<void> {
   await withLinksOut(
     'dangling link out',
-    { files: { 'room.tscn': deskKin('Room') } },
-    (real, outside) => linkTo(join(outside, 'gone'), join(real, 'shared')),
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': deskKin('Kin') } },
+    (real, outside) =>
+      linkTo(join(outside, 'gone'), join(real, 'later')) && linkTo(outside, join(real, 'shared')),
     async (at) => {
       const renamed = await renameTheTop(at);
       assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
-      assert.deepEqual(linksLeft(renamed), linksOut(at.project).toSorted(), JSON.stringify(renamed));
+      assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+    },
+  );
+}
+
+/**
+ * Where names keep their case, a link out named `Shared` leaves the project's own `shared` folder
+ * followed. Where they do not, the platform refuses the second name and the case skips.
+ */
+async function testALinkOutInAnotherCaseLeavesTheFolderInside(): Promise<void> {
+  await withLinksOut(
+    'link out in another case',
+    {
+      files: { 'room.tscn': deskKin('Room'), 'shared/in.tscn': deskKin('In') },
+      outside: { 'kin.tscn': deskKin('Kin') },
+    },
+    (real, outside) => linkTo(outside, join(real, 'Shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://Shared/'], JSON.stringify(renamed));
+      assert.deepEqual(
+        asArray(get(renamed, 'followed')).map(String).toSorted(),
+        ['res://room.tscn', 'res://shared/in.tscn'],
+        JSON.stringify(renamed),
+      );
+    },
+  );
+}
+
+/**
+ * Only a link that can hold a scene is named: a folder, or a file with a scene's extension. A file
+ * link to a text file is not. A delete in a scene nothing inside names still names the scene link,
+ * since the scene behind it may.
+ */
+async function testALinkOutThatHoldsNoSceneIsNotNamed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'link out to a text file',
+    {
+      files: { 'room.tscn': deskKin('Room'), 'alone.tscn': LINKED_DESK },
+      outside: { 'kin.tscn': kin, 'notes.txt': 'notes' },
+    },
+    (real, outside) =>
+      linkTo(join(outside, 'notes.txt'), join(real, 'notes_link.txt'), 'file') &&
+      linkTo(join(outside, 'kin.tscn'), join(real, 'kin_link.tscn'), 'file'),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://kin_link.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      const deleted = await at.call('scene_node', { op: 'delete', scenePath: 'alone.tscn', nodePath: 'Leg' });
+      assert.equal(get(deleted, 'deletedNodePath'), 'Leg', JSON.stringify(deleted));
+      assert.deepEqual(linksLeft(deleted), ['res://kin_link.tscn'], JSON.stringify(deleted));
     },
   );
 }
@@ -97792,6 +97866,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALinkOutInsideAWalkedFolderIsNamed,
   testRelativePathsBehindALinkOutAreLeft,
   testADanglingLinkOutLeavesTheFollowerWorking,
+  testALinkOutThatHoldsNoSceneIsNotNamed,
+  testALinkOutInAnotherCaseLeavesTheFolderInside,
   testARingOfJunctionsDoesNotHangTheFollower,
   testAProjectReachedThroughAJunctionNamesItsLinkOut,
   testAnAnimationBehindALinkOutIsNotSaved,

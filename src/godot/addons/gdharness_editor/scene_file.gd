@@ -947,9 +947,11 @@ static func links_out_in(args: Dictionary) -> PackedStringArray:
 ## one, or "". Case is ignored, since a scene may spell a file in another case where the file system
 ## ignores it.
 static func out_through_link(file: String, links_out: PackedStringArray) -> String:
-	var lowered: String = file.to_lower()
+	# Windows and macOS name a file in any case, Linux only in the case it was made in.
+	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
+	var lowered: String = file.to_lower() if any_case else file
 	for link: String in links_out:
-		var held: String = link.to_lower()
+		var held: String = link.to_lower() if any_case else link
 		if lowered == held or (held.ends_with("/") and lowered.begins_with(held)):
 			return (
 				(

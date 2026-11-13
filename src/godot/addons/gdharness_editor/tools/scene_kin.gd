@@ -432,10 +432,22 @@ static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
 ## Every file [param text] names in an ext_resource, as a res:// path.
 static func _named_in(text: String, scene_path: String) -> PackedStringArray:
 	var named: PackedStringArray = []
-	var each: RegEx = RegEx.create_from_string('\\[ext_resource [^\\n]*path="([^"]+)"')
+	var each: RegEx = RegEx.create_from_string("\\[ext_resource [^\\n]*\\]")
 	for found: RegExMatch in each.search_all(text):
-		var _added: bool = named.append(_resolved(found.get_string(1), scene_path))
+		var _added: bool = named.append(_loaded_from(found.get_string(), scene_path))
 	return named
+
+
+## The res:// path the engine loads the ext_resource [param entry] from, in the scene at
+## [param scene_path]. A uid the project knows wins over the path written beside it, which goes
+## stale when the file moves.
+static func _loaded_from(entry: String, scene_path: String) -> String:
+	var uid: String = _attribute(entry, "uid")
+	if not uid.is_empty():
+		var id: int = ResourceUID.text_to_id(uid)
+		if id != ResourceUID.INVALID_ID and ResourceUID.has_id(id):
+			return ResourceUID.get_id_path(id)
+	return _resolved(_attribute(entry, "path"), scene_path)
 
 
 ## [param path] as a res:// path. The engine reads a path with no scheme against the folder of the
@@ -456,10 +468,13 @@ static func _read_scenes(texts: Dictionary, links_out: PackedStringArray) -> voi
 			texts[path] = FileAccess.get_file_as_string(path)
 
 
-## A notFollowed row for each of [param links_out], since no scene behind one was read.
+## A notFollowed row for each of [param links_out] that can hold a scene, since no scene behind one
+## was read: a folder, or a file with a scene's extension.
 static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
 	var rows: Array[Dictionary] = []
 	for link: String in links_out:
+		if not link.ends_with("/") and not ["tscn", "scn"].has(link.get_extension().to_lower()):
+			continue
 		rows.append(
 			{
 				"scenePath": link,
@@ -498,12 +513,10 @@ static func _base_of(text: String, scene_path: String) -> String:
 			return ""
 		var named: RegExMatch = (
 			RegEx
-			. create_from_string(
-				'\\[ext_resource [^\\n]*path="([^"]+)" id="%s"\\]' % instanced.get_string(1)
-			)
+			. create_from_string('\\[ext_resource [^\\n]* id="%s"\\]' % instanced.get_string(1))
 			. search(text)
 		)
-		return _resolved(named.get_string(1), scene_path) if named != null else ""
+		return _loaded_from(named.get_string(), scene_path) if named != null else ""
 	return ""
 
 
