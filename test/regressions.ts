@@ -97539,7 +97539,7 @@ async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void
       assert.equal(at.fileOf('nav.tscn'), navScene);
 
       const inside = await at.call('scene_animation', trackOn('res://b.tscn'));
-      assert.equal(get(inside, 'ok'), true, JSON.stringify(inside));
+      assert.equal(get(inside, 'trackIndex'), 0, JSON.stringify(inside));
       assert.ok(at.fileOf('real/anims.tres').includes('tracks/0/path'), at.fileOf('real/anims.tres'));
     },
   );
