@@ -94,12 +94,14 @@ import { configDisagrees } from '../src/config-pin.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
+  type DesktopStart,
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperAssembly,
   helperExit,
   helperFailure,
   helperStep,
+  spawnOnDesktop,
   throughHelper,
   windowsCommandLine,
 } from '../src/desktop.js';
@@ -572,6 +574,7 @@ import {
   type ChildProcess,
   runHidden,
   runSyncHidden,
+  type SpawnOptions,
   type SpawnSyncReturns,
   spawnHidden,
   spawnShown,
@@ -18075,6 +18078,291 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
   } finally {
     sweep(directory);
   }
+}
+
+/** What [param read] answers once it is not undefined, asked every 100 ms for at most [param ms]. */
+async function answeredWithin<T>(read: () => T | undefined, ms: number): Promise<T | undefined> {
+  for (let waited = 0; waited < ms; waited += 100) {
+    const answer = read();
+    if (answer !== undefined) {
+      return answer;
+    }
+    await delay(100);
+  }
+  return read();
+}
+
+/** Whether [param child] has exited within [param ms]. */
+async function exitedWithin(child: DesktopStart['child'], ms: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      new Promise<boolean>((settle) => {
+        child.once('exit', () => {
+          settle(true);
+        });
+      }),
+      new Promise<boolean>((settle) => {
+        timer = setTimeout(() => {
+          settle(false);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What [param start]'s helper prints, as far as it has: the stand-in's one line. */
+function standInSaid(start: DesktopStart): () => string {
+  let heard = '';
+  start.child.stdout?.on('data', (chunk: Buffer) => {
+    heard += chunk.toString();
+  });
+  return () => heard;
+}
+
+/**
+ * One call starts a process on a desktop: its files in the scratch folder, the stop and exit files
+ * where they are named, the desktop in the environment only when one is named, and a stop that goes
+ * through the helper. A stand-in prints the desktop it is told of and waits.
+ */
+async function testADesktopStartIsOneCall(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-call-'));
+  const kept = join(root, 'kept');
+  const scratch = join(root, 'scratch');
+  mkdirSync(kept);
+  mkdirSync(scratch);
+  const running: DesktopStart[] = [];
+  const pids: number[] = [];
+  const piped: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'] };
+  const waiting = [
+    '-e',
+    "console.log(process.env['GDHARNESS_DESKTOP'] ?? 'none'); setInterval(() => undefined, 1000);",
+  ];
+  const noDesktop = { ...process.env };
+  delete noDesktop['GDHARNESS_DESKTOP'];
+  try {
+    // Every platform: the files are named inside the scratch folder, the stop and exit files as
+    // handed, and a helper that is not there is an error of the child.
+    const missing = join(root, 'no-helper');
+    const beside = spawnOnDesktop(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: join(kept, 'stop-missing'),
+        exit: join(kept, 'exit-missing'),
+      },
+      process.execPath,
+      ['-e', ''],
+      { stdio: 'ignore' },
+      missing,
+    );
+    const failed = new Promise<Error>((settle) => {
+      beside.child.once('error', settle);
+    });
+    for (const name of ['spec', 'pid', 'error', 'step'] as const) {
+      assert.equal(beside.files[name], join(scratch, name), `${name} is named inside the scratch folder`);
+    }
+    assert.equal(beside.files.stop, join(kept, 'stop-missing'), 'the stop file is as handed');
+    assert.equal(beside.files.exit, join(kept, 'exit-missing'), 'the exit file is as handed');
+    assert.ok(existsSync(beside.files.spec), 'the spec is written');
+    assert.equal(beside.pid(), undefined, 'a helper that never ran wrote no pid');
+    assert.ok((await failed) instanceof Error, 'a helper that is not there ends the child in an error');
+
+    const keeper = readFileSync(join('src', 'keeper.ts'), 'utf8');
+    assert.equal(keeper.split('endingTheGame(child, stopFile)').length - 1, 1, 'the keeper makes one ender');
+    assert.ok(
+      keeper.includes("child.kill() ? 'signalled' : 'gone'"),
+      'which answers whether anything was signalled',
+    );
+
+    if (process.platform !== 'win32') {
+      console.log('desktop start regression: the helper is Windows-only');
+      return;
+    }
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    const begin = (
+      how: Parameters<typeof spawnOnDesktop>[0],
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions = piped,
+    ): DesktopStart => {
+      const start = spawnOnDesktop(how, command, args, options);
+      running.push(start);
+      return start;
+    };
+    const named = async (start: DesktopStart): Promise<number> => {
+      const pid = await answeredWithin(() => start.pid(), 60_000);
+      assert.ok(pid !== undefined, `the helper should name the process: ${helperStep(start.files.step)}`);
+      pids.push(pid);
+      return pid;
+    };
+
+    // Stopped through the helper, with the scratch folder gone as a keeper's is once the pid is read.
+    const first = begin(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: join(kept, 'stop'),
+        exit: join(kept, 'exit'),
+      },
+      process.execPath,
+      waiting,
+    );
+    const firstSaid = standInSaid(first);
+    const firstPid = await named(first);
+    assert.notEqual(firstPid, first.child.pid, 'the pid is the process, not its helper');
+    assert.ok(alive(firstPid), 'and it is running');
+    assert.equal(
+      await answeredWithin(() => (firstSaid().includes(HIDDEN_DESKTOP) ? true : undefined), 60_000),
+      true,
+      `the process is told its desktop: ${firstSaid()}`,
+    );
+    rmSync(scratch, { recursive: true, force: true });
+    first.stop();
+    assert.ok(await exitedWithin(first.child, 60_000), 'the stop file ends the helper');
+    assert.equal(
+      await answeredWithin(() => (alive(firstPid) ? undefined : true), 30_000),
+      true,
+      'and the process with it',
+    );
+    // 257 has the low byte of the code a stop leaves, 1, so only a code the helper wrote is whole.
+    assert.equal(helperExit(first.files.exit, 257), 1, 'the exit file is in the folder that outlives it');
+    mkdirSync(scratch);
+
+    // A crash is told whole where an exit file is named and no stop file is.
+    const crashed = begin(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        exit: join(kept, 'exit-crash'),
+        endsWithHelper: true,
+      },
+      join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      ['/d', '/c', 'exit', '-1073741819'],
+    );
+    assert.equal(crashed.files.stop, '', 'no stop file is named for a start that handed none');
+    assert.ok(await exitedWithin(crashed.child, 60_000), 'the crashing stand-in ends');
+    assert.equal(helperExit(crashed.files.exit, 5), 0xc0000005, 'its whole code is read from the exit file');
+
+    // Neither file: the helper's end ends the process.
+    const bare = begin(
+      { desktop: HIDDEN_DESKTOP, directory: root, scratch, endsWithHelper: true },
+      process.execPath,
+      waiting,
+    );
+    assert.equal(bare.files.stop, '', 'no stop file');
+    assert.equal(bare.files.exit, '', 'and no exit file are named for a start that handed neither');
+    const barePid = await named(bare);
+    bare.stop();
+    assert.ok(await exitedWithin(bare.child, 60_000), 'a stop with no file ends the helper');
+    assert.equal(
+      await answeredWithin(() => (alive(barePid) ? undefined : true), 30_000),
+      true,
+      'and the process goes with it',
+    );
+
+    // A start in a folder holding the last start's pid does not read it.
+    assert.ok(existsSync(bare.files.pid), "the case needs the last start's pid file in place");
+    const absent = begin(
+      { desktop: HIDDEN_DESKTOP, directory: root, scratch, endsWithHelper: true },
+      'gdharness-no-such-command.exe',
+      [],
+    );
+    assert.ok(await exitedWithin(absent.child, 60_000), 'the helper of a command that is not there ends');
+    assert.equal(absent.pid(), undefined, "it names no pid, not the last start's");
+    assert.match(
+      helperFailure(absent.files.error) ?? '',
+      /gdharness-no-such-command/,
+      'and says which command it could not start',
+    );
+
+    // A start that names the first start's stop path, whose file was written, is not ended by it.
+    assert.ok(existsSync(first.files.stop), "the case needs the first start's stop file written");
+    const third = begin(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: first.files.stop,
+        exit: join(kept, 'exit-third'),
+      },
+      process.execPath,
+      waiting,
+    );
+    assert.equal(
+      existsSync(first.files.stop),
+      false,
+      "the last start's stop file is gone once the start returns",
+    );
+    const thirdPid = await named(third);
+    assert.ok(alive(thirdPid), 'so the new process is running');
+
+    // Named no desktop, it is told of none.
+    const plain = begin(
+      { noActivate: true, directory: root, scratch, endsWithHelper: true },
+      process.execPath,
+      waiting,
+      { ...piped, env: noDesktop },
+    );
+    const plainSaid = standInSaid(plain);
+    await named(plain);
+    assert.equal(
+      await answeredWithin(() => (plainSaid().includes('none') ? true : undefined), 60_000),
+      true,
+      `a start that names no desktop prints none: ${plainSaid()}`,
+    );
+
+    for (const start of running) {
+      start.stop();
+      assert.ok(await exitedWithin(start.child, 60_000), 'every stand-in is ended with its helper');
+    }
+    for (const pid of pids) {
+      assert.equal(
+        await answeredWithin(() => (alive(pid) ? undefined : true), 30_000),
+        true,
+        `pid ${pid} is gone`,
+      );
+    }
+  } finally {
+    for (const start of running) {
+      start.stop();
+      start.child.kill();
+    }
+    for (const pid of pids) {
+      if (alive(pid)) {
+        process.kill(pid);
+      }
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * The helper's command, its spec and its desktop variable are made in one place. Every other start
+ * through the helper is a call to it, which a new caller writing its own would bypass.
+ */
+function testEveryDesktopStartGoesThroughOneCall(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => join('src', entry));
+  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
+  const calling = (needle: string): string[] =>
+    files.filter((file) => readFileSync(file, 'utf8').includes(needle)).toSorted();
+  assert.deepEqual(calling(['through', 'Helper('].join('')), [join('src', 'desktop.ts')], 'the spec writer');
+  assert.deepEqual(
+    calling(['[DESKTOP', 'VARIABLE]'].join('_')),
+    [join('src', 'desktop.ts')],
+    'the desktop variable is named in one place',
+  );
 }
 
 // A folder the compile cannot use is said at once, not waited out and blamed on the compile.
@@ -93375,6 +93663,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
+  testADesktopStartIsOneCall,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
@@ -93809,6 +94098,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
   testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
   testEveryProcessStartsThroughTheHiddenSpawn,
+  testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,

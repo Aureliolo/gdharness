@@ -96,14 +96,13 @@ import {
   type StoppedAt,
 } from './dap_client.js';
 import {
-  DESKTOP_VARIABLE,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
   helperStep,
-  throughHelper,
+  spawnOnDesktop,
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
@@ -14498,32 +14497,35 @@ class GodotServer {
   ): SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void } {
     // Through the helper the child is PowerShell, and ending it would leave the engine running on a
     // desktop nobody can see, so the helper is asked to end the engine instead.
-    const wrapper =
+    const helped =
       onDesktop === undefined
         ? null
-        : throughHelper(
-            { desktop: HIDDEN_DESKTOP, directory: onDesktop.directory },
+        : spawnOnDesktop(
+            {
+              desktop: HIDDEN_DESKTOP,
+              directory: onDesktop.directory,
+              scratch: dirname(onDesktop.files.spec),
+              stop: onDesktop.files.stop,
+              exit: onDesktop.files.exit,
+            },
             godotPath,
             cmdArgs,
-            onDesktop.files,
+            { stdio: ['ignore', 'pipe', 'pipe'], env: env ?? process.env },
           );
     const child =
-      wrapper === null
+      helped === null
         ? spawnHidden(godotPath, cmdArgs, {
             stdio: ['ignore', 'pipe', 'pipe'],
             ...(env ? { env } : {}),
           })
-        : spawnHidden(wrapper.command, wrapper.args, {
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...(env ?? process.env), [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
-          });
+        : helped.child;
     belowNormal(child);
     const whole = holdExit(child.pid);
     const stop = (): void => {
-      if (onDesktop === undefined) {
+      if (helped === null) {
         child.kill();
       } else {
-        writeFileSync(onDesktop.files.stop, '');
+        helped.stop();
       }
     };
     // The same reasoning at the other end of the call: a caller who cancelled is no longer the
@@ -14561,10 +14563,10 @@ class GodotServer {
       throughEditor: false,
       brokeOn: null,
     };
-    child.stdout.on('data', (data: Buffer) => {
+    child.stdout?.on('data', (data: Buffer) => {
       log.append('stdout', data);
     });
-    child.stderr.on('data', (data: Buffer) => {
+    child.stderr?.on('data', (data: Buffer) => {
       log.append('stderr', data);
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
@@ -14595,8 +14597,8 @@ class GodotServer {
           done();
         }
       };
-      child.stdout.once('close', closed);
-      child.stderr.once('close', closed);
+      child.stdout?.once('close', closed);
+      child.stderr?.once('close', closed);
       child.once('exit', () => {
         setTimeout(done, STREAMS_GRACE_MS).unref();
       });

@@ -22,7 +22,8 @@ import { mendBeforeStart, programArgumentsOf } from './uid-cache.js';
 
 /**
  * The one way this package and its tests start a process, so every one starts with no window.
- *
+ * A process on a desktop of its own is started by a helper, which `spawnOnDesktop` in `desktop.ts`
+ * starts here: Node cannot name a desktop. *
  * A process with no console, which this server is under a harness and a gate run is when detached,
  * gives every console program it starts a console window of its own on the desktop in use: a gate
  * run detached after a push opened about twenty Godot console windows on the screen of the person
@@ -30,7 +31,12 @@ import { mendBeforeStart, programArgumentsOf } from './uid-cache.js';
  * each call to remember. A regression refuses `child_process` and `Bun.spawn` anywhere else.
  */
 
-export type { ChildProcess, ChildProcessWithoutNullStreams, SpawnSyncReturns } from 'node:child_process';
+export type {
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+  SpawnOptions,
+  SpawnSyncReturns,
+} from 'node:child_process';
 
 /**
  * Sets the uid cache and the class list of the project a start names right. Only the program's

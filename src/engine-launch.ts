@@ -12,7 +12,6 @@ import {
   readdirSync,
   readSync,
   rmSync,
-  writeFileSync,
   writeSync,
 } from 'node:fs';
 import { availableParallelism, freemem, totalmem } from 'node:os';
@@ -22,14 +21,13 @@ import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
 import {
-  DESKTOP_VARIABLE,
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
   helperPid,
   helperStep,
-  throughHelper,
+  spawnOnDesktop,
 } from './desktop.js';
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
@@ -557,45 +555,38 @@ async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
       end: { code: null, signal: null, ended: `the engine could not be started ${where}: ${compiled}` },
     };
   }
-  const stopFile = join(directory, 'stop');
-  const error = join(directory, 'error');
-  const helper: HelperFiles = {
-    error,
-    how: where,
-    pid: join(directory, 'pid'),
-    step: join(directory, 'step'),
-    exit: join(directory, 'exit'),
-  };
   const how = {
     desktop: HIDDEN_DESKTOP,
     directory: launch.projectPath,
     endsWithHelper: true,
+    scratch: directory,
+    stop: join(directory, 'stop'),
+    exit: join(directory, 'exit'),
     ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
   };
-  const wrapper = throughHelper(how, launch.godotPath, args, {
-    spec: join(directory, 'spec'),
-    pid: helper.pid,
-    error,
-    stop: stopFile,
-    step: helper.step,
-    exit: helper.exit,
-  });
   // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
   // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
   // helper hands the engine its stdout for both streams, so their lines stay in order.
-  const helped = spawnHidden(wrapper.command, wrapper.args, {
+  const onDesktop = spawnOnDesktop(how, launch.godotPath, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
+    env,
     cwd: directory,
   });
+  const helped = onDesktop.child;
   return {
     kind: 'started',
     child: helped,
     stop: () => {
-      writeFileSync(stopFile, '');
+      onDesktop.stop();
     },
-    piped: [helped.stdout, helped.stderr],
-    helper,
+    piped: [helped.stdout, helped.stderr].filter((stream): stream is Readable => stream !== null),
+    helper: {
+      error: onDesktop.files.error,
+      how: where,
+      pid: onDesktop.files.pid,
+      step: onDesktop.files.step,
+      exit: onDesktop.files.exit,
+    },
   };
 }
 

@@ -6,27 +6,25 @@
  * a boot that warns once per resource, was ended by Node and answered as an engine fault.
  */
 
-import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { callSignal } from './call-signal.js';
 import {
-  DESKTOP_VARIABLE,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
   helperPid,
-  throughHelper,
+  spawnOnDesktop,
 } from './desktop.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
 import { belowNormal } from './priority.js';
-import { spawnHidden } from './spawn.js';
+import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import { windowsStatusOf } from './suite-judge.js';
 import { holdExit } from './whole-exit.js';
 
@@ -156,11 +154,12 @@ export async function runEngine(
   }
 }
 
-/** How an engine is started: directly, or through the helper that gives it a desktop of its own. */
+/**
+ * An engine started directly, or through the helper that gives it a desktop of its own, in which
+ * case its helper's files are named. A crashed run's exit code is read from the exit file alone.
+ */
 interface Launch {
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly env: NodeJS.ProcessEnv;
+  readonly child: ChildProcess;
   readonly files: HelperFiles | null;
 }
 
@@ -169,36 +168,29 @@ function launchOf(
   args: readonly string[],
   lock: string,
   desktop: RunOptions['desktop'],
+  signal: AbortSignal | undefined,
 ): Launch {
-  const env = onTheSlot(process.env, lock);
-  if (desktop === undefined) {
-    return { command: executable, args, env, files: null };
-  }
-  const at = (name: string): string => join(desktop.scratch, name);
-  const files: HelperFiles = {
-    spec: at('spec'),
-    pid: at('pid'),
-    error: at('error'),
-    stop: '',
-    step: at('step'),
-    exit: at('exit'),
+  const options: SpawnOptions = {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: onTheSlot(process.env, lock),
+    ...(signal === undefined ? {} : { signal }),
   };
-  // A start after one that crashed must not read that one's files.
-  for (const file of [files.pid, files.error, files.step, files.exit]) {
-    rmSync(file, { force: true });
+  if (desktop === undefined) {
+    return { child: spawnHidden(executable, args, options), files: null };
   }
-  const wrapper = throughHelper(
-    { desktop: HIDDEN_DESKTOP, directory: desktop.directory, endsWithHelper: true },
+  const started = spawnOnDesktop(
+    {
+      desktop: HIDDEN_DESKTOP,
+      directory: desktop.directory,
+      endsWithHelper: true,
+      scratch: desktop.scratch,
+      exit: join(desktop.scratch, 'exit'),
+    },
     executable,
     args,
-    files,
+    options,
   );
-  return {
-    command: wrapper.command,
-    args: wrapper.args,
-    env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
-    files,
-  };
+  return { child: started.child, files: started.files };
 }
 
 /** What the run's handlers share while it lasts. */
@@ -245,12 +237,7 @@ function runStarted(
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
-    const { command, args: spawned, env, files } = launchOf(executable, args, lock, options.desktop);
-    const child = spawnHidden(command, spawned, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-      ...(signal === undefined ? {} : { signal }),
-    });
+    const { child, files } = launchOf(executable, args, lock, options.desktop, signal);
     belowNormal(child);
     const whole = holdExit(child.pid);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
@@ -260,10 +247,10 @@ function runStarted(
     if (child.pid !== undefined && files === null) {
       void nameSlotEngineOf(lock, process.pid, child.pid);
     }
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout?.on('data', (chunk: Buffer) => {
       log.append('stdout', chunk);
     });
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr?.on('data', (chunk: Buffer) => {
       log.append('stderr', chunk);
     });
     const state: RunState = { pid: engineAt(), failure: null, closed: false };

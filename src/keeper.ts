@@ -17,15 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
-import {
-  DESKTOP_VARIABLE,
-  ensureHelperCompiled,
-  helperExit,
-  helperFailure,
-  helperPid,
-  helperStep,
-  throughHelper,
-} from './desktop.js';
+import { ensureHelperCompiled, helperExit, helperFailure, helperStep, spawnOnDesktop } from './desktop.js';
 import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
@@ -100,7 +92,7 @@ async function startDirectly(
 }
 
 /**
- * [param spec] started through `throughHelper`, on the desktop it names or shown without
+ * [param spec] started through `spawnOnDesktop`, on the desktop it names or shown without
  * activation: the child is the process that waits for it and exits with its code, and the pid is
  * the target's own, read from the file that process writes once the target has started.
  *
@@ -119,9 +111,6 @@ async function startThroughHelper(
   exitFile: string,
 ): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   const scratch = scratchDirectory('desktop');
-  const pidFile = join(scratch, 'pid');
-  const errorFile = join(scratch, 'error');
-  const stepFile = join(scratch, 'step');
   const where =
     spec.desktop !== undefined
       ? `on the ${spec.desktop} desktop`
@@ -135,49 +124,59 @@ async function startThroughHelper(
     if (compiled !== null) {
       return { error: `it could not be started ${where}: ${compiled}` };
     }
-    const wrapper = throughHelper({ ...spec, directory: process.cwd() }, spec.command, spec.args, {
-      spec: join(scratch, 'spec.json'),
-      pid: pidFile,
-      error: errorFile,
-      stop: stopFile,
-      step: stepFile,
-      exit: exitFile,
-    });
-    // The helper's environment is what it starts inherits, since the start names no other.
-    const envChanges =
-      spec.desktop === undefined ? spec.envChanges : { ...spec.envChanges, [DESKTOP_VARIABLE]: spec.desktop };
-    // In the temporary directory, with the target given this one explicitly: Windows PowerShell
-    // saves its module cache relative to where it runs when the profile does not resolve, and this
-    // process runs in the server's directory, which is usually somebody's project.
-    const started = await startDirectly(
-      { ...spec, command: wrapper.command, args: wrapper.args, envChanges },
-      output,
-      true,
-      false,
-      'ignore',
-      tmpdir(),
+    // The helper's environment is what it starts inherits, since the start names no other. In the
+    // temporary directory, with the target given the directory explicitly: Windows PowerShell saves
+    // its module cache relative to where it runs when the profile does not resolve, and this process
+    // runs in the server's directory, which is usually somebody's project.
+    const onDesktop = spawnOnDesktop(
+      {
+        ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
+        ...(spec.noActivate === undefined ? {} : { noActivate: spec.noActivate }),
+        directory: process.cwd(),
+        scratch,
+        stop: stopFile,
+        exit: exitFile,
+      },
+      spec.command,
+      spec.args,
+      {
+        stdio: ['ignore', output, 'ignore'],
+        env: withChanges(process.env, spec.envChanges),
+        cwd: tmpdir(),
+      },
     );
-    if ('error' in started) {
-      return started;
+    const { child } = onDesktop;
+    belowNormal(child);
+    const whole = holdExit(child.pid);
+    const spawned = await new Promise<string | null>((resolve) => {
+      child.once('error', (error: Error) => {
+        resolve(error.message);
+      });
+      child.once('spawn', () => {
+        resolve(child.pid === undefined ? 'the operating system gave it no pid' : null);
+      });
+    });
+    if (spawned !== null) {
+      return { error: spawned };
     }
     const exited = { now: false };
-    started.child.once('exit', () => {
+    child.once('exit', () => {
       exited.now = true;
     });
     for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
-      const pid = helperPid(pidFile);
+      const pid = onDesktop.pid();
       if (pid !== undefined) {
-        return { child: started.child, pid, whole: started.whole };
+        return { child, pid, whole };
       }
       if (exited.now) {
-        const why = helperFailure(errorFile) ?? 'it exited saying nothing';
+        const why = helperFailure(onDesktop.files.error) ?? 'it exited saying nothing';
         return { error: `it could not be started ${where}: ${why}` };
       }
       await delay(50);
     }
-    started.child.kill();
+    child.kill();
     return {
-      error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(stepFile)}`,
+      error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(onDesktop.files.step)}`,
     };
   } finally {
     discard(scratch);
