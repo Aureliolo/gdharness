@@ -479,7 +479,8 @@ static func _fitted(target: Node, method: String, arguments: Array) -> Array:
 			var parameter: Dictionary = parameters[at]
 			declared = GdhRead.as_int(parameter.get("type", TYPE_NIL))
 		if value is int and declared == TYPE_FLOAT:
-			value = float(value)
+			var whole: int = value
+			value = float(whole)
 		elif value is float and declared == TYPE_INT:
 			var number: float = value
 			if (is_finite(number)
