@@ -219,7 +219,7 @@ const NO_ROOM = new Set(['ENOSPC', 'EDQUOT']);
  * What a failed call says when the disk it wrote to had no room left, or null for any other
  * failure. A full disk is the machine's state with a known fix, so it is not reported as a defect.
  */
-export function noRoomLeft(error: unknown): string | null {
+function noRoomLeft(error: unknown): string | null {
   if (!NO_ROOM.has(errorCode(error) ?? '')) {
     return null;
   }
