@@ -17,6 +17,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -1838,48 +1839,74 @@ function aFailedInstallLeavesTheProjectAsItWas(): void {
     fc.record({ at: fc.constant('digest' as const), addon: fc.constantFrom<0 | 1>(0, 1) }),
   );
   fc.assert(
-    fc.property(fc.boolean(), fc.boolean(), failures, (earlier, hadAddonsFolder, failure) => {
-      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-install-'));
-      try {
-        const project = join(root, 'project');
-        mkdirSync(project);
-        if (hadAddonsFolder) {
-          mkdirSync(join(project, 'addons', 'other'), { recursive: true });
-        }
-        if (earlier) {
-          installAddons(project, fakePackage(root, 'old', { at: 'none' }));
-        }
-        const before = treeOf(join(project, 'addons'));
-        const from = fakePackage(root, 'new', failure);
-        if (failure.at === 'none') {
-          const installed = installAddons(project, from);
-          assert.deepEqual(
-            installed.map((addon) => [addon.name, addon.replaced]),
-            ADDONS.map((name) => [name, earlier]),
-          );
-          for (const name of ADDONS) {
-            assert.equal(
-              readFileSync(join(project, 'addons', name, VERSION_MARKER), 'utf8').trim(),
-              SERVER_VERSION,
+    fc.property(
+      fc.boolean(),
+      fc.boolean(),
+      failures,
+      fc.option(fc.record({ addon: fc.integer({ min: 0, max: 3 }), partial: fc.boolean() }), {
+        nil: undefined,
+      }),
+      (earlier, hadAddonsFolder, failure, killed) => {
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-install-'));
+        try {
+          const project = join(root, 'project');
+          mkdirSync(project);
+          if (hadAddonsFolder) {
+            mkdirSync(join(project, 'addons', 'other'), { recursive: true });
+          }
+          if (earlier) {
+            installAddons(project, fakePackage(root, 'old', { at: 'none' }));
+          }
+          const before = treeOf(join(project, 'addons'));
+          if (earlier && killed !== undefined) {
+            killAnInstallAt(project, killed.addon, killed.partial);
+          }
+          const from = fakePackage(root, 'new', failure);
+          if (failure.at === 'none') {
+            const installed = installAddons(project, from);
+            assert.deepEqual(
+              installed.map((addon) => [addon.name, addon.replaced]),
+              ADDONS.map((name) => [name, earlier]),
+            );
+            for (const name of ADDONS) {
+              assert.equal(
+                readFileSync(join(project, 'addons', name, VERSION_MARKER), 'utf8').trim(),
+                SERVER_VERSION,
+              );
+            }
+            assert.notEqual(installedEditorDigest(project), null);
+            assert.notEqual(installedRuntimeDigest(project), null);
+          } else {
+            assert.throws(() => installAddons(project, from));
+            assert.deepEqual(
+              treeOf(join(project, 'addons')),
+              before,
+              'the addons are as the failed install found them',
             );
           }
-          assert.notEqual(installedEditorDigest(project), null);
-          assert.notEqual(installedRuntimeDigest(project), null);
-        } else {
-          assert.throws(() => installAddons(project, from));
-          assert.deepEqual(
-            treeOf(join(project, 'addons')),
-            before,
-            'the addons are as the failed install found them',
-          );
+          assert.equal(existsSync(join(project, 'addons', '.gdharness-previous')), false);
+        } finally {
+          sweep(root);
         }
-        assert.equal(existsSync(join(project, 'addons', '.gdharness-previous')), false);
-      } finally {
-        sweep(root);
-      }
-    }),
+      },
+    ),
     { numRuns: 25 },
   );
+}
+
+/**
+ * The folder an install killed midway leaves: the addon it had reached set aside in the folder for
+ * replaced addons, and with [param partial] the start of the new copy in its place.
+ */
+function killAnInstallAt(project: string, addon: number, partial: boolean): void {
+  const name = ADDONS[addon] ?? ADDONS[0];
+  const addons = join(project, 'addons');
+  mkdirSync(join(addons, '.gdharness-previous'), { recursive: true });
+  renameSync(join(addons, name), join(addons, '.gdharness-previous', name));
+  if (partial) {
+    mkdirSync(join(addons, name));
+    writeFileSync(join(addons, name, 'half.gd'), 'half');
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2149,16 +2176,16 @@ function aFoldedErrorCostsTheSameAtEveryFrame(): void {
   const bound = 4000;
   const log = new GameLog();
   const began = performance.now();
-  for (let frame = 0; frame < frames; frame += 1) {
-    log.append('stdout', `frame ${String(frame)}\n`);
+  for (let tick = 0; tick < frames; tick += 1) {
+    log.append('stdout', `frame ${String(tick)}\n`);
     log.append(
       'stderr',
-      `ERROR: bad value\nsecond line ${String(frame)}\n   at: push_error (core/variant/variant_utility.cpp:1024)\n`,
+      `ERROR: bad value\nsecond line ${String(tick)}\n   at: push_error (core/variant/variant_utility.cpp:1024)\n`,
     );
-    if (frame % 1000 === 999) {
+    if (tick % 1000 === 999) {
       assert.ok(
         performance.now() - began < bound,
-        `${String(frame + 1)} frames took over ${String(bound)} ms`,
+        `${String(tick + 1)} frames took over ${String(bound)} ms`,
       );
     }
   }

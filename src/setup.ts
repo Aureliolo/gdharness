@@ -334,16 +334,16 @@ export function installAddons(
   projectPath: string,
   from: string = shippedAddonsDirectory(),
 ): InstalledAddon[] {
+  const addons = join(projectPath, 'addons');
+  const addonsExisted = somethingAt(addons);
+  const previous = join(addons, PREVIOUS_FOLDER);
+  restoreInterrupted(addons, previous);
   for (const name of ADDONS) {
     const source = join(from, name);
     if (!existsSync(join(source, addonMarking(name)))) {
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
   }
-  const addons = join(projectPath, 'addons');
-  const addonsExisted = somethingAt(addons);
-  const previous = join(addons, PREVIOUS_FOLDER);
-  rmSync(previous, { recursive: true, force: true });
   const installed: InstalledAddon[] = [];
   // The addons whose folder this install has taken over, which a failure puts back.
   const taken: { readonly name: string; readonly kept: boolean }[] = [];
@@ -375,6 +375,22 @@ export function installAddons(
     rmSync(previous, { recursive: true, force: true });
   }
   return installed;
+}
+
+/**
+ * Puts back the addons an install that was killed had set aside in [param previous], over whatever
+ * it had copied in their place, so the next install starts from the project as it was and a failure
+ * of that one leaves it so.
+ */
+function restoreInterrupted(addons: string, previous: string): void {
+  if (!somethingAt(previous)) {
+    return;
+  }
+  for (const name of readdirSync(previous)) {
+    rmSync(join(addons, name), { recursive: true, force: true });
+    renameSync(join(previous, name), join(addons, name));
+  }
+  rmSync(previous, { recursive: true, force: true });
 }
 
 /** Removes each addon a failed install took over and puts back the one it replaced, from [param previous]. */
