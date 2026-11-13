@@ -73716,7 +73716,12 @@ async function aProcessDrawsOnlyFromBlocksItHolds(): Promise<void> {
   }
   const dialled = createConnection({ port: first, host: '127.0.0.1' });
   dialled.on('error', () => undefined);
-  await once(dialled, 'close');
+  const closed = await once(dialled, 'close', { signal: AbortSignal.timeout(10_000) }).then(
+    () => true,
+    () => false,
+  );
+  dialled.destroy();
+  assert.ok(closed, `the hold on ${first} lets a dial go at once rather than keeping it open`);
 }
 
 /**
