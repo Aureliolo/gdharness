@@ -66783,7 +66783,9 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     assert.deepEqual(leftInSlots(slots), [], 'and the machine slots are all given back');
     assert.equal(existsSync(mark), false, 'no mark is left');
 
-    // A file whose writer has gone adds no lane, and the run leaves no mark.
+    // A file whose writer has gone adds no lane, and the run leaves no mark. Each run records the
+    // times its suites took, and four quick ones would be dealt to a single engine.
+    keep(fourTimed);
     writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
     const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
     await exitOf(gone);
@@ -66795,9 +66797,10 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     const dead = runWith(file, 4, '--engines', '2', '--slot-count', '4');
     stands();
     assert.equal(dead.status, 0, dead.said);
-    assert.ok(
-      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
-      `a dead file adds no lane: ${dead.said}`,
+    assert.deepEqual(
+      [...new Set(readRunResult(resultFile).engines.map((engine) => engine.lane))].toSorted((a, b) => a - b),
+      [0, 1],
+      `a dead file adds no lane to the run's two: ${dead.said}`,
     );
     assert.doesNotMatch(dead.said, /raised this run from/, 'and says nothing of a rise');
     assert.equal(existsSync(mark), false, 'it leaves no mark');
@@ -66809,13 +66812,15 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     );
 
     // An empty variable names no file.
+    keep(fourTimed);
     await standsIn('always', 4);
     const empty = runWith('', 4, '--engines', '2', '--slot-count', '4');
     stands();
     assert.equal(empty.status, 0, empty.said);
-    assert.ok(
-      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
-      'no lane is added',
+    assert.deepEqual(
+      [...new Set(readRunResult(resultFile).engines.map((engine) => engine.lane))].toSorted((a, b) => a - b),
+      [0, 1],
+      `no lane is added to the run's two: ${empty.said}`,
     );
     assert.equal(
       slotsSeen().withCompile,
