@@ -33,7 +33,8 @@
  * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
  * is `$XDG_CACHE_HOME/gdharness/slots` where that variable is set, else
  * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`. The count is half
- * the processors, at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
+ * the processors, but no more than the physical memory above 16 GiB holds at 1.5 GiB an engine, and
+ * at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
  * replace either, and a command's `--slots` and `--slot-count` replace those ({@link machineSlots}).
  *
  * The games' own tools take slots in this directory the same way, which is the point of it: the
@@ -54,7 +55,7 @@ import {
   watch,
   writeSync,
 } from 'node:fs';
-import { availableParallelism, homedir } from 'node:os';
+import { availableParallelism, homedir, totalmem } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -95,6 +96,10 @@ export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
  * one slot to five left the machine about half idle while gates waited in line for engines.
  */
 const PROCESSORS_A_SLOT = 2;
+/** The memory one slot stands for, as the machine's queue counts it. */
+const ENGINE_MEMORY_BYTES = 1536 * 1024 ** 2;
+/** The physical memory no slot stands for: editors, language servers and sessions. */
+const OUTSIDE_MEMORY_BYTES = 16 * 1024 ** 3;
 
 /** Where the slots are and how many there are. */
 interface SlotsChosen {
@@ -107,6 +112,8 @@ interface SlotsMachine {
   readonly env: NodeJS.ProcessEnv;
   readonly platform: NodeJS.Platform;
   readonly processors: number;
+  /** The physical memory in bytes. */
+  readonly memory: number;
   readonly home: string;
   readonly cwd: string;
 }
@@ -125,6 +132,7 @@ export function machineSlots(
     env: process.env,
     platform: process.platform,
     processors: availableParallelism(),
+    memory: totalmem(),
     home: homedir(),
     cwd: process.cwd(),
   },
@@ -139,7 +147,9 @@ export function machineSlots(
   if (count === null && counted !== undefined) {
     count = wholeFlag(counted, SLOT_COUNT_VARIABLE);
   }
-  return { directory, count: count ?? Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT)) };
+  const byProcessors = Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT));
+  const byMemory = Math.floor((machine.memory - OUTSIDE_MEMORY_BYTES) / ENGINE_MEMORY_BYTES);
+  return { directory, count: count ?? Math.max(1, Math.min(byProcessors, byMemory)) };
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -279,7 +289,16 @@ interface SlotWaiter {
   /** When it began to wait, in milliseconds since the epoch. */
   readonly since: number;
   readonly game: boolean;
+  /** How many slots it waits for at once: above 1 only for a job needing several, else 1. */
+  readonly wants: number;
 }
+
+/**
+ * How long a taker waiting for several slots at once has the slots freed meanwhile left to it, past
+ * which takers behind it take them and it starts on what is free. Written as the machine's queue
+ * writes it.
+ */
+export const SLOTS_DRAIN_MS = 300_000;
 
 /**
  * Each live taker waiting for a slot in [param directory], as its mark names it. A mark's `taker` of
@@ -319,11 +338,12 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
     return null;
   }
   const parsed: unknown = JSON.parse(content);
-  const { taker, since }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+  const { taker, since, wants }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
   if (taker === MEMORY_TAKER) {
     return null;
   }
   return {
+    wants: typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? wants : 1,
     mark,
     taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
@@ -904,6 +924,11 @@ export class EngineSlots {
   private readonly passedOver = new Map<string, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
+  /**
+   * Whether the inherited slot is one a timing or a heavy job lends, which a program inside it takes
+   * no slot beside: its engines wait for the lent one, as a job started inside a job does.
+   */
+  private jobLent = false;
   /** The last look at the inherited slot, which the next one waits for. */
   private inheriting: Promise<void> = Promise.resolve();
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
@@ -1040,6 +1065,9 @@ export class EngineSlots {
     if (inherited !== null) {
       return inherited;
     }
+    if (this.inherited !== null && this.jobLent) {
+      return null;
+    }
     const taker = this.taker();
     if (await this.starvedOutFor(taker)) {
       return null;
@@ -1149,7 +1177,11 @@ export class EngineSlots {
     }
     const now = Date.now();
     const drawn: (readonly number[])[] = [];
-    for (const one of ahead) {
+    // A taker waiting for several slots at once is ahead once for each, for its first drain.
+    const places = ahead.flatMap((one) =>
+      Array.from({ length: now - one.since < SLOTS_DRAIN_MS ? one.wants : 1 }, () => one),
+    );
+    for (const one of places) {
       const aged = one.taker === 'other' && !one.game && now - one.since >= ONE_OFF_AGED_MS;
       const theirs = slotsDrawnOn(
         this.count,
@@ -1159,7 +1191,7 @@ export class EngineSlots {
       drawn.push(theirs.numbers);
     }
     return new Map(
-      [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, ahead[at]?.mark ?? '']),
+      [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, places[at]?.mark ?? '']),
     );
   }
 
@@ -1190,6 +1222,23 @@ export class EngineSlots {
    * so the variable alone would put it on the editor's slot.
    */
   private async inheritedLock(): Promise<string | null> {
+    this.jobLent = false;
+    const engines = await this.engineLock();
+    if (engines !== null) {
+      return engines;
+    }
+    const lent = nonEmpty(process.env[TIMED_VARIABLE]);
+    const content = lent === undefined ? null : readWhole(lent);
+    const holder = content === null ? null : holderOf(content);
+    if (lent === undefined || holder === null || holder.pid === process.pid || (await this.free(lent))) {
+      return null;
+    }
+    this.jobLent = true;
+    return lent;
+  }
+
+  /** The lock of the engine above this process, which [constant HELD_VARIABLE] names, or null. */
+  private async engineLock(): Promise<string | null> {
     const lock = nonEmpty(process.env[HELD_VARIABLE]);
     const content = lock === undefined ? null : readWhole(lock);
     const holder = content === null ? null : holderOf(content);

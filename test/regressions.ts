@@ -59984,6 +59984,105 @@ function testARestartedCountDoesNotTakeWorkFromBeforeTheRestart(): void {
  * an editor plays inherits the editor's environment and runs the editor's executable, so it takes a
  * slot of its own.
  */
+/**
+ * How many slots a machine counts: half the processors, held to the memory above 16 GiB at 1.5 GiB
+ * an engine, and a variable replaces either.
+ */
+function testTheSlotCountIsHeldToTheMemoryThereIs(): void {
+  const gib = 1024 ** 3;
+  const count = (processors: number, memory: number, env: NodeJS.ProcessEnv = {}): number =>
+    machineSlots(
+      { directory: null, count: null },
+      { env, platform: 'linux', processors, memory, home: join(sep, 'home'), cwd: join(sep, 'work') },
+    ).count;
+  assert.equal(count(32, 12 * gib), 1, 'memory below 16 GiB still counts one slot');
+  assert.equal(count(32, 16 * gib), 1, 'and exactly 16 GiB');
+  assert.equal(count(32, 24 * gib), 5, 'memory caps below half the processors: 8 GiB is five engines');
+  assert.equal(count(8, 64 * gib), 4, 'half the processors caps below the memory');
+  assert.equal(count(1, 64 * gib), 1, 'one processor is one slot');
+  assert.equal(count(32, 12 * gib, { GODOT_ENGINE_SLOT_COUNT: '7' }), 7, 'the variable overrides the memory');
+  assert.equal(count(2, 64 * gib, { GODOT_ENGINE_SLOT_COUNT: '9' }), 9, 'and the processors');
+}
+
+/**
+ * A waiting mark naming `wants` above 1 has that many free slots left to it for its first drain, one
+ * after, and a `wants` that is no whole number above 1 counts one.
+ */
+async function testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-wants-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    const take = async (wants: unknown, waitedMs: number): Promise<[string | null, number[]]> => {
+      writeFileSync(
+        join(marks, '1-1.json'),
+        JSON.stringify({ ...me, taker: 'other', since: (Date.now() - waitedMs) / 1000, wants }),
+      );
+      const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
+      try {
+        const lock = await newcomer.takeFree();
+        return [lock === null ? null : basename(lock), [...(newcomer.drawn.left ?? [])]];
+      } finally {
+        newcomer.releaseAll();
+      }
+    };
+    assert.deepEqual(await take(3, 60_000), ['0.lock', [1, 2, 3]], 'three left to a mark wanting three');
+    assert.deepEqual(await take(3, 299_000), ['0.lock', [1, 2, 3]], 'to the end of its drain');
+    const past = await take(3, 301_000);
+    assert.deepEqual([past[0] !== null, past[1].length], [true, 1], 'one once the drain is past');
+    assert.deepEqual(await take(4, 10_000), [null, [0, 1, 2, 3]], 'and all four to a mark wanting four');
+    for (const odd of [undefined, 1, 0, -2, 1.5, '3', null, true]) {
+      const one = await take(odd, 60_000);
+      assert.deepEqual([one[0] !== null, one[1].length], [true, 1], `${JSON.stringify(odd)} counts one`);
+    }
+    assert.equal(slotWaiters(directory)[0]?.wants, 1, 'a mark read with no usable wants says one');
+  } finally {
+    sweep(directory);
+  }
+}
+
+/**
+ * A program inside a timing or a heavy job runs on the slot the job lends, one engine at a time,
+ * and takes none beside it. Once the lender has gone it takes slots as any program does.
+ */
+async function testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-job-'));
+  const lender = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const had = process.env['GODOT_ENGINE_TIMED'];
+  try {
+    const pid = lender.pid;
+    assert.ok(typeof pid === 'number', 'the lender needs a live process');
+    const started = (await startTimesOf([pid])).get(pid);
+    assert.ok(started !== undefined, 'and a start');
+    const lent = join(directory, '0.lock');
+    writeFileSync(lent, JSON.stringify({ pid, started }));
+    process.env['GODOT_ENGINE_TIMED'] = lent;
+    const me = { pid: process.pid, started: await ownStart() };
+    const slots = new EngineSlots(directory, 3, me);
+    assert.equal(await slots.takeFree(), lent, 'the first engine runs on the lent slot');
+    assert.equal(await slots.takeFree(), null, 'the second waits rather than take another');
+    assert.equal(readdirSync(directory).filter((name) => name.endsWith('.lock')).length, 1, 'none was made');
+    slots.release(lent);
+    assert.equal(await slots.takeFree(), lent, 'and the lent slot serves the next once it is free');
+    slots.release(lent);
+    const ended = new Promise((over) => lender.once('exit', over));
+    lender.kill();
+    await ended;
+    const after = await slots.takeFree();
+    assert.ok(after !== null && after !== lent, `with the job gone it takes a slot of its own: ${String(after)}`);
+    slots.releaseAll();
+  } finally {
+    lender.kill();
+    if (had === undefined) {
+      delete process.env['GODOT_ENGINE_TIMED'];
+    } else {
+      process.env['GODOT_ENGINE_TIMED'] = had;
+    }
+    sweep(directory);
+  }
+}
+
 async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
   const tree: ProcessTree = new Map([
     [10, { parent: 9, command: '"C:\\tools\\Bun.exe" x gdharness test' }],
@@ -60956,7 +61055,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       'read in whole milliseconds, as a take reads its own clock',
     );
     const tied = new SlotLine('other', false, () => began);
-    const waiter = { mark: '1-1.json', taker: 'other', since: began, game: false } as const;
+    const waiter = { mark: '1-1.json', taker: 'other', since: began, game: false, wants: 1 } as const;
     assert.deepEqual(
       tied.ahead([waiter]).map((one) => one.mark),
       ['1-1.json'],
@@ -60966,10 +61065,10 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
     // Gate work goes before younger side work whenever each began, and side work that has waited two
     // minutes with it. A game never counts as aged. Uploads waited behind side work begun before them.
-    const sideWork = { mark: 'a.json', taker: 'other', since: began - 10_000, game: false } as const;
-    const gateWork = { mark: 'b.json', taker: 'tier', since: began, game: false } as const;
-    const agedSide = { mark: 'c.json', taker: 'other', since: began - 121_000, game: false } as const;
-    const agedGame = { mark: 'd.json', taker: 'other', since: began - 1_200_000, game: true } as const;
+    const sideWork = { mark: 'a.json', taker: 'other', since: began - 10_000, game: false, wants: 1 } as const;
+    const gateWork = { mark: 'b.json', taker: 'tier', since: began, game: false, wants: 1 } as const;
+    const agedSide = { mark: 'c.json', taker: 'other', since: began - 121_000, game: false, wants: 1 } as const;
+    const agedGame = { mark: 'd.json', taker: 'other', since: began - 1_200_000, game: true, wants: 1 } as const;
     assert.deepEqual(
       new SlotLine('other', false, () => began)
         .ahead([sideWork, gateWork, agedSide, agedGame])
@@ -64167,6 +64266,7 @@ async function checksTheMachineSlotsAndTheirWaitMessages(): Promise<void> {
     env,
     platform,
     processors,
+    memory: 64 * 1024 ** 3,
     home: join(sep, 'home', 'me'),
     cwd: join(sep, 'work'),
   });
@@ -99472,6 +99572,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStarvedMeasurementHoldsSideEngines,
   testGatesInTheQueueKeepTheirSlots,
   testARunFollowsTheLanesAGateWrites,
+  testTheSlotCountIsHeldToTheMemoryThereIs,
+  testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
+  testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
