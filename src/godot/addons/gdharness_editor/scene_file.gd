@@ -971,20 +971,20 @@ static func out_through_link(file: String, links_out: PackedStringArray) -> Stri
 ## as a path out through one link and back in through another does. A ring, or a path that runs out
 ## of the project at its end, is not inside. Only link targets are read, never file contents.
 static func _ends_inside(file: String, any_case: bool) -> bool:
-	var root: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	var inside: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
 	var led: String = _followed(ProjectSettings.globalize_path(file))
-	if root.is_empty() or led.is_empty():
+	if inside.is_empty() or led.is_empty():
 		return false
 	if any_case:
-		root = root.to_lower()
+		inside = inside.to_lower()
 		led = led.to_lower()
-	return led == root or led.begins_with(root + "/")
+	return led == inside or led.begins_with(inside + "/")
 
 
-## Where the absolute [param path] leads, each link on it followed in turn, or "" after
+## Where the absolute path [param given] leads, each link on it followed in turn, or "" after
 ## [constant MOST_LINKS] links, which is a ring. A link whose target is gone leads to that target.
-static func _followed(path: String) -> String:
-	var parts: PackedStringArray = path.replace("\\", "/").simplify_path().split("/")
+static func _followed(given: String) -> String:
+	var parts: PackedStringArray = given.replace("\\", "/").simplify_path().split("/")
 	var disk: DirAccess = DirAccess.open(parts[0] + "/")
 	if disk == null:
 		return ""
@@ -1001,7 +1001,11 @@ static func _followed(path: String) -> String:
 		if links > MOST_LINKS:
 			return ""
 		var rest: PackedStringArray = parts.slice(index)
-		parts = _target_of(disk, next, current).split("/")
+		var target: String = _target_of(disk, next, current)
+		# A link the engine cannot read leads somewhere unknown, which is not inside.
+		if target.is_empty():
+			return ""
+		parts = target.split("/")
 		current = parts[0]
 		index = 1
 		parts.append_array(rest)
@@ -1011,6 +1015,8 @@ static func _followed(path: String) -> String:
 ## The absolute path the link [param at], found in the folder [param folder], points to.
 static func _target_of(disk: DirAccess, at: String, folder: String) -> String:
 	var target: String = disk.read_link(at).replace("\\", "/")
+	if target.is_empty():
+		return ""
 	# A junction's target may carry the prefix Windows gives a path that skips its own parsing.
 	for prefix: String in ["//?/", "/??/"]:
 		target = target.trim_prefix(prefix)

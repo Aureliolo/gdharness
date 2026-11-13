@@ -91726,7 +91726,8 @@ function testTheAddonJudgesALinkChainByWhereItEnds(): void {
     assert.ok(answered !== undefined, said);
     assert.deepEqual(
       JSON.parse(answered),
-      [false, true, true, true, true, false, false, true],
+      // The dangling link inside the chain (hole) is refused: the engine cannot read where it points.
+      [false, true, true, true, true, true, false, true],
       `${paths.join(' ')}: ${said}`,
     );
   } finally {
