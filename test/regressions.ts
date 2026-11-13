@@ -66521,6 +66521,7 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
   const mark = `${file}${FOLLOWS_SUFFIX}`;
   const standIn = join(pool, 'portion.cjs');
   const listings = join(pool, 'listings.jsonl');
+  const testRuns = join(project, '.godot', 'gdharness', 'test-runs');
   const children: Array<ReturnType<typeof spawnHidden>> = [];
   const suiteOf = (waits: readonly number[]): string =>
     [
@@ -66558,15 +66559,26 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
   const standsIn = async (mode: 'onMark' | 'always' | 'never', lanes: number, as?: number): Promise<void> => {
     rmSync(listings, { force: true });
     rmSync(file, { force: true });
-    const child = spawnHidden(process.execPath, [standIn, pool, file, String(lanes), mode, listings], {
-      stdio: ['pipe', 'ignore', 'ignore'],
-    });
+    // A run kept from before would show its compile log from the first listing.
+    rmSync(testRuns, { recursive: true, force: true });
+    const child = spawnHidden(
+      process.execPath,
+      [standIn, pool, file, String(lanes), mode, listings, slots, testRuns],
+      { stdio: ['pipe', 'ignore', 'ignore'] },
+    );
     children.push(child);
     const began = (await startTimesOf([child.pid ?? 0])).get(child.pid ?? 0);
     child.stdin.write(`${String(as ?? began ?? Date.now())}\n`);
     await untilItHolds('the stand-in to list the pool', () => existsSync(listings));
   };
-  const listed = (): Array<{ names: string[]; mark: number | null; at: number }> =>
+  const listed = (): Array<{
+    names: string[];
+    mark: number | null;
+    at: number;
+    locks: number;
+    compile: boolean;
+    suites: boolean;
+  }> =>
     readFileSync(listings, 'utf8')
       .split('\n')
       .filter((line) => line !== '')
@@ -66575,12 +66587,32 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
         const names = get(one, 'names');
         const held = get(one, 'mark');
         const at = get(one, 'at');
+        const locks = get(one, 'locks');
         assert.ok(
-          Array.isArray(names) && typeof at === 'number',
-          `a listing names files and a time: ${line}`,
+          Array.isArray(names) && typeof at === 'number' && typeof locks === 'number',
+          `a listing names files, locks and a time: ${line}`,
         );
-        return { names: names.map(String), mark: typeof held === 'number' ? held : null, at };
+        return {
+          names: names.map(String),
+          mark: typeof held === 'number' ? held : null,
+          at,
+          locks,
+          compile: get(one, 'compile') === true,
+          suites: get(one, 'suites') === true,
+        };
       });
+  /** The most machine slots held at one listing, and whether the compile log was seen. */
+  const slotsSeen = (): { most: number; compiled: boolean; compiledFirst: boolean; withCompile: number } => {
+    const seen = listed();
+    const compiledAt = seen.findIndex((one) => one.compile);
+    const suitesAt = seen.findIndex((one) => one.suites);
+    return {
+      most: Math.max(0, ...seen.map((one) => one.locks)),
+      compiled: compiledAt >= 0,
+      compiledFirst: compiledAt >= 0 && (suitesAt < 0 || compiledAt < suitesAt),
+      withCompile: Math.max(0, ...seen.filter((one) => one.compile).map((one) => one.locks)),
+    };
+  };
   const runWith = (
     laneVariable: string | undefined,
     poolOf: number,
@@ -66624,8 +66656,12 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     writeFileSync(
       standIn,
       [
-        "const { appendFileSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');",
-        'const [pool, file, lanes, mode, listings] = process.argv.slice(2);',
+        "const { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');",
+        "const { join } = require('node:path');",
+        'const [pool, file, lanes, mode, listings, slots, runs] = process.argv.slice(2);',
+        'const read = (folder) => { try { return readdirSync(folder); } catch { return []; } };',
+        // Whether a run's engine named by [param named] has written its log yet.
+        'const logged = (named) => read(runs).some((run) => read(join(runs, run)).some((one) => named(one) && existsSync(join(runs, run, one, "engine.log"))));',
         'let started = 0;',
         "process.stdin.setEncoding('utf8');",
         "process.stdin.on('data', (line) => { started = Number(line); });",
@@ -66637,12 +66673,15 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
         '  const names = readdirSync(pool);',
         '  let held = null;',
         '  try { held = JSON.parse(readFileSync(mark, "utf8")).pid; } catch {}',
-        "  appendFileSync(listings, JSON.stringify({ names, mark: held, at: Date.now() }) + '\\n');",
+        '  const locks = read(slots).filter((name) => name.endsWith(".lock")).length;',
+        '  const compile = logged((one) => one === "compile");',
+        '  const suites = logged((one) => one.startsWith("engine-"));',
+        "  appendFileSync(listings, JSON.stringify({ names, mark: held, at: Date.now(), locks, compile, suites }) + '\\n');",
         '  if (started === 0 || mode === "never") { return; }',
         // Written only once a listing has seen the mark, since the run gives it back at its ceiling.
         '  if (mode === "onMark" && !wrote && held !== null) { said(); wrote = true; }',
         '  if (mode === "always" && Date.now() - last > 1000) { said(); last = Date.now(); }',
-        '}, 100);',
+        '}, 50);',
         '',
       ].join('\n'),
     );
@@ -66702,6 +66741,12 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     );
     assert.doesNotMatch(dead.said, /raised this run from/, 'and says nothing of a rise');
     assert.equal(existsSync(mark), false, 'it leaves no mark');
+    const deadSlots = slotsSeen();
+    assert.ok(deadSlots.compiled, 'the compile check ran');
+    assert.ok(
+      deadSlots.most <= 2,
+      `a paced run holds its two lanes, the check in one: ${String(deadSlots.most)}`,
+    );
 
     // An empty variable names no file.
     await standsIn('always', 4);
@@ -66711,6 +66756,11 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     assert.ok(
       readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
       'no lane is added',
+    );
+    assert.equal(
+      slotsSeen().withCompile,
+      3,
+      'a run naming no lanes file compiles in a slot beside its two lanes',
     );
     for (const folder of [pool, project, process.cwd()]) {
       assert.deepEqual(
@@ -66802,8 +66852,8 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
       'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
       'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
     });
-    for (const gone of ['c', 'd']) {
-      rmSync(join(project, 'tests', `${gone}_lane_test.gd`), { force: true });
+    for (const removed of ['c', 'd']) {
+      rmSync(join(project, 'tests', `${removed}_lane_test.gd`), { force: true });
     }
     keep({
       'res://tests/a_lane_test.gd': [20, 20, 20, 20],
@@ -66826,6 +66876,12 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
     assert.equal(wholeOrdered.status, 0, wholeOrdered.said);
     assert.match(wholeOrdered.said, /8 test functions in 2 suites over 1 engine, in the order named/);
     assert.doesNotMatch(wholeOrdered.said, /Dealt out case by case/, 'no suite is cut for the pool');
+    const orderedSlots = slotsSeen();
+    assert.ok(
+      orderedSlots.most <= 1,
+      `an ordered paced run holds its one lane: ${String(orderedSlots.most)}`,
+    );
+    assert.ok(orderedSlots.compiledFirst, 'its lane lends the check its slot before its first suite engine');
   } finally {
     stands();
     sweep(project, slots, pool);
