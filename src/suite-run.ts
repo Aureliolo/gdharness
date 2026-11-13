@@ -761,12 +761,24 @@ async function runStages(context: RunContext): Promise<number> {
   };
   announceDeal(context, suites, deal, say);
   const started = await takenLanes(context, deal, say);
-  // Once the lanes hold what slots were free, so it takes one only beside them.
-  const handed = new HandedSlot();
-  const compiling = compileUnlessUnchanged(launch, context.suites, compileKept, handed);
+  const memory =
+    started.shared && (deal.memoryHeld || started.follows !== null)
+      ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes)
+      : undefined;
+  // In a paced run a lane lends the check its slot, so the run holds no engine beyond its lanes.
+  // Otherwise the lanes hold what slots were free, so it takes one only beside them.
+  const paced = envValue(LANES_VARIABLE) !== undefined;
+  const handed = new HandedSlot(paced);
+  const compiling = compileUnlessUnchanged(
+    launch,
+    context.suites,
+    compileKept,
+    handed,
+    paced ? memory : undefined,
+  );
   // Awaited after the suites. A run failing before then reports its own error, not this one too.
   compiling.catch(() => undefined);
-  const ran = await ranEngines(context, deal, started, handed, say);
+  const ran = await ranEngines(context, deal, started, handed, memory, say);
   recordTimes(context, loaded, ran);
   const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
   const passKept = recordPassed(
@@ -1126,10 +1138,11 @@ async function ranEngines(
   deal: Deal,
   started: StartedLanes,
   handed: HandedSlot,
+  memory: MemoryGate | undefined,
   say: (line: string) => void,
 ): Promise<EngineRan[]> {
   const { launch, declared } = context;
-  const { units, times, memoryHeld } = deal;
+  const { units, times } = deal;
   const { lanes, taken, shared, follows } = started;
   const follower = follows === null ? null : new FollowedLanes(launch.slots, follows.file, follows.ceiling);
   let ran: EngineRan[];
@@ -1144,9 +1157,7 @@ async function ranEngines(
           times,
           (plan, index, lock, holds) => runEngine(launch, plan, index, times, '', lock, holds),
           handed,
-          memoryHeld || follows !== null
-            ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes)
-            : undefined,
+          memory,
           follower === null
             ? undefined
             : {
@@ -1517,17 +1528,48 @@ const COMPILE_CHECK = 'compiling every script together';
  * The slot the compile check runs in, beside a run's suites: one free as it asks, or else the first
  * a lane of the same run is done with, handed over rather than given back, since another run waiting
  * would take it and leave this one waiting on slots held elsewhere after its suites had finished.
+ *
+ * In a paced run it is a lane's own slot, lent before the lane's first engine and taken back however
+ * the check ends, so the run holds no more engines than its lanes.
  */
-class HandedSlot {
+export class HandedSlot {
+  /** Whether the check runs in a lane's slot, lent to it, rather than one beside the lanes. */
+  readonly inALane: boolean;
   private wanted = true;
+  private handedInALend = false;
   private handOver: (lock: string) => void = () => undefined;
+  private over: () => void = () => undefined;
+  private readonly checkEnded = new Promise<void>((settled) => {
+    this.over = settled;
+  });
   readonly lock = new Promise<string>((received) => {
     this.handOver = received;
   });
 
-  /** Takes no slot after all, so every lane gives its own back to the machine. */
-  decline(): void {
+  constructor(inALane = false) {
+    this.inALane = inALane;
+  }
+
+  /** Whether a lend handed its lock over, so the lane that lent it takes it back. */
+  get lent(): boolean {
+    return this.handedInALend;
+  }
+
+  /**
+   * Lends [param lock] to a check that still wants a slot, in a paced run, and settles once the
+   * check has ended. Otherwise it settles at once. Only the first offer is taken.
+   */
+  async lend(lock: string): Promise<void> {
+    if (this.inALane && this.give(lock)) {
+      this.handedInALend = true;
+      await this.checkEnded;
+    }
+  }
+
+  /** Told as the check ends, however it ends, or as it takes no slot. Nothing is handed after. */
+  ended(): void {
     this.wanted = false;
+    this.over();
   }
 
   /** Hands [param lock] over when the check still wants a slot, and says whether it did. */
@@ -1552,48 +1594,83 @@ function doneWith(slots: Pick<EngineSlots, 'release'>, lock: string, handed: Han
  * Compiles [param suites] together beside every class of the game in an engine of its own, which
  * names every script that does not compile. Apart from the suites' engines, so those load only what
  * their suites do and what each records is what its suites could have used. Beside a run's suites
- * it runs in the slot [param handed] settles on. Alone, in the next slot free.
+ * it runs in the slot [param handed] settles on. Alone, in the next slot free. In a paced run it asks
+ * [param memory] before its engine starts.
  */
 async function compileCheck(
-  launch: Launch,
+  launch: CheckLaunch,
   suites: readonly DeclaredSuite[],
   handed?: HandedSlot,
+  memory?: Pick<MemoryGate, 'admit'>,
 ): Promise<Compiled> {
-  const directory = join(launch.runDirectory, 'compile');
-  mkdirSync(join(directory, 'user'), { recursive: true });
-  const suitesFile = join(directory, 'suites.txt');
-  writeFileSync(suitesFile, `${suites.map((suite) => suite.path).join('\n')}\n`);
-  const args = [
-    '--headless',
-    '--audio-driver',
-    'Dummy',
-    '--path',
-    launch.projectPath,
-    '-s',
-    shippedListedRunner(),
-    '--',
-    '--suites-in',
-    suitesFile,
-    '--compile-only',
-  ];
-  const log = join(directory, 'engine.log');
-  let lock: string;
-  if (handed === undefined) {
-    lock = await launch.slots.take();
-  } else {
-    const free = await launch.slots.takeFree();
-    if (free !== null && !handed.give(free)) {
-      launch.slots.release(free);
-    }
-    lock = await handed.lock;
-  }
-  let end: EngineEnd;
   try {
-    end = await watchedEngine(launch, lock, args, directory, log, launch.silenceFloorSeconds);
+    const directory = join(launch.runDirectory, 'compile');
+    mkdirSync(join(directory, 'user'), { recursive: true });
+    const suitesFile = join(directory, 'suites.txt');
+    writeFileSync(suitesFile, `${suites.map((suite) => suite.path).join('\n')}\n`);
+    const args = [
+      '--headless',
+      '--audio-driver',
+      'Dummy',
+      '--path',
+      launch.projectPath,
+      '-s',
+      shippedListedRunner(),
+      '--',
+      '--suites-in',
+      suitesFile,
+      '--compile-only',
+    ];
+    const log = join(directory, 'engine.log');
+    const lock = await checkSlot(launch.slots, handed);
+    let end: EngineEnd;
+    let admitted: Admitted | undefined;
+    try {
+      admitted = await memory?.admit(new AbortController().signal, () => MEMORY_PER_ENGINE);
+      end = await watchedEngine(
+        launch,
+        lock,
+        args,
+        directory,
+        log,
+        launch.silenceFloorSeconds,
+        undefined,
+        admitted?.holds,
+      );
+    } finally {
+      admitted?.ended();
+      if (handed?.lent !== true) {
+        launch.slots.release(lock);
+      }
+      handed?.ended();
+    }
+    return { faults: judgeCompile(readRun(readFileSync(log, 'utf8')), end), log };
   } finally {
-    launch.slots.release(lock);
+    handed?.ended();
   }
-  return { faults: judgeCompile(readRun(readFileSync(log, 'utf8')), end), log };
+}
+
+/** What the compile check reads of a run, so a test builds one without a whole run. */
+type CheckLaunch = EngineLaunch & Pick<Launch, 'runDirectory' | 'slots' | 'silenceFloorSeconds'>;
+
+/**
+ * The slot the compile check runs in: the next free one alone, the one a lane lends in a paced run,
+ * or else one free as it asks or the first a lane is done with.
+ */
+async function checkSlot(
+  slots: Pick<EngineSlots, 'take' | 'takeFree' | 'release'>,
+  handed: HandedSlot | undefined,
+): Promise<string> {
+  if (handed === undefined) {
+    return await slots.take();
+  }
+  if (!handed.inALane) {
+    const free = await slots.takeFree();
+    if (free !== null && !handed.give(free)) {
+      slots.release(free);
+    }
+  }
+  return await handed.lock;
 }
 
 /** Where a `--changed-only` run keeps what compiled together, and what it reads the files with. */
@@ -1624,25 +1701,40 @@ function compiledPrint(
  * no slot is taken, which a `--changed-only` run with nothing to run otherwise waited for. A clean
  * check is kept only when nothing it read changed while it ran.
  */
-async function compileUnlessUnchanged(
-  launch: Launch,
+export async function compileUnlessUnchanged(
+  launch: CheckLaunch,
   suites: readonly DeclaredSuite[],
   kept: CompileKept | null,
   handed?: HandedSlot,
+  memory?: Pick<MemoryGate, 'admit'>,
+): Promise<Compiled> {
+  try {
+    return await compiledUnlessKept(launch, suites, kept, handed, memory);
+  } finally {
+    handed?.ended();
+  }
+}
+
+/** [method compileUnlessUnchanged] within the `finally` that ends its handed slot. */
+async function compiledUnlessKept(
+  launch: CheckLaunch,
+  suites: readonly DeclaredSuite[],
+  kept: CompileKept | null,
+  handed: HandedSlot | undefined,
+  memory: Pick<MemoryGate, 'admit'> | undefined,
 ): Promise<Compiled> {
   if (kept === null) {
-    return await compileCheck(launch, suites, handed);
+    return await compileCheck(launch, suites, handed, memory);
   }
   const before = compiledPrint(kept, launch.projectPath, suites).print;
   if (readKeptPrint(kept.file) === before) {
-    handed?.decline();
     console.log(
       'Every script compiled together on these same files when last checked, so it is not compiled again.',
     );
     return { faults: [], log: '' };
   }
   const began = Date.now();
-  const compiled = await compileCheck(launch, suites, handed);
+  const compiled = await compileCheck(launch, suites, handed, memory);
   const after = compiledPrint(kept, launch.projectPath, suites);
   if (compiled.faults.length === 0 && !after.inputs.modifiedAfter(after.read, began)) {
     writeJson(kept.file, { print: after.print });
@@ -1839,6 +1931,7 @@ async function runLane(
 ): Promise<EngineRan[]> {
   const lock = taken ?? (await launch.slots.take());
   try {
+    await handed?.lend(lock);
     const ran: EngineRan[] = [];
     for (const { plan, index } of lane) {
       ran.push(await runEngine(launch, plan, index, times, '', lock));
@@ -1855,8 +1948,9 @@ async function runLane(
  * starting only once [param memory] has room for what its share was seen to hold in [param times],
  * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
- * run open that has nothing left to give it. A lane takes its slot before it waits for memory, so
- * an engine memory admits never waits for one. With [param raised] it starts one lane more for each
+ * run open that has nothing left to give it. A lane takes its slot, lends it to a compile check that
+ * wants one, and only then waits for memory, so an engine memory admits never waits for a slot or a
+ * check. With [param raised] it starts one lane more for each
  * the run is raised to, up to its ceiling, asking again until every share is handed out.
  */
 export async function runShares<T extends { readonly index: number }>(
@@ -1899,6 +1993,7 @@ export async function runShares<T extends { readonly index: number }>(
     let admitted: Admitted | undefined;
     try {
       held.lock ??= await slots.take(handedOut.signal);
+      await handed?.lend(held.lock);
       admitted = await memory?.admit(handedOut.signal, needed);
     } catch (error) {
       if (handedOut.signal.aborted) {

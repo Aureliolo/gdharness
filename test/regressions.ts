@@ -137,11 +137,13 @@ import {
   heldToCores,
   inTurns,
   KEPT_RUN_DIRECTORIES,
+  MEMORY_PER_ENGINE,
   macMemoryLevel,
   memoryAvailable,
   memoryRoomOf,
   resPathOf,
   roomFor,
+  roomForAnother,
   sweepRunDirectories,
   versionNamed,
   versionPrinted,
@@ -665,8 +667,10 @@ import {
 import {
   type Admitted,
   acrossSaid,
+  compileUnlessUnchanged,
   engineSaid,
   enginesCutFor,
+  HandedSlot,
   importEnd,
   importFault,
   importNeeded,
@@ -66061,6 +66065,435 @@ async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
   await endAsTheyCome(longRising, longRun);
 }
 
+/** Suite engines and a stand-in compile check over two lanes, counted together. */
+interface CheckRig {
+  readonly four: ReturnType<typeof eightSuitesOf>;
+  readonly events: string[];
+  readonly released: string[];
+  readonly counted: { live: number; most: number };
+  readonly going: Array<{ readonly lock: string; ended: boolean; readonly end: () => void }>;
+  readonly ran: string[];
+  /** The two lanes over `one` and `two`, handing [param handed] on. */
+  readonly lanes: (handed: HandedSlot, memory?: MemoryGate) => Promise<Array<{ index: number }>>;
+  /** Ends each suite engine as it starts, until [param pending] settles. */
+  readonly endAsTheyCome: (pending: Promise<unknown>) => Promise<void>;
+}
+
+function checkRig(): CheckRig {
+  const four = eightSuitesOf(4, 1);
+  const events: string[] = [];
+  const released: string[] = [];
+  const counted = { live: 0, most: 0 };
+  const going: CheckRig['going'] = [];
+  const ran: string[] = [];
+  const run = (plan: EnginePlan, index: number, lock: string): Promise<{ index: number }> =>
+    new Promise((finished) => {
+      counted.live += 1;
+      counted.most = Math.max(counted.most, counted.live);
+      events.push(`start ${lock}`);
+      going.push({
+        lock,
+        ended: false,
+        end: () => {
+          counted.live -= 1;
+          ran.push(...plan.suites.map((one) => one.path));
+          finished({ index });
+        },
+      });
+    });
+  const lanes = (handed: HandedSlot, memory?: MemoryGate): Promise<Array<{ index: number }>> => {
+    const pending = runShares(
+      {
+        take: () => Promise.reject(new Error('every lane holds a slot')),
+        release: (lock) => {
+          released.push(lock);
+        },
+      },
+      four.units,
+      four.declared,
+      2,
+      ['one', 'two'],
+      four.times,
+      run,
+      handed,
+      memory,
+    );
+    pending.catch(() => undefined);
+    return pending;
+  };
+  const endAsTheyCome = async (pending: Promise<unknown>): Promise<void> => {
+    const over = pending.then(
+      () => true,
+      () => true,
+    );
+    while (!(await Promise.race([over, delay(2).then(() => false)]))) {
+      for (const engine of going.filter((one) => !one.ended)) {
+        engine.ended = true;
+        engine.end();
+      }
+    }
+  };
+  return { four, events, released, counted, going, ran, lanes, endAsTheyCome };
+}
+
+/**
+ * A stand-in compile check: it waits for [param handed]'s slot, counts as an engine, asks
+ * [param memory] once it holds the slot, and ends when told, failing after with [param fails].
+ */
+function standInCheck(
+  rig: CheckRig,
+  handed: HandedSlot,
+  memory?: Pick<MemoryGate, 'admit'>,
+  fails = false,
+): { lock: () => string | null; end: () => void; done: Promise<void> } {
+  let lock: string | null = null;
+  let tell: () => void = () => undefined;
+  const told = new Promise<void>((settled) => {
+    tell = settled;
+  });
+  const done = (async (): Promise<void> => {
+    lock = await handed.lock;
+    rig.counted.live += 1;
+    rig.counted.most = Math.max(rig.counted.most, rig.counted.live);
+    rig.events.push(`check holds ${lock}`);
+    const admitted = await memory?.admit(new AbortController().signal, () => MEMORY_PER_ENGINE);
+    rig.events.push('check admitted');
+    await told;
+    admitted?.ended();
+    rig.counted.live -= 1;
+    rig.events.push('check ended');
+    handed.ended();
+    if (fails) {
+      throw new Error('the stand-in check failed');
+    }
+  })();
+  done.catch(() => undefined);
+  return { lock: () => lock, end: tell, done };
+}
+
+/** Every suite of [param rig] ran once. */
+function everySuiteRanOnce(rig: CheckRig, what: string): void {
+  assert.deepEqual(
+    rig.ran.toSorted(),
+    [...rig.four.declared.keys()].toSorted(),
+    `${what}: every suite ran once`,
+  );
+}
+
+/** A lane lends the check its slot, one suite engine goes beside it, and the slot returns to its lane. */
+async function checksALaneLendsItsSlot(): Promise<void> {
+  const rig = checkRig();
+  const handed = new HandedSlot(true);
+  const check = standInCheck(rig, handed);
+  const run = rig.lanes(handed);
+  await untilItHolds('the check to hold a lane slot', () => check.lock() !== null);
+  await untilItHolds('a suite engine beside it', () => rig.going.length === 1);
+  await delay(50);
+  const lent = check.lock() ?? '';
+  assert.ok(['one', 'two'].includes(lent), `the check holds a lane's slot: ${lent}`);
+  assert.equal(rig.going.length, 1, 'one suite engine goes beside the check, not two');
+  assert.notEqual(rig.going[0]?.lock, lent, "on the other lane's slot");
+  check.end();
+  await check.done;
+  assert.equal(handed.lent, true, 'the slot was lent');
+  await untilItHolds('a suite engine on the lent slot', () => rig.going.some((one) => one.lock === lent));
+  assert.ok(!rig.released.includes(lent), 'the lent slot is not given back while its lane holds it');
+  await rig.endAsTheyCome(run);
+  await run;
+  everySuiteRanOnce(rig, 'a lent slot');
+  assert.ok(rig.counted.most <= 2, `never three engines at once: ${String(rig.counted.most)}`);
+  assert.deepEqual(rig.released.toSorted(), ['one', 'two'], 'both slots go back once the lanes end');
+}
+
+/** A check over before it began, or one that fails, keeps no lane waiting. */
+async function checksAnEndedCheckKeepsNoLaneWaiting(): Promise<void> {
+  const before = checkRig();
+  const over = new HandedSlot(true);
+  over.ended();
+  const run = before.lanes(over);
+  await untilItHolds('two suite engines at once from the start', () => before.going.length === 2);
+  await before.endAsTheyCome(run);
+  await run;
+  everySuiteRanOnce(before, 'a check over before it began');
+  assert.equal(over.lent, false, 'nothing was lent to it');
+
+  const failing = checkRig();
+  const handed = new HandedSlot(true);
+  const check = standInCheck(failing, handed, undefined, true);
+  const failed = failing.lanes(handed);
+  await untilItHolds('the check to hold a lane slot', () => check.lock() !== null);
+  check.end();
+  await assert.rejects(check.done, /the stand-in check failed/);
+  await failing.endAsTheyCome(failed);
+  await failed;
+  everySuiteRanOnce(failing, 'a check that fails');
+}
+
+/** A run naming no lanes file keeps the check beside its lanes, in the first slot a lane is done with. */
+async function checksMainsWayLendsNothing(): Promise<void> {
+  const rig = checkRig();
+  const handed = new HandedSlot();
+  let settled = false;
+  void handed.lock.then(() => {
+    settled = true;
+  });
+  const run = rig.lanes(handed);
+  await untilItHolds('two suite engines at once from the start', () => rig.going.length === 2);
+  assert.equal(settled, false, 'the check has no slot while both lanes go');
+  await rig.endAsTheyCome(run);
+  await run;
+  await delay(0);
+  assert.equal(settled, true, 'the check takes the first slot a lane is done with');
+  assert.equal(handed.lent, false, 'and nothing was lent');
+  assert.equal(rig.released.length, 1, 'the other slot goes back to the machine');
+  everySuiteRanOnce(rig, "main's way");
+}
+
+/** With room for one engine, the check is admitted in its lent slot first and the suites after it. */
+async function checksTheCheckIsAdmittedBeforeItsLane(): Promise<void> {
+  const gib = 1024 ** 3;
+  const read = 5.6 * gib;
+  assert.ok(
+    roomForAnother(read, 0, gib) && !roomForAnother(read, MEMORY_PER_ENGINE, gib),
+    'the read leaves room for one engine',
+  );
+  const rig = checkRig();
+  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(read), 5);
+  const handed = new HandedSlot(true);
+  const check = standInCheck(rig, handed, gate);
+  const run = rig.lanes(handed, gate);
+  await untilItHolds('the check admitted', () => rig.events.includes('check admitted'));
+  await delay(50);
+  assert.equal(rig.going.length, 0, 'no suite engine goes beside the admitted check');
+  const lent = check.lock() ?? '';
+  check.end();
+  await check.done;
+  await rig.endAsTheyCome(run);
+  await run;
+  const firstStart = rig.events.findIndex((event) => event.startsWith('start '));
+  assert.deepEqual(
+    rig.events.slice(0, firstStart),
+    [`check holds ${lent}`, 'check admitted', 'check ended'],
+    `the check holds its slot, is admitted and ends before any suite engine: ${rig.events.join(', ')}`,
+  );
+  assert.ok(rig.events.includes(`start ${lent}`), 'and a suite engine runs on the lent slot');
+  assert.equal(rig.counted.most, 1, 'never two go at once');
+  everySuiteRanOnce(rig, 'tight memory');
+}
+
+/** What the compile check reads of a run, over [param directory]. */
+function checkLaunchIn(
+  directory: string,
+  slots: EngineSlots,
+  godotPath = 'no-engine',
+): Parameters<typeof compileUnlessUnchanged>[0] {
+  return {
+    godotPath,
+    projectPath: join(directory, 'project'),
+    deadlineSeconds: 120,
+    running: new Set(),
+    cores: null,
+    runDirectory: join(directory, 'run'),
+    slots,
+    silenceFloorSeconds: 60,
+  };
+}
+
+/** The real check asks memory once in its lent slot, gives the slot back to its lane after a throw, and its error is read last. */
+async function checksTheRealCheckLendsAndAsks(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lent-check-'));
+  try {
+    const slotsDirectory = join(scratch, 'slots');
+    const slots = new EngineSlots(slotsDirectory, 2, { pid: process.pid, started: await ownStart() });
+    const launch = checkLaunchIn(scratch, slots);
+    const asked: number[] = [];
+    const refusing = {
+      admit: (_signal: AbortSignal, need: () => number): Promise<Admitted> => {
+        asked.push(need());
+        return Promise.reject(new Error('no room for the check'));
+      },
+    };
+    const rig = checkRig();
+    const handed = new HandedSlot(true);
+    const suites = [rig.four.declared.keys().next().value ?? ''].map((path) => ({
+      path,
+      cases: ['test_one'],
+      windowed: false,
+      headless: false,
+      together: false,
+      accessible: false,
+    }));
+    const compiling = compileUnlessUnchanged(launch, suites, null, handed, refusing);
+    compiling.catch(() => undefined);
+    const run = runShares(
+      slots,
+      rig.four.units,
+      rig.four.declared,
+      2,
+      [],
+      rig.four.times,
+      (plan, index, lock) =>
+        new Promise<{ index: number }>((finished) => {
+          rig.going.push({
+            lock,
+            ended: false,
+            end: () => {
+              rig.ran.push(...plan.suites.map((one) => one.path));
+              finished({ index });
+            },
+          });
+        }),
+      handed,
+    );
+    run.catch(() => undefined);
+    const lent = await handed.lock;
+    await untilItHolds('a suite engine on the lent slot', () => rig.going.some((one) => one.lock === lent));
+    assert.equal(handed.lent, true, 'the slot was lent');
+    assert.deepEqual(asked, [MEMORY_PER_ENGINE], 'the check asked memory once, for an engine');
+    assert.ok(existsSync(lent), "the lent slot's lock is still there while its lane holds it");
+    await rig.endAsTheyCome(run);
+    await run;
+    everySuiteRanOnce(rig, 'the real check');
+    await assert.rejects(compiling, /no room for the check/, "the check's error is read after the lanes");
+    assert.deepEqual(leftInSlots(slotsDirectory), [], 'both slots are given back');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** A check that throws before its slot keeps no lending lane waiting. */
+async function checksACheckThrowingBeforeItsSlot(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-thrown-check-'));
+  try {
+    const slots = new EngineSlots(join(scratch, 'slots'), 2, { pid: process.pid, started: await ownStart() });
+    const blocked = join(scratch, 'a file');
+    writeFileSync(blocked, '');
+    const underAFile = { ...checkLaunchIn(scratch, slots), runDirectory: join(blocked, 'run') };
+    const asFolder = checkLaunchIn(join(scratch, 'folder'), slots);
+    mkdirSync(join(asFolder.runDirectory, 'compile', 'suites.txt'), { recursive: true });
+    mkdirSync(join(scratch, 'kept', 'project'), { recursive: true });
+    const unreadable = new ProjectScripts(join(scratch, 'kept', 'project'));
+    const refused = (): never => {
+      throw new Error('the scripts are unreadable');
+    };
+    for (const read of ['projectPath', 'script', 'baseOf']) {
+      Object.defineProperty(unreadable, read, { get: refused });
+    }
+    const throwers: Array<[string, (handed: HandedSlot) => Promise<unknown>]> = [
+      ['a run folder under a file', (handed) => compileUnlessUnchanged(underAFile, [], null, handed)],
+      ['a suites file that is a folder', (handed) => compileUnlessUnchanged(asFolder, [], null, handed)],
+      [
+        'scripts that throw at their first read',
+        (handed) =>
+          compileUnlessUnchanged(
+            checkLaunchIn(join(scratch, 'kept'), slots),
+            [],
+            { file: join(scratch, 'kept.json'), scripts: unreadable, always: [] },
+            handed,
+          ),
+      ],
+    ];
+    for (const [what, start] of throwers) {
+      const rig = checkRig();
+      const handed = new HandedSlot(true);
+      const compiling = start(handed);
+      compiling.catch(() => undefined);
+      const run = rig.lanes(handed);
+      await untilItHolds(`${what}: two suite engines at once from the start`, () => rig.going.length === 2);
+      await rig.endAsTheyCome(run);
+      await run;
+      everySuiteRanOnce(rig, what);
+      assert.deepEqual(rig.released.toSorted(), ['one', 'two'], `${what}: both slots are given back`);
+      await assert.rejects(compiling, Error, `${what}: the error is read from the check's promise`);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** With Godot, the check tells its admission what its engine holds at each look. */
+async function checksTheCheckTellsWhatItHolds(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('compile check readings skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-check-readings-'));
+  try {
+    const slots = new EngineSlots(join(scratch, 'slots'), 1, { pid: process.pid, started: await ownStart() });
+    const launch = checkLaunchIn(scratch, slots, godotPath);
+    // The suite's script waits as it loads, so the check's engine lives past three of its looks.
+    writeTree(launch.projectPath, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="CheckReadings"\n',
+      'tests/slow_test.gd':
+        'extends GdUnitTestSuite\n\n\nstatic func _static_init() -> void:\n\tOS.delay_msec(2000)\n\n\n' +
+        'func test_one() -> void:\n\tassert_bool(true).is_true()\n',
+    });
+    cpSync(gdunit, join(launch.projectPath, 'addons', 'gdUnit4'), { recursive: true });
+    spawnSyncHidden(godotPath, ['--headless', '--path', launch.projectPath, '--import'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const needs: number[] = [];
+    const readings: number[] = [];
+    let readBeforeEnd = -1;
+    const recording = {
+      admit: (_signal: AbortSignal, need: () => number): Promise<Admitted> => {
+        needs.push(need());
+        return Promise.resolve({
+          need: need(),
+          held: 0,
+          ended: () => {
+            readBeforeEnd = readings.length;
+          },
+          holds: (bytes: number) => {
+            readings.push(bytes);
+          },
+        });
+      },
+    };
+    const suite = {
+      path: 'res://tests/slow_test.gd',
+      cases: ['test_one'],
+      windowed: false,
+      headless: false,
+      together: false,
+      accessible: false,
+    };
+    const compiled = await compileUnlessUnchanged(launch, [suite], null, undefined, recording);
+    assert.deepEqual(
+      needs,
+      [MEMORY_PER_ENGINE],
+      `the check is admitted once, for an engine: ${compiled.log}`,
+    );
+    assert.ok(
+      readings.slice(0, readBeforeEnd).some((bytes) => bytes > 0),
+      `the check tells its admission what its engine holds before it ends: ${JSON.stringify(readings)}`,
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A paced run's compile check runs in a slot one of its lanes lends it, so the run holds no more
+ * engines than its lanes. The lane takes it back however the check ends, the check is admitted by
+ * memory as a lane's engine is, and a run naming no lanes file keeps the check beside its lanes.
+ */
+async function testAPacedRunsCompileCheckIsOneOfItsLanes(): Promise<void> {
+  await checksALaneLendsItsSlot();
+  await checksAnEndedCheckKeepsNoLaneWaiting();
+  await checksMainsWayLendsNothing();
+  await checksTheCheckIsAdmittedBeforeItsLane();
+  await checksTheRealCheckLendsAndAsks();
+  await checksACheckThrowingBeforeItsSlot();
+  await checksTheCheckTellsWhatItHolds();
+}
+
 /**
  * A run in a gate follows the lanes file its paced portion writes: it begins on its own lanes, adds
  * the rest the file names while work and processors allow, gives its mark back at its ceiling, and
@@ -96924,6 +97357,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsSizedByWhatItWasSeenToHold,
   testARunOutOfMemoryNamesEveryEngine,
   testARunAddsALaneAsItsLanesRise,
+  testAPacedRunsCompileCheckIsOneOfItsLanes,
   testAGatesRunFollowsItsLanesFile,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
 ];

@@ -840,6 +840,8 @@ it holds one as long as it plays.
   number it told. A run that cannot grow makes none.
 - The run removes its mark at once when it reaches its ceiling of processors, pool count or work,
   and otherwise once every share is handed out.
+- The engine that compiles every script together counts as one of the lanes. It runs in a lane's
+  slot before that lane's first suites, and waits for memory as a suite's engine does.
 
 ### Games and the kept slots
 
