@@ -1,5 +1,5 @@
 /**
- * Properties over the readers that take input nobody here wrote, and over the order a run's waits come in.
+ * Properties over the readers that take input nobody here wrote, over the order a run's waits come in, and over the port walk.
  *
  * The example tests beside these pin one crafted input each. A property states what must hold for
  * every input and lets the generator hunt for the one that breaks it, which is how the cases nobody
@@ -47,6 +47,7 @@ import {
   unitsOf,
 } from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
+import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
 
@@ -1319,6 +1320,92 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
   assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
 }
 
+/** A stand-in `hold` that takes the blocks named, records each ask and answers after [param turns] microtask turns. */
+function standInHold(
+  taken: ReadonlySet<number>,
+  turns: readonly number[],
+): { asks: number[]; hold: (first: number) => Promise<boolean> } {
+  const asks: number[] = [];
+  const hold = async (first: number): Promise<boolean> => {
+    const at = asks.length;
+    asks.push(first);
+    for (let turn = 0; turn < (turns[at % Math.max(turns.length, 1)] ?? 0); turn += 1) {
+      await Promise.resolve();
+    }
+    return taken.has(first);
+  };
+  return { asks, hold };
+}
+
+const WALK_CALLS = 300;
+const WALK_BLOCKS = 200;
+
+/** A batch's results against the walk's rules, given what the walk has handed out this lap. */
+function checkWalkBatch(
+  results: PromiseSettledResult<number>[],
+  taken: ReadonlySet<number>,
+  lap: Set<number>,
+  asked: { before: number; now: number },
+): void {
+  if (taken.size === 0) {
+    assert.ok(
+      results.every((result) => result.status === 'rejected'),
+      'with no block taken every call is refused',
+    );
+    assert.equal(asked.now - asked.before, WALK_BLOCKS * results.length, 'after exactly 200 asks each');
+    return;
+  }
+  const numbersInLap = taken.size * (PORT_BAND.block - 1);
+  for (const result of results) {
+    assert.equal(result.status, 'fulfilled', 'with a block taken no call is refused');
+    const port = result.value;
+    assert.notEqual(
+      (port - PORT_BAND.first) % PORT_BAND.block,
+      0,
+      `a first number was given: ${String(port)}`,
+    );
+    const first = port - ((port - PORT_BAND.first) % PORT_BAND.block);
+    assert.ok(taken.has(first), `${String(port)} is in a block that was not taken`);
+    assert.ok(!lap.has(port), `${String(port)} came again before every taken number came`);
+    lap.add(port);
+    if (lap.size === numbersInLap) {
+      lap.clear();
+    }
+  }
+}
+
+function theWalkGivesOnlyWhatItHolds(): Promise<void> {
+  return fc.assert(
+    fc.asyncProperty(
+      fc.integer({ min: PORT_BAND.first, max: PORT_BAND.last }),
+      fc.uniqueArray(fc.integer({ min: 0, max: WALK_BLOCKS - 1 })),
+      fc.array(fc.integer({ min: 1, max: 6 })),
+      fc.array(fc.integer({ min: 0, max: 5 })),
+      async (start, takenBlocks, batchSizes, turns) => {
+        const taken = new Set(takenBlocks.map((index) => PORT_BAND.first + index * PORT_BAND.block));
+        const { asks, hold } = standInHold(taken, turns);
+        const walk = bandWalk(start, hold);
+        const lap = new Set<number>();
+        let calls = 0;
+        for (let batch = 0; calls < WALK_CALLS; batch += 1) {
+          const size = Math.min(batchSizes[batch % Math.max(batchSizes.length, 1)] ?? 1, WALK_CALLS - calls);
+          calls += size;
+          const before = asks.length;
+          const results = await Promise.allSettled(Array.from({ length: size }, walk));
+          checkWalkBatch(results, taken, lap, { before, now: asks.length });
+        }
+        for (const first of taken) {
+          assert.ok(
+            asks.filter((ask) => ask === first).length <= 1,
+            `block ${String(first)} was asked again`,
+          );
+        }
+      },
+    ),
+    { numRuns: 100 },
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -1338,5 +1425,6 @@ logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
 await noOrderOfSlotAndMemoryWaitsHangsARun();
+await theWalkGivesOnlyWhatItHolds();
 
 console.log('fuzz properties held');

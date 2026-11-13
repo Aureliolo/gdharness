@@ -87,8 +87,8 @@ function projectsNamedIn(directory: string): string[] {
 }
 
 /**
- * Ports this process has already handed out. The walk repeats only after 20,000 numbers, but a
- * stand-in `offer` can repeat at once.
+ * Ports this process has already handed out.
+ * The walk repeats only after every number of its blocks, but a stand-in `offer` can repeat at once.
  */
 const handedOut = new Set<number>();
 
@@ -142,16 +142,92 @@ export async function listenOnAReservedPort(
 /**
  * The ports a fixture names before its listener exists. Kernels hand out port-zero picks from
  * 32768 or above on every platform CI runs, so no such pick lands on a number drawn from here.
+ * A process draws only from blocks of `block` numbers whose first number a listener of
+ * its own holds until it ends.
  */
-export const PORT_BAND = { first: 10_000, last: 29_999 } as const;
+export const PORT_BAND = { first: 10_000, last: 29_999, block: 100 } as const;
 
-/** A walk through the band from [param start], one number a call, back to the first after the last. */
-export function bandWalk(start: number): () => number {
+const BLOCKS = (PORT_BAND.last - PORT_BAND.first + 1) / PORT_BAND.block;
+
+/** The listeners holding the first numbers of this process's blocks, kept so none is collected. */
+const blockListeners: Server[] = [];
+
+/**
+ * True once a listener on 127.0.0.1 and [param first] is up, false for any bind error. The listener
+ * is unreferenced, so it never keeps the process alive, and it turns away every connection.
+ */
+async function holdBlock(first: number): Promise<boolean> {
+  const listener = createServer((socket) => {
+    socket.on('error', () => undefined);
+    socket.destroy();
+  });
+  listener.unref();
+  listener.on('error', () => undefined);
+  try {
+    await once(listener.listen(first, '127.0.0.1'), 'listening');
+  } catch {
+    return false;
+  }
+  blockListeners.push(listener);
+  return true;
+}
+
+const firstOfBlock = (port: number): number =>
+  PORT_BAND.first + Math.floor((port - PORT_BAND.first) / PORT_BAND.block) * PORT_BAND.block;
+
+const afterPort = (port: number): number => (port >= PORT_BAND.last ? PORT_BAND.first : port + 1);
+
+/**
+ * A walk from [param start] through the blocks [param hold] takes, one number a call.
+ * It gives no block's first number and answers calls made together one at a time.
+ */
+export function bandWalk(
+  start: number,
+  hold: (first: number) => Promise<boolean> = holdBlock,
+): () => Promise<number> {
   let next = start;
+  const held = new Set<number>();
+  let turn: Promise<unknown> = Promise.resolve();
+
+  const holds = async (first: number): Promise<boolean> => {
+    if (held.has(first)) {
+      return true;
+    }
+    if (!(await hold(first))) {
+      return false;
+    }
+    held.add(first);
+    return true;
+  };
+
+  // A refused block moves the walk to the next block, and a call that has been refused by every
+  // block gives up.
+  const take = async (): Promise<number> => {
+    let refused = 0;
+    for (;;) {
+      const first = firstOfBlock(next);
+      if (!(await holds(first))) {
+        refused += 1;
+        if (refused >= BLOCKS) {
+          throw new Error(
+            `none of the ${BLOCKS} blocks from ${PORT_BAND.first} to ${PORT_BAND.last} could be held on 127.0.0.1`,
+          );
+        }
+        next = afterPort(first + PORT_BAND.block - 1);
+        continue;
+      }
+      const port = next;
+      next = afterPort(port);
+      if (port !== first) {
+        return port;
+      }
+    }
+  };
+
   return () => {
-    const port = next;
-    next = port >= PORT_BAND.last ? PORT_BAND.first : port + 1;
-    return port;
+    const result = turn.then(take);
+    turn = result.catch(() => undefined);
+    return result;
   };
 }
 
@@ -185,14 +261,14 @@ async function bindOnce(port: number): Promise<NodeJS.ErrnoException | null> {
  * answered at all.
  */
 export async function unheldPort(
-  draw: () => number = processWalk,
+  draw: () => number | Promise<number> = processWalk,
   bind: (port: number) => Promise<NodeJS.ErrnoException | null> = bindOnce,
   dial: (port: number) => Promise<boolean | null> = acceptsConnections,
 ): Promise<number> {
   let last = 'nothing was drawn';
   let unanswered = 0;
   for (let attempt = 0; attempt < DRAWS_LIMIT; attempt += 1) {
-    const port = draw();
+    const port = await draw();
     const failure = await bind(port);
     if (failure) {
       last = `${port}: ${failure.code ?? failure.message}`;

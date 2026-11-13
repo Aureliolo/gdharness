@@ -73369,7 +73369,7 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
  * away, in the check on who holds the debug adapter port.
  *
  * Forty ports drawn from the band differ whether or not anything deduplicates, so the repeating
- * source is written down. The stand-in numbers sit below the band, where no real reservation lands.
+ * source is written down. A stand-in number no socket binds sits below the band, and a number this case binds comes from the walk.
  *
  * The band is checked against each platform's range for port zero, since a kernel pick inside it
  * could be a reserved number.
@@ -73393,14 +73393,19 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
   await theRealReservationsComeFromTheBandAlongTheWalk();
   await aListenerDeclinesAPortAlreadyHandedOut();
   await unheldPortProvesFreeTheNumberItReturns();
-  thePortWalkWrapsAndEachProcessStartsItsOwn();
+  await thePortWalkWrapsAndEachProcessStartsItsOwn();
+  await aProcessDrawsOnlyFromBlocksItHolds();
 }
 
 /** The real reservations are in the band and a few steps along the walk from the one before. */
 async function theRealReservationsComeFromTheBandAlongTheWalk(): Promise<void> {
   // The real one still answers, so what is asserted above is not the only thing that runs. Each
   // number is in the band and a few steps along the walk from the one before.
-  const walked = [await reservePort(), await reservePort(), await reservePort()];
+  followsAlongTheWalk([await reservePort(), await reservePort(), await reservePort()]);
+}
+
+/** Each number is in the band and ahead of the one before along the walk, however many blocks lie between. */
+function followsAlongTheWalk(walked: number[]): void {
   for (const [index, port] of walked.entries()) {
     assert.ok(
       port >= PORT_BAND.first && port <= PORT_BAND.last,
@@ -73410,7 +73415,7 @@ async function theRealReservationsComeFromTheBandAlongTheWalk(): Promise<void> {
     if (before !== undefined) {
       const span = PORT_BAND.last - PORT_BAND.first + 1;
       const step = (port - before + span) % span;
-      assert.ok(step >= 1 && step <= 200, `each follows the one before along the walk: ${walked.join(', ')}`);
+      assert.ok(step >= 1, `each follows the one before along the walk: ${walked.join(', ')}`);
     }
   }
 }
@@ -73420,26 +73425,29 @@ async function aListenerDeclinesAPortAlreadyHandedOut(): Promise<void> {
   // A listener takes its port the same way, so it never sits on one a server has been given: the
   // fake debug adapter on port zero took a reserved bridge port, and the fake editor dialling the
   // bridge reached the adapter and timed out. 1100 is handed out above, so it is declined here.
-  const offered = [1100, 1102];
-  let next = 0;
-  const pool = (): Promise<number> => Promise.resolve(offered[Math.min(next++, offered.length - 1)] ?? 0);
+  const fresh = await unheldPort();
+  const held = await unheldPort();
+  const next = await unheldPort();
+  const offered = [1100, fresh];
+  let asked = 0;
+  const pool = (): Promise<number> => Promise.resolve(offered[Math.min(asked++, offered.length - 1)] ?? 0);
   const listeners = [createServer(), createServer(), createServer()];
   try {
     assert.equal(
       await listenOnAReservedPort(listeners[0] ?? createServer(), '127.0.0.1', pool),
-      1102,
+      fresh,
       'a listener declines a port already handed out',
     );
-    // 1107 held by something that took it before the listener could, as another process can take
+    // A number held by something that took it before the listener could, as another process can take
     // a reserved port before it is bound: given up for the next one offered.
-    await new Promise<void>((ready) => listeners[1]?.listen(1107, '127.0.0.1', ready));
-    const taken = [1107, 1108];
+    await new Promise<void>((ready) => listeners[1]?.listen(held, '127.0.0.1', ready));
+    const taken = [held, next];
     let offeredNext = 0;
     assert.equal(
       await listenOnAReservedPort(listeners[2] ?? createServer(), '127.0.0.1', () =>
         Promise.resolve(taken[Math.min(offeredNext++, taken.length - 1)] ?? 0),
       ),
-      1108,
+      next,
       'and takes the next port when one it reserved is in use',
     );
   } finally {
@@ -73469,11 +73477,13 @@ async function unheldPortProvesFreeTheNumberItReturns(): Promise<void> {
     await once(holder.listen(port, host), 'listening');
   };
   try {
-    // The proof binds the number itself: a holder on 1111 is passed over even when no dial sees it.
-    await hold(1111, '127.0.0.1');
+    // The proof binds the number itself, so a number a holder has is passed over even when no dial sees it.
+    const heldNumber = await reservePort();
+    const nextNumber = await reservePort();
+    await hold(heldNumber, '127.0.0.1');
     assert.equal(
-      await unheldPort(draws(1111, 1112), undefined, dialAnswers(false)),
-      1112,
+      await unheldPort(draws(heldNumber, nextNumber), undefined, dialAnswers(false)),
+      nextNumber,
       'a number a listener holds is not proved free',
     );
 
@@ -73554,9 +73564,18 @@ async function unheldPortProvesFreeTheNumberItReturns(): Promise<void> {
 }
 
 /** The walk wraps inside the band, a port zero starts above it, and each process starts its walk somewhere of its own. */
-function thePortWalkWrapsAndEachProcessStartsItsOwn(): void {
-  const walk = bandWalk(29_998);
-  assert.deepEqual([walk(), walk(), walk()], [29_998, 29_999, 10_000], 'the walk wraps inside the band');
+async function thePortWalkWrapsAndEachProcessStartsItsOwn(): Promise<void> {
+  const asked: number[] = [];
+  const walk = bandWalk(29_998, (first) => {
+    asked.push(first);
+    return Promise.resolve(true);
+  });
+  assert.deepEqual(
+    [await walk(), await walk(), await walk()],
+    [29_998, 29_999, 10_001],
+    'the walk wraps inside the band and gives no first number',
+  );
+  assert.deepEqual(asked, [29_900, 10_000], 'each block is asked for once, as the walk enters it');
 
   const kernelStarts: number[] = [];
   if (process.platform === 'win32') {
@@ -73576,20 +73595,128 @@ function thePortWalkWrapsAndEachProcessStartsItsOwn(): void {
     assert.ok(start > PORT_BAND.last, `port zero starts above the band: ${kernelStarts.join(', ')}`);
   }
 
-  // Each process starts its walk somewhere of its own, so two suites on one machine meet rarely.
+  // Each process starts its walk somewhere of its own, so a run seldom lands on a number an earlier run left dialled.
   const firsts = new Set<string>();
   for (let count = 0; count < 3; count += 1) {
-    const printed = spawnSyncHidden(
-      process.execPath,
-      ['-e', "import { reservePort } from './test/support/server.ts'; console.log(await reservePort());"],
-      { encoding: 'utf8' },
+    const printed = childPrints(
+      "import { reservePort } from './test/support/server.ts'; console.log(await reservePort());",
     );
-    assert.equal(printed.status, 0, `a process prints its first port: ${printed.stderr}`);
-    const first = Number(printed.stdout.trim());
-    assert.ok(first >= PORT_BAND.first && first <= PORT_BAND.last, `from the band: ${printed.stdout}`);
-    firsts.add(printed.stdout.trim());
+    const first = Number(printed);
+    assert.ok(first >= PORT_BAND.first && first <= PORT_BAND.last, `from the band: ${printed}`);
+    firsts.add(printed);
   }
   assert.ok(firsts.size > 1, `three processes do not all start at one number: ${[...firsts].join(', ')}`);
+
+  // A second process meets the blocks this one holds, so its walk begins in a block of its own.
+  const other = await bandWalk(await reservePort())();
+  const second = Number(
+    childPrints(
+      `import { bandWalk } from './test/support/server.ts'; console.log(await bandWalk(${other})());`,
+    ),
+  );
+  assert.ok(second >= PORT_BAND.first && second <= PORT_BAND.last, `from the band: ${second}`);
+  assert.notEqual(blockOf(second), blockOf(other), `another process leaves the block of ${other}: ${second}`);
+
+  // A number a fixture shut after listening on it is still in a block this process holds.
+  const game = createServer();
+  const shut = await listenOnAReservedPort(game);
+  game.close();
+  const drawn = Number(
+    childPrints(
+      `import { bandWalk, unheldPort } from './test/support/server.ts'; console.log(await unheldPort(bandWalk(${shut})));`,
+    ),
+  );
+  assert.notEqual(blockOf(drawn), blockOf(shut), `a shut number's block is not handed on: ${drawn}`);
+}
+
+const blockOf = (port: number): number =>
+  PORT_BAND.first + Math.floor((port - PORT_BAND.first) / PORT_BAND.block) * PORT_BAND.block;
+
+/** What a Bun child running [param script] from the repository root prints, which it must leave by itself. */
+function childPrints(script: string): string {
+  const printed = spawnSyncHidden(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(printed.status, 0, `a process prints its port: ${printed.stderr}`);
+  assert.equal(printed.signal, null, 'and leaves without being stopped');
+  return printed.stdout.trim();
+}
+
+/** The walk asks a block once, gives only blocks it holds, settles calls made together and gives up on a band that holds nothing. */
+async function aProcessDrawsOnlyFromBlocksItHolds(): Promise<void> {
+  const recording = (answer: (first: number) => boolean, after = 0) => {
+    const asked: number[] = [];
+    const hold = async (first: number): Promise<boolean> => {
+      asked.push(first);
+      if (after > 0) {
+        await delay(after);
+      }
+      return answer(first);
+    };
+    return { asked, hold };
+  };
+
+  const refusing = recording((first) => first !== 12_000);
+  assert.equal(await bandWalk(12_050, refusing.hold)(), 12_101, 'a block that cannot be held is passed over');
+  assert.deepEqual(refusing.asked, [12_000, 12_100], 'and is asked for once');
+
+  const refusingAll = recording(() => false);
+  const empty = bandWalk(10_000, refusingAll.hold);
+  const none = /none of the 200 blocks from 10000 to 29999 could be held/;
+  await assert.rejects(empty, none, 'a band no block of which can be held is refused');
+  assert.equal(refusingAll.asked.length, 200, 'after every block was asked for');
+  await assert.rejects(empty, none, 'and the next call does the same');
+  assert.equal(refusingAll.asked.length, 400, 'asking every block again');
+
+  const slow = recording(() => true, 20);
+  const together = bandWalk(12_098, slow.hold);
+  assert.deepEqual(
+    await Promise.all([together(), together(), together()]),
+    [12_098, 12_099, 12_101],
+    'calls made together take their turns',
+  );
+  assert.deepEqual(slow.asked, [12_000, 12_100], 'and each block is asked for once');
+
+  const onlyOne = recording((first) => first === 12_000);
+  const lone = bandWalk(12_098, onlyOne.hold);
+  assert.deepEqual(
+    [await lone(), await lone(), await lone()],
+    [12_098, 12_099, 12_001],
+    'a block held stays held',
+  );
+  assert.equal(onlyOne.asked.length, 200, 'and is not asked for again');
+
+  const gaps = recording((first) => first !== 12_100 && first !== 12_200);
+  const across = bandWalk(12_098, gaps.hold);
+  followsAlongTheWalk([await across(), await across(), await across()]);
+  assert.deepEqual(
+    gaps.asked,
+    [12_000, 12_100, 12_200, 12_300],
+    'two blocks in a row that cannot be held are passed over',
+  );
+
+  const plain = recording(() => true);
+  assert.equal(await bandWalk(12_000, plain.hold)(), 12_001, 'a start that is a first number is not given');
+  assert.deepEqual(plain.asked, [12_000], 'though its block is asked for');
+
+  const port = await reservePort();
+  const away = await bandWalk(port)();
+  assert.ok(away >= PORT_BAND.first && away <= PORT_BAND.last, `from the band: ${away}`);
+  assert.notEqual(blockOf(away), blockOf(port), 'the real hold keeps the block of a reserved port');
+  const first = blockOf(away);
+  const probe = createServer();
+  try {
+    await assert.rejects(
+      async () => {
+        await once(probe.listen(first, '127.0.0.1'), 'listening');
+      },
+      { code: 'EADDRINUSE' },
+      'the first number of a block the walk entered is held',
+    );
+  } finally {
+    probe.close();
+  }
+  const dialled = createConnection({ port: first, host: '127.0.0.1' });
+  dialled.on('error', () => undefined);
+  await once(dialled, 'close');
 }
 
 /**

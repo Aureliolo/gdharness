@@ -22,7 +22,13 @@ import { spawnHidden } from '../src/spawn.js';
 import { greeting } from './support/greeting.js';
 import { asArray, asObject, get, text } from './support/json.js';
 import { contentOf, isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
-import { listenOnAReservedPort, reservePort, ServerProcess, serverIdentity } from './support/server.js';
+import {
+  listenOnAReservedPort,
+  reservePort,
+  ServerProcess,
+  serverIdentity,
+  unheldPort,
+} from './support/server.js';
 import { sweep } from './support/sweep.js';
 
 const BRIDGE_HOST = process.env['GDHARNESS_BRIDGE_HOST'] ?? '127.0.0.1';
@@ -373,19 +379,20 @@ interface BridgeRig {
  */
 async function checksThePortOffers(rig: BridgeRig): Promise<void> {
   const { projectPath } = rig;
-  const takenPort = 1113;
+  const takenPort = await unheldPort();
+  const nextPort = await unheldPort();
   const takenBy = createServer();
   await once(takenBy.listen(takenPort, '127.0.0.1'), 'listening');
   const offerDir = mkdtempSync(join(tmpdir(), 'gdharness-offer-'));
   const offered = { pid: process.pid, projectPath, name: 'offered' };
   try {
-    const numbers = [takenPort, takenPort + 1];
+    const numbers = [takenPort, nextPort];
     const moved = await startMockRuntime(offerDir, {
       ...offered,
       offer: () => Promise.resolve(numbers.shift() ?? 0),
     });
     try {
-      assert.equal(moved.port, takenPort + 1, 'a held number is passed over for the next one offered');
+      assert.equal(moved.port, nextPort, 'a held number is passed over for the next one offered');
     } finally {
       await moved.close();
     }
