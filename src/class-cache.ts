@@ -13,7 +13,8 @@
 import { existsSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { codeOf, shapeOf } from './gdscript-source.js';
-import { bytesOf, entriesOf } from './listed-reads.js';
+import { bytesOf } from './listed-reads.js';
+import { walkProject } from './project-walk.js';
 import { isRecord } from './records.js';
 import { readWhole } from './whole-file.js';
 
@@ -135,34 +136,44 @@ export function declaredClassOf(source: string): string | null {
 
 /**
  * Every script under the project the engine would import, handed to [param each] as its `res://`
- * path and its source. A directory holding a `.gdignore` is stepped over, as the engine steps over it.
+ * path and its source. A directory holding a `.gdignore` or a `project.godot` of its own is stepped
+ * over, as the engine steps over it. Every path the engine scans, behind a link too.
+ * [method scriptsInside] is the list for a reader of the project.
  */
 export function eachScript(projectPath: string, each: (script: string, source: string) => void): void {
-  visitScripts(projectPath, '', each);
-}
-
-function visitScripts(
-  directory: string,
-  prefix: string,
-  each: (script: string, source: string) => void,
-): void {
-  if (existsSync(join(directory, '.gdignore'))) {
-    return;
-  }
-  for (const entry of entriesOf(directory)) {
-    if (entry.name.startsWith('.')) {
-      continue;
-    }
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      visitScripts(path, `${prefix}${entry.name}/`, each);
-    } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-      const source = bytesOf(path);
+  for (const folder of walkProject(projectPath, { withOurs: true }).folders) {
+    const prefix = folder.folder === '' ? 'res://' : `res://${folder.folder}/`;
+    for (const file of folder.files) {
+      if (!file.name.endsWith('.gd')) {
+        continue;
+      }
+      const source = bytesOf(join(folder.path, file.name));
       if (source !== null) {
-        each(`res://${prefix}${entry.name}`, source.toString('utf8'));
+        each(`${prefix}${file.name}`, source.toString('utf8'));
       }
     }
   }
+}
+
+/**
+ * Each script inside the project as its `res://` path and its source, in the scan's order. A script
+ * a link reaches is listed once, and none behind a link out of the project.
+ */
+export function scriptsInside(projectPath: string): [string, string][] {
+  const scripts: [string, string][] = [];
+  for (const folder of walkProject(projectPath, { withOurs: true, inside: projectPath }).folders) {
+    const prefix = folder.folder === '' ? 'res://' : `res://${folder.folder}/`;
+    for (const file of folder.files) {
+      if (file.twin || !file.name.endsWith('.gd')) {
+        continue;
+      }
+      const source = bytesOf(join(folder.path, file.name));
+      if (source !== null) {
+        scripts.push([`${prefix}${file.name}`, source.toString('utf8')]);
+      }
+    }
+  }
+  return scripts;
 }
 
 /** A script naming a class, and whether it is a `@tool` script, which runs inside the editor. */

@@ -25,6 +25,7 @@ import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
 import { ignoredTexts, installedByUs, projectTexts } from './project-scan.js';
+import { walkProject } from './project-walk.js';
 import {
   ClassGraph,
   declaredIn,
@@ -147,23 +148,14 @@ function fileInTheWay(absolute: string): string | null {
 /** Every .scn and .res in the project the engine sees. */
 function binaryResources(projectPath: string): string[] {
   const found: string[] = [];
-  const visit = (directory: string, prefix: string): void => {
-    if (existsSync(join(directory, '.gdignore'))) {
-      return;
-    }
-    for (const entry of entriesOf(directory)) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const path = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        visit(join(directory, entry.name), `${path}/`);
-      } else if (/\.(scn|res)$/i.test(entry.name)) {
-        found.push(path);
+  for (const folder of walkProject(projectPath, { withOurs: true }).folders) {
+    const prefix = folder.folder === '' ? 'res://' : `res://${folder.folder}/`;
+    for (const file of folder.files) {
+      if (!file.twin && /\.(scn|res)$/i.test(file.name)) {
+        found.push(`${prefix}${file.name}`);
       }
     }
-  };
-  visit(projectPath, 'res://');
+  }
   return found;
 }
 

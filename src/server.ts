@@ -59,7 +59,6 @@ import {
   declaredClassLines,
   declaredSince,
   EXTERNAL_MEMBER,
-  eachScript,
   externalMemberIn,
   failedReloadNote,
   heldButGone,
@@ -72,6 +71,7 @@ import {
   type ReloadedFirst,
   reloadDifference,
   scriptsDeclaring,
+  scriptsInside,
   scriptsNaming,
   staleAnalysisNote,
   staleClassNames,
@@ -3564,15 +3564,6 @@ export function projectSourceOf(projectPath: string): SourceOf {
     }
     return read.get(script) ?? null;
   };
-}
-
-/** [param projectPath]'s scripts, as `callersOf` reads them. */
-function projectScripts(projectPath: string): [string, string][] {
-  const scripts: [string, string][] = [];
-  eachScript(projectPath, (script, source) => {
-    scripts.push([script, source]);
-  });
-  return scripts;
 }
 
 /**
@@ -15730,7 +15721,7 @@ class GodotServer {
       sourceOf: projectSourceOf(projectPath),
       ...(callersName === undefined
         ? {}
-        : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
+        : { callersOf: { name: callersName, scripts: () => scriptsInside(projectPath) } }),
     };
   }
 

@@ -72,6 +72,7 @@ import {
   heldButGone,
   type MissingMember,
   missingMemberIn,
+  scriptsInside,
   staleAnalysisNote,
   staleClassNames,
   uncachedClassNote,
@@ -146,6 +147,7 @@ import {
   windowsCommitLeft,
 } from '../src/engine-launch.js';
 import {
+  projectSelfTypedExports,
   selfTypedExports,
   selfTypedSentence,
   WALK_BEGAN,
@@ -20980,6 +20982,37 @@ function testTwinUidsSettleAsTheEditorScans(): void {
       [30n, 'res://k/x.gd.tscn'],
     ]);
     assert.deepEqual(settled(mended), expected, 'each twin settles on the file the scan meets later');
+
+    // The scan orders a folder by the file a sidecar stands for, and never enters a nested project.
+    const nested = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-uid-nested-'));
+    try {
+      writeTree(nested, {
+        'project.godot': 'config_version=5\n',
+        'a/x.gd': 'extends Node\n',
+        'a/x.gd.uid': 'uid://6\n',
+        'A2/x.gd': 'extends Node\n',
+        'A2/x.gd.uid': 'uid://6\n',
+        'demo/project.godot': 'config_version=5\n',
+        'demo/y.gd': 'extends Node\n',
+        'demo/y.gd.uid': 'uid://7\n',
+      });
+      mkdirSync(join(nested, '.godot'));
+      writeFileSync(
+        join(nested, '.godot', 'uid_cache.bin'),
+        encodedUidCache([
+          [31n, 'res://gone/6.gd'],
+          [32n, 'res://gone/7.gd'],
+        ]),
+      );
+      mendUidCache(nested);
+      assert.deepEqual(
+        uidCacheEntries(readFileSync(join(nested, '.godot', 'uid_cache.bin'))),
+        [[31n, 'res://A2/x.gd']],
+        'the later folder wins a twin, and a nested project declares nothing',
+      );
+    } finally {
+      rmSync(nested, { recursive: true, force: true });
+    }
 
     const godotPath = resolveGodotPath();
     if (!godotPath) {
@@ -55528,7 +55561,17 @@ function profiledRunsOn(server: ServerProcess, project: string): ProfiledRuns {
 /** The scene that works in _ready, with the runtime addon, comes back complete with exact calls. */
 async function checksTheWholeProfile(runs: ProfiledRuns): Promise<void> {
   const { server, profiledRun } = runs;
-  const whole = await profiledRun('once', true, { callersOf: 'ranked', limit: 100 });
+  // A folder beside the project, reached through a link, whose script calls the function asked for.
+  const beside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profiled-beside-'));
+  writeFileSync(join(beside, 'o.gd'), 'extends Node\n\n\nfunc other() -> void:\n\tranked([])\n');
+  symlinkSync(beside, join(runs.project, 'shared'), 'junction');
+  let whole: unknown;
+  try {
+    whole = await profiledRun('once', true, { callersOf: 'ranked', limit: 100 });
+  } finally {
+    rmSync(join(runs.project, 'shared'), { recursive: true, force: true });
+    sweep(beside);
+  }
   const wholeShown = JSON.stringify(whole);
   assert.equal(
     get(runs.started, 'profile', 'on'),
@@ -62426,6 +62469,10 @@ function testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores(): void {
       'project.godot': 'config_version=5\n',
       'raw/.gdignore': '',
       'raw/a.json': '1\n',
+      'fake/f.json': '1\n',
+      'fake/project.godot/x.txt': '1\n',
+      'demo/project.godot': 'config_version=5\n',
+      'demo/d.json': '1\n',
     });
     writeTree(elsewhere, { 'shared.json': '1\n' });
     symlinkSync(elsewhere, join(project, 'linked'), 'junction');
@@ -62441,9 +62488,15 @@ function testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores(): void {
     walkSeen(project, (under) => names.push(under));
     assert.deepEqual(
       names,
-      ['linked/shared.json', 'project.godot'],
-      'and a link back up the tree is not walked again',
+      ['fake/f.json', 'fake/project.godot/x.txt', 'linked/shared.json', 'project.godot'],
+      'a link back up the tree is not walked again, a folder named project.godot is no project and a nested project holds nothing',
     );
+    const listing = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_NAME]);
+    const listed = listing();
+    writeFileSync(join(project, 'demo', 'e.json'), '1\n');
+    assert.equal(listing(), listed, 'a file in a nested project is no name a listing sees');
+    rmSync(join(project, 'demo'), { recursive: true });
+    assert.notEqual(listing(), listed, 'while the nested project is itself named');
     assert.deepEqual(
       reachedAlsoSaid([join(project, 'raw')]),
       ['.gdignore\n\na.json\nchanged\n'],
@@ -93763,8 +93816,15 @@ function testAWalkFollowsLinksAndMarksTheOnesThatLeave(): void {
   const p = (...steps: string[]): string => join(project, ...steps);
   const gd = '# needle\n';
   try {
-    writeTree(project, { 'project.godot': '', 'real/r.gd': gd, 'sub/keep.txt': '' });
-    writeTree(outside, { 'o.gd': '# outsider\n' });
+    const exporting = (name: string): string =>
+      `class_name ${name}\n@export var next: Array[${name}] = []\n\n\nfunc f() -> void:\n\thelper()\n`;
+    writeTree(project, {
+      'project.godot': '',
+      'real/r.gd': `${gd}${exporting('R')}`,
+      'real/m.png': 'M',
+      'sub/keep.txt': '',
+    });
+    writeTree(outside, { 'o.gd': `# outsider\n${exporting('O')}`, 'n.png': 'N' });
     linkTo(p('real'), p('link'));
     const walked = tour(project);
     const at = (read: ReadWalk, path: string): ReadWalk['files'][number] | undefined =>
@@ -93808,6 +93868,57 @@ function testAWalkFollowsLinksAndMarksTheOnesThatLeave(): void {
     );
     const out = held.leftOut.filter((left) => left.why === 'outside').map((left) => left.folder);
     assert.deepEqual(out, fileLinked ? ['linked.gd', 'shared'] : ['shared']);
+    const imports = staleImports(project).map((one) => one.path);
+    assert.deepEqual(
+      imports.filter((path) => path.endsWith('.png')),
+      ['res://real/m.png', 'res://shared/n.png'],
+      'the import check names a file behind a link out and a file behind a link in once',
+    );
+
+    const scanned: string[] = [];
+    eachScript(project, (script) => scanned.push(script));
+    const inside = scriptsInside(project);
+    const sought = (scripts: readonly string[]): string[] =>
+      scripts
+        .filter((script) => /\/(r|o)\.gd$/.test(script) && !script.startsWith('res://Upper/'))
+        .toSorted();
+    assert.deepEqual(
+      sought(scanned),
+      ['res://link/r.gd', 'res://real/r.gd', 'res://shared/o.gd'],
+      'the engine scans every path',
+    );
+    assert.deepEqual(
+      sought(inside.map(([script]) => script)),
+      ['res://real/r.gd'],
+      'a reader of the project takes the file once and none behind a link out',
+    );
+    const calling = callersOf(
+      {
+        startedAt: 0,
+        lastFrameAt: 1,
+        frames: 1,
+        complete: true,
+        unreadable: 0,
+        engineCalls: true,
+        functions: {},
+      },
+      'helper',
+      inside,
+    );
+    assert.deepEqual(
+      calling.sites.map((site) => site.script),
+      ['res://real/r.gd'],
+      'one place, in a file of the project',
+    );
+    const loaded = new ProjectScripts(project).sources;
+    const exported = projectSelfTypedExports(project);
+    assert.deepEqual(exported, selfTypedExports(loaded));
+    assert.deepEqual(
+      sought(exported.filter((one) => one.property === 'next').map((one) => one.script)),
+      ['res://link/r.gd', 'res://real/r.gd', 'res://shared/o.gd'],
+      'the note on what the engine held names every path it loaded',
+    );
+    assert.equal(selfTypedSentence(exported), selfTypedSentence(selfTypedExports(loaded)));
     const outsider = search('outsider');
     assert.deepEqual([outsider.results, outsider.not_searched?.includes('res://shared/')], [[], true]);
     assert.deepEqual(folderFiles(project, p('shared'), ['.gd']), []);
@@ -93905,8 +94016,88 @@ function testASearchStepsOverAFolderHoldingAProject(): void {
   });
 }
 
+/** The class cache holds no class a nested project declares, and holds the project's own. */
+function testTheClassCacheStepsOverAFolderHoldingAProject(): void {
+  inNested(
+    {
+      'scripts/hero.gd': 'class_name Hero\nextends Node\n',
+      'game_copy/stowaway.gd': 'class_name Stowaway\nextends Node\n',
+    },
+    (project) => {
+      assert.deepEqual([...declaredClasses(project).keys()], ['Hero']);
+    },
+  );
+}
+
+/** A uid a nested project's files declare is declared by nothing, and the project's own still is. */
+function testTheUidCacheStepsOverAFolderHoldingAProject(): void {
+  inNested(
+    {
+      'gdharness/loader.gd': 'extends Node\n',
+      'gdharness/loader.gd.uid': 'uid://bil88s3xjahd0\n',
+      'game_copy/copy.gd': 'extends Node\n',
+      'game_copy/copy.gd.uid': 'uid://i\n',
+    },
+    (project) => {
+      mkdirSync(join(project, '.godot'));
+      writeFileSync(
+        join(project, '.godot', 'uid_cache.bin'),
+        encodedUidCache([
+          [2972703169784048779n, 'res://boot/loader.gd'],
+          [8n, 'res://copy.gd'],
+        ]),
+      );
+      assert.deepEqual(mendUidCache(project), {
+        moved: [[2972703169784048779n, 'res://boot/loader.gd', 'res://gdharness/loader.gd']],
+        dropped: [[8n, 'res://copy.gd']],
+      });
+    },
+  );
+}
+
+/** A binary resource in a nested project is not one a move has to leave alone, and the project's own is. */
+function testAMoveListsNoBinaryResourceOfAFolderHoldingAProject(): void {
+  const project = moveProject();
+  try {
+    writeTree(project, {
+      'game_copy/project.godot': 'config_version=5\n',
+      'game_copy/baked.scn': 'RSCN res://game.gd',
+      'baked.scn': 'RSCN res://game.gd',
+    });
+    const outcome = planFileMove(project, join(project, 'game.gd'), join(project, 'moved_game.gd'));
+    assert.ok(outcome.ok, `the move was refused: ${JSON.stringify(outcome)}`);
+    const said = JSON.stringify(get(outcome.report, 'leftAlone'));
+    assert.ok(said.includes('res://baked.scn'), `the project's own binary resource is listed: ${said}`);
+    assert.ok(!said.includes('game_copy'), `and the nested project's is not: ${said}`);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** The import check leaves a nested project's files out, and still names the project's own. */
+function testTheImportCheckStepsOverAFolderHoldingAProject(): void {
+  inNested({ 'raw.png': 'R', 'game_copy/raw.png': 'R' }, (project) => {
+    assert.deepEqual(staleImports(project), [{ path: 'res://raw.png', reason: 'it has not been imported' }]);
+  });
+}
+
+/** A native extension manifest in a nested project is not listed as the project's. */
+function testTheExtensionListStepsOverAFolderHoldingAProject(): void {
+  inNested(
+    { 'native/b.gdextension': '[configuration]\n', 'game_copy/c.gdextension': '[configuration]\n' },
+    (project) => {
+      assert.deepEqual(seedExtensionList(project), ['res://native/b.gdextension']);
+    },
+  );
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testRegressionPartsCoverEveryTestOnceAndBalance,
+  testTheClassCacheStepsOverAFolderHoldingAProject,
+  testTheUidCacheStepsOverAFolderHoldingAProject,
+  testAMoveListsNoBinaryResourceOfAFolderHoldingAProject,
+  testTheImportCheckStepsOverAFolderHoldingAProject,
+  testTheExtensionListStepsOverAFolderHoldingAProject,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,

@@ -8,10 +8,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { type Dirent, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { installedByUs } from './project-scan.js';
-import { kindOf } from './project-walk.js';
+import { walkProject } from './project-walk.js';
 import { importRecord } from './reimport.js';
 
 /** One file whose import is behind it, by its `res://` path, with why. */
@@ -296,70 +295,28 @@ function recordedSourceMd5(projectPath: string, resPath: string): string {
 }
 
 /**
- * Every file under [param projectPath] whose import is behind it, walked as `project_import
- * status` walks: past names starting with a dot, folders holding a `.gdignore`, and addons
- * gdharness installed. A file with an importable extension and no import file has not been
- * imported. A sidecar whose source has gone is left to `project_import status`, since no import
- * can bring it back.
+ * Every file under [param projectPath] whose import is behind it, walked as the engine's scan walks,
+ * less the addons gdharness installed. A file with an importable extension and no import file has
+ * not been imported. A sidecar whose source has gone is left to `project_import status`, since no
+ * import can bring it back.
  */
 export function staleImports(projectPath: string): StaleImport[] {
   const stale: StaleImport[] = [];
   const importedFrom = importedSidecarMd5s(projectPath);
-  // The folders entered, by what a link resolves to, since the engine follows links and a link back
-  // up the tree would otherwise be walked for good.
-  const entered = new Set<string>();
-  collectStale({ projectPath, importedFrom, entered, stale }, projectPath, 'res://');
+  for (const folder of walkProject(projectPath).folders) {
+    const resDirectory = folder.folder === '' ? 'res://' : `res://${folder.folder}/`;
+    for (const file of folder.files) {
+      if (file.twin || file.name.endsWith('.import')) {
+        continue;
+      }
+      const resPath = `${resDirectory}${file.name}`;
+      const reason = staleReasonOfFile(projectPath, folder.path, file.name, resPath, importedFrom);
+      if (reason !== null) {
+        stale.push({ path: resPath, reason });
+      }
+    }
+  }
   return stale.toSorted((one, other) => one.path.localeCompare(other.path));
-}
-
-/** What a walk of the project carries from folder to folder. */
-interface Walk {
-  readonly projectPath: string;
-  readonly importedFrom: ReadonlyMap<string, string>;
-  readonly entered: Set<string>;
-  readonly stale: StaleImport[];
-}
-
-function collectStale(walk: Walk, directory: string, resDirectory: string): void {
-  const entries = entriesToWalk(directory, walk.entered);
-  if (entries === null) {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) {
-      continue;
-    }
-    const resPath = `${resDirectory}${entry.name}`;
-    const kind = kindOf(directory, entry);
-    if (kind === 'directory') {
-      collectStale(walk, join(directory, entry.name), `${resPath}/`);
-      continue;
-    }
-    if (kind !== 'file' || entry.name.endsWith('.import')) {
-      continue;
-    }
-    const reason = staleReasonOfFile(walk.projectPath, directory, entry.name, resPath, walk.importedFrom);
-    if (reason !== null) {
-      walk.stale.push({ path: resPath, reason });
-    }
-  }
-}
-
-/** The entries of [param directory], or null when the walk leaves it out, enters it again or cannot read it. */
-function entriesToWalk(directory: string, entered: Set<string>): Dirent[] | null {
-  if (existsSync(join(directory, '.gdignore')) || installedByUs(directory)) {
-    return null;
-  }
-  try {
-    const real = realpathSync(directory);
-    if (entered.has(real)) {
-      return null;
-    }
-    entered.add(real);
-    return readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return null;
-  }
 }
 
 /** Why the file [param name] in [param directory] is behind its import, or null when it is not. */

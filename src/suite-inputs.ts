@@ -21,6 +21,7 @@ import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
 import { isLibraryCopy } from './library-copies.js';
 import { bytesOf, cannotOpen, contentOf, entriesOf, statOf } from './listed-reads.js';
+import { isGodotProject } from './paths.js';
 import { projectFiles } from './project-scan.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
@@ -1287,8 +1288,9 @@ export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modi
  * Every file and folder under [param root] that [method walkSeen] would walk, in its order, by where
  * it lies under the root, a folder ending in a slash. A folder below the root holding a `.gdignore`
  * is named, since a listing sees it, but nothing in it is: the engine leaves it out, and it is where
- * builds and exports are written while suites run. A suite reading data kept there names the folder
- * with `--reach-also`. A link to a folder or a file is followed, once per folder on the way down so
+ * builds and exports are written while suites run. So is a folder holding a `project.godot` of its
+ * own, which the engine never sees. A suite reading data kept there names the folder with
+ * `--reach-also`. A link to a folder or a file is followed, once per folder on the way down so
  * a loop ends.
  */
 function namesSeen(root: string, seen: (under: string, file: string, folder: boolean) => void): void {
@@ -1314,7 +1316,7 @@ function walkNames(
       const real = realPathOf(file);
       if (!entry.name.startsWith('.') && real !== null && !above.has(real)) {
         seen(`${under}${entry.name}/`, file, true);
-        if (!existsSync(join(file, '.gdignore'))) {
+        if (!existsSync(join(file, '.gdignore')) && !isGodotProject(file)) {
           walkNames(file, `${under}${entry.name}/`, new Set([...above, real]), seen);
         }
       }
