@@ -3014,9 +3014,14 @@ async function onlyTheFiftyLastLateAnswersAreKept(): Promise<void> {
       async (answerOrder) => {
         const game = await fakeGame('silent', process.pid);
         try {
-          const replies = await Promise.all(
-            answerOrder.map(() => runtimeRequest(game.endpoint, 'slow', {}, 250, 'keep')),
-          );
+          // The waits run out together once the game holds every request, however long the four
+          // places the dial cap gives take to pass them on, so no wait races the machine's load.
+          jest.useFakeTimers();
+          const asking = answerOrder.map(() => runtimeRequest(game.endpoint, 'slow', {}, 250, 'keep'));
+          await realTick(() => game.held.length === answerOrder.length);
+          jest.advanceTimersByTime(250);
+          const replies = await Promise.all(asking);
+          jest.useRealTimers();
           const ids = replies.map((reply) => (reply.ok ? -1 : (reply.requestId ?? -1)));
           assert.ok(!ids.includes(-1), 'every wait ran out on a game holding the request');
           await eventually(() => game.held.length === answerOrder.length);
@@ -3032,6 +3037,7 @@ async function onlyTheFiftyLastLateAnswersAreKept(): Promise<void> {
             last.toSorted((a, b) => (a ?? 0) - (b ?? 0)),
           );
         } finally {
+          jest.useRealTimers();
           await game.close();
         }
       },
@@ -3269,7 +3275,8 @@ async function noMoreThanFourConnectionsWaitForOneGame(): Promise<void> {
 
 /** Real time passing, for a wait that fake timers do not move. */
 async function realTick(done: () => boolean): Promise<void> {
-  for (let tick = 0; tick < 200_000 && !done(); tick += 1) {
+  // Counted in turns of the event loop, since fake timers hold every clock still.
+  for (let tick = 0; tick < 5_000_000 && !done(); tick += 1) {
     await new Promise((settle) => setImmediate(settle));
   }
   assert.ok(done(), 'the wait ended');

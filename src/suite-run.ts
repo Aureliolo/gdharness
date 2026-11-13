@@ -1079,8 +1079,10 @@ interface StartedLanes {
 }
 
 /**
- * The lanes file a run follows and the lanes it may rise to, or null. A run grows only where a gate
- * names a file, it is not ordered, and work, the pool and the processors leave room above its lanes.
+ * The lanes file a run follows and the lanes it may rise to, or null. A run follows only where a gate
+ * names a file and it is not ordered. It rises only where work, the pool and the processors leave
+ * room above its lanes. One of several lanes follows the file for a fall even with no room to rise,
+ * since a gate may tell it fewer lanes than it began on.
  */
 function followedFile(context: RunContext, deal: Deal, dealtLanes: number): StartedLanes['follows'] {
   const { options, declared } = context;
@@ -1094,7 +1096,12 @@ function followedFile(context: RunContext, deal: Deal, dealtLanes: number): Star
     pool ?? Number.POSITIVE_INFINITY,
     lanesOf(dealt(deal.units, declared, Number.POSITIVE_INFINITY)),
   );
-  return ceiling > dealtLanes ? { file, ceiling } : null;
+  return followedAt(file, ceiling, dealtLanes);
+}
+
+/** What [function followedFile] answers for the lanes [param file], a [param ceiling] and the lanes dealt. */
+export function followedAt(file: string, ceiling: number, dealtLanes: number): StartedLanes['follows'] {
+  return ceiling > dealtLanes || dealtLanes > 1 ? { file, ceiling: Math.max(ceiling, dealtLanes) } : null;
 }
 
 /** Takes a slot for each lane where one is free now, and says what that leaves for the rest. */
@@ -1145,7 +1152,16 @@ async function ranEngines(
   const { launch, declared } = context;
   const { units, times } = deal;
   const { lanes, taken, shared, follows } = started;
-  const follower = follows === null ? null : new FollowedLanes(launch.slots, follows.file, follows.ceiling);
+  const follower =
+    follows === null
+      ? null
+      : new FollowedLanes(
+          launch.slots,
+          follows.file,
+          follows.ceiling,
+          undefined,
+          follows.ceiling > lanes.length,
+        );
   let ran: EngineRan[];
   try {
     ran = shared
@@ -1966,7 +1982,9 @@ async function runLane(
  * run open that has nothing left to give it. A lane takes its slot, lends it to a compile check that
  * wants one, and only then waits for memory, so an engine memory admits never waits for a slot or a
  * check. With [param raised] it starts one lane more for each
- * the run is raised to, up to its ceiling, asking again until every share is handed out.
+ * the run is raised to, up to its ceiling, asking again until every share is handed out. A lane the
+ * lanes file tells to stop reads the file again after each of its waits and before it draws, and gives
+ * its slot back to the machine.
  */
 export async function runShares<T extends { readonly index: number }>(
   slots: Pick<EngineSlots, 'take' | 'release'>,
@@ -1988,13 +2006,63 @@ export async function runShares<T extends { readonly index: number }>(
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
-  // The share this lane would draw now, read at each look. Nothing is awaited between the admission
-  // and the draw, so the share it was admitted for is the one it draws.
+  // The share this lane would draw now, read at each look. Only a read of the lanes file lies between
+  // the admission and the draw, which a share another lane draws meanwhile can only make smaller.
   const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
+  /** Whether the lanes file tells fewer lanes than lane [param at] belongs to. */
+  const fallenPast = async (at: number): Promise<boolean> => {
+    const told = (await raised?.told?.()) ?? null;
+    return raised?.untilTold !== undefined && told !== null && at >= told;
+  };
+  /**
+   * Gives the lane's slot back to the machine while the lanes file tells fewer lanes than [param at]
+   * + 1, and waits for it to tell more, or for every share to be handed out. A check still waiting
+   * for a slot takes one the ordinary way. Answers whether the lane was told to stop.
+   */
+  const parkedPastTheLanesTold = async (at: number, held: { lock: string | null }): Promise<boolean> => {
+    if (!(await fallenPast(at)) || raised?.untilTold === undefined) {
+      return false;
+    }
+    if (held.lock !== null) {
+      slots.release(held.lock);
+      held.lock = null;
+    }
+    await raised.untilTold(at, handedOut.signal);
+    return true;
+  };
+  /**
+   * Takes the lane's slot, lends it to a check that wants one and waits for memory, or answers null
+   * once the run is over. The lanes file is read again after the slot and the check, and after
+   * memory, since a wait can outlast a fall. A lane told fewer lanes goes back to waiting for the
+   * lanes to rise instead of waiting for memory or drawing a share.
+   */
+  const waitedFor = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
+    for (;;) {
+      if (await parkedPastTheLanesTold(at, held)) {
+        if (empty()) {
+          return null;
+        }
+        continue;
+      }
+      held.lock ??= await slots.take(handedOut.signal);
+      await handed?.lend(held.lock);
+      if (await fallenPast(at)) {
+        continue;
+      }
+      const admitted = await memory?.admit(handedOut.signal, needed);
+      if (!(await fallenPast(at))) {
+        return { lock: held.lock, admitted };
+      }
+      admitted?.ended();
+    }
+  };
   /**
    * Takes the lane's slot and the memory its next share needs, draws the share and numbers its
-   * engine, or answers null once every share is handed out. Nothing is awaited between the
-   * admission and the draw.
+   * engine, or answers null once every share is handed out. The lanes file is read last, right
+   * before the draw.
    */
   const admit = async (
     at: number,
@@ -2005,17 +2073,19 @@ export async function runShares<T extends { readonly index: number }>(
     readonly plan: EnginePlan;
     readonly index: number;
   } | null> => {
-    let admitted: Admitted | undefined;
+    let waited: Awaited<ReturnType<typeof waitedFor>>;
     try {
-      held.lock ??= await slots.take(handedOut.signal);
-      await handed?.lend(held.lock);
-      admitted = await memory?.admit(handedOut.signal, needed);
+      waited = await waitedFor(at, held);
     } catch (error) {
       if (handedOut.signal.aborted) {
         return null;
       }
       throw error;
     }
+    if (waited === null) {
+      return null;
+    }
+    const { lock, admitted } = waited;
     const plan = shares.next(at);
     if (plan === null) {
       admitted?.ended();
@@ -2026,7 +2096,7 @@ export async function runShares<T extends { readonly index: number }>(
     }
     const index = engines;
     engines += 1;
-    return { lock: held.lock, admitted, plan, index };
+    return { lock, admitted, plan, index };
   };
   /** Runs a drawn share, ending its admission once it is over. */
   const runDrawn = async (drawn: {
@@ -2041,30 +2111,11 @@ export async function runShares<T extends { readonly index: number }>(
       drawn.admitted?.ended();
     }
   };
-  /**
-   * Gives the lane's slot back while the lanes file tells fewer lanes than [param at] + 1, and waits
-   * for it to tell more, or for every share to be handed out. A lane draws its next share only after.
-   */
-  const parkedPastTheLanesTold = async (at: number, held: { lock: string | null }): Promise<void> => {
-    const told = (await raised?.told?.()) ?? null;
-    if (raised?.untilTold === undefined || told === null || at < told) {
-      return;
-    }
-    if (held.lock !== null) {
-      doneWith(slots, held.lock, handed);
-      held.lock = null;
-    }
-    await raised.untilTold(at, handedOut.signal);
-  };
   const lane = async (at: number): Promise<T[]> => {
     const held = { lock: taken[at] ?? null };
     const ran: T[] = [];
     try {
       while (!empty()) {
-        await parkedPastTheLanesTold(at, held);
-        if (empty()) {
-          break;
-        }
         const drawn = await admit(at, held);
         if (drawn === null) {
           break;

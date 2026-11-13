@@ -672,6 +672,7 @@ import {
   compileUnlessUnchanged,
   engineSaid,
   enginesCutFor,
+  followedAt,
   HandedSlot,
   importEnd,
   importFault,
@@ -60110,7 +60111,10 @@ async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promi
   }
 }
 
-/** A fall to one lane while the last shares are out still ends the lanes parked behind it. */
+/**
+ * A run told one lane runs one engine at a time, and the lanes parked behind it end with the run once
+ * its last share is out.
+ */
 async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> {
   const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-'));
   const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-pool-'));
@@ -60124,10 +60128,15 @@ async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> 
   const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
   const ends: Array<() => void> = [];
   let suitesRun = 0;
+  let running = 0;
+  let mostRunning = 0;
   const run = (plan: EnginePlan, index: number): Promise<{ index: number }> =>
     new Promise((done) => {
       suitesRun += plan.suites.length;
+      running += 1;
+      mostRunning = Math.max(mostRunning, running);
       ends.push(() => {
+        running -= 1;
         done({ index });
       });
     });
@@ -60150,10 +60159,204 @@ async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> 
       12,
       `and the one lane told ran every suite once, in ${String(ran.length)} engines`,
     );
+    assert.equal(mostRunning, 1, 'with one engine at a time, since the other two lanes were told to stop');
   } finally {
     sweep(machine);
     sweep(pool);
   }
+}
+
+/** A follower that tells [param told] lanes and waits until the run has handed out every share. */
+function toldLanes(
+  ceiling: number,
+  told: () => number | Promise<number>,
+): NonNullable<Parameters<typeof runShares>[9]> {
+  return {
+    ceiling,
+    past: () => Promise.resolve(ceiling),
+    told: async () => await told(),
+    untilTold: (_lane, signal) =>
+      new Promise<void>((over) => {
+        if (signal.aborted) {
+          over();
+          return;
+        }
+        signal.addEventListener(
+          'abort',
+          () => {
+            over();
+          },
+          { once: true },
+        );
+      }),
+  };
+}
+
+/**
+ * A two-lane run whose second lane is held in a wait for a slot or for memory while the file falls to
+ * one lane. Answers the engines started and the slots given back to the machine once the wait ended.
+ */
+async function secondLaneHeldInAWhileTheFileFalls(
+  wait: 'slot' | 'memory',
+): Promise<{ started: number; released: string[] }> {
+  const released: string[] = [];
+  const takes: Array<(lock: string) => void> = [];
+  const slots = {
+    take: () =>
+      new Promise<string>((taken) => {
+        takes.push(taken);
+      }),
+    release: (lock: string) => {
+      released.push(lock);
+    },
+  };
+  let told = 2;
+  let free = 0;
+  let started = 0;
+  let finishing = false;
+  const ends: Array<() => void> = [];
+  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
+    new Promise((done) => {
+      started += 1;
+      if (finishing) {
+        done({ index });
+      } else {
+        ends.push(() => {
+          done({ index });
+        });
+      }
+    });
+  const memory = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
+  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const pending = runShares(
+    slots,
+    units,
+    declared,
+    2,
+    wait === 'slot' ? ['T0'] : ['T0', 'T1'],
+    {},
+    run,
+    undefined,
+    memory,
+    toldLanes(2, () => told),
+  );
+  try {
+    if (wait === 'slot') {
+      assert.ok(await cameTrue(() => takes.length === 1, 5000), 'the second lane waits for a slot');
+    } else {
+      await delay(150);
+    }
+    assert.equal(started, 1, 'the first lane is running its share');
+    told = 1;
+    free = 2 ** 40;
+    takes[0]?.('N1');
+    await delay(200);
+    const snapshot = { started, released: [...released] };
+    finishing = true;
+    for (const end of ends.splice(0)) {
+      end();
+    }
+    const over = await Promise.race([pending, delay(10_000).then(() => null)]);
+    assert.ok(over !== null, `the run ends (${wait})`);
+    return snapshot;
+  } finally {
+    finishing = true;
+    for (const end of ends.splice(0)) {
+      end();
+    }
+  }
+}
+
+/** A lane reads the lanes file after the waits that can outlast a fall, and draws no share past it. */
+async function testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited(): Promise<void> {
+  const afterTheSlot = await secondLaneHeldInAWhileTheFileFalls('slot');
+  assert.equal(afterTheSlot.started, 1, 'a lane whose slot came after the fall starts no engine');
+  assert.deepEqual(afterTheSlot.released, ['N1'], 'and gives the slot it was handed back to the machine');
+  const afterMemory = await secondLaneHeldInAWhileTheFileFalls('memory');
+  assert.equal(afterMemory.started, 1, 'a lane that memory admitted after the fall starts no engine');
+  assert.deepEqual(afterMemory.released, ['T1'], 'and gives its slot back to the machine');
+}
+
+/** A lane told to stop gives its slot to the machine, and a compile check still waiting takes its own. */
+async function testAParkedLanesSlotGoesToTheMachineNotTheCheck(): Promise<void> {
+  const released: string[] = [];
+  const slots = {
+    take: () => Promise.resolve('N'),
+    release: (lock: string) => {
+      released.push(lock);
+    },
+  };
+  const handed = new HandedSlot(true);
+  let reads = 0;
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  // The first lane reads the file a moment after the second, which is told it is past the number.
+  const raised = toldLanes(2, async () => {
+    reads += 1;
+    if (reads === 1) {
+      await delay(100);
+    }
+    return 1;
+  });
+  const pending = runShares(
+    slots,
+    units,
+    declared,
+    2,
+    ['T0', 'T1'],
+    {},
+    (_plan, index) => Promise.resolve({ index }),
+    handed,
+    undefined,
+    raised,
+  );
+  try {
+    const given = await Promise.race([handed.lock, delay(2000).then(() => null)]);
+    assert.equal(given, 'T0', 'the check runs in the slot of the lane that went on, not the parked one');
+    assert.deepEqual(released, ['T1'], 'the parked lane gave its slot to the machine');
+  } finally {
+    handed.ended();
+  }
+  assert.ok((await Promise.race([pending, delay(10_000).then(() => null)])) !== null, 'the run ends');
+}
+
+/** A run begun on every lane it may have still follows the file, for a fall, and is handed shares. */
+async function testARunBegunAtItsCeilingStillFollowsTheLanesFile(): Promise<void> {
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-ceiling-'));
+  try {
+    const holder = { pid: process.pid, started: await ownStart() };
+    const file = join(pool, 'lanes-1.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ lanes: 2, pid: process.pid, started: holder.started, written: Date.now() }),
+    );
+    const flat = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5, false);
+    assert.equal(await flat.told(), 2, 'a run that cannot rise still reads the number, for a fall');
+    assert.equal(existsSync(`${file}.follows`), false, 'and holds no mark, since it has no lane to add');
+    const rising = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+    assert.equal(await rising.told(), 2, 'a run that can rise reads it too');
+    assert.equal(existsSync(`${file}.follows`), true, 'and holds the mark that tells the writer it may grow');
+    rising.end();
+  } finally {
+    sweep(pool);
+  }
+  assert.deepEqual(
+    followedAt('lanes.json', 4, 4),
+    { file: 'lanes.json', ceiling: 4 },
+    'four of four follows',
+  );
+  assert.deepEqual(
+    followedAt('lanes.json', 6, 3),
+    { file: 'lanes.json', ceiling: 6 },
+    'three of six follows',
+  );
+  assert.deepEqual(
+    followedAt('lanes.json', 2, 3),
+    { file: 'lanes.json', ceiling: 3 },
+    'more lanes than the ceiling follows with the lanes it has',
+  );
+  assert.equal(followedAt('lanes.json', 1, 1), null, 'one lane has no lane to give back');
 }
 
 /**
@@ -60248,6 +60451,123 @@ async function testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent(): Promise<
     );
     slots.releaseAll();
   } finally {
+    lender.kill();
+    if (had === undefined) {
+      delete process.env['GODOT_ENGINE_TIMED'];
+    } else {
+      process.env['GODOT_ENGINE_TIMED'] = had;
+    }
+    sweep(directory);
+  }
+}
+
+/**
+ * A taker waiting for several slots at once keeps the slots left to it while it looks, which it says
+ * by touching the note beside its mark, and a newcomer in a take loop of its own, looking again
+ * and again from one set of slots, leaves them to it for its drain. One that stopped looking
+ * loses them after five seconds.
+ */
+async function testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-looks-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    const mark = join(marks, '1-1.json');
+    writeFileSync(
+      mark,
+      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 10_000) / 1000, wants: 3 }),
+    );
+    const looked = (): void => {
+      const note = join(marks, '1-1.seen');
+      closeSync(openSync(note, 'a'));
+      const now = new Date();
+      utimesSync(note, now, now);
+    };
+    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
+    const line = new SlotLine('other');
+    const look = async (): Promise<[string | null, number[]]> => {
+      const lock = await newcomer.takeFree(false, 0, line);
+      const left = [...(newcomer.drawn.left ?? [])];
+      if (lock !== null) {
+        newcomer.release(lock);
+      }
+      return [lock === null ? null : basename(lock), left];
+    };
+    const keeps = (): string => {
+      const names = slotWaiters(directory)[0];
+      return names === undefined ? 'no waiter' : String(names.seen > 0);
+    };
+    assert.equal(keeps(), 'true', 'the waiter has a time of its last look');
+    for (let second = 0; second < 8; second += 1) {
+      looked();
+      assert.deepEqual(
+        await look(),
+        ['0.lock', [1, 2, 3]],
+        `second ${String(second)}: the three slots stay left to the waiter while it looks`,
+      );
+      await delay(1000);
+    }
+    let lost = false;
+    for (let second = 0; second < 8 && !lost; second += 1) {
+      const [lock, left] = await look();
+      lost = left.length === 0;
+      assert.ok(lock !== null, 'the newcomer takes a slot');
+      await delay(1000);
+    }
+    assert.ok(lost, 'a waiter that stopped looking loses the slots five seconds on');
+  } finally {
+    sweep(directory);
+  }
+}
+
+/**
+ * A take inside a job whose lent slot is in use waits for that slot alone: it puts down no mark in
+ * the machine's waiting folder, so another program's free slot is not left idle for it.
+ */
+async function testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-lentwait-'));
+  const lender = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const had = process.env['GODOT_ENGINE_TIMED'];
+  const waiting = new AbortController();
+  try {
+    const pid = lender.pid;
+    assert.ok(typeof pid === 'number', 'the lender needs a live process');
+    const started = (await startTimesOf([pid])).get(pid);
+    assert.ok(started !== undefined, 'and a start');
+    const lent = join(directory, '0.lock');
+    writeFileSync(lent, JSON.stringify({ pid, started }));
+    process.env['GODOT_ENGINE_TIMED'] = lent;
+    const me = { pid: process.pid, started: await ownStart() };
+    const inside = new EngineSlots(directory, 2, me);
+    assert.equal(await inside.take(), lent, 'the first take runs on the lent slot');
+    let blocked = 0;
+    const second = inside.take(waiting.signal, undefined, () => {
+      blocked += 1;
+    });
+    second.catch(() => undefined);
+    assert.ok(await cameTrue(() => blocked === 1, 5000), 'the second take waits, and says so once');
+    await delay(1500);
+    assert.equal(blocked, 1, 'once');
+    const marked = existsSync(join(directory, WAITING_FOLDER))
+      ? readdirSync(join(directory, WAITING_FOLDER))
+      : [];
+    assert.deepEqual(marked, [], 'and it marks no wait in the machine');
+    delete process.env['GODOT_ENGINE_TIMED'];
+    const outsider = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    const free = await outsider.takeFree();
+    process.env['GODOT_ENGINE_TIMED'] = lent;
+    assert.equal(
+      free === null ? null : basename(free),
+      '1.lock',
+      'another program takes the free slot at once',
+    );
+    outsider.releaseAll();
+    inside.release(lent);
+    assert.equal(await second, lent, 'and the waiting take gets the lent slot once it is free');
+    inside.releaseAll();
+  } finally {
+    waiting.abort();
     lender.kill();
     if (had === undefined) {
       delete process.env['GODOT_ENGINE_TIMED'];
@@ -61230,7 +61550,14 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       'read in whole milliseconds, as a take reads its own clock',
     );
     const tied = new SlotLine('other', false, () => began);
-    const waiter = { mark: '1-1.json', taker: 'other', since: began, game: false, wants: 1 } as const;
+    const waiter = {
+      mark: '1-1.json',
+      taker: 'other',
+      since: began,
+      game: false,
+      wants: 1,
+      seen: began,
+    } as const;
     assert.deepEqual(
       tied.ahead([waiter]).map((one) => one.mark),
       ['1-1.json'],
@@ -61246,14 +61573,23 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began - 10_000,
       game: false,
       wants: 1,
+      seen: began,
     } as const;
-    const gateWork = { mark: 'b.json', taker: 'tier', since: began, game: false, wants: 1 } as const;
+    const gateWork = {
+      mark: 'b.json',
+      taker: 'tier',
+      since: began,
+      game: false,
+      wants: 1,
+      seen: began,
+    } as const;
     const agedSide = {
       mark: 'c.json',
       taker: 'other',
       since: began - 121_000,
       game: false,
       wants: 1,
+      seen: began,
     } as const;
     const agedGame = {
       mark: 'd.json',
@@ -61261,6 +61597,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began - 1_200_000,
       game: true,
       wants: 1,
+      seen: began,
     } as const;
     assert.deepEqual(
       new SlotLine('other', false, () => began)
@@ -61277,6 +61614,8 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
 
     const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    // Before the take, which notes when it first left the slot as it answers.
+    const leftBy = Date.now();
     const first = await late.takeFree();
     // Read after the take, which notes when it first left the slot before it answers.
     const firstLeft = Date.now();
@@ -61288,13 +61627,17 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       /It leaves free slot 1 to takers that began waiting before it, which go first\.$/,
     );
 
-    let now = Date.now();
-    const line = new SlotLine('other', false, () => now);
+    const line = new SlotLine('other');
     assert.equal(await late.takeFree(false, 0, line), null, 'a take with its place in line leaves it too');
-    now += SLOT_YIELD_MS - 1;
-    assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
-    now += 1;
-    assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    const realNow = Date.now;
+    try {
+      Date.now = () => leftBy + SLOT_YIELD_MS - 1;
+      assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
+      Date.now = () => leftBy + SLOT_YIELD_MS + 100;
+      assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    } finally {
+      Date.now = realNow;
+    }
     // A mark that let a slot left to it stand, as a wait for memory under an older release does.
     late.release(join(directory, '1.lock'));
     await delay(Math.max(0, firstLeft + SLOT_YIELD_MS - Date.now()));
@@ -99774,6 +100117,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
   testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
   testAFallWhileEveryShareIsOutEndsTheParkedLanes,
+  testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
+  testAParkedLanesSlotGoesToTheMachineNotTheCheck,
+  testARunBegunAtItsCeilingStillFollowsTheLanesFile,
+  testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking,
+  testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing,
   testTheSlotCountIsHeldToTheMemoryThereIs,
   testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
   testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,

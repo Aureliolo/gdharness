@@ -751,12 +751,16 @@ ones.
 - Give each, in turn, the first free slot of those it may take now (below, aged by its own `since`)
   not given to one before it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
-  its coming free. From then on, leave that waiter nothing.
+  its coming free. From then on, leave that waiter nothing, unless it has looked since. A waiter
+  says it looks by touching `<mark name without .json>.seen` beside its mark at each look, and
+  removes the file with its mark. Count the 5 seconds from the later of the first time you left it
+  a slot and its last look. A mark with no such file looks since it was made.
 - A mark may also hold `wants`, a whole number above 1, for a taker waiting for that many slots at
   once. It is ahead that many times for its first 300 seconds of waiting, and once after. Any other
   `wants` counts as 1.
 - A program inside a timing or a heavy job is lent the job's slot in `GODOT_ENGINE_TIMED`. It runs one
-  engine at a time on that slot and takes no other while the job lives.
+  engine at a time on that slot and takes no other while the job lives. While the slot is in use it
+  waits for it alone and puts down no waiting mark.
 - A waiter that leaves a free slot untaken is waiting for something else, such as memory.
 - A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
 
@@ -847,12 +851,14 @@ it holds one as long as it plays.
   processors or free machine slots. A file missing, older than ten seconds or written by a process
   that has gone tells nothing, and the lanes the run has go on. With the variable unset or empty the
   run holds `--engines`.
-- Before each share a lane reads the number again. A lane numbered at or past it gives its machine
-  slot back, waits for the number to grow, and takes a slot again when it does. Lanes count from 0.
-  It ends once every share is handed out. An engine already running finishes its share first.
+- A lane reads the number again after each wait (for a slot, for the compile check, for memory) and
+  right before it draws a share. A lane numbered at or past it gives its machine slot back to the
+  machine, waits for the number to grow, and takes a slot again when it does. Lanes count from 0.
+  It ends once every share is handed out. An engine already running finishes its share first. A
+  run with several lanes follows the file this way even when it began on every lane it may have.
 - A run that can grow makes `<lanes file>.follows` as a lock is made, and takes one whose holder has
   gone over under its steal file. Until a live mark stands, the writer holds no more than the
-  number it told. A run that cannot grow makes none.
+  number it told. A run that cannot grow reads the number for a fall and makes no mark.
 - The run removes its mark at once when it reaches its ceiling of processors, pool count or work,
   and otherwise once every share is handed out.
 - The engine that compiles every script together counts as one of the lanes. It runs in a lane's

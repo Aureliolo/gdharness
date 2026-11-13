@@ -52,6 +52,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   watch,
   writeSync,
 } from 'node:fs';
@@ -197,6 +198,29 @@ export function endedNoteOf(mark: string): string {
   return `${mark.replace(/\.json$/, '')}${ENDED_SUFFIX}`;
 }
 
+/** What follows a mark's name in the file whose time says when its taker last looked. */
+const SEEN_SUFFIX = '.seen';
+
+/** The file beside [param mark] that its taker writes at each look. */
+function seenNoteOf(mark: string): string {
+  return `${mark.replace(/\.json$/, '')}${SEEN_SUFFIX}`;
+}
+
+/**
+ * Sets the time of the look note beside [param mark] to now, making it first where it is not there.
+ * Only the time changes after the first look, so the folder a take watches stays quiet.
+ */
+function lookNoted(mark: string): void {
+  const note = seenNoteOf(mark);
+  try {
+    closeSync(openSync(note, 'a'));
+    const now = new Date();
+    utimesSync(note, now, now);
+  } catch {
+    // The wait is marked alive by its mark's own time instead, which costs a moment, never a slot.
+  }
+}
+
 /**
  * When [param mark] was made, in seconds since the epoch, or undefined when it cannot be read. Summed
  * from whole seconds and nanoseconds as Python's `st_mtime` is, so a reader in Python matching a
@@ -215,7 +239,7 @@ export function markBegan(mark: string): number | undefined {
 function endedNotesSwept(marks: string): void {
   let names: string[];
   try {
-    names = readdirSync(marks).filter((name) => name.endsWith(ENDED_SUFFIX));
+    names = readdirSync(marks).filter((name) => name.endsWith(ENDED_SUFFIX) || name.endsWith(SEEN_SUFFIX));
   } catch {
     return;
   }
@@ -275,7 +299,9 @@ export const ONE_OFF_AGED_MS = 120_000;
  * How long a take leaves a free slot to a taker waiting longer that may take it, past which it takes
  * the slot itself. One waiting ahead takes a slot within a moment of its coming free, woken as the
  * lock goes, so one left that long is one it cannot take after all, a mark misread or a taker the
- * queue has paused, and a slot never stands idle longer while someone waits who may take it.
+ * queue has paused, and a slot never stands idle longer while someone waits who may take it. A taker
+ * that has looked since, which it says by touching the note beside its mark, is still taking, so the
+ * time counts from its last look.
  */
 export const SLOT_YIELD_MS = 5000;
 
@@ -291,6 +317,8 @@ interface SlotWaiter {
   readonly game: boolean;
   /** How many slots it waits for at once: above 1 only for a job needing several, else 1. */
   readonly wants: number;
+  /** When it last looked, in milliseconds, or when its mark was made where it never says. */
+  readonly seen: number;
 }
 
 /**
@@ -342,8 +370,15 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
   if (taker === MEMORY_TAKER) {
     return null;
   }
+  let seen = madeAt;
+  try {
+    seen = statSync(join(marks, seenNoteOf(mark))).mtimeMs;
+  } catch {
+    // No look written: the wait has only its mark's time to show it is alive.
+  }
   return {
     wants: typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? wants : 1,
+    seen,
     mark,
     taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
@@ -386,8 +421,8 @@ export class SlotLine {
   readonly since: number;
   /** The name of its own waiting mark once it has one. */
   mark: string | undefined;
-  /** The slots it leaves to those ahead, each with when it first left it. */
-  private left = new Map<number, number>();
+  /** The slots it leaves to those ahead at its last look. */
+  private left = new Set<number>();
 
   readonly taker: SlotTaker;
   readonly game: boolean;
@@ -434,17 +469,17 @@ export class SlotLine {
 
   /**
    * Those of [param numbers] it may take now, the order kept: it leaves out each of [param theirs],
-   * the free slots those ahead take first, until it has left it {@link SLOT_YIELD_MS}.
+   * the free slots those ahead take first. How long a taker ahead is waited for is counted by the
+   * take, per taker, not per slot, so a wait for several slots keeps all of them for its drain.
    */
   admitted(numbers: readonly number[], theirs: ReadonlySet<number>): number[] {
-    const now = this.clock();
-    this.left = new Map([...theirs].map((slot) => [slot, this.left.get(slot) ?? now]));
-    return numbers.filter((slot) => !theirs.has(slot) || now - (this.left.get(slot) ?? now) >= SLOT_YIELD_MS);
+    this.left = new Set(theirs);
+    return numbers.filter((slot) => !theirs.has(slot));
   }
 
   /** The free slots it leaves to those waiting longer, lowest first. */
   leaves(): number[] {
-    return [...this.left.keys()].toSorted((a, b) => a - b);
+    return [...this.left].toSorted((a, b) => a - b);
   }
 }
 
@@ -729,9 +764,12 @@ export class FolderChanges {
  * A process following the lanes file a gate's paced portion writes in the pool. It reads the number
  * as the spare count is read and holds a mark beside the file as a lock is held, so the portion
  * grows past the number it told only while a run stands behind it. It takes no lock in the pool.
+ * A run that cannot rise above the lanes it began on only reads the number, for a fall, and holds no
+ * mark, since the portion has nothing to gain from a run that cannot take more lanes.
  */
 export class FollowedLanes {
   readonly ceiling: number;
+  private readonly rises: boolean;
   private readonly mark: string;
   private changes: FolderChanges | null = null;
   private holding = false;
@@ -746,10 +784,12 @@ export class FollowedLanes {
     file: string,
     ceiling: number,
     lookMs = SLOT_LOOK_MS,
+    rises = true,
   ) {
     this.slots = slots;
     this.file = file;
     this.ceiling = ceiling;
+    this.rises = rises;
     this.lookMs = lookMs;
     this.mark = `${file}${FOLLOWS_SUFFIX}`;
   }
@@ -826,8 +866,12 @@ export class FollowedLanes {
   /** The lanes the file tells now, at most the ceiling, and 0 while the mark is not held or a look fails. */
   private async look(): Promise<number> {
     try {
-      await this.holdMark();
-      return this.holding ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
+      if (this.rises) {
+        await this.holdMark();
+      }
+      return this.holding || !this.rises
+        ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling)
+        : 0;
     } catch {
       // Held by a reader or unreadable for now, which the next look tries again.
       return 0;
@@ -1016,6 +1060,7 @@ export class EngineSlots {
     const began = line.since;
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
+    let lentWaitSaid = false;
     let changes: FolderChanges | undefined;
     try {
       for (;;) {
@@ -1024,7 +1069,14 @@ export class EngineSlots {
         if (lock !== null) {
           return lock;
         }
-        if (mark === undefined) {
+        if (this.waitsOnTheLentSlot()) {
+          // The wait is for the slot the job lent alone, which no other program could take, so
+          // nothing in the machine's waiting folder says it waits.
+          if (!lentWaitSaid) {
+            lentWaitSaid = true;
+            blocked?.();
+          }
+        } else if (mark === undefined) {
           mark = this.waitMarked(line);
           blocked?.();
         }
@@ -1108,8 +1160,12 @@ export class EngineSlots {
     if (inherited !== null) {
       return inherited;
     }
-    if (this.inherited !== null && this.jobLent) {
+    if (this.waitsOnTheLentSlot()) {
       return null;
+    }
+    if (line?.mark !== undefined) {
+      // Every look says its taker still looks, so the slots left to a wait for several last its drain.
+      lookNoted(join(this.directory, WAITING_FOLDER, line.mark));
     }
     const taker = this.taker();
     if (await this.starvedOutFor(taker)) {
@@ -1131,6 +1187,11 @@ export class EngineSlots {
         ? this.drawn.numbers
         : await this.leftAfterThoseAhead(line ?? new SlotLine(taker, game), queued);
     return await this.lockOneOf(tried, game);
+  }
+
+  /** Whether this process runs inside a job, whose lent slot it already holds and no take can add to. */
+  private waitsOnTheLentSlot(): boolean {
+    return this.inherited !== null && this.jobLent;
   }
 
   /** Locks the first of [param slots] that is made fresh or taken over, and answers its path. */
@@ -1182,7 +1243,7 @@ export class EngineSlots {
     }
     const ahead = placed
       .ahead(waiting)
-      .filter((one) => now - (this.passedOver.get(one.mark) ?? now) < SLOT_YIELD_MS);
+      .filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS);
     const claims = await this.claimedAhead(ahead, queued);
     for (const mark of claims.values()) {
       if (!this.passedOver.has(mark)) {
@@ -1370,6 +1431,7 @@ export class EngineSlots {
     this.marks.delete(mark);
     writeWhole(endedNoteOf(mark), JSON.stringify({ began, ended: Date.now() / 1000 }));
     removeWhole(mark);
+    removeWhole(seenNoteOf(mark));
   }
 
   /** Which of the slots [param numbers] a live game editor_run started holds. */
