@@ -31125,6 +31125,7 @@ async function greetAsAStandInEditor(
  */
 async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-several-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-outside-'));
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     const script = (path: string): void => {
@@ -31156,6 +31157,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     writeFileSync(join(project, 'kit', 'gdharness_runtime', VERSION_MARKER), '1.0.0\n');
     script('kit/old/legacy.gd');
     writeFileSync(join(project, 'kit', 'old', '.gdignore'), '');
+    // A folder holding a project of its own, a link back up the tree and a link out of the project,
+    // each with a script the walk must not take in.
+    script('nests/inner/x.gd');
+    writeFileSync(join(project, 'nests', 'inner', 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(outside, 'away.gd'), 'extends Node\n');
+    mkdirSync(join(project, 'links'));
+    symlinkSync(join(project, 'links'), join(project, 'links', 'up'), 'junction');
+    symlinkSync(outside, join(project, 'links', 'away'), 'junction');
 
     // Which scripts a call names, without a language server.
     assert.deepEqual(
@@ -31214,6 +31223,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       [
         ['kit', 'empty'],
         /^No \.gd script is under kit that a folder walk takes in: kit\/gdharness_runtime is an addon gdharness installed, whose scripts are checked when it is named; kit\/old holds a \.gdignore, so the engine never loads what is under it, and a script there is checked when the script is named\. No \.gd script is under empty\.$/,
+      ],
+      [
+        ['nests'],
+        /^No \.gd script is under nests that a folder walk takes in: nests\/inner holds a project\.godot of its own, so the engine never loads what is under it as part of this project, and a script there is checked when the script is named\.$/,
+      ],
+      [
+        ['links'],
+        /^No \.gd script is under links that a folder walk takes in: links\/away is a link out of the project, which the walk does not enter; links\/up is a link back up the tree or to nothing, which the walk does not enter\.$/,
       ],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
@@ -31432,6 +31449,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     }
   } finally {
     sweep(project);
+    sweep(outside);
   }
 }
 
@@ -93661,7 +93679,7 @@ function testOneWalkStepsOverWhatTheEngineDoes(): void {
     );
     assert.deepEqual([marked.leftOut, leftOutAt(project, 'odd/o.gd')], [[ours, nested, ignored], null]);
 
-    writeTree(project, { 'node_modules/pkg/m.gd': gd, 'godot/x.gd': gd });
+    writeTree(project, { 'node_modules/pkg/m.gd': gd, 'godot/x.gd': gd, 'deep/godot/y.gd': gd });
     assert.ok(projectFiles(project, ['.gd']).includes('node_modules/pkg/m.gd'));
     assert.ok(tour(project).scripts.includes('godot/x.gd'));
     const hidden = '[application]\n\nconfig/use_hidden_project_data_directory=false\n';
@@ -93671,6 +93689,8 @@ function testOneWalkStepsOverWhatTheEngineDoes(): void {
       [visible.scripts.includes('godot/x.gd'), visible.leftOut.some((left) => left.folder === 'godot')],
       [false, false],
     );
+    // The data folder is the project's own, so a godot folder lower down is walked like any other.
+    assert.ok(visible.scripts.includes('deep/godot/y.gd'), JSON.stringify(visible.scripts));
 
     writeTree(project, { 'folders/Zeta/z.gd': gd, 'folders/alpha/a.gd': gd, 'folders/b.gd': gd });
     const forward = tour(project);
