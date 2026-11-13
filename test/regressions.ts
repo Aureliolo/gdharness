@@ -166,20 +166,25 @@ import {
 } from '../src/engine-run.js';
 import {
   claimIsOurs,
+  countSaid,
   EngineSlots,
   endedNoteOf,
+  FOLLOWS_SUFFIX,
   FolderChanges,
+  FollowedLanes,
   gamesKeptOf,
   holderOf,
   inheritsSlot,
   inOneSlot,
   keptSlotsOf,
+  LANES_VARIABLE,
   lockIsFree,
   machineSlots,
   markBegan,
   nameSlotEngine,
   ONE_OFF_AGED_MS,
   ownStart,
+  poolCount,
   QUEUED_FOLDER,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
@@ -199,7 +204,6 @@ import {
   slotWaitedSaid,
   slotWaiters,
   slotWaitSaid,
-  spareSaid,
   starvedSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
@@ -59915,8 +59919,285 @@ function checksTheSlotRulesWithoutAFolder(): void {
       runsInAGate({ [SHARE_VARIABLE]: '', [SHARE_COUNT_VARIABLE]: '3' }),
     ],
     [true, false, false],
-    'a gate names its share in both variables',
+    'a gate names its pool in both variables',
   );
+}
+
+/**
+ * A run follows the lanes file a gate's paced portion writes in the pool: it holds a mark beside the
+ * file, reads the number as the spare count is read, answers a rise to at most its ceiling and gives
+ * the mark back there. A mark whose maker has gone is taken over under its steal file.
+ */
+async function testARunFollowsTheLanesAGateWrites(): Promise<void> {
+  const started = await ownStart();
+  const holder = { pid: process.pid, started };
+  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await exitOf(gone);
+  const gonePid = gone.pid ?? 0;
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-'));
+  const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-other-'));
+  const file = join(pool, 'lanes-1.json');
+  const mark = `${file}${FOLLOWS_SUFFIX}`;
+  const said = (lanes: unknown, agoMs = 0, pid = process.pid): void => {
+    writeFileSync(file, JSON.stringify({ lanes, pid, started, written: Date.now() - agoMs }));
+  };
+  const markedBy = (): number | undefined => {
+    try {
+      return holderOf(readFileSync(mark, 'utf8'))?.pid;
+    } catch {
+      return undefined;
+    }
+  };
+  const answerOf = (asked: Promise<number>, withinMs: number): Promise<string> =>
+    Promise.race([
+      asked.then(
+        (lanes) => `answered ${String(lanes)}`,
+        (error: unknown) => `rejected: ${errorMessage(error)}`,
+      ),
+      delay(withinMs).then(() => 'pending'),
+    ]);
+  const slots = new EngineSlots(other, 1, holder);
+  const helpers: Array<ReturnType<typeof spawnHidden>> = [];
+  const aborts: AbortController[] = [];
+  const followers: FollowedLanes[] = [];
+  const following = (
+    lanes: ConstructorParameters<typeof FollowedLanes>[0],
+    ceiling: number,
+  ): FollowedLanes => {
+    const made = new FollowedLanes(lanes, file, ceiling, 5);
+    followers.push(made);
+    return made;
+  };
+  const fresh = (): AbortSignal => {
+    const control = new AbortController();
+    aborts.push(control);
+    return control.signal;
+  };
+  try {
+    assert.equal(LANES_VARIABLE, 'GODOT_ENGINE_LANES', 'the lanes file is named by this variable');
+    // The count of the pool, read as a number.
+    assert.equal(poolCount({ [SHARE_COUNT_VARIABLE]: '9' }), 9, 'the pool count is a number');
+    assert.equal(poolCount({}), null, 'null with the count unset');
+    assert.equal(poolCount({ [SHARE_COUNT_VARIABLE]: '' }), null, 'and with it empty');
+    for (const wrong of ['x', '0', '2.5']) {
+      assert.throws(
+        () => poolCount({ [SHARE_COUNT_VARIABLE]: wrong }),
+        (error: unknown) => error instanceof EngineUsageError && error.message.includes(SHARE_COUNT_VARIABLE),
+        `a count of ${wrong} is refused by name`,
+      );
+    }
+
+    const followed = following(new EngineSlots(pool, 1, holder), 8);
+    const slotsOfPool = (): string[] => readdirSync(pool).toSorted();
+
+    // Rising mid-run.
+    said(2);
+    const rising = followed.past(2, fresh());
+    assert.equal(await answerOf(rising, 100), 'pending', 'a number the run holds adds no lane');
+    assert.equal(markedBy(), process.pid, 'the run holds its mark while it follows');
+    said(5);
+    assert.equal(await answerOf(rising, 20_000), 'answered 5', 'a rise mid-run is answered');
+    assert.deepEqual(slotsOfPool(), ['lanes-1.json', 'lanes-1.json.follows'], 'no lock stands in the pool');
+
+    // Each state that adds no lane, then the number.
+    const addsNoneUntilSaid = async (why: string, write: () => void): Promise<void> => {
+      followed.end();
+      rmSync(file, { force: true });
+      write();
+      const asked = followed.past(2, fresh());
+      assert.equal(await answerOf(asked, 100), 'pending', `${why} adds no lane`);
+      assert.equal(markedBy(), process.pid, `and the mark is made with ${why}`);
+      said(5);
+      assert.equal(
+        await answerOf(asked, 20_000),
+        'answered 5',
+        `and the number is taken once it is said after ${why}`,
+      );
+    };
+    await addsNoneUntilSaid('a stale file', () => {
+      said(5, SPARE_STALE_MS + 1000);
+    });
+    await addsNoneUntilSaid('a file whose writer has gone', () => {
+      said(5, 0, gonePid);
+    });
+    await addsNoneUntilSaid('no file', () => undefined);
+    for (const [why, content] of [
+      ['lanes of 0', JSON.stringify({ lanes: 0, pid: process.pid, started, written: Date.now() })],
+      ['lanes as a string', JSON.stringify({ lanes: '4', pid: process.pid, started, written: Date.now() })],
+      ['lanes of 2.5', JSON.stringify({ lanes: 2.5, pid: process.pid, started, written: Date.now() })],
+      ['lanes of -1', JSON.stringify({ lanes: -1, pid: process.pid, started, written: Date.now() })],
+      ['a file cut short', '{"lanes": 5, "pid":'],
+      ['no written', JSON.stringify({ lanes: 5, pid: process.pid, started })],
+    ] as const) {
+      await addsNoneUntilSaid(why, () => {
+        writeFileSync(file, content);
+      });
+    }
+
+    // The floor.
+    followed.end();
+    said(1);
+    const floor = followed.past(3, fresh());
+    assert.equal(await answerOf(floor, 100), 'pending', 'a number below the one the run holds adds none');
+    said(5);
+    assert.equal(await answerOf(floor, 20_000), 'answered 5', 'a higher number is taken');
+    said(2);
+    const fall = new AbortController();
+    assert.equal(await answerOf(followed.past(5, fall.signal), 100), 'pending', 'a fall adds none');
+    fall.abort(new Error('fall over'));
+    await delay(50);
+    followed.end();
+
+    // The ceiling.
+    let counts = 0;
+    const counted = following(
+      {
+        holder,
+        takeFile: (path) => new EngineSlots(pool, 1, holder).takeFile(path),
+        countIn: (path, key) => {
+          counts += 1;
+          return new EngineSlots(pool, 1, holder).countIn(path, key);
+        },
+      },
+      4,
+    );
+    said(9);
+    assert.equal(
+      await answerOf(counted.past(2, fresh()), 20_000),
+      'answered 4',
+      'the ceiling caps the answer',
+    );
+    assert.equal(existsSync(mark), false, 'and the mark is given back there');
+    const lookedBefore = counts;
+    const atCeiling = counted.past(4, fresh());
+    const timer = delay(50).then(() => 'timer');
+    assert.equal(
+      await Promise.race([
+        timer,
+        atCeiling.then(
+          () => 'answered',
+          () => 'rejected',
+        ),
+      ]),
+      'timer',
+      'a run at its ceiling pends',
+    );
+    await delay(100);
+    assert.equal(existsSync(mark), false, 'and makes no mark');
+    assert.equal(counts, lookedBefore, 'and looks at nothing');
+    for (const control of aborts) {
+      control.abort(new Error('done with the ceiling'));
+    }
+    assert.equal(
+      await answerOf(atCeiling, 5000),
+      'rejected: done with the ceiling',
+      'until its signal aborts',
+    );
+
+    // A live mark stands until its holder gives it back.
+    const keeper = await slotHeldElsewhere(mark, 2000);
+    helpers.push(keeper);
+    said(5);
+    const behind = followed.past(2, fresh());
+    assert.equal(await answerOf(behind, 300), 'pending', 'a live mark is never written over');
+    assert.equal(markedBy(), keeper.pid, 'and still names its holder');
+    assert.equal(await answerOf(behind, 20_000), 'answered 5', 'the run follows once the holder is done');
+    assert.equal(markedBy(), process.pid, 'and its mark names this process');
+    followed.end();
+
+    // A mark whose maker has gone is taken over under its steal file.
+    const dead = JSON.stringify({ pid: gonePid, started });
+    writeFileSync(mark, dead);
+    assert.equal(
+      await answerOf(followed.past(2, fresh()), 20_000),
+      'answered 5',
+      'a dead mark is taken over',
+    );
+    assert.equal(markedBy(), process.pid, 'and names this process');
+    assert.equal(existsSync(`${mark}.steal`), false, 'with no steal file left');
+    followed.end();
+    writeFileSync(mark, dead);
+    const first = new EngineSlots(pool, 1, holder);
+    const second = new EngineSlots(pool, 1, holder);
+    const won = await Promise.all([first.takeFile(mark), second.takeFile(mark)]);
+    assert.equal(won.filter(Boolean).length, 1, `exactly one of two takers wins: ${JSON.stringify(won)}`);
+    assert.equal(markedBy(), process.pid, 'and the mark names this process');
+    assert.equal(existsSync(`${mark}.steal`), false, 'with no steal file');
+    followed.end();
+    writeFileSync(mark, dead);
+    writeFileSync(`${mark}.steal`, JSON.stringify(holder));
+    assert.equal(await first.takeFile(mark), false, 'a mark another run is taking over is left');
+    assert.equal(readFileSync(mark, 'utf8'), dead, 'unchanged');
+    rmSync(`${mark}.steal`);
+    rmSync(mark);
+
+    // The end.
+    said(5);
+    const ending = following(new EngineSlots(pool, 1, holder), 8);
+    assert.equal(await answerOf(ending.past(2, fresh()), 20_000), 'answered 5', 'a run to end');
+    ending.end();
+    ending.end();
+    assert.deepEqual(slotsOfPool(), ['lanes-1.json'], 'the end gives the mark back and leaves the file');
+    assert.equal(await answerOf(ending.past(2, fresh()), 20_000), 'answered 5', 'the mark is made again');
+    writeFileSync(mark, JSON.stringify({ pid: process.ppid, started }));
+    ending.end();
+    assert.equal(markedBy(), process.ppid, 'a mark naming another process is left');
+    rmSync(mark);
+    const aborted = new AbortController();
+    aborted.abort(new Error('already aborted'));
+    assert.equal(
+      await answerOf(ending.past(2, aborted.signal), 5000),
+      'rejected: already aborted',
+      'an aborted signal rejects',
+    );
+    assert.equal(existsSync(mark), false, 'and leaves no mark');
+
+    // The mark counts as no slot: a wait for the first engine still says so.
+    rmSync(file, { force: true });
+    const lines: string[] = [];
+    const stop = new AbortController();
+    const waiter = new EngineSlots(other, 1, holder, (line) => {
+      lines.push(line);
+      stop.abort(new Error('heard'));
+    });
+    const lateStop = setTimeout(() => {
+      stop.abort(new Error('silent'));
+    }, 10_000);
+    const heldLock = await slotHeldElsewhere(join(other, '0.lock'), 20_000);
+    helpers.push(heldLock);
+    const markOther = join(other, 'lanes-2.json.follows');
+    assert.equal(await waiter.takeFile(markOther), true, 'a mark is made beside the slots');
+    await assert.rejects(waiter.take(stop.signal), /heard|silent/, 'the wait ends on its line');
+    clearTimeout(lateStop);
+    assert.equal(lines.length, 1, `one line was said: ${JSON.stringify(lines)}`);
+    assert.match(lines[0] ?? '', /for an engine/, 'and it says the run waits for an engine');
+
+    // A reader holding a dead mark open stands in its removal's way until it lets go.
+    if (process.platform === 'win32') {
+      const stuck = join(pool, 'lanes-3.json.follows');
+      writeFileSync(stuck, dead);
+      const reader = await heldOpenByAReader(stuck, 'ReadWrite');
+      try {
+        assert.equal(await slots.takeFile(stuck), false, 'a held dead mark is not taken');
+        assert.equal(existsSync(`${stuck}.steal`), false, 'and no steal file is left');
+      } finally {
+        await reader.letGo();
+      }
+      assert.equal(await slots.takeFile(stuck), true, 'it is taken once the reader has let go');
+    }
+  } finally {
+    for (const control of aborts) {
+      control.abort(new Error('finished'));
+    }
+    for (const made of followers) {
+      made.end();
+    }
+    for (const helper of helpers) {
+      helper.kill();
+    }
+    rmSync(pool, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
+  }
 }
 
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
@@ -60061,11 +60342,17 @@ async function checksTheSpareSlots(rig: SlotsRig, gonePid: number): Promise<void
   rmSync(spareFile);
   assert.deepEqual(await takeAll(outside), kept, 'or with no count at all');
   assert.equal(
-    spareSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS),
+    countSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS, 'spare'),
     3,
     'a count is read up to its age limit',
   );
-  assert.equal(spareSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS), 0, 'and not past it');
+  assert.equal(
+    countSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS, 'spare'),
+    0,
+    'and not past it',
+  );
+  assert.equal(countSaid('{"lanes": 3, "written": 1000}', 1000, 'lanes'), 3, 'a count is read under its key');
+  assert.equal(countSaid('{"lanes": 3, "written": 1000}', 1000, 'spare'), 0, 'and under no other');
   assert.deepEqual(
     slotsDrawnOn(16, 'other', 'spare'),
     { numbers: every16 },
@@ -95047,6 +95334,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
   testGatesInTheQueueKeepTheirSlots,
+  testARunFollowsTheLanesAGateWrites,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
