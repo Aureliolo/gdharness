@@ -97049,6 +97049,7 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
           await call('project_export', {
             op: 'run',
             projectPath: project,
+            preset: 'Windows',
             outputPath: 'res://shared/game.exe',
           }),
           await call('project_settings', {
@@ -97060,6 +97061,7 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
         for (const answer of taken) {
           assert.doesNotMatch(answer, /through the link/, answer);
         }
+        assert.match(taken[0] ?? '', /export_presets\.cfg/, `the export went past the path: ${taken[0]}`);
       },
       { GODOT_PATH: standInEngine() },
     );
