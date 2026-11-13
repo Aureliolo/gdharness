@@ -53,7 +53,7 @@ export interface WalkOptions {
 type Rule = 'gdignore' | 'project' | 'gdharness';
 
 /** What [param entry] of [param directory] is, a link taken as what it points at. */
-export function kindOf(directory: string, entry: Dirent): 'directory' | 'file' | 'other' {
+function kindOf(directory: string, entry: Dirent): 'directory' | 'file' | 'other' {
   if (entry.isDirectory()) {
     return 'directory';
   }
