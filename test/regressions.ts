@@ -95742,6 +95742,53 @@ async function testAMoveFollowsEveryPathItsFileIsReachedBy(): Promise<void> {
   }
 }
 
+/**
+ * A binary file moved by a file or a folder move takes every path that names it along, the link
+ * spelling too, though the scan reads no text of it. Its `.import` sidecar moves once.
+ */
+function testAMovedBinaryIsNamedByEveryPathItIsReachedBy(): void {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  const scene = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Texture2D" path="${path}" id="1"]\n\n[node name="Main" type="Sprite2D"]\ntexture = ExtResource("1")\n`;
+  writeTree(project, {
+    'project.godot': '',
+    'real/icon.png': 'not really a png',
+    'real/icon.png.import': '[deps]\nsource_file="res://real/icon.png"\n',
+    'main.tscn': scene('res://link/icon.png'),
+    'other.tscn': scene('res://real/icon.png'),
+  });
+  try {
+    assert.ok(linkTo(join(project, 'real'), join(project, 'link')), 'the platform makes a link to a folder');
+    const mentioning = (outcome: ReturnType<typeof planFileMove>, path: string): string => {
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const rewrite = outcome.inPlace.find((one) => one.path === path);
+      assert.ok(rewrite !== undefined, `${path} is rewritten`);
+      return rewrite.after;
+    };
+    for (const through of ['link', 'real']) {
+      const outcome = planFileMove(project, join(project, through, 'icon.png'), join(project, 'moved.png'));
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      assert.match(mentioning(outcome, 'res://main.tscn'), /path="res:\/\/moved\.png"/, `through ${through}`);
+      assert.match(
+        mentioning(outcome, 'res://other.tscn'),
+        /path="res:\/\/moved\.png"/,
+        `through ${through}`,
+      );
+      assert.deepEqual(
+        outcome.moved.map((file) => file.from).toSorted(),
+        ['res://real/icon.png', 'res://real/icon.png.import'],
+        'the file and its sidecar move once each',
+      );
+    }
+    const folder = planFileMove(project, join(project, 'link'), join(project, 'gone'));
+    assert.match(mentioning(folder, 'res://main.tscn'), /path="res:\/\/gone\/icon\.png"/);
+    assert.match(mentioning(folder, 'res://other.tscn'), /path="res:\/\/gone\/icon\.png"/);
+  } finally {
+    sweep(root);
+  }
+}
+
 /** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
 function projectWithTwoPaths(): { root: string; project: string } {
   const root = tmpDir();
@@ -95928,6 +95975,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTextsStepOverAFolderHoldingAProject,
   testAFileTwoPathsReachIsRenamedOnce,
   testAMoveFollowsEveryPathItsFileIsReachedBy,
+  testAMovedBinaryIsNamedByEveryPathItIsReachedBy,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,

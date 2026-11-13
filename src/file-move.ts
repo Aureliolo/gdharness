@@ -24,7 +24,7 @@ import {
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, installedByUs, linksOut, projectTexts, spellingsOf } from './project-scan.js';
+import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
@@ -315,6 +315,22 @@ function binaryMentions(projectPath: string, moves: ReadonlyMap<string, string>)
   return binaries;
 }
 
+/**
+ * Where each path that names a moving file must point afterwards: the files of [param moves] and
+ * every other path that reaches one of them.
+ */
+function referencesOf(reach: Reach, moves: ReadonlyMap<string, string>): Map<string, string> {
+  const references = new Map(moves);
+  for (const [source, target] of moves) {
+    for (const other of reach.pathsOf(source)) {
+      if (!references.has(other)) {
+        references.set(other, target);
+      }
+    }
+  }
+  return references;
+}
+
 export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {
   const checked = checkedMove(projectPath, absoluteFrom, absoluteTo);
   if ('reason' in checked) {
@@ -327,26 +343,15 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: collision };
   }
 
-  const texts = projectTexts(projectPath).map((file) =>
+  const scanned = scanProject(projectPath);
+  const texts = scanned.texts.map((file) =>
     file.realPath !== undefined && moves.has(file.realPath) && !moves.has(file.path)
-      ? { ...file, path: file.realPath, alsoAt: [file.path, ...(file.alsoAt ?? [])] }
+      ? { ...file, path: file.realPath }
       : file,
   );
   const scripts = scriptsOf(texts);
-  // A file reached by more than one path is named by any of them, and each must follow it. The files
-  // that move on disk stay those of `moves`.
-  const references = new Map(moves);
-  for (const text of texts) {
-    const target = moves.get(text.path);
-    if (target === undefined) {
-      continue;
-    }
-    for (const other of spellingsOf(texts, text.path)) {
-      if (!references.has(other)) {
-        references.set(other, target);
-      }
-    }
-  }
+  // The files that move on disk stay those of `moves`.
+  const references = referencesOf(scanned.reach, moves);
   let plan = planMove(
     {
       texts,

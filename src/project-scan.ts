@@ -327,8 +327,20 @@ export interface ProjectText {
   readonly text: string;
   /** The file's real place as a `res://` path, set where the text is kept under a link's path and that place is inside the project. */
   readonly realPath?: string;
-  /** The other `res://` paths the walk reaches the same file by through a link, which a move of it takes along. */
-  readonly alsoAt?: readonly string[];
+}
+
+/**
+ * Every `res://` path each file of the project is reached by, binary files included. A move of a file
+ * takes them all along, since a reference may name the file by any of them.
+ */
+export interface Reach {
+  /**
+   * [param path] with every other path that reaches the same file: each link to it and its real place
+   * when that lies inside the project. Only [param path] where the walk does not reach it.
+   */
+  readonly pathsOf: (path: string) => readonly string[];
+  /** Every path the walk reaches, and each real place that lies inside the project. */
+  readonly paths: () => Iterable<string>;
 }
 
 /** A text below a folder the scan leaves out, with that folder and why it is left out. */
@@ -399,11 +411,7 @@ function realPathOf(realProject: string, file: Reached): string | undefined {
 }
 
 /** The text file at [param file] as a project text, or null when it cannot be read or is binary. */
-function textOf(
-  file: Reached,
-  realPath: string | undefined,
-  alsoAt: readonly string[] = [],
-): ProjectText | null {
+function textOf(file: Reached, realPath: string | undefined): ProjectText | null {
   if (BINARY_EXTENSIONS.has(extensionOf(file.name))) {
     return null;
   }
@@ -416,7 +424,6 @@ function textOf(
     absolute: file.absolute,
     text: bytes.toString('utf8'),
     ...(realPath === undefined ? {} : { realPath }),
-    ...(alsoAt.length === 0 ? {} : { alsoAt }),
   };
   return text;
 }
@@ -441,14 +448,36 @@ function pathNamedBy(projectPath: string, named: string, files: readonly Reached
   );
 }
 
-/**
- * Every `res://` path the file [param path] names in [param texts] is reached by: that one, its real
- * place and each link to it. A move maps them all, since a reference may use any of them.
- */
-export function spellingsOf(texts: readonly ProjectText[], path: string): string[] {
-  const text = texts.find((one) => one.path === path);
-  const real = text?.realPath === undefined ? [] : [text.realPath];
-  return [...new Set([path, ...real, ...(text?.alsoAt ?? [])])];
+/** Each path of [param files] with every path that reaches the same file and that file's real place inside the project. */
+function pathGroups(realProject: string, files: readonly Reached[]): Map<string, readonly string[]> {
+  const byReal = new Map<string, string[]>();
+  for (const file of files) {
+    const group = byReal.get(file.real) ?? [];
+    group.push(`res://${file.spelled}`);
+    byReal.set(file.real, group);
+  }
+  const byPath = new Map<string, readonly string[]>();
+  for (const [real, group] of byReal) {
+    const inside = relativeWithin(realProject, real);
+    const place = inside === null || inside === '' ? null : `res://${inside}`;
+    if (place !== null && !group.includes(place)) {
+      group.push(place);
+    }
+    for (const path of group) {
+      byPath.set(path, group);
+    }
+  }
+  return byPath;
+}
+
+/** The paths of [param files] grouped by the file they reach, built on the first lookup. */
+function reachOf(realProject: string, files: readonly Reached[]): Reach {
+  let groups: Map<string, readonly string[]> | null = null;
+  const built = (): Map<string, readonly string[]> => (groups ??= pathGroups(realProject, files));
+  return {
+    pathsOf: (path) => built().get(path) ?? [path],
+    paths: () => built().keys(),
+  };
 }
 
 /**
@@ -457,6 +486,14 @@ export function spellingsOf(texts: readonly ProjectText[], path: string): string
  * project. Text holds no NUL in its first eight thousand bytes.
  */
 export function projectTexts(projectPath: string, named: readonly string[] = []): ProjectText[] {
+  return scanProject(projectPath, named).texts;
+}
+
+/** The texts of [param projectTexts], with the paths every file of the same walk is reached by. */
+export function scanProject(
+  projectPath: string,
+  named: readonly string[] = [],
+): { texts: ProjectText[]; reach: Reach } {
   const { files } = reachedFrom(projectPath, projectPath, '');
   const kept = new Map<string, Reached>();
   for (const file of files) {
@@ -471,19 +508,14 @@ export function projectTexts(projectPath: string, named: readonly string[] = [])
     }
   }
   const realProject = realAsFarAsItExists(projectPath);
-  const spellings = new Map<string, string[]>();
-  for (const file of files) {
-    spellings.set(file.real, [...(spellings.get(file.real) ?? []), `res://${file.spelled}`]);
-  }
   const found: ProjectText[] = [];
   for (const file of files) {
-    const others = (spellings.get(file.real) ?? []).filter((path) => path !== `res://${file.spelled}`);
-    const text = kept.get(file.real) === file ? textOf(file, realPathOf(realProject, file), others) : null;
+    const text = kept.get(file.real) === file ? textOf(file, realPathOf(realProject, file)) : null;
     if (text !== null) {
       found.push(text);
     }
   }
-  return found;
+  return { texts: found, reach: reachOf(realProject, files) };
 }
 
 /** A folder the scan leaves out for a `.gdignore` or a `project.godot`, whose texts a rename mentions. */

@@ -11,7 +11,7 @@ import { type DeclarationKind, isIdentifier, type Position } from './gdscript-so
 import { statOf } from './listed-reads.js';
 import { LSPTimeout } from './lsp_client.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, linksOut, type ProjectText, projectTexts, spellingsOf } from './project-scan.js';
+import { ignoredTexts, linksOut, type ProjectText, type Reach, scanProject } from './project-scan.js';
 import {
   ClassGraph,
   type ClassId,
@@ -193,6 +193,7 @@ interface RenameContext {
   readonly services: RenameServices;
   readonly declaringPath: string;
   readonly texts: readonly ProjectText[];
+  readonly reach: Reach;
   readonly scripts: ReadonlyMap<string, Script>;
   readonly declaring: Script;
   readonly declared: ReturnType<typeof declaredIn>;
@@ -271,7 +272,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   }
   const { named, moveTo } = checked;
 
-  const texts = projectTexts(projectPath, named === null ? [] : [named]);
+  const { texts, reach } = scanProject(projectPath, named === null ? [] : [named]);
   const scripts = scriptsOf(texts);
   const declaringText = texts.find((file) => (file.realPath ?? file.path) === checked.declaringPath);
   const declaringPath = declaringText?.path ?? checked.declaringPath;
@@ -284,7 +285,16 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   }
   const declared = declaredIn(scripts);
   const isClass = declaring.shape.className?.name === symbol;
-  const context: RenameContext = { request, services, declaringPath, texts, scripts, declaring, declared };
+  const context: RenameContext = {
+    request,
+    services,
+    declaringPath,
+    texts,
+    reach,
+    scripts,
+    declaring,
+    declared,
+  };
   const step = isClass ? await classRenameStep(context) : await memberRenameStep(context);
   if ('ok' in step) {
     return step;
@@ -533,7 +543,7 @@ function renamed(
   step: Planned,
   where: { moveTo: string | null; isClass: boolean },
 ): RenameOutcome {
-  const { request, declaringPath, texts, scripts, declared } = context;
+  const { request, declaringPath, texts, reach, scripts, declared } = context;
   const { projectPath, symbol, newName } = request;
   const { moveTo, isClass } = where;
   const { what, resolvedBy, took, overrides, declaringFiles } = step;
@@ -543,7 +553,7 @@ function renamed(
       {
         texts,
         scripts,
-        moves: new Map(spellingsOf(texts, declaringPath).map((path) => [path, moveTo])),
+        moves: new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo])),
         named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },
