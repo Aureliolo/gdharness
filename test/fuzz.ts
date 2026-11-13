@@ -42,6 +42,7 @@ import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { listenForTheServer } from '../src/keeper-channel.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
+import { startTimesOf } from '../src/process-children.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
 import { isRecord } from '../src/records.js';
 import { parseProjectGodot } from '../src/resources.js';
@@ -3166,6 +3167,247 @@ function chunkedText(text: string, points: readonly number[]): string[] {
   return pieces.filter((piece) => piece !== '');
 }
 
+interface Dialled {
+  readonly socket: Socket;
+  id: number | undefined;
+  welcomed: boolean;
+}
+
+/** A listener that welcomes a connection only when told, and answers each request once it has. */
+async function holdingGame(): Promise<{
+  readonly endpoint: RuntimeEndpoint;
+  readonly connections: Dialled[];
+  welcomeAll(): number;
+  close(): Promise<void>;
+}> {
+  const connections: Dialled[] = [];
+  const reply = (one: Dialled): void => {
+    one.socket.write(`${JSON.stringify({ id: one.id, type: 'result' })}\n`);
+  };
+  const server = createServer((socket) => {
+    const one: Dialled = { socket, id: undefined, welcomed: false };
+    connections.push(one);
+    socket.on('error', () => undefined);
+    let said = '';
+    socket.on('data', (chunk: Buffer) => {
+      said += chunk.toString('utf8');
+      const parsed: unknown = said.includes('\n') ? JSON.parse(said.split('\n')[0] ?? '') : null;
+      if (isRecord(parsed) && typeof parsed['id'] === 'number' && one.id === undefined) {
+        one.id = parsed['id'];
+        if (one.welcomed) {
+          reply(one);
+        }
+      }
+    });
+  });
+  await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening));
+  const address = server.address();
+  const game = await fakeGame('silent', process.pid);
+  await game.close();
+  return {
+    endpoint: { ...game.endpoint, port: typeof address === 'object' && address !== null ? address.port : 0 },
+    connections,
+    welcomeAll: () => {
+      let welcomed = 0;
+      for (const one of connections) {
+        if (!one.welcomed) {
+          one.welcomed = true;
+          one.socket.write(welcome());
+          welcomed += 1;
+          if (one.id !== undefined) {
+            reply(one);
+          }
+        }
+      }
+      return welcomed;
+    },
+    close: () =>
+      new Promise<void>((closed) => {
+        for (const one of connections) {
+          one.socket.destroy();
+        }
+        server.close(() => {
+          closed();
+        });
+      }),
+  };
+}
+
+/**
+ * However many requests are sent to one game together, no more than four connections wait for the
+ * game to take them, the rest dial as places come free, and every request is answered.
+ */
+async function noMoreThanFourConnectionsWaitForOneGame(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(fc.integer({ min: 1, max: 11 }), async (requests) => {
+      const game = await holdingGame();
+      try {
+        const sent = Array.from({ length: requests }, () => runtimeRequest(game.endpoint, 'ping', {}, 4000));
+        let peak = 0;
+        let answered = 0;
+        while (answered < requests) {
+          await eventually(() => game.connections.filter((one) => !one.welcomed).length > 0);
+          await new Promise((settle) => setTimeout(settle, 15));
+          const waiting = game.connections.filter((one) => !one.welcomed).length;
+          peak = Math.max(peak, waiting);
+          assert.ok(waiting <= 4, `${String(waiting)} connections waiting for ${String(requests)} requests`);
+          answered += game.welcomeAll();
+        }
+        const replies = await Promise.all(sent);
+        assert.ok(
+          replies.every((one) => one.ok),
+          'every request is answered',
+        );
+        assert.equal(peak, Math.min(requests, 4), 'and the game is dialled four at a time while it is asked');
+      } finally {
+        await game.close();
+      }
+    }),
+    { numRuns: 12 },
+  );
+}
+
+/** Real time passing, for a wait that fake timers do not move. */
+async function realTick(done: () => boolean): Promise<void> {
+  for (let tick = 0; tick < 200_000 && !done(); tick += 1) {
+    await new Promise((settle) => setImmediate(settle));
+  }
+  assert.ok(done(), 'the wait ended');
+}
+
+/** The complaint of a late wait that ended unanswered, from whichever way it was kept. */
+function neverMessage(kept: ReturnType<typeof lateAnswer>, handed: RuntimeReplyOf | undefined): string {
+  if (kept?.state === 'never') {
+    return kept.why;
+  }
+  return handed?.ok === false ? handed.message : '';
+}
+
+/** The last millisecond of the half hour passes, then the game answers too late. */
+async function theHalfHourEnds(
+  held: { socket: Socket; id: number },
+  how: 'keep' | 'function',
+  handed: RuntimeReplyOf[],
+  state: () => string | undefined,
+): Promise<void> {
+  jest.advanceTimersByTime(1);
+  await realTick(() => state() !== 'waiting');
+  assert.equal(state(), how === 'keep' ? 'never' : 'over', 'and over once it is');
+  const reply = how === 'keep' ? lateAnswer(held.id) : undefined;
+  assert.match(neverMessage(reply, handed[0]), /No answer came within 30 minutes/);
+  gameEnds(held.socket, held.id, 'answers');
+  for (let turn = 0; turn < 2000; turn += 1) {
+    await new Promise((settle) => setImmediate(settle));
+  }
+  assert.equal(handed.length, how === 'keep' ? 0 : 1, 'an answer after the end is not taken');
+}
+
+/**
+ * A request the wait ran out on is still listened for until its answer, a close, or half an hour
+ * after the wait ended, which ends it as never answered. An answer after that is ignored.
+ */
+async function aLateWaitEndsAfterHalfAnHour(): Promise<void> {
+  const LATE = 30 * 60_000;
+  const scene = fc.record({
+    at: fc.constantFrom(0, 1, 60_000, LATE - 1000, LATE - 1, LATE, LATE + 1, 2 * LATE),
+    answers: fc.boolean(),
+    how: fc.constantFrom('keep' as const, 'function' as const),
+  });
+  await fc.assert(
+    fc.asyncProperty(scene, async ({ at, answers, how }) => {
+      const game = await fakeGame('silent', process.pid);
+      jest.useFakeTimers();
+      try {
+        const handed: RuntimeReplyOf[] = [];
+        const asked = runtimeRequest(
+          game.endpoint,
+          'slow',
+          {},
+          SHORT_WAIT_MS,
+          how === 'keep' ? 'keep' : (late) => handed.push(late),
+        );
+        await realTick(() => game.held.length === 1);
+        jest.advanceTimersByTime(SHORT_WAIT_MS);
+        const first = await asked;
+        assert.equal(first.ok, false);
+        const held = game.held[0];
+        assert.ok(held !== undefined);
+        const state = (): string | undefined =>
+          how === 'keep' ? lateAnswer(held.id)?.state : handed.length === 0 ? 'waiting' : 'over';
+        jest.advanceTimersByTime(Math.min(at, LATE - 1));
+        const inTime = answers && at < LATE;
+        if (inTime) {
+          gameEnds(held.socket, held.id, 'answers');
+          await realTick(() => state() !== 'waiting');
+          assert.equal(state(), how === 'keep' ? 'answered' : 'over', 'an answer in time is kept');
+          return;
+        }
+        assert.equal(state(), 'waiting', 'still listened for before the half hour is up');
+        if (at >= LATE) {
+          await theHalfHourEnds(held, how, handed, state);
+        }
+      } finally {
+        jest.useRealTimers();
+        await game.close();
+      }
+    }),
+    { numRuns: 16 },
+  );
+}
+
+/**
+ * A process's start is read once for ten seconds. A look inside that window uses the reading, and
+ * the first look at or past it reads again.
+ */
+async function aProcessStartIsReadAgainOnlyAfterTenSeconds(): Promise<void> {
+  const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const pid = child.pid;
+  assert.ok(typeof pid === 'number', 'the fixture needs a live process');
+  const began = (await startTimesOf([pid])).get(pid);
+  assert.ok(began !== undefined, 'and its start');
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-start-'));
+  try {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.constantFrom(0, 1, 9999, 10_000, 10_001, 25_000), { minLength: 1, maxLength: 8 }),
+        async (gaps) => {
+          const slots = new EngineSlots(root, 2, { pid: process.pid, started: began });
+          const file = join(root, 'spare.json');
+          const real = Date.now();
+          jest.useFakeTimers();
+          try {
+            let now = real;
+            let readAt: number | undefined;
+            for (const gap of gaps) {
+              now += gap;
+              jest.setSystemTime(now);
+              writeFileSync(file, JSON.stringify({ spare: 1, pid, started: began, written: now }));
+              assert.equal(await slots.countIn(file, 'spare'), 1, 'the file is read as live');
+              if (readAt === undefined || now - readAt >= 10_000) {
+                readAt = now;
+              }
+              const starts: unknown = Reflect.get(slots, 'starts');
+              assert.ok(starts instanceof Map, 'the readings are kept');
+              const reading: unknown = starts.get(pid);
+              assert.equal(
+                isRecord(reading) ? reading['readAt'] : undefined,
+                readAt,
+                `looks ${JSON.stringify(gaps)}`,
+              );
+            }
+          } finally {
+            jest.useRealTimers();
+          }
+        },
+      ),
+      { numRuns: 25 },
+    );
+  } finally {
+    child.kill();
+    sweep(root);
+  }
+}
+
 let strangerRuns = 0;
 
 interface JudgedFile {
@@ -3334,5 +3576,8 @@ await everyEndOfARequestIsSaid();
 await onlyTheFiftyLastLateAnswersAreKept();
 await aStrangerIsJudgedOnceAndForTheFileAsWritten();
 await theKeeperAnswersEachConnectionOnce();
+await noMoreThanFourConnectionsWaitForOneGame();
+await aLateWaitEndsAfterHalfAnHour();
+await aProcessStartIsReadAgainOnlyAfterTenSeconds();
 
 console.log('fuzz properties held');
