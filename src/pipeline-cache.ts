@@ -214,6 +214,8 @@ function keptHolds(kept: string, engine: string, bytes: number): boolean {
 /** How long a keep waits for another's swap, which takes milliseconds, before leaving its copy unkept. */
 const LOCK_WAIT_MS = 10_000;
 
+let ownStarted: Promise<number> | undefined;
+
 /** How often a keep waiting for the swap's lock looks at it again. */
 const LOCK_LOOK_MS = 20;
 
@@ -222,7 +224,9 @@ const LOCK_LOOK_MS = 20;
  * lock could not be had in time. A lock whose holder has gone is taken over as a write turn's is.
  */
 async function underLock<T>(lock: string, swap: () => T): Promise<T | null> {
-  const holder = JSON.stringify({ pid: process.pid, started: await ownStart() });
+  // Read once, since on Windows each read is a query of its own.
+  ownStarted ??= ownStart();
+  const holder = JSON.stringify({ pid: process.pid, started: await ownStarted });
   const starts = new Map<number, number | undefined>();
   const deadline = Date.now() + LOCK_WAIT_MS;
   while (!(await tryTake(lock, holder, starts))) {

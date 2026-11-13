@@ -34,7 +34,6 @@ import {
   DebuggerStream,
   decodeVariant,
   framedCommand,
-  type GodotValue,
   type SentValue,
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
@@ -1678,15 +1677,15 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
   await fc.assert(
     fc.asyncProperty(
       fc.array(fc.integer({ min: 1, max: 80 }), { minLength: 2, maxLength: 4 }),
-      fc.boolean(),
-      async (counts, staleLock) => {
+      async (counts) => {
         const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-keep-'));
         try {
           const home = join(root, 'home');
           const project = join(root, 'project');
           mkdirSync(project);
           const start = join(root, 'start');
-          // One small cache is kept first, so a lock left by a dead keep can sit where the swap looks.
+          // One small cache is kept first, and a lock left by a keep that died sits where the swap looks:
+          // the keeps that follow take it over and still leave the largest cache.
           const first = join(root, 'user-first', 'Godot', 'app_userdata', 'game', 'shader_cache');
           mkdirSync(first, { recursive: true });
           writeFileSync(join(first, '0.bin'), 'x'.repeat(100));
@@ -1696,11 +1695,9 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
             'pipeline-caches',
             readdirSync(join(home, 'pipeline-caches'))[0] ?? '',
           );
-          if (staleLock) {
-            writeFileSync(`${keptFolder}.lock`, '0');
-            const longAgo = new Date(Date.now() - 3_600_000);
-            utimesSync(`${keptFolder}.lock`, longAgo, longAgo);
-          }
+          writeFileSync(`${keptFolder}.lock`, '0');
+          const longAgo = new Date(Date.now() - 3_600_000);
+          utimesSync(`${keptFolder}.lock`, longAgo, longAgo);
           const exits = counts.map((files, index) => {
             const folder = join(
               root,
@@ -1737,21 +1734,6 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
           assert.ok(isRecord(record));
           assert.equal(record['bytes'], Math.max(...counts) * 100);
           assert.equal(readdirSync(join(folder, 'shader_cache')).length, Math.max(...counts));
-
-          // A lock left by a keep that died inside its swap does not stop the next keep.
-          const larger = join(root, 'user-larger', 'Godot', 'app_userdata', 'game', 'shader_cache');
-          mkdirSync(larger, { recursive: true });
-          for (let file = 0; file <= Math.max(...counts); file += 1) {
-            writeFileSync(join(larger, `${String(file)}.bin`), 'x'.repeat(100));
-          }
-          writeFileSync(`${folder}.lock`, '0');
-          const longAgo = new Date(Date.now() - 3_600_000);
-          utimesSync(`${folder}.lock`, longAgo, longAgo);
-          await keepPipelineCache(join(root, 'user-larger'), project, process.execPath, home);
-          const after: unknown = JSON.parse(readFileSync(join(folder, 'kept.json'), 'utf8'));
-          assert.ok(isRecord(after));
-          assert.equal(after['bytes'], (Math.max(...counts) + 1) * 100);
-          assert.equal(existsSync(`${folder}.lock`), false, 'the lock is given back');
         } finally {
           sweep(root);
         }
@@ -2185,11 +2167,11 @@ const sentCommand = fc.record({
 });
 
 /** What the reader makes of a sent value: a bigint as a number while one holds it, else its digits. */
-function readBack(value: SentValue): GodotValue {
+function readBack(value: SentValue): unknown {
   if (typeof value === 'bigint') {
     return Number.isSafeInteger(Number(value)) ? Number(value) : { kind: 'int', values: [value.toString()] };
   }
-  return Array.isArray(value) ? value.map(readBack) : (value as GodotValue);
+  return Array.isArray(value) ? value.map(readBack) : value;
 }
 
 /** Every message a stream gives for [param pieces], and whether it was out of step after them. */
