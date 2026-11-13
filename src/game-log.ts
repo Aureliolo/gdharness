@@ -569,7 +569,10 @@ export class GameLog {
     if (taken.length === 0) {
       return;
     }
-    owner.detail.push(...taken.map((entry) => entry.text.trim()));
+    // One push per line, since a spread of a game's hundred thousand loose prints overflows Node's stack.
+    for (const entry of taken) {
+      owner.detail.push(entry.text.trim());
+    }
     this.removeEntries(taken);
   }
 
@@ -582,8 +585,8 @@ export class GameLog {
    */
   private removeEntries(gone: readonly LogEntry[]): void {
     const dropped = new Set(gone.map((entry) => entry.index));
-    const first = Math.min(...dropped);
     const before = [...dropped].toSorted((a, b) => a - b);
+    const first = before[0] ?? this.entries.length;
     const shifted = (position: number): number =>
       position - before.filter((index) => index < position).length;
     const moved = this.entries.splice(first);

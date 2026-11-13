@@ -325,6 +325,9 @@ function somethingAt(path: string): boolean {
 /** Where an install keeps the addons it replaces until it has finished, a folder Godot does not scan. */
 const PREVIOUS_FOLDER = '.gdharness-previous';
 
+/** Where a whole install moves what it replaced, to be removed. Nothing in it is ever restored. */
+const REPLACED_FOLDER = '.gdharness-replaced';
+
 /**
  * Each addon copied whole into the project's addons/, over whatever was there. An install that
  * fails leaves the project as it found it: an editor addon with its markers beside a runtime addon
@@ -365,6 +368,10 @@ export function installAddons(
     for (const name of ADDONS) {
       writeFileSync(join(addons, name, VERSION_MARKER), `${SERVER_VERSION}\n`);
     }
+    // One rename says the install is whole, so a removal cut short after it is never undone.
+    if (somethingAt(previous)) {
+      renameSync(previous, join(addons, REPLACED_FOLDER));
+    }
   } catch (error) {
     putBack(addons, previous, taken);
     if (!addonsExisted && existsSync(addons) && readdirSync(addons).length === 0) {
@@ -373,6 +380,7 @@ export function installAddons(
     throw error;
   } finally {
     rmSync(previous, { recursive: true, force: true });
+    rmSync(join(addons, REPLACED_FOLDER), { recursive: true, force: true });
   }
   return installed;
 }
@@ -380,9 +388,10 @@ export function installAddons(
 /**
  * Puts back the addons an install that was killed had set aside in [param previous], over whatever
  * it had copied in their place, so the next install starts from the project as it was and a failure
- * of that one leaves it so.
+ * of that one leaves it so. What a whole install replaced is only removed.
  */
 function restoreInterrupted(addons: string, previous: string): void {
+  rmSync(join(addons, REPLACED_FOLDER), { recursive: true, force: true });
   if (!somethingAt(previous)) {
     return;
   }

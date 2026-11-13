@@ -12,6 +12,7 @@ import { jest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1885,12 +1886,48 @@ function aFailedInstallLeavesTheProjectAsItWas(): void {
             );
           }
           assert.equal(existsSync(join(project, 'addons', '.gdharness-previous')), false);
+          assert.equal(existsSync(join(project, 'addons', '.gdharness-replaced')), false);
         } finally {
           sweep(root);
         }
       },
     ),
     { numRuns: 25 },
+  );
+}
+
+/**
+ * A whole install whose removal of the addons it replaced was cut short, by a kill or a locked
+ * file, is kept by the next install, which only finishes that removal. A refused rerun then leaves
+ * the whole install, whichever addon the removal had reached.
+ */
+function aWholeInstallOutlivesItsCutShortCleanup(): void {
+  fc.assert(
+    fc.property(fc.integer({ min: 0, max: ADDONS.length }), (reached) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-cleanup-'));
+      try {
+        const project = join(root, 'project');
+        mkdirSync(project);
+        installAddons(project, fakePackage(root, 'old', { at: 'none' }));
+        const replaced = join(root, 'replaced');
+        cpSync(join(project, 'addons'), replaced, { recursive: true });
+        installAddons(project, fakePackage(root, 'new', { at: 'none' }));
+        const whole = treeOf(join(project, 'addons'));
+        // The removal got through the first [reached] addons and stopped.
+        for (const name of ADDONS.slice(reached)) {
+          cpSync(join(replaced, name), join(project, 'addons', '.gdharness-replaced', name), {
+            recursive: true,
+          });
+        }
+        assert.throws(() =>
+          installAddons(project, fakePackage(root, 'refused', { at: 'missing', addon: 0 })),
+        );
+        assert.deepEqual(treeOf(join(project, 'addons')), whole, 'the whole install is kept');
+      } finally {
+        sweep(root);
+      }
+    }),
+    { numRuns: 10 },
   );
 }
 
@@ -2196,6 +2233,43 @@ function aFoldedErrorCostsTheSameAtEveryFrame(): void {
   ]);
 }
 
+/**
+ * A headline followed by a game's tens of thousands of loose prints folds them without spreading
+ * the list into one call. Node's stack takes about 120,000 arguments and Bun's far more, so a spread
+ * here would pass under Bun and crash every read of that console under Node. Calls given more than
+ * a thousand arguments throw while the log folds.
+ */
+function aWideFoldSpreadsNoList(): void {
+  const count = 20_000;
+  const limit = 1000;
+  const push = Array.prototype.push;
+  const min = Math.min;
+  const refuseMany = (given: readonly unknown[]): void => {
+    if (given.length > limit) {
+      throw new RangeError(`a call was given ${String(given.length)} arguments`);
+    }
+  };
+  const log = new GameLog();
+  const lines = Array.from({ length: count }, (_, at) => `line ${String(at)}\n`).join('');
+  Array.prototype.push = function (this: unknown[], ...given: unknown[]): number {
+    refuseMany(given);
+    return push.apply(this, given);
+  };
+  Math.min = (...given: number[]): number => {
+    refuseMany(given);
+    return min(...given);
+  };
+  try {
+    log.append('transcript', `WARNING: the game's own warning\n${lines}  indented\n`);
+    log.finish();
+  } finally {
+    Array.prototype.push = push;
+    Math.min = min;
+  }
+  assert.equal(log.all.length, 1, JSON.stringify(log.all.slice(0, 3)));
+  assert.equal(log.all[0]?.detail.length, count + 1);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The debugger stream
 // ---------------------------------------------------------------------------------------------
@@ -2340,9 +2414,11 @@ aPlanDependsOnItsUnitsAlone();
 await theLargerKeptCacheSurvivesConcurrentKeeps();
 await exactlyOneTakerHoldsAStaleLock();
 aFailedInstallLeavesTheProjectAsItWas();
+aWholeInstallOutlivesItsCutShortCleanup();
 theRetryScheduleHoldsWhateverFails();
 aGameLogReadsTheSameWhenInterleavedAndRead();
 aFoldedErrorCostsTheSameAtEveryFrame();
+aWideFoldSpreadsNoList();
 theDebuggerStreamIsCutProof();
 
 console.log('fuzz properties held');
