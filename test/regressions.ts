@@ -97608,6 +97608,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
   junction(join(project, 'ring1'), join(project, 'ring2'));
   junction(join(project, 'real'), join(outside, 'back'));
   junction(project, alias);
+  junction(project, join(project, 'loop'));
   let fileLinks = true;
   try {
     symlinkSync(join(outside, 'f.gd'), join(project, 'linked.gd'), 'file');
@@ -97624,6 +97625,11 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
     // A short name is the long one, read on the system drive, which is where 8.3 names are made.
     if (process.platform === 'win32' && existsSync('C:\\PROGRA~1')) {
       assert.equal(listedSpelling('C:\\', 'PROGRA~1/Common Files'), 'Program Files/Common Files');
+      // A path under the project's short name is taken as the folders list it.
+      const shortened = resolveWithinProject('C:\\Program Files', 'C:\\PROGRA~1\\COMMON~1', {
+        forTheEngine: true,
+      });
+      assert.ok(shortened.ok && shortened.relativePath === 'Common Files', JSON.stringify(shortened));
     } else {
       console.log('  skipped the short name: no 8.3 names here');
     }
@@ -97791,6 +97797,18 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
         const backIn = await answer(join(alias, 'link', 'r.gd'), 1, 'set', project);
         assert.ok(heldIn(backIn).includes('res://link/r.gd:1'), backIn);
         assert.ok(!heldIn(backIn).includes('res://real/r.gd:1'), backIn);
+
+        // A link back to the project root is a step like any other, whichever name the project has.
+        for (const through of [project, alias]) {
+          const looped = await answer(join(through, 'loop', 'real', 'r.gd'), 1, 'set', project);
+          assert.ok(heldIn(looped).includes('res://loop/real/r.gd:1'), `${through}: ${looped}`);
+          assert.ok(!heldIn(looped).includes('res://real/r.gd:1'), `${through}: ${looped}`);
+        }
+        // Through the other name, the tail is in the case the folders list.
+        if (ignoresCase) {
+          const cased = resolveWithinProject(project, join(alias, 'REAL', 'R.GD'), { forTheEngine: true });
+          assert.ok(cased.ok && cased.relativePath === 'real/r.gd', JSON.stringify(cased));
+        }
 
         // A folder named like a script is no script.
         assert.equal(await answer('res://dir.gd', 1), 'res://dir.gd is a folder, not a script.');

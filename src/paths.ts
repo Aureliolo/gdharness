@@ -352,22 +352,23 @@ function insideProject(root: string, candidate: string): string | null {
 }
 
 /**
- * [param candidate] below [param root] as written, where a leading part of it names the project
- * another way (a link to it, a short name, a macOS /private path), or null where none does. The
- * rest keeps its own steps, so a link on it is still seen by the gate.
+ * [param candidate] below [param root], where its leading part names the project another way (a
+ * link to it, a short name, a macOS /private path), or null where none does. The shortest such
+ * part is the project, so a link back to the project further on is a step like any other. The rest
+ * keeps its own steps, so a link on it is still seen by the gate, in the case the folders list.
  */
 function belowTheProjectByAnotherName(root: string, candidate: string): string | null {
   const realRoot = realAsFarAsItExists(root);
-  const tail: string[] = [];
+  const steps: string[] = [];
+  const ancestors: string[] = [];
   let at = resolve(candidate);
   for (let parent = dirname(at); parent !== at; parent = dirname(at)) {
-    tail.unshift(basename(at));
+    steps.unshift(basename(at));
     at = parent;
-    if (relative(realAsFarAsItExists(at), realRoot) === '') {
-      return tail.join('/');
-    }
+    ancestors.unshift(at);
   }
-  return null;
+  const found = ancestors.findIndex((ancestor) => relative(realAsFarAsItExists(ancestor), realRoot) === '');
+  return found === -1 ? null : listedSpelling(realRoot, steps.slice(found).join('/'));
 }
 
 /** Why a path starting with the scheme [param scheme] is refused. */
