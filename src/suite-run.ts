@@ -45,12 +45,19 @@ import {
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import type { EngineRun } from './engine-run.js';
-import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import {
+  EngineSlots,
+  FollowedLanes,
+  LANES_VARIABLE,
+  machineSlots,
+  ownStart,
+  poolCount,
+} from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
-import { hiddenWindowFlags, wholeFlag } from './launch.js';
+import { envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
 import { prependTo, readLog } from './log-read.js';
@@ -191,7 +198,10 @@ export interface RunResult {
   }[];
   /** The directory every engine's output is kept under, or null when the run removed it. */
   readonly logs: string | null;
-  /** The engines asked for, before the room on the machine and the slots held the run to fewer. */
+  /**
+   * The engines asked for, before the room on the machine and the slots held the run to fewer. A
+   * gate's lanes file may raise the run above it.
+   */
   readonly enginesAsked: number;
   /** How many of the slots its lanes take were free as it began. Fewer than the lanes is a shared run. */
   readonly slotsFree: number;
@@ -1020,12 +1030,36 @@ function sayWhatWasCutUp(deal: Deal, say: (line: string) => void): void {
   }
 }
 
-/** The lanes of a deal, each engine with its place in the deal, and the slots taken for them. */
+/**
+ * The lanes of a deal, each engine with its place in the deal, the slots taken for them, and the
+ * lanes file a run that can grow follows.
+ */
 interface StartedLanes {
   readonly lanes: ReadonlyArray<ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>>;
   readonly taken: readonly string[];
   /** Whether the engines are handed shares as slots come free, rather than one lane to a slot. */
   readonly shared: boolean;
+  /** The lanes file to follow and the most lanes to rise to, or null for a run that cannot grow. */
+  readonly follows: { readonly file: string; readonly ceiling: number } | null;
+}
+
+/**
+ * The lanes file a run follows and the lanes it may rise to, or null. A run grows only where a gate
+ * names a file, it is not ordered, and work, the pool and the processors leave room above its lanes.
+ */
+function followedFile(context: RunContext, deal: Deal, dealtLanes: number): StartedLanes['follows'] {
+  const { options, declared } = context;
+  const file = envValue(LANES_VARIABLE);
+  if (file === undefined || options.order !== null) {
+    return null;
+  }
+  const pool = poolCount();
+  const ceiling = Math.min(
+    options.cores ?? availableParallelism(),
+    pool ?? Number.POSITIVE_INFINITY,
+    lanesOf(dealt(deal.units, declared, Number.POSITIVE_INFINITY)),
+  );
+  return ceiling > dealtLanes ? { file, ceiling } : null;
 }
 
 /** Takes a slot for each lane where one is free now, and says what that leaves for the rest. */
@@ -1054,11 +1088,14 @@ async function takenLanes(
   if (memoryHeld) {
     say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
   }
-  const shared = options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length);
+  const follows = followedFile(context, deal, lanes.length);
+  const shared =
+    follows !== null ||
+    (options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length));
   if (shared && taken.length < startable) {
     say(sharesSaid(taken.length, startable));
   }
-  return { lanes, taken, shared };
+  return { lanes, taken, shared, follows };
 }
 
 /** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
@@ -1071,22 +1108,40 @@ async function ranEngines(
 ): Promise<EngineRan[]> {
   const { launch, declared } = context;
   const { units, times, memoryHeld } = deal;
-  const { lanes, taken, shared } = started;
-  const ran = shared
-    ? await runShares(
-        launch.slots,
-        units,
-        declared,
-        lanes.length,
-        taken,
-        times,
-        (plan, index, lock, holds) => runEngine(launch, plan, index, times, '', lock, holds),
-        handed,
-        memoryHeld ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes) : undefined,
-      )
-    : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
-        .flat()
-        .toSorted((a, b) => a.index - b.index);
+  const { lanes, taken, shared, follows } = started;
+  const follower = follows === null ? null : new FollowedLanes(launch.slots, follows.file, follows.ceiling);
+  let ran: EngineRan[];
+  try {
+    ran = shared
+      ? await runShares(
+          launch.slots,
+          units,
+          declared,
+          lanes.length,
+          taken,
+          times,
+          (plan, index, lock, holds) => runEngine(launch, plan, index, times, '', lock, holds),
+          handed,
+          memoryHeld || follows !== null
+            ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes)
+            : undefined,
+          follower === null
+            ? undefined
+            : {
+                ceiling: follower.ceiling,
+                past: async (above, signal) => {
+                  const said = await follower.past(above, signal);
+                  say(lanesSaid(above, said));
+                  return said;
+                },
+              },
+        )
+      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
+          .flat()
+          .toSorted((a, b) => a.index - b.index);
+  } finally {
+    follower?.end();
+  }
   if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
     say(outOfMemorySaid(ran));
     const again: EngineRan[] = [];
@@ -1132,6 +1187,11 @@ function recordTimes(context: RunContext, loaded: ProjectScripts, ran: readonly 
  */
 export function sharesSaid(free: number, lanes: number): string {
   return `${free === 0 ? 'None' : String(free)} of the ${String(lanes)} slots this run uses ${free === 1 ? 'was' : 'were'} free as it began, so its engines are handed the suites a share at a time as each starts, and an engine starts as each slot comes free.`;
+}
+
+/** What a run says when the gate's lanes file raised it from [param from] lanes to [param to]. */
+export function lanesSaid(from: number, to: number): string {
+  return `The gate raised this run from ${plural(from, 'lane')} to ${String(to)}. Each new lane starts an engine on a share of what is left.`;
 }
 
 /**
@@ -1774,7 +1834,8 @@ async function runLane(
  * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. A lane takes its slot before it waits for memory, so
- * an engine memory admits never waits for one.
+ * an engine memory admits never waits for one. With [param raised] it starts one lane more for each
+ * the run is raised to, up to its ceiling, asking again until every share is handed out.
  */
 export async function runShares<T extends { readonly index: number }>(
   slots: Pick<EngineSlots, 'take' | 'release'>,
@@ -1786,9 +1847,13 @@ export async function runShares<T extends { readonly index: number }>(
   run: (plan: EnginePlan, index: number, lock: string, holds?: (bytes: number) => void) => Promise<T>,
   handed?: HandedSlot,
   memory?: MemoryGate,
+  raised?: Pick<FollowedLanes, 'ceiling' | 'past'>,
 ): Promise<T[]> {
   const shares = new Shares(units, declared, lanes);
   const handedOut = new AbortController();
+  if (shares.empty) {
+    handedOut.abort();
+  }
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
@@ -1862,9 +1927,43 @@ export async function runShares<T extends { readonly index: number }>(
       }
     }
   };
-  return (await Promise.all(Array.from({ length: lanes }, (_, at) => lane(at))))
-    .flat()
-    .toSorted((a, b) => a.index - b.index);
+  const started = Array.from({ length: lanes }, (_, at) => lane(at));
+  /** The lanes [param ask] raises the run to past [param going], or null once every share is handed out. */
+  const raisedPast = async (ask: NonNullable<typeof raised>, going: number): Promise<number | null> => {
+    try {
+      const said = await ask.past(going, handedOut.signal);
+      return handedOut.signal.aborted ? null : said;
+    } catch (error) {
+      if (handedOut.signal.aborted) {
+        return null;
+      }
+      throw error;
+    }
+  };
+  /** Starts the lanes the run is raised to, until the ceiling or the last share. */
+  const rising = async (ask: NonNullable<typeof raised>): Promise<void> => {
+    let going = lanes;
+    while (going < ask.ceiling) {
+      const said = await raisedPast(ask, going);
+      if (said === null || said <= going) {
+        return;
+      }
+      const to = Math.min(said, ask.ceiling);
+      shares.widen(to);
+      for (; going < to; going += 1) {
+        const added = lane(going);
+        // Read below with the rest, once the asking has ended.
+        added.catch(() => undefined);
+        started.push(added);
+      }
+    }
+  };
+  try {
+    await Promise.all([raised === undefined ? undefined : rising(raised), ...started]);
+  } finally {
+    handedOut.abort();
+  }
+  return (await Promise.all(started)).flat().toSorted((a, b) => a.index - b.index);
 }
 
 /** The files an engine is handed or writes, each named in its arguments. */
@@ -2272,7 +2371,7 @@ function writeEarlyResult(
 
 /**
  * How many engines [param ran] took, for the closing line, with the most that ran at once when that
- * is fewer. A run handed out a share at a time starts more engines than --engines, never more at
+ * is fewer. A run handed out a share at a time starts more engines than it has lanes, never more at
  * once, and a count of every engine it started read as the cap not holding.
  */
 export function acrossSaid(ran: readonly Pick<EngineRan, 'began' | 'seconds'>[]): string {

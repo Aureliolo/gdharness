@@ -138,6 +138,7 @@ import {
   inTurns,
   KEPT_RUN_DIRECTORIES,
   macMemoryLevel,
+  memoryAvailable,
   memoryRoomOf,
   resPathOf,
   roomFor,
@@ -669,6 +670,7 @@ import {
   importFault,
   importNeeded,
   importStartOf,
+  lanesSaid,
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
@@ -65721,6 +65723,552 @@ function testARunOutOfMemoryNamesEveryEngine(): void {
   );
 }
 
+/** Suites of one 40 s case each, which a share holds whole, each seen to hold [param peakGiB]. */
+function eightSuitesOf(
+  count: number,
+  peakGiB: number,
+): { units: ReturnType<typeof unitsOf>; declared: Map<string, string[]>; times: SuiteTimes } {
+  const paths = Array.from({ length: count }, (_, at) => `res://rise_${String(at)}_test.gd`);
+  const suites: DeclaredSuite[] = paths.map((path) => ({
+    path,
+    cases: ['test_one'],
+    windowed: false,
+    headless: false,
+    together: false,
+    accessible: false,
+  }));
+  const times: SuiteTimes = Object.fromEntries(
+    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 }, peak: peakGiB * 1024 ** 3 }]),
+  );
+  return {
+    units: unitsOf(suites, times),
+    declared: new Map(paths.map((path) => [path, ['test_one']])),
+    times,
+  };
+}
+
+/** The engines of a run that is raised, which wait until the case ends them. */
+interface RisingEngines {
+  readonly going: Array<{ readonly lane: number; readonly suites: string[]; end: () => void }>;
+  readonly started: () => number;
+  /** The most engines that were going at the same moment. */
+  readonly most: () => number;
+  readonly run: (plan: EnginePlan, index: number) => Promise<{ index: number; suites: string[] }>;
+}
+
+function risingEngines(): RisingEngines {
+  const going: RisingEngines['going'] = [];
+  let live = 0;
+  let most = 0;
+  return {
+    going,
+    started: () => going.length,
+    most: () => most,
+    run: (plan, index) =>
+      new Promise((finished) => {
+        const suites = plan.suites.map((one) => one.path);
+        live += 1;
+        most = Math.max(most, live);
+        going.push({
+          lane: plan.lane,
+          suites,
+          end: () => {
+            live -= 1;
+            finished({ index, suites });
+          },
+        });
+      }),
+  };
+}
+
+/** Waits until [param until] holds, or fails after [param ms]. */
+async function untilItHolds(what: string, until: () => boolean, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!until()) {
+    assert.ok(Date.now() < deadline, `waited ${String(ms)} ms for ${what}`);
+    await delay(2);
+  }
+}
+
+/**
+ * A stand-in for the lanes a gate raises: answers [param said] once [param when] holds, then pends
+ * until its signal aborts. With [param when] null it never answers, as a stale file's follower does.
+ */
+function raisedTo(
+  ceiling: number,
+  when: (() => boolean) | null,
+  said: number,
+): {
+  readonly raised: { ceiling: number; past: (above: number, signal: AbortSignal) => Promise<number> };
+  readonly asks: Array<{ readonly above: number; readonly signal: AbortSignal }>;
+} {
+  const asks: Array<{ readonly above: number; readonly signal: AbortSignal }> = [];
+  return {
+    asks,
+    raised: {
+      ceiling,
+      past: async (above, signal) => {
+        asks.push({ above, signal });
+        if (asks.length === 1 && when !== null) {
+          await untilItHolds('the engines the rise waits for', when);
+          return said;
+        }
+        await new Promise<void>((_, refused) => {
+          signal.addEventListener('abort', () => {
+            refused(new Error('the asking was ended'));
+          });
+        });
+        return said;
+      },
+    },
+  };
+}
+
+/** A run's lanes rise as the number a gate names does: the shares are cut for them and each starts an engine. */
+async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
+  const gib = 1024 ** 3;
+  // The shares are cut for the lanes there are now.
+  const eight = eightSuitesOf(8, 1);
+  const shares = new Shares(eight.units, eight.declared, 2);
+  assert.equal(shares.next(0)?.suites.length, 4, 'two lanes are each handed half of what is left');
+  shares.widen(4);
+  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 160 s left is one suite');
+  shares.widen(1);
+  assert.equal(shares.next(2)?.suites.length, 1, 'a number below the present one lowers nothing');
+
+  const six = eightSuitesOf(6, 1);
+  const slots = { take: () => Promise.resolve('lock'), release: () => undefined };
+  const taken = ['one', 'two'];
+  const startedRun = (
+    engines: RisingEngines,
+    raised: Parameters<typeof runShares>[9],
+    gate?: MemoryGate,
+    inputs = six,
+    slotsOf: Pick<EngineSlots, 'take' | 'release'> = slots,
+  ): Promise<Array<{ index: number; suites: string[] }>> => {
+    const run = runShares(
+      slotsOf,
+      inputs.units,
+      inputs.declared,
+      2,
+      taken,
+      inputs.times,
+      engines.run,
+      undefined,
+      gate,
+      raised,
+    );
+    run.catch(() => undefined);
+    return run;
+  };
+  const endsWithin = async <T>(pending: Promise<T>, what: string): Promise<T> => {
+    const ended = await Promise.race([pending.then((value) => ({ value })), delay(10_000).then(() => null)]);
+    assert.ok(ended !== null, `${what} ended`);
+    return ended.value;
+  };
+  const endAsTheyCome = async (engines: RisingEngines, pending: Promise<unknown>): Promise<void> => {
+    const over = pending.then(
+      () => true,
+      () => true,
+    );
+    const ended = new Set<number>();
+    while (!(await Promise.race([over, delay(2).then(() => false)]))) {
+      engines.going.forEach((engine, at) => {
+        if (!ended.has(at)) {
+          ended.add(at);
+          engine.end();
+        }
+      });
+    }
+  };
+
+  // Rising mid-run, then the last share's abort of the asking.
+  const rising = risingEngines();
+  const risen = raisedTo(6, () => rising.started() >= 2, 4);
+  const risingRun = startedRun(rising, risen.raised);
+  await untilItHolds('four engines', () => rising.started() >= 4);
+  assert.deepEqual(
+    rising.going.map((engine) => [engine.lane, engine.suites.length]),
+    [
+      [0, 3],
+      [1, 1],
+      [2, 1],
+      [3, 1],
+    ],
+    'four engines go at once, in lanes 0 to 3, the added ones on shares cut for four lanes',
+  );
+  await untilItHolds('the second asking', () => risen.asks.length >= 2);
+  assert.equal(
+    risen.asks[1]?.signal.aborted,
+    true,
+    'the asking ends once the last share is handed out, while its engines still go',
+  );
+  rising.going.forEach((engine) => {
+    engine.end();
+  });
+  const ran = await endsWithin(risingRun, 'the rising run');
+  assert.deepEqual(
+    ran.map((engine) => engine.index),
+    [0, 1, 2, 3],
+    'four engines in index order',
+  );
+  assert.deepEqual(
+    ran.flatMap((engine) => engine.suites).toSorted(),
+    six.units.map((unit) => unit.suite).toSorted(),
+    'every suite once',
+  );
+  assert.deepEqual(
+    risen.asks.map((ask) => ask.above),
+    [2, 4],
+    'asked again from the lanes it was raised to',
+  );
+  assert.equal(risen.asks[1]?.signal.aborted, true, 'and that asking ended with the last share');
+
+  // At its ceiling a run asks no more.
+  const atCeiling = risingEngines();
+  const ceiling = raisedTo(4, () => atCeiling.started() >= 2, 4);
+  const ceilingRun = startedRun(atCeiling, ceiling.raised);
+  await untilItHolds('four engines at the ceiling', () => atCeiling.started() >= 4);
+  atCeiling.going.forEach((engine) => {
+    engine.end();
+  });
+  const ceilingRan = await endsWithin(ceilingRun, 'the run at its ceiling');
+  assert.deepEqual(
+    ceiling.asks.map((ask) => ask.above),
+    [2],
+    'asked once, at its ceiling no more',
+  );
+  assert.equal(ceilingRan.flatMap((engine) => engine.suites).length, 6, 'every suite once');
+
+  // A number that never rises adds no lane.
+  const unraised = risingEngines();
+  const never = raisedTo(6, null, 4);
+  const neverRun = startedRun(unraised, never.raised);
+  await untilItHolds('two engines', () => unraised.started() >= 2);
+  await endAsTheyCome(unraised, neverRun);
+  assert.equal(unraised.most(), 2, 'never more than two engines at once');
+  assert.deepEqual(
+    [...new Set(unraised.going.map((engine) => engine.lane))].toSorted((a, b) => a - b),
+    [0, 1],
+    'lanes 0 and 1 alone',
+  );
+  assert.equal(never.asks.length, 1, 'the asking went on with nothing to add');
+  assert.equal(never.asks[0]?.signal.aborted, true, 'and ended with the last share');
+
+  // Memory holds an added lane's engine.
+  const heavy = eightSuitesOf(6, 3);
+  const held = risingEngines();
+  const memoryRise = raisedTo(6, () => held.started() >= 2, 4);
+  const memoryRun = startedRun(
+    held,
+    memoryRise.raised,
+    new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(10 * gib), 5),
+    heavy,
+  );
+  await untilItHolds('the rise to be answered', () => memoryRise.asks.length >= 2);
+  await delay(100);
+  assert.equal(held.started(), 2, 'memory for two engines starts two, whatever the lanes');
+  await endAsTheyCome(held, memoryRun);
+  assert.equal(
+    (await memoryRun).flatMap((engine) => engine.suites).length,
+    6,
+    'and every suite is run in the end',
+  );
+
+  // No work left for an added lane: it takes no slot that never comes.
+  const little = eightSuitesOf(2, 1);
+  const idle = risingEngines();
+  const waitingForSlots = {
+    take: (signal?: AbortSignal): Promise<string> =>
+      new Promise((_, refused) => {
+        signal?.addEventListener('abort', () => {
+          refused(new Error('the wait for a slot was ended'));
+        });
+      }),
+    release: () => undefined,
+  };
+  const idleRun = startedRun(
+    idle,
+    { ceiling: 6, past: () => Promise.resolve(4) },
+    undefined,
+    little,
+    waitingForSlots,
+  );
+  await untilItHolds('two engines', () => idle.started() >= 2);
+  idle.going.forEach((engine) => {
+    engine.end();
+  });
+  const idleRan = await endsWithin(idleRun, 'the run with no work for an added lane');
+  assert.equal(idleRan.length, 2, 'two engines, with no bound of its own');
+}
+
+/**
+ * A run in a gate follows the lanes file its paced portion writes: it begins on its own lanes, adds
+ * the rest the file names while work and processors allow, gives its mark back at its ceiling, and
+ * takes no lock in the portion's pool. A stand-in process plays the portion.
+ */
+async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('gate lanes regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const room = roomFor(3, availableParallelism(), (await memoryAvailable()).bytes);
+  if (room.engines < 3) {
+    console.log(`gate lanes regression skipped: under three engines fit, since ${room.held ?? ''}`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-slots-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-pool-'));
+  const file = join(pool, 'lanes-1.json');
+  const mark = `${file}${FOLLOWS_SUFFIX}`;
+  const standIn = join(pool, 'portion.cjs');
+  const listings = join(pool, 'listings.jsonl');
+  const children: Array<ReturnType<typeof spawnHidden>> = [];
+  const suiteOf = (waits: readonly number[]): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      ...waits.flatMap((seconds, at) => [
+        '',
+        `func test_wait_${String(at)}() -> void:`,
+        `\tawait get_tree().create_timer(${seconds.toFixed(1)}).timeout`,
+        '\tassert_bool(true).is_true()',
+      ]),
+      '',
+    ].join('\n');
+  const gateTimes = join(project, 'gate', 'suite-times.json');
+  const resultFile = join(project, 'gate', 'result.json');
+  const keep = (suites: Record<string, readonly number[]>): void => {
+    mkdirSync(dirname(gateTimes), { recursive: true });
+    writeFileSync(
+      gateTimes,
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(suites).map(([path, costs]) => [
+            path,
+            {
+              seconds: costs.reduce((sum, cost) => sum + cost, 0),
+              cases: Object.fromEntries(costs.map((cost, at) => [`test_wait_${String(at)}`, cost])),
+            },
+          ]),
+        ),
+      ),
+    );
+  };
+  const four = ['a', 'b', 'c', 'd'].map((name) => `tests/${name}_lane_test.gd`);
+  const fourTimed = Object.fromEntries(four.map((path) => [`res://${path}`, [40]]));
+  const standsIn = async (mode: 'onMark' | 'always' | 'never', lanes: number, as?: number): Promise<void> => {
+    rmSync(listings, { force: true });
+    rmSync(file, { force: true });
+    const child = spawnHidden(process.execPath, [standIn, pool, file, String(lanes), mode, listings], {
+      stdio: ['pipe', 'ignore', 'ignore'],
+    });
+    children.push(child);
+    const began = (await startTimesOf([child.pid ?? 0])).get(child.pid ?? 0);
+    child.stdin.write(`${String(as ?? began ?? Date.now())}\n`);
+    await untilItHolds('the stand-in to list the pool', () => existsSync(listings));
+  };
+  const listed = (): Array<{ names: string[]; mark: number | null; at: number }> =>
+    readFileSync(listings, 'utf8')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => {
+        const one: unknown = JSON.parse(line);
+        const names = get(one, 'names');
+        const held = get(one, 'mark');
+        const at = get(one, 'at');
+        assert.ok(
+          Array.isArray(names) && typeof at === 'number',
+          `a listing names files and a time: ${line}`,
+        );
+        return { names: names.map(String), mark: typeof held === 'number' ? held : null, at };
+      });
+  const runWith = (
+    laneVariable: string | undefined,
+    poolOf: number,
+    ...args: string[]
+  ): { said: string; status: number | null; pid: number } => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      GODOT_PATH: godotPath,
+      [SHARE_COUNT_VARIABLE]: String(poolOf),
+    };
+    delete env[SHARE_VARIABLE];
+    if (laneVariable === undefined) {
+      delete env[LANES_VARIABLE];
+    } else {
+      env[LANES_VARIABLE] = laneVariable;
+    }
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--times',
+        gateTimes,
+        '--result',
+        resultFile,
+        ...args,
+      ],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    return { said: `${ran.stdout}${ran.stderr}`, status: ran.status, pid: ran.pid };
+  };
+  const stands = (): void => {
+    for (const child of children.splice(0)) {
+      child.kill();
+    }
+  };
+  try {
+    writeFileSync(
+      standIn,
+      [
+        "const { appendFileSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');",
+        'const [pool, file, lanes, mode, listings] = process.argv.slice(2);',
+        'let started = 0;',
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', (line) => { started = Number(line); });",
+        `const mark = file + ${JSON.stringify(FOLLOWS_SUFFIX)};`,
+        'const said = () => writeFileSync(file, JSON.stringify({ lanes: Number(lanes), pid: process.pid, started, written: Date.now() }));',
+        'let wrote = false;',
+        'let last = 0;',
+        'setInterval(() => {',
+        '  const names = readdirSync(pool);',
+        '  let held = null;',
+        '  try { held = JSON.parse(readFileSync(mark, "utf8")).pid; } catch {}',
+        "  appendFileSync(listings, JSON.stringify({ names, mark: held, at: Date.now() }) + '\\n');",
+        '  if (started === 0 || mode === "never") { return; }',
+        // Written only once a listing has seen the mark, since the run gives it back at its ceiling.
+        '  if (mode === "onMark" && !wrote && held !== null) { said(); wrote = true; }',
+        '  if (mode === "always" && Date.now() - last > 1000) { said(); last = Date.now(); }',
+        '}, 100);',
+        '',
+      ].join('\n'),
+    );
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="GateLanes"\n',
+      ...Object.fromEntries(four.map((path) => [path, suiteOf([8])])),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+
+    // A file raising the run above its two lanes, followed until its ceiling.
+    keep(fourTimed);
+    await standsIn('onMark', 4);
+    const ceiling = Math.min(4, availableParallelism());
+    const followed = runWith(file, 4, '--engines', '2', '--slot-count', '4');
+    const endedAt = Date.now();
+    stands();
+    assert.equal(followed.status, 0, followed.said);
+    const risen = readRunResult(resultFile);
+    assert.ok(risen.dealing.includes(lanesSaid(2, ceiling)), `the rise is said: ${followed.said}`);
+    assert.ok(
+      risen.engines.some((engine) => engine.lane === 2),
+      `an engine ran in an added lane: ${JSON.stringify(risen.engines)}`,
+    );
+    const seen = listed();
+    const marked = seen.findIndex((one) => one.mark !== null);
+    assert.ok(
+      marked >= 0 && seen[marked]?.mark === followed.pid,
+      `the mark names the run while it follows: ${JSON.stringify(seen[marked])}, run ${String(followed.pid)}`,
+    );
+    // Each added engine waits 8 s, so a listing 2 s before the run ended was taken while it lived.
+    assert.ok(
+      seen.slice(marked).some((one) => one.mark === null && one.at < endedAt - 2000),
+      'and is given back at the ceiling while the run still lives',
+    );
+    assert.ok(
+      seen.every((one) => one.names.every((name) => !name.endsWith('.lock'))),
+      'the run takes no lock in the pool',
+    );
+    assert.deepEqual(leftInSlots(slots), [], 'and the machine slots are all given back');
+    assert.equal(existsSync(mark), false, 'no mark is left');
+
+    // A file whose writer has gone adds no lane, and the run leaves no mark.
+    writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    await standsIn('never', 4);
+    writeFileSync(
+      file,
+      JSON.stringify({ lanes: 4, pid: gone.pid ?? 0, started: Date.now() - 60_000, written: Date.now() }),
+    );
+    const dead = runWith(file, 4, '--engines', '2', '--slot-count', '4');
+    stands();
+    assert.equal(dead.status, 0, dead.said);
+    assert.ok(
+      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
+      `a dead file adds no lane: ${dead.said}`,
+    );
+    assert.doesNotMatch(dead.said, /raised this run from/, 'and says nothing of a rise');
+    assert.equal(existsSync(mark), false, 'it leaves no mark');
+
+    // An empty variable names no file.
+    await standsIn('always', 4);
+    const empty = runWith('', 4, '--engines', '2', '--slot-count', '4');
+    stands();
+    assert.equal(empty.status, 0, empty.said);
+    assert.ok(
+      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
+      'no lane is added',
+    );
+    for (const folder of [pool, project, process.cwd()]) {
+      assert.deepEqual(
+        readdirSync(folder).filter((name) => name.endsWith(FOLLOWS_SUFFIX)),
+        [],
+        `no mark is made in ${folder}`,
+      );
+    }
+
+    // Processors cap the lanes, so a run held to two follows nothing.
+    writeTree(project, {
+      'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
+      'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
+    });
+    keep({
+      'res://tests/a_lane_test.gd': [20, 20, 20, 20],
+      'res://tests/b_lane_test.gd': [20, 20, 20, 20],
+    });
+    await standsIn('always', 9);
+    const held = runWith(file, 9, '--engines', '2', '--cores', '2', '--slot-count', '4');
+    stands();
+    assert.equal(held.status, 0, held.said);
+    assert.ok(
+      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
+      'no lane is added',
+    );
+    assert.doesNotMatch(held.said, /raised this run from/, 'and nothing is said of a rise');
+    assert.ok(
+      listed().every((one) => one.mark === null && one.names.every((name) => !name.endsWith(FOLLOWS_SUFFIX))),
+      'no mark stood at any listing',
+    );
+
+    // An ordered run cannot grow, so it makes no mark.
+    keep(fourTimed);
+    writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
+    await standsIn('always', 4);
+    const ordered = runWith(file, 4, '--engines', '2', '--slot-count', '4', '--order', 'named');
+    stands();
+    assert.equal(ordered.status, 0, ordered.said);
+    assert.doesNotMatch(ordered.said, /raised this run from/, 'an ordered run says nothing of a rise');
+    assert.ok(
+      listed().every((one) => one.mark === null),
+      'and no mark stood at any listing',
+    );
+  } finally {
+    stands();
+    sweep(project, slots, pool);
+  }
+}
+
 /**
  * A test run is held to what its suites were seen to hold: an engine starts once memory covers the
  * most any suite of the run was seen to hold, and the run keeps what each engine held.
@@ -96094,6 +96642,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsReadForWhatItHolds,
   testAnEngineIsSizedByWhatItWasSeenToHold,
   testARunOutOfMemoryNamesEveryEngine,
+  testARunAddsALaneAsItsLanesRise,
+  testAGatesRunFollowsItsLanesFile,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
 ];
 

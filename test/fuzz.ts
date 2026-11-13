@@ -1110,7 +1110,11 @@ interface RunSetup {
   readonly freeGiB: number;
   /** What each suite was seen to hold, in GiB, in suite order. */
   readonly peaksGiB: readonly number[];
+  /** The lanes the run is raised by, one answer each, up to the ceiling of {@link RISE_CEILING}. */
+  readonly rises?: readonly number[];
 }
+
+const RISE_CEILING = 6;
 
 interface Ran {
   readonly index: number;
@@ -1172,7 +1176,7 @@ function takeFreeSlots(slots: StandInSlots, count: number): string[] {
 }
 
 /** Starts the run the setup describes, with the scheduler deciding when each wait ends. */
-function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): StartedRun {
+function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; above?: boolean }): StartedRun {
   const slots = new StandInSlots(setup.slotCount);
   if (setup.outsideHolds && setup.slotCount > 1) {
     slots.takeNow();
@@ -1190,6 +1194,29 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
   const gate = new MemoryGate(slots, free, 1);
   const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
   const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
+  // The lanes the run was last raised to, which no more engines than may go at once.
+  let lanesNow = setup.lanes;
+  const rises = [...(setup.rises ?? [])];
+  const raised =
+    setup.rises === undefined
+      ? undefined
+      : {
+          ceiling: RISE_CEILING,
+          past: async (above: number, signal: AbortSignal): Promise<number> => {
+            const by = rises.shift();
+            if (by === undefined) {
+              await new Promise<void>((_, refused) => {
+                signal.addEventListener('abort', () => {
+                  refused(new Error('the asking was ended'));
+                });
+              });
+            }
+            await s.schedule(Promise.resolve(), 'a rise is answered');
+            signal.throwIfAborted();
+            lanesNow = Math.min(RISE_CEILING, above + (by ?? 1));
+            return lanesNow;
+          },
+        };
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
@@ -1208,6 +1235,10 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
     const engine = { need, held: 0 };
     going.set(index, engine);
     peak.engines = Math.max(peak.engines, going.size);
+    assert.ok(going.size <= lanesNow, `${String(going.size)} engines going on ${String(lanesNow)} lanes`);
+    if (going.size > setup.lanes) {
+      peak.above = true;
+    }
     void s.schedule(Promise.resolve(), `engine ${String(index)} tells`).then(() => {
       if (going.get(index) === engine) {
         engine.held = need;
@@ -1220,7 +1251,7 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate)
+  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate, raised)
     .then(
       (ran) => {
         result = ran;
@@ -1318,6 +1349,49 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
     jest.useRealTimers();
   }
   assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
+}
+
+async function noOrderOfRisesLosesASuite(): Promise<void> {
+  const peak: { engines: number; above?: boolean } = { engines: 0 };
+  jest.useFakeTimers();
+  try {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.integer({ min: 1, max: 3 }),
+        fc.integer({ min: 2, max: 3 }),
+        fc.integer({ min: 2, max: 6 }),
+        fc.constantFrom(5, 6.5, 8, 16),
+        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 6, maxLength: 6 }),
+        fc.array(fc.integer({ min: 1, max: 3 }), { maxLength: 3 }),
+        async (s, slotCount, lanes, suites, freeGiB, peaksGiB, rises) => {
+          const started = startRun(
+            s,
+            { slotCount, outsideHolds: false, lanes, suites, freeGiB, peaksGiB, rises },
+            peak,
+          );
+          if (!(await stepUntilEnded(s, started))) {
+            await endHungRun(started);
+            throw new Error(
+              `hung: ${String(suites)} suites over ${String(lanes)} lanes raised by ${rises.join(', ')}`,
+            );
+          }
+          await s.waitIdle();
+          assert.deepEqual(
+            (started.ran() ?? []).flatMap((engine) => engine.suites).toSorted(),
+            suitesOf(suites, peaksGiB)
+              .units.map((unit) => unit.suite)
+              .toSorted(),
+          );
+          assert.equal(started.slots.freeCount, slotCount);
+        },
+      ),
+      { numRuns: 150, seed: 42 },
+    );
+  } finally {
+    jest.useRealTimers();
+  }
+  assert.ok(peak.above === true, 'no run ever had more engines going than the lanes it began on');
 }
 
 /** A stand-in `hold` that takes the blocks named, records each ask and answers after [param turns] microtask turns. */
@@ -1425,6 +1499,7 @@ logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
 await noOrderOfSlotAndMemoryWaitsHangsARun();
+await noOrderOfRisesLosesASuite();
 await theWalkGivesOnlyWhatItHolds();
 
 console.log('fuzz properties held');

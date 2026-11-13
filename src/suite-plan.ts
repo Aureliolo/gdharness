@@ -913,14 +913,15 @@ const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
  * lane, as it starts or finishes an engine, is handed a share of what is left: the windowed units
  * first and whole, then the slowest headless units up to [param lanes] parts of what is left, never
  * less than [constant SHARE_FLOOR_SECONDS] while that much remains. The shares shrink as the work
- * runs out, so the lanes end close together however late each began.
+ * runs out, so the lanes end close together however late each began. A run whose lanes rise widens
+ * the parts, so a lane joining late is handed a part cut for the lanes there are now.
  */
 export class Shares {
   private windowed: readonly Unit[];
   private headless: readonly Unit[];
   private readonly declared: CasesBySuite;
   private readonly all: readonly Unit[];
-  private readonly lanes: number;
+  private lanes: number;
 
   constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
     this.windowed = units.filter((unit) => unit.windowed);
@@ -928,6 +929,11 @@ export class Shares {
     this.declared = declared;
     this.all = units;
     this.lanes = Math.max(1, lanes);
+  }
+
+  /** Raises the lanes the next shares are cut for. A number at or below the present one changes nothing. */
+  widen(lanes: number): void {
+    this.lanes = Math.max(this.lanes, lanes);
   }
 
   /** Whether every unit has been handed out. */
