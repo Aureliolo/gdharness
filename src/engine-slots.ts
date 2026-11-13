@@ -735,6 +735,7 @@ export class FollowedLanes {
   private readonly mark: string;
   private changes: FolderChanges | null = null;
   private holding = false;
+  private taking: Promise<boolean> | null = null;
 
   private readonly slots: Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'>;
   private readonly file: string;
@@ -779,6 +780,34 @@ export class FollowedLanes {
     }
   }
 
+  /**
+   * The lanes the file tells now, at most the ceiling, or null while it tells none: its writer has
+   * gone, it holds no number, or another reader holds the mark.
+   */
+  async told(): Promise<number | null> {
+    const said = await this.look();
+    return said > 0 ? said : null;
+  }
+
+  /**
+   * Settles once the file tells a number above [param lane] or tells none, and at once when
+   * [param signal] aborts. A lane at or past the number told waits here for it to grow.
+   */
+  async untilTold(lane: number, signal: AbortSignal): Promise<void> {
+    const changes = new FolderChanges(dirname(this.file));
+    try {
+      while (!signal.aborted) {
+        const told = await this.told();
+        if (told === null || lane < told) {
+          return;
+        }
+        await changes.next(this.lookMs, SLOT_SETTLE_MS, signal);
+      }
+    } finally {
+      changes.close();
+    }
+  }
+
   /** Rejects once [param signal] aborts, giving the mark back first. */
   private untilAborted(signal: AbortSignal): Promise<never> {
     return new Promise<never>((_, reject) => {
@@ -797,12 +826,26 @@ export class FollowedLanes {
   /** The lanes the file tells now, at most the ceiling, and 0 while the mark is not held or a look fails. */
   private async look(): Promise<number> {
     try {
-      this.holding ||= await this.slots.takeFile(this.mark);
-      return this.holding ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
+      await this.holdMark();
+      return this.holding ?Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
     } catch {
       // Held by a reader or unreadable for now, which the next look tries again.
       return 0;
     }
+  }
+
+  /**
+   * Takes the mark unless it is held. Looks begun together share one attempt: the lanes of a run
+   * ask at once, and a failing attempt finishing after a succeeding one must not undo it.
+   */
+  private async holdMark(): Promise<void> {
+    if (this.holding) {
+      return;
+    }
+    this.taking ??= this.slots.takeFile(this.mark).finally(() => {
+      this.taking = null;
+    });
+    this.holding = await this.taking;
   }
 
   /** Gives the mark back while it names this process, and stops watching. */

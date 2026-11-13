@@ -59984,6 +59984,165 @@ function testARestartedCountDoesNotTakeWorkFromBeforeTheRestart(): void {
  * an editor plays inherits the editor's environment and runs the editor's executable, so it takes a
  * slot of its own.
  */
+const SHARE_UNIT = (suite: string, cost: number): Unit => ({
+  suite: `res://${suite}.gd`,
+  cases: ['test_one'],
+  cost,
+  timed: true,
+  windowed: false,
+  accessible: false,
+  headless: false,
+});
+
+/** The cost of each share a lane is handed from units of [param costs], one lane's draws in turn. */
+function shareCosts(costs: readonly number[], lanes: number): number[] {
+  const units = costs.map((cost, at) => SHARE_UNIT(`s${String(at)}`, cost));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const shares = new Shares(units, declared, lanes);
+  const drawn: number[] = [];
+  for (let plan = shares.next(0); plan !== null; plan = shares.next(0)) {
+    drawn.push(plan.cost);
+  }
+  return drawn;
+}
+
+/** A share holds at most 120 s, at least the floor while that much is left, and a long suite is alone. */
+function testAShareHoldsNoMoreThanTwoMinutesOfWork(): void {
+  const long = shareCosts(Array.from({ length: 30 }, () => 30), 2);
+  assert.ok(
+    long.every((cost) => cost <= 120),
+    `a long run is cut into shares of 120 s: ${JSON.stringify(long)}`,
+  );
+  assert.ok(long.length >= 8, '900 s makes at least eight of them');
+  assert.equal(
+    long.reduce((sum, cost) => sum + cost, 0),
+    900,
+    'holding every unit once',
+  );
+  assert.deepEqual(
+    shareCosts([300, 10, 10], 1),
+    [300, 20],
+    'a suite over 120 s is a share of its own, the rest after it',
+  );
+  assert.deepEqual(shareCosts([10, 10, 10, 10], 4), [20, 20], 'the floor of 30 s beats left over lanes');
+  assert.deepEqual(shareCosts([], 3), [], 'nothing left makes no share');
+  assert.deepEqual(shareCosts([120], 1), [120], 'a suite of exactly 120 s is one share');
+}
+
+/** A run's lanes read the lanes file before each share and give a slot back when told fewer. */
+async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promise<void> {
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fall-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-pool-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const file = join(pool, 'lanes-1.json');
+  const say = (lanes: number, pid = process.pid): void => {
+    writeFileSync(file, JSON.stringify({ lanes, pid, started: holder.started, written: Date.now() }));
+  };
+  const locksHeld = (): number => readdirSync(machine).filter((name) => name.endsWith('.lock')).length;
+  const slots = new EngineSlots(machine, 4, holder);
+  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+  const going = new Map<number, () => void>();
+  let started = 0;
+  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
+    started += 1;
+    return new Promise((done) => {
+      going.set(index, () => {
+        going.delete(index);
+        done({ index });
+      });
+    });
+  };
+  const endAll = (): void => {
+    for (const end of [...going.values()]) {
+      end();
+    }
+  };
+  const units = Array.from({ length: 30 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  try {
+    say(3);
+    const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
+    assert.ok(await cameTrue(() => started === 3 && locksHeld() === 3, 10_000), 'three lanes start on three slots');
+    say(2);
+    endAll();
+    assert.ok(
+      await cameTrue(() => started === 5 && locksHeld() === 2, 10_000),
+      `told two, the third lane gives its slot back: ${String(started)} started, ${String(locksHeld())} slots held`,
+    );
+    say(3);
+    endAll();
+    assert.ok(
+      await cameTrue(() => started === 8 && locksHeld() === 3, 10_000),
+      `told three again, it takes a slot and goes on: ${String(started)} started, ${String(locksHeld())} held`,
+    );
+    say(1, 2 ** 31 - 1);
+    endAll();
+    assert.ok(
+      await cameTrue(() => going.size === 0 || locksHeld() === 3, 10_000),
+      'a file whose writer has gone tells nothing, so all three lanes go on',
+    );
+    let over = false;
+    void pending.then(() => {
+      over = true;
+    });
+    for (let round = 0; round < 2000 && !over; round += 1) {
+      endAll();
+      await delay(5);
+    }
+    const ran = await Promise.race([pending, delay(20_000).then(() => null)]);
+    assert.ok(ran !== null, 'the run ends once every share is handed out');
+    assert.deepEqual(
+      ran.map((one) => one.index),
+      Array.from({ length: started }, (_, at) => at),
+      'every engine ran once, in order',
+    );
+    assert.equal(locksHeld(), 0, 'and no slot is left held');
+  } finally {
+    endAll();
+    sweep(machine);
+    sweep(pool);
+  }
+}
+
+/** A fall to one lane while the last shares are out still ends the lanes parked behind it. */
+async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> {
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-pool-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const file = join(pool, 'lanes-1.json');
+  writeFileSync(file, JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }));
+  const slots = new EngineSlots(machine, 4, holder);
+  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+  const ends: Array<() => void> = [];
+  let suitesRun = 0;
+  const run = (plan: EnginePlan, index: number): Promise<{ index: number }> =>
+    new Promise((done) => {
+      suitesRun += plan.suites.length;
+      ends.push(() => {
+        done({ index });
+      });
+    });
+  const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  try {
+    const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
+    for (let round = 0; round < 400; round += 1) {
+      for (const end of ends.splice(0)) {
+        end();
+      }
+      if (await Promise.race([pending.then(() => true), delay(5).then(() => false)])) {
+        break;
+      }
+    }
+    const ran = await Promise.race([pending, delay(10_000).then(() => null)]);
+    assert.ok(ran !== null, 'a lane told to stop ends with the run, and is not left waiting');
+    assert.equal(suitesRun, 12, `and the one lane told ran every suite once, in ${String(ran.length)} engines`);
+  } finally {
+    sweep(machine);
+    sweep(pool);
+  }
+}
+
 /**
  * How many slots a machine counts: half the processors, held to the memory above 16 GiB at 1.5 GiB
  * an engine, and a variable replaces either.
@@ -99572,6 +99731,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStarvedMeasurementHoldsSideEngines,
   testGatesInTheQueueKeepTheirSlots,
   testARunFollowsTheLanesAGateWrites,
+  testAShareHoldsNoMoreThanTwoMinutesOfWork,
+  testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
+  testAFallWhileEveryShareIsOutEndsTheParkedLanes,
   testTheSlotCountIsHeldToTheMemoryThereIs,
   testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
   testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,

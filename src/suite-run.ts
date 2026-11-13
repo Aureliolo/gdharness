@@ -1163,6 +1163,8 @@ async function ranEngines(
             ? undefined
             : {
                 ceiling: follower.ceiling,
+                told: () => follower.told(),
+                untilTold: (lane, signal) => follower.untilTold(lane, signal),
                 past: async (above, signal) => {
                   const said = await follower.past(above, signal);
                   say(lanesSaid(above, said));
@@ -1976,7 +1978,7 @@ export async function runShares<T extends { readonly index: number }>(
   run: (plan: EnginePlan, index: number, lock: string, holds?: (bytes: number) => void) => Promise<T>,
   handed?: HandedSlot,
   memory?: MemoryGate,
-  raised?: Pick<FollowedLanes, 'ceiling' | 'past'>,
+  raised?: Pick<FollowedLanes, 'ceiling' | 'past'> & Partial<Pick<FollowedLanes, 'told' | 'untilTold'>>,
 ): Promise<T[]> {
   const shares = new Shares(units, declared, lanes);
   const handedOut = new AbortController();
@@ -2039,11 +2041,30 @@ export async function runShares<T extends { readonly index: number }>(
       drawn.admitted?.ended();
     }
   };
+  /**
+   * Gives the lane's slot back while the lanes file tells fewer lanes than [param at] + 1, and waits
+   * for it to tell more, or for every share to be handed out. A lane draws its next share only after.
+   */
+  const parkedPastTheLanesTold = async (at: number, held: { lock: string | null }): Promise<void> => {
+    const told = (await raised?.told?.()) ?? null;
+    if (raised?.untilTold === undefined || told === null || at < told) {
+      return;
+    }
+    if (held.lock !== null) {
+      doneWith(slots, held.lock, handed);
+      held.lock = null;
+    }
+    await raised.untilTold(at, handedOut.signal);
+  };
   const lane = async (at: number): Promise<T[]> => {
     const held = { lock: taken[at] ?? null };
     const ran: T[] = [];
     try {
       while (!empty()) {
+        await parkedPastTheLanesTold(at, held);
+        if (empty()) {
+          break;
+        }
         const drawn = await admit(at, held);
         if (drawn === null) {
           break;

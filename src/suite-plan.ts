@@ -909,6 +909,13 @@ function slowestFirst(a: Unit, b: Unit): number {
 const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
 
 /**
+ * The most work a share holds, apart from one suite longer than that, which is a share of its own.
+ * A lane gives its slot back between shares, so a run told to hold fewer slots frees them within
+ * this long, not after the lane's whole part.
+ */
+export const SHARE_MOST_SECONDS = 120;
+
+/**
  * [param units] handed out a share at a time, to lanes that start at different moments.
  *
  * Dealt once, every lane is handed its part at the start, which is right when every lane starts then
@@ -917,7 +924,8 @@ const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
  * suites from there, and the run ends as late as running the suites after the export. Here each
  * lane, as it starts or finishes an engine, is handed a share of what is left: the windowed units
  * first and whole, then the slowest headless units up to [param lanes] parts of what is left, never
- * less than [constant SHARE_FLOOR_SECONDS] while that much remains. The shares shrink as the work
+ * less than [constant SHARE_FLOOR_SECONDS] while that much remains, and never more than
+ * [constant SHARE_MOST_SECONDS]. The shares shrink as the work
  * runs out, so the lanes end close together however late each began. A run whose lanes rise widens
  * the parts, so a lane joining late is handed a part cut for the lanes there are now.
  */
@@ -970,7 +978,7 @@ export class Shares {
   /** The headless units a share takes, and those left for the shares after it. */
   private headlessSplit(): { share: Unit[]; rest: Unit[] } {
     const left = this.headless.reduce((sum, unit) => sum + unit.cost, 0);
-    const target = Math.max(SHARE_FLOOR_SECONDS, left / this.lanes);
+    const target = Math.min(SHARE_MOST_SECONDS, Math.max(SHARE_FLOOR_SECONDS, left / this.lanes));
     const share: Unit[] = [];
     const rest: Unit[] = [];
     let cost = 0;
