@@ -95789,6 +95789,44 @@ function testAMovedBinaryIsNamedByEveryPathItIsReachedBy(): void {
   }
 }
 
+/**
+ * A link inside a moved folder goes with it in the one rename, and the paths through it follow. What
+ * it leads to does not move.
+ */
+function testALinkInsideAMovedFolderMovesWithIt(): void {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  const scene = (paths: string[]): string =>
+    `[gd_scene format=3]\n\n${paths.map((path, index) => `[ext_resource type="Script" path="${path}" id="${String(index + 1)}"]\n`).join('')}\n[node name="Main" type="Node"]\n`;
+  writeTree(project, {
+    'project.godot': '',
+    'pack/p.gd': 'extends Node\n',
+    'shared/a.gd': 'extends Node\n',
+    'main.tscn': scene(['res://pack/lnk/a.gd', 'res://shared/a.gd', 'res://pack/p.gd']),
+  });
+  try {
+    assert.ok(linkTo(join(project, 'shared'), join(project, 'pack', 'lnk')), 'the platform makes a link');
+    const outcome = planFileMove(project, join(project, 'pack'), join(project, 'newpack'));
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(
+      outcome.moved.map((file) => `${file.from} -> ${file.to}`),
+      ['res://pack/p.gd -> res://newpack/p.gd'],
+      'the files behind the link do not move, and nothing garbled is listed',
+    );
+    const scened = outcome.inPlace.find((one) => one.path === 'res://main.tscn')?.after ?? '';
+    assert.match(
+      scened,
+      /path="res:\/\/newpack\/lnk\/a\.gd"/,
+      'the path through the link follows the folder',
+    );
+    assert.match(scened, /path="res:\/\/shared\/a\.gd"/, 'the path to the real place stays');
+    assert.match(scened, /path="res:\/\/newpack\/p\.gd"/);
+    assert.deepEqual(outcome.report['leftAlone'] ?? [], [], 'nothing is left naming the old folder');
+  } finally {
+    sweep(root);
+  }
+}
+
 /** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
 function projectWithTwoPaths(): { root: string; project: string } {
   const root = tmpDir();
@@ -95976,6 +96014,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFileTwoPathsReachIsRenamedOnce,
   testAMoveFollowsEveryPathItsFileIsReachedBy,
   testAMovedBinaryIsNamedByEveryPathItIsReachedBy,
+  testALinkInsideAMovedFolderMovesWithIt,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,

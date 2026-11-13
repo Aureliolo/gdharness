@@ -77,10 +77,16 @@ export type MoveOutcome =
     }
   | { readonly ok: false; readonly reason: string; readonly advice?: string[] };
 
-/** Every file under [param directory]. */
+/**
+ * Every file under [param directory]. A link is none of them: it goes with the folder that holds it
+ * in the one rename, and what it leads to stays where it is.
+ */
 function filesUnder(directory: string): string[] {
   return entriesOf(directory).flatMap((entry) => {
     const path = join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      return [];
+    }
     return entry.isDirectory() ? filesUnder(path) : [path];
   });
 }
@@ -316,11 +322,24 @@ function binaryMentions(projectPath: string, moves: ReadonlyMap<string, string>)
 }
 
 /**
- * Where each path that names a moving file must point afterwards: the files of [param moves] and
- * every other path that reaches one of them.
+ * Where each path that names a moving file must point afterwards: the files of [param moves], every
+ * path below a moved folder (a link in it moves with it, so its paths follow), and every other path
+ * that reaches a moving file.
  */
-function referencesOf(reach: Reach, moves: ReadonlyMap<string, string>): Map<string, string> {
+function referencesOf(
+  reach: Reach,
+  moves: ReadonlyMap<string, string>,
+  folder: { from: string; to: string } | null,
+): Map<string, string> {
   const references = new Map(moves);
+  if (folder !== null) {
+    const below = `${folder.from}/`;
+    for (const path of reach.paths()) {
+      if (path.startsWith(below) && !references.has(path)) {
+        references.set(path, `${folder.to}${path.slice(folder.from.length)}`);
+      }
+    }
+  }
   for (const [source, target] of moves) {
     for (const other of reach.pathsOf(source)) {
       if (!references.has(other)) {
@@ -351,7 +370,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   );
   const scripts = scriptsOf(texts);
   // The files that move on disk stay those of `moves`.
-  const references = referencesOf(scanned.reach, moves);
+  const references = referencesOf(scanned.reach, moves, isDirectory ? { from, to } : null);
   let plan = planMove(
     {
       texts,
