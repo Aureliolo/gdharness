@@ -91621,6 +91621,119 @@ async function testAnAnimationReachedByALinkInsideIsSaved(): Promise<void> {
   );
 }
 
+/** The follower saves an animation reached through a link out and then a link back into the project. */
+async function testAnAnimationReachedByALinkBackInIsSaved(): Promise<void> {
+  await withLinksOut(
+    'animation through a link back in',
+    {
+      files: {
+        'a.tscn': playingScene(['res://shared/back/walk.tres']),
+        'real/walk.tres': animationFile('walk', 'Body/Arm:position'),
+      },
+    },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(outside, 'back')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [['a0', 'Arm:position']],
+        JSON.stringify(moved),
+      );
+      assert.equal(get(moved, 'notRetargeted'), undefined, JSON.stringify(moved));
+      assert.ok(
+        at.fileOf('real/walk.tres').includes('NodePath("Arm:position")'),
+        at.fileOf('real/walk.tres'),
+      );
+    },
+  );
+}
+
+/**
+ * The addon judges a path under a link out by where it ends: back inside the project is inside,
+ * and out again, a ring, and a link whose target is gone are judged as the server's gate judges them.
+ */
+function testTheAddonJudgesALinkChainByWhereItEnds(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('link chain regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chain-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  try {
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'real/a.tres': '', 'other/b.tres': '' });
+    writeTree(outside, { 'c.tres': '', 'deeper/d.tres': '' });
+    const links: [string, string][] = [
+      [outside, join(project, 'shared')],
+      [join(project, 'real'), join(outside, 'back')],
+      [join(outside, 'deeper'), join(project, 'real', 'again')],
+      [join(project, 'nowhere'), join(project, 'real', 'hole')],
+      [join(outside, 'loop2'), join(outside, 'loop1')],
+      [join(outside, 'loop1'), join(outside, 'loop2')],
+      [join(outside, 'nowhere'), join(outside, 'gone')],
+    ];
+    for (const [target, at] of links) {
+      symlinkSync(target, at, 'junction');
+    }
+    const paths = [
+      'res://shared/back/a.tres',
+      'res://shared/c.tres',
+      'res://shared/back/again/d.tres',
+      'res://shared/loop1/x.tres',
+      'res://shared/gone/x.tres',
+      'res://shared/back/hole/x.tres',
+      'res://other/b.tres',
+      'res://shared/',
+    ];
+    writeFileSync(
+      join(project, 'runner.gd'),
+      [
+        'extends SceneTree',
+        '',
+        'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar links: PackedStringArray = ["res://shared/"]',
+        `\tvar paths: Array[String] = ${JSON.stringify(paths)}`,
+        '\tvar refused: Array[bool] = []',
+        '\tfor path: String in paths:',
+        '\t\trefused.append(not GdhSceneFile.out_through_link(path, links).is_empty())',
+        '\tprint("CHAIN " + JSON.stringify(refused))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+      encoding: 'utf8',
+      timeout: 120000,
+    });
+    const said = `${run.stdout}\n${run.stderr}`;
+    const answered = /CHAIN (\[.*\])/.exec(said)?.[1];
+    assert.ok(answered !== undefined, said);
+    assert.deepEqual(
+      JSON.parse(answered),
+      [false, true, true, true, true, false, false, true],
+      `${paths.join(' ')}: ${said}`,
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
 /**
  * A node renamed or deleted in a scene is followed into a scene instancing one that inherits it,
  * where the instance's root is the changed scene's root under another scene's name.
@@ -97477,6 +97590,28 @@ const WALK_LIBRARY =
 /** An AnimationNodeStateMachine kept in a .tres of its own. */
 const STATE_MACHINE = '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n';
 
+/** A plain absolute path inside the project is spelt as the folders list it, as one named through an alias is. */
+function testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt(): void {
+  const project = tmpDir();
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'real/r.gd': 'extends Node\n' });
+    if (!existsSync(join(project, 'REAL', 'R.GD'))) {
+      console.log('  skipped: this disk tells names apart by case');
+      return;
+    }
+    const found = resolveWithinProject(project, join(project, 'REAL', 'R.GD'));
+    assert.ok(found.ok, JSON.stringify(found));
+    assert.equal(found.relativePath, 'real/r.gd');
+    const named = resolveWithinProject(project, 'res://REAL/R.GD');
+    assert.ok(
+      named.ok && named.relativePath === 'REAL/R.GD',
+      'a res:// path keeps the spelling it was given',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
 /** A scene whose AnimationPlayer Player plays the library kept at [library]. */
 function playerOf(library: string): string {
   return (
@@ -97508,11 +97643,24 @@ async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void
           '[gd_scene format=3]\n\n[ext_resource type="AnimationNodeStateMachine" path="res://shared/sm.tres" id="1_sm"]\n\n' +
           '[node name="A" type="Node3D"]\n\n[node name="Tree" type="AnimationTree" parent="."]\ntree_root = ExtResource("1_sm")\n',
         'real/anims.tres': WALK_LIBRARY,
+        'c.tscn': playerOf('res://shared/back/anims2.tres'),
+        'd.tscn': playerOf('res://shared/back/again/anims.tres'),
+        'navback.tscn': nav.replace('res://shared/mesh.tres', 'res://shared/back/mesh.tres'),
+        'real/anims2.tres': WALK_LIBRARY,
+        'real/mesh.tres': mesh,
       },
-      outside: { 'anims.tres': WALK_LIBRARY, 'mesh.tres': mesh, 'sm.tres': STATE_MACHINE },
+      outside: {
+        'anims.tres': WALK_LIBRARY,
+        'mesh.tres': mesh,
+        'sm.tres': STATE_MACHINE,
+        'deeper/anims.tres': WALK_LIBRARY,
+      },
     },
     (real, outside) =>
-      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(real, 'link')),
+      linkTo(outside, join(real, 'shared')) &&
+      linkTo(join(real, 'real'), join(real, 'link')) &&
+      linkTo(join(real, 'real'), join(outside, 'back')) &&
+      linkTo(join(outside, 'deeper'), join(real, 'real', 'again')),
     async (at) => {
       const trackOn = (scenePath: string): Record<string, unknown> => ({
         op: 'add_track',
@@ -97571,6 +97719,20 @@ async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void
       const inside = await at.call('scene_animation', trackOn('res://b.tscn'));
       assert.equal(get(inside, 'trackIndex'), 0, JSON.stringify(inside));
       assert.ok(at.fileOf('real/anims.tres').includes('tracks/0/path'), at.fileOf('real/anims.tres'));
+
+      // Out through shared and back in through its link to real is inside, and out again is not.
+      const back = await at.call('scene_animation', trackOn('res://c.tscn'));
+      assert.equal(get(back, 'trackIndex'), 0, JSON.stringify(back));
+      assert.ok(at.fileOf('real/anims2.tres').includes('tracks/0/path'), at.fileOf('real/anims2.tres'));
+      const bakedBack = await at.call('scene_node', {
+        op: 'bake_navigation',
+        scenePath: 'res://navback.tscn',
+        nodePath: 'Region',
+      });
+      assert.equal(get(bakedBack, 'savedTo'), 'res://shared/back/mesh.tres', JSON.stringify(bakedBack));
+      const again = await at.say('scene_animation', trackOn('res://d.tscn'));
+      assert.ok(again.includes('leads out of the project through the link res://'), again);
+      assert.equal(readFileSync(join(at.outside, 'deeper', 'anims.tres'), 'utf8'), WALK_LIBRARY);
     },
   );
 }
@@ -98466,6 +98628,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnimationBehindALinkOutIsNotSaved,
   testABranchSavedOutLeavesAnAnimationBehindALinkOut,
   testAnAnimationReachedByALinkInsideIsSaved,
+  testAnAnimationReachedByALinkBackInIsSaved,
+  testTheAddonJudgesALinkChainByWhereItEnds,
+  testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt,
   testAMoveIsFollowedThroughAnInheritedInstance,
   testAMovedNodeKeepsThePathsNamingIt,
   testADeleteDropsWhatOtherScenesKeptBelowIt,

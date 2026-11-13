@@ -41,6 +41,8 @@ const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhSceneFile = preload("scene_file.gd")
 const GdhSceneUids = preload("scene_uids.gd")
+## How many links one path is followed through before it is taken to run in a ring.
+const MOST_LINKS: int = 40
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
@@ -944,8 +946,8 @@ static func links_out_in(args: Dictionary) -> PackedStringArray:
 
 
 ## Why [param file] is not read or written here when it is one of [param links_out] or lies below
-## one, or "". Case is ignored, since a scene may spell a file in another case where the file system
-## ignores it.
+## one and does not come back into the project, or "". Case is ignored, since a scene may spell a
+## file in another case where the file system ignores it.
 static func out_through_link(file: String, links_out: PackedStringArray) -> String:
 	# Windows and macOS name a file in any case, Linux only in the case it was made in.
 	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
@@ -953,6 +955,8 @@ static func out_through_link(file: String, links_out: PackedStringArray) -> Stri
 	for link: String in links_out:
 		var held: String = link.to_lower() if any_case else link
 		if lowered == held or (held.ends_with("/") and lowered.begins_with(held)):
+			if _ends_inside(file, any_case):
+				return ""
 			return (
 				(
 					"%s leads out of the project through the link %s, and only what is inside "
@@ -961,6 +965,55 @@ static func out_through_link(file: String, links_out: PackedStringArray) -> Stri
 				% [file, link]
 			)
 	return ""
+
+
+## Whether [param file], a res:// path, ends inside the project once each link on it is followed,
+## as a path out through one link and back in through another does. A ring, or a path that runs out
+## of the project at its end, is not inside. Only link targets are read, never file contents.
+static func _ends_inside(file: String, any_case: bool) -> bool:
+	var root: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	var led: String = _followed(ProjectSettings.globalize_path(file))
+	if root.is_empty() or led.is_empty():
+		return false
+	if any_case:
+		root = root.to_lower()
+		led = led.to_lower()
+	return led == root or led.begins_with(root + "/")
+
+
+## Where the absolute [param path] leads, each link on it followed in turn, or "" after
+## [constant MOST_LINKS] links, which is a ring. A link whose target is gone leads to that target.
+static func _followed(path: String) -> String:
+	var parts: PackedStringArray = path.replace("\\", "/").simplify_path().split("/")
+	var current: String = parts[0]
+	var index: int = 1
+	var links: int = 0
+	while index < parts.size():
+		var next: String = current + "/" + parts[index]
+		index += 1
+		if not DirAccess.is_link(next):
+			current = next
+			continue
+		links += 1
+		if links > MOST_LINKS:
+			return ""
+		var rest: PackedStringArray = parts.slice(index)
+		parts = _target_of(next, current).split("/")
+		current = parts[0]
+		index = 1
+		parts.append_array(rest)
+	return current
+
+
+## The absolute path the link [param at], found in the folder [param folder], points to.
+static func _target_of(at: String, folder: String) -> String:
+	var target: String = DirAccess.read_link(at).replace("\\", "/")
+	# A junction's target may carry the prefix Windows gives a path that skips its own parsing.
+	for prefix: String in ["//?/", "/??/"]:
+		target = target.trim_prefix(prefix)
+	if not target.is_absolute_path():
+		target = folder.path_join(target)
+	return target.simplify_path()
 
 
 ## Frees [member root] and answers [param error] as a refusal.

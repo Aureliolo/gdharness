@@ -344,8 +344,9 @@ function insideProject(root: string, candidate: string): string | null {
   if (!isAbsolute(candidate)) {
     return null;
   }
+  const written = relativeWithin(root, candidate);
   return (
-    relativeWithin(root, candidate) ??
+    (written === null ? null : listedSpelling(realAsFarAsItExists(root), written)) ??
     belowTheProjectByAnotherName(root, candidate) ??
     relativeWithin(realAsFarAsItExists(root), realAsFarAsItExists(resolve(candidate)))
   );
