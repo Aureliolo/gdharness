@@ -2036,14 +2036,15 @@ const streamText = fc
   }));
 
 /**
- * One read of [param log] at [param floor], checked against what the entries since [param marked]
- * hold. A search names the whole run and moves no mark, and any other read moves it to the end.
+ * One read of [param log] at [param floor], checked against the entries not yet [param covered] by
+ * an earlier read. A search names the whole run and moves no mark, and any other read covers every
+ * entry there is, which a later fold of some of them into an earlier entry does not undo.
  */
 function readsAsShown(
   log: GameLog,
   floor: Severity,
   step: { readonly mode: 'since' | 'all' | 'contains'; readonly limit: number },
-  marked: { at: number },
+  covered: Set<LogEntry>,
 ): void {
   const tail = (entries: readonly LogEntry[]): { entries: LogEntry[]; omitted: number } => {
     const omitted = Math.max(0, entries.length - step.limit);
@@ -2056,9 +2057,13 @@ function readsAsShown(
   }
   const since = step.mode === 'since';
   const found = log.select({ severity: floor, sinceLastCall: since, limit: step.limit });
-  const shown = log.all.slice(since ? marked.at : 0).filter((entry) => answersTo(entry, floor, undefined));
+  const shown = log.all.filter(
+    (entry) => !(since && covered.has(entry)) && answersTo(entry, floor, undefined),
+  );
   assert.deepEqual(found, tail(shown));
-  marked.at = log.all.length;
+  for (const entry of log.all) {
+    covered.add(entry);
+  }
 }
 
 /**
@@ -2096,7 +2101,7 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
       (texts, program: LogStep[], floor) => {
         const log = new GameLog();
         const left = texts.map((entry) => Buffer.from(entry.text, 'utf8'));
-        const marked = { at: 0 };
+        const covered = new Set<LogEntry>();
         for (const step of program) {
           if (step.kind === 'write') {
             const index = streams.indexOf(step.source);
@@ -2107,7 +2112,7 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
           } else if (step.kind === 'record') {
             log.record(step.severity, step.text);
           } else {
-            readsAsShown(log, floor, step, marked);
+            readsAsShown(log, floor, step, covered);
           }
         }
         for (const [index, bytes] of left.entries()) {
@@ -2120,22 +2125,25 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
           whole.append(streams[index] ?? 'stdout', entry.text);
         }
         whole.finish();
-        // An entry from another stream between a headline's unindented lines and its `at:` line keeps
-        // those lines out of its detail, so the lines of a stream are compared by content.
+        // Whatever other streams and the debugger put between a headline's unindented lines and its
+        // `at:` line, the entries of a stream fold as they do when it arrives whole.
         for (const source of streams) {
-          const linesOf = (
-            entries: readonly { source: string; text: string; detail: readonly string[] }[],
-          ): string[] =>
-            entries
+          const foldedOf = (reader: GameLog) =>
+            reader.all
               .filter((entry) => entry.source === source)
-              .flatMap((entry) => [entry.text, ...entry.detail])
-              .toSorted();
-          assert.deepEqual(
-            linesOf(log.all),
-            linesOf(whole.all),
-            `${source} holds the same lines as if it had arrived whole`,
-          );
+              .map(({ severity, text, detail }) => ({ severity, text, detail }));
+          const scriptsOf = (reader: GameLog): boolean[] =>
+            reader.all
+              .filter((entry) => entry.source === source)
+              .map((entry) => reader.raisedByScript(entry));
+          assert.deepEqual(foldedOf(log), foldedOf(whole), `${source} folds as if it had arrived whole`);
+          assert.deepEqual(scriptsOf(log), scriptsOf(whole), `${source} keeps its script errors`);
         }
+        assert.deepEqual(
+          log.all.map((entry) => entry.index),
+          log.all.map((_, position) => position),
+          'every entry is numbered by its position',
+        );
         const said = texts.reduce(
           (sum, entry) =>
             sum + entry.text.split('\n').filter((line) => line.replace(/\r$/, '').trim() !== '').length,
