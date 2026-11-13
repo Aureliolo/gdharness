@@ -27,6 +27,7 @@ import {
   type SentValue,
   TYPE_NAMES,
 } from './godot-variant.js';
+import { isRecord } from './records.js';
 import { shippedAddonsDirectory } from './setup.js';
 
 /** One frame of a held game's stack, innermost first. */
@@ -49,14 +50,71 @@ interface DebugScope {
   readonly variables: readonly DebugVariable[];
 }
 
-export type DebugRequest =
-  | { readonly op: 'breakpoint'; readonly script: string; readonly line: number; readonly set: boolean }
-  | { readonly op: 'pause' }
-  | { readonly op: 'resume'; readonly how: 'continue' | 'next' | 'step' | 'out' }
-  | { readonly op: 'stack' }
-  | { readonly op: 'variables'; readonly frame: number }
-  | { readonly op: 'evaluate'; readonly frame: number; readonly expression: string }
-  | { readonly op: 'output' };
+/**
+ * Each request the debugger takes, with the type of each field: a name for a string, number or
+ * boolean, and a list for a field that takes one of its values. The wire check reads it as a value
+ * and `DebugRequest` reads it as a type, so the two cannot disagree.
+ */
+export const DEBUG_REQUESTS = {
+  breakpoint: { script: 'string', line: 'number', set: 'boolean' },
+  pause: {},
+  resume: { how: ['continue', 'next', 'step', 'out'] },
+  stack: {},
+  variables: { frame: 'number' },
+  evaluate: { frame: 'number', expression: 'string' },
+  output: {},
+} as const;
+
+type FieldValue<Field> = Field extends 'string'
+  ? string
+  : Field extends 'number'
+    ? number
+    : Field extends 'boolean'
+      ? boolean
+      : Field extends readonly (infer One)[]
+        ? One
+        : never;
+
+export type DebugRequest = {
+  [Op in keyof typeof DEBUG_REQUESTS]: { readonly op: Op } & {
+    readonly [Field in keyof (typeof DEBUG_REQUESTS)[Op]]: FieldValue<(typeof DEBUG_REQUESTS)[Op][Field]>;
+  };
+}[keyof typeof DEBUG_REQUESTS];
+
+function isDebugOp(op: unknown): op is keyof typeof DEBUG_REQUESTS {
+  return typeof op === 'string' && Object.hasOwn(DEBUG_REQUESTS, op);
+}
+
+function isFieldOf(field: string | readonly string[], value: unknown): boolean {
+  return typeof field === 'string'
+    ? typeof value === field
+    : typeof value === 'string' && field.includes(value);
+}
+
+function isDebugRequest(request: Readonly<Record<string, unknown>>): request is DebugRequest {
+  const { op } = request;
+  if (!isDebugOp(op)) {
+    return false;
+  }
+  const fields: Readonly<Record<string, string | readonly string[]>> = DEBUG_REQUESTS[op];
+  return Object.entries(fields).every(([name, field]) => isFieldOf(field, request[name]));
+}
+
+/**
+ * The request [param asked] is, with its op and the table's fields alone, or null when the op is not
+ * in the table or a field has another type.
+ */
+export function debugRequestOf(asked: unknown): DebugRequest | null {
+  if (!isRecord(asked) || !isDebugOp(asked['op'])) {
+    return null;
+  }
+  const fields: Readonly<Record<string, string | readonly string[]>> = DEBUG_REQUESTS[asked['op']];
+  const request: Record<string, unknown> = { op: asked['op'] };
+  for (const name of Object.keys(fields)) {
+    request[name] = asked[name];
+  }
+  return isDebugRequest(request) ? request : null;
+}
 
 /** An answer as it crosses the keeper's channel: a refusal says why under `refused`. */
 export type DebugAnswer = Readonly<Record<string, unknown>>;

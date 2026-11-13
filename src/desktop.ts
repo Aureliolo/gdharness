@@ -20,12 +20,15 @@
  *
  * Node cannot name a desktop when it starts a process, and the package ships no native code, so the
  * one call that can, CreateProcessW with a desktop in its startup information, is made from C# (see
- * `compiled-helper.ts`).
+ * `compiled-helper.ts`). Every such start is `spawnOnDesktop`, which starts the helper through
+ * `spawnHidden`.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CompiledHelper, HELPER_COMPILE_MS } from './compiled-helper.js';
+import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import { mendBeforeStart } from './uid-cache.js';
 
 /** The desktop every process started this way shares. */
@@ -36,7 +39,7 @@ export const HIDDEN_DESKTOP = 'gdharness';
  * its games there too. Kept in step with `DESKTOP_VARIABLE` in the runtime autoload, which says what
  * a desktop with no pointer does to a game's own reading of the mouse.
  */
-export const DESKTOP_VARIABLE = 'GDHARNESS_DESKTOP';
+const DESKTOP_VARIABLE = 'GDHARNESS_DESKTOP';
 
 const SOURCE = `using System;
 using System.ComponentModel;
@@ -500,4 +503,73 @@ export function throughHelper(
     'utf8',
   );
   return { command: assembly, args: [files.spec, files.error, files.step] };
+}
+
+/** A process started on a desktop by `spawnOnDesktop`. */
+export interface DesktopStart {
+  /** The helper, which exits with the process's code. */
+  readonly child: ChildProcess;
+  readonly files: HelperFiles;
+  /** Writes the stop file, or ends the helper where the start named none. */
+  stop(): void;
+  /** The process's own pid, undefined until the helper has written it. */
+  pid(): number | undefined;
+}
+
+/**
+ * Starts [param command] through the helper, with its files in [param how]'s scratch folder. The
+ * stop and exit files are whole paths of the caller's, each named apart and in a folder that
+ * outlives the process, since the scratch folder may be deleted once the pid is read. A start that
+ * names neither hands the helper an empty name for it.
+ *
+ * The last start's files are removed first, so a start never reads another's pid, error or stop.
+ */
+export function spawnOnDesktop(
+  how: {
+    readonly desktop?: string;
+    readonly noActivate?: boolean;
+    readonly directory: string;
+    readonly affinity?: bigint;
+    readonly endsWithHelper?: boolean;
+    readonly scratch: string;
+    readonly stop?: string;
+    readonly exit?: string;
+  },
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+  assembly = helperAssembly(),
+): DesktopStart {
+  const files: HelperFiles = {
+    spec: join(how.scratch, 'spec'),
+    pid: join(how.scratch, 'pid'),
+    error: join(how.scratch, 'error'),
+    stop: how.stop ?? '',
+    step: join(how.scratch, 'step'),
+    exit: how.exit ?? '',
+  };
+  for (const file of [files.pid, files.error, files.step, files.stop, files.exit]) {
+    if (file !== '') {
+      rmSync(file, { force: true });
+    }
+  }
+  const wrapper = throughHelper(how, command, args, files, assembly);
+  const child = spawnHidden(wrapper.command, wrapper.args, {
+    ...options,
+    ...(how.desktop === undefined
+      ? {}
+      : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),
+  });
+  return {
+    child,
+    files,
+    stop: () => {
+      if (files.stop === '') {
+        child.kill();
+      } else {
+        writeFileSync(files.stop, '');
+      }
+    },
+    pid: () => helperPid(files.pid),
+  };
 }

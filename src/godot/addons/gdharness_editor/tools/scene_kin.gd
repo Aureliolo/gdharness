@@ -4,6 +4,7 @@ extends RefCounted
 ## scene, or by instancing it with its children editable.
 
 const GdhFileReads = preload("../file_reads.gd")
+const GdhFileWalk = preload("../file_walk.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSceneUids = preload("../scene_uids.gd")
@@ -182,7 +183,7 @@ static func follow(
 	changed: String, old_path: String, new_path: String, carried: GdhPaths
 ) -> Dictionary:
 	var run: GdhFollow = GdhFollow.new(changed, old_path, new_path, carried)
-	_read_scenes("res://", run.texts)
+	_read_scenes(run.texts)
 	var kin: Array[String] = _kin_of(changed, run.texts)
 	for scene_path: String in kin:
 		_follow_scene(scene_path, run)
@@ -341,7 +342,7 @@ static func _gone(path: String, moves: Dictionary) -> bool:
 ## when it names any.
 static func enclose(changed: String, at: String) -> Dictionary:
 	var texts: Dictionary = {}
-	_read_scenes("res://", texts)
+	_read_scenes(texts)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
 	for scene_path: String in _kin_of(changed, texts):
@@ -418,23 +419,12 @@ static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
 	return kin
 
 
-## The text of every .tscn under [param directory] into [param texts], keyed by res:// path, leaving
-## out the folders the engine's scan steps over: hidden ones, the engine's own, one holding a
-## `.gdignore` and one holding a project of its own. A build's copies sit in such folders.
-static func _read_scenes(directory: String, texts: Dictionary) -> void:
-	for name: String in DirAccess.get_directories_at(directory):
-		var folder: String = directory.path_join(name)
-		if not (
-			name.begins_with(".")
-			or FileAccess.file_exists(folder.path_join(".gdignore"))
-			or FileAccess.file_exists(folder.path_join("project.godot"))
-		):
-			_read_scenes(folder, texts)
-	for name: String in DirAccess.get_files_at(directory):
-		if name.ends_with(".tscn"):
-			texts[directory.path_join(name)] = FileAccess.get_file_as_string(
-				directory.path_join(name)
-			)
+## The text of every .tscn the engine scans into [param texts], keyed by res:// path. The shared
+## walk leaves out the folders the engine steps over, so a build's copies are not read, and takes in
+## the addons gdharness installed, which the engine loads.
+static func _read_scenes(texts: Dictionary) -> void:
+	for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
+		texts[path] = FileAccess.get_file_as_string(path)
 
 
 ## Whether the scene at [param scene_path] inherits [param changed], through any number of scenes.

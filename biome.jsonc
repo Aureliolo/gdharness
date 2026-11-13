@@ -23,7 +23,7 @@
     // test/regressions.ts is one suite in one file, run by name through one loose matcher, and it
     // passed the default of a mebibyte. Past the limit Biome skips the file and warns, which the
     // lint gate fails on, so the file is read rather than split to fit a performance default.
-    "maxSize": 4194304
+    "maxSize": 8388608
   },
   "json": {
     "parser": {

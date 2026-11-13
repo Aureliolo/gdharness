@@ -8,9 +8,10 @@ const GdhRead = preload("reading.gd")
 # skips anything beginning with a dot, including .import sidecars that would otherwise answer
 # for the resource they belong to.
 #
-# Both stop at a `.gdignore`, because the engine does: nothing under one is imported, so what is
-# in there is not a resource, not a dependency and not a global class. Walking in anyway hands
-# every caller files the engine will never answer for.
+# Both stop at a `.gdignore` and at a directory below their start holding a project.godot, because
+# the engine does: nothing under either is imported, so what is in there is not a resource, not a
+# dependency and not a global class. Walking in anyway hands every caller files the engine will
+# never answer for.
 
 
 # Why [param path], a res:// or uid:// path a setting names, is not a file the engine can load, or
@@ -114,6 +115,13 @@ func is_stepped_over(path: String) -> bool:
 	return FileAccess.file_exists(path + ".gdignore")
 
 
+# Whether the directory [param path], which ends in a slash, holds a project of its own. A walk
+# asks it of the directories below its start only, since the start is res://, which holds a
+# project.godot too.
+func holds_a_project(path: String) -> bool:
+	return FileAccess.file_exists(path + "project.godot")
+
+
 # An addon gdharness installed, told by the marker setup writes into it. The engine loads it, but
 # nobody on the project wrote it: the health check counted its thirty-odd scripts as the project's,
 # 39 beside the 5 project_info's own count gave, which the server's walks already step over.
@@ -129,22 +137,16 @@ func find_files(path: String, extension: String, with_ours: bool = false) -> Arr
 	var files: Array[String] = []
 	if is_stepped_over(path) or (not with_ours and is_installed_by_gdharness(path)):
 		return files
-
-	var dir: DirAccess = DirAccess.open(path)
-
-	if dir:
-		if dir.list_dir_begin() != OK:
-			return files
-		var file_name: String = dir.get_next()
-
-		while file_name != "":
-			if dir.current_is_dir() and not file_name.begins_with("."):
-				files.append_array(find_files(path + file_name + "/", extension, with_ours))
-			elif file_name.ends_with(extension):
-				files.append(path + file_name)
-
-			file_name = dir.get_next()
-
+	# A folder's folders and then its files, each sorted as DirAccess gives them, so a walk answers
+	# in one order on every platform: in the order the file system kept them, Linux named the scenes
+	# a branch save followed in another order than Windows.
+	for folder: String in DirAccess.get_directories_at(path):
+		var inner: String = path + folder + "/"
+		if not folder.begins_with(".") and not holds_a_project(inner):
+			files.append_array(find_files(inner, extension, with_ours))
+	for file_name: String in DirAccess.get_files_at(path):
+		if file_name.ends_with(extension):
+			files.append(path + file_name)
 	return files
 
 
@@ -153,29 +155,11 @@ func find_files_with_extensions(path: String, extensions: Array) -> Array[String
 	var files: Array[String] = []
 	if is_stepped_over(path) or is_installed_by_gdharness(path):
 		return files
-
-	var dir: DirAccess = DirAccess.open(path)
-
-	if dir:
-		if dir.list_dir_begin() != OK:
-			return files
-		var file_name: String = dir.get_next()
-
-		while file_name != "":
-			if file_name.begins_with("."):
-				file_name = dir.get_next()
-				continue
-
-			var full_path: String = path + file_name
-			if dir.current_is_dir():
-				files.append_array(find_files_with_extensions(full_path + "/", extensions))
-			else:
-				var ext: String = file_name.get_extension().to_lower()
-				if ext in extensions:
-					files.append(full_path)
-
-			file_name = dir.get_next()
-
-		dir.list_dir_end()
-
+	for folder: String in DirAccess.get_directories_at(path):
+		var inner: String = path + folder + "/"
+		if not folder.begins_with(".") and not holds_a_project(inner):
+			files.append_array(find_files_with_extensions(inner, extensions))
+	for file_name: String in DirAccess.get_files_at(path):
+		if not file_name.begins_with(".") and file_name.get_extension().to_lower() in extensions:
+			files.append(path + file_name)
 	return files

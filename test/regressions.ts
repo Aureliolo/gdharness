@@ -94,12 +94,14 @@ import { configDisagrees } from '../src/config-pin.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
+  type DesktopStart,
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperAssembly,
   helperExit,
   helperFailure,
   helperStep,
+  spawnOnDesktop,
   throughHelper,
   windowsCommandLine,
 } from '../src/desktop.js';
@@ -209,13 +211,21 @@ import {
   Spent,
   STARVED,
   sampled,
+  secondsFromClock,
   watching,
 } from '../src/engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { fileNoCaseCompare } from '../src/file-order.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
-import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
+import {
+  DEBUG_REQUESTS,
+  type DebugRequest,
+  debugRequestOf,
+  framesOf,
+  GameDebugger,
+  shownValue,
+} from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
   answersTo,
@@ -369,9 +379,10 @@ import {
   startTimesOf,
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
-import { cpuSecondsOf, secondsFromClock } from '../src/process-time.js';
 import {
+  folderFiles,
   ignoredTexts,
+  projectFiles,
   projectStructure,
   projectTexts,
   type SearchOptions,
@@ -379,8 +390,17 @@ import {
   SHOWN_OF_A_LINE,
   scriptsWithoutUid,
   searchProject,
+  steppedOverIn,
   VERSION_MARKER,
 } from '../src/project-scan.js';
+import {
+  type LeftOut,
+  leftOutAt,
+  type WalkedFile,
+  type WalkedFolder,
+  type WalkOptions,
+  walkProject,
+} from '../src/project-walk.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
 import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
@@ -565,6 +585,7 @@ import {
   type ChildProcess,
   runHidden,
   runSyncHidden,
+  type SpawnOptions,
   type SpawnSyncReturns,
   spawnHidden,
   spawnShown,
@@ -13395,7 +13416,7 @@ function testASearchReadsWhatItSaysItReads(): void {
     writeFileSync(join(sandbox, 'Zed.txt'), 'cutword\n');
     assert.deepEqual(
       search('cutword', { maxResults: 1 }).results.map((entry) => entry.file),
-      ['res://Zed.txt'],
+      ['res://alpha.txt'],
       'a cut search shows the same file on every file system',
     );
   } finally {
@@ -18070,6 +18091,291 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
   }
 }
 
+/** What [param read] answers once it is not undefined, asked every 100 ms for at most [param ms]. */
+async function answeredWithin<T>(read: () => T | undefined, ms: number): Promise<T | undefined> {
+  for (let waited = 0; waited < ms; waited += 100) {
+    const answer = read();
+    if (answer !== undefined) {
+      return answer;
+    }
+    await delay(100);
+  }
+  return read();
+}
+
+/** Whether [param child] has exited within [param ms]. */
+async function exitedWithin(child: DesktopStart['child'], ms: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      new Promise<boolean>((settle) => {
+        child.once('exit', () => {
+          settle(true);
+        });
+      }),
+      new Promise<boolean>((settle) => {
+        timer = setTimeout(() => {
+          settle(false);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What [param start]'s helper prints, as far as it has: the stand-in's one line. */
+function standInSaid(start: DesktopStart): () => string {
+  let heard = '';
+  start.child.stdout?.on('data', (chunk: Buffer) => {
+    heard += chunk.toString();
+  });
+  return () => heard;
+}
+
+/**
+ * One call starts a process on a desktop: its files in the scratch folder, the stop and exit files
+ * where they are named, the desktop in the environment only when one is named, and a stop that goes
+ * through the helper. A stand-in prints the desktop it is told of and waits.
+ */
+async function testADesktopStartIsOneCall(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-call-'));
+  const kept = join(root, 'kept');
+  const scratch = join(root, 'scratch');
+  mkdirSync(kept);
+  mkdirSync(scratch);
+  const running: DesktopStart[] = [];
+  const pids: number[] = [];
+  const piped: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'] };
+  const waiting = [
+    '-e',
+    "console.log(process.env['GDHARNESS_DESKTOP'] ?? 'none'); setInterval(() => undefined, 1000);",
+  ];
+  const noDesktop = { ...process.env };
+  delete noDesktop['GDHARNESS_DESKTOP'];
+  try {
+    // Every platform: the files are named inside the scratch folder, the stop and exit files as
+    // handed, and a helper that is not there is an error of the child.
+    const missing = join(root, 'no-helper');
+    const beside = spawnOnDesktop(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: join(kept, 'stop-missing'),
+        exit: join(kept, 'exit-missing'),
+      },
+      process.execPath,
+      ['-e', ''],
+      { stdio: 'ignore' },
+      missing,
+    );
+    const failed = new Promise<Error>((settle) => {
+      beside.child.once('error', settle);
+    });
+    for (const name of ['spec', 'pid', 'error', 'step'] as const) {
+      assert.equal(beside.files[name], join(scratch, name), `${name} is named inside the scratch folder`);
+    }
+    assert.equal(beside.files.stop, join(kept, 'stop-missing'), 'the stop file is as handed');
+    assert.equal(beside.files.exit, join(kept, 'exit-missing'), 'the exit file is as handed');
+    assert.ok(existsSync(beside.files.spec), 'the spec is written');
+    assert.equal(beside.pid(), undefined, 'a helper that never ran wrote no pid');
+    assert.ok((await failed) instanceof Error, 'a helper that is not there ends the child in an error');
+
+    const keeper = readFileSync(join('src', 'keeper.ts'), 'utf8');
+    assert.equal(keeper.split('endingTheGame(child, stopFile)').length - 1, 1, 'the keeper makes one ender');
+    assert.ok(
+      keeper.includes("child.kill() ? 'signalled' : 'gone'"),
+      'which answers whether anything was signalled',
+    );
+
+    if (process.platform !== 'win32') {
+      console.log('desktop start regression: the helper is Windows-only');
+      return;
+    }
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    const begin = (
+      how: Parameters<typeof spawnOnDesktop>[0],
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions = piped,
+    ): DesktopStart => {
+      const start = spawnOnDesktop(how, command, args, options);
+      running.push(start);
+      return start;
+    };
+    const named = async (start: DesktopStart): Promise<number> => {
+      const pid = await answeredWithin(() => start.pid(), 60_000);
+      assert.ok(pid !== undefined, `the helper should name the process: ${helperStep(start.files.step)}`);
+      pids.push(pid);
+      return pid;
+    };
+
+    // Stopped through the helper, with the scratch folder gone as a keeper's is once the pid is read.
+    const first = begin(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: join(kept, 'stop'),
+        exit: join(kept, 'exit'),
+      },
+      process.execPath,
+      waiting,
+    );
+    const firstSaid = standInSaid(first);
+    const firstPid = await named(first);
+    assert.notEqual(firstPid, first.child.pid, 'the pid is the process, not its helper');
+    assert.ok(alive(firstPid), 'and it is running');
+    assert.equal(
+      await answeredWithin(() => (firstSaid().includes(HIDDEN_DESKTOP) ? true : undefined), 60_000),
+      true,
+      `the process is told its desktop: ${firstSaid()}`,
+    );
+    rmSync(scratch, { recursive: true, force: true });
+    first.stop();
+    assert.ok(await exitedWithin(first.child, 60_000), 'the stop file ends the helper');
+    assert.equal(
+      await answeredWithin(() => (alive(firstPid) ? undefined : true), 30_000),
+      true,
+      'and the process with it',
+    );
+    // 257 has the low byte of the code a stop leaves, 1, so only a code the helper wrote is whole.
+    assert.equal(helperExit(first.files.exit, 257), 1, 'the exit file is in the folder that outlives it');
+    mkdirSync(scratch);
+
+    // A crash is told whole where an exit file is named and no stop file is.
+    const crashed = begin(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        exit: join(kept, 'exit-crash'),
+        endsWithHelper: true,
+      },
+      join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      ['/d', '/c', 'exit', '-1073741819'],
+    );
+    assert.equal(crashed.files.stop, '', 'no stop file is named for a start that handed none');
+    assert.ok(await exitedWithin(crashed.child, 60_000), 'the crashing stand-in ends');
+    assert.equal(helperExit(crashed.files.exit, 5), 0xc0000005, 'its whole code is read from the exit file');
+
+    // Neither file: the helper's end ends the process.
+    const bare = begin(
+      { desktop: HIDDEN_DESKTOP, directory: root, scratch, endsWithHelper: true },
+      process.execPath,
+      waiting,
+    );
+    assert.equal(bare.files.stop, '', 'no stop file');
+    assert.equal(bare.files.exit, '', 'and no exit file are named for a start that handed neither');
+    const barePid = await named(bare);
+    bare.stop();
+    assert.ok(await exitedWithin(bare.child, 60_000), 'a stop with no file ends the helper');
+    assert.equal(
+      await answeredWithin(() => (alive(barePid) ? undefined : true), 30_000),
+      true,
+      'and the process goes with it',
+    );
+
+    // A start in a folder holding the last start's pid does not read it.
+    assert.ok(existsSync(bare.files.pid), "the case needs the last start's pid file in place");
+    const absent = begin(
+      { desktop: HIDDEN_DESKTOP, directory: root, scratch, endsWithHelper: true },
+      'gdharness-no-such-command.exe',
+      [],
+    );
+    assert.ok(await exitedWithin(absent.child, 60_000), 'the helper of a command that is not there ends');
+    assert.equal(absent.pid(), undefined, "it names no pid, not the last start's");
+    assert.match(
+      helperFailure(absent.files.error) ?? '',
+      /gdharness-no-such-command/,
+      'and says which command it could not start',
+    );
+
+    // A start that names the first start's stop path, whose file was written, is not ended by it.
+    assert.ok(existsSync(first.files.stop), "the case needs the first start's stop file written");
+    const third = begin(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: first.files.stop,
+        exit: join(kept, 'exit-third'),
+      },
+      process.execPath,
+      waiting,
+    );
+    assert.equal(
+      existsSync(first.files.stop),
+      false,
+      "the last start's stop file is gone once the start returns",
+    );
+    const thirdPid = await named(third);
+    assert.ok(alive(thirdPid), 'so the new process is running');
+
+    // Named no desktop, it is told of none.
+    const plain = begin(
+      { noActivate: true, directory: root, scratch, endsWithHelper: true },
+      process.execPath,
+      waiting,
+      { ...piped, env: noDesktop },
+    );
+    const plainSaid = standInSaid(plain);
+    await named(plain);
+    assert.equal(
+      await answeredWithin(() => (plainSaid().includes('none') ? true : undefined), 60_000),
+      true,
+      `a start that names no desktop prints none: ${plainSaid()}`,
+    );
+
+    for (const start of running) {
+      start.stop();
+      assert.ok(await exitedWithin(start.child, 60_000), 'every stand-in is ended with its helper');
+    }
+    for (const pid of pids) {
+      assert.equal(
+        await answeredWithin(() => (alive(pid) ? undefined : true), 30_000),
+        true,
+        `pid ${pid} is gone`,
+      );
+    }
+  } finally {
+    for (const start of running) {
+      start.stop();
+      start.child.kill();
+    }
+    for (const pid of pids) {
+      if (alive(pid)) {
+        process.kill(pid);
+      }
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * The helper's command, its spec and its desktop variable are made in one place. Every other start
+ * through the helper is a call to it, which a new caller writing its own would bypass.
+ */
+function testEveryDesktopStartGoesThroughOneCall(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => join('src', entry));
+  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
+  const calling = (needle: string): string[] =>
+    files.filter((file) => readFileSync(file, 'utf8').includes(needle)).toSorted();
+  assert.deepEqual(calling(['through', 'Helper('].join('')), [join('src', 'desktop.ts')], 'the spec writer');
+  assert.deepEqual(
+    calling(['[DESKTOP', 'VARIABLE]'].join('_')),
+    [join('src', 'desktop.ts')],
+    'the desktop variable is named in one place',
+  );
+}
+
 // A folder the compile cannot use is said at once, not waited out and blamed on the compile.
 async function testAHelperFolderThatCannotBeUsedIsReportedAtOnce(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-folder-'));
@@ -18313,11 +18619,20 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
     return { pid: asNumber(get(launched, 'pid')), said: said.trim() };
   };
   try {
+    // The desktop in use is the one this process is on, asked the same way: a session or a queue
+    // can run the tests on a desktop other than Default.
+    const own = spawnSyncHidden(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(probe, 'utf16le').toString('base64')],
+      { encoding: 'utf8', timeout: 90_000 },
+    );
+    const inUse = / desktop=(\S+)$/.exec(own.stdout.trim())?.[1];
+    assert.ok(inUse, `the probe should name this process's desktop: ${own.stdout} ${own.stderr}`);
     const control = await where('control', undefined, 'transcript');
     assert.match(
       control.said,
-      /desktop=Default$/,
-      `the probe should read the desktop in use: ${control.said}`,
+      new RegExp(` desktop=${inUse.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`),
+      `the probe should read the desktop in use, ${inUse}: ${control.said}`,
     );
     // A desktop of each case's own, so nothing but its own launch can be holding it open.
     for (const read of ['file', 'transcript'] as const) {
@@ -19408,7 +19723,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
  * started before the game existed. Two candidates are one too many to choose between. On POSIX the
  * listing gives starts to the second, cut down, so a successor listed up to a second early is kept.
  */
-function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
+async function testASuccessorIsTheEngineStartedAsTheGameExited(): Promise<void> {
   const engine = process.platform === 'win32' ? 'C:\\Godot\\Godot_v4.exe' : '/opt/godot/godot';
   const run = (rest: string): string =>
     process.platform === 'win32' ? `"C:\\Godot\\Godot_v4.exe" ${rest}` : `/opt/godot/godot ${rest}`;
@@ -19497,6 +19812,50 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
     ticked,
     'is within the second and the tick that reading can be early by',
   );
+  if (process.platform === 'win32') {
+    console.log(
+      'successor listing regression skipped for the POSIX half (Windows lists it through the table)',
+    );
+    return;
+  }
+  // The listing itself: stand-ins of this runtime that write to the run's transcript, one of them
+  // older than the window, and each read through the process table and the dated starts.
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-successor-'));
+  const transcript = join(folder, 'transcript.log');
+  const output = openSync(transcript, 'w');
+  const standIns: ChildProcess[] = [];
+  const standIn = (): number => {
+    const child = spawnHidden(process.execPath, ['--eval', 'setInterval(() => undefined, 1000)'], {
+      stdio: ['ignore', output, 'ignore'],
+    });
+    standIns.push(child);
+    assert.ok(typeof child.pid === 'number', 'the stand-in engine started');
+    return child.pid;
+  };
+  try {
+    const earlier = standIn();
+    await delay(RESTARTED_WITHIN_MS + 1500);
+    const successor = standIn();
+    const leftAt = Date.now();
+    const followed = await followSuccessor(
+      process.pid,
+      process.execPath,
+      leftAt - 60_000,
+      leftAt,
+      transcript,
+    );
+    assert.equal(followed?.successor.pid, successor, 'the stand-in started as the game exited is followed');
+    assert.ok(followed.successor.command.includes('--eval'), 'with the command line it was started as');
+    const [began] = (await startTimesOf([successor])).values();
+    assert.equal(followed.successor.startedAt, began, 'and the start the table dates it by');
+    assert.notEqual(followed.successor.pid, earlier, 'the one started two seconds before the exit is not');
+  } finally {
+    for (const child of standIns) {
+      child.kill();
+    }
+    closeSync(output);
+    rmSync(folder, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -22534,6 +22893,84 @@ async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
     });
   } finally {
     garbled.close();
+  }
+}
+
+/**
+ * A request is checked field by field against the table both the type and the wire check read: every
+ * op keeps its fields and only those, a field of another type or a missing one refuses it, and the
+ * keeper's listener and sender use the same check.
+ */
+async function testADebugRequestIsCheckedAgainstItsTable(): Promise<void> {
+  // @ts-expect-error `how` takes the four values of the table, not any string.
+  const widened: DebugRequest = { op: 'resume', how: 'jump' };
+  assert.equal(widened.op, 'resume');
+  const valid: Readonly<Record<string, unknown>> = {
+    breakpoint: { op: 'breakpoint', script: 'res://main.gd', line: 3, set: true },
+    pause: { op: 'pause' },
+    resume: { op: 'resume', how: 'step' },
+    stack: { op: 'stack' },
+    variables: { op: 'variables', frame: 0 },
+    evaluate: { op: 'evaluate', frame: 1, expression: 'a + 1' },
+    output: { op: 'output' },
+  };
+  assert.deepEqual(
+    Object.keys(valid).toSorted(),
+    Object.keys(DEBUG_REQUESTS).toSorted(),
+    'every op is covered',
+  );
+  const wrong: Readonly<Record<string, unknown>> = {
+    script: 1,
+    line: '3',
+    set: 1,
+    how: 'jump',
+    frame: '0',
+    expression: 7,
+  };
+  for (const [op, request] of Object.entries(valid)) {
+    assert.ok(isRecord(request), `${op} is a record`);
+    assert.deepEqual(debugRequestOf(request), request, `${op} with every field valid`);
+    for (const field of Object.keys(request).filter((name) => name !== 'op')) {
+      assert.equal(
+        debugRequestOf({ ...request, [field]: wrong[field] }),
+        null,
+        `${op} with ${field} of another type`,
+      );
+      const { [field]: _left, ...without } = request;
+      assert.equal(debugRequestOf(without), null, `${op} without ${field}`);
+    }
+  }
+  assert.deepEqual(
+    debugRequestOf({ op: 'pause', how: 'next', extra: 1 }),
+    { op: 'pause' },
+    'fields the table does not name are dropped',
+  );
+  for (const asked of [null, [], 'pause', {}, { op: 'state' }, { op: 'toString' }]) {
+    assert.equal(debugRequestOf(asked), null, `${JSON.stringify(asked)} is no request`);
+  }
+
+  const calls: unknown[] = [];
+  const listening = await listenForTheServer(
+    () => 'gone',
+    (request) => {
+      calls.push(request);
+      return Promise.resolve({ paused: true });
+    },
+  );
+  assert.ok(listening !== null, 'the keeper listens');
+  try {
+    const said = await saidToPieces(listening.address, ['debug {"op":"variables","frame":"0"}\n']);
+    assert.match(said, /^\{"refused":"The debugger takes no request like /u, 'a request of the wrong type');
+    assert.equal(said.split('\n').length, 2, 'is one line');
+    assert.equal(calls.length, 0, 'never reaches the debugger');
+    assert.deepEqual(
+      await askTheKeepersDebugger(listening.address, { op: 'resume', how: 'out' }, 30_000),
+      { paused: true },
+      'a request the sender and the listener agree on is answered',
+    );
+    assert.deepEqual(calls, [{ op: 'resume', how: 'out' }], 'and reaches the debugger as it was sent');
+  } finally {
+    listening.close();
   }
 }
 
@@ -30688,6 +31125,7 @@ async function greetAsAStandInEditor(
  */
 async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-several-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-outside-'));
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     const script = (path: string): void => {
@@ -30719,6 +31157,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     writeFileSync(join(project, 'kit', 'gdharness_runtime', VERSION_MARKER), '1.0.0\n');
     script('kit/old/legacy.gd');
     writeFileSync(join(project, 'kit', 'old', '.gdignore'), '');
+    // A folder holding a project of its own, a link back up the tree and a link out of the project,
+    // each with a script the walk must not take in.
+    script('nests/inner/x.gd');
+    writeFileSync(join(project, 'nests', 'inner', 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(outside, 'away.gd'), 'extends Node\n');
+    mkdirSync(join(project, 'links'));
+    symlinkSync(join(project, 'links'), join(project, 'links', 'up'), 'junction');
+    symlinkSync(outside, join(project, 'links', 'away'), 'junction');
 
     // Which scripts a call names, without a language server.
     assert.deepEqual(
@@ -30777,6 +31223,14 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       [
         ['kit', 'empty'],
         /^No \.gd script is under kit that a folder walk takes in: kit\/gdharness_runtime is an addon gdharness installed, whose scripts are checked when it is named; kit\/old holds a \.gdignore, so the engine never loads what is under it, and a script there is checked when the script is named\. No \.gd script is under empty\.$/,
+      ],
+      [
+        ['nests'],
+        /^No \.gd script is under nests that a folder walk takes in: nests\/inner holds a project\.godot of its own, so the engine never loads what is under it as part of this project, and a script there is checked when the script is named\.$/,
+      ],
+      [
+        ['links'],
+        /^No \.gd script is under links that a folder walk takes in: links\/away is a link out of the project, which the walk does not enter; links\/up is a link back up the tree or to nothing, which the walk does not enter\.$/,
       ],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
@@ -30995,6 +31449,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     }
   } finally {
     sweep(project);
+    sweep(outside);
   }
 }
 
@@ -50414,7 +50869,7 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
     assert.equal(tree.get(probe.pid)?.parent, process.pid, 'the child names this process as its parent');
 
     const before = process.cpuUsage();
-    const seconds = await cpuSecondsOf(process.pid);
+    const seconds = (await processorSecondsOf([process.pid], 6_000)).get(process.pid);
     const after = process.cpuUsage();
     const of = (usage: NodeJS.CpuUsage): number => (usage.user + usage.system) / 1e6;
     assert.ok(
@@ -50422,7 +50877,7 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
       `the processor time is the one Node reads: ${String(seconds)} between ${of(before)} and ${of(after)}`,
     );
     assert.equal(
-      await cpuSecondsOf(probe.pid + 999_999),
+      (await processorSecondsOf([probe.pid + 999_999], 6_000)).get(probe.pid + 999_999),
       undefined,
       'and none is given for a process not running',
     );
@@ -72667,6 +73122,107 @@ function testProcessorTimeIsReadOffEveryClockFormat(): void {
   assert.equal(secondsFromClock('0:01,23'), 1.23);
   assert.equal(secondsFromClock('1-00:00:00'), 86_400);
   assert.equal(secondsFromClock(' 00:12'), 12, 'a clock padded by the column is read');
+  assert.equal(secondsFromClock('01:02'), 62);
+  assert.equal(secondsFromClock('1-02:03:04'), 93_784);
+  assert.equal(secondsFromClock('0:00,50'), 0.5, 'a comma is the point of another locale');
+  assert.equal(secondsFromClock('-'), undefined, 'a dash is no clock and not zero');
+}
+
+/**
+ * A pid's processor seconds are read one way for one pid or many, to the tenth of a second.
+ *
+ * `ps` prints whole seconds where `/proc` counts ticks, so a process that has used 400 ms read as
+ * zero. A pid that has gone is left out of the answer, never read as zero, and never costs the
+ * others theirs.
+ */
+async function testProcessorSecondsAreReadOneWay(): Promise<void> {
+  const child = spawnHidden(
+    process.execPath,
+    [
+      '--eval',
+      "const until = process.cpuUsage(); while ((process.cpuUsage().user - until.user) < 400_000) {} console.log('spun'); setInterval(() => undefined, 1000);",
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  const gone = spawnHidden(process.execPath, ['--eval', '0'], { stdio: 'ignore' });
+  try {
+    assert.ok(typeof child.pid === 'number' && typeof gone.pid === 'number', 'the fixtures started');
+    await new Promise<void>((spun, reject) => {
+      let said = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        said += chunk.toString('utf8');
+        if (said.includes('spun')) {
+          spun();
+        }
+      });
+      child.once('error', reject);
+      child.once('close', () => {
+        reject(new Error('the spinning child ended before it said so'));
+      });
+    });
+    await new Promise<void>((exited) => {
+      if (gone.exitCode !== null) {
+        exited();
+      }
+      gone.once('close', () => {
+        exited();
+      });
+    });
+    const spent = (await processorSecondsOf([child.pid])).get(child.pid);
+    assert.ok(
+      spent !== undefined && spent >= 0.2 && spent <= 5,
+      `a child that spun for 400 ms has used between 0.2 and 5 s: ${String(spent)}`,
+    );
+    const some = await processorSecondsOf([process.pid, gone.pid]);
+    assert.deepEqual([...some.keys()], [process.pid], 'a pid that has gone is left out, not read as zero');
+    assert.equal((await processorSecondsOf([])).size, 0, 'no pid is no answer');
+    assert.equal((await processorSecondsOf([gone.pid])).size, 0, 'a gone pid alone is no answer');
+    if (process.platform === 'win32') {
+      const first = (await processorSecondsOf([child.pid], 6_000)).get(child.pid);
+      await delay(500);
+      const second = (await processorSecondsOf([child.pid], 6_000)).get(child.pid);
+      assert.ok(
+        first !== undefined && second !== undefined && second >= first,
+        `the second read is no smaller: ${String(first)}, then ${String(second)}`,
+      );
+    } else {
+      console.log('processor seconds wait regression skipped for the Windows half (only it asks a table)');
+    }
+  } finally {
+    child.kill();
+    gone.kill();
+  }
+}
+
+/**
+ * Each read of the operating system's process table has one home: the listing and the `ps` of
+ * starts in `process-children.ts`, the processor seconds in `engine-spent.ts`.
+ *
+ * Two modules asking their own way gave two answers on one machine, `ps` rounding to whole seconds
+ * where `/proc` did not. Walked, so a second ask added later in any file is found.
+ */
+function testEveryProcessTableReadIsOne(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+    .map((entry) => join('src', entry).replaceAll('\\', '/'));
+  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
+  const holding = (word: string): string[] =>
+    files.filter((file) => readFileSync(file, 'utf8').includes(word)).toSorted();
+  // Built from parts, so that this file is not one that holds them.
+  const everything = ["'", 'ps', "'"].join('');
+  const listing = files.filter((file) => {
+    const source = readFileSync(file, 'utf8');
+    return source.includes(everything) && new RegExp(`${everything}\\s*,\\s*\\[?\\s*'-e'`).test(source);
+  });
+  assert.deepEqual(listing, ['src/process-children.ts'], 'the whole table is listed in one file');
+  assert.deepEqual(holding(['l', 'start'].join('')), ['src/process-children.ts'], 'starts are read in one');
+  assert.deepEqual(
+    holding(['time', '='].join('')),
+    ['src/engine-spent.ts'],
+    'processor seconds are read by ps in one',
+  );
+  assert.deepEqual(holding(['ProcessorSeconds', '(int'].join('')), [], 'the table reads seconds one way');
 }
 
 /**
@@ -72842,7 +73398,7 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
  * away, in the check on who holds the debug adapter port.
  *
  * Forty ports drawn from the band differ whether or not anything deduplicates, so the repeating
- * source is written down. The stand-in numbers sit below the band, where no real reservation lands.
+ * source is written down. A stand-in number no socket binds sits below the band, and a number this case binds comes from the walk.
  *
  * The band is checked against each platform's range for port zero, since a kernel pick inside it
  * could be a reserved number.
@@ -72866,14 +73422,19 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
   await theRealReservationsComeFromTheBandAlongTheWalk();
   await aListenerDeclinesAPortAlreadyHandedOut();
   await unheldPortProvesFreeTheNumberItReturns();
-  thePortWalkWrapsAndEachProcessStartsItsOwn();
+  await thePortWalkWrapsAndEachProcessStartsItsOwn();
+  await aProcessDrawsOnlyFromBlocksItHolds();
 }
 
 /** The real reservations are in the band and a few steps along the walk from the one before. */
 async function theRealReservationsComeFromTheBandAlongTheWalk(): Promise<void> {
   // The real one still answers, so what is asserted above is not the only thing that runs. Each
   // number is in the band and a few steps along the walk from the one before.
-  const walked = [await reservePort(), await reservePort(), await reservePort()];
+  followsAlongTheWalk([await reservePort(), await reservePort(), await reservePort()]);
+}
+
+/** Each number is in the band and ahead of the one before along the walk, however many blocks lie between. */
+function followsAlongTheWalk(walked: number[]): void {
   for (const [index, port] of walked.entries()) {
     assert.ok(
       port >= PORT_BAND.first && port <= PORT_BAND.last,
@@ -72883,7 +73444,7 @@ async function theRealReservationsComeFromTheBandAlongTheWalk(): Promise<void> {
     if (before !== undefined) {
       const span = PORT_BAND.last - PORT_BAND.first + 1;
       const step = (port - before + span) % span;
-      assert.ok(step >= 1 && step <= 200, `each follows the one before along the walk: ${walked.join(', ')}`);
+      assert.ok(step >= 1, `each follows the one before along the walk: ${walked.join(', ')}`);
     }
   }
 }
@@ -72893,26 +73454,29 @@ async function aListenerDeclinesAPortAlreadyHandedOut(): Promise<void> {
   // A listener takes its port the same way, so it never sits on one a server has been given: the
   // fake debug adapter on port zero took a reserved bridge port, and the fake editor dialling the
   // bridge reached the adapter and timed out. 1100 is handed out above, so it is declined here.
-  const offered = [1100, 1102];
-  let next = 0;
-  const pool = (): Promise<number> => Promise.resolve(offered[Math.min(next++, offered.length - 1)] ?? 0);
+  const fresh = await unheldPort();
+  const held = await unheldPort();
+  const next = await unheldPort();
+  const offered = [1100, fresh];
+  let asked = 0;
+  const pool = (): Promise<number> => Promise.resolve(offered[Math.min(asked++, offered.length - 1)] ?? 0);
   const listeners = [createServer(), createServer(), createServer()];
   try {
     assert.equal(
       await listenOnAReservedPort(listeners[0] ?? createServer(), '127.0.0.1', pool),
-      1102,
+      fresh,
       'a listener declines a port already handed out',
     );
-    // 1107 held by something that took it before the listener could, as another process can take
+    // A number held by something that took it before the listener could, as another process can take
     // a reserved port before it is bound: given up for the next one offered.
-    await new Promise<void>((ready) => listeners[1]?.listen(1107, '127.0.0.1', ready));
-    const taken = [1107, 1108];
+    await new Promise<void>((ready) => listeners[1]?.listen(held, '127.0.0.1', ready));
+    const taken = [held, next];
     let offeredNext = 0;
     assert.equal(
       await listenOnAReservedPort(listeners[2] ?? createServer(), '127.0.0.1', () =>
         Promise.resolve(taken[Math.min(offeredNext++, taken.length - 1)] ?? 0),
       ),
-      1108,
+      next,
       'and takes the next port when one it reserved is in use',
     );
   } finally {
@@ -72942,11 +73506,13 @@ async function unheldPortProvesFreeTheNumberItReturns(): Promise<void> {
     await once(holder.listen(port, host), 'listening');
   };
   try {
-    // The proof binds the number itself: a holder on 1111 is passed over even when no dial sees it.
-    await hold(1111, '127.0.0.1');
+    // The proof binds the number itself, so a number a holder has is passed over even when no dial sees it.
+    const heldNumber = await reservePort();
+    const nextNumber = await reservePort();
+    await hold(heldNumber, '127.0.0.1');
     assert.equal(
-      await unheldPort(draws(1111, 1112), undefined, dialAnswers(false)),
-      1112,
+      await unheldPort(draws(heldNumber, nextNumber), undefined, dialAnswers(false)),
+      nextNumber,
       'a number a listener holds is not proved free',
     );
 
@@ -73027,9 +73593,18 @@ async function unheldPortProvesFreeTheNumberItReturns(): Promise<void> {
 }
 
 /** The walk wraps inside the band, a port zero starts above it, and each process starts its walk somewhere of its own. */
-function thePortWalkWrapsAndEachProcessStartsItsOwn(): void {
-  const walk = bandWalk(29_998);
-  assert.deepEqual([walk(), walk(), walk()], [29_998, 29_999, 10_000], 'the walk wraps inside the band');
+async function thePortWalkWrapsAndEachProcessStartsItsOwn(): Promise<void> {
+  const asked: number[] = [];
+  const walk = bandWalk(29_998, (first) => {
+    asked.push(first);
+    return Promise.resolve(true);
+  });
+  assert.deepEqual(
+    [await walk(), await walk(), await walk()],
+    [29_998, 29_999, 10_001],
+    'the walk wraps inside the band and gives no first number',
+  );
+  assert.deepEqual(asked, [29_900, 10_000], 'each block is asked for once, as the walk enters it');
 
   const kernelStarts: number[] = [];
   if (process.platform === 'win32') {
@@ -73049,20 +73624,133 @@ function thePortWalkWrapsAndEachProcessStartsItsOwn(): void {
     assert.ok(start > PORT_BAND.last, `port zero starts above the band: ${kernelStarts.join(', ')}`);
   }
 
-  // Each process starts its walk somewhere of its own, so two suites on one machine meet rarely.
+  // Each process starts its walk somewhere of its own, so a run seldom lands on a number an earlier run left dialled.
   const firsts = new Set<string>();
   for (let count = 0; count < 3; count += 1) {
-    const printed = spawnSyncHidden(
-      process.execPath,
-      ['-e', "import { reservePort } from './test/support/server.ts'; console.log(await reservePort());"],
-      { encoding: 'utf8' },
+    const printed = childPrints(
+      "import { reservePort } from './test/support/server.ts'; console.log(await reservePort());",
     );
-    assert.equal(printed.status, 0, `a process prints its first port: ${printed.stderr}`);
-    const first = Number(printed.stdout.trim());
-    assert.ok(first >= PORT_BAND.first && first <= PORT_BAND.last, `from the band: ${printed.stdout}`);
-    firsts.add(printed.stdout.trim());
+    const first = Number(printed);
+    assert.ok(first >= PORT_BAND.first && first <= PORT_BAND.last, `from the band: ${printed}`);
+    firsts.add(printed);
   }
   assert.ok(firsts.size > 1, `three processes do not all start at one number: ${[...firsts].join(', ')}`);
+
+  // A second process meets the blocks this one holds, so its walk begins in a block of its own.
+  const other = await bandWalk(await reservePort())();
+  const second = Number(
+    childPrints(
+      `import { bandWalk } from './test/support/server.ts'; console.log(await bandWalk(${other})());`,
+    ),
+  );
+  assert.ok(second >= PORT_BAND.first && second <= PORT_BAND.last, `from the band: ${second}`);
+  assert.notEqual(blockOf(second), blockOf(other), `another process leaves the block of ${other}: ${second}`);
+
+  // A number a fixture shut after listening on it is still in a block this process holds.
+  const game = createServer();
+  const shut = await listenOnAReservedPort(game);
+  game.close();
+  const drawn = Number(
+    childPrints(
+      `import { bandWalk, unheldPort } from './test/support/server.ts'; console.log(await unheldPort(bandWalk(${shut})));`,
+    ),
+  );
+  assert.notEqual(blockOf(drawn), blockOf(shut), `a shut number's block is not handed on: ${drawn}`);
+}
+
+const blockOf = (port: number): number =>
+  PORT_BAND.first + Math.floor((port - PORT_BAND.first) / PORT_BAND.block) * PORT_BAND.block;
+
+/** What a Bun child running [param script] from the repository root prints, which it must leave by itself. */
+function childPrints(script: string): string {
+  const printed = spawnSyncHidden(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(printed.status, 0, `a process prints its port: ${printed.stderr}`);
+  assert.equal(printed.signal, null, 'and leaves without being stopped');
+  return printed.stdout.trim();
+}
+
+/** The walk asks a block once, gives only blocks it holds, settles calls made together and gives up on a band that holds nothing. */
+async function aProcessDrawsOnlyFromBlocksItHolds(): Promise<void> {
+  const recording = (answer: (first: number) => boolean, after = 0) => {
+    const asked: number[] = [];
+    const hold = async (first: number): Promise<boolean> => {
+      asked.push(first);
+      if (after > 0) {
+        await delay(after);
+      }
+      return answer(first);
+    };
+    return { asked, hold };
+  };
+
+  const refusing = recording((first) => first !== 12_000);
+  assert.equal(await bandWalk(12_050, refusing.hold)(), 12_101, 'a block that cannot be held is passed over');
+  assert.deepEqual(refusing.asked, [12_000, 12_100], 'and is asked for once');
+
+  const refusingAll = recording(() => false);
+  const empty = bandWalk(10_000, refusingAll.hold);
+  const none = /none of the 200 blocks from 10000 to 29999 could be held/;
+  await assert.rejects(empty, none, 'a band no block of which can be held is refused');
+  assert.equal(refusingAll.asked.length, 200, 'after every block was asked for');
+  await assert.rejects(empty, none, 'and the next call does the same');
+  assert.equal(refusingAll.asked.length, 400, 'asking every block again');
+
+  const slow = recording(() => true, 20);
+  const together = bandWalk(12_098, slow.hold);
+  assert.deepEqual(
+    await Promise.all([together(), together(), together()]),
+    [12_098, 12_099, 12_101],
+    'calls made together take their turns',
+  );
+  assert.deepEqual(slow.asked, [12_000, 12_100], 'and each block is asked for once');
+
+  const onlyOne = recording((first) => first === 12_000);
+  const lone = bandWalk(12_098, onlyOne.hold);
+  assert.deepEqual(
+    [await lone(), await lone(), await lone()],
+    [12_098, 12_099, 12_001],
+    'a block held stays held',
+  );
+  assert.equal(onlyOne.asked.length, 200, 'and is not asked for again');
+
+  const gaps = recording((first) => first !== 12_100 && first !== 12_200);
+  const across = bandWalk(12_098, gaps.hold);
+  followsAlongTheWalk([await across(), await across(), await across()]);
+  assert.deepEqual(
+    gaps.asked,
+    [12_000, 12_100, 12_200, 12_300],
+    'two blocks in a row that cannot be held are passed over',
+  );
+
+  const plain = recording(() => true);
+  assert.equal(await bandWalk(12_000, plain.hold)(), 12_001, 'a start that is a first number is not given');
+  assert.deepEqual(plain.asked, [12_000], 'though its block is asked for');
+
+  const port = await reservePort();
+  const away = await bandWalk(port)();
+  assert.ok(away >= PORT_BAND.first && away <= PORT_BAND.last, `from the band: ${away}`);
+  assert.notEqual(blockOf(away), blockOf(port), 'the real hold keeps the block of a reserved port');
+  const first = blockOf(away);
+  const probe = createServer();
+  try {
+    await assert.rejects(
+      async () => {
+        await once(probe.listen(first, '127.0.0.1'), 'listening');
+      },
+      { code: 'EADDRINUSE' },
+      'the first number of a block the walk entered is held',
+    );
+  } finally {
+    probe.close();
+  }
+  const dialled = createConnection({ port: first, host: '127.0.0.1' });
+  dialled.on('error', () => undefined);
+  const closed = await once(dialled, 'close', { signal: AbortSignal.timeout(10_000) }).then(
+    () => true,
+    () => false,
+  );
+  dialled.destroy();
+  assert.ok(closed, `the hold on ${first} lets a dial go at once rather than keeping it open`);
 }
 
 /**
@@ -87937,6 +88625,9 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
   files['export/room.tscn'] = files['room.tscn'] ?? '';
   files['nested/project.godot'] = 'config_version=5\n';
   files['nested/room.tscn'] = files['room.tscn'] ?? '';
+  // A scene in an addon gdharness installed, which the engine loads and the walk takes in.
+  files['addons/ours/.gdharness-version'] = '0.0.0\n';
+  files['addons/ours/hall.tscn'] = files['long_desk.tscn'] ?? '';
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(project, path)), { recursive: true });
     writeFileSync(join(project, path), content);
@@ -87970,7 +88661,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.deepEqual(
       asArray(get(renamed, 'followed')).map(String).toSorted(),
-      ['res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
+      ['res://addons/ours/hall.tscn', 'res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
       JSON.stringify(renamed),
     );
     assert.deepEqual(
@@ -92886,6 +93577,43 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
+
+  // The parts CI runs fit the time each part's run is given, by the platform's own figures, with a
+  // fifth to spare: five Windows parts by stale figures came to 830 seconds and ran one part out of
+  // its 1200. Read from the workflows, so a part count or a budget changed there is held here too.
+  const workflows = join(process.cwd(), '.github', 'workflows');
+  const budgetSaid = /GDHARNESS_REGRESSION_BUDGET_MS: '(\d+)'/.exec(
+    readFileSync(join(workflows, 'engine.yml'), 'utf8'),
+  )?.[1];
+  assert.ok(budgetSaid, 'engine.yml gives the regressions their run time');
+  const budgetSeconds = Number(budgetSaid) / 1000;
+  const ci = readFileSync(join(workflows, 'ci.yml'), 'utf8');
+  for (const [job, platform] of [
+    ['engine-linux-parts', 'linux'],
+    ['engine-windows-parts', 'win32'],
+    ['engine-macos-parts', 'darwin'],
+  ] as const) {
+    const block = ci.slice(ci.indexOf(`  ${job}:`));
+    const said = /regression-parts: '(\[[^']*\])'/.exec(block)?.[1];
+    assert.ok(said, `ci.yml names the parts of ${job}`);
+    const named: unknown = JSON.parse(said);
+    assert.ok(Array.isArray(named), said);
+    const parts = named.length;
+    assert.deepEqual(
+      named,
+      Array.from({ length: parts }, (_unused, at) => `${at + 1}/${parts}`),
+      `${job} names every part of ${parts} once`,
+    );
+    const seconds = REGRESSION_SECONDS[platform];
+    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
+    const loads = Array.from({ length: parts }, (_unused, at) =>
+      regressionPart(names, at + 1, parts, seconds).reduce((total, name) => total + weight(name), 0),
+    );
+    assert.ok(
+      Math.max(...loads) <= budgetSeconds * 0.8,
+      `${platform}'s ${parts} parts fit four fifths of ${budgetSeconds}s: ${loads.join(', ')}`,
+    );
+  }
 }
 
 /**
@@ -92917,8 +93645,275 @@ function testAnUpgradeRestartsOnlyAnEditorThatIsOpen(): void {
   );
 }
 
+function tmpDir(): string {
+  return mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-walk-'));
+}
+
+interface ReadWalk {
+  folders: WalkedFolder[];
+  files: (WalkedFile & { path: string })[];
+  scripts: string[];
+  leftOut: LeftOut[];
+}
+
+function tour(start: string, options: WalkOptions = {}): ReadWalk {
+  const walk = walkProject(start, options);
+  const folders = [...walk.folders];
+  const files = folders.flatMap((from) => {
+    const prefix = from.folder === '' ? '' : `${from.folder}/`;
+    return from.files.map((file) => ({ ...file, path: `${prefix}${file.name}` }));
+  });
+  const scripts = files.map((file) => file.path).filter((path) => path.endsWith('.gd'));
+  const leftOut = walk.leftOut.toSorted((a, b) => a.folder.localeCompare(b.folder));
+  return { folders, files, scripts, leftOut };
+}
+
+function linkTo(target: string, path: string, kind: 'junction' | 'file' = 'junction'): boolean {
+  try {
+    symlinkSync(target, path, kind);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function testOneWalkStepsOverWhatTheEngineDoes(): void {
+  const project = tmpDir();
+  const gd = '';
+  try {
+    const addon = 'addons/gdharness_editor';
+    writeTree(project, {
+      'project.godot': '',
+      'a.gd': gd,
+      '.hidden/h.gd': gd,
+      '.hidden/.gdignore': '',
+      '.godot/g.gd': gd,
+    });
+    writeTree(project, { 'kit/.gdignore': '', 'kit/k.gd': gd, 'demo/project.godot': '', 'demo/d.gd': gd });
+    writeTree(project, { [`${addon}/.gdharness-version`]: '', [`${addon}/e.gd`]: gd });
+    const ours = { folder: addon, why: 'gdharness' };
+    const nested = { folder: 'demo', why: 'project' };
+    const ignored = { folder: 'kit', why: 'gdignore' };
+    assert.deepEqual(tour(project).scripts, ['a.gd']);
+    assert.deepEqual(tour(project).leftOut, [ours, nested, ignored]);
+    assert.deepEqual(tour(project, { withOurs: true }).scripts.toSorted(), ['a.gd', `${addon}/e.gd`]);
+    const demo = join(project, 'demo');
+    assert.deepEqual(tour(demo).scripts, ['d.gd']);
+    const named = (directory: string): string[] => folderFiles(project, directory, ['.gd']);
+    assert.deepEqual([named(demo), named(join(project, 'kit')), named(project)], [[], [], ['a.gd']]);
+    assert.deepEqual(steppedOverIn(project, demo), [{ folder: '', why: 'project' }]);
+    assert.deepEqual(steppedOverIn(project, project), [ours, nested, ignored]);
+    assert.deepEqual(leftOutAt(project, 'demo/sub/x.gd'), nested);
+    assert.deepEqual(leftOutAt(project, 'kit/k.gd'), ignored);
+    assert.deepEqual([leftOutAt(project, ''), leftOutAt(project, '.hidden/h.gd')], [null, null]);
+
+    writeTree(project, { 'fake/f.gd': gd, 'fake/project.godot/x': '' });
+    writeTree(project, { 'odd/o.gd': gd, 'odd/.gdignore/x': '' });
+    const marked = tour(project);
+    assert.deepEqual(
+      marked.scripts.filter((name) => /^(fake|odd)/.test(name)),
+      ['fake/f.gd', 'odd/o.gd'],
+    );
+    assert.deepEqual([marked.leftOut, leftOutAt(project, 'odd/o.gd')], [[ours, nested, ignored], null]);
+
+    writeTree(project, { 'node_modules/pkg/m.gd': gd, 'godot/x.gd': gd, 'deep/godot/y.gd': gd });
+    assert.ok(projectFiles(project, ['.gd']).includes('node_modules/pkg/m.gd'));
+    assert.ok(tour(project).scripts.includes('godot/x.gd'));
+    const hidden = '[application]\n\nconfig/use_hidden_project_data_directory=false\n';
+    writeTree(project, { 'project.godot': hidden });
+    const visible = tour(project);
+    assert.deepEqual(
+      [visible.scripts.includes('godot/x.gd'), visible.leftOut.some((left) => left.folder === 'godot')],
+      [false, false],
+    );
+    // The data folder is the project's own, so a godot folder lower down is walked like any other.
+    assert.ok(visible.scripts.includes('deep/godot/y.gd'), JSON.stringify(visible.scripts));
+
+    writeTree(project, { 'folders/Zeta/z.gd': gd, 'folders/alpha/a.gd': gd, 'folders/b.gd': gd });
+    const forward = tour(project);
+    const backward = tour(project, { reversed: true });
+    const under = (read: ReadWalk): string[] =>
+      read.folders.map((folder) => folder.folder).filter((folder) => folder.startsWith('folders'));
+    assert.deepEqual(under(forward), ['folders/alpha', 'folders/Zeta', 'folders']);
+    assert.deepEqual(under(backward), ['folders', 'folders/Zeta', 'folders/alpha']);
+    assert.deepEqual(
+      backward.files.map((file) => file.path),
+      forward.files.map((file) => file.path).toReversed(),
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+function testASearchCutAtItsLimitFollowsTheScanOrder(): void {
+  inNested({ 'a.gd': '#x', 'z/y.gd': '#x' }, (project) => {
+    const found = searchProject(project, { query: 'x', regex: false, caseSensitive: false, maxResults: 1 });
+    const { total_matches: total, truncated } = found.summary;
+    assert.deepEqual(
+      [found.results.map((entry) => entry.file), total, truncated],
+      [['res://z/y.gd'], 2, true],
+    );
+  });
+}
+
+function testAWalkFollowsLinksAndMarksTheOnesThatLeave(): void {
+  const base = tmpDir();
+  const project = join(base, 'project');
+  const outside = join(base, 'outside');
+  const p = (...steps: string[]): string => join(project, ...steps);
+  const gd = '# needle\n';
+  try {
+    writeTree(project, { 'project.godot': '', 'real/r.gd': gd, 'sub/keep.txt': '' });
+    writeTree(outside, { 'o.gd': '# outsider\n' });
+    linkTo(p('real'), p('link'));
+    const walked = tour(project);
+    const at = (read: ReadWalk, path: string): ReadWalk['files'][number] | undefined =>
+      read.files.find((file) => file.path === path);
+    const via = at(walked, 'link/r.gd');
+    const direct = at(walked, 'real/r.gd');
+    assert.deepEqual(
+      [via?.twin, direct?.twin, via?.real === direct?.real, walked.leftOut],
+      [true, false, true, []],
+    );
+    assert.deepEqual([projectStructure(project).scripts, scriptsWithoutUid(project)], [1, ['real/r.gd']]);
+    const search = (query: string, more: Partial<SearchOptions> = {}): SearchResult =>
+      searchProject(project, { query, regex: false, caseSensitive: false, maxResults: 100, ...more });
+    const files = (found: SearchResult): string[] => found.results.map((entry) => entry.file);
+    assert.deepEqual(
+      [search('needle').summary.total_matches, files(search('needle'))],
+      [1, ['res://real/r.gd']],
+    );
+    assert.deepEqual(scriptsToDiagnose(project, 'res://'), { ok: true, value: ['res://real/r.gd'] });
+    assert.deepEqual(scriptsToDiagnose(project, 'res://link'), { ok: true, value: ['res://link/r.gd'] });
+    assert.deepEqual(files(search('needle', { within: p('link') })), ['res://link/r.gd']);
+
+    writeTree(project, { 'kit/.gdignore': '', 'kit/sub/s.gd': gd });
+    linkTo(p('kit', 'sub'), p('via1'));
+    linkTo(p('kit', 'sub'), p('via2'));
+    const twice = tour(project);
+    assert.deepEqual([at(twice, 'via1/s.gd')?.twin, at(twice, 'via2/s.gd')?.twin], [false, true]);
+
+    if (existsSync(p('REAL')) && linkTo(p('REAL'), p('Upper'))) {
+      const cased = tour(project);
+      assert.equal(at(cased, 'Upper/r.gd')?.real, at(cased, 'real/r.gd')?.real);
+    }
+
+    linkTo(outside, p('shared'));
+    const fileLinked = linkTo(join(outside, 'o.gd'), p('linked.gd'), 'file');
+    assert.ok(tour(project).scripts.includes('shared/o.gd'));
+    const held = tour(project, { inside: project });
+    assert.deepEqual(
+      [held.scripts.includes('shared/o.gd'), held.scripts.includes('linked.gd')],
+      [false, false],
+    );
+    const out = held.leftOut.filter((left) => left.why === 'outside').map((left) => left.folder);
+    assert.deepEqual(out, fileLinked ? ['linked.gd', 'shared'] : ['shared']);
+    const outsider = search('outsider');
+    assert.deepEqual([outsider.results, outsider.not_searched?.includes('res://shared/')], [[], true]);
+    assert.deepEqual(folderFiles(project, p('shared'), ['.gd']), []);
+    assert.deepEqual(steppedOverIn(project, p('shared')), [{ folder: '', why: 'outside' }]);
+    assert.deepEqual(tour(outside, { inside: project }).leftOut, [{ folder: '', why: 'outside' }]);
+
+    linkTo(p('real'), p('sub', 'l'));
+    assert.deepEqual(folderFiles(project, p('sub'), ['.gd']), ['l/r.gd']);
+
+    mkdirSync(p('tmp'));
+    linkTo(project, p('loop'));
+    linkTo(project, p('real', 'up'));
+    linkTo(p('tmp'), p('gone'));
+    rmSync(p('tmp'), { recursive: true });
+    const ended = tour(project, { inside: project }).leftOut.filter((left) => left.why === 'link');
+    const folders = ['gone', 'link/up', 'loop', 'real/up'];
+    assert.deepEqual(
+      ended.filter((left) => folders.includes(left.folder)),
+      folders.map((folder) => ({ folder, why: 'link' })),
+    );
+    const skipped = search('needle').not_searched ?? [];
+    assert.deepEqual(
+      folders.map((f) => skipped.includes(`res://${f}/`)),
+      [true, true, true, true],
+    );
+  } finally {
+    sweep(base);
+  }
+}
+
+function inNested(files: Record<string, string>, body: (project: string) => void): void {
+  const project = tmpDir();
+  try {
+    writeTree(project, { 'project.godot': '', 'game_copy/project.godot': '', ...files });
+    body(project);
+  } finally {
+    sweep(project);
+  }
+}
+
+function testAFolderHoldingAProjectIsNotCounted(): void {
+  const files = {
+    'scenes/main.tscn': '',
+    'scripts/hero.gd': '',
+    'game_copy/level.tscn': '',
+    'game_copy/a.png': '',
+  };
+  inNested(files, (project) => {
+    assert.deepEqual(projectStructure(project), { scenes: 1, scripts: 1, assets: 0, other: 1 });
+  });
+}
+
+function testTheFileWalksStepOverAFolderHoldingAProject(): void {
+  const files = {
+    'scripts/hero.gd': '',
+    'scripts/deep/project.godot': '',
+    'scripts/deep/h.gd': '',
+    'game_copy/o.gd': '',
+  };
+  inNested(files, (project) => {
+    const scripts = join(project, 'scripts');
+    const copy = join(project, 'game_copy');
+    assert.deepEqual(projectFiles(project, ['.gd']), ['scripts/hero.gd']);
+    assert.deepEqual(folderFiles(project, scripts, ['.gd']), ['hero.gd']);
+    assert.deepEqual(folderFiles(project, project, ['.gd']), ['scripts/hero.gd']);
+    assert.deepEqual(folderFiles(project, copy, ['.gd']), []);
+    const nested = ['game_copy', 'scripts/deep'].map((folder) => ({ folder, why: 'project' }));
+    assert.deepEqual(steppedOverIn(project, project), nested);
+    assert.deepEqual(steppedOverIn(project, scripts), [{ folder: 'deep', why: 'project' }]);
+    assert.deepEqual(steppedOverIn(project, copy), [{ folder: '', why: 'project' }]);
+  });
+}
+
+function testScriptsWithoutAUidStepOverAFolderHoldingAProject(): void {
+  inNested({ 'scripts/hero.gd': '', 'game_copy/other.gd': '' }, (project) => {
+    assert.deepEqual(scriptsWithoutUid(project), ['scripts/hero.gd']);
+  });
+}
+
+function testASearchStepsOverAFolderHoldingAProject(): void {
+  inNested({ 'scripts/hero.gd': '#find', 'game_copy/other.gd': '#find' }, (project) => {
+    const options = { query: 'find', regex: false, caseSensitive: false, maxResults: 100 };
+    const found = searchProject(project, options);
+    const named = searchProject(project, { ...options, within: join(project, 'game_copy') });
+    assert.deepEqual(
+      [found.results.map((entry) => entry.file), found.not_searched, found.summary.files_searched],
+      [['res://scripts/hero.gd'], ['res://game_copy/'], 2],
+    );
+    assert.deepEqual(
+      named.results.map((entry) => entry.file),
+      ['res://game_copy/other.gd'],
+    );
+    assert.ok(named.note?.startsWith('res://game_copy/ is searched because path names it.'));
+    assert.ok(named.note?.endsWith('it holds a project.godot of its own, which makes it another project.'));
+  });
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testRegressionPartsCoverEveryTestOnceAndBalance,
+  testOneWalkStepsOverWhatTheEngineDoes,
+  testASearchCutAtItsLimitFollowsTheScanOrder,
+  testAWalkFollowsLinksAndMarksTheOnesThatLeave,
+  testAFolderHoldingAProjectIsNotCounted,
+  testTheFileWalksStepOverAFolderHoldingAProject,
+  testScriptsWithoutAUidStepOverAFolderHoldingAProject,
+  testASearchStepsOverAFolderHoldingAProject,
   testAnUpgradeRestartsOnlyAnEditorThatIsOpen,
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
@@ -93022,6 +94017,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryFileArgumentIsContained,
   testAnUnknownArgumentSaysWhichServerSaysSo,
   testProcessorTimeIsReadOffEveryClockFormat,
+  testProcessorSecondsAreReadOneWay,
+  testEveryProcessTableReadIsOne,
   testAWaitOfNothingIsAWaitOfNothing,
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
   testEveryShippedAddonIsInstalled,
@@ -93140,6 +94137,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
+  testADesktopStartIsOneCall,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
@@ -93412,6 +94410,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheKeepersListenerAnswersTheFirstLineOnly,
   testTheLauncherSaysWhyARunDidNotStart,
   testTheKeeperAnswersItsDebuggersQuestions,
+  testADebugRequestIsCheckedAgainstItsTable,
   testAKeptGamesStackAndValuesRead,
   testAPauseAnswersWithTheGamesOwnScript,
   testAnExitedGamesLastMessagesAreRead,
@@ -93573,6 +94572,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
   testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
   testEveryProcessStartsThroughTheHiddenSpawn,
+  testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,

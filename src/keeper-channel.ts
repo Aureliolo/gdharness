@@ -18,7 +18,7 @@ import { connect, createServer, type Server } from 'node:net';
 import { join } from 'node:path';
 import process from 'node:process';
 import { errorMessage } from './errors.js';
-import type { DebugAnswer, DebugRequest } from './game-debugger.js';
+import { type DebugAnswer, type DebugRequest, debugRequestOf } from './game-debugger.js';
 import { isRecord } from './records.js';
 import { discard, scratchDirectory } from './scratch.js';
 
@@ -63,41 +63,6 @@ async function debuggedOrWhyNot(
   } catch (error) {
     return JSON.stringify({ refused: `The debugger could not answer: ${errorText(error)}` });
   }
-}
-
-const RESUMED_HOW = ['continue', 'next', 'step', 'out'] as const;
-
-/** The request [param asked] is, or null when it is not one the debugger takes. */
-function debugRequestOf(asked: unknown): DebugRequest | null {
-  if (!isRecord(asked)) {
-    return null;
-  }
-  const { op, script, line, set, how, frame, expression } = asked;
-  switch (op) {
-    case 'breakpoint':
-      return breakpointRequestOf(script, line, set);
-    case 'pause':
-    case 'stack':
-    case 'output':
-      return { op };
-    case 'resume': {
-      const resumed = RESUMED_HOW.find((one) => one === how);
-      return resumed === undefined ? null : { op, how: resumed };
-    }
-    case 'variables':
-      return typeof frame === 'number' ? { op, frame } : null;
-    case 'evaluate':
-      return typeof frame === 'number' && typeof expression === 'string' ? { op, frame, expression } : null;
-    default:
-      return null;
-  }
-}
-
-/** The breakpoint request the three fields make, or null when any is the wrong type. */
-function breakpointRequestOf(script: unknown, line: unknown, set: unknown): DebugRequest | null {
-  return typeof script === 'string' && typeof line === 'number' && typeof set === 'boolean'
-    ? { op: 'breakpoint', script, line, set }
-    : null;
 }
 
 function errorText(error: unknown): string {

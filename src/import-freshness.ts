@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { type Dirent, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { installedByUs } from './project-scan.js';
+import { kindOf } from './project-walk.js';
 import { importRecord } from './reimport.js';
 
 /** One file whose import is behind it, by its `res://` path, with why. */
@@ -291,25 +292,6 @@ function recordedSourceMd5(projectPath: string, resPath: string): string {
     );
   } catch {
     return '';
-  }
-}
-
-/** What [param entry] of [param directory] is, a link taken as what it points at. */
-function kindOf(directory: string, entry: Dirent): 'directory' | 'file' | 'other' {
-  if (entry.isDirectory()) {
-    return 'directory';
-  }
-  if (entry.isFile()) {
-    return 'file';
-  }
-  if (!entry.isSymbolicLink()) {
-    return 'other';
-  }
-  try {
-    const target = statSync(join(directory, entry.name));
-    return target.isDirectory() ? 'directory' : target.isFile() ? 'file' : 'other';
-  } catch {
-    return 'other';
   }
 }
 

@@ -96,14 +96,13 @@ import {
   type StoppedAt,
 } from './dap_client.js';
 import {
-  DESKTOP_VARIABLE,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
   helperStep,
-  throughHelper,
+  spawnOnDesktop,
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
@@ -137,6 +136,7 @@ import {
 } from './engine-leaks.js';
 import { CONSOLE_CLOSED, type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
+import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -262,18 +262,17 @@ import {
   whyTheProcessTreeFailed,
 } from './process-children.js';
 import { ensureProcessTable } from './process-table.js';
-import { cpuSecondsOf } from './process-time.js';
 import {
   folderFiles,
   pathsInUidCache,
   projectFiles,
   projectStructure,
-  type SteppedOver,
   scriptsWithoutUid,
   searchProject,
   steppedOverIn,
   underGdignore,
 } from './project-scan.js';
+import type { LeftOut } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
@@ -4212,13 +4211,13 @@ function scriptsNamedBy(
   if (!isDirectory(location.absolutePath)) {
     return { ok: true, scripts: [`res://${fromRoot}`], empty: [] };
   }
-  const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
+  const inside = folderFiles(projectPath, location.absolutePath, ['.gd']).map((script) =>
     fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
   );
   return {
     ok: true,
     scripts: inside,
-    empty: inside.length === 0 ? [noScriptUnder(entry, location.absolutePath, fromRoot)] : [],
+    empty: inside.length === 0 ? [noScriptUnder(projectPath, entry, location.absolutePath, fromRoot)] : [],
   };
 }
 
@@ -4274,14 +4273,20 @@ function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): 
 }
 
 /** Why a folder named gave no script, with each folder below it that the walk stepped over. */
-function noScriptUnder(entry: string, absolute: string, fromRoot: string): string {
-  const said = (stepped: SteppedOver): string => {
+function noScriptUnder(projectPath: string, entry: string, absolute: string, fromRoot: string): string {
+  const said = (stepped: LeftOut): string => {
     const folder = [fromRoot, stepped.folder].filter((step) => step !== '').join('/') || entry;
-    return stepped.why === 'gdharness'
-      ? `${folder} is an addon gdharness installed, whose scripts are checked when it is named`
-      : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
+    const checkedWhenNamed = 'and a script there is checked when the script is named';
+    const reasons: Record<LeftOut['why'], string> = {
+      gdharness: `is an addon gdharness installed, whose scripts are checked when it is named`,
+      project: `holds a project.godot of its own, so the engine never loads what is under it as part of this project, ${checkedWhenNamed}`,
+      link: 'is a link back up the tree or to nothing, which the walk does not enter',
+      outside: 'is a link out of the project, which the walk does not enter',
+      gdignore: `holds a .gdignore, so the engine never loads what is under it, ${checkedWhenNamed}`,
+    };
+    return `${folder} ${reasons[stepped.why]}`;
   };
-  const stepped = steppedOverIn(absolute);
+  const stepped = steppedOverIn(projectPath, absolute);
   return stepped.length === 0
     ? `No .gd script is under ${entry}.`
     : `No .gd script is under ${entry} that a folder walk takes in: ${stepped.map(said).join('; ')}.`;
@@ -8560,8 +8565,8 @@ class GodotServer {
     if (place !== null && !existsSync(place.absolutePath)) {
       return this.createErrorResponse(nothingToSearchAt(project.value.path, place.relativePath));
     }
-    // The walk steps over links, but the place asked for is opened through them, so a link inside
-    // the project naming a folder outside it would be searched whole.
+    // The search reads nothing behind a link out of the project, but the place asked for is opened through one,
+    // so a link inside the project naming a folder outside it would be searched whole.
     if (
       place !== null &&
       !isWithinRoot(realpathSync.native(project.value.path), realpathSync.native(place.absolutePath))
@@ -14498,32 +14503,35 @@ class GodotServer {
   ): SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void } {
     // Through the helper the child is PowerShell, and ending it would leave the engine running on a
     // desktop nobody can see, so the helper is asked to end the engine instead.
-    const wrapper =
+    const helped =
       onDesktop === undefined
         ? null
-        : throughHelper(
-            { desktop: HIDDEN_DESKTOP, directory: onDesktop.directory },
+        : spawnOnDesktop(
+            {
+              desktop: HIDDEN_DESKTOP,
+              directory: onDesktop.directory,
+              scratch: dirname(onDesktop.files.spec),
+              stop: onDesktop.files.stop,
+              exit: onDesktop.files.exit,
+            },
             godotPath,
             cmdArgs,
-            onDesktop.files,
+            { stdio: ['ignore', 'pipe', 'pipe'], env: env ?? process.env },
           );
     const child =
-      wrapper === null
+      helped === null
         ? spawnHidden(godotPath, cmdArgs, {
             stdio: ['ignore', 'pipe', 'pipe'],
             ...(env ? { env } : {}),
           })
-        : spawnHidden(wrapper.command, wrapper.args, {
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...(env ?? process.env), [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
-          });
+        : helped.child;
     belowNormal(child);
     const whole = holdExit(child.pid);
     const stop = (): void => {
-      if (onDesktop === undefined) {
+      if (helped === null) {
         child.kill();
       } else {
-        writeFileSync(onDesktop.files.stop, '');
+        helped.stop();
       }
     };
     // The same reasoning at the other end of the call: a caller who cancelled is no longer the
@@ -14561,10 +14569,10 @@ class GodotServer {
       throughEditor: false,
       brokeOn: null,
     };
-    child.stdout.on('data', (data: Buffer) => {
+    child.stdout?.on('data', (data: Buffer) => {
       log.append('stdout', data);
     });
-    child.stderr.on('data', (data: Buffer) => {
+    child.stderr?.on('data', (data: Buffer) => {
       log.append('stderr', data);
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
@@ -14595,8 +14603,8 @@ class GodotServer {
           done();
         }
       };
-      child.stdout.once('close', closed);
-      child.stderr.once('close', closed);
+      child.stdout?.once('close', closed);
+      child.stderr?.once('close', closed);
       child.once('exit', () => {
         setTimeout(done, STREAMS_GRACE_MS).unref();
       });
@@ -16649,8 +16657,11 @@ class GodotServer {
     const processToAsk = wanted
       ? (announced ?? (stillRunning(run) ? await this.gameProcessOf(run) : undefined) ?? run.pid ?? null)
       : null;
+    // Six seconds, since a loaded machine is the one whose run somebody is watching for a stall.
     const cpuSeconds =
-      wanted && processToAsk !== null && stillRunning(run) ? await cpuSecondsOf(processToAsk) : undefined;
+      wanted && processToAsk !== null && stillRunning(run)
+        ? (await processorSecondsOf([processToAsk], 6_000)).get(processToAsk)
+        : undefined;
     return { processToAsk, cpuSeconds };
   }
 

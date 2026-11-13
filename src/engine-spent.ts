@@ -11,7 +11,6 @@ import { readFileSync } from 'node:fs';
 import { availableParallelism, cpus } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { askProcessTable } from './process-table.js';
-import { secondsFromClock } from './process-time.js';
 import { runHidden as run } from './spawn.js';
 
 /**
@@ -207,7 +206,7 @@ export async function heldBy(pids: readonly number[]): Promise<Map<number, numbe
     } else if (process.platform === 'linux') {
       await readProcSeconds(pids, new Map(), held);
     } else {
-      await readPsSeconds(pids, new Map(), held);
+      await readPsSeconds(pids, new Map(), held, ASK_TIMEOUT_MS);
     }
   } catch {
     // Unread, so the engine's figure is left out.
@@ -225,16 +224,29 @@ async function readWindowsHeld(pids: readonly number[], held: Map<number, number
   }
 }
 
-/** The processor seconds each of [param pids] has used, without any the platform does not answer for. */
-export async function processorSecondsOf(pids: readonly number[]): Promise<Map<number, number>> {
+/**
+ * The processor seconds each of [param pids] has used, within [param withinMs] of waiting on the
+ * platform, without any it will not answer for.
+ *
+ * Best effort on purpose. Every way of asking is a different program on a different platform, any
+ * of them can be missing, slow or refused, and the answer a caller builds does not depend on this
+ * one: a missing number is left out rather than turned into a failure.
+ */
+export async function processorSecondsOf(
+  pids: readonly number[],
+  withinMs = ASK_TIMEOUT_MS,
+): Promise<Map<number, number>> {
   const found = new Map<number, number>();
+  if (pids.length === 0) {
+    return found;
+  }
   try {
     if (process.platform === 'win32') {
-      await readWindowsSeconds(pids, found);
+      await readWindowsSeconds(pids, found, withinMs);
     } else if (process.platform === 'linux') {
       await readProcSeconds(pids, found, new Map());
     } else {
-      await readPsSeconds(pids, found, new Map());
+      await readPsSeconds(pids, found, new Map(), withinMs);
     }
   } catch {
     // Unread, so the stretch counts by the clock.
@@ -242,8 +254,12 @@ export async function processorSecondsOf(pids: readonly number[]): Promise<Map<n
   return found;
 }
 
-async function readWindowsSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
-  const said = await askProcessTable(`ProcessorSecondsOf('${pids.join(',')}')`, ASK_TIMEOUT_MS);
+async function readWindowsSeconds(
+  pids: readonly number[],
+  found: Map<number, number>,
+  withinMs: number,
+): Promise<void> {
+  const said = await askProcessTable(`ProcessorSecondsOf('${pids.join(',')}')`, withinMs);
   for (const line of said.split(/\r?\n/)) {
     const [pid, seconds] = line.trim().split(' ').map(Number);
     if (pid !== undefined && seconds !== undefined && Number.isFinite(pid) && Number.isFinite(seconds)) {
@@ -283,8 +299,8 @@ async function readProcSeconds(
 }
 
 /** What `ps` printed for [param some], also when it exited 1 because one of them had gone. */
-function askedPs(some: readonly number[]): Promise<string> {
-  return run('ps', ['-o', 'pid=,time=,rss=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
+function askedPs(some: readonly number[], withinMs: number): Promise<string> {
+  return run('ps', ['-o', 'pid=,time=,rss=', '-p', some.join(',')], { timeout: withinMs }).then(
     (done) => done.stdout,
     (error: unknown) => {
       const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
@@ -297,12 +313,13 @@ async function readPsSeconds(
   pids: readonly number[],
   found: Map<number, number>,
   held: Map<number, number>,
+  withinMs: number,
 ): Promise<void> {
   // ps exits 1 when any pid it was given has gone, and still prints the rest. One it cannot
   // take at all leaves it printing nothing, so each is then asked alone.
-  let stdout = await askedPs(pids);
+  let stdout = await askedPs(pids, withinMs);
   if (stdout.trim() === '' && pids.length > 1) {
-    stdout = (await Promise.all(pids.map((pid) => askedPs([pid])))).join('\n');
+    stdout = (await Promise.all(pids.map((pid) => askedPs([pid], withinMs)))).join('\n');
   }
   for (const line of stdout.split('\n')) {
     const [pid, time, rss] = line.trim().split(/\s+/);
@@ -315,6 +332,27 @@ async function readPsSeconds(
       held.set(Number(pid), kibibytes * 1024);
     }
   }
+}
+
+/**
+ * `ps` prints processor time as `MM:SS`, `HH:MM:SS` or `DD-HH:MM:SS` depending on how long it has
+ * been going, with fractions of a second on some systems, after a comma in some locales. Anything
+ * else is no clock, so a bare dash or colon is not read as zero processor time.
+ */
+const CLOCK = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:[.,]\d+)?)$/;
+
+export function secondsFromClock(printed: string): number | undefined {
+  const parts = CLOCK.exec(printed.trim());
+  if (parts === null) {
+    return undefined;
+  }
+  const [, days, hours, minutes, seconds] = parts;
+  return (
+    Number(days ?? 0) * 86_400 +
+    Number(hours ?? 0) * 3600 +
+    Number(minutes) * 60 +
+    Number(seconds?.replace(',', '.'))
+  );
 }
 
 let ticks: Promise<number> | null = null;
