@@ -14,6 +14,7 @@ import {
   closeSync,
   constants,
   copyFileSync,
+  type Dirent,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -237,8 +238,10 @@ import {
   isSameDirectory,
   isWithinRoot,
   keptInside,
+  listedSpelling,
   notAGodotProject,
   realAsFarAsItExists,
+  relativeWithin,
   resolveWithinProject,
 } from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
@@ -819,12 +822,19 @@ function withRemedyBehindALink(refused: { reason: string; reached?: boolean }, r
 /**
  * A file under the project as the project spells it, which is how a caller names it.
  *
- * Both sides resolved, since the adapter's spelling has every symlink followed and the project's
- * as the bridge reports it may not: on macOS every /var/folders project is really under
- * /private/var/folders, and the unresolved root would put its own files outside it.
+ * A path under the project's real root keeps its own steps, so a script behind a link is named by
+ * the link's path. Any other is resolved on both sides, since the editor's spelling has every
+ * symlink followed and the project's as the bridge reports it may not: on macOS every /var/folders
+ * project is really under /private/var/folders, and the unresolved root would put its own files
+ * outside it.
  */
 function projectSpelling(projectPath: string, absolutePath: string): string {
-  return `res://${relative(realAsFarAsItExists(projectPath), realAsFarAsItExists(absolutePath)).replaceAll('\\', '/')}`;
+  const root = realAsFarAsItExists(projectPath);
+  const within = relativeWithin(root, absolutePath);
+  if (within !== null) {
+    return `res://${within}`;
+  }
+  return `res://${relative(root, realAsFarAsItExists(absolutePath)).replaceAll('\\', '/')}`;
 }
 
 /**
@@ -4255,11 +4265,16 @@ function missingScriptReason(projectPath: string, relativePath: string, said: st
   const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
   const folder = dirname(relativePath.replaceAll('\\', '/'));
   const inFolder = join(projectPath, folder);
-  const beside = existsSync(inFolder)
-    ? readdirSync(inFolder, { withFileTypes: true })
-        .filter((entry) => entry.isFile())
-        .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
-    : [];
+  // A step of the path can be a file or a ring of links, which cannot be listed.
+  let listed: Dirent[];
+  try {
+    listed = readdirSync(inFolder, { withFileTypes: true });
+  } catch {
+    listed = [];
+  }
+  const beside = listed
+    .filter((entry) => entry.isFile())
+    .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`);
   return withNearestFiles(said, `res://${relativePath}`, scripts, beside);
 }
 
@@ -5017,6 +5032,8 @@ interface BreakpointCall {
   readonly located: { readonly relativePath: string; readonly absolutePath: string };
   readonly scriptPath: string;
   readonly line: number;
+  /** Said where the script lies behind a link out of the project and so was not read. */
+  readonly lineNotChecked?: string;
 }
 
 /** What a breakpoint answer says of the game this server started: not told, not taken, or taken. */
@@ -6851,15 +6868,18 @@ class GodotServer {
     args: OperationParams,
     project: { readonly value: { readonly path: string } },
   ): Promise<ToolResponse> {
-    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
+    const given = readString(args, 'scriptPath') ?? '';
+    // The engine loads a script behind a link out of the project, so a breakpoint on one is taken.
+    const located = resolveWithinProject(project.value.path, given, { forTheEngine: true });
     if (!located.ok) {
       return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
     }
-    // Resolved, because the adapter refuses a path that does not start with the project as
-    // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
-    // every /var/folders path is really /private/var/folders.
+    // The project's real root, because the adapter refuses a path that does not start with the
+    // project as it holds it, and on macOS /var/folders is /private/var/folders. The tail follows
+    // no link, as the engine loads it, in its folders' case, since a game matches the exact path.
     const session = this.dapHoldingBreakpointsOf(project.value.path);
-    const scriptPath = realAsFarAsItExists(located.absolutePath);
+    const root = realAsFarAsItExists(project.value.path);
+    const scriptPath = join(root, listedSpelling(root, located.relativePath));
     const line = readPositiveNumber(args, 'line');
     if (line === undefined) {
       return this.createErrorResponse('line is required: the one-based line to stop on.');
@@ -6867,16 +6887,38 @@ class GodotServer {
     // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
     // is kept in the project's set and never stops anything. Removing one is left alone, so a
     // breakpoint on a script since deleted or shortened can still be taken off.
+    let lineNotChecked: string | undefined;
     if (op === 'set') {
+      const gate = resolveWithinProject(project.value.path, given);
+      const link = gate.ok ? null : (gate.link ?? null);
       if (!existsSync(located.absolutePath)) {
+        // A link whose target is gone leaves nothing to name a missing script in.
+        if (!gate.ok && link !== null && !existsSync(join(project.value.path, link.slice('res://'.length)))) {
+          return this.createErrorResponse(gate.reason, PATH_SOLUTIONS);
+        }
         return this.missingScript(project.value.path, located.relativePath);
       }
-      const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
-      if (nothing !== null) {
-        return this.createErrorResponse(nothing);
+      if (link === null) {
+        const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
+        if (nothing !== null) {
+          return this.createErrorResponse(nothing);
+        }
+      } else {
+        // Reading the script would read a file the project does not hold.
+        const linkSteps = listedSpelling(root, link.slice('res://'.length).replace(/\/$/, ''));
+        lineNotChecked = `Line ${line} of ${projectSpelling(project.value.path, scriptPath)} was not checked, since the script lies behind the link res://${linkSteps}${link.endsWith('/') ? '/' : ''}, which leads out of the project.`;
       }
     }
-    return await this.applyBreakpoint({ op, args, project, session, located, scriptPath, line });
+    return await this.applyBreakpoint({
+      op,
+      args,
+      project,
+      session,
+      located,
+      scriptPath,
+      line,
+      ...(lineNotChecked === undefined ? {} : { lineNotChecked }),
+    });
   }
 
   /** A breakpoint handed to the editor's adapter when one is connected, and otherwise held here. */
@@ -6938,6 +6980,7 @@ class GodotServer {
           );
     return this.jsonTextResponse({
       ...answer,
+      ...(call.lineNotChecked === undefined ? {} : { lineNotChecked: call.lineNotChecked }),
       held: this.breakpointsAsProjectSpells(project.value.path, held),
       // The editor's own, as it reported them to this session, so a caller reading the whole
       // set sees the lines the user set by hand as well as the ones set here.

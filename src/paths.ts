@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { entriesOf } from './listed-reads.js';
 
 /**
  * Paths that arrive as tool arguments and are then opened, written, or handed to Godot.
@@ -79,6 +80,35 @@ export function realAsFarAsItExists(path: string): string {
       at = parent;
     }
   }
+}
+
+/**
+ * [param relativePath], forward slashes, as the folders under [param root] list its steps, each in
+ * the disk's case. A step is the entry of that name, else the one entry equal to it with case
+ * ignored. A step no entry matches, or several do, keeps its spelling and so do the steps after it.
+ *
+ * No link is followed, since the engine loads a script by the path through the link. A folder that
+ * cannot be listed (a file, or a ring of links) matches nothing, and only names are read.
+ */
+export function listedSpelling(root: string, relativePath: string): string {
+  const steps = relativePath.split('/');
+  const spelt: string[] = [];
+  for (const [index, step] of steps.entries()) {
+    let names: string[];
+    try {
+      names = entriesOf(join(root, ...spelt)).map((entry) => entry.name);
+    } catch {
+      names = [];
+    }
+    const lower = step.toLowerCase();
+    const same = names.filter((name) => name.toLowerCase() === lower);
+    const found = names.includes(step) ? step : same.length === 1 ? same[0] : undefined;
+    if (found === undefined) {
+      return [...spelt, ...steps.slice(index)].join('/');
+    }
+    spelt.push(found);
+  }
+  return spelt.join('/');
 }
 
 /** How many links one path is followed through before it is taken to run in a ring. */

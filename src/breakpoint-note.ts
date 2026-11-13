@@ -35,12 +35,16 @@ export function breakpointNotePath(projectPath: string): string {
  */
 export function writeBreakpointNote(projectPath: string, held: readonly HeldBreakpoint[]): void {
   const path = breakpointNotePath(projectPath);
-  // The project as the adapter's paths spell it, which is with every symlink resolved: on macOS
-  // every /var/folders project is really under /private/var/folders, and a file compared against
-  // the unresolved root reads as outside it.
+  // Spelt as debug_breakpoint spells it, the project resolved and the path below it as written:
+  // on macOS every /var/folders project is really under /private/var/folders, and a file compared
+  // against the unresolved root reads as outside it. A path elsewhere is resolved to be compared.
   const root = realAsFarAsItExists(projectPath);
   const inside = held
-    .map((one) => ({ scriptPath: realAsFarAsItExists(one.scriptPath), lines: one.lines }))
+    .map((one) => ({
+      scriptPath:
+        relativeWithin(root, one.scriptPath) === null ? realAsFarAsItExists(one.scriptPath) : one.scriptPath,
+      lines: one.lines,
+    }))
     .filter((one) => one.lines.length > 0 && withinProject(root, one.scriptPath));
   try {
     if (inside.length === 0) {
@@ -94,9 +98,9 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
         ? listed.filter((line): line is number => Number.isInteger(line) && line > 0)
         : [];
       if (lines.length > 0) {
-        // Resolved the way debug_breakpoint resolves what it is given, since the adapter refuses
-        // a spelling of the file that is not the one it holds the project under.
-        held.push({ scriptPath: realAsFarAsItExists(join(projectPath, script)), lines });
+        // Spelt as debug_breakpoint spells it, the project resolved and the path below it as
+        // written, since the adapter refuses a path that is not under the project it holds.
+        held.push({ scriptPath: join(realAsFarAsItExists(projectPath), script), lines });
       }
     }
     return held;

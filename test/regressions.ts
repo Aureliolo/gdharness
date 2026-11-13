@@ -97201,7 +97201,12 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
           scriptPath: 'res://shared/o.gd',
           line: 1,
         });
-        assert.ok(breakpoint.includes('through the link res://shared/'), breakpoint);
+        // The engine loads the script, so a breakpoint on one is held, with its line unchecked.
+        assert.equal(
+          get(JSON.parse(breakpoint) as unknown, 'lineNotChecked'),
+          'Line 1 of res://shared/o.gd was not checked, since the script lies behind the link res://shared/, which leads out of the project.',
+          breakpoint,
+        );
         assert.ok(existsSync(join(project, 'a.gd')), 'a.gd stays where it was');
         assert.deepEqual(readdirSync(outside).toSorted(), kept, 'nothing was written outside');
         assert.deepEqual(kept, ['back', 'o.gd', 'tool']);
@@ -97229,6 +97234,202 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
     await aFileBehindALinkIsReadByTheEngine(project, outside);
   } finally {
     sweep(dirname(project));
+  }
+}
+
+/**
+ * A breakpoint on a script behind a link out of the project is held without the script being read,
+ * the answer says the line went unchecked and names the link, and the script is spelt as the engine
+ * loads it: through the link, in the disk's case. A link whose target is gone is refused.
+ */
+async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-bp-link-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  const alias = join(sandbox, 'alias');
+  const lines = (count: number): string =>
+    Array.from({ length: count }, (_, at) => `var ${'xyz'[at] ?? 'w'} := ${at + 1}`).join('\n') + '\n';
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'a.gd': lines(3),
+    'player.gd': lines(2),
+    'real/r.gd': lines(2),
+  });
+  // A folder named like a script, so that any read of it throws.
+  mkdirSync(join(outside, 'o.gd'), { recursive: true });
+  writeTree(outside, { 'f.gd': lines(2) });
+  const junction = (target: string, at: string): void => {
+    symlinkSync(target, at, 'junction');
+  };
+  junction(join(project, 'real'), join(project, 'link'));
+  junction(outside, join(project, 'shared'));
+  junction(outside, join(project, 'my shared'));
+  junction(join(outside, 'later'), join(project, 'later'));
+  junction(join(project, 'ring2'), join(project, 'ring1'));
+  junction(join(project, 'ring1'), join(project, 'ring2'));
+  junction(join(project, 'real'), join(outside, 'back'));
+  junction(project, alias);
+  let fileLinks = true;
+  try {
+    symlinkSync(join(outside, 'f.gd'), join(project, 'linked.gd'), 'file');
+    symlinkSync(join(outside, 'made.gd'), join(project, 'made.gd'), 'file');
+  } catch {
+    fileLinks = false;
+    console.log('  skipped the file links: the platform refuses one');
+  }
+  const ignoresCase = existsSync(join(project, 'A.GD'));
+  const realProject = realpathSync.native(project);
+  const linkOutAnswer = (script: string, link: string, line: number): string =>
+    `Line ${line} of ${script} was not checked, since the script lies behind the link ${link}, which leads out of the project.`;
+  try {
+    await withStdioServer(
+      async (call) => {
+        const answer = async (
+          scriptPath: string,
+          line: number,
+          op = 'set',
+          projectPath = project,
+        ): Promise<string> => await call('debug_breakpoint', { op, projectPath, scriptPath, line });
+        const heldIn = (said: string): string[] =>
+          asArray(get(JSON.parse(said) as unknown, 'held')).map(
+            (one) => `${asString(get(one, 'scriptPath'))}:${asArray(get(one, 'lines')).join(',')}`,
+          );
+        const noted = (): Map<string, number[]> =>
+          new Map(
+            asArray(
+              get(JSON.parse(readFileSync(breakpointNotePath(project), 'utf8')) as unknown, 'breakpoints'),
+            ).map((one) => [asString(get(one, 'script')), asArray(get(one, 'lines')).map(Number)]),
+          );
+
+        // A folder link out: the answer names the link once, and nothing reads the script.
+        const behind = await answer('res://shared/o.gd', 2);
+        assert.equal(get(JSON.parse(behind) as unknown, 'set'), true, behind);
+        assert.equal(
+          get(JSON.parse(behind) as unknown, 'lineNotChecked'),
+          linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+        );
+        assert.equal(behind.split('the link res://shared/').length - 1, 1, behind);
+        assert.ok(heldIn(behind).includes('res://shared/o.gd:2'), behind);
+        assert.deepEqual(noted().get('shared/o.gd'), [2]);
+        assert.deepEqual(
+          readBreakpointNote(project).find((one) => one.scriptPath.endsWith('o.gd'))?.scriptPath,
+          join(realProject, 'shared', 'o.gd'),
+          'spelt through the link, not by the file under outside',
+        );
+
+        // In another case, the disk's case is held, noted and said.
+        if (ignoresCase) {
+          const cased = await answer('res://Shared/O.gd', 2);
+          assert.ok(heldIn(cased).includes('res://shared/o.gd:2'), cased);
+          assert.ok(!heldIn(cased).some((one) => one.startsWith('res://Shared')), cased);
+          assert.deepEqual(
+            [...noted().keys()].filter((one) => /^shared/i.test(one)),
+            ['shared/o.gd'],
+          );
+          assert.equal(
+            get(JSON.parse(cased) as unknown, 'lineNotChecked'),
+            linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+          );
+          const player = await answer('res://Player.gd', 1);
+          assert.ok(heldIn(player).includes('res://player.gd:1'), player);
+          assert.deepEqual(noted().get('player.gd'), [1]);
+        } else {
+          console.log('  skipped the case cases: this file system tells case apart');
+        }
+
+        // A link that stays inside the project is read and spelt through the link.
+        assert.equal(
+          await answer('res://link/r.gd', 9),
+          'res://link/r.gd has 2 lines, so there is no line 9 to stop on.',
+        );
+        const inside = await answer('res://link/r.gd', 1);
+        assert.equal(get(JSON.parse(inside) as unknown, 'lineNotChecked'), undefined, inside);
+        assert.ok(heldIn(inside).includes('res://link/r.gd:1'), inside);
+        assert.deepEqual(noted().get('link/r.gd'), [1]);
+
+        assert.equal(
+          await answer('res://a.gd', 4),
+          'res://a.gd has 3 lines, so there is no line 4 to stop on.',
+        );
+
+        // A link whose target is gone is refused, and nothing is held for it.
+        const dangling = await answer('res://later/x.gd', 1);
+        assert.ok(dangling.includes('through the link res://later/'), dangling);
+        const listed = await call('debug_breakpoint', { op: 'list', projectPath: project });
+        assert.ok(!heldIn(listed).some((one) => one.startsWith('res://later/')), listed);
+
+        // A script missing behind a live link is a missing script.
+        const typo = await answer('res://shared/typo.gd', 1);
+        assert.ok(typo.includes('Script file does not exist: res://shared/typo.gd'), typo);
+        assert.ok(!typo.includes('leads out of the project'), typo);
+
+        // A step that is a file lists nothing, and neither does a ring of links.
+        for (const folder of ['a.gd', 'ring1']) {
+          const removed = JSON.parse(await answer(`res://${folder}/x.gd`, 1, 'remove')) as unknown;
+          assert.equal(get(removed, 'removed'), false);
+          assert.ok(
+            asString(get(removed, 'why')).includes(
+              `No breakpoint was held on line 1 of res://${folder}/x.gd`,
+            ),
+          );
+          const missing = await answer(`res://${folder}/x.gd`, 1);
+          assert.ok(missing.includes(`Script file does not exist: res://${folder}/x.gd`), missing);
+        }
+
+        // Out and back in through a second link is read, so its line is checked.
+        assert.equal(
+          await answer('res://shared/back/r.gd', 9),
+          'res://shared/back/r.gd has 2 lines, so there is no line 9 to stop on.',
+        );
+
+        // A link with a space in its name.
+        const spaced = await answer('res://my shared/o.gd', 1);
+        assert.equal(
+          get(JSON.parse(spaced) as unknown, 'lineNotChecked'),
+          linkOutAnswer('res://my shared/o.gd', 'res://my shared/', 1),
+        );
+        assert.ok(heldIn(spaced).includes('res://my shared/o.gd:1'), spaced);
+
+        // A link to a file out of the project, and one whose target is gone.
+        if (fileLinks) {
+          const file = await answer('res://linked.gd', 2);
+          assert.equal(
+            get(JSON.parse(file) as unknown, 'lineNotChecked'),
+            linkOutAnswer('res://linked.gd', 'res://linked.gd', 2),
+          );
+          assert.ok(heldIn(file).includes('res://linked.gd:2'), file);
+          const gone = await answer('res://made.gd', 1);
+          assert.ok(gone.includes('through the link res://made.gd'), gone);
+          assert.ok(
+            !heldIn(await call('debug_breakpoint', { op: 'list', projectPath: project })).some((one) =>
+              one.startsWith('res://made.gd'),
+            ),
+          );
+        }
+
+        // The project opened through a junction, and on Windows in upper case, answers as under its path.
+        const named = [alias];
+        if (process.platform === 'win32') {
+          named.push(project.toUpperCase());
+        }
+        const before = heldIn(await call('debug_breakpoint', { op: 'list', projectPath: project }));
+        const noteBefore = readFileSync(breakpointNotePath(project), 'utf8');
+        for (const root of named) {
+          const through = await answer('res://shared/o.gd', 2, 'set', root);
+          assert.deepEqual(heldIn(through), before, root);
+          assert.equal(
+            get(JSON.parse(through) as unknown, 'lineNotChecked'),
+            linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+            root,
+          );
+          assert.equal(readFileSync(breakpointNotePath(project), 'utf8'), noteBefore, root);
+        }
+        assert.ok(existsSync(join(project, 'a.gd')), 'the project is intact');
+      },
+      { GODOT_PATH: standInEngine() },
+    );
+  } finally {
+    sweep(sandbox);
   }
 }
 
@@ -97760,6 +97961,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveIntoAFolderHoldingAProjectIsRefused,
   testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
   testANamedPathBehindALinkOutIsRefused,
+  testABreakpointBehindALinkOutIsSetUnchecked,
   testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,
