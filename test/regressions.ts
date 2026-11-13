@@ -66756,6 +66756,13 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
         'tests/a_lane_test.gd': suiteOf([3, 3, 3, 3]),
         'tests/b_lane_test.gd': suiteOf([3, 3, 3, 3]),
       });
+      rmSync(join(project, 'tests', 'c_lane_test.gd'), { force: true });
+      rmSync(join(project, 'tests', 'd_lane_test.gd'), { force: true });
+      // The earlier run recorded what its suites cost, so the 20 s cases are kept again.
+      keep({
+        'res://tests/a_lane_test.gd': [20, 20, 20, 20],
+        'res://tests/b_lane_test.gd': [20, 20, 20, 20],
+      });
       await standsIn('onMark', 4);
       const grown = runWith(file, 4, '--engines', '2', '--slot-count', '8');
       stands();
@@ -66789,6 +66796,36 @@ async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
       listed().every((one) => one.mark === null),
       'and no mark stood at any listing',
     );
+
+    // An ordered run keeps the units it cuts for its engines, so two long suites stay whole in it.
+    writeTree(project, {
+      'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
+      'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
+    });
+    for (const gone of ['c', 'd']) {
+      rmSync(join(project, 'tests', `${gone}_lane_test.gd`), { force: true });
+    }
+    keep({
+      'res://tests/a_lane_test.gd': [20, 20, 20, 20],
+      'res://tests/b_lane_test.gd': [20, 20, 20, 20],
+    });
+    await standsIn('always', 4);
+    const wholeOrdered = runWith(
+      file,
+      4,
+      '--engines',
+      '2',
+      '--slot-count',
+      '4',
+      '--order',
+      'named',
+      'tests/a_lane_test.gd',
+      'tests/b_lane_test.gd',
+    );
+    stands();
+    assert.equal(wholeOrdered.status, 0, wholeOrdered.said);
+    assert.match(wholeOrdered.said, /8 test functions in 2 suites over 1 engine, in the order named/);
+    assert.doesNotMatch(wholeOrdered.said, /Dealt out case by case/, 'no suite is cut for the pool');
   } finally {
     stands();
     sweep(project, slots, pool);
