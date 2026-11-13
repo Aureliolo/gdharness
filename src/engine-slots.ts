@@ -769,7 +769,8 @@ export class FolderChanges {
  */
 export class FollowedLanes {
   readonly ceiling: number;
-  private readonly rises: boolean;
+  /** Whether it may still hold the mark: false for a run that cannot rise, and once the mark is given back. */
+  private rises: boolean;
   private readonly mark: string;
   private changes: FolderChanges | null = null;
   private holding = false;
@@ -889,14 +890,24 @@ export class FollowedLanes {
     this.taking ??= this.slots.takeFile(this.mark).finally(() => {
       this.taking = null;
     });
-    this.holding = await this.taking;
+    const took = await this.taking;
+    if (took && !this.rises) {
+      // Ended while the mark was being taken, so it is given straight back.
+      giveBackSlot(this.mark, this.slots.holder.pid);
+      return;
+    }
+    this.holding = took;
   }
 
-  /** Gives the mark back while it names this process, and stops watching. */
+  /**
+   * Gives the mark back while it names this process, and stops watching. It holds none again, so a
+   * run that has reached its ceiling goes on reading the number for a fall without it.
+   */
   end(): void {
     this.changes?.close();
     this.changes = null;
     this.holding = false;
+    this.rises = false;
     giveBackSlot(this.mark, this.slots.holder.pid);
   }
 }

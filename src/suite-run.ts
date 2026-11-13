@@ -2006,8 +2006,8 @@ export async function runShares<T extends { readonly index: number }>(
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
-  // The share this lane would draw now, read at each look. Only a read of the lanes file lies between
-  // the admission and the draw, which a share another lane draws meanwhile can only make smaller.
+  // The share this lane would draw now, read at each look. A run following a lanes file reads it
+  // between the admission and the draw, and asks again if the share it would draw has grown.
   const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
   /** Whether the lanes file tells fewer lanes than lane [param at] belongs to. */
   const fallenPast = async (at: number): Promise<boolean> => {
@@ -2031,30 +2031,46 @@ export async function runShares<T extends { readonly index: number }>(
     return true;
   };
   /**
-   * Takes the lane's slot, lends it to a check that wants one and waits for memory, or answers null
-   * once the run is over. The lanes file is read again after the slot and the check, and after
-   * memory, since a wait can outlast a fall. A lane told fewer lanes goes back to waiting for the
-   * lanes to rise instead of waiting for memory or drawing a share.
+   * Takes the lane's slot and lends it to a check that wants one, and answers the slot. Answers
+   * 'again' when the lanes file tells the lane to stop, which gives its slot back first, and 'over'
+   * once every share is handed out.
+   */
+  const slotHeld = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{ readonly lock: string } | 'again' | 'over'> => {
+    if (await parkedPastTheLanesTold(at, held)) {
+      return empty() ? 'over' : 'again';
+    }
+    held.lock ??= await slots.take(handedOut.signal);
+    const lock = held.lock;
+    await handed?.lend(lock);
+    return (await fallenPast(at)) ? 'again' : { lock };
+  };
+  /**
+   * Takes the lane's slot and waits for the memory its share needs, or answers null once the run is
+   * over. The lanes file is read again after the slot and the check, and after memory, since a wait
+   * can outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
+   * waiting for memory or drawing a share.
    */
   const waitedFor = async (
     at: number,
     held: { lock: string | null },
   ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
     for (;;) {
-      if (await parkedPastTheLanesTold(at, held)) {
-        if (empty()) {
-          return null;
-        }
-        continue;
+      const got = await slotHeld(at, held);
+      if (got === 'over') {
+        return null;
       }
-      held.lock ??= await slots.take(handedOut.signal);
-      await handed?.lend(held.lock);
-      if (await fallenPast(at)) {
+      if (got === 'again') {
         continue;
       }
       const admitted = await memory?.admit(handedOut.signal, needed);
-      if (!(await fallenPast(at))) {
-        return { lock: held.lock, admitted };
+      // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
+      // one, a share another lane draws meanwhile may leave a heavier one, which is admitted again.
+      const fallen = raised !== undefined && (await fallenPast(at));
+      if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
+        return { lock: got.lock, admitted };
       }
       admitted?.ended();
     }

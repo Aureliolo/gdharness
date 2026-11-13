@@ -65102,7 +65102,12 @@ async function checksTheCommandWaitsBehindTheSlotHeld(fixture: MachineSlotFixtur
     await delay(100);
   }
   assert.deepEqual(
-    [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
+    [
+      classes.exitCode,
+      holderOf(readFileSync(ours, 'utf8'))?.pid,
+      // Without the note beside the mark that says the command still looks.
+      leftInSlots(slots).filter((name) => !name.endsWith('.seen')),
+    ],
     [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
     `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
   );
