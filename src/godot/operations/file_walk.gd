@@ -137,24 +137,16 @@ func find_files(path: String, extension: String, with_ours: bool = false) -> Arr
 	var files: Array[String] = []
 	if is_stepped_over(path) or (not with_ours and is_installed_by_gdharness(path)):
 		return files
-
-	var dir: DirAccess = DirAccess.open(path)
-
-	if dir:
-		if dir.list_dir_begin() != OK:
-			return files
-		var file_name: String = dir.get_next()
-
-		while file_name != "":
-			if dir.current_is_dir() and not file_name.begins_with("."):
-				var inner: String = path + file_name + "/"
-				if not holds_a_project(inner):
-					files.append_array(find_files(inner, extension, with_ours))
-			elif file_name.ends_with(extension):
-				files.append(path + file_name)
-
-			file_name = dir.get_next()
-
+	# A folder's folders and then its files, each sorted as DirAccess gives them, so a walk answers
+	# in one order on every platform: in the order the file system kept them, Linux named the scenes
+	# a branch save followed in another order than Windows.
+	for folder: String in DirAccess.get_directories_at(path):
+		var inner: String = path + folder + "/"
+		if not folder.begins_with(".") and not holds_a_project(inner):
+			files.append_array(find_files(inner, extension, with_ours))
+	for file_name: String in DirAccess.get_files_at(path):
+		if file_name.ends_with(extension):
+			files.append(path + file_name)
 	return files
 
 
@@ -163,30 +155,11 @@ func find_files_with_extensions(path: String, extensions: Array) -> Array[String
 	var files: Array[String] = []
 	if is_stepped_over(path) or is_installed_by_gdharness(path):
 		return files
-
-	var dir: DirAccess = DirAccess.open(path)
-
-	if dir:
-		if dir.list_dir_begin() != OK:
-			return files
-		var file_name: String = dir.get_next()
-
-		while file_name != "":
-			if file_name.begins_with("."):
-				file_name = dir.get_next()
-				continue
-
-			var full_path: String = path + file_name
-			if dir.current_is_dir():
-				if not holds_a_project(full_path + "/"):
-					files.append_array(find_files_with_extensions(full_path + "/", extensions))
-			else:
-				var ext: String = file_name.get_extension().to_lower()
-				if ext in extensions:
-					files.append(full_path)
-
-			file_name = dir.get_next()
-
-		dir.list_dir_end()
-
+	for folder: String in DirAccess.get_directories_at(path):
+		var inner: String = path + folder + "/"
+		if not folder.begins_with(".") and not holds_a_project(inner):
+			files.append_array(find_files_with_extensions(inner, extensions))
+	for file_name: String in DirAccess.get_files_at(path):
+		if not file_name.begins_with(".") and file_name.get_extension().to_lower() in extensions:
+			files.append(path + file_name)
 	return files
