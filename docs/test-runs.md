@@ -838,8 +838,9 @@ it holds one as long as it plays.
   `{"lanes", "pid", "started", "written"}`. `lanes` is a whole number of 1 or more and `written` is
   in milliseconds. It is written at each change and every five seconds.
 - The run begins on `--engines` and holds up to `lanes` lanes, fewer only for want of work, memory,
-  processors or free machine slots. The number never falls. A file missing, older than ten seconds or written by a
-  process that has gone adds no lane. With the variable unset or empty the run holds `--engines`.
+  processors or free machine slots. The number never falls. A file missing, older than ten seconds
+  or written by a process that has gone adds no lane. With the variable unset or empty the run
+  holds `--engines`.
 - A run that can grow makes `<lanes file>.follows` as a lock is made, and takes one whose holder has
   gone over under its steal file. Until a live mark stands, the writer holds no more than the
   number it told. A run that cannot grow makes none.
