@@ -977,28 +977,6 @@ static func out_through_link(file: String, links_out: PackedStringArray) -> Stri
 	return ""
 
 
-## The disk file [param file], a res:// path, is, spelt so that two paths naming one file give the
-## same text, or [param file] itself when its links cannot be followed.
-static func disk_file_of(file: String) -> String:
-	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
-	var led: String = _followed(ProjectSettings.globalize_path(file))
-	if led.is_empty():
-		return file
-	return led.to_lower() if any_case else led
-
-
-## Whether [param file], a res:// path, is reached without passing through a link, so that the
-## path is the file's own name in the project.
-static func reached_directly(file: String) -> bool:
-	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
-	var inside: String = _followed(ProjectSettings.globalize_path("res://"))
-	var led: String = _followed(ProjectSettings.globalize_path(file))
-	if inside.is_empty() or led.is_empty():
-		return false
-	var own: String = inside + "/" + file.trim_prefix("res://")
-	return led.to_lower() == own.to_lower() if any_case else led == own
-
-
 ## Where [param file], a res:// path, ends once each link on it is followed: "inside" the project,
 ## as a path out through one link and back in through another does, "outside" it, or "unknown"
 ## when a ring, more than [constant MOST_LINKS] links or a link that cannot be read stops the

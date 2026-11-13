@@ -178,8 +178,9 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 ## for a node deleted, the node paths are only named, and the entries are dropped as
 ## [method _without_vanished] says. Answers followed, the scenes rewritten, notFollowed, each one
 ## left as it was with why, and dropped, each only when it names any, with what [param carried]
-## gives. No scene behind a link of [param links_out], each a res:// folder or file that leads out
-## of the project, is read or rewritten, and notFollowed names each link.
+## gives. No scene whose path passes through a link is read or rewritten. notFollowed names each
+## link met, each of [param links_out] (res:// folders and files that lead out of the project), and
+## each scene that names a scene through a link.
 static func follow(
 	changed: String,
 	old_path: String,
@@ -188,11 +189,13 @@ static func follow(
 	links_out: PackedStringArray,
 ) -> Dictionary:
 	var run: GdhFollow = GdhFollow.new(changed, old_path, new_path, carried)
-	_read_scenes(run.texts, links_out)
-	var kin: Array[String] = _kin_of(changed, run.texts)
+	var links: GdhLinks = GdhLinks.new()
+	_read_scenes(run.texts, links)
+	var kin: Array[String] = _kin_of(changed, run.texts, links)
 	for scene_path: String in kin:
 		_follow_scene(scene_path, run)
-	run.not_followed.append_array(_links_left(links_out))
+	run.not_followed.append_array(_links_left(links_out, links))
+	run.not_followed.append_array(_spelt_through_links(changed, run.texts, links))
 	var answer: Dictionary = carried.answer(links_out)
 	if not run.followed.is_empty():
 		answer["followed"] = run.followed
@@ -345,14 +348,16 @@ static func _gone(path: String, moves: Dictionary) -> bool:
 ## on a node inside it or adds one below it. Those still load, and the next save of that scene
 ## dropped them, since the packer skips every node under an instance whose children are not
 ## editable. Answers followed, the scenes marked, and notFollowed, each left with why, each only
-## when it names any. No scene behind a link of [param links_out], each a res:// folder or file
-## that leads out of the project, is read or rewritten, and notFollowed names each link.
+## when it names any. No scene whose path passes through a link is read or rewritten. notFollowed
+## names each link met, each of [param links_out] (res:// folders and files that lead out of the
+## project), and each scene that names a scene through a link.
 static func enclose(changed: String, at: String, links_out: PackedStringArray) -> Dictionary:
 	var texts: Dictionary = {}
-	_read_scenes(texts, links_out)
+	var links: GdhLinks = GdhLinks.new()
+	_read_scenes(texts, links)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
-	for scene_path: String in _kin_of(changed, texts):
+	for scene_path: String in _kin_of(changed, texts, links):
 		if scene_path == changed:
 			continue
 		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
@@ -385,7 +390,8 @@ static func enclose(changed: String, at: String, links_out: PackedStringArray) -
 		file.close()
 		GdhSceneFile.refresh(scene_path)
 		followed.append(scene_path)
-	not_followed.append_array(_links_left(links_out))
+	not_followed.append_array(_links_left(links_out, links))
+	not_followed.append_array(_spelt_through_links(changed, texts, links))
 	var answer: Dictionary = {}
 	if not followed.is_empty():
 		answer["followed"] = followed
@@ -410,7 +416,7 @@ static func _holds_below(text: String, path: String) -> bool:
 
 
 ## [param changed] and every scene in [param texts] that instances or inherits it at any depth.
-static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
+static func _kin_of(changed: String, texts: Dictionary, links: GdhLinks) -> Array[String]:
 	var kin: Array[String] = [changed]
 	var named: Dictionary[String, PackedStringArray] = {}
 	for scene_path: String in texts:
@@ -422,10 +428,16 @@ static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
 			if kin.has(scene_path):
 				continue
 			for one: String in kin:
-				if named[scene_path].has(one):
+				if not named[scene_path].has(one):
+					continue
+				# A scene file that is itself a link is one file under two names.
+				var link: String = links.on(scene_path)
+				if link.is_empty():
 					kin.append(scene_path)
 					grew = true
-					break
+				else:
+					links.met[link] = true
+				break
 	return kin
 
 
@@ -460,32 +472,26 @@ static func _resolved(path: String, scene_path: String) -> String:
 
 ## The text of every .tscn the engine scans into [param texts], keyed by res:// path. The shared
 ## walk leaves out the folders the engine steps over, so a build's copies are not read, and takes in
-## the addons gdharness installed, which the engine loads. That less the scenes behind a link of
-## [param links_out]. One file on disk is one scene, read and written once: where links give it
-## several paths, it keeps the one that passes through no link, else the first the walk found.
-static func _read_scenes(texts: Dictionary, links_out: PackedStringArray) -> void:
-	var kept: Array[String] = []
-	var owner_of: Dictionary = {}
+## the addons gdharness installed, which the engine loads. That less every scene whose path passes
+## through a link, out of the project or back into it, since one file reached by two spellings would
+## be read and written twice. Each such link is noted in [param links].
+static func _read_scenes(texts: Dictionary, links: GdhLinks) -> void:
 	for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
-		if not GdhSceneFile.out_through_link(path, links_out).is_empty():
-			continue
-		kept.append(path)
-		var key: String = GdhSceneFile.disk_file_of(path)
-		if not owner_of.has(key) or (
-			GdhSceneFile.reached_directly(path)
-			and not GdhSceneFile.reached_directly(str(owner_of[key]))
-		):
-			owner_of[key] = path
-	for path: String in kept:
-		if owner_of[GdhSceneFile.disk_file_of(path)] == path:
+		var link: String = links.under(path)
+		if link.is_empty():
 			texts[path] = FileAccess.get_file_as_string(path)
+		else:
+			links.met[link] = true
 
 
-## A notFollowed row for each of [param links_out] that can hold a scene, since no scene behind one
-## was read: a folder, or a file with a scene's extension.
-static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
+## A notFollowed row for each link no scene behind was read, since no scene behind one was read or
+## changed: each of [param links_out] that can hold a scene (a folder, or a file with a scene's
+## extension), and each other link of [param links] the walk met.
+static func _links_left(links_out: PackedStringArray, links: GdhLinks) -> Array[Dictionary]:
 	var rows: Array[Dictionary] = []
+	var listed: PackedStringArray = []
 	for link: String in links_out:
+		var _kept: bool = listed.append(link.to_lower())
 		if not link.ends_with("/") and not ["tscn", "scn"].has(link.get_extension().to_lower()):
 			continue
 		rows.append(
@@ -498,6 +504,59 @@ static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
 				),
 			}
 		)
+	for link: String in links.met:
+		if listed.has(link.to_lower()):
+			continue
+		rows.append(
+			{
+				"scenePath": link,
+				"reason":
+				(
+					"a link, so no scene behind it was read or changed. Name the scene by its "
+					+ "path without the link"
+				),
+			}
+		)
+	return rows
+
+
+## A notFollowed row for each scene of [param texts] that names a scene through a link, and for
+## [param changed] when it lies behind one, since a scene reached that way is not followed.
+static func _spelt_through_links(
+	changed: String, texts: Dictionary, links: GdhLinks
+) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	var own: String = links.on(changed)
+	if not own.is_empty():
+		rows.append(
+			{
+				"scenePath": changed,
+				"reason":
+				(
+					"lies behind the link %s, so no scene naming it was followed. Name the scene "
+					+ "by its path without the link"
+				)
+				% own,
+			}
+		)
+	for scene_path: String in texts:
+		for named: String in _named_in(str(texts[scene_path]), scene_path):
+			if not ["tscn", "scn"].has(named.get_extension().to_lower()):
+				continue
+			var link: String = links.on(named)
+			if link.is_empty():
+				continue
+			rows.append(
+				{
+					"scenePath": scene_path,
+					"reason":
+					(
+						"names the scene %s through the link %s, so it was not followed. Name the "
+						+ "scene by its path without the link"
+					)
+					% [named, link],
+				}
+			)
 	return rows
 
 
@@ -633,6 +692,50 @@ static func _attribute_moved(
 
 static func _without_ids(line: String, ids: String) -> String:
 	return RegEx.create_from_string(" %s=PackedInt32Array\\([^)]*\\)" % ids).sub(line, "")
+
+
+## Which paths of the project pass through a link, each folder asked of the disk once.
+class GdhLinks:
+	## Each link the walk met, as a res:// path with a closing slash for a folder.
+	var met: Dictionary = {}
+	var _disk: DirAccess
+	var _root: String
+	var _known: Dictionary[String, String] = {}
+
+
+	func _init() -> void:
+		_root = ProjectSettings.globalize_path("res://").replace("\\", "/").trim_suffix("/")
+		_disk = DirAccess.open(_root.split("/")[0] + "/")
+
+
+	## The first link [param file], a res:// path, passes through, or "".
+	func on(file: String) -> String:
+		if _disk == null or not file.begins_with("res://"):
+			return ""
+		var folder: String = _folder_link(file.get_base_dir())
+		if not folder.is_empty():
+			return folder
+		return file if _disk.is_link(_root + "/" + file.trim_prefix("res://")) else ""
+
+	## The first link the folders above [param file], a res:// path, pass through, or "". The file
+	## itself is not asked of the disk.
+	func under(file: String) -> String:
+		if _disk == null or not file.begins_with("res://"):
+			return ""
+		return _folder_link(file.get_base_dir())
+
+	## The first link the folder [param folder], a res:// path, passes through, or "".
+	func _folder_link(folder: String) -> String:
+		if _known.has(folder):
+			return _known[folder]
+		var found: String = ""
+		var parent: String = folder.get_base_dir()
+		if folder != "res://" and not folder.is_empty():
+			found = _folder_link(parent)
+			if found.is_empty() and _disk.is_link(_root + "/" + folder.trim_prefix("res://")):
+				found = folder + "/"
+		_known[folder] = found
+		return found
 
 
 ## What [method follow] works on and records: the move, the text of every scene, and the scenes
