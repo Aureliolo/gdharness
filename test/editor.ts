@@ -4392,6 +4392,7 @@ async function testAWriteThroughTheEditorBehindALinkOutIsRefused({
       projectPath: project,
       op: 'add',
       scenePath: 'res://shared/s.tscn',
+      nodeName: 'N',
       nodeType: 'Node3D',
     });
     assert.ok(added.text.includes(through), added.text);

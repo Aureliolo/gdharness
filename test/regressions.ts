@@ -91083,6 +91083,8 @@ interface LinkedProject {
   real: string;
   outside: string;
   call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** The text of the answer, which a refusal is, where `call` reads the JSON of one that is not. */
+  say: (name: string, args: Record<string, unknown>) => Promise<string>;
   fileOf: (file: string) => string;
 }
 
@@ -91152,6 +91154,14 @@ async function withLinksOut(
             240_000,
           ),
         ),
+      say: async (name, args) =>
+        textOf(
+          await serving.request(
+            'tools/call',
+            { name, arguments: { projectPath: project, ...args } },
+            240_000,
+          ),
+        ) ?? '',
       fileOf: (file) => readFileSync(join(real, file), 'utf8'),
     });
   } finally {
@@ -97497,46 +97507,38 @@ async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void
     (real, outside) =>
       linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(real, 'link')),
     async (at) => {
-      const addTrack = async (scenePath: string): Promise<unknown> =>
-        await at.call('scene_animation', {
-          op: 'add_track',
-          scenePath,
-          playerNodePath: 'Player',
-          animationName: 'walk',
-          track: {
-            type: 'property',
-            nodePath: '.',
-            property: 'position',
-            keyframes: [{ time: 0, value: { x: 1, y: 2, z: 3 } }],
-          },
-        });
+      const trackOn = (scenePath: string): Record<string, unknown> => ({
+        op: 'add_track',
+        scenePath,
+        playerNodePath: 'Player',
+        animationName: 'walk',
+        track: {
+          type: 'property',
+          nodePath: '.',
+          property: 'position',
+          keyframes: [{ time: 0, value: { x: 1, y: 2, z: 3 } }],
+        },
+      });
       const scene = at.fileOf('a.tscn');
-      const refusedTrack = await addTrack('res://a.tscn');
-      assert.equal(get(refusedTrack, 'ok'), false, JSON.stringify(refusedTrack));
+      const refusedTrack = await at.say('scene_animation', trackOn('res://a.tscn'));
       assert.ok(
-        String(get(refusedTrack, 'error')).includes(
-          behindTheLink('res://shared/anims.tres', 'res://shared/'),
-        ),
-        JSON.stringify(refusedTrack),
+        refusedTrack.includes(behindTheLink('res://shared/anims.tres', 'res://shared/')),
+        refusedTrack,
       );
       assert.equal(readFileSync(join(at.outside, 'anims.tres'), 'utf8'), WALK_LIBRARY);
       assert.equal(at.fileOf('a.tscn'), scene);
 
       const navScene = at.fileOf('nav.tscn');
-      const baked = await at.call('scene_node', {
+      const baked = await at.say('scene_node', {
         op: 'bake_navigation',
         scenePath: 'res://nav.tscn',
         nodePath: 'Region',
       });
-      assert.equal(get(baked, 'ok'), false, JSON.stringify(baked));
-      assert.ok(
-        String(get(baked, 'error')).includes(behindTheLink('res://shared/mesh.tres', 'res://shared/')),
-        JSON.stringify(baked),
-      );
+      assert.ok(baked.includes(behindTheLink('res://shared/mesh.tres', 'res://shared/')), baked);
       assert.equal(readFileSync(join(at.outside, 'mesh.tres'), 'utf8'), mesh);
       assert.equal(at.fileOf('nav.tscn'), navScene);
 
-      const inside = await addTrack('res://b.tscn');
+      const inside = await at.call('scene_animation', trackOn('res://b.tscn'));
       assert.equal(get(inside, 'ok'), true, JSON.stringify(inside));
       assert.ok(at.fileOf('real/anims.tres').includes('tracks/0/path'), at.fileOf('real/anims.tres'));
     },
