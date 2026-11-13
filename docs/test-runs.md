@@ -463,6 +463,11 @@ with that flag, in `gdharness test` and `project_test` alike. It is read like th
 from the suite or a script it extends, or from a class constant. A suite declaring it beside
 `GDHARNESS_NEEDS_WINDOW` false is refused.
 
+The engine sends a control `NOTIFICATION_ACCESSIBILITY_UPDATE` only once something has asked for
+the tree. On Windows the run asks once through UI Automation, as a screen reader does, before the
+first suite starts. A run that could not ask prints why, starting with
+`gdharness could not ask for the accessibility tree`.
+
 ### The windowed engine
 
 All the windowed suites go to one windowed engine, which starts first, counts toward `--engines`

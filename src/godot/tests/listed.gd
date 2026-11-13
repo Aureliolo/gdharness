@@ -110,6 +110,21 @@ func _initialize() -> void:
 		GdhReached.current.autoloaded()
 	_runner = started(given)
 	_runner.own_path = get_script().resource_path
+	if GdhTreeAsk.wanted():
+		_added_once_asked(GdhTreeAsk.new())
+		return
+	root.add_child(_runner)
+
+
+## Adds the runner once [param asking] has its answer, so a suite's first case runs with the tree
+## already built. The engine answers the question between frames, so the wait is frame by frame.
+func _added_once_asked(asking: GdhTreeAsk) -> void:
+	var refused: String = asking.start()
+	while refused.is_empty() and not asking.over():
+		await process_frame
+	var said: String = refused if not refused.is_empty() else asking.outcome()
+	if not said.is_empty():
+		print("%s: %s" % [GdhTreeAsk.UNASKED, said])
 	root.add_child(_runner)
 
 
@@ -717,6 +732,76 @@ class GdhFreshFrame:
 	func set_debug_mode(debug_mode: bool) -> void:
 		super.set_debug_mode(debug_mode)
 		_case_stage.set_debug_mode(debug_mode)
+
+
+## One UI Automation question put to the engine's window, as a Windows screen reader puts it. With
+## `--accessibility always` the engine gives each control its element, but sends
+## NOTIFICATION_ACCESSIBILITY_UPDATE only once something has asked for the tree, and nothing on
+## gdharness's desktop does. The question is asked from this engine, so the client lands on the
+## engine's own desktop.
+class GdhTreeAsk:
+	extends RefCounted
+
+	## Printed before why the tree was not asked for.
+	const UNASKED: String = "gdharness could not ask for the accessibility tree"
+	## How long starting PowerShell and loading UI Automation may take. A cold start on a loaded
+	## Windows runner took 23 s, and a warm one under a second.
+	const WAIT_MS: int = 45000
+	## The question, with $Handle set before it. Reaching the window's first child is what makes UI
+	## Automation ask the window for its provider.
+	const QUESTION: String = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+$window = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
+$null = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetFirstChild($window)
+"""
+
+	var _pid: int = 0
+	var _began_ms: int = 0
+
+	## Whether the engine runs with the tree on, windowed on Windows, where the question is asked.
+	static func wanted() -> bool:
+		if OS.get_name() != "Windows" or DisplayServer.get_name() == "headless":
+			return false
+		var args: PackedStringArray = OS.get_cmdline_args()
+		var at: int = args.find("--accessibility")
+		return at >= 0 and at + 1 < args.size() and args[at + 1] == "always"
+
+	## Starts the client, or answers why it could not.
+	func start() -> String:
+		var handle: int = DisplayServer.window_get_native_handle(DisplayServer.WINDOW_HANDLE)
+		if handle == 0:
+			return "the engine has no window to ask"
+		# The system's own PowerShell by its path, so a powershell.exe earlier on PATH is not what runs.
+		var shell: String = OS.get_environment("SystemRoot").path_join(
+			"System32/WindowsPowerShell/v1.0/powershell.exe"
+		)
+		var script: String = "$Handle = %d\n%s" % [handle, QUESTION]
+		_pid = OS.create_process(
+			shell,
+			[
+				"-NoProfile",
+				"-NonInteractive",
+				"-EncodedCommand",
+				Marshalls.raw_to_base64(script.to_utf16_buffer()),
+			]
+		)
+		if _pid <= 0:
+			return "PowerShell could not be started from %s" % shell
+		_began_ms = Time.get_ticks_msec()
+		return ""
+
+	## Whether the client has ended or run out of time.
+	func over() -> bool:
+		return not OS.is_process_running(_pid) or Time.get_ticks_msec() - _began_ms > WAIT_MS
+
+	## Empty once the client has asked, or why it did not.
+	func outcome() -> String:
+		if OS.is_process_running(_pid):
+			var _killed: Error = OS.kill(_pid)
+			return "UI Automation did not answer within %.0f s" % (WAIT_MS / 1000.0)
+		var code: int = OS.get_process_exit_code(_pid)
+		return "" if code == 0 else "the UI Automation client exited with code %d" % code
 
 
 ## The rows of one parameterised case an engine runs: those named, or every row but those.

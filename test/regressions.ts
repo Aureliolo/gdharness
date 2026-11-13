@@ -871,6 +871,48 @@ function accessibilityTreeSuite(constant: string): string {
   ].join('\n');
 }
 
+/**
+ * A suite whose control counts the engine's NOTIFICATION_ACCESSIBILITY_UPDATE and makes a
+ * sub-element there, which code describing its parts to a screen reader does.
+ */
+function accessibilityUpdatesSuite(): string {
+  return [
+    'extends GdUnitTestSuite',
+    '',
+    'const GDHARNESS_ACCESSIBILITY: bool = true',
+    '',
+    '',
+    'class Counted:',
+    '\textends Control',
+    '',
+    '\tvar updates: int = 0',
+    '\tvar part: RID = RID()',
+    '',
+    '\tfunc _notification(what: int) -> void:',
+    '\t\tif what != NOTIFICATION_ACCESSIBILITY_UPDATE:',
+    '\t\t\treturn',
+    '\t\tupdates += 1',
+    '\t\tif not part.is_valid():',
+    '\t\t\tpart = DisplayServer.accessibility_create_sub_element(',
+    '\t\t\t\tget_accessibility_element(), DisplayServer.ROLE_STATIC_TEXT',
+    '\t\t\t)',
+    '',
+    '',
+    'func test_updates() -> void:',
+    '\tvar shown: Counted = auto_free(Counted.new())',
+    '\tget_tree().root.add_child(shown)',
+    '\tfor _frame: int in 10:',
+    '\t\tawait get_tree().process_frame',
+    '\tassert_int(shown.updates) \\',
+    '\t\t.override_failure_message("the control was sent no accessibility update") \\',
+    '\t\t.is_greater(0)',
+    '\tassert_bool(DisplayServer.accessibility_has_element(shown.part)) \\',
+    '\t\t.override_failure_message("the sub-element made in the update is not in the tree") \\',
+    '\t\t.is_true()',
+    '',
+  ].join('\n');
+}
+
 let standInEngineBuilt: string | null = null;
 
 /**
@@ -68150,6 +68192,35 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       return pushed;
     };
     const pushed = aBenchmarkSuiteTheEngineVersionAndAnAutoloadThatCannotStart();
+    /** A suite asking for the accessibility tree runs with it on, and its controls are sent updates. */
+    const theAccessibilityTreeIsBuilt = (): void => {
+      // On Linux a window alone builds no tree, so the same case fails there. A GitHub Windows
+      // runner built it for a window alone.
+      writeTree(project, {
+        'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+        'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+      });
+      const tree = test('tests/tree_test.gd');
+      assert.equal(tree.status, 0, tree.said);
+      assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
+      const bare = test('tests/bare_test.gd');
+      assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
+      if (process.platform === 'linux') {
+        assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
+        assert.match(bare.said, /no accessibility element/, bare.said);
+      }
+      rmSync(join(project, 'tests', 'tree_test.gd'));
+      rmSync(join(project, 'tests', 'bare_test.gd'));
+      if (process.platform === 'win32') {
+        // The engine sends a control its updates only once a client has asked for the tree, which
+        // the run does on Windows as a screen reader would.
+        writeTree(project, { 'tests/updates_test.gd': accessibilityUpdatesSuite() });
+        const updates = test('tests/updates_test.gd');
+        assert.equal(updates.status, 0, updates.said);
+        assert.match(updates.said, /^Passed: 1 case in 1 suite/m, updates.said);
+        rmSync(join(project, 'tests', 'updates_test.gd'));
+      }
+    };
     /** The lock a suite's engine runs on names that engine beside the process holding it. */
     const theLockOfASuitesEngine = (): void => {
       // The lock a suite's engine runs on names that engine beside the process holding it, so what
@@ -68273,23 +68344,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
           ),
           shared.said,
         );
-        // A suite asking for the accessibility tree runs with it on. On Linux a window alone builds no
-        // tree, so the same case fails there. A GitHub Windows runner built it for a window alone.
-        writeTree(project, {
-          'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
-          'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
-        });
-        const tree = test('tests/tree_test.gd');
-        assert.equal(tree.status, 0, tree.said);
-        assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
-        const bare = test('tests/bare_test.gd');
-        assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
-        if (process.platform === 'linux') {
-          assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
-          assert.match(bare.said, /no accessibility element/, bare.said);
-        }
-        rmSync(join(project, 'tests', 'tree_test.gd'));
-        rmSync(join(project, 'tests', 'bare_test.gd'));
+        theAccessibilityTreeIsBuilt();
       } else {
         console.log(`test command windowed case skipped: ${windowed}`);
       }
@@ -70463,6 +70518,24 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                 }
                 rmSync(join(project, 'tree'), { recursive: true, force: true });
                 rmSync(join(project, 'bare'), { recursive: true, force: true });
+                if (process.platform === 'win32') {
+                  // Its controls are sent their updates too, since the run asks for the tree.
+                  writeTree(project, { 'updates/updates_test.gd': accessibilityUpdatesSuite() });
+                  const updates = jsonOf(
+                    await call(
+                      'project_test',
+                      { projectPath: project, path: 'updates' },
+                      ENGINE_CALL_TIMEOUT_MS * 3,
+                    ),
+                    'updates',
+                  );
+                  assert.deepEqual(
+                    [get(updates, 'passed'), get(updates, 'tests')],
+                    [true, 1],
+                    JSON.stringify(updates),
+                  );
+                  rmSync(join(project, 'updates'), { recursive: true, force: true });
+                }
               };
               await theTreeIsBuiltForAnAccessibilitySuite();
             }
