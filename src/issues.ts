@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { errorMessage } from './errors.js';
+import { errorCode, errorMessage } from './errors.js';
 import { currentRunner } from './runner.js';
 import { SERVER_VERSION } from './server-version.js';
 
@@ -212,6 +212,23 @@ export class DefectsSeen {
   }
 }
 
+/** The codes a write fails with once its disk, or the user's quota on it, has no room left. */
+const NO_ROOM = new Set(['ENOSPC', 'EDQUOT']);
+
+/**
+ * What a failed call says when the disk it wrote to had no room left, or null for any other
+ * failure. A full disk is the machine's state with a known fix, so it is not reported as a defect.
+ */
+export function noRoomLeft(error: unknown): string | null {
+  if (!NO_ROOM.has(errorCode(error) ?? '')) {
+    return null;
+  }
+  const path =
+    error instanceof Error && 'path' in error && typeof error.path === 'string' ? error.path : null;
+  const disk = path === null ? 'a disk gdharness writes to' : `the disk holding ${path}`;
+  return `No space is left on ${disk}. Free space there, then send the call again.\n\n${errorMessage(error)}`;
+}
+
 /** What the caller knows about a defect that the report itself cannot work out. */
 interface DefectContext {
   /** The engine's version, when whatever failed had already learned it. */
@@ -241,6 +258,10 @@ interface DefectContext {
  * which. The paragraph after it hands over the decision, which is not the agent's to take.
  */
 export function defectReport(where: string, error: unknown, context: DefectContext = {}): string {
+  const full = noRoomLeft(error);
+  if (full !== null) {
+    return full;
+  }
   const { godotVersion, seenBefore = 0 } = context;
   const signature = defectSignature(where, errorMessage(error));
   const message = withoutMachinePaths(errorMessage(error));

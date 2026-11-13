@@ -242,4 +242,35 @@ const nearly = spawnSyncHidden(process.execPath, ['src/cli.ts', 'doctr'], {
 }).stderr.toString();
 assert.match(nearly, /Unknown command: doctr\. Did you mean doctor\? Run gdharness help\./, nearly);
 
+// A full disk is the machine's state with a known fix. Shaped as Node's fs errors are, with the
+// code and the path the write failed on.
+const log = join(tmpdir(), 'run', 'engine.log');
+const noRoom = (code: string, path?: string): Error =>
+  Object.assign(new Error(`${code}: no space left on device, rename '${log}' -> '${log}.whole'`), {
+    code,
+    ...(path === undefined ? {} : { path }),
+  });
+for (const code of ['ENOSPC', 'EDQUOT']) {
+  const full = defectReport('gdharness test', noRoom(code, log), { seenBefore: 3 });
+  assert.ok(
+    full.startsWith(
+      `No space is left on the disk holding ${log}. Free space there, then send the call again.`,
+    ),
+    `${code} names the disk and the fix: ${full}`,
+  );
+  assert.ok(full.includes(`${code}: no space left on device`), `${code} keeps the error itself`);
+  assert.doesNotMatch(full, /defect|issues\/new|this exact failure/u, `${code} is no defect: ${full}`);
+}
+assert.ok(
+  defectReport('gdharness test', noRoom('ENOSPC')).startsWith(
+    'No space is left on a disk gdharness writes to. Free space there',
+  ),
+  'a full disk without a path still names the fix',
+);
+assert.match(
+  defectReport('gdharness test', Object.assign(new Error('EIO: i/o error'), { code: 'EIO', path: log })),
+  /That is a gdharness defect/u,
+  'another failed write is still a defect',
+);
+
 console.log('issue reporting checks passed');
