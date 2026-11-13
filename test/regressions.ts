@@ -97248,7 +97248,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
   const outside = join(sandbox, 'outside');
   const alias = join(sandbox, 'alias');
   const lines = (count: number): string =>
-    Array.from({ length: count }, (_, at) => `var ${'xyz'[at] ?? 'w'} := ${at + 1}`).join('\n') + '\n';
+    `${Array.from({ length: count }, (_, at) => `var ${'xyz'[at] ?? 'w'} := ${at + 1}`).join('\n')}\n`;
   writeTree(project, {
     'project.godot': 'config_version=5\n',
     'a.gd': lines(3),
@@ -97290,22 +97290,29 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
           op = 'set',
           projectPath = project,
         ): Promise<string> => await call('debug_breakpoint', { op, projectPath, scriptPath, line });
+        // A refusal or a crash is text, and says so where it is read as an answer.
+        const parsed = (said: string): unknown => {
+          assert.ok(said.startsWith('{'), said);
+          return JSON.parse(said) as unknown;
+        };
         const heldIn = (said: string): string[] =>
-          asArray(get(JSON.parse(said) as unknown, 'held')).map(
+          asArray(get(parsed(said), 'held')).map(
             (one) => `${asString(get(one, 'scriptPath'))}:${asArray(get(one, 'lines')).join(',')}`,
           );
-        const noted = (): Map<string, number[]> =>
-          new Map(
+        const noted = (): Map<string, number[]> => {
+          assert.ok(existsSync(breakpointNotePath(project)), 'the project keeps a note of what is held');
+          return new Map(
             asArray(
               get(JSON.parse(readFileSync(breakpointNotePath(project), 'utf8')) as unknown, 'breakpoints'),
             ).map((one) => [asString(get(one, 'script')), asArray(get(one, 'lines')).map(Number)]),
           );
+        };
 
         // A folder link out: the answer names the link once, and nothing reads the script.
         const behind = await answer('res://shared/o.gd', 2);
-        assert.equal(get(JSON.parse(behind) as unknown, 'set'), true, behind);
+        assert.equal(get(parsed(behind), 'set'), true, behind);
         assert.equal(
-          get(JSON.parse(behind) as unknown, 'lineNotChecked'),
+          get(parsed(behind), 'lineNotChecked'),
           linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
         );
         assert.equal(behind.split('the link res://shared/').length - 1, 1, behind);
@@ -97327,7 +97334,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
             ['shared/o.gd'],
           );
           assert.equal(
-            get(JSON.parse(cased) as unknown, 'lineNotChecked'),
+            get(parsed(cased), 'lineNotChecked'),
             linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
           );
           const player = await answer('res://Player.gd', 1);
@@ -97343,7 +97350,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
           'res://link/r.gd has 2 lines, so there is no line 9 to stop on.',
         );
         const inside = await answer('res://link/r.gd', 1);
-        assert.equal(get(JSON.parse(inside) as unknown, 'lineNotChecked'), undefined, inside);
+        assert.equal(get(parsed(inside), 'lineNotChecked'), undefined, inside);
         assert.ok(heldIn(inside).includes('res://link/r.gd:1'), inside);
         assert.deepEqual(noted().get('link/r.gd'), [1]);
 
@@ -97365,7 +97372,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
 
         // A step that is a file lists nothing, and neither does a ring of links.
         for (const folder of ['a.gd', 'ring1']) {
-          const removed = JSON.parse(await answer(`res://${folder}/x.gd`, 1, 'remove')) as unknown;
+          const removed = parsed(await answer(`res://${folder}/x.gd`, 1, 'remove'));
           assert.equal(get(removed, 'removed'), false);
           assert.ok(
             asString(get(removed, 'why')).includes(
@@ -97385,7 +97392,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
         // A link with a space in its name.
         const spaced = await answer('res://my shared/o.gd', 1);
         assert.equal(
-          get(JSON.parse(spaced) as unknown, 'lineNotChecked'),
+          get(parsed(spaced), 'lineNotChecked'),
           linkOutAnswer('res://my shared/o.gd', 'res://my shared/', 1),
         );
         assert.ok(heldIn(spaced).includes('res://my shared/o.gd:1'), spaced);
@@ -97394,7 +97401,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
         if (fileLinks) {
           const file = await answer('res://linked.gd', 2);
           assert.equal(
-            get(JSON.parse(file) as unknown, 'lineNotChecked'),
+            get(parsed(file), 'lineNotChecked'),
             linkOutAnswer('res://linked.gd', 'res://linked.gd', 2),
           );
           assert.ok(heldIn(file).includes('res://linked.gd:2'), file);
@@ -97418,7 +97425,7 @@ async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
           const through = await answer('res://shared/o.gd', 2, 'set', root);
           assert.deepEqual(heldIn(through), before, root);
           assert.equal(
-            get(JSON.parse(through) as unknown, 'lineNotChecked'),
+            get(parsed(through), 'lineNotChecked'),
             linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
             root,
           );

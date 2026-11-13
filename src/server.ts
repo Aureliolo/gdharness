@@ -6887,38 +6887,43 @@ class GodotServer {
     // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
     // is kept in the project's set and never stops anything. Removing one is left alone, so a
     // breakpoint on a script since deleted or shortened can still be taken off.
-    let lineNotChecked: string | undefined;
-    if (op === 'set') {
-      const gate = resolveWithinProject(project.value.path, given);
-      const link = gate.ok ? null : (gate.link ?? null);
-      if (!existsSync(located.absolutePath)) {
-        // A link whose target is gone leaves nothing to name a missing script in.
-        if (!gate.ok && link !== null && !existsSync(join(project.value.path, link.slice('res://'.length)))) {
-          return this.createErrorResponse(gate.reason, PATH_SOLUTIONS);
-        }
-        return this.missingScript(project.value.path, located.relativePath);
-      }
-      if (link === null) {
-        const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
-        if (nothing !== null) {
-          return this.createErrorResponse(nothing);
-        }
-      } else {
-        // Reading the script would read a file the project does not hold.
-        const linkSteps = listedSpelling(root, link.slice('res://'.length).replace(/\/$/, ''));
-        lineNotChecked = `Line ${line} of ${projectSpelling(project.value.path, scriptPath)} was not checked, since the script lies behind the link res://${linkSteps}${link.endsWith('/') ? '/' : ''}, which leads out of the project.`;
-      }
+    const checked = op === 'set' ? this.checkedSetLine(project.value.path, given, located, line) : {};
+    if ('refusal' in checked) {
+      return checked.refusal;
     }
-    return await this.applyBreakpoint({
-      op,
-      args,
-      project,
-      session,
-      located,
-      scriptPath,
-      line,
-      ...(lineNotChecked === undefined ? {} : { lineNotChecked }),
-    });
+    return await this.applyBreakpoint({ op, args, project, session, located, scriptPath, line, ...checked });
+  }
+
+  /**
+   * What a set on [param line] of the script [param given] answers before it is taken: the refusal
+   * of a missing script or a line nothing stops on, or the note that the line went unchecked for a
+   * script behind a link out of the project, which is not read.
+   */
+  private checkedSetLine(
+    projectPath: string,
+    given: string,
+    located: { readonly relativePath: string; readonly absolutePath: string },
+    line: number,
+  ): { refusal: ToolResponse } | { lineNotChecked?: string } {
+    const gate = resolveWithinProject(projectPath, given);
+    const link = gate.ok ? null : (gate.link ?? null);
+    if (!existsSync(located.absolutePath)) {
+      // A link whose target is gone leaves nothing to name a missing script in.
+      if (!gate.ok && link !== null && !existsSync(join(projectPath, link.slice('res://'.length)))) {
+        return { refusal: this.createErrorResponse(gate.reason, PATH_SOLUTIONS) };
+      }
+      return { refusal: this.missingScript(projectPath, located.relativePath) };
+    }
+    if (link === null) {
+      const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
+      return nothing === null ? {} : { refusal: this.createErrorResponse(nothing) };
+    }
+    const root = realAsFarAsItExists(projectPath);
+    const linkSteps = listedSpelling(root, link.slice('res://'.length).replace(/\/$/, ''));
+    const script = projectSpelling(projectPath, join(root, listedSpelling(root, located.relativePath)));
+    return {
+      lineNotChecked: `Line ${line} of ${script} was not checked, since the script lies behind the link res://${linkSteps}${link.endsWith('/') ? '/' : ''}, which leads out of the project.`,
+    };
   }
 
   /** A breakpoint handed to the editor's adapter when one is connected, and otherwise held here. */
