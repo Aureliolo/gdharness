@@ -6,7 +6,7 @@
     "security:openssf-scorecard",
     ":semanticCommitsDisabled"
   ],
-  "timezone": "Etc/UTC",
+  "timezone": "Europe/Zurich",
   "schedule": ["before 6am on monday"],
   "description": "The dependency dashboard is on. It is the only place the raises this config switches off are visible: the github-runners majors, the engines floor, and anything Renovate tried and could not land. The weekly pull request shows what did arrive and says nothing about what did not, so turning the dashboard off hides exactly the half nobody would otherwise go looking for. It is an issue that never closes, which is a thing to recognise rather than a thing to close: it carries the renovate label for that.",
   "dependencyDashboard": true,
