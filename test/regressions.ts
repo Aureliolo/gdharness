@@ -60249,7 +60249,9 @@ async function secondLaneHeldInAWhileTheFileFalls(
     }
     assert.equal(started, 1, 'the first lane is running its share');
     told = 1;
-    free = 2 ** 40;
+    if (wait === 'memory') {
+      free = 2 ** 40;
+    }
     takes[0]?.('N1');
     await delay(200);
     const snapshot = { started, released: [...released] };
