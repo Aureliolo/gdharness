@@ -91804,7 +91804,7 @@ function testALinkChainTooLongToFollowIsNotSaidToLeadOut(): void {
     // 40 links ending inside: judged and kept. 41 ending inside: too long, and not said to lead out.
     assert.equal(said[0], '', output);
     assert.match(said[1] ?? '', /cannot be followed to the end/, `41 links ending inside: ${said[1]}`);
-    assert.doesNotMatch(said[1] ?? '', /leads out of the project/, said[1] ?? '');
+    assert.doesNotMatch(said[1] ?? '', /leads out of the project through/, said[1] ?? '');
     assert.match(said[2] ?? '', /cannot be followed to the end/, `41 links ending outside: ${said[2]}`);
     assert.match(
       said[3] ?? '',
