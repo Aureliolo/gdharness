@@ -4495,12 +4495,7 @@ function nothingToSearchAt(projectPath: string, relativePath: string): string {
   // answered with the project's top-level folders named nothing near it.
   const parts = relativePath.split('/').filter((part) => part !== '');
   let kept = parts.length - 1;
-  while (
-    kept > 0 &&
-    statSync(join(projectPath, ...parts.slice(0, kept)), {
-      throwIfNoEntry: false,
-    })?.isDirectory() !== true
-  ) {
+  while (kept > 0 && !isDirectory(join(projectPath, ...parts.slice(0, kept)))) {
     kept -= 1;
   }
   const within = parts.slice(0, kept).join('/');

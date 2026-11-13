@@ -97037,6 +97037,13 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
         for (const answer of answers) {
           assert.ok(answer.includes(through), answer);
         }
+        // A ring of links under a project named through a link has no file to search, and no fault.
+        const inARing = await call('project_search', {
+          projectPath: join(dirname(project), 'alias'),
+          query: 'extends',
+          path: 'res://ring1/x.gd',
+        });
+        assert.match(inARing, /^There is nothing at res:\/\/ring1\/x\.gd to search\./, inARing);
         const kept = readdirSync(outside).toSorted();
         const moves = [
           await call('resource_edit', {
