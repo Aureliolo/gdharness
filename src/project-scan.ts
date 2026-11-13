@@ -154,15 +154,6 @@ export function folderFiles(projectPath: string, directory: string, extensions: 
 }
 
 /**
- * Whether [param relativePath], a project-relative path, is under a folder of the project holding a
- * `.gdignore`, which the engine never loads anything from.
- */
-export function underGdignore(projectPath: string, relativePath: string): boolean {
-  const folders = relativePath.split('/').slice(0, -1).join('/');
-  return leftOutAt(projectPath, folders)?.why === 'gdignore';
-}
-
-/**
  * The topmost folders [method folderFiles] steps over in [param directory], so that a folder with
  * no script it walks can say where its scripts are. `addons` holding only gdharness's addons was
  * answered as holding no .gd script, beside the seventy-three that naming each addon found.

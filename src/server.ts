@@ -270,7 +270,6 @@ import {
   scriptsWithoutUid,
   searchProject,
   steppedOverIn,
-  underGdignore,
 } from './project-scan.js';
 import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
@@ -4258,9 +4257,10 @@ function scriptsTheEngineNeverLoads(
   const ignored: string[] = [];
   const nested: string[] = [];
   for (const script of scripts.map((one) => one.replace(/^res:\/\//, ''))) {
-    if (underGdignore(projectPath, script)) {
+    const why = leftOutAt(projectPath, script.split('/').slice(0, -1).join('/'))?.why;
+    if (why === 'gdignore') {
       ignored.push(`res://${script}`);
-    } else if (leftOutAt(projectPath, script.split('/').slice(0, -1).join('/'))?.why === 'project') {
+    } else if (why === 'project') {
       nested.push(`res://${script}`);
     }
   }
