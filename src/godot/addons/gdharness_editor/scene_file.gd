@@ -985,20 +985,21 @@ static func _ends_inside(file: String, any_case: bool) -> bool:
 ## [constant MOST_LINKS] links, which is a ring. A link whose target is gone leads to that target.
 static func _followed(path: String) -> String:
 	var parts: PackedStringArray = path.replace("\\", "/").simplify_path().split("/")
+	var disk: DirAccess = DirAccess.create(DirAccess.ACCESS_FILESYSTEM)
 	var current: String = parts[0]
 	var index: int = 1
 	var links: int = 0
 	while index < parts.size():
 		var next: String = current + "/" + parts[index]
 		index += 1
-		if not DirAccess.is_link(next):
+		if not disk.is_link(next):
 			current = next
 			continue
 		links += 1
 		if links > MOST_LINKS:
 			return ""
 		var rest: PackedStringArray = parts.slice(index)
-		parts = _target_of(next, current).split("/")
+		parts = _target_of(disk, next, current).split("/")
 		current = parts[0]
 		index = 1
 		parts.append_array(rest)
@@ -1006,8 +1007,8 @@ static func _followed(path: String) -> String:
 
 
 ## The absolute path the link [param at], found in the folder [param folder], points to.
-static func _target_of(at: String, folder: String) -> String:
-	var target: String = DirAccess.read_link(at).replace("\\", "/")
+static func _target_of(disk: DirAccess, at: String, folder: String) -> String:
+	var target: String = disk.read_link(at).replace("\\", "/")
 	# A junction's target may carry the prefix Windows gives a path that skips its own parsing.
 	for prefix: String in ["//?/", "/??/"]:
 		target = target.trim_prefix(prefix)
