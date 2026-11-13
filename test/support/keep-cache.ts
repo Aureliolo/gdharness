@@ -21,4 +21,4 @@ if (
 while (!existsSync(start)) {
   // Spins until the parent says go, so every child leaves its start at the same moment.
 }
-keepPipelineCache(user, project, godot, home);
+await keepPipelineCache(user, project, godot, home);

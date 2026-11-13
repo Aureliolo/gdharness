@@ -65,7 +65,7 @@ import {
   unitsOf,
 } from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
-import { inTurnFor } from '../src/write-turns.js';
+import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -1677,13 +1677,29 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
   await fc.assert(
     fc.asyncProperty(
       fc.array(fc.integer({ min: 1, max: 80 }), { minLength: 2, maxLength: 4 }),
-      async (counts) => {
+      fc.boolean(),
+      async (counts, staleLock) => {
         const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-keep-'));
         try {
           const home = join(root, 'home');
           const project = join(root, 'project');
           mkdirSync(project);
           const start = join(root, 'start');
+          // One small cache is kept first, so a lock left by a dead keep can sit where the swap looks.
+          const first = join(root, 'user-first', 'Godot', 'app_userdata', 'game', 'shader_cache');
+          mkdirSync(first, { recursive: true });
+          writeFileSync(join(first, '0.bin'), 'x'.repeat(100));
+          await keepPipelineCache(join(root, 'user-first'), project, process.execPath, home);
+          const keptFolder = join(
+            home,
+            'pipeline-caches',
+            readdirSync(join(home, 'pipeline-caches'))[0] ?? '',
+          );
+          if (staleLock) {
+            writeFileSync(`${keptFolder}.lock`, '0');
+            const longAgo = new Date(Date.now() - 3_600_000);
+            utimesSync(`${keptFolder}.lock`, longAgo, longAgo);
+          }
           const exits = counts.map((files, index) => {
             const folder = join(
               root,
@@ -1730,7 +1746,7 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
           writeFileSync(`${folder}.lock`, '0');
           const longAgo = new Date(Date.now() - 3_600_000);
           utimesSync(`${folder}.lock`, longAgo, longAgo);
-          keepPipelineCache(join(root, 'user-larger'), project, process.execPath, home);
+          await keepPipelineCache(join(root, 'user-larger'), project, process.execPath, home);
           const after: unknown = JSON.parse(readFileSync(join(folder, 'kept.json'), 'utf8'));
           assert.ok(isRecord(after));
           assert.equal(after['bytes'], (Math.max(...counts) + 1) * 100);
@@ -1741,6 +1757,40 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
       },
     ),
     { numRuns: 5 },
+  );
+}
+
+/**
+ * However many takers meet one lock whose holder has gone, whatever it holds, exactly one of them
+ * ends up holding it, and the lock names that one.
+ */
+async function exactlyOneTakerHoldsAStaleLock(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.integer({ min: 2, max: 6 }),
+      fc.constantFrom('unwritten', 'deadHolder'),
+      async (takers, kind) => {
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-take-'));
+        try {
+          const lock = join(root, 'held.lock');
+          // A pid no process has: the largest a 32-bit signed id holds.
+          writeFileSync(lock, kind === 'unwritten' ? '0' : JSON.stringify({ pid: 2 ** 31 - 1, started: 1 }));
+          const longAgo = new Date(Date.now() - 3_600_000);
+          utimesSync(lock, longAgo, longAgo);
+          const holders = Array.from(
+            { length: takers },
+            (_, index) => `{"pid":${String(process.pid)},"n":${String(index)}}`,
+          );
+          const got = await Promise.all(holders.map((holder) => tryTake(lock, holder, new Map())));
+          assert.equal(got.filter(Boolean).length, 1, `${String(takers)} takers of a lock held by ${kind}`);
+          assert.equal(readFileSync(lock, 'utf8'), holders[got.indexOf(true)]);
+          assert.equal(existsSync(`${lock}.steal`), false, 'the steal file is given back');
+        } finally {
+          sweep(root);
+        }
+      },
+    ),
+    { numRuns: 30 },
   );
 }
 
@@ -2232,6 +2282,7 @@ await theWalkGivesOnlyWhatItHolds();
 await writersTakeTurnsInTheOrderTheyAsked();
 aPlanDependsOnItsUnitsAlone();
 await theLargerKeptCacheSurvivesConcurrentKeeps();
+await exactlyOneTakerHoldsAStaleLock();
 aFailedInstallLeavesTheProjectAsItWas();
 theRetryScheduleHoldsWhateverFails();
 aGameLogReadsTheSameWhenInterleavedAndRead();

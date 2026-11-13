@@ -403,7 +403,7 @@ export async function watchedEngine(
       (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
     );
   } finally {
-    keepPipelineCache(user, launch.projectPath, launch.godotPath);
+    await keepPipelineCache(user, launch.projectPath, launch.godotPath);
   }
 }
 

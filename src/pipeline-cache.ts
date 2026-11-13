@@ -12,9 +12,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { cacheHome } from './cache-home.js';
+import { ownStart } from './engine-slots.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
+import { tryTake } from './write-turns.js';
 
 /**
  * A test run's engine gets a user:// of its own, and Godot keeps its pipeline cache there, in
@@ -154,12 +157,12 @@ export function seedPipelineCache(
  * builds none, and a run of one suite fewer than a run of all of them. The caches of projects no
  * longer on disk go at the same time, as test projects do.
  */
-export function keepPipelineCache(
+export async function keepPipelineCache(
   user: string,
   projectPath: string,
   godotPath: string,
   home: string = cacheHome(),
-): void {
+): Promise<void> {
   const engine = engineBuild(godotPath);
   const where = cacheUnder(user);
   if (engine === null || where === null) {
@@ -181,7 +184,7 @@ export function keepPipelineCache(
     writeFileSync(join(building, RECORD), JSON.stringify(made));
     // The copy takes a while and runs go side by side, so the kept one is read again under the lock
     // the swap holds: a smaller cache that finished last would otherwise replace a larger one.
-    const swapped = underLock(`${kept}.lock`, () => {
+    const swapped = await underLock(`${kept}.lock`, () => {
       if (keptHolds(kept, engine, bytes)) {
         return false;
       }
@@ -211,35 +214,22 @@ function keptHolds(kept: string, engine: string, bytes: number): boolean {
 /** How long a keep waits for another's swap, which takes milliseconds, before leaving its copy unkept. */
 const LOCK_WAIT_MS = 10_000;
 
-/** A lock older than this was left by a keep that died inside its swap. */
-const LOCK_ABANDONED_MS = 30_000;
+/** How often a keep waiting for the swap's lock looks at it again. */
+const LOCK_LOOK_MS = 20;
 
 /**
  * Runs [param swap] holding the lock file [param lock], and answers what it did, or null when the
- * lock could not be had in time. The wait blocks, since a keep runs after its engine has ended.
+ * lock could not be had in time. A lock whose holder has gone is taken over as a write turn's is.
  */
-function underLock<T>(lock: string, swap: () => T): T | null {
-  const pause = new Int32Array(new SharedArrayBuffer(4));
+async function underLock<T>(lock: string, swap: () => T): Promise<T | null> {
+  const holder = JSON.stringify({ pid: process.pid, started: await ownStart() });
+  const starts = new Map<number, number | undefined>();
   const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      writeFileSync(lock, String(process.pid), { flag: 'wx' });
-      break;
-    } catch {
-      if (Date.now() > deadline) {
-        return null;
-      }
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_ABANDONED_MS) {
-          rmSync(lock, { force: true });
-          continue;
-        }
-      } catch {
-        // Given back since it was found, which the next try takes.
-        continue;
-      }
-      Atomics.wait(pause, 0, 0, 10);
+  while (!(await tryTake(lock, holder, starts))) {
+    if (Date.now() > deadline) {
+      return null;
     }
+    await delay(LOCK_LOOK_MS);
   }
   try {
     return swap();

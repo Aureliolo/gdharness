@@ -11870,7 +11870,7 @@ const READ_IN_WORDS = 163;
  * every pipeline cold. A run that built fewer pipelines leaves the kept cache alone, and another
  * engine build is handed none.
  */
-function testAPipelineCacheIsCarriedToTheNextRun(): void {
+async function testAPipelineCacheIsCarriedToTheNextRun(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
   try {
     const home = join(scratch, 'home');
@@ -11900,7 +11900,7 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
     assert.equal(cached(first), null, 'the first run starts with no cache');
     mkdirSync(join(first, where), { recursive: true });
     writeFileSync(join(first, where, 'pipelines.cache'), 'x'.repeat(100));
-    keepPipelineCache(first, project, godot, home);
+    await keepPipelineCache(first, project, godot, home);
 
     const second = join(scratch, 'second', 'user');
     seedPipelineCache(second, project, godot, home);
@@ -11912,15 +11912,15 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
 
     const headless = run('headless', null);
     rmSync(join(headless, where), { recursive: true, force: true });
-    keepPipelineCache(headless, project, godot, home);
+    await keepPipelineCache(headless, project, godot, home);
     const fewer = run('fewer', 40);
-    keepPipelineCache(fewer, project, godot, home);
+    await keepPipelineCache(fewer, project, godot, home);
     const third = join(scratch, 'third', 'user');
     seedPipelineCache(third, project, godot, home);
     assert.equal(cached(third)?.length, 100, 'a run with no cache or a smaller one leaves the kept cache');
 
     const more = run('more', 200);
-    keepPipelineCache(more, project, godot, home);
+    await keepPipelineCache(more, project, godot, home);
     const fourth = join(scratch, 'fourth', 'user');
     seedPipelineCache(fourth, project, godot, home);
     assert.equal(cached(fourth)?.length, 200, 'a run that built more pipelines replaces it');
@@ -11933,7 +11933,7 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
     // the old build's is good for nothing once the project moves on.
     mkdirSync(join(elsewhere, where), { recursive: true });
     writeFileSync(join(elsewhere, where, 'pipelines.cache'), 'y'.repeat(10));
-    keepPipelineCache(elsewhere, project, other, home);
+    await keepPipelineCache(elsewhere, project, other, home);
     const kept = join(home, 'pipeline-caches');
     assert.equal(readdirSync(kept).length, 1, `one kept cache: ${readdirSync(kept).join(', ')}`);
     const onOther = join(scratch, 'on-other', 'user');
@@ -11946,10 +11946,10 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
     const goneRun = join(scratch, 'gone-run', 'user');
     mkdirSync(join(goneRun, where), { recursive: true });
     writeFileSync(join(goneRun, where, 'pipelines.cache'), 'z');
-    keepPipelineCache(goneRun, gone, godot, home);
+    await keepPipelineCache(goneRun, gone, godot, home);
     assert.equal(readdirSync(kept).length, 2, readdirSync(kept).join(', '));
     rmSync(gone, { recursive: true });
-    keepPipelineCache(more, project, godot, home);
+    await keepPipelineCache(more, project, godot, home);
     assert.equal(
       readdirSync(kept).length,
       1,
@@ -11964,7 +11964,7 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
  * One project is one kept cache however its folder is spelled, and a copy a keep left unfinished
  * is swept once it is old, while one a keep is still building is left.
  */
-function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
+async function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
   try {
     const home = join(scratch, 'home');
@@ -11978,7 +11978,7 @@ function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
     const left = join(scratch, 'left', 'user');
     mkdirSync(join(left, where), { recursive: true });
     writeFileSync(join(left, where, 'pipelines.cache'), 'x'.repeat(50));
-    keepPipelineCache(left, project, godot, home);
+    await keepPipelineCache(left, project, godot, home);
 
     const spellings = [
       linked,
@@ -12013,7 +12013,7 @@ function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
     const more = join(scratch, 'more', 'user');
     mkdirSync(join(more, where), { recursive: true });
     writeFileSync(join(more, where, 'pipelines.cache'), 'x'.repeat(80));
-    keepPipelineCache(more, project, godot, home);
+    await keepPipelineCache(more, project, godot, home);
     assert.deepEqual(
       readdirSync(kept).toSorted(),
       [key, basename(building)].toSorted(),

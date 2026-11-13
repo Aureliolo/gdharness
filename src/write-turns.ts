@@ -77,14 +77,7 @@ async function takeTurn<T>(
   mkdirSync(join(projectPath, '.godot', WRITES_FOLDER), { recursive: true });
   const holder = JSON.stringify({ pid: process.pid, started: await ownStart(), file });
   const starts = new Map<number, number | undefined>();
-  while (
-    !made(lock, holder) &&
-    !(await takenOverUnderSteal(
-      lock,
-      () => gone(lock, starts),
-      (path) => made(path, holder),
-    ))
-  ) {
+  while (!(await tryTake(lock, holder, starts))) {
     await delay(TURN_LOOK_MS);
   }
   let result: T;
@@ -100,6 +93,27 @@ async function takeTurn<T>(
     );
   }
   return result;
+}
+
+/**
+ * One try at taking the lock file [param lock] for [param holder], a JSON `{pid, started}`: made
+ * when there is none, or taken over under its steal file when the holder it names has gone. Shared
+ * with every other lock file that names its holder this way, so each is judged by one rule.
+ * [param starts] keeps each holder's start, read once.
+ */
+export async function tryTake(
+  lock: string,
+  holder: string,
+  starts: Map<number, number | undefined>,
+): Promise<boolean> {
+  return (
+    made(lock, holder) ||
+    (await takenOverUnderSteal(
+      lock,
+      () => gone(lock, starts),
+      (path) => made(path, holder),
+    ))
+  );
 }
 
 /**
