@@ -60027,7 +60027,7 @@ function testAShareHoldsNoMoreThanTwoMinutesOfWork(): void {
     [300, 20],
     'a suite over 120 s is a share of its own, the rest after it',
   );
-  assert.deepEqual(shareCosts([10, 10, 10, 10], 4), [20, 20], 'the floor of 30 s beats left over lanes');
+  assert.deepEqual(shareCosts([10, 10, 10, 10], 4), [30, 10], 'the floor of 30 s beats left over lanes');
   assert.deepEqual(shareCosts([], 3), [], 'nothing left makes no share');
   assert.deepEqual(shareCosts([120], 1), [120], 'a suite of exactly 120 s is one share');
 }
@@ -62151,15 +62151,17 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       handed,
       [
         [0, true, [suiteNamed('scene')]],
-        [1, false, [suiteNamed('h0'), suiteNamed('h4')]],
-        [0, false, [suiteNamed('h1'), suiteNamed('h7')]],
+        [1, false, [suiteNamed('h0')]],
+        [0, false, [suiteNamed('h1')]],
         [2, false, [suiteNamed('h2')]],
         [0, false, [suiteNamed('h3')]],
+        [1, false, [suiteNamed('h4')]],
         [2, false, [suiteNamed('h5')]],
         [1, false, [suiteNamed('h6')]],
+        [0, false, [suiteNamed('h7')]],
         [2, false, [suiteNamed('h8')]],
       ],
-      'the windowed suite first and alone, then the slowest up to a third of what is left, shrinking as it runs out',
+      'the windowed suite first and alone, then the slowest up to a third of what is left and never over two minutes, shrinking as it runs out',
     );
     assert.deepEqual(
       handed.flatMap(([, , suitePaths]) => suitePaths).toSorted(),
@@ -66189,9 +66191,13 @@ async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
   // The shares are cut for the lanes there are now.
   const eight = eightSuitesOf(8, 1);
   const shares = new Shares(eight.units, eight.declared, 2);
-  assert.equal(shares.next(0)?.suites.length, 4, 'two lanes are each handed half of what is left');
+  assert.equal(
+    shares.next(0)?.suites.length,
+    3,
+    'two lanes are each handed half of what is left, up to 120 s',
+  );
   shares.widen(4);
-  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 160 s left is one suite');
+  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 200 s left is one suite');
   shares.widen(1);
   assert.equal(shares.next(2)?.suites.length, 1, 'a number below the present one lowers nothing');
 
