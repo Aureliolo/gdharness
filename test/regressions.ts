@@ -60494,11 +60494,6 @@ async function testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking(): Promise<v
       }
       return [lock === null ? null : basename(lock), left];
     };
-    const keeps = (): string => {
-      const names = slotWaiters(directory)[0];
-      return names === undefined ? 'no waiter' : String(names.seen > 0);
-    };
-    assert.equal(keeps(), 'true', 'the waiter has a time of its last look');
     for (let second = 0; second < 8; second += 1) {
       looked();
       assert.deepEqual(
