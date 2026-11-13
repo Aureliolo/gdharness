@@ -1521,7 +1521,8 @@ async function writersTakeTurnsInTheOrderTheyAsked(): Promise<void> {
       fc.array(
         fc.record({
           file: fc.constantFrom<0 | 1>(0, 1),
-          holdMs: fc.integer({ min: 0, max: 3 }),
+          // A hold past the waiters' 100 ms look is what makes them compete for the turn.
+          holdMs: fc.constantFrom(0, 0, 1, 3, 130),
           fails: fc.boolean(),
         }),
         { minLength: 1, maxLength: 7 },
