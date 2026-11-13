@@ -8,9 +8,10 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
+import { statOf } from './listed-reads.js';
 import { LSPTimeout } from './lsp_client.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, type ProjectText, projectTexts } from './project-scan.js';
+import { ignoredTexts, linksOut, type ProjectText, projectTexts } from './project-scan.js';
 import {
   ClassGraph,
   type ClassId,
@@ -116,6 +117,28 @@ export function resourcePathOf(projectPath: string, absolute: string): string | 
 }
 
 /**
+ * The link [param absolute], a path in the project as written, goes out of the project by, as a
+ * `res://` path in the caller's spelling with a closing slash for a folder. It is the shortest
+ * leading part whose real place lies outside the project. Null where no part leaves.
+ */
+export function linkOutOf(projectPath: string, absolute: string): string | null {
+  const written = relativeWithin(projectPath, absolute);
+  if (written === null || written === '') {
+    return null;
+  }
+  const realProject = onDiskSpelling(projectPath);
+  const steps = written.split('/');
+  for (const [index] of steps.entries()) {
+    const part = join(projectPath, ...steps.slice(0, index + 1));
+    if (relativeWithin(realProject, onDiskSpelling(part)) === null) {
+      const isFolder = index < steps.length - 1 || statOf(part)?.isDirectory() === true;
+      return `res://${steps.slice(0, index + 1).join('/')}${isFolder ? '/' : ''}`;
+    }
+  }
+  return null;
+}
+
+/**
  * [param path] as the file system spells it, for a path whose tail does not exist yet too: the
  * nearest directory that exists is resolved and the rest appended. Resolving only paths that exist
  * left a move's target in the spelling it was given, and on Windows that can be an 8.3 short name
@@ -210,7 +233,14 @@ function checkedRename(
   }
   const declaringPath = resourcePathOf(projectPath, request.scriptPath);
   if (declaringPath === null) {
-    return { ok: false, reason: `${request.scriptPath} is not inside the project.` };
+    const link = linkOutOf(projectPath, request.scriptPath);
+    return {
+      ok: false,
+      reason:
+        link === null
+          ? `${request.scriptPath} is not inside the project.`
+          : `${request.scriptPath} is behind the link ${link}, which leads out of the project, so ${symbol} is not renamed from here. Rename it in the project that holds the script.`,
+    };
   }
   let moveTo: string | null = null;
   if (request.newScriptPath !== null) {
@@ -249,7 +279,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   if (declaring === undefined) {
     return {
       ok: false,
-      reason: `${declaringPath} is not among the scripts the engine sees: it is under a directory holding a .gdignore, or one whose name starts with a dot.`,
+      reason: `${declaringPath} is not among the scripts the engine sees: it is under a directory holding a .gdignore or a project.godot of its own, or one whose name starts with a dot.`,
     };
   }
   const declared = declaredIn(scripts);
@@ -520,7 +550,13 @@ function renamed(
       plan,
     );
   }
-  plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? [] : [declaringPath]);
+  plan = mentionIgnored(
+    plan,
+    ignoredTexts(projectPath),
+    symbol,
+    moveTo === null ? [] : [declaringPath],
+    linksOut(projectPath),
+  );
   const rewrites = rewritesOf(
     plan,
     texts,

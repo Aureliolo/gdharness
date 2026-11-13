@@ -489,7 +489,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Project info',
     effect: 'read',
     description:
-      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets (images, fonts, sound, models, video and shaders) it holds, other counting every remaining file. No count includes the .import and .uid files the engine writes beside others, the addons gdharness installed, or any file in a folder holding a .gdignore. Optional sections go on top. ' +
+      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets (images, fonts, sound, models, video and shaders) it holds, other counting every remaining file. No count includes the .import and .uid files the engine writes beside others, the addons gdharness installed, or any file in a folder holding a .gdignore or a project.godot of its own, or behind a link out of the project. Optional sections go on top. ' +
       CLASSES_REBUILT,
     parameters: {
       projectPath: PROJECT_PATH,
@@ -714,7 +714,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Search the project',
     effect: 'read',
     description:
-      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it. total_matches counts those lines. A line over 400 characters, such as the cells of a tile map or a minified file, is answered as the 400 around its first match, with shownFrom the column they start at and lineLength the length of the whole line. Skipped: names starting with a dot, node_modules, any directory holding a .gdignore (named under not_searched when the search passed one) and the addons gdharness installed. A path naming one of those folders, or a place inside one, is searched as asked, and note says the whole-project search steps over it. Each line is searched on its own, so a query holding a line break is refused.',
+      'Searches text or a regular expression across project files and returns file paths with line numbers, one entry per line that holds the query, however often it holds it. total_matches counts those lines. A line over 400 characters, such as the cells of a tile map or a minified file, is answered as the 400 around its first match, with shownFrom the column they start at and lineLength the length of the whole line. Skipped: names starting with a dot, any directory holding a .gdignore or a project.godot of its own, a link out of the project or to a folder the search is inside (each named under not_searched when the search passed one) and the addons gdharness installed. A path naming one of those folders, or a place inside one, is searched as asked, and note says the whole-project search steps over it. Each line is searched on its own, so a query holding a line break is refused.',
     parameters: {
       projectPath: PROJECT_PATH,
       query: { type: 'string', description: 'The text or pattern to find.' },
@@ -1656,7 +1656,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: ['string', 'array'],
         items: { type: 'string' },
         description:
-          'A script inside the project, a folder, or a list of either, such as "scripts/player.gd" or ["scripts/economy", "ui/shop.gd"]. A folder is its .gd files at any depth, skipping what the engine skips and the addons gdharness installed. A folder whose scripts all sit in those is refused, naming each. A script named that sits under a folder holding a .gdignore is checked as asked and listed under underGdignore, since the engine never loads it and its errors do not stop the project. One script is answered on its own. Several are answered together, each named by its res:// path, with clean, errors and warnings for all of them: a script with nothing to report is named in nothingReported, and every other is answered under scripts in that same shape, including a script that could not be read, named with why while the rest are still asked about. Any number of scripts is one call, which reports progress as it goes.',
+          'A script inside the project, a folder, or a list of either, such as "scripts/player.gd" or ["scripts/economy", "ui/shop.gd"]. A folder is its .gd files at any depth, skipping what the engine skips and the addons gdharness installed. A folder whose scripts all sit in those is refused, naming each. A script named that sits under a folder holding a .gdignore is checked as asked and listed under underGdignore, since the engine never loads it and its errors do not stop the project. One under a folder holding a project.godot of its own is listed under inNestedProject the same way. One script is answered on its own. Several are answered together, each named by its res:// path, with clean, errors and warnings for all of them: a script with nothing to report is named in nothingReported, and every other is answered under scripts in that same shape, including a script that could not be read, named with why while the rest are still asked about. Any number of scripts is one call, which reports progress as it goes.',
       },
     },
     requires: ['projectPath', 'scriptPath'],

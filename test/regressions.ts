@@ -414,6 +414,7 @@ import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
+  linkOutOf,
   type RenameServices,
   renameSymbol,
   resourcePathOf,
@@ -31272,7 +31273,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       ],
       [
         ['links'],
-        /^No \.gd script is under links that a folder walk takes in: links\/away is a link out of the project, which the walk does not enter; links\/up is a link back up the tree or to nothing, which the walk does not enter\.$/,
+        /^No \.gd script is under links that a folder walk takes in: links\/away is a link that leads out of the project, so nothing behind it is read; links\/up is a link back up the tree or to nothing, so nothing behind it is read\.$/,
       ],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
@@ -31351,6 +31352,33 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
             );
             assert.match(text(get(named, 'underGdignoreNote')), /^The engine never loads a script under/);
           }
+          // One in a nested project is listed under its own name, and one in an installed addon,
+          // which the engine loads, under neither.
+          for (const scriptPath of ['nests/inner/x.gd', ['ui/shop.gd', 'res://nests/inner/x.gd']]) {
+            const named = parseTextContent(
+              await server.request('tools/call', {
+                name: 'script_diagnostics',
+                arguments: { projectPath: project, scriptPath },
+              }),
+            );
+            assert.deepEqual(
+              [get(named, 'inNestedProject'), get(named, 'underGdignore')],
+              [['res://nests/inner/x.gd'], undefined],
+              JSON.stringify(named),
+            );
+            assert.match(text(get(named, 'inNestedProjectNote')), /^The engine never loads a script in/);
+          }
+          const loaded = parseTextContent(
+            await server.request('tools/call', {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: 'addons/gdharness_editor/plugin.gd' },
+            }),
+          );
+          assert.deepEqual(
+            [get(loaded, 'inNestedProject'), get(loaded, 'underGdignore')],
+            [undefined, undefined],
+            JSON.stringify(loaded),
+          );
         } finally {
           await server.stop();
         }
@@ -94706,6 +94734,15 @@ function testTheFileWalksStepOverAFolderHoldingAProject(): void {
     assert.deepEqual(steppedOverIn(project, scripts), [{ folder: 'deep', why: 'project' }]);
     assert.deepEqual(steppedOverIn(project, copy), [{ folder: '', why: 'project' }]);
   });
+  inNested({ 'addons/game_copy/project.godot': '' }, (project) => {
+    const refused = scriptsToDiagnose(project, 'addons');
+    assert.ok(
+      !refused.ok &&
+        refused.reason.includes('addons/game_copy holds a project.godot of its own') &&
+        !refused.reason.includes('game_copy/game_copy'),
+      JSON.stringify(refused),
+    );
+  });
 }
 
 function testScriptsWithoutAUidStepOverAFolderHoldingAProject(): void {
@@ -94788,6 +94825,254 @@ function testAMoveListsNoBinaryResourceOfAFolderHoldingAProject(): void {
   } finally {
     sweep(project);
   }
+}
+
+/** A rename lists a nested project's copy under leftAlone, in its own words, and does not change it. */
+async function testANestedProjectIsListedAndLeftUnchangedByARename(): Promise<void> {
+  const mod = ['extends "res://told.gd"', '', 'var made: Told = Told.new()', ''].join('\n');
+  const project = renameProjectWith({
+    'game_copy/project.godot': 'config_version=5\n',
+    'game_copy/mod.gd': mod,
+    'kit/.gdignore': '',
+    'kit/mod.gd': mod,
+  });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    assert.ok(changed.includes('res://told.gd:1'), `the declaration is changed: ${JSON.stringify(changed)}`);
+    assert.ok(
+      !changed.some((one) => one.startsWith('res://game_copy/') || one.startsWith('res://kit/')),
+      `nothing in the nested project or under the .gdignore is changed: ${JSON.stringify(changed)}`,
+    );
+    assert.deepEqual(
+      left.filter((one) => one.startsWith('res://game_copy/') || one.startsWith('res://kit/')),
+      ['res://game_copy/mod.gd:3:ignored', 'res://kit/mod.gd:3:ignored'],
+    );
+    const why = asArray(get(outcome.report, 'leftAlone'))
+      .filter((one) => text(get(one, 'kind')) === 'ignored')
+      .map((one) => text(get(one, 'why')));
+    assert.deepEqual(why, [
+      'in a folder holding a project.godot of its own, which the engine does not load as part of this project, so it was not changed',
+      'under a directory holding a .gdignore, which the engine does not load, so it was not changed',
+    ]);
+    applyRewrites(outcome.rewrites);
+    assert.equal(readFileSync(join(project, 'game_copy', 'mod.gd'), 'utf8'), mod);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A script in a nested project is no script the engine sees, so a rename of it is refused saying so. */
+async function testARenameOfAScriptInANestedProjectIsRefused(): Promise<void> {
+  const project = renameProjectWith({
+    'game_copy/project.godot': 'config_version=5\n',
+    'game_copy/ghost.gd': 'class_name Ghost\nextends Node\n',
+  });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'game_copy', 'ghost.gd'),
+        symbol: 'Ghost',
+        newName: 'Spirit',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(!outcome.ok, 'the rename is refused');
+    assert.match(outcome.reason, /is not among the scripts the engine sees: .* a project\.godot of its own/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A move into a nested project is refused, and one into an installed addon is not refused for that reason. */
+function testAMoveIntoAFolderHoldingAProjectIsRefused(): void {
+  const project = moveProject();
+  try {
+    writeTree(project, {
+      'game_copy/project.godot': 'config_version=5\n',
+      'addons/gdharness_editor/plugin.gd': 'extends Node\n',
+      [`addons/gdharness_editor/${VERSION_MARKER}`]: '1.0.0\n',
+    });
+    const outcome = planFileMove(
+      project,
+      join(project, 'scenes/hero.tscn'),
+      join(project, 'game_copy/hero.tscn'),
+    );
+    assert.ok(!outcome.ok, 'the move is refused');
+    assert.match(outcome.reason, /under a directory holding a project\.godot of its own/);
+    assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')), 'nothing moved');
+    writeTree(project, { 'kit/.gdignore': '' });
+    const ignored = planFileMove(project, join(project, 'scenes/hero.tscn'), join(project, 'kit/hero.tscn'));
+    assert.ok(!ignored.ok, 'a move under a .gdignore is refused');
+    assert.match(ignored.reason, /under a directory holding a \.gdignore, which the engine does not load/);
+    const toAddon = planFileMove(
+      project,
+      join(project, 'scenes/hero.tscn'),
+      join(project, 'addons/gdharness_editor/hero.tscn'),
+    );
+    assert.ok(
+      toAddon.ok || !/the engine does not/.test(toAddon.reason),
+      `an installed addon is loaded: ${JSON.stringify(toAddon)}`,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A project beside a folder of `o.gd` and `b.res` that a junction `shared` and a file link reach. */
+function projectLinkedOut(project: string): { outside: string; fileLinked: boolean } {
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-outside-'));
+  writeTree(outside, {
+    'o.gd': 'class_name Shared\nextends Node\nvar t: Told = null\nconst G = "res://game.gd"\n',
+    'p.gd': 'extends Node\nvar t: Told = null\n',
+    'b.res': 'RSCN res://game.gd',
+  });
+  symlinkSync(outside, join(project, 'shared'), 'junction');
+  let fileLinked = true;
+  try {
+    symlinkSync(join(outside, 'p.gd'), join(project, 'linked.gd'), 'file');
+  } catch {
+    fileLinked = false;
+  }
+  return { outside, fileLinked };
+}
+
+/** What a rename and a move do about a link out of the project: read nothing behind it, change nothing, name it. */
+async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promise<void> {
+  const project = renameProject();
+  const moving = moveProject();
+  const { outside, fileLinked } = projectLinkedOut(project);
+  try {
+    const before = (name: string): string => readFileSync(join(outside, name), 'utf8');
+    const kept = { o: before('o.gd'), p: before('p.gd') };
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed } = renameReadings(outcome.report);
+    assert.ok(changed.includes('res://told.gd:1'), `the rename ran: ${JSON.stringify(changed)}`);
+    applyRewrites(outcome.rewrites);
+    assert.deepEqual([before('o.gd'), before('p.gd')], [kept.o, kept.p], 'nothing behind a link is written');
+    const ignored = asArray(get(outcome.report, 'leftAlone')).filter(
+      (one) => text(get(one, 'kind')) === 'ignored',
+    );
+    const named = (path: string): unknown[] => ignored.filter((one) => get(one, 'file') === path);
+    assert.equal(named('res://shared/').length, 1, JSON.stringify(ignored));
+    assert.match(text(get(named('res://shared/')[0], 'why')), /a link that leads out of the project/);
+    assert.equal(named('res://shared/o.gd').length, 0, 'nothing behind the link is listed');
+    if (fileLinked) {
+      assert.equal(named('res://linked.gd').length, 1, 'a file link out is named too');
+    } else {
+      console.log('  skipped the file link: the platform refuses one');
+    }
+
+    symlinkSync(outside, join(moving, 'shared'), 'junction');
+    const move = planFileMove(moving, join(moving, 'game.gd'), join(moving, 'moved_game.gd'));
+    assert.ok(move.ok, `the move was refused: ${JSON.stringify(move)}`);
+    const said = asArray(get(move.report, 'leftAlone')).map((one) => text(get(one, 'file')));
+    assert.deepEqual(
+      said.filter((file) => file.startsWith('res://shared')),
+      ['res://shared/'],
+      'the link is named once and no binary resource behind it',
+    );
+    assert.equal(before('o.gd'), kept.o, 'the move wrote nothing behind the link');
+
+    const behind = planFileMove(project, join(project, 'shared', 'o.gd'), join(project, 'o.gd'));
+    assert.ok(!behind.ok, 'a file behind a link is not moved');
+    assert.match(behind.reason, /is behind the link res:\/\/shared\//);
+    assert.ok(existsSync(join(outside, 'o.gd')), 'and stays where it is');
+    const own = planFileMove(project, project, join(project, 'elsewhere'));
+    assert.ok(!own.ok && /The project directory itself cannot be moved/.test(own.reason), 'the folder itself');
+
+    const symbol = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'shared', 'o.gd'),
+        symbol: 'Shared',
+        newName: 'Common',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(!symbol.ok, 'a script behind a link is not renamed');
+    assert.match(symbol.reason, /is behind the link res:\/\/shared\//);
+    assert.doesNotMatch(symbol.reason, /\.gdignore|project\.godot|starts with a dot/);
+    assert.equal(before('o.gd'), kept.o);
+
+    mkdirSync(join(project, 'held'));
+    symlinkSync(outside, join(project, 'held', 'far'), 'junction');
+    for (const [given, folder] of [
+      ['res://held', 'held/far'],
+      ['res://shared', 'shared'],
+    ] as const) {
+      const refused = scriptsToDiagnose(project, given);
+      assert.ok(
+        !refused.ok && refused.reason.includes(`${folder} is a link that leads out of the project`),
+        `${given}: ${JSON.stringify(refused)}`,
+      );
+    }
+
+    mkdirSync(join(project, 'real'));
+    symlinkSync(join(project, 'real'), join(project, 'inner'), 'junction');
+    assert.equal(linkOutOf(project, join(project, 'shared', 'o.gd')), 'res://shared/');
+    assert.equal(linkOutOf(project, join(project, 'inner', 'i.gd')), null);
+    assert.equal(linkOutOf(project, join(outside, 'o.gd')), null);
+    if (fileLinked) {
+      assert.equal(linkOutOf(project, join(project, 'linked.gd')), 'res://linked.gd');
+    }
+  } finally {
+    sweep(project, moving, outside);
+  }
+}
+
+/** Every reader of the project's folders takes its rule from the one walk. */
+function testEveryProjectWalkIsOne(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+    .map((entry) => join('src', entry).replaceAll('\\', '/'));
+  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
+  const literal = ["'", '.gdignore', "'"].join('');
+  const holding = files.filter((file) => readFileSync(file, 'utf8').includes(literal)).toSorted();
+  assert.deepEqual(holding, ['src/project-walk.ts', 'src/suite-inputs.ts']);
+  const walker = readFileSync('src/project-walk.ts', 'utf8');
+  assert.ok(
+    new RegExp(`isFileAt\\(join\\([^)]*${literal}\\)\\)`).test(walker),
+    'the walker asks whether it is a file',
+  );
+  assert.ok(
+    /function isFileAt\([^)]*\)[^{]*\{\s*try \{\s*return statOf\([^)]*\)\?\.isFile\(\) === true/.test(walker),
+    'by a stat, which a folder of that name fails',
+  );
+  assert.ok(
+    !new RegExp(`existsSync\\([^)]*${literal}`).test(walker),
+    'a folder named .gdignore is no marker',
+  );
+  const nodeModules = ['node', 'modules'].join('_');
+  assert.deepEqual(
+    files.filter((file) => readFileSync(file, 'utf8').includes(nodeModules)),
+    [],
+    'no walk skips node_modules',
+  );
 }
 
 /** The import check leaves a nested project's files out, and still names the project's own. */
@@ -95013,6 +95298,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheClassCacheStepsOverAFolderHoldingAProject,
   testTheUidCacheStepsOverAFolderHoldingAProject,
   testAMoveListsNoBinaryResourceOfAFolderHoldingAProject,
+  testANestedProjectIsListedAndLeftUnchangedByARename,
+  testARenameOfAScriptInANestedProjectIsRefused,
+  testAMoveIntoAFolderHoldingAProjectIsRefused,
+  testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
+  testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,
   testTheTextsStepOverAFolderHoldingAProject,

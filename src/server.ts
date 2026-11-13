@@ -270,9 +270,8 @@ import {
   scriptsWithoutUid,
   searchProject,
   steppedOverIn,
-  underGdignore,
 } from './project-scan.js';
-import type { LeftOut } from './project-walk.js';
+import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
@@ -4137,7 +4136,8 @@ function withoutNestedPaths(resolved: readonly string[]): string[] {
  * Several are named as a list, a folder, or both: a change across seventeen scripts was one call
  * each, so four were asked about and thirteen waited for the unit tier, which says less about a
  * parse error and says it minutes later. A folder is its `.gd` files at any depth, without the
- * directories the engine skips (a `.gdignore`, a hidden name) and without following a link out.
+ * directories the engine skips (a `.gdignore`, a hidden name) and without reading behind a link out
+ * of the project. A link to a folder of the project is followed.
  *
  * No count is refused. A cap of three hundred told a flat test folder of 1192 scripts to name
  * narrower folders, which it had none of, or to call again for the rest, which nothing could name.
@@ -4245,22 +4245,38 @@ function missingScriptReason(projectPath: string, relativePath: string, said: st
 }
 
 /**
- * The scripts of [param scripts], project-relative or res:// paths, that sit under a `.gdignore`.
- * Named on purpose they are checked like any other, and an error in one read as the project's,
- * although the engine never loads it: a class renamed elsewhere left one failing to compile.
+ * The scripts of [param scripts], project-relative or res:// paths, that sit under a `.gdignore` or
+ * in a nested project. Named on purpose they are checked like any other, and an error in one read
+ * as the project's, although the engine never loads it: a class renamed elsewhere left one failing
+ * to compile. gdharness's addons are loaded, and a link left out holds no script to read.
  */
-function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): Record<string, unknown> {
-  const ignored = scripts
-    .map((script) => script.replace(/^res:\/\//, ''))
-    .filter((script) => underGdignore(projectPath, script))
-    .map((script) => `res://${script}`);
-  return ignored.length === 0
-    ? {}
-    : {
-        underGdignore: ignored,
-        underGdignoreNote:
-          'The engine never loads a script under a folder holding a .gdignore, so what is reported for these does not stop the project from compiling or running.',
-      };
+function scriptsTheEngineNeverLoads(projectPath: string, scripts: readonly string[]): Record<string, unknown> {
+  const ignored: string[] = [];
+  const nested: string[] = [];
+  for (const script of scripts.map((one) => one.replace(/^res:\/\//, ''))) {
+    const why = leftOutAt(projectPath, script.split('/').slice(0, -1).join('/'))?.why;
+    if (why === 'gdignore') {
+      ignored.push(`res://${script}`);
+    } else if (why === 'project') {
+      nested.push(`res://${script}`);
+    }
+  }
+  return {
+    ...(ignored.length === 0
+      ? {}
+      : {
+          underGdignore: ignored,
+          underGdignoreNote:
+            'The engine never loads a script under a folder holding a .gdignore, so what is reported for these does not stop the project from compiling or running.',
+        }),
+    ...(nested.length === 0
+      ? {}
+      : {
+          inNestedProject: nested,
+          inNestedProjectNote:
+            'The engine never loads a script in a folder holding a project.godot of its own as part of this project, so what is reported for these does not stop the project from compiling or running.',
+        }),
+  };
 }
 
 /** Why a folder named gave no script, with each folder below it that the walk stepped over. */
@@ -4271,8 +4287,8 @@ function noScriptUnder(projectPath: string, entry: string, absolute: string, fro
     const reasons: Record<LeftOut['why'], string> = {
       gdharness: `is an addon gdharness installed, whose scripts are checked when it is named`,
       project: `holds a project.godot of its own, so the engine never loads what is under it as part of this project, ${checkedWhenNamed}`,
-      link: 'is a link back up the tree or to nothing, which the walk does not enter',
-      outside: 'is a link out of the project, which the walk does not enter',
+      link: 'is a link back up the tree or to nothing, so nothing behind it is read',
+      outside: 'is a link that leads out of the project, so nothing behind it is read',
       gdignore: `holds a .gdignore, so the engine never loads what is under it, ${checkedWhenNamed}`,
     };
     return `${folder} ${reasons[stepped.why]}`;
@@ -10486,7 +10502,7 @@ class GodotServer {
       if (!existsSync(location.absolutePath)) {
         return this.missingScript(project.value.path, location.relativePath);
       }
-      ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
+      ignored = scriptsTheEngineNeverLoads(project.value.path, [location.relativePath]);
     }
     const one = await this.diagnosticsOf(args);
     if ('noLanguageServer' in one) {
@@ -10577,7 +10593,7 @@ class GodotServer {
   ): ToolResponse {
     return this.jsonTextResponse({
       ...diagnosticsSummary(tally, scripts.length),
-      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts) : {}),
+      ...(project.ok ? scriptsTheEngineNeverLoads(project.value.path, scripts) : {}),
     });
   }
 
