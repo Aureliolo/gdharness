@@ -19,6 +19,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,6 +38,7 @@ import {
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { keepPipelineCache } from '../src/pipeline-cache.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
 import { isRecord } from '../src/records.js';
 import { parseProjectGodot } from '../src/resources.js';
@@ -1718,6 +1720,21 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
           assert.ok(isRecord(record));
           assert.equal(record['bytes'], Math.max(...counts) * 100);
           assert.equal(readdirSync(join(folder, 'shader_cache')).length, Math.max(...counts));
+
+          // A lock left by a keep that died inside its swap does not stop the next keep.
+          const larger = join(root, 'user-larger', 'Godot', 'app_userdata', 'game', 'shader_cache');
+          mkdirSync(larger, { recursive: true });
+          for (let file = 0; file <= Math.max(...counts); file += 1) {
+            writeFileSync(join(larger, `${String(file)}.bin`), 'x'.repeat(100));
+          }
+          writeFileSync(`${folder}.lock`, '0');
+          const longAgo = new Date(Date.now() - 3_600_000);
+          utimesSync(`${folder}.lock`, longAgo, longAgo);
+          keepPipelineCache(join(root, 'user-larger'), project, process.execPath, home);
+          const after: unknown = JSON.parse(readFileSync(join(folder, 'kept.json'), 'utf8'));
+          assert.ok(isRecord(after));
+          assert.equal(after['bytes'], (Math.max(...counts) + 1) * 100);
+          assert.equal(existsSync(`${folder}.lock`), false, 'the lock is given back');
         } finally {
           sweep(root);
         }
