@@ -11,7 +11,7 @@ import { type DeclarationKind, isIdentifier, type Position } from './gdscript-so
 import { statOf } from './listed-reads.js';
 import { LSPTimeout } from './lsp_client.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, linksOut, type ProjectText, projectTexts } from './project-scan.js';
+import { ignoredTexts, linksOut, type ProjectText, projectTexts, spellingsOf } from './project-scan.js';
 import {
   ClassGraph,
   type ClassId,
@@ -543,7 +543,7 @@ function renamed(
       {
         texts,
         scripts,
-        moves: new Map([[declaringPath, moveTo]]),
+        moves: new Map(spellingsOf(texts, declaringPath).map((path) => [path, moveTo])),
         named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },

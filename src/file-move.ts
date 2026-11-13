@@ -24,7 +24,7 @@ import {
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, installedByUs, linksOut, projectTexts } from './project-scan.js';
+import { ignoredTexts, installedByUs, linksOut, projectTexts, spellingsOf } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
@@ -329,22 +329,36 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
 
   const texts = projectTexts(projectPath).map((file) =>
     file.realPath !== undefined && moves.has(file.realPath) && !moves.has(file.path)
-      ? { ...file, path: file.realPath }
+      ? { ...file, path: file.realPath, alsoAt: [file.path, ...(file.alsoAt ?? [])] }
       : file,
   );
   const scripts = scriptsOf(texts);
+  // A file reached by more than one path is named by any of them, and each must follow it. The files
+  // that move on disk stay those of `moves`.
+  const references = new Map(moves);
+  for (const text of texts) {
+    const target = moves.get(text.path);
+    if (target === undefined) {
+      continue;
+    }
+    for (const other of spellingsOf(texts, text.path)) {
+      if (!references.has(other)) {
+        references.set(other, target);
+      }
+    }
+  }
   let plan = planMove(
     {
       texts,
       scripts,
-      moves,
+      moves: references,
       named: [from],
       exists: (path) => existsSync(join(projectPath, path.slice('res://'.length))),
     },
     { edits: [], mentions: [] },
   );
   plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from], linksOut(projectPath));
-  const binaries = binaryMentions(projectPath, moves);
+  const binaries = binaryMentions(projectPath, references);
   const afterwards = (path: string): string => moves.get(path) ?? path;
   const rewrites = rewritesOf(plan, texts, null);
   // A rewrite is written as UTF-8 text, so a file holding any other byte would lose it silently.

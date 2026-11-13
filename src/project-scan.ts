@@ -327,6 +327,8 @@ export interface ProjectText {
   readonly text: string;
   /** The file's real place as a `res://` path, set where the text is kept under a link's path and that place is inside the project. */
   readonly realPath?: string;
+  /** The other `res://` paths the walk reaches the same file by through a link, which a move of it takes along. */
+  readonly alsoAt?: readonly string[];
 }
 
 /** A text below a folder the scan leaves out, with that folder and why it is left out. */
@@ -397,7 +399,11 @@ function realPathOf(realProject: string, file: Reached): string | undefined {
 }
 
 /** The text file at [param file] as a project text, or null when it cannot be read or is binary. */
-function textOf(file: Reached, realPath: string | undefined): ProjectText | null {
+function textOf(
+  file: Reached,
+  realPath: string | undefined,
+  alsoAt: readonly string[] = [],
+): ProjectText | null {
   if (BINARY_EXTENSIONS.has(extensionOf(file.name))) {
     return null;
   }
@@ -405,8 +411,14 @@ function textOf(file: Reached, realPath: string | undefined): ProjectText | null
   if (bytes === null || isBinary(bytes)) {
     return null;
   }
-  const text = { path: `res://${file.spelled}`, absolute: file.absolute, text: bytes.toString('utf8') };
-  return realPath === undefined ? text : { ...text, realPath };
+  const text: ProjectText = {
+    path: `res://${file.spelled}`,
+    absolute: file.absolute,
+    text: bytes.toString('utf8'),
+    ...(realPath === undefined ? {} : { realPath }),
+    ...(alsoAt.length === 0 ? {} : { alsoAt }),
+  };
+  return text;
 }
 
 /**
@@ -430,6 +442,16 @@ function pathNamedBy(projectPath: string, named: string, files: readonly Reached
 }
 
 /**
+ * Every `res://` path the file [param path] names in [param texts] is reached by: that one, its real
+ * place and each link to it. A move maps them all, since a reference may use any of them.
+ */
+export function spellingsOf(texts: readonly ProjectText[], path: string): string[] {
+  const text = texts.find((one) => one.path === path);
+  const real = text?.realPath === undefined ? [] : [text.realPath];
+  return [...new Set([path, ...real, ...(text?.alsoAt ?? [])])];
+}
+
+/**
  * Every text file a writer may change, each real file once: under a path in [param named] that
  * reaches it, else its own, else the first the scan reaches it by. None behind a link out of the
  * project. Text holds no NUL in its first eight thousand bytes.
@@ -449,9 +471,14 @@ export function projectTexts(projectPath: string, named: readonly string[] = [])
     }
   }
   const realProject = realAsFarAsItExists(projectPath);
+  const spellings = new Map<string, string[]>();
+  for (const file of files) {
+    spellings.set(file.real, [...(spellings.get(file.real) ?? []), `res://${file.spelled}`]);
+  }
   const found: ProjectText[] = [];
   for (const file of files) {
-    const text = kept.get(file.real) === file ? textOf(file, realPathOf(realProject, file)) : null;
+    const others = (spellings.get(file.real) ?? []).filter((path) => path !== `res://${file.spelled}`);
+    const text = kept.get(file.real) === file ? textOf(file, realPathOf(realProject, file), others) : null;
     if (text !== null) {
       found.push(text);
     }

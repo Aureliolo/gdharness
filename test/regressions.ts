@@ -95672,6 +95672,76 @@ function filesReported(report: Record<string, unknown>): string[] {
   return [...new Set(lines.map((line) => line.slice(0, line.lastIndexOf(':'))))].toSorted();
 }
 
+/**
+ * A script moved by a rename or a move takes along every path that names it, whichever path the
+ * caller named it by: its real place, and each link to it. Named through one link, the move left
+ * the scene and the preload naming another path pointing at nothing.
+ */
+async function testAMoveFollowsEveryPathItsFileIsReachedBy(): Promise<void> {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  const scene = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Script" path="${path}" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n`;
+  writeTree(project, {
+    'project.godot': '',
+    'real/r.gd': 'class_name Runner\nextends Node\n',
+    'main.tscn': scene('res://real/r.gd'),
+    'user.gd': 'extends Node\nconst R = preload("res://real/r.gd")\nvar r: Runner\n',
+    'link_user.gd': 'extends Node\nconst R = preload("res://link/r.gd")\n',
+    'kit/.gdignore': '',
+    'kit/sub/s.gd': 'class_name Kit\nextends Node\n',
+    'kit.tscn': scene('res://via1/s.gd'),
+    'kit_user.gd': 'extends Node\nconst K = preload("res://via1/s.gd")\nvar k: Kit\n',
+  });
+  try {
+    const made = [
+      linkTo(join(project, 'real'), join(project, 'link')),
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via1')),
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via2')),
+    ];
+    assert.ok(!made.includes(false), 'the platform makes a link to a folder');
+    const renamedTo = async (script: string, symbol: string, to: string, path: string): Promise<string[]> => {
+      const outcome = await renameSymbol(
+        { projectPath: project, scriptPath: script, symbol, newName: to, newScriptPath: join(project, path) },
+        { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+      );
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      return filesReported(outcome.report);
+    };
+    assert.deepEqual(
+      await renamedTo(join(project, 'link', 'r.gd'), 'Runner', 'Racer', 'racer.gd'),
+      ['res://link/r.gd', 'res://link_user.gd', 'res://main.tscn', 'res://user.gd'],
+      'named through the link, the paths naming its real place follow it',
+    );
+    const real = planFileMove(project, join(project, 'link', 'r.gd'), join(project, 'moved.gd'));
+    assert.ok(real.ok, JSON.stringify(real));
+    assert.deepEqual(
+      filesReported(real.report),
+      ['res://link_user.gd', 'res://main.tscn', 'res://user.gd'],
+      'a move named through the link takes the path through it as well as the real one',
+    );
+    assert.deepEqual(
+      await renamedTo(join(project, 'via2', 's.gd'), 'Kit', 'Gear', 'gear.gd'),
+      ['res://kit.tscn', 'res://kit_user.gd', 'res://via2/s.gd'],
+      'named through one link, the paths through the other follow it',
+    );
+    const moved = planFileMove(project, join(project, 'via2', 's.gd'), join(project, 'gear.gd'));
+    assert.ok(moved.ok, JSON.stringify(moved));
+    assert.deepEqual(
+      filesReported(moved.report),
+      ['res://kit.tscn', 'res://kit_user.gd'],
+      'a move named through one link takes the paths through the other',
+    );
+    assert.deepEqual(
+      moved.moved.map((file) => file.from),
+      ['res://kit/sub/s.gd'],
+      'and moves the file once',
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
 /** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
 function projectWithTwoPaths(): { root: string; project: string } {
   const root = tmpDir();
@@ -95857,6 +95927,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheExtensionListStepsOverAFolderHoldingAProject,
   testTheTextsStepOverAFolderHoldingAProject,
   testAFileTwoPathsReachIsRenamedOnce,
+  testAMoveFollowsEveryPathItsFileIsReachedBy,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,
