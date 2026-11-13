@@ -461,9 +461,10 @@ static func _not_added(why: String) -> Array:
 	return [-1, why, null, false, "", []]
 
 
-## [param arguments] as [param method] on [param target] takes them: a whole number read as a
-## float, as JSON gives every number, is an int unless the parameter is a float, so a key calling
-## step(by: int) with 3 is saved as 3 rather than 3.0.
+## [param arguments] as [param method] on [param target] takes them. They arrive read as untyped
+## values, a bare whole number an int and a tagged whole float a float, so a whole number is fitted
+## to a parameter declaring int or float alone: a key calling step(by: int) with 3 is saved as 3,
+## and one calling lean(by: float) with 1 as 1.0.
 static func _fitted(target: Node, method: String, arguments: Array) -> Array:
 	var parameters: Array = []
 	for info: Dictionary in target.get_method_list():
@@ -477,7 +478,9 @@ static func _fitted(target: Node, method: String, arguments: Array) -> Array:
 		if at < parameters.size():
 			var parameter: Dictionary = parameters[at]
 			declared = GdhRead.as_int(parameter.get("type", TYPE_NIL))
-		if value is float and declared != TYPE_FLOAT:
+		if value is int and declared == TYPE_FLOAT:
+			value = float(value)
+		elif value is float and declared == TYPE_INT:
 			var number: float = value
 			if (is_finite(number)
 					and number == floorf(number)

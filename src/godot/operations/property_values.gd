@@ -720,6 +720,10 @@ func _value_as(target: Object, declared: Dictionary, raw: Variant) -> Array:
 func _parse_plain(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	var property: String = str(declared.get("name", ""))
 	var expected_type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	# A read answers a whole float a property holds as a bare number, so where nothing declares the
+	# type, one holding a float keeps it and the value read writes back as it was.
+	if expected_type == TYPE_NIL and raw is float and target.get(property) is float:
+		expected_type = TYPE_FLOAT
 	var elements: Array = _elements_declared(target, declared)
 	if GdhShapes.fraction(raw, expected_type, elements):
 		return [false, _fraction_refusal(target, property, raw)]

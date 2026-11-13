@@ -42223,12 +42223,13 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
     'sample.gd':
       'extends Node\n\n@export var sample: Dictionary = {}\n@export var copy: Dictionary = {}\n' +
       '@export var counts: Array[int] = []\n@export var ratios: Array[float] = []\n' +
-      '@export var marks: Array = []\n',
+      '@export var marks: Array = []\n@export_storage var loose = 1.5\n@export_storage var empty\n',
     'sample.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_s"]\n\n' +
       '[node name="Sample" type="Node"]\nscript = ExtResource("1_s")\n' +
       'sample = {\n"lines": 7,\n"ratio": 7.0,\n"rows": [["186", false, 1, 2.0]]\n}\n' +
-      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\nmarks = [3, 3.0, 2.5, [4.0]]\n',
+      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\nmarks = [3, 3.0, 2.5, [4.0]]\n' +
+      'loose = 7.0\n',
   });
   const server = new ServerProcess({
     env: {
@@ -42294,6 +42295,22 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
     });
     const bare = (/^copy = \{\n([^}]*)\}\n/m.exec(file())?.[1] ?? '').split(/,?\n/).filter(Boolean);
     assert.deepEqual(bare.toSorted(), ['"half": 0.5', '"list": [4, 4.0]', '"n": 3'], file());
+
+    // A property that declares no type keeps the float it holds, which a read answers as a bare 7,
+    // so a bare whole number written to it is a float. One holding nothing takes it as the int
+    // GDScript reads the literal as.
+    assert.equal(get(read, 'properties', 'loose'), 7, JSON.stringify(read));
+    await answered('scene_node', {
+      op: 'set',
+      scenePath: 'sample.tscn',
+      nodePath: '.',
+      properties: { loose: 9, empty: 3 },
+    });
+    assert.deepEqual(
+      [/^loose = (.*)$/m.exec(file())?.[1], /^empty = (.*)$/m.exec(file())?.[1]],
+      ['9.0', '3'],
+      file(),
+    );
   } finally {
     await server.stop();
     sweep(project);
