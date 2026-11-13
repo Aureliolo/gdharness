@@ -44,17 +44,18 @@ import {
   watchedEngine,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
+import type { EngineRun } from './engine-run.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
-import { CONTROL_SEQUENCE } from './game-log.js';
+import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
+import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags, wholeFlag } from './launch.js';
-import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
+import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
 import { prependTo, readLog } from './log-read.js';
 import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { isRecord, isStringList } from './records.js';
-import { forceNextImport } from './reimport.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
@@ -1652,18 +1653,7 @@ export function importNeeded(projectPath: string): string | null {
  * scripts declare, which is all an import would change for the suites.
  */
 async function importProject(launch: Launch): Promise<string | null> {
-  const seeded = seedExtensionList(launch.projectPath);
-  if (seeded !== null && seeded.length > 0) {
-    console.log(`Wrote .godot/extension_list.cfg naming ${named(seeded)}, so the import loads them.`);
-  }
-  const cached = cachedClasses(launch.projectPath);
-  const stale = staleImports(launch.projectPath);
-  if (
-    (seeded === null || seeded.length === 0) &&
-    cached !== null &&
-    staleAgainst(cached, launch.projectPath).length === 0 &&
-    stale.length === 0
-  ) {
+  if (importNeeded(launch.projectPath) === null) {
     console.log('The import was skipped: every imported file and the class cache are current.');
     return null;
   }
@@ -1672,39 +1662,72 @@ async function importProject(launch: Launch): Promise<string | null> {
   const log = join(directory, 'import.log');
   const lock = await launch.slots.take();
   try {
-    // An editor open on the project holds the copies of its extension libraries, and an import
-    // that cannot copy one runs without the extension.
-    freeLibraryCopies(launch.projectPath);
-    // The engine's scan without the editor's cache passes over a sidecar that names no output, so
-    // every file found behind is marked for the import rather than left to the scan's judgement.
-    for (const one of stale) {
-      forceNextImport(launch.projectPath, one.path);
+    let last: EngineEnd = { code: null, signal: null, ended: null };
+    const watched = async (args: readonly string[]): Promise<EngineEnd> => {
+      last = await watchedEngine(launch, lock, args, directory, log, launch.silenceFloorSeconds);
+      return last;
+    };
+    const imported = await suiteImport(launch.godotPath, launch.projectPath, importStartOf(watched, log));
+    if (imported.extensionsListed !== undefined) {
+      console.log(
+        `Wrote .godot/extension_list.cfg naming ${named(imported.extensionsListed)}, so the import loads them.`,
+      );
     }
-    const ended = await watchedEngine(
-      launch,
-      lock,
-      ['--headless', '--audio-driver', 'Dummy', '--path', launch.projectPath, '--import'],
-      directory,
-      log,
-      launch.silenceFloorSeconds,
-    );
-    const end = importEnd(ended);
+    const where = `and everything it printed is in ${launch.logs.named(log)}`;
+    const end = importEnd(last);
     if (end !== null) {
-      return `${end}, and everything it printed is in ${launch.logs.named(log)}`;
+      return `${end}, ${where}`;
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
-    // the import left behind.
+    // the import left behind. The whole log is read, since an outcome keeps the newest messages alone.
     const printed = readRun(readLog(log));
     const wrongEngine =
       launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
     if (wrongEngine !== null) {
-      return `${wrongEngine}, and everything it printed is in ${launch.logs.named(log)}`;
+      return `${wrongEngine}, ${where}`;
+    }
+    if (!imported.ok) {
+      return `${imported.message} ${where}`;
     }
     const fault = importFault(printed);
-    return fault === null ? null : `${fault}, and everything it printed is in ${launch.logs.named(log)}`;
+    return fault === null ? null : `${fault}, ${where}`;
   } finally {
     launch.slots.release(lock);
   }
+}
+
+/**
+ * The import pass's engine start for a suite run: [param watched] run, and what it printed into
+ * [param log] read into a log. A crash stays an exit code or a signal, which the doc cache check
+ * reads, and only an engine gdharness ended is a failure.
+ */
+export function importStartOf(
+  watched: (args: readonly string[]) => Promise<EngineEnd>,
+  log: string,
+): (args: readonly string[]) => Promise<EngineRun> {
+  return async (args) => {
+    const ended = await watched(args);
+    const printed = new GameLog();
+    printed.append('stdout', readLog(log));
+    printed.finish();
+    return { log: printed, exitCode: ended.code, exitSignal: ended.signal, failure: ended.ended };
+  };
+}
+
+/**
+ * The import pass in a suite run's slot. The engine's scan without the editor's cache passes over a
+ * sidecar that names no output, so every file found behind is marked for the import rather than left
+ * to the scan's judgement.
+ */
+export function suiteImport(
+  godotPath: string,
+  projectPath: string,
+  engine: (args: readonly string[]) => Promise<EngineRun>,
+): Promise<ImportOutcome> {
+  return runImport(godotPath, projectPath, {
+    forcing: staleImports(projectPath).map((one) => one.path),
+    engine,
+  });
 }
 
 /**

@@ -6,20 +6,12 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
-import { bytesOf, entriesOf } from './listed-reads.js';
-import { relativeWithin } from './paths.js';
+import { bytesOf, statOf } from './listed-reads.js';
+import { realAsFarAsItExists, relativeWithin } from './paths.js';
 import { type LeftOut, leftOutAt, leftOutsOnPath, VERSION_MARKER, walkProject } from './project-walk.js';
 import { uidCacheEntries } from './uid-cache.js';
 
 export { VERSION_MARKER };
-
-/** Directories that are never part of a project's own files, and are not spelled with a dot. */
-const SKIPPED = new Set(['node_modules']);
-
-/** Whether the text readers step over this entry. */
-function skipped(name: string): boolean {
-  return name.startsWith('.') || SKIPPED.has(name);
-}
 
 /** The extension of a file name without its dot, lower case, empty for a name with none such as `gd`. */
 function extensionOf(name: string): string {
@@ -27,28 +19,9 @@ function extensionOf(name: string): string {
 }
 
 /**
- * A directory holding a `.gdignore` is stepped over, because the engine steps over it.
- *
- * A vendored engine, an export directory, somebody else's project kept for reference: what is
- * under one is not imported, so it is not this project's content and counting or searching it
- * answers about files the engine will never load. A hundred megabytes of exported binary is the
- * cheap half of getting this wrong. The expensive half is a search that finds a match in a copy
- * of the code nobody is running.
- *
- * An addon gdharness installed is stepped over too. The engine loads it, but nobody on the project
- * wrote it: a search for a word in the game answered with this tool's own comments, its thirty-odd
- * scripts were counted as the project's, and a rename would have rewritten code the next upgrade
- * replaces. Told by the marker setup writes, so a project's own addon of the same name is kept.
+ * Whether gdharness installed the addon in [param directory], which it marks with its version. The
+ * engine loads such an addon, but nobody on the project wrote it, and the next upgrade replaces it.
  */
-function steppedOver(directory: string): boolean {
-  return gdignored(directory) || installedByUs(directory);
-}
-
-function gdignored(directory: string): boolean {
-  return existsSync(join(directory, '.gdignore'));
-}
-
-/** Whether gdharness installed the addon in [param directory], which it marks with its version. */
 export function installedByUs(directory: string): boolean {
   return existsSync(join(directory, VERSION_MARKER));
 }
@@ -178,15 +151,6 @@ export function folderFiles(projectPath: string, directory: string, extensions: 
   return filesIn(walkProject(directory, { inside: projectPath }), (name) =>
     extensions.includes(extname(name).toLowerCase()),
   );
-}
-
-/**
- * Whether [param relativePath], a project-relative path, is under a folder of the project holding a
- * `.gdignore`, which the engine never loads anything from.
- */
-export function underGdignore(projectPath: string, relativePath: string): boolean {
-  const folders = relativePath.split('/').slice(0, -1).join('/');
-  return leftOutAt(projectPath, folders)?.why === 'gdignore';
 }
 
 /**
@@ -361,6 +325,15 @@ export interface ProjectText {
   readonly path: string;
   readonly absolute: string;
   readonly text: string;
+  /** The file's real place as a `res://` path, set where the text is kept under a link's path and that place is inside the project. */
+  readonly realPath?: string;
+}
+
+/** A text below a folder the scan leaves out, with that folder and why it is left out. */
+export interface IgnoredText extends ProjectText {
+  readonly why: 'gdignore' | 'project';
+  /** The topmost left-out folder above the file, as a `res://` path with a closing slash. */
+  readonly folder: string;
 }
 
 /**
@@ -381,89 +354,215 @@ const BINARY_EXTENSIONS = new Set([
   'dylib',
 ]);
 
-/**
- * Every text file of the project the engine would see, as the search walks them: dot directories,
- * node_modules and directories holding a `.gdignore` are stepped over, and a file is text when its
- * first eight thousand bytes hold no NUL.
- */
-export function projectTexts(projectPath: string): ProjectText[] {
-  const found: ProjectText[] = [];
-  collectTexts(found, projectPath, '');
-  return found;
+/** A file a walk reached, by the path the walk spells it with. */
+interface Reached {
+  readonly name: string;
+  /** Relative to the project, with forward slashes. */
+  readonly spelled: string;
+  readonly absolute: string;
+  readonly real: string;
+  readonly twin: boolean;
 }
 
-function collectTexts(found: ProjectText[], directory: string, prefix: string): void {
-  if (steppedOver(directory)) {
-    return;
+/** Every file of the walk from [param start], inside [param projectPath], spelled below [param prefix]. */
+function reachedFrom(
+  start: string,
+  projectPath: string,
+  prefix: string,
+): { files: Reached[]; leftOut: readonly LeftOut[] } {
+  const walk = walkProject(start, { inside: projectPath });
+  const files: Reached[] = [];
+  for (const folder of walk.folders) {
+    const below = folder.folder === '' ? prefix : `${prefix}${folder.folder}/`;
+    for (const file of folder.files) {
+      files.push({
+        name: file.name,
+        spelled: `${below}${file.name}`,
+        absolute: join(folder.path, file.name),
+        real: file.real,
+        twin: file.twin,
+      });
+    }
   }
-  for (const entry of entriesOf(directory)) {
-    if (skipped(entry.name)) {
-      continue;
-    }
-    const absolute = join(directory, entry.name);
-    const spelled = `${prefix}${entry.name}`;
-    if (entry.isDirectory()) {
-      collectTexts(found, absolute, `${spelled}/`);
-      continue;
-    }
-    const text =
-      entry.isFile() && !BINARY_EXTENSIONS.has(extensionOf(entry.name)) ? textOf(absolute, spelled) : null;
-    if (text !== null) {
-      found.push(text);
-    }
-  }
+  return { files, leftOut: walk.leftOut };
 }
 
-/** The text file at [param absolute] as a project text, or null when it cannot be read or is binary. */
-function textOf(absolute: string, spelled: string): ProjectText | null {
-  const bytes = bytesOf(absolute);
+/** The `res://` path of [param file]'s real place when it differs from the path it is kept under and lies inside the project. */
+function realPathOf(realProject: string, file: Reached): string | undefined {
+  const inside = relativeWithin(realProject, file.real);
+  if (inside === null || inside === '' || inside === file.spelled) {
+    return undefined;
+  }
+  return `res://${inside}`;
+}
+
+/** The text file at [param file] as a project text, or null when it cannot be read or is binary. */
+function textOf(file: Reached, realPath: string | undefined): ProjectText | null {
+  if (BINARY_EXTENSIONS.has(extensionOf(file.name))) {
+    return null;
+  }
+  const bytes = bytesOf(file.absolute);
   if (bytes === null || isBinary(bytes)) {
     return null;
   }
-  return { path: `res://${spelled}`, absolute, text: bytes.toString('utf8') };
+  const text = { path: `res://${file.spelled}`, absolute: file.absolute, text: bytes.toString('utf8') };
+  return realPath === undefined ? text : { ...text, realPath };
 }
 
 /**
- * The text files under the directories [projectTexts] steps over for holding a `.gdignore`: copies
- * the engine never loads, such as a mod kit's sources, which still name the project's classes and
- * are still broken by a rename. Dot directories and node_modules are stepped over here too.
+ * The walk's path that the `res://` path [param named] stands for: the one that equals it, else the
+ * one that equals it in lower case, among those to the file at its real place. A file system that
+ * tells case apart has no file at a path in another case, so that match is reached only where case is
+ * ignored.
  */
-export function ignoredTexts(projectPath: string): ProjectText[] {
-  const found: ProjectText[] = [];
-  collectIgnoredTexts(found, projectPath, '', false);
-  return found;
+function pathNamedBy(projectPath: string, named: string, files: readonly Reached[]): Reached | undefined {
+  if (!named.startsWith('res://')) {
+    return undefined;
+  }
+  const spelled = named.slice('res://'.length);
+  const real = realAsFarAsItExists(join(projectPath, ...spelled.split('/')));
+  const same = files.filter((file) => file.real === real);
+  const lowered = spelled.toLowerCase();
+  return (
+    same.find((file) => file.spelled === spelled) ??
+    same.find((file) => file.spelled.toLowerCase() === lowered)
+  );
 }
 
-function collectIgnoredTexts(
-  found: ProjectText[],
-  directory: string,
-  prefix: string,
-  ignored: boolean,
-): void {
-  if (installedByUs(directory)) {
-    return;
+/**
+ * Every text file a writer may change, each real file once: under a path in [param named] that
+ * reaches it, else its own, else the first the scan reaches it by. None behind a link out of the
+ * project. Text holds no NUL in its first eight thousand bytes.
+ */
+export function projectTexts(projectPath: string, named: readonly string[] = []): ProjectText[] {
+  const { files } = reachedFrom(projectPath, projectPath, '');
+  const kept = new Map<string, Reached>();
+  for (const file of files) {
+    if (!file.twin) {
+      kept.set(file.real, file);
+    }
   }
-  const under = ignored || gdignored(directory);
-  for (const entry of entriesOf(directory)) {
-    if (skipped(entry.name)) {
-      continue;
+  for (const path of named) {
+    const stands = pathNamedBy(projectPath, path, files);
+    if (stands !== undefined) {
+      kept.set(stands.real, stands);
     }
-    const absolute = join(directory, entry.name);
-    const spelled = `${prefix}${entry.name}`;
-    if (entry.isDirectory()) {
-      collectIgnoredTexts(found, absolute, `${spelled}/`, under);
-      continue;
-    }
-    const wanted =
-      under &&
-      entry.isFile() &&
-      !BINARY_EXTENSIONS.has(extensionOf(entry.name)) &&
-      entry.name !== '.gdignore';
-    const text = wanted ? textOf(absolute, spelled) : null;
+  }
+  const realProject = realAsFarAsItExists(projectPath);
+  const found: ProjectText[] = [];
+  for (const file of files) {
+    const text = kept.get(file.real) === file ? textOf(file, realPathOf(realProject, file)) : null;
     if (text !== null) {
       found.push(text);
     }
   }
+  return found;
+}
+
+/** A folder the scan leaves out for a `.gdignore` or a `project.godot`, whose texts a rename mentions. */
+interface IgnoredStart {
+  /** Relative to the project, with forward slashes. */
+  readonly folder: string;
+  readonly why: IgnoredText['why'];
+  /** The topmost left-out folder above it, itself included. */
+  readonly top: string;
+}
+
+/** A text found below a left-out folder, ranked by how plain the path to it is. */
+interface IgnoredFound {
+  readonly file: Reached;
+  readonly rank: number;
+  readonly start: IgnoredStart;
+}
+
+/** The left-out folders in [param leftOut], below [param above], taking the topmost one's reason. */
+function ignoredStartsIn(
+  leftOut: readonly LeftOut[],
+  above: { folder: string; why: IgnoredText['why']; top: string } | null,
+): IgnoredStart[] {
+  const starts: IgnoredStart[] = [];
+  for (const left of leftOut) {
+    if (left.why !== 'gdignore' && left.why !== 'project') {
+      continue;
+    }
+    const folder = above === null ? left.folder : `${above.folder}/${left.folder}`;
+    starts.push({
+      folder,
+      why: above?.why ?? left.why,
+      top: above?.top ?? `res://${folder}/`,
+    });
+  }
+  return starts;
+}
+
+/**
+ * 0 for a file whose path holds no link, 1 for one holding none below its left-out folder, else 2.
+ */
+function plainness(realProject: string, top: string, file: Reached): number {
+  const folder = top.slice('res://'.length, -1);
+  const realTop = realAsFarAsItExists(join(realProject, ...folder.split('/')));
+  const below = file.spelled.slice(folder.length + 1);
+  if (file.real !== join(realTop, ...below.split('/'))) {
+    return 2;
+  }
+  return file.real === join(realProject, ...file.spelled.split('/')) ? 0 : 1;
+}
+
+/**
+ * The texts below each folder the scan leaves out for a `.gdignore` or a `project.godot`, copies
+ * the engine never loads, such as a mod kit's sources, which still name the project's classes and
+ * are still broken by a rename. Each real file is listed once, under a path with no link below its
+ * left-out folder where there is one, with the topmost such folder and its reason. A file the
+ * project's own walk reaches is no copy.
+ */
+export function ignoredTexts(projectPath: string): IgnoredText[] {
+  const project = reachedFrom(projectPath, projectPath, '');
+  const reached = new Set(project.files.map((file) => file.real));
+  const realProject = realAsFarAsItExists(projectPath);
+  const found = new Map<string, IgnoredFound>();
+  const queue = ignoredStartsIn(project.leftOut, null);
+  const entered = new Set<string>();
+  // The queue grows as each walk names the folders left out inside it, so a loop over it is the walk.
+  for (const start of queue) {
+    const at = join(projectPath, ...start.folder.split('/'));
+    const key = `${realAsFarAsItExists(at)}\0${start.top}`;
+    if (entered.has(key)) {
+      continue;
+    }
+    entered.add(key);
+    const walked = reachedFrom(at, projectPath, `${start.folder}/`);
+    for (const file of walked.files.filter((one) => !one.twin && !reached.has(one.real))) {
+      const rank = plainness(realProject, start.top, file);
+      const known = found.get(file.real);
+      if (known === undefined || rank < known.rank) {
+        found.set(file.real, { file, rank, start });
+      }
+    }
+    queue.push(...ignoredStartsIn(walked.leftOut, start));
+  }
+  const texts: IgnoredText[] = [];
+  for (const { file, start } of found.values()) {
+    const text = textOf(file, realPathOf(realProject, file));
+    if (text !== null) {
+      texts.push({ ...text, why: start.why, folder: start.top });
+    }
+  }
+  return texts;
+}
+
+/**
+ * Each link of the project that leads out of it, as a `res://` path with a closing slash for a
+ * folder, in the scan's order. A link below a folder the scan leaves out is not among them.
+ */
+export function linksOut(projectPath: string): string[] {
+  const walk = walkProject(projectPath, { inside: projectPath });
+  Array.from(walk.folders);
+  return walk.leftOut
+    .filter((left) => left.why === 'outside')
+    .map((left) => {
+      const isFolder = statOf(join(projectPath, ...left.folder.split('/')))?.isDirectory() === true;
+      return `res://${left.folder}${isFolder ? '/' : ''}`;
+    });
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   statSync,
   symlinkSync,
   utimesSync,
+  watch as watchFolder,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -72,6 +73,7 @@ import {
   heldButGone,
   type MissingMember,
   missingMemberIn,
+  scriptsInside,
   staleAnalysisNote,
   staleClassNames,
   uncachedClassNote,
@@ -146,6 +148,7 @@ import {
   windowsCommitLeft,
 } from '../src/engine-launch.js';
 import {
+  projectSelfTypedExports,
   selfTypedExports,
   selfTypedSentence,
   WALK_BEGAN,
@@ -163,20 +166,25 @@ import {
 } from '../src/engine-run.js';
 import {
   claimIsOurs,
+  countSaid,
   EngineSlots,
   endedNoteOf,
+  FOLLOWS_SUFFIX,
   FolderChanges,
+  FollowedLanes,
   gamesKeptOf,
   holderOf,
   inheritsSlot,
   inOneSlot,
   keptSlotsOf,
+  LANES_VARIABLE,
   lockIsFree,
   machineSlots,
   markBegan,
   nameSlotEngine,
   ONE_OFF_AGED_MS,
   ownStart,
+  poolCount,
   QUEUED_FOLDER,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
@@ -196,7 +204,6 @@ import {
   slotWaitedSaid,
   slotWaiters,
   slotWaitSaid,
-  spareSaid,
   starvedSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
@@ -279,7 +286,7 @@ import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/
 import {
   ASIDE,
   answerIn,
-  type ImportOutcome,
+  judgeImport,
   librariesNotCopied,
   notImportedNote,
   RESUMED,
@@ -382,6 +389,7 @@ import {
 import {
   folderFiles,
   ignoredTexts,
+  linksOut,
   projectFiles,
   projectStructure,
   projectTexts,
@@ -406,6 +414,7 @@ import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
+  linkOutOf,
   type RenameServices,
   renameSymbol,
   resourcePathOf,
@@ -612,6 +621,7 @@ import {
 } from '../src/suite-inputs.js';
 import {
   COMPILED_SAID,
+  type EngineEnd,
   exitNamed,
   failedOnPushErrors,
   funcOf,
@@ -658,6 +668,7 @@ import {
   importEnd,
   importFault,
   importNeeded,
+  importStartOf,
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
@@ -669,6 +680,7 @@ import {
   sharesSaid,
   silenceWhile,
   startsSaid,
+  suiteImport,
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
@@ -20981,6 +20993,37 @@ function testTwinUidsSettleAsTheEditorScans(): void {
     ]);
     assert.deepEqual(settled(mended), expected, 'each twin settles on the file the scan meets later');
 
+    // The scan orders a folder by the file a sidecar stands for, and never enters a nested project.
+    const nested = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-uid-nested-'));
+    try {
+      writeTree(nested, {
+        'project.godot': 'config_version=5\n',
+        'a/x.gd': 'extends Node\n',
+        'a/x.gd.uid': 'uid://6\n',
+        'A2/x.gd': 'extends Node\n',
+        'A2/x.gd.uid': 'uid://6\n',
+        'demo/project.godot': 'config_version=5\n',
+        'demo/y.gd': 'extends Node\n',
+        'demo/y.gd.uid': 'uid://7\n',
+      });
+      mkdirSync(join(nested, '.godot'));
+      writeFileSync(
+        join(nested, '.godot', 'uid_cache.bin'),
+        encodedUidCache([
+          [31n, 'res://gone/6.gd'],
+          [32n, 'res://gone/7.gd'],
+        ]),
+      );
+      mendUidCache(nested);
+      assert.deepEqual(
+        uidCacheEntries(readFileSync(join(nested, '.godot', 'uid_cache.bin'))),
+        [[31n, 'res://A2/x.gd']],
+        'the later folder wins a twin, and a nested project declares nothing',
+      );
+    } finally {
+      rmSync(nested, { recursive: true, force: true });
+    }
+
     const godotPath = resolveGodotPath();
     if (!godotPath) {
       if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -31230,7 +31273,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       ],
       [
         ['links'],
-        /^No \.gd script is under links that a folder walk takes in: links\/away is a link out of the project, which the walk does not enter; links\/up is a link back up the tree or to nothing, which the walk does not enter\.$/,
+        /^No \.gd script is under links that a folder walk takes in: links\/away is a link that leads out of the project, so nothing behind it is read; links\/up is a link back up the tree or to nothing, so nothing behind it is read\.$/,
       ],
     ] as const) {
       const refused = scriptsToDiagnose(project, given);
@@ -31309,6 +31352,33 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
             );
             assert.match(text(get(named, 'underGdignoreNote')), /^The engine never loads a script under/);
           }
+          // One in a nested project is listed under its own name, and one in an installed addon,
+          // which the engine loads, under neither.
+          for (const scriptPath of ['nests/inner/x.gd', ['ui/shop.gd', 'res://nests/inner/x.gd']]) {
+            const named = parseTextContent(
+              await server.request('tools/call', {
+                name: 'script_diagnostics',
+                arguments: { projectPath: project, scriptPath },
+              }),
+            );
+            assert.deepEqual(
+              [get(named, 'inNestedProject'), get(named, 'underGdignore')],
+              [['res://nests/inner/x.gd'], undefined],
+              JSON.stringify(named),
+            );
+            assert.match(text(get(named, 'inNestedProjectNote')), /^The engine never loads a script in/);
+          }
+          const loaded = parseTextContent(
+            await server.request('tools/call', {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: 'addons/gdharness_editor/plugin.gd' },
+            }),
+          );
+          assert.deepEqual(
+            [get(loaded, 'inNestedProject'), get(loaded, 'underGdignore')],
+            [undefined, undefined],
+            JSON.stringify(loaded),
+          );
         } finally {
           await server.stop();
         }
@@ -32257,13 +32327,13 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   assert.deepEqual(librariesNotCopied([]), [], 'and nothing is read from a clean pass');
 
   const passes: string[] = [];
-  const stand = (outcomes: ImportOutcome[]) => (): Promise<ImportOutcome> => {
+  const stand = (outcomes: EngineRun[]) => (): Promise<EngineRun> => {
     passes.push('pass');
     const next = outcomes.shift();
     assert.ok(next !== undefined, 'no more passes were expected');
     return Promise.resolve(next);
   };
-  const clean: ImportOutcome = { ok: true, messages: [] };
+  const clean = anImportRun('');
 
   // A resource the caller forces is armed before every pass: the first imported it without the
   // extension, and it reads as up to date to the second otherwise. Read from the sidecar each pass
@@ -32274,7 +32344,7 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
     writeFileSync(sidecar, 'valid=false\n[remap]\n');
   };
   const armed: boolean[] = [];
-  const reading = (outcomes: ImportOutcome[]) => (): Promise<ImportOutcome> => {
+  const reading = (outcomes: EngineRun[]) => (): Promise<EngineRun> => {
     armed.push(!readFileSync(sidecar, 'utf8').includes('valid=false'));
     importedWithoutIt();
     return stand(outcomes)();
@@ -32282,7 +32352,7 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   try {
     importedWithoutIt();
     const retried = await runImport('godot', project, {
-      once: reading([{ ok: true, messages: collided }, clean]),
+      engine: reading([anImportRun(measured), clean]),
       forcing: ['res://good.png'],
     });
     assert.equal(passes.length, 2, 'a pass that could not copy the library is run again');
@@ -32297,7 +32367,10 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
 
     passes.length = 0;
     armed.length = 0;
-    const single = await runImport('godot', project, { once: reading([clean]), forcing: ['res://good.png'] });
+    const single = await runImport('godot', project, {
+      engine: reading([anImportRun('')]),
+      forcing: ['res://good.png'],
+    });
     assert.deepEqual(
       [passes.length, single.librariesRetried, armed],
       [1, undefined, [true]],
@@ -32310,17 +32383,14 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   // The measured first pass also crashed on its way out, so a failed pass is run again as well.
   passes.length = 0;
   const afterACrash = await runImport('godot', 'project', {
-    once: stand([{ ok: false, message: 'the import pass failed (exit 139)', messages: collided }, clean]),
+    engine: stand([anImportRun(measured, 139), anImportRun('')]),
   });
   assert.deepEqual([passes.length, afterACrash.ok, afterACrash.librariesRetried], [2, true, [library]]);
 
   // A second pass that could not copy it either is said to have run without it, not to have loaded it.
   passes.length = 0;
   const twice = await runImport('godot', 'project', {
-    once: stand([
-      { ok: true, messages: collided },
-      { ok: true, messages: collided },
-    ]),
+    engine: stand([anImportRun(measured), anImportRun(measured)]),
   });
   assert.deepEqual(
     [twice.librariesRetried, twice.librariesNotLoaded],
@@ -32331,16 +32401,13 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   assert.match(failedTwice, /still could not load .*this answer is from an import without it/, failedTwice);
   assert.doesNotMatch(failedTwice, /loaded the extension/, 'and not said to have loaded it');
 
-  const quiet = await runImport('godot', 'project', { once: stand([clean]) });
+  const quiet = await runImport('godot', 'project', { engine: stand([clean]) });
   assert.equal(quiet.extensionNote, undefined, 'and a clean pass has no note');
 
-  const pair = new GameLog();
-  pair.append('stderr', 'ERROR: Error copying library: a.dll\nERROR: Error copying library: b.dll\n');
-  pair.finish();
   const both = await runImport('godot', 'project', {
-    once: stand([
-      { ok: true, messages: pair.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries },
-      clean,
+    engine: stand([
+      anImportRun('ERROR: Error copying library: a.dll\nERROR: Error copying library: b.dll\n'),
+      anImportRun(''),
     ]),
   });
   assert.match(
@@ -32518,36 +32585,282 @@ function assertTheEditorCacheDirectoryIsFoundWhereTheEngineLooks(): void {
 
 /** An import pass that failed over a stale doc cache is run again, and its note is carried to the answer. */
 async function assertAnImportThatCrashedOverAStaleDocCacheRunsAgain(): Promise<void> {
-  const outcomes: ImportOutcome[] = [];
-  const stand = (): Promise<ImportOutcome> => {
-    const next = outcomes.shift();
-    assert.ok(next !== undefined, 'no more passes were expected');
-    return Promise.resolve(next);
-  };
-  const failedFirst: ImportOutcome = {
-    ok: false,
-    message: 'the import pass failed (exit code 5): [ DONE ] loading_editor_layout',
-    messages: [],
-    docCacheNote: 'The first import ended badly.',
-  };
-  outcomes.push(failedFirst, { ok: true, messages: [], docCacheNote: 'not the first' });
+  const sc = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
+  try {
+    // A self-contained engine keeps its doc cache beside itself, so the crash is made in a folder of its own.
+    writeFileSync(join(sc, '._sc_'), '');
+    const godot = join(sc, 'godot.exe');
+    const cache = join(sc, 'editor_data', 'cache', 'editor_doc_cache-4.6.res');
+    let written = 0;
+    const rebuildCache = (): void => {
+      mkdirSync(dirname(cache), { recursive: true });
+      writeFileSync(cache, 'cache');
+      written += 1;
+      const at = new Date(1_700_000_000_000 + written * 10_000);
+      utimesSync(cache, at, at);
+    };
+    const calls: string[][] = [];
+    const answering =
+      (steps: ReadonlyArray<() => EngineRun>) =>
+      (args: readonly string[]): Promise<EngineRun> => {
+        calls.push([...args]);
+        const step = steps[calls.length - 1];
+        assert.ok(step !== undefined, 'no more passes were expected');
+        return Promise.resolve(step());
+      };
+    const crashing = (): EngineRun => {
+      rebuildCache();
+      return anImportRun('Godot Engine v4.6\n', 5);
+    };
+    const crashedAgain = await runImport(godot, 'project', {
+      engine: answering([crashing, () => anImportRun('', 0)]),
+    });
+    assert.equal(calls.length, 2, 'a pass that crashed over a stale doc cache is run again');
+    assert.equal(crashedAgain.ok, true, 'and the second pass answers');
+    assert.match(
+      crashedAgain.docCacheNote ?? '',
+      /^The first import ended badly \(exit code 5\) after rebuilding the editor's class reference cache/,
+      'with the first pass’s note',
+    );
+
+    calls.length = 0;
+    const brokeAgain = await runImport(godot, 'project', {
+      engine: answering([crashing, () => anImportRun('ERROR: it broke.\n', 1)]),
+    });
+    assert.equal(calls.length, 2, 'each was run twice');
+    const refused = brokeAgain.ok ? '' : brokeAgain.message;
+    assert.match(
+      refused,
+      /^the import pass failed \(exit code 1\): it broke\. The first import ended badly/,
+      'and a second pass that fails carries the note in the message it is answered with',
+    );
+  } finally {
+    sweep(sc);
+  }
+}
+
+/**
+ * The server and a suite run import through one pass and hand it how the engine starts. Each road of
+ * the pass is walked here with a stand-in start: the judge, the skip rule's text, the forced marks,
+ * the Blender stop, the extension seed, the library retry through a suite's start, the three ends a
+ * watched engine can have, the doc cache crash through a suite's start and an engine this server ended.
+ */
+async function testOneImportPassServesTheServerAndASuiteRun(): Promise<void> {
+  const printedError = anImportRun('ERROR: Failed loading resource: res://a.png\n');
+  const judged = judgeImport(printedError, null);
   assert.deepEqual(
-    await runImport('godot', 'project', { once: stand }),
-    { ok: true, messages: [], docCacheNote: 'The first import ended badly.' },
-    'the second pass answers, with the first pass’s note',
+    [judged.ok, judged.messages.length],
+    [true, 1],
+    'a pass that printed an error and exited 0 is not refused by the judge',
   );
-  outcomes.push(failedFirst, {
-    ok: false,
-    message: 'the import pass failed (exit code 1): it broke.',
-    messages: [],
-  });
-  const twice = await runImport('godot', 'project', { once: stand });
-  assert.equal(
-    twice.ok ? '' : twice.message,
-    'the import pass failed (exit code 1): it broke. The first import ended badly.',
-    'and a second pass that fails carries the note in the message it is answered with',
-  );
-  assert.equal(outcomes.length, 0, 'each was run twice');
+
+  const functionSource = (file: string, marker: string): string => {
+    const source = readFileSync(join('src', file), 'utf8');
+    const from = source.indexOf(marker);
+    assert.ok(from >= 0, `${marker} is in src/${file}`);
+    const to = source.indexOf('\n}\n', from);
+    return source.slice(from, to);
+  };
+  const importing = functionSource('suite-run.ts', 'async function importProject(');
+  for (const wanted of ['importNeeded(', 'suiteImport(', 'importFault(', 'readRun(readLog(log))']) {
+    assert.ok(importing.includes(wanted), `a suite run's import uses ${wanted}`);
+  }
+  for (const unwanted of ['seedExtensionList(', 'staleAgainst(', '.messages']) {
+    assert.ok(!importing.includes(unwanted), `a suite run's import leaves ${unwanted} to the pass`);
+  }
+  for (const handler of [
+    'private async handleRefreshUids(',
+    'private async reimportThroughTheEngine(',
+    'private async rebuildTheUidTable(',
+  ]) {
+    assert.ok(
+      functionSource('server.ts', handler).includes('extensionsListed'),
+      `${handler} names extensionsListed`,
+    );
+  }
+
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-pass-'));
+  try {
+    // A resource changed since its import is named stale, and the suite's pass forces it.
+    const project = join(root, 'stale');
+    mkdirSync(project, { recursive: true });
+    writeImported(project, 'picture.png', 'one');
+    writeFileSync(join(project, 'picture.png'), 'two');
+    assert.deepEqual(
+      staleImports(project).map((one) => one.path),
+      ['res://picture.png'],
+      'the changed picture is stale',
+    );
+    const sidecar = join(project, 'picture.png.import');
+    const written = statSync(sidecar).mtimeMs;
+    let seen = 0;
+    const suiteOutcome = await suiteImport('godot', project, () => {
+      seen = statSync(sidecar).mtimeMs;
+      return Promise.resolve(anImportRun(''));
+    });
+    assert.ok(suiteOutcome.ok, 'the suite pass answers');
+    assert.equal(
+      Math.floor(seen),
+      Math.floor(written) + 2000,
+      'a stale import is marked for the pass before the engine starts',
+    );
+
+    // The Blender stop, with the line at the severity the judge reads.
+    const stopped = await runImport('godot', project, {
+      engine: () => Promise.resolve(anImportRun('ERROR: Blender path is invalid or not set\n')),
+    });
+    assert.ok(
+      !stopped.ok && stopped.message.startsWith('the import pass stopped at a .blend file'),
+      `the Blender stop is a failure: ${JSON.stringify(stopped)}`,
+    );
+
+    // A fresh clone with an extension is listed before the engine starts, and a list there is left alone.
+    const clone = join(root, 'clone');
+    mkdirSync(join(clone, 'a'), { recursive: true });
+    writeFileSync(join(clone, 'a', 'x.gdextension'), '');
+    const list = join(clone, '.godot', 'extension_list.cfg');
+    const argumentsGiven: string[][] = [];
+    let listAtStart: string | null = null;
+    const listing = (args: readonly string[]): Promise<EngineRun> => {
+      argumentsGiven.push([...args]);
+      listAtStart = existsSync(list) ? readFileSync(list, 'utf8') : null;
+      return Promise.resolve(anImportRun(''));
+    };
+    const seeded = await runImport('godot', clone, { engine: listing });
+    assert.equal(listAtStart, 'res://a/x.gdextension\n', 'the list is there when the engine starts');
+    assert.deepEqual(seeded.extensionsListed, ['res://a/x.gdextension'], 'and the pass says it wrote it');
+    writeFileSync(list, 'res://other.gdextension\n');
+    const kept = await runImport('godot', clone, { engine: listing });
+    assert.deepEqual(
+      [kept.extensionsListed, readFileSync(list, 'utf8')],
+      [undefined, 'res://other.gdextension\n'],
+      'a list the engine wrote is left as it is',
+    );
+    for (const args of argumentsGiven) {
+      assert.deepEqual(
+        args,
+        ['--headless', '--path', clone, '--import'],
+        'every start is handed the same arguments',
+      );
+    }
+
+    // The library retry marks before each pass.
+    const marked = join(root, 'marked');
+    mkdirSync(marked, { recursive: true });
+    const second = join(marked, 'b.png.import');
+    writeFileSync(second, '[remap]\n');
+    const base = new Date(1_700_000_000_000);
+    utimesSync(second, base, base);
+    const marks: number[] = [];
+    const outputs = ['ERROR: Error copying library: res://a/x.dll\n', ''];
+    const retried = await runImport('godot', marked, {
+      forcing: ['res://b.png'],
+      engine: () => {
+        marks.push(statSync(second).mtimeMs);
+        utimesSync(second, base, base);
+        return Promise.resolve(anImportRun(outputs.shift() ?? ''));
+      },
+    });
+    assert.deepEqual(
+      [marks, retried.ok, retried.librariesRetried],
+      [[base.getTime() + 2000, base.getTime() + 2000], true, ['res://a/x.dll']],
+      'two passes, and a mark is written before each',
+    );
+
+    // A suite's start: the same retry, with the engine's lines read from the run's log.
+    const log = join(root, 'import.log');
+    let starts = 0;
+    const printing =
+      (lines: readonly string[], end: EngineEnd = { code: 0, signal: null, ended: null }) =>
+      (): Promise<EngineEnd> => {
+        starts += 1;
+        writeFileSync(log, lines[starts - 1] ?? '');
+        return Promise.resolve(end);
+      };
+    const suiteRetried = await runImport('godot', marked, {
+      engine: importStartOf(printing(['ERROR: Error copying library: res://a/x.dll\n', '']), log),
+    });
+    assert.deepEqual(
+      [suiteRetried.ok, suiteRetried.librariesRetried, starts],
+      [true, ['res://a/x.dll'], 2],
+      'a suite run beside an open editor retries the pass that could not copy a library',
+    );
+
+    // The three ends a watched engine can have.
+    const hushed = await importStartOf(
+      () => Promise.resolve({ code: 0, signal: null, ended: 'the engine was silent for 60 s' }),
+      log,
+    )(['--import']);
+    assert.equal(hushed.failure, 'the engine was silent for 60 s', 'an engine gdharness ended is a failure');
+    const exited = await importStartOf(
+      () => Promise.resolve({ code: 5, signal: null, ended: null }),
+      log,
+    )([]);
+    const signalled = await importStartOf(
+      () => Promise.resolve({ code: null, signal: 'SIGSEGV', ended: null }),
+      log,
+    )([]);
+    assert.deepEqual(
+      [
+        exited.exitCode,
+        exited.exitSignal,
+        exited.failure,
+        signalled.exitCode,
+        signalled.exitSignal,
+        signalled.failure,
+      ],
+      [5, null, null, null, 'SIGSEGV', null],
+      'a crash stays an exit code or a signal, for the doc cache check',
+    );
+
+    // A crash over a stale doc cache, through a suite's start.
+    const engineHome = join(root, 'engine');
+    mkdirSync(engineHome, { recursive: true });
+    writeFileSync(join(engineHome, '._sc_'), '');
+    const cache = join(engineHome, 'editor_data', 'cache', 'editor_doc_cache-4.6.res');
+    starts = 0;
+    const crashed = await runImport(join(engineHome, 'godot.exe'), marked, {
+      engine: importStartOf(() => {
+        starts += 1;
+        mkdirSync(dirname(cache), { recursive: true });
+        writeFileSync(cache, 'cache');
+        writeFileSync(log, starts === 1 ? 'Godot Engine v4.6\n' : '');
+        return Promise.resolve({ code: starts === 1 ? 5 : 0, signal: null, ended: null });
+      }, log),
+    });
+    assert.deepEqual(
+      [starts, crashed.ok, (crashed.docCacheNote ?? '').startsWith('The first import ended badly')],
+      [2, true, true],
+      'a suite pass that crashed over a stale doc cache runs again',
+    );
+
+    // An engine this server ended is not started again.
+    starts = 0;
+    const killed = await runImport(join(engineHome, 'godot.exe'), marked, {
+      engine: () => {
+        starts += 1;
+        mkdirSync(dirname(cache), { recursive: true });
+        writeFileSync(cache, 'rebuilt');
+        const later = new Date(Date.now() + 60_000);
+        utimesSync(cache, later, later);
+        return Promise.resolve(anImportRun('Godot Engine v4.6\n', null, 'the engine was ended by SIGKILL'));
+      },
+    });
+    assert.ok(
+      !killed.ok && killed.message.includes('the engine was ended by SIGKILL') && starts === 1,
+      `an engine gdharness ended runs once: ${JSON.stringify(killed)} after ${String(starts)}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/** An engine run that printed [param printed] to stderr and ended as [param exitCode] and [param failure] say. */
+function anImportRun(printed: string, exitCode: number | null = 0, failure: string | null = null): EngineRun {
+  const log = new GameLog();
+  log.append('stderr', printed);
+  log.finish();
+  return { log, exitCode, exitSignal: null, failure };
 }
 
 /** A real engine over a cache whose key was rewritten crashes on its way out, and the import and the export run again. */
@@ -40020,6 +40333,9 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
  * could not be called at all. JSON numbers are doubles on both sides, so a RefCounted's instance id,
  * which has its top bit set, came back as a neighbouring id, and a 64-bit seed sent as a number
  * would be stored as a neighbour of the one sent.
+ *
+ * Issue #1609: a parameter that declares no type took a bare 125 as 125.0, so a setter comparing it
+ * with the int it held refused it. It takes the int GDScript reads the literal as.
  */
 async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
   const engine = resolveGodotPath();
@@ -40043,7 +40359,9 @@ async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
           'func echo(number: int) -> int:\n\treturn number\n\n\n' +
           'func digits(number: int) -> String:\n\treturn str(number)\n\n\n' +
           'func counted() -> RefCounted:\n\treturn kept\n\n\n' +
-          'func counted_id() -> String:\n\treturn str(kept.get_instance_id())\n',
+          'func counted_id() -> String:\n\treturn str(kept.get_instance_id())\n\n\n' +
+          'func kind_of(value) -> String:\n\treturn type_string(typeof(value))\n\n\n' +
+          'func kind_of_variant(value: Variant) -> String:\n\treturn type_string(typeof(value))\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -40094,6 +40412,19 @@ async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
       // A number below the bound is still a number.
       const small = await invoke('/root/Main', 'echo', [42]);
       assert.equal(get(small, 'result'), 42, JSON.stringify(small));
+      // A parameter that declares no type, with or without the word Variant, takes a bare whole
+      // number as an int, a fraction as a float and a tagged whole float as the float it names.
+      const kinds: unknown[] = [];
+      for (const method of ['kind_of', 'kind_of_variant']) {
+        for (const sent of [125, 7.5, { _type: 'float', value: 2 }, -3]) {
+          kinds.push(get(await invoke('/root/Main', method, [sent]), 'result'));
+        }
+      }
+      assert.deepEqual(
+        kinds,
+        ['int', 'float', 'float', 'int', 'int', 'float', 'float', 'int'],
+        'an untyped parameter reads a bare whole number as GDScript reads the literal',
+      );
       // Sent as a number it may already be a neighbour, so it is refused and the tag named.
       const bare = await invoke('/root/Main', 'echo', [9007199254740994]);
       assert.match(
@@ -42166,12 +42497,13 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
     'sample.gd':
       'extends Node\n\n@export var sample: Dictionary = {}\n@export var copy: Dictionary = {}\n' +
       '@export var counts: Array[int] = []\n@export var ratios: Array[float] = []\n' +
-      '@export var marks: Array = []\n',
+      '@export var marks: Array = []\n@export_storage var loose = 1.5\n@export_storage var empty\n',
     'sample.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_s"]\n\n' +
       '[node name="Sample" type="Node"]\nscript = ExtResource("1_s")\n' +
       'sample = {\n"lines": 7,\n"ratio": 7.0,\n"rows": [["186", false, 1, 2.0]]\n}\n' +
-      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\nmarks = [3, 3.0, 2.5, [4.0]]\n',
+      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\nmarks = [3, 3.0, 2.5, [4.0]]\n' +
+      'loose = 7.0\n',
   });
   const server = new ServerProcess({
     env: {
@@ -42237,6 +42569,22 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
     });
     const bare = (/^copy = \{\n([^}]*)\}\n/m.exec(file())?.[1] ?? '').split(/,?\n/).filter(Boolean);
     assert.deepEqual(bare.toSorted(), ['"half": 0.5', '"list": [4, 4.0]', '"n": 3'], file());
+
+    // A property that declares no type keeps the float it holds, which a read answers as a bare 7,
+    // so a bare whole number written to it is a float. One holding nothing takes it as the int
+    // GDScript reads the literal as.
+    assert.equal(get(read, 'properties', 'loose'), 7, JSON.stringify(read));
+    await answered('scene_node', {
+      op: 'set',
+      scenePath: 'sample.tscn',
+      nodePath: '.',
+      properties: { loose: 9, empty: 3 },
+    });
+    assert.deepEqual(
+      [/^loose = (.*)$/m.exec(file())?.[1], /^empty = (.*)$/m.exec(file())?.[1]],
+      ['9.0', '3'],
+      file(),
+    );
   } finally {
     await server.stop();
     sweep(project);
@@ -55528,7 +55876,17 @@ function profiledRunsOn(server: ServerProcess, project: string): ProfiledRuns {
 /** The scene that works in _ready, with the runtime addon, comes back complete with exact calls. */
 async function checksTheWholeProfile(runs: ProfiledRuns): Promise<void> {
   const { server, profiledRun } = runs;
-  const whole = await profiledRun('once', true, { callersOf: 'ranked', limit: 100 });
+  // A folder beside the project, reached through a link, whose script calls the function asked for.
+  const beside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profiled-beside-'));
+  writeFileSync(join(beside, 'o.gd'), 'extends Node\n\n\nfunc other() -> void:\n\tranked([])\n');
+  symlinkSync(beside, join(runs.project, 'shared'), 'junction');
+  let whole: unknown;
+  try {
+    whole = await profiledRun('once', true, { callersOf: 'ranked', limit: 100 });
+  } finally {
+    rmSync(join(runs.project, 'shared'), { recursive: true, force: true });
+    sweep(beside);
+  }
   const wholeShown = JSON.stringify(whole);
   assert.equal(
     get(runs.started, 'profile', 'on'),
@@ -58879,6 +59237,184 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
 }
 
 /**
+ * A hidden PowerShell opening [param path] for [param access] while sharing reads and writes but no
+ * removal, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
+ * closes it after [param forMs], and else at [method letGo] or after 30 s, so a run killed before its
+ * `finally` leaves no process holding a file for good.
+ */
+async function heldOpenByAReader(
+  path: string,
+  access: 'ReadWrite' | 'Read',
+  forMs?: number,
+): Promise<{ letGo(): Promise<void> }> {
+  const reader = spawnHidden(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
+      // second a removal waits on a slow runner.
+      `$f = [IO.File]::Open('${path.replaceAll("'", "''")}', 'Open', '${access}', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(${String(forMs ?? 30_000)}); $f.Close()`,
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  const letGo = async (): Promise<void> => {
+    reader.kill();
+    await exitOf(reader);
+  };
+  try {
+    await new Promise<void>((settle, fail) => {
+      reader.stdout.once('data', () => {
+        settle();
+      });
+      reader.once('exit', () => {
+        fail(new Error(`the reader of ${path} ended before it held the file`));
+      });
+    });
+  } catch (error) {
+    await letGo();
+    throw error;
+  }
+  return { letGo };
+}
+
+/**
+ * Waits until two samples a second apart show the machine under 60% busy at every reading for 30 s,
+ * as [method samplesReadAChildWatchedForMemory] works the share out. Answers null once it is, and the
+ * last busy share when it was not within three minutes.
+ */
+async function untilTheProcessorIsQuiet(): Promise<number | null> {
+  const giveUp = Date.now() + 180_000;
+  let quietSince: number | undefined;
+  let share = 1;
+  let before = await sampled();
+  while (Date.now() < giveUp) {
+    await delay(1100);
+    const after = await sampled();
+    share = (after.machine - before.machine) / ((after.at - before.at) * availableParallelism());
+    before = after;
+    if (share >= 0.6) {
+      quietSince = undefined;
+    } else {
+      quietSince ??= Date.now();
+      if (Date.now() - quietSince >= 30_000) {
+        return null;
+      }
+    }
+  }
+  return share;
+}
+
+/**
+ * Runs [param call], which takes over the dead [param lock] in [param directory] while a reader holds
+ * it open, and lets the reader go 300 ms after the takeover first makes its steal file. The call must
+ * leave the process free to run, shown by an interval that keeps ticking, and answer within 5 s of the
+ * let-go.
+ */
+async function aHeldDeadLockIsTakenOverOnceLetGo(
+  lock: string,
+  directory: string,
+  dead: string,
+  call: () => Promise<unknown>,
+  caller: string,
+): Promise<void> {
+  writeFileSync(lock, dead);
+  const reader = await heldOpenByAReader(lock, 'ReadWrite');
+  let letGoAt = 0;
+  let sawSteal = false;
+  const watcher = watchFolder(directory, (_event, name) => {
+    if (!sawSteal && name === `${basename(lock)}.steal`) {
+      sawSteal = true;
+      setTimeout(() => {
+        letGoAt = Date.now();
+        void reader.letGo();
+      }, 300);
+    }
+  });
+  let last = Date.now();
+  let widest = 0;
+  const ticking = setInterval(() => {
+    const now = Date.now();
+    widest = Math.max(widest, now - last);
+    last = now;
+  }, 20);
+  const running = call().then(
+    () => 'taken',
+    (error: unknown) => `refused: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  try {
+    const outcome = await Promise.race([running, delay(20_000).then(() => 'still waiting after 20 s')]);
+    const tookAt = Date.now();
+    assert.equal(outcome, 'taken', `${caller} takes the dead lock over once the reader lets go`);
+    assert.ok(sawSteal, `${caller} made a steal file while the reader held the lock`);
+    assert.ok(
+      tookAt - letGoAt < 5000,
+      `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
+    );
+    assert.ok(widest <= 500, `${caller} leaves the process free to run: ticks ${String(widest)} ms apart`);
+  } finally {
+    clearInterval(ticking);
+    watcher.close();
+    await reader.letGo();
+    rmSync(lock, { force: true });
+    await running;
+  }
+}
+
+/**
+ * A dead lock a reader holds open is taken over once the reader lets go, by a slot's taker and by a
+ * write waiting its turn, and neither stops the process while it waits. Windows alone, since
+ * elsewhere a reader holds no removal back.
+ */
+async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log(
+      'held-lock takeover regression ran on Windows alone: elsewhere a reader holds no removal back',
+    );
+    return;
+  }
+  const busy = await untilTheProcessorIsQuiet();
+  if (busy !== null) {
+    const said = 'held-lock takeover regression skipped: the processor never stayed under 60% for 30 s';
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`${said}, the last busy share was ${String(busy)}`);
+    }
+    console.log(said);
+    return;
+  }
+  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await exitOf(gone);
+  const started = await ownStart();
+  const dead = JSON.stringify({ pid: gone.pid, started });
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
+  try {
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started });
+    await aHeldDeadLockIsTakenOverOnceLetGo(
+      join(directory, '0.lock'),
+      directory,
+      dead,
+      () => slots.take(AbortSignal.timeout(20_000)),
+      'a slot',
+    );
+    const file = join(project, 'floor.tscn');
+    const lock = writeLockOf(project, file);
+    mkdirSync(dirname(lock), { recursive: true });
+    await aHeldDeadLockIsTakenOverOnceLetGo(
+      lock,
+      dirname(lock),
+      dead,
+      () => inTurnFor(project, file, () => Promise.resolve('written')),
+      'a write turn',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * The slots are freed only once their holder has gone, and taken over by one taker at a time.
  *
  * A lock names its holder by pid and start time, since a pid alone is reissued: a live process with
@@ -58982,22 +59518,8 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
       // remove a file such a tool holds open: the slot is that tool's, not a fault of the run's.
       writeFileSync(second, '');
       utimesSync(second, old, old);
-      const holder = spawnHidden(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `$f = [IO.File]::Open('${second.replaceAll("'", "''")}', 'Open', 'ReadWrite', 'ReadWrite'); 'held'; Start-Sleep 30`,
-        ],
-        { stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const holder = await heldOpenByAReader(second, 'ReadWrite');
       try {
-        await new Promise<void>((settle) => {
-          holder.stdout.once('data', () => {
-            settle();
-          });
-        });
         await assert.rejects(
           slots.take(AbortSignal.timeout(1000)),
           /timeout|abort/i,
@@ -59005,8 +59527,7 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
         );
         assert.equal(existsSync(`${second}.steal`), false, 'and the steal file is given up');
       } finally {
-        holder.kill();
-        await exitOf(holder);
+        await holder.letGo();
       }
     }
 
@@ -59689,8 +60210,285 @@ function checksTheSlotRulesWithoutAFolder(): void {
       runsInAGate({ [SHARE_VARIABLE]: '', [SHARE_COUNT_VARIABLE]: '3' }),
     ],
     [true, false, false],
-    'a gate names its share in both variables',
+    'a gate names its pool in both variables',
   );
+}
+
+/**
+ * A run follows the lanes file a gate's paced portion writes in the pool: it holds a mark beside the
+ * file, reads the number as the spare count is read, answers a rise to at most its ceiling and gives
+ * the mark back there. A mark whose maker has gone is taken over under its steal file.
+ */
+async function testARunFollowsTheLanesAGateWrites(): Promise<void> {
+  const started = await ownStart();
+  const holder = { pid: process.pid, started };
+  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await exitOf(gone);
+  const gonePid = gone.pid ?? 0;
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-'));
+  const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-other-'));
+  const file = join(pool, 'lanes-1.json');
+  const mark = `${file}${FOLLOWS_SUFFIX}`;
+  const said = (lanes: unknown, agoMs = 0, pid = process.pid): void => {
+    writeFileSync(file, JSON.stringify({ lanes, pid, started, written: Date.now() - agoMs }));
+  };
+  const markedBy = (): number | undefined => {
+    try {
+      return holderOf(readFileSync(mark, 'utf8'))?.pid;
+    } catch {
+      return undefined;
+    }
+  };
+  const answerOf = (asked: Promise<number>, withinMs: number): Promise<string> =>
+    Promise.race([
+      asked.then(
+        (lanes) => `answered ${String(lanes)}`,
+        (error: unknown) => `rejected: ${errorMessage(error)}`,
+      ),
+      delay(withinMs).then(() => 'pending'),
+    ]);
+  const slots = new EngineSlots(other, 1, holder);
+  const helpers: Array<ReturnType<typeof spawnHidden>> = [];
+  const aborts: AbortController[] = [];
+  const followers: FollowedLanes[] = [];
+  const following = (
+    lanes: ConstructorParameters<typeof FollowedLanes>[0],
+    ceiling: number,
+  ): FollowedLanes => {
+    const made = new FollowedLanes(lanes, file, ceiling, 5);
+    followers.push(made);
+    return made;
+  };
+  const fresh = (): AbortSignal => {
+    const control = new AbortController();
+    aborts.push(control);
+    return control.signal;
+  };
+  try {
+    assert.equal(LANES_VARIABLE, 'GODOT_ENGINE_LANES', 'the lanes file is named by this variable');
+    // The count of the pool, read as a number.
+    assert.equal(poolCount({ [SHARE_COUNT_VARIABLE]: '9' }), 9, 'the pool count is a number');
+    assert.equal(poolCount({}), null, 'null with the count unset');
+    assert.equal(poolCount({ [SHARE_COUNT_VARIABLE]: '' }), null, 'and with it empty');
+    for (const wrong of ['x', '0', '2.5']) {
+      assert.throws(
+        () => poolCount({ [SHARE_COUNT_VARIABLE]: wrong }),
+        (error: unknown) => error instanceof EngineUsageError && error.message.includes(SHARE_COUNT_VARIABLE),
+        `a count of ${wrong} is refused by name`,
+      );
+    }
+
+    const followed = following(new EngineSlots(pool, 1, holder), 8);
+    const slotsOfPool = (): string[] => readdirSync(pool).toSorted();
+
+    // Rising mid-run.
+    said(2);
+    const rising = followed.past(2, fresh());
+    assert.equal(await answerOf(rising, 100), 'pending', 'a number the run holds adds no lane');
+    assert.equal(markedBy(), process.pid, 'the run holds its mark while it follows');
+    said(5);
+    assert.equal(await answerOf(rising, 20_000), 'answered 5', 'a rise mid-run is answered');
+    assert.deepEqual(slotsOfPool(), ['lanes-1.json', 'lanes-1.json.follows'], 'no lock stands in the pool');
+
+    // Each state that adds no lane, then the number.
+    const addsNoneUntilSaid = async (why: string, write: () => void): Promise<void> => {
+      followed.end();
+      rmSync(file, { force: true });
+      write();
+      const asked = followed.past(2, fresh());
+      assert.equal(await answerOf(asked, 100), 'pending', `${why} adds no lane`);
+      assert.equal(markedBy(), process.pid, `and the mark is made with ${why}`);
+      said(5);
+      assert.equal(
+        await answerOf(asked, 20_000),
+        'answered 5',
+        `and the number is taken once it is said after ${why}`,
+      );
+    };
+    await addsNoneUntilSaid('a stale file', () => {
+      said(5, SPARE_STALE_MS + 1000);
+    });
+    await addsNoneUntilSaid('a file whose writer has gone', () => {
+      said(5, 0, gonePid);
+    });
+    await addsNoneUntilSaid('no file', () => undefined);
+    for (const [why, content] of [
+      ['lanes of 0', JSON.stringify({ lanes: 0, pid: process.pid, started, written: Date.now() })],
+      ['lanes as a string', JSON.stringify({ lanes: '4', pid: process.pid, started, written: Date.now() })],
+      ['lanes of 2.5', JSON.stringify({ lanes: 2.5, pid: process.pid, started, written: Date.now() })],
+      ['lanes of -1', JSON.stringify({ lanes: -1, pid: process.pid, started, written: Date.now() })],
+      ['a file cut short', '{"lanes": 5, "pid":'],
+      ['no written', JSON.stringify({ lanes: 5, pid: process.pid, started })],
+    ] as const) {
+      await addsNoneUntilSaid(why, () => {
+        writeFileSync(file, content);
+      });
+    }
+
+    // The floor.
+    followed.end();
+    said(1);
+    const floor = followed.past(3, fresh());
+    assert.equal(await answerOf(floor, 100), 'pending', 'a number below the one the run holds adds none');
+    said(5);
+    assert.equal(await answerOf(floor, 20_000), 'answered 5', 'a higher number is taken');
+    said(2);
+    const fall = new AbortController();
+    assert.equal(await answerOf(followed.past(5, fall.signal), 100), 'pending', 'a fall adds none');
+    fall.abort(new Error('fall over'));
+    await delay(50);
+    followed.end();
+
+    // The ceiling.
+    let counts = 0;
+    const counted = following(
+      {
+        holder,
+        takeFile: (path) => new EngineSlots(pool, 1, holder).takeFile(path),
+        countIn: (path, key) => {
+          counts += 1;
+          return new EngineSlots(pool, 1, holder).countIn(path, key);
+        },
+      },
+      4,
+    );
+    said(9);
+    assert.equal(
+      await answerOf(counted.past(2, fresh()), 20_000),
+      'answered 4',
+      'the ceiling caps the answer',
+    );
+    assert.equal(existsSync(mark), false, 'and the mark is given back there');
+    const lookedBefore = counts;
+    const atCeiling = counted.past(4, fresh());
+    const timer = delay(50).then(() => 'timer');
+    assert.equal(
+      await Promise.race([
+        timer,
+        atCeiling.then(
+          () => 'answered',
+          () => 'rejected',
+        ),
+      ]),
+      'timer',
+      'a run at its ceiling pends',
+    );
+    await delay(100);
+    assert.equal(existsSync(mark), false, 'and makes no mark');
+    assert.equal(counts, lookedBefore, 'and looks at nothing');
+    for (const control of aborts) {
+      control.abort(new Error('done with the ceiling'));
+    }
+    assert.equal(
+      await answerOf(atCeiling, 5000),
+      'rejected: done with the ceiling',
+      'until its signal aborts',
+    );
+
+    // A live mark stands until its holder gives it back.
+    const keeper = await slotHeldElsewhere(mark, 2000);
+    helpers.push(keeper);
+    said(5);
+    const behind = followed.past(2, fresh());
+    assert.equal(await answerOf(behind, 300), 'pending', 'a live mark is never written over');
+    assert.equal(markedBy(), keeper.pid, 'and still names its holder');
+    assert.equal(await answerOf(behind, 20_000), 'answered 5', 'the run follows once the holder is done');
+    assert.equal(markedBy(), process.pid, 'and its mark names this process');
+    followed.end();
+
+    // A mark whose maker has gone is taken over under its steal file.
+    const dead = JSON.stringify({ pid: gonePid, started });
+    writeFileSync(mark, dead);
+    assert.equal(
+      await answerOf(followed.past(2, fresh()), 20_000),
+      'answered 5',
+      'a dead mark is taken over',
+    );
+    assert.equal(markedBy(), process.pid, 'and names this process');
+    assert.equal(existsSync(`${mark}.steal`), false, 'with no steal file left');
+    followed.end();
+    writeFileSync(mark, dead);
+    const first = new EngineSlots(pool, 1, holder);
+    const second = new EngineSlots(pool, 1, holder);
+    const won = await Promise.all([first.takeFile(mark), second.takeFile(mark)]);
+    assert.equal(won.filter(Boolean).length, 1, `exactly one of two takers wins: ${JSON.stringify(won)}`);
+    assert.equal(markedBy(), process.pid, 'and the mark names this process');
+    assert.equal(existsSync(`${mark}.steal`), false, 'with no steal file');
+    followed.end();
+    writeFileSync(mark, dead);
+    writeFileSync(`${mark}.steal`, JSON.stringify(holder));
+    assert.equal(await first.takeFile(mark), false, 'a mark another run is taking over is left');
+    assert.equal(readFileSync(mark, 'utf8'), dead, 'unchanged');
+    rmSync(`${mark}.steal`);
+    rmSync(mark);
+
+    // The end.
+    said(5);
+    const ending = following(new EngineSlots(pool, 1, holder), 8);
+    assert.equal(await answerOf(ending.past(2, fresh()), 20_000), 'answered 5', 'a run to end');
+    ending.end();
+    ending.end();
+    assert.deepEqual(slotsOfPool(), ['lanes-1.json'], 'the end gives the mark back and leaves the file');
+    assert.equal(await answerOf(ending.past(2, fresh()), 20_000), 'answered 5', 'the mark is made again');
+    writeFileSync(mark, JSON.stringify({ pid: process.ppid, started }));
+    ending.end();
+    assert.equal(markedBy(), process.ppid, 'a mark naming another process is left');
+    rmSync(mark);
+    const aborted = new AbortController();
+    aborted.abort(new Error('already aborted'));
+    assert.equal(
+      await answerOf(ending.past(2, aborted.signal), 5000),
+      'rejected: already aborted',
+      'an aborted signal rejects',
+    );
+    assert.equal(existsSync(mark), false, 'and leaves no mark');
+
+    // The mark counts as no slot: a wait for the first engine still says so.
+    rmSync(file, { force: true });
+    const lines: string[] = [];
+    const stop = new AbortController();
+    const waiter = new EngineSlots(other, 1, holder, (line) => {
+      lines.push(line);
+      stop.abort(new Error('heard'));
+    });
+    const lateStop = setTimeout(() => {
+      stop.abort(new Error('silent'));
+    }, 10_000);
+    const heldLock = await slotHeldElsewhere(join(other, '0.lock'), 20_000);
+    helpers.push(heldLock);
+    const markOther = join(other, 'lanes-2.json.follows');
+    assert.equal(await waiter.takeFile(markOther), true, 'a mark is made beside the slots');
+    await assert.rejects(waiter.take(stop.signal), /heard|silent/, 'the wait ends on its line');
+    clearTimeout(lateStop);
+    assert.equal(lines.length, 1, `one line was said: ${JSON.stringify(lines)}`);
+    assert.match(lines[0] ?? '', /for an engine/, 'and it says the run waits for an engine');
+
+    // A reader holding a dead mark open stands in its removal's way until it lets go.
+    if (process.platform === 'win32') {
+      const stuck = join(pool, 'lanes-3.json.follows');
+      writeFileSync(stuck, dead);
+      const reader = await heldOpenByAReader(stuck, 'ReadWrite');
+      try {
+        assert.equal(await slots.takeFile(stuck), false, 'a held dead mark is not taken');
+        assert.equal(existsSync(`${stuck}.steal`), false, 'and no steal file is left');
+      } finally {
+        await reader.letGo();
+      }
+      assert.equal(await slots.takeFile(stuck), true, 'it is taken once the reader has let go');
+    }
+  } finally {
+    for (const control of aborts) {
+      control.abort(new Error('finished'));
+    }
+    for (const made of followers) {
+      made.end();
+    }
+    for (const helper of helpers) {
+      helper.kill();
+    }
+    rmSync(pool, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
+  }
 }
 
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
@@ -59835,11 +60633,17 @@ async function checksTheSpareSlots(rig: SlotsRig, gonePid: number): Promise<void
   rmSync(spareFile);
   assert.deepEqual(await takeAll(outside), kept, 'or with no count at all');
   assert.equal(
-    spareSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS),
+    countSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS, 'spare'),
     3,
     'a count is read up to its age limit',
   );
-  assert.equal(spareSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS), 0, 'and not past it');
+  assert.equal(
+    countSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS, 'spare'),
+    0,
+    'and not past it',
+  );
+  assert.equal(countSaid('{"lanes": 3, "written": 1000}', 1000, 'lanes'), 3, 'a count is read under its key');
+  assert.equal(countSaid('{"lanes": 3, "written": 1000}', 1000, 'spare'), 0, 'and under no other');
   assert.deepEqual(
     slotsDrawnOn(16, 'other', 'spare'),
     { numbers: every16 },
@@ -60279,29 +61083,12 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
 
     if (process.platform === 'win32') {
       const lock = await slots.take();
-      const reader = spawnHidden(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
-          // second a removal waits on a slow runner.
-          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(300); $f.Close()`,
-        ],
-        { stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const reader = await heldOpenByAReader(lock, 'Read', 300);
       try {
-        await new Promise<void>((settle) => {
-          reader.stdout.once('data', () => {
-            settle();
-          });
-        });
         slots.release(lock);
         assert.equal(existsSync(lock), false, 'a lock given back while another process reads it is removed');
       } finally {
-        reader.kill();
-        await exitOf(reader);
+        await reader.letGo();
       }
     }
   } finally {
@@ -62426,6 +63213,10 @@ function testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores(): void {
       'project.godot': 'config_version=5\n',
       'raw/.gdignore': '',
       'raw/a.json': '1\n',
+      'fake/f.json': '1\n',
+      'fake/project.godot/x.txt': '1\n',
+      'demo/project.godot': 'config_version=5\n',
+      'demo/d.json': '1\n',
     });
     writeTree(elsewhere, { 'shared.json': '1\n' });
     symlinkSync(elsewhere, join(project, 'linked'), 'junction');
@@ -62441,9 +63232,15 @@ function testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores(): void {
     walkSeen(project, (under) => names.push(under));
     assert.deepEqual(
       names,
-      ['linked/shared.json', 'project.godot'],
-      'and a link back up the tree is not walked again',
+      ['fake/f.json', 'fake/project.godot/x.txt', 'linked/shared.json', 'project.godot'],
+      'a link back up the tree is not walked again, a folder named project.godot is no project and a nested project holds nothing',
     );
+    const listing = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_NAME]);
+    const listed = listing();
+    writeFileSync(join(project, 'demo', 'e.json'), '1\n');
+    assert.equal(listing(), listed, 'a file in a nested project is no name a listing sees');
+    rmSync(join(project, 'demo'), { recursive: true });
+    assert.notEqual(listing(), listed, 'while the nested project is itself named');
     assert.deepEqual(
       reachedAlsoSaid([join(project, 'raw')]),
       ['.gdignore\n\na.json\nchanged\n'],
@@ -93763,8 +94560,15 @@ function testAWalkFollowsLinksAndMarksTheOnesThatLeave(): void {
   const p = (...steps: string[]): string => join(project, ...steps);
   const gd = '# needle\n';
   try {
-    writeTree(project, { 'project.godot': '', 'real/r.gd': gd, 'sub/keep.txt': '' });
-    writeTree(outside, { 'o.gd': '# outsider\n' });
+    const exporting = (name: string): string =>
+      `class_name ${name}\n@export var next: Array[${name}] = []\n\n\nfunc f() -> void:\n\thelper()\n`;
+    writeTree(project, {
+      'project.godot': '',
+      'real/r.gd': `${gd}${exporting('R')}`,
+      'real/m.png': 'M',
+      'sub/keep.txt': '',
+    });
+    writeTree(outside, { 'o.gd': `# outsider\n${exporting('O')}`, 'n.png': 'N' });
     linkTo(p('real'), p('link'));
     const walked = tour(project);
     const at = (read: ReadWalk, path: string): ReadWalk['files'][number] | undefined =>
@@ -93808,6 +94612,57 @@ function testAWalkFollowsLinksAndMarksTheOnesThatLeave(): void {
     );
     const out = held.leftOut.filter((left) => left.why === 'outside').map((left) => left.folder);
     assert.deepEqual(out, fileLinked ? ['linked.gd', 'shared'] : ['shared']);
+    const imports = staleImports(project).map((one) => one.path);
+    assert.deepEqual(
+      imports.filter((path) => path.endsWith('.png')),
+      ['res://real/m.png', 'res://shared/n.png'],
+      'the import check names a file behind a link out and a file behind a link in once',
+    );
+
+    const scanned: string[] = [];
+    eachScript(project, (script) => scanned.push(script));
+    const inside = scriptsInside(project);
+    const sought = (scripts: readonly string[]): string[] =>
+      scripts
+        .filter((script) => /\/(r|o)\.gd$/.test(script) && !script.startsWith('res://Upper/'))
+        .toSorted();
+    assert.deepEqual(
+      sought(scanned),
+      ['res://link/r.gd', 'res://real/r.gd', 'res://shared/o.gd'],
+      'the engine scans every path',
+    );
+    assert.deepEqual(
+      sought(inside.map(([script]) => script)),
+      ['res://real/r.gd'],
+      'a reader of the project takes the file once and none behind a link out',
+    );
+    const calling = callersOf(
+      {
+        startedAt: 0,
+        lastFrameAt: 1,
+        frames: 1,
+        complete: true,
+        unreadable: 0,
+        engineCalls: true,
+        functions: {},
+      },
+      'helper',
+      inside,
+    );
+    assert.deepEqual(
+      calling.sites.map((site) => site.script),
+      ['res://real/r.gd'],
+      'one place, in a file of the project',
+    );
+    const loaded = new ProjectScripts(project).sources;
+    const exported = projectSelfTypedExports(project);
+    assert.deepEqual(exported, selfTypedExports(loaded));
+    assert.deepEqual(
+      sought(exported.filter((one) => one.property === 'next').map((one) => one.script)),
+      ['res://link/r.gd', 'res://real/r.gd', 'res://shared/o.gd'],
+      'the note on what the engine held names every path it loaded',
+    );
+    assert.equal(selfTypedSentence(exported), selfTypedSentence(selfTypedExports(loaded)));
     const outsider = search('outsider');
     assert.deepEqual([outsider.results, outsider.not_searched?.includes('res://shared/')], [[], true]);
     assert.deepEqual(folderFiles(project, p('shared'), ['.gd']), []);
@@ -93879,6 +94734,15 @@ function testTheFileWalksStepOverAFolderHoldingAProject(): void {
     assert.deepEqual(steppedOverIn(project, scripts), [{ folder: 'deep', why: 'project' }]);
     assert.deepEqual(steppedOverIn(project, copy), [{ folder: '', why: 'project' }]);
   });
+  inNested({ 'addons/game_copy/project.godot': '' }, (project) => {
+    const refused = scriptsToDiagnose(project, 'addons');
+    assert.ok(
+      !refused.ok &&
+        refused.reason.includes('addons/game_copy holds a project.godot of its own') &&
+        !refused.reason.includes('game_copy/game_copy'),
+      JSON.stringify(refused),
+    );
+  });
 }
 
 function testScriptsWithoutAUidStepOverAFolderHoldingAProject(): void {
@@ -93905,8 +94769,547 @@ function testASearchStepsOverAFolderHoldingAProject(): void {
   });
 }
 
+/** The class cache holds no class a nested project declares, and holds the project's own. */
+function testTheClassCacheStepsOverAFolderHoldingAProject(): void {
+  inNested(
+    {
+      'scripts/hero.gd': 'class_name Hero\nextends Node\n',
+      'game_copy/stowaway.gd': 'class_name Stowaway\nextends Node\n',
+    },
+    (project) => {
+      assert.deepEqual([...declaredClasses(project).keys()], ['Hero']);
+    },
+  );
+}
+
+/** A uid a nested project's files declare is declared by nothing, and the project's own still is. */
+function testTheUidCacheStepsOverAFolderHoldingAProject(): void {
+  inNested(
+    {
+      'gdharness/loader.gd': 'extends Node\n',
+      'gdharness/loader.gd.uid': 'uid://bil88s3xjahd0\n',
+      'game_copy/copy.gd': 'extends Node\n',
+      'game_copy/copy.gd.uid': 'uid://i\n',
+    },
+    (project) => {
+      mkdirSync(join(project, '.godot'));
+      writeFileSync(
+        join(project, '.godot', 'uid_cache.bin'),
+        encodedUidCache([
+          [2972703169784048779n, 'res://boot/loader.gd'],
+          [8n, 'res://copy.gd'],
+        ]),
+      );
+      assert.deepEqual(mendUidCache(project), {
+        moved: [[2972703169784048779n, 'res://boot/loader.gd', 'res://gdharness/loader.gd']],
+        dropped: [[8n, 'res://copy.gd']],
+      });
+    },
+  );
+}
+
+/** A binary resource in a nested project is not one a move has to leave alone, and the project's own is. */
+function testAMoveListsNoBinaryResourceOfAFolderHoldingAProject(): void {
+  const project = moveProject();
+  try {
+    writeTree(project, {
+      'game_copy/project.godot': 'config_version=5\n',
+      'game_copy/baked.scn': 'RSCN res://game.gd',
+      'baked.scn': 'RSCN res://game.gd',
+    });
+    const outcome = planFileMove(project, join(project, 'game.gd'), join(project, 'moved_game.gd'));
+    assert.ok(outcome.ok, `the move was refused: ${JSON.stringify(outcome)}`);
+    const said = JSON.stringify(get(outcome.report, 'leftAlone'));
+    assert.ok(said.includes('res://baked.scn'), `the project's own binary resource is listed: ${said}`);
+    assert.ok(!said.includes('game_copy'), `and the nested project's is not: ${said}`);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A rename lists a nested project's copy under leftAlone, in its own words, and does not change it. */
+async function testANestedProjectIsListedAndLeftUnchangedByARename(): Promise<void> {
+  const mod = ['extends "res://told.gd"', '', 'var made: Told = Told.new()', ''].join('\n');
+  const project = renameProjectWith({
+    'game_copy/project.godot': 'config_version=5\n',
+    'game_copy/mod.gd': mod,
+    'kit/.gdignore': '',
+    'kit/mod.gd': mod,
+  });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    assert.ok(changed.includes('res://told.gd:1'), `the declaration is changed: ${JSON.stringify(changed)}`);
+    assert.ok(
+      !changed.some((one) => one.startsWith('res://game_copy/') || one.startsWith('res://kit/')),
+      `nothing in the nested project or under the .gdignore is changed: ${JSON.stringify(changed)}`,
+    );
+    assert.deepEqual(
+      left.filter((one) => one.startsWith('res://game_copy/') || one.startsWith('res://kit/')),
+      ['res://game_copy/mod.gd:3:ignored', 'res://kit/mod.gd:3:ignored'],
+    );
+    const why = asArray(get(outcome.report, 'leftAlone'))
+      .filter((one) => text(get(one, 'kind')) === 'ignored')
+      .map((one) => text(get(one, 'why')));
+    assert.deepEqual(why, [
+      'in a folder holding a project.godot of its own, which the engine does not load as part of this project, so it was not changed',
+      'under a directory holding a .gdignore, which the engine does not load, so it was not changed',
+    ]);
+    applyRewrites(outcome.rewrites);
+    assert.equal(readFileSync(join(project, 'game_copy', 'mod.gd'), 'utf8'), mod);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A script in a nested project is no script the engine sees, so a rename of it is refused saying so. */
+async function testARenameOfAScriptInANestedProjectIsRefused(): Promise<void> {
+  const project = renameProjectWith({
+    'game_copy/project.godot': 'config_version=5\n',
+    'game_copy/ghost.gd': 'class_name Ghost\nextends Node\n',
+  });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'game_copy', 'ghost.gd'),
+        symbol: 'Ghost',
+        newName: 'Spirit',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(!outcome.ok, 'the rename is refused');
+    assert.match(outcome.reason, /is not among the scripts the engine sees: .* a project\.godot of its own/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A move into a nested project is refused, and one into an installed addon is not refused for that reason. */
+function testAMoveIntoAFolderHoldingAProjectIsRefused(): void {
+  const project = moveProject();
+  try {
+    writeTree(project, {
+      'game_copy/project.godot': 'config_version=5\n',
+      'addons/gdharness_editor/plugin.gd': 'extends Node\n',
+      [`addons/gdharness_editor/${VERSION_MARKER}`]: '1.0.0\n',
+    });
+    const outcome = planFileMove(
+      project,
+      join(project, 'scenes/hero.tscn'),
+      join(project, 'game_copy/hero.tscn'),
+    );
+    assert.ok(!outcome.ok, 'the move is refused');
+    assert.match(outcome.reason, /under a directory holding a project\.godot of its own/);
+    assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')), 'nothing moved');
+    writeTree(project, { 'kit/.gdignore': '' });
+    const ignored = planFileMove(project, join(project, 'scenes/hero.tscn'), join(project, 'kit/hero.tscn'));
+    assert.ok(!ignored.ok, 'a move under a .gdignore is refused');
+    assert.match(ignored.reason, /under a directory holding a \.gdignore, which the engine does not load/);
+    const toAddon = planFileMove(
+      project,
+      join(project, 'scenes/hero.tscn'),
+      join(project, 'addons/gdharness_editor/hero.tscn'),
+    );
+    assert.ok(
+      toAddon.ok || !toAddon.reason.includes('the engine does not'),
+      `an installed addon is loaded: ${JSON.stringify(toAddon)}`,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A project beside a folder of `o.gd` and `b.res` that a junction `shared` and a file link reach. */
+function projectLinkedOut(project: string): { outside: string; fileLinked: boolean } {
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-outside-'));
+  writeTree(outside, {
+    'o.gd': 'class_name Shared\nextends Node\nvar t: Told = null\nconst G = "res://game.gd"\n',
+    'p.gd': 'extends Node\nvar t: Told = null\n',
+    'b.res': 'RSCN res://game.gd',
+  });
+  symlinkSync(outside, join(project, 'shared'), 'junction');
+  let fileLinked = true;
+  try {
+    symlinkSync(join(outside, 'p.gd'), join(project, 'linked.gd'), 'file');
+  } catch {
+    fileLinked = false;
+  }
+  return { outside, fileLinked };
+}
+
+/** What a rename and a move do about a link out of the project: read nothing behind it, change nothing, name it. */
+async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promise<void> {
+  const project = renameProject();
+  const moving = moveProject();
+  const { outside, fileLinked } = projectLinkedOut(project);
+  try {
+    const before = (name: string): string => readFileSync(join(outside, name), 'utf8');
+    const kept = { o: before('o.gd'), p: before('p.gd') };
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed } = renameReadings(outcome.report);
+    assert.ok(changed.includes('res://told.gd:1'), `the rename ran: ${JSON.stringify(changed)}`);
+    applyRewrites(outcome.rewrites);
+    assert.deepEqual([before('o.gd'), before('p.gd')], [kept.o, kept.p], 'nothing behind a link is written');
+    const ignored = asArray(get(outcome.report, 'leftAlone')).filter(
+      (one) => text(get(one, 'kind')) === 'ignored',
+    );
+    const named = (path: string): unknown[] => ignored.filter((one) => get(one, 'file') === path);
+    assert.equal(named('res://shared/').length, 1, JSON.stringify(ignored));
+    assert.match(text(get(named('res://shared/')[0], 'why')), /a link that leads out of the project/);
+    assert.equal(named('res://shared/o.gd').length, 0, 'nothing behind the link is listed');
+    if (fileLinked) {
+      assert.equal(named('res://linked.gd').length, 1, 'a file link out is named too');
+    } else {
+      console.log('  skipped the file link: the platform refuses one');
+    }
+
+    symlinkSync(outside, join(moving, 'shared'), 'junction');
+    const move = planFileMove(moving, join(moving, 'game.gd'), join(moving, 'moved_game.gd'));
+    assert.ok(move.ok, `the move was refused: ${JSON.stringify(move)}`);
+    const said = asArray(get(move.report, 'leftAlone')).map((one) => text(get(one, 'file')));
+    assert.deepEqual(
+      said.filter((file) => file.startsWith('res://shared')),
+      ['res://shared/'],
+      'the link is named once and no binary resource behind it',
+    );
+    assert.equal(before('o.gd'), kept.o, 'the move wrote nothing behind the link');
+
+    const behind = planFileMove(project, join(project, 'shared', 'o.gd'), join(project, 'o.gd'));
+    assert.ok(!behind.ok, 'a file behind a link is not moved');
+    assert.match(behind.reason, /is behind the link res:\/\/shared\//);
+    assert.ok(existsSync(join(outside, 'o.gd')), 'and stays where it is');
+    const own = planFileMove(project, project, join(project, 'elsewhere'));
+    assert.ok(
+      !own.ok && own.reason.includes('The project directory itself cannot be moved'),
+      'the folder itself',
+    );
+
+    const symbol = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'shared', 'o.gd'),
+        symbol: 'Shared',
+        newName: 'Common',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(!symbol.ok, 'a script behind a link is not renamed');
+    assert.match(symbol.reason, /is behind the link res:\/\/shared\//);
+    assert.doesNotMatch(symbol.reason, /\.gdignore|project\.godot|starts with a dot/);
+    assert.equal(before('o.gd'), kept.o);
+
+    mkdirSync(join(project, 'held'));
+    symlinkSync(outside, join(project, 'held', 'far'), 'junction');
+    for (const [given, folder] of [
+      ['res://held', 'held/far'],
+      ['res://shared', 'shared'],
+    ] as const) {
+      const refused = scriptsToDiagnose(project, given);
+      assert.ok(
+        !refused.ok && refused.reason.includes(`${folder} is a link that leads out of the project`),
+        `${given}: ${JSON.stringify(refused)}`,
+      );
+    }
+
+    mkdirSync(join(project, 'real'));
+    symlinkSync(join(project, 'real'), join(project, 'inner'), 'junction');
+    assert.equal(linkOutOf(project, join(project, 'shared', 'o.gd')), 'res://shared/');
+    assert.equal(linkOutOf(project, join(project, 'inner', 'i.gd')), null);
+    assert.equal(linkOutOf(project, join(outside, 'o.gd')), null);
+    if (fileLinked) {
+      assert.equal(linkOutOf(project, join(project, 'linked.gd')), 'res://linked.gd');
+    }
+  } finally {
+    sweep(project, moving, outside);
+  }
+}
+
+/** Every reader of the project's folders takes its rule from the one walk. */
+function testEveryProjectWalkIsOne(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+    .map((entry) => join('src', entry).replaceAll('\\', '/'));
+  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
+  const literal = ["'", '.gdignore', "'"].join('');
+  const holding = files.filter((file) => readFileSync(file, 'utf8').includes(literal)).toSorted();
+  assert.deepEqual(holding, ['src/project-walk.ts', 'src/suite-inputs.ts']);
+  const walker = readFileSync('src/project-walk.ts', 'utf8');
+  assert.ok(
+    new RegExp(`isFileAt\\(join\\([^)]*${literal}\\)\\)`).test(walker),
+    'the walker asks whether it is a file',
+  );
+  assert.ok(
+    /function isFileAt\([^)]*\)[^{]*\{\s*try \{\s*return statOf\([^)]*\)\?\.isFile\(\) === true/.test(walker),
+    'by a stat, which a folder of that name fails',
+  );
+  assert.ok(
+    !new RegExp(`existsSync\\([^)]*${literal}`).test(walker),
+    'a folder named .gdignore is no marker',
+  );
+  const nodeModules = ['node', 'modules'].join('_');
+  assert.deepEqual(
+    files.filter((file) => readFileSync(file, 'utf8').includes(nodeModules)),
+    [],
+    'no walk skips node_modules',
+  );
+}
+
+/** The import check leaves a nested project's files out, and still names the project's own. */
+function testTheImportCheckStepsOverAFolderHoldingAProject(): void {
+  inNested({ 'raw.png': 'R', 'game_copy/raw.png': 'R' }, (project) => {
+    assert.deepEqual(staleImports(project), [{ path: 'res://raw.png', reason: 'it has not been imported' }]);
+  });
+}
+
+/** A native extension manifest in a nested project is not listed as the project's. */
+function testTheExtensionListStepsOverAFolderHoldingAProject(): void {
+  inNested(
+    { 'native/b.gdextension': '[configuration]\n', 'game_copy/c.gdextension': '[configuration]\n' },
+    (project) => {
+      assert.deepEqual(seedExtensionList(project), ['res://native/b.gdextension']);
+    },
+  );
+}
+
+function testTheTextsStepOverAFolderHoldingAProject(): void {
+  inNested({ 'scripts/hero.gd': '', 'game_copy/copy.gd': '' }, (project) => {
+    const gd = (path: string): boolean => path.endsWith('.gd');
+    assert.deepEqual(
+      projectTexts(project)
+        .map((file) => file.path)
+        .filter(gd),
+      ['res://scripts/hero.gd'],
+    );
+    assert.deepEqual(
+      ignoredTexts(project)
+        .filter((file) => gd(file.path))
+        .map((file) => [file.path, file.why, file.folder]),
+      [['res://game_copy/copy.gd', 'project', 'res://game_copy/']],
+    );
+  });
+}
+
+const HERO = 'class_name Hero\nextends Node\n\nvar speed: int = 1\n';
+const USES_HERO = (head: string): string =>
+  `${head}extends Node\n\nvar h: Hero = Hero.new()\n\n\nfunc f() -> int:\n\treturn h.speed\n`;
+
+const KIT_HEAD = 'class_name Kit\nconst SELF := preload("res://kit/sub/s.gd")\n';
+
+/** The paths of the files a rename reported as changed. */
+function filesReported(report: Record<string, unknown>): string[] {
+  const lines = renameReadings(report).changed;
+  return [...new Set(lines.map((line) => line.slice(0, line.lastIndexOf(':'))))].toSorted();
+}
+
+/** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
+function projectWithTwoPaths(): { root: string; project: string } {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  writeTree(project, {
+    'project.godot': '',
+    'hero.gd': HERO,
+    'real/r.gd': USES_HERO(''),
+    'kit/.gdignore': '',
+    'kit/sub/s.gd': USES_HERO(KIT_HEAD),
+    'other/.gdignore': '',
+    'other/x.gd': 'extends Node\n# Hero\n',
+    'kit/deep/project.godot': '',
+    'kit/deep/d.gd': 'extends Node\n',
+  });
+  writeTree(root, { 'outside/o.gd': USES_HERO('') });
+  const made = [
+    linkTo(join(project, 'real'), join(project, 'link')),
+    linkTo(join(project, 'kit', 'sub'), join(project, 'via1')),
+    linkTo(join(project, 'kit', 'sub'), join(project, 'via2')),
+    linkTo(join(project, 'other'), join(project, 'kit', 'lnk')),
+    linkTo(join(project, 'kit'), join(project, 'other', 'back')),
+    linkTo(join(project, 'other'), join(project, 'aaa')),
+    linkTo(join(root, 'outside'), join(project, 'shared')),
+    linkTo(join(root, 'outside'), join(project, 'kit', 'far')),
+  ];
+  assert.ok(!made.includes(false), 'the platform makes a link to a folder');
+  return { root, project };
+}
+
+async function renamedIn(
+  project: string,
+  request: { script: string; symbol: string; to: string },
+  services: Pick<RenameServices, 'references' | 'definitions'> = NO_LANGUAGE_SERVER,
+): Promise<Extract<Awaited<ReturnType<typeof renameSymbol>>, { ok: true }>> {
+  const outcome = await renameSymbol(
+    {
+      projectPath: project,
+      scriptPath: request.script,
+      symbol: request.symbol,
+      newName: request.to,
+      newScriptPath: null,
+    },
+    { namesTaken: engineSaying(), ...services },
+  );
+  assert.ok(outcome.ok, `the rename of ${request.symbol} was refused: ${JSON.stringify(outcome)}`);
+  return outcome;
+}
+
+/** A language server that answers the references of `Hero.speed` with a place in each of three files. */
+function referencesToSpeed(project: string): Pick<RenameServices, 'references' | 'definitions'> {
+  const place = (file: string, source: string): { file: string; line: number; character: number } => {
+    const lines = source.split('\n');
+    const line = lines.findIndex((one) => one.includes('speed'));
+    return { file, line, character: lines[line]?.indexOf('speed') ?? 0 };
+  };
+  const answer = [
+    place(join(project, 'hero.gd'), HERO),
+    place(join(project, 'real', 'r.gd'), USES_HERO('')),
+    place(join(project, 'kit', 'sub', 's.gd'), USES_HERO(KIT_HEAD)),
+  ];
+  return {
+    references: async () => await Promise.resolve(answer),
+    definitions: async () => await Promise.resolve([]),
+  };
+}
+
+async function testAFileTwoPathsReachIsRenamedOnce(): Promise<void> {
+  const { root, project } = projectWithTwoPaths();
+  try {
+    const kitPath = (spelling: string): string => join(project, spelling, 's.gd');
+    const kitRename = async (script: string): Promise<string[]> =>
+      filesReported((await renamedIn(project, { script, symbol: 'Kit', to: 'Gear' })).report);
+
+    // A file two paths reach is one text, under the path the caller named or its own.
+    assert.deepEqual(
+      [
+        projectTexts(project).find((file) => file.path === 'res://real/r.gd')?.realPath,
+        projectTexts(project).some((file) => file.path === 'res://link/r.gd'),
+      ],
+      [undefined, false],
+      'the file under its own path, and not under the link',
+    );
+    const named = projectTexts(project, ['res://link/r.gd']);
+    assert.deepEqual(
+      [
+        named.find((file) => file.path === 'res://link/r.gd')?.realPath,
+        named.some((file) => file.path === 'res://real/r.gd'),
+      ],
+      ['res://real/r.gd', false],
+      'the file under the path named, which says where it lives',
+    );
+
+    // A file only links reach, named through one of them or by its real place.
+    assert.deepEqual(await kitRename(kitPath('via2')), ['res://via2/s.gd'], 'the path the caller gave');
+    assert.deepEqual(
+      await kitRename(join(project, 'kit', 'sub', 's.gd')),
+      ['res://via1/s.gd'],
+      'the first link path when the caller named the real one',
+    );
+    const viaOne = projectTexts(project).find((file) => file.path === 'res://via1/s.gd');
+    assert.equal(viaOne?.realPath, 'res://kit/sub/s.gd');
+    assert.ok(
+      !ignoredTexts(project).some((file) => file.path === 'res://kit/sub/s.gd'),
+      'a file the project reaches is no copy left alone',
+    );
+
+    // Where the file system ignores case, a name in another case stands for the path the walk holds.
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      assert.deepEqual(await kitRename(kitPath('Via2')), ['res://via2/s.gd']);
+      assert.ok(
+        projectTexts(project, ['res://Via2/s.gd']).some((file) => file.path === 'res://via2/s.gd'),
+        'the walk spells the path, not the caller',
+      );
+    } else {
+      console.log('skipped: this file system tells case apart, so no path in another case opens');
+    }
+
+    // A member rename, whose places the language server spells by the real path.
+    const member = await renamedIn(
+      project,
+      { script: join(project, 'hero.gd'), symbol: 'speed', to: 'pace' },
+      referencesToSpeed(project),
+    );
+    assert.deepEqual(filesReported(member.report), ['res://hero.gd', 'res://real/r.gd', 'res://via1/s.gd']);
+
+    // Nothing behind a link out is read, and the left-out copies are listed once.
+    const files = [...projectTexts(project), ...ignoredTexts(project)].map((file) => file.path);
+    assert.ok(!files.some((path) => path.endsWith('/o.gd')), `nothing outside is read: ${files.join(', ')}`);
+    assert.deepEqual(
+      ignoredTexts(project)
+        .filter((file) => file.path.endsWith('x.gd') || file.path.endsWith('d.gd'))
+        .map((file) => [file.path, file.why, file.folder]),
+      [
+        ['res://other/x.gd', 'gdignore', 'res://other/'],
+        ['res://kit/deep/d.gd', 'gdignore', 'res://kit/'],
+      ],
+      'each copy once, with the topmost left-out folder above it and its reason',
+    );
+    writeTree(root, { 'outside/f.gd': '' });
+    const fileLinked = linkTo(join(root, 'outside', 'f.gd'), join(project, 'flink.gd'), 'file');
+    assert.deepEqual(linksOut(project), fileLinked ? ['res://flink.gd', 'res://shared/'] : ['res://shared/']);
+    if (!fileLinked) {
+      console.log('skipped: this platform refuses a link to a file');
+    }
+
+    // A move spells its source by the real path, and a file only a link reaches is the file it moves.
+    const moved = planFileMove(project, join(project, 'kit', 'sub', 's.gd'), join(project, 't.gd'));
+    assert.ok(moved.ok, JSON.stringify(moved));
+    assert.deepEqual(
+      [moved.inPlace.length, filesReported(moved.report), moved.moved.map((one) => one.to)],
+      [0, ['res://t.gd'], ['res://t.gd']],
+    );
+
+    // The class rename, last since it writes: the file two paths reach is changed and counted once.
+    const outcome = await renamedIn(project, {
+      script: join(project, 'hero.gd'),
+      symbol: 'Hero',
+      to: 'Champion',
+    });
+    const left = JSON.stringify(get(outcome.report, 'leftAlone') ?? []);
+    assert.deepEqual(filesReported(outcome.report), ['res://hero.gd', 'res://real/r.gd', 'res://via1/s.gd']);
+    assert.equal(get(get(outcome.report, 'summary'), 'filesChanged'), 3);
+    assert.ok(!/real\/r\.gd|link\/r\.gd/.test(left), `left alone names neither path: ${left}`);
+    applyRewrites(outcome.rewrites);
+    assert.match(readFileSync(join(project, 'real', 'r.gd'), 'utf8'), /var h: Champion = Champion\.new\(\)/);
+  } finally {
+    sweep(root);
+  }
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testRegressionPartsCoverEveryTestOnceAndBalance,
+  testTheClassCacheStepsOverAFolderHoldingAProject,
+  testTheUidCacheStepsOverAFolderHoldingAProject,
+  testAMoveListsNoBinaryResourceOfAFolderHoldingAProject,
+  testANestedProjectIsListedAndLeftUnchangedByARename,
+  testARenameOfAScriptInANestedProjectIsRefused,
+  testAMoveIntoAFolderHoldingAProjectIsRefused,
+  testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
+  testEveryProjectWalkIsOne,
+  testTheImportCheckStepsOverAFolderHoldingAProject,
+  testTheExtensionListStepsOverAFolderHoldingAProject,
+  testTheTextsStepOverAFolderHoldingAProject,
+  testAFileTwoPathsReachIsRenamedOnce,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,
@@ -94248,6 +95651,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeepersScratchFoldersAreSweptWhenItIsGone,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
+  testOneImportPassServesTheServerAndASuiteRun,
   testForcingAReimportTouchesOnlyThatResource,
   testAnImportOrExportOverAStaleDocCacheRunsAgain,
   testACrashIsBlamedOnlyOnTheCacheOfTheEnginesOwnVersion,
@@ -94478,6 +95882,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testNestedErrorsAndDeclaredErrorsAreRead,
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
+  testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
@@ -94486,6 +95891,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
   testGatesInTheQueueKeepTheirSlots,
+  testARunFollowsTheLanesAGateWrites,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,

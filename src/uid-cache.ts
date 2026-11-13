@@ -1,17 +1,10 @@
-import {
-  type Dirent,
-  existsSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedEntries } from './class-cache.js';
 import { errorMessage } from './errors.js';
 import { fileNoCaseCompare } from './file-order.js';
+import { walkProject } from './project-walk.js';
 
 /**
  * A project's uid cache, `.godot/uid_cache.bin`, set right before an engine starts on it: an entry
@@ -164,51 +157,27 @@ function declared(path: string, name: string): readonly [text: string, owner: st
 
 /**
  * The `res://` path of the file declaring each of [param wanted], as the engine's scan settles it:
- * a folder or file spelled with a leading dot, and a folder holding a `.gdignore`, are stepped over.
+ * a folder or file spelled with a leading dot, and a folder holding a `.gdignore` or a `project.godot`
+ * of its own, are stepped over.
  * The scan takes a folder's subfolders first, then its files, each in `fileNoCaseCompare` order, and
  * of two files declaring one id the later wins. The walk goes in the reverse order and keeps the
  * first, so it ends once every id is found.
  */
 function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<bigint, string> {
   const found = new Map<bigint, string>();
-  findDeclarations(projectPath, '', wanted, found);
+  for (const folder of walkProject(projectPath, { withOurs: true, reversed: true }).folders) {
+    const prefix = folder.folder === '' ? '' : `${folder.folder}/`;
+    const files = folder.files.toSorted((a, b) =>
+      fileNoCaseCompare(declaredFor(b.name), declaredFor(a.name)),
+    );
+    for (const file of files) {
+      if (found.size === wanted.size) {
+        return found;
+      }
+      recordDeclaration(join(folder.path, file.name), `${prefix}${file.name}`, wanted, found);
+    }
+  }
   return found;
-}
-
-function findDeclarations(
-  directory: string,
-  prefix: string,
-  wanted: ReadonlySet<bigint>,
-  found: Map<bigint, string>,
-): void {
-  let entries: Dirent[];
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  if (entries.some((entry) => entry.name === '.gdignore')) {
-    return;
-  }
-  const shown = entries.filter((entry) => !entry.name.startsWith('.'));
-  const files = shown
-    .filter((entry) => entry.isFile())
-    .toSorted((a, b) => fileNoCaseCompare(declaredFor(b.name), declaredFor(a.name)));
-  const folders = shown
-    .filter((entry) => entry.isDirectory())
-    .toSorted((a, b) => fileNoCaseCompare(b.name, a.name));
-  for (const file of files) {
-    if (found.size === wanted.size) {
-      return;
-    }
-    recordDeclaration(join(directory, file.name), `${prefix}${file.name}`, wanted, found);
-  }
-  for (const folder of folders) {
-    if (found.size === wanted.size) {
-      return;
-    }
-    findDeclarations(join(directory, folder.name), `${prefix}${folder.name}/`, wanted, found);
-  }
 }
 
 /** The name of the file [param name] declares a uid for, which is where the engine's scan meets it. */

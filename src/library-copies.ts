@@ -1,13 +1,6 @@
-import {
-  type Dirent,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { walkProject } from './project-walk.js';
 import { readWhole } from './whole-file.js';
 
 /** What freeing a project's library copies did, for the debug log. */
@@ -157,30 +150,15 @@ export function unlistedExtensions(projectPath: string): string[] {
     return [];
   }
   const found: string[] = [];
-  collectExtensions(projectPath, 'res://', found);
+  for (const folder of walkProject(projectPath, { withOurs: true }).folders) {
+    const resDirectory = folder.folder === '' ? 'res://' : `res://${folder.folder}/`;
+    for (const file of folder.files) {
+      if (file.name.endsWith('.gdextension')) {
+        found.push(`${resDirectory}${file.name}`);
+      }
+    }
+  }
   return found.toSorted();
-}
-
-function collectExtensions(directory: string, resDirectory: string, found: string[]): void {
-  if (existsSync(join(directory, '.gdignore'))) {
-    return;
-  }
-  let entries: Dirent[];
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) {
-      continue;
-    }
-    if (entry.isDirectory()) {
-      collectExtensions(join(directory, entry.name), `${resDirectory}${entry.name}/`, found);
-    } else if (entry.name.endsWith('.gdextension')) {
-      found.push(`${resDirectory}${entry.name}`);
-    }
-  }
 }
 
 /**

@@ -27,7 +27,7 @@ import {
   type ScriptShape,
   shapeOf,
 } from './gdscript-source.js';
-import type { ProjectText } from './project-scan.js';
+import type { IgnoredText, ProjectText } from './project-scan.js';
 
 /** What an edit changes, which says why it was made. */
 export type EditKind =
@@ -1250,17 +1250,32 @@ function sceneOrText(file: string): 'scene' | 'text' {
  * [param movedFrom] in [param ignored] added as a mention. Those files are not changed: the engine
  * does not load them, so nothing says which of their words are uses, but a copy kept there to be
  * shipped or vendored back is broken by the change all the same, and is answered rather than
- * passed over.
+ * passed over. A link out of the project is named once, since nothing behind it is read.
  */
 export function mentionIgnored(
   plan: Plan,
-  ignored: readonly ProjectText[],
+  ignored: readonly IgnoredText[],
   name: string | null,
   movedFrom: readonly string[],
+  linksOut: readonly string[],
 ): Plan {
   const mentions = [...plan.mentions];
-  const why = 'under a directory holding a .gdignore, which the engine does not load, so it was not changed';
+  const whys: Record<IgnoredText['why'], string> = {
+    gdignore: 'under a directory holding a .gdignore, which the engine does not load, so it was not changed',
+    project:
+      'in a folder holding a project.godot of its own, which the engine does not load as part of this project, so it was not changed',
+  };
+  for (const link of linksOut) {
+    mentions.push({
+      file: link,
+      line: 0,
+      kind: 'ignored',
+      text: '',
+      why: 'a link that leads out of the project, so nothing behind it was read or changed',
+    });
+  }
   for (const file of ignored) {
+    const why = whys[file.why];
     const lines = new Lines(file.text);
     const offsets =
       name === null

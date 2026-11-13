@@ -1278,7 +1278,8 @@ uid. A reference gets the uid the uid cache holds for its path and no other.
   copied whole.
 
 A file left to be named by path for the first reason is listed under `namedByPath`, with
-`project_import refresh_uids`. That import pass gives the cache its uid. Each headless call is an
+`project_import refresh_uids`. That import pass gives the cache its uid. A suite run and the server
+run the same import pass. Each hands in how the engine is started. Each headless call is an
 engine of its own. So the list gathered in a static on `scene_file.gd` holds that call's saves alone.
 
 ### Library files and open editors
@@ -1358,7 +1359,9 @@ is an argument to the next.
 JSON writes 7 and 7.0 alike. A typed property or element says which one it wants, but an untyped
 Array or Dictionary does not. There, a whole float is answered as `{"_type": "float", "value": 7}`,
 and a bare whole number written there becomes an int, as the GDScript literal does. A read written
-back then saves the same types.
+back then saves the same types. A property or method parameter that declares no type takes a bare
+whole number as an int too. A property holding a float keeps it, since a read answers that float as
+a bare number.
 
 ### Dictionary keys
 

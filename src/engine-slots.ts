@@ -55,7 +55,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { availableParallelism, homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
@@ -225,11 +225,23 @@ function endedNotesSwept(marks: string): void {
  */
 export const QUEUED_FOLDER = 'queued';
 /**
- * The variables naming the share of the gate a process runs in, set in every process a gate runs,
- * so both set says the engine is a gate's.
+ * The variables naming the pool of the gate a process runs in, its folder and its number of lock
+ * numbers, which is never the share. Both set says the engine is a gate's.
  */
 export const SHARE_VARIABLE = 'GODOT_ENGINE_SHARE';
 export const SHARE_COUNT_VARIABLE = 'GODOT_ENGINE_SHARE_COUNT';
+/** The variable naming the lanes file a gate's paced portion writes in the pool, which a run follows. */
+export const LANES_VARIABLE = 'GODOT_ENGINE_LANES';
+/** What follows a lanes file's name in the mark a run holds while it follows the file. */
+export const FOLLOWS_SUFFIX = '.follows';
+
+/**
+ * The pool's number of lock numbers as [param env] gives it, null where it is unset or empty. A
+ * following run needs it as a number, for its ceiling.
+ */
+export function poolCount(env: NodeJS.ProcessEnv = process.env): number | null {
+  return wholeFlag(nonEmpty(env[SHARE_COUNT_VARIABLE]), SHARE_COUNT_VARIABLE);
+}
 /**
  * How many slots of [param count] are kept for engines outside a gate while a gate is queued, the
  * last ones: a quarter, at least two. The gates draw on the rest alone, and an engine outside a gate
@@ -554,11 +566,17 @@ export function slotsDrawnOn(count: number, taker: SlotTaker, queue: GateQueue):
  */
 export const SPARE_FILE = 'spare.json';
 
-/** How old a spare count may be. Its writer writes it again every five seconds while a gate waits. */
+/**
+ * How old a spare count may be. Its writer writes it again every five seconds while a gate waits. A
+ * lanes file is held to the same age.
+ */
 export const SPARE_STALE_MS = 10_000;
 
-/** The spare count [param content] holds at [param now], or 0 for none, a malformed one or a stale one. */
-export function spareSaid(content: string | null, now: number): number {
+/**
+ * The whole number [param content] holds under [param key] at [param now], or 0 for none, a
+ * malformed one, one below 1 or a stale one.
+ */
+export function countSaid(content: string | null, now: number, key: string): number {
   let said: unknown;
   try {
     said = JSON.parse(content ?? '');
@@ -568,11 +586,11 @@ export function spareSaid(content: string | null, now: number): number {
   if (!isRecord(said)) {
     return 0;
   }
-  const { spare, written } = said;
-  if (typeof spare !== 'number' || !Number.isInteger(spare) || typeof written !== 'number') {
+  const { [key]: count, written } = said;
+  if (typeof count !== 'number' || !Number.isInteger(count) || typeof written !== 'number') {
     return 0;
   }
-  return now - written > SPARE_STALE_MS ? 0 : Math.max(0, spare);
+  return now - written > SPARE_STALE_MS ? 0 : Math.max(0, count);
 }
 
 /** [param queue] as a game reads it: a game holds its slot for as long as it plays, so never a spare one. */
@@ -580,7 +598,7 @@ function forAGame(queue: GateQueue, game: boolean): GateQueue {
   return game && queue === 'spare' ? 'queued' : queue;
 }
 
-/** Whether [param env] says this process runs inside a gate, which names its share in both. */
+/** Whether [param env] says this process runs inside a gate, which names its pool in both. */
 export function inAGate(env: NodeJS.ProcessEnv = process.env): boolean {
   return nonEmpty(env[SHARE_VARIABLE]) !== undefined && nonEmpty(env[SHARE_COUNT_VARIABLE]) !== undefined;
 }
@@ -684,6 +702,95 @@ export class FolderChanges {
 
   close(): void {
     this.watcher?.close();
+  }
+}
+
+/**
+ * A process following the lanes file a gate's paced portion writes in the pool. It reads the number
+ * as the spare count is read and holds a mark beside the file as a lock is held, so the portion
+ * grows past the number it told only while a run stands behind it. It takes no lock in the pool.
+ */
+export class FollowedLanes {
+  readonly ceiling: number;
+  private readonly mark: string;
+  private changes: FolderChanges | null = null;
+  private holding = false;
+
+  private readonly slots: Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'>;
+  private readonly file: string;
+  private readonly lookMs: number;
+
+  constructor(
+    slots: Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'>,
+    file: string,
+    ceiling: number,
+    lookMs = SLOT_LOOK_MS,
+  ) {
+    this.slots = slots;
+    this.file = file;
+    this.ceiling = ceiling;
+    this.lookMs = lookMs;
+    this.mark = `${file}${FOLLOWS_SUFFIX}`;
+  }
+
+  /**
+   * Answers the lanes the file tells, at most the ceiling, once that passes [param above]. A number
+   * at or below it adds none. At the ceiling there is nothing to add, so it waits for [param signal]
+   * to abort without a mark.
+   */
+  async past(above: number, signal: AbortSignal): Promise<number> {
+    if (above >= this.ceiling) {
+      await this.untilAborted(signal);
+    }
+    for (;;) {
+      if (signal.aborted) {
+        this.end();
+        throw signal.reason;
+      }
+      const said = await this.look();
+      if (said > above) {
+        if (said >= this.ceiling) {
+          this.end();
+        }
+        return said;
+      }
+      this.changes ??= new FolderChanges(dirname(this.file));
+      await this.changes.next(this.lookMs, SLOT_SETTLE_MS, signal);
+    }
+  }
+
+  /** Rejects once [param signal] aborts, giving the mark back first. */
+  private untilAborted(signal: AbortSignal): Promise<never> {
+    return new Promise<never>((_, reject) => {
+      const stop = (): void => {
+        this.end();
+        reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      if (signal.aborted) {
+        stop();
+      } else {
+        signal.addEventListener('abort', stop, { once: true });
+      }
+    });
+  }
+
+  /** The lanes the file tells now, at most the ceiling, and 0 while the mark is not held or a look fails. */
+  private async look(): Promise<number> {
+    try {
+      this.holding ||= await this.slots.takeFile(this.mark);
+      return this.holding ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
+    } catch {
+      // Held by a reader or unreadable for now, which the next look tries again.
+      return 0;
+    }
+  }
+
+  /** Gives the mark back while it names this process, and stops watching. */
+  end(): void {
+    this.changes?.close();
+    this.changes = null;
+    this.holding = false;
+    giveBackSlot(this.mark, this.slots.holder.pid);
   }
 }
 
@@ -1196,10 +1303,22 @@ export class EngineSlots {
   }
 
   /** The spare count the gates' queue last wrote, 0 once it is stale or its writer has gone. */
-  private async spare(): Promise<number> {
-    const path = join(this.directory, SPARE_FILE);
-    const said = spareSaid(readWhole(path), Date.now());
+  private spare(): Promise<number> {
+    return this.countIn(join(this.directory, SPARE_FILE), 'spare');
+  }
+
+  /** The whole number under [param key] in the file at [param path], 0 once it is stale or its writer has gone. */
+  async countIn(path: string, key: string): Promise<number> {
+    const said = countSaid(readWhole(path), Date.now(), key);
     return said > 0 && !(await this.free(path)) ? said : 0;
+  }
+
+  /**
+   * Makes [param path] as a lock is made, or takes it over under its steal file once its holder has
+   * gone. Answers whether this call made it. The file counts as no slot.
+   */
+  async takeFile(path: string): Promise<boolean> {
+    return this.made(path) || (await this.takenOver(path, this.holder));
   }
 
   /**
@@ -1326,36 +1445,13 @@ export class EngineSlots {
    * taker has just made in its place is never removed. With [param retake] it makes it again for
    * this process, written as [param holder]. Answers whether that was done.
    */
-  private async cleared(lock: string, retake: boolean, holder: SlotHolder = this.holder): Promise<boolean> {
-    if (!(await this.free(lock))) {
-      return false;
-    }
-    const steal = `${lock}.steal`;
-    if (!this.made(steal)) {
-      try {
-        if (Date.now() - statSync(steal).mtimeMs > UNWRITTEN_MS) {
-          rmSync(steal, { force: true });
-        }
-      } catch {
-        // Gone between the two, which is its taker finishing.
-      }
-      return false;
-    }
-    try {
-      if (!(await this.free(lock))) {
-        return false;
-      }
-      try {
-        rmSync(lock, { force: true });
-      } catch {
-        // Held open by a tool locking the file itself, as the games' tools did before this scheme:
-        // Windows will not remove it, and that tool still holds the slot.
-        return false;
-      }
-      return retake ? this.made(lock, holder) : true;
-    } finally {
-      rmSync(steal, { force: true });
-    }
+  private cleared(lock: string, retake: boolean, holder: SlotHolder = this.holder): Promise<boolean> {
+    return takenOverUnderSteal(
+      lock,
+      () => this.free(lock),
+      (path) => this.made(path, holder),
+      retake,
+    );
   }
 
   private async free(lock: string): Promise<boolean> {
@@ -1383,6 +1479,50 @@ export class EngineSlots {
     }
     const started = (await startTimesOf([pid])).get(pid);
     this.starts.set(pid, { started, readAt: Date.now() });
+  }
+}
+
+/**
+ * Removes [param lock] once [param gone] says its holder has gone, under its steal file, so that a
+ * lock another taker has just made in its place is never removed. [param make] makes a file for this
+ * process, the steal file and with [param retake] the lock again. Answers whether that was done.
+ * It tries the removal once and never waits, because a server calls it from its protocol and its
+ * caller looks again.
+ */
+export async function takenOverUnderSteal(
+  lock: string,
+  gone: () => Promise<boolean>,
+  make: (path: string) => boolean,
+  retake = true,
+): Promise<boolean> {
+  if (!(await gone())) {
+    return false;
+  }
+  const steal = `${lock}.steal`;
+  if (!make(steal)) {
+    try {
+      if (Date.now() - statSync(steal).mtimeMs > UNWRITTEN_MS) {
+        rmSync(steal, { force: true });
+      }
+    } catch {
+      // Gone between the two, which is its taker finishing.
+    }
+    return false;
+  }
+  try {
+    if (!(await gone())) {
+      return false;
+    }
+    try {
+      rmSync(lock, { force: true });
+    } catch {
+      // Held open by a tool locking the file itself: Windows will not remove it, and that tool still
+      // holds the lock.
+      return false;
+    }
+    return retake ? make(lock) : true;
+  } finally {
+    rmSync(steal, { force: true });
   }
 }
 

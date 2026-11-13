@@ -61,8 +61,9 @@ when the command line itself is wrong.
   of them unchanged. Every script is still compiled together, unless they compiled together
   cleanly on the same files last time.
 - `--reach-also PATH`: a file or folder every suite depends on, for `--changed-only`. May be given
-  more than once. A suite reading data from a folder that holds a `.gdignore` names that folder
-  here, because the engine leaves such a folder out and so does the reuse check.
+  more than once. A suite reading data from a folder that holds a `.gdignore` or a `project.godot`
+  of its own names that folder here, because the engine leaves such a folder out and so does the
+  reuse check.
 - `--whole-tree`: run nothing, and print each script that makes suites depend on every file, as
   `path:line: argument`. Each line says how many suites reach it from their code and the autoloads.
 - `--times FILE`: deal the suites by the times in `FILE` and record what they took into it, in

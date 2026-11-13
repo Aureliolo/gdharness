@@ -24,7 +24,8 @@ import {
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, installedByUs, projectTexts } from './project-scan.js';
+import { ignoredTexts, installedByUs, linksOut, projectTexts } from './project-scan.js';
+import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
   declaredIn,
@@ -40,6 +41,7 @@ import {
   changedReport,
   type LeftAloneDetail,
   leftAloneReport,
+  linkOutOf,
   onDiskSpelling,
   resourcePathOf,
   summaryOf,
@@ -97,17 +99,19 @@ function sameFile(one: string, other: string): boolean {
 /** Why [param path], a `res://` path, is somewhere the engine does not look, or null. */
 function unseenByTheEngine(projectPath: string, path: string): string | null {
   const steps = path.slice('res://'.length).split('/');
-  let directory = projectPath;
-  for (const [at, step] of steps.entries()) {
-    if (step.startsWith('.')) {
-      return `${path} is under ${step}, and the engine passes over every directory whose name starts with a dot`;
-    }
-    if (at < steps.length - 1) {
-      directory = join(directory, step);
-      if (existsSync(join(directory, '.gdignore'))) {
-        return `${path} is under a directory holding a .gdignore, which the engine does not load`;
-      }
-    }
+  const left = leftOutsOnPath(projectPath, steps.slice(0, -1).join('/')).find(
+    (one) => one.why === 'gdignore' || one.why === 'project',
+  );
+  const leftAt = left === undefined ? Number.POSITIVE_INFINITY : left.folder.split('/').length - 1;
+  const dotAt = steps.findIndex((step) => step.startsWith('.'));
+  if (dotAt >= 0 && dotAt <= leftAt) {
+    return `${path} is under ${steps[dotAt]}, and the engine passes over every directory whose name starts with a dot`;
+  }
+  if (left?.why === 'gdignore') {
+    return `${path} is under a directory holding a .gdignore, which the engine does not load`;
+  }
+  if (left?.why === 'project') {
+    return `${path} is under a directory holding a project.godot of its own, which the engine does not load as part of this project`;
   }
   return null;
 }
@@ -144,26 +148,17 @@ function fileInTheWay(absolute: string): string | null {
   }
 }
 
-/** Every .scn and .res in the project the engine sees. */
+/** Every .scn and .res in the project the engine sees, none behind a link out of the project. */
 function binaryResources(projectPath: string): string[] {
   const found: string[] = [];
-  const visit = (directory: string, prefix: string): void => {
-    if (existsSync(join(directory, '.gdignore'))) {
-      return;
-    }
-    for (const entry of entriesOf(directory)) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const path = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        visit(join(directory, entry.name), `${path}/`);
-      } else if (/\.(scn|res)$/i.test(entry.name)) {
-        found.push(path);
+  for (const folder of walkProject(projectPath, { withOurs: true, inside: projectPath }).folders) {
+    const prefix = folder.folder === '' ? 'res://' : `res://${folder.folder}/`;
+    for (const file of folder.files) {
+      if (!file.twin && /\.(scn|res)$/i.test(file.name)) {
+        found.push(`${prefix}${file.name}`);
       }
     }
-  };
-  visit(projectPath, 'res://');
+  }
   return found;
 }
 
@@ -187,7 +182,13 @@ function checkedMove(projectPath: string, absoluteFrom: string, absoluteTo: stri
   const from = resourcePathOf(projectPath, absoluteFrom);
   const to = targetPathOf(projectPath, absoluteTo);
   if (from === null) {
-    return { reason: 'The project directory itself cannot be moved. Give a file or a directory in it.' };
+    const link = linkOutOf(projectPath, absoluteFrom);
+    return {
+      reason:
+        link === null
+          ? 'The project directory itself cannot be moved. Give a file or a directory in it.'
+          : `${absoluteFrom} is behind the link ${link}, which leads out of the project, so it is not moved from here. Move it in the folder it lives in.`,
+    };
   }
   if (to === null) {
     return { reason: `newPath must be a path inside the project, and ${absoluteTo} is not.` };
@@ -326,7 +327,11 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: collision };
   }
 
-  const texts = projectTexts(projectPath);
+  const texts = projectTexts(projectPath).map((file) =>
+    file.realPath !== undefined && moves.has(file.realPath) && !moves.has(file.path)
+      ? { ...file, path: file.realPath }
+      : file,
+  );
   const scripts = scriptsOf(texts);
   let plan = planMove(
     {
@@ -338,7 +343,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     },
     { edits: [], mentions: [] },
   );
-  plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from]);
+  plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from], linksOut(projectPath));
   const binaries = binaryMentions(projectPath, moves);
   const afterwards = (path: string): string => moves.get(path) ?? path;
   const rewrites = rewritesOf(plan, texts, null);

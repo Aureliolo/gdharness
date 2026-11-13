@@ -9,12 +9,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { holderOf, lockIsFree, ownStart, UNWRITTEN_MS } from './engine-slots.js';
+import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './engine-slots.js';
 import { startTimesOf } from './process-children.js';
 import { removeWhole } from './whole-file.js';
 
@@ -46,7 +46,14 @@ export async function inTurnFor<T>(projectPath: string, file: string, write: () 
   mkdirSync(join(projectPath, '.godot', WRITES_FOLDER), { recursive: true });
   const holder = JSON.stringify({ pid: process.pid, started: await ownStart(), file });
   const starts = new Map<number, number | undefined>();
-  while (!made(lock, holder) && !(await takenOver(lock, holder, starts))) {
+  while (
+    !made(lock, holder) &&
+    !(await takenOverUnderSteal(
+      lock,
+      () => gone(lock, starts),
+      (path) => made(path, holder),
+    ))
+  ) {
     await delay(TURN_LOOK_MS);
   }
   let result: T;
@@ -92,33 +99,6 @@ function made(path: string, content: string): boolean {
     closeSync(file);
   }
   return true;
-}
-
-/** Makes [param lock] again for [param holder] when its holder has gone, under its steal file. */
-async function takenOver(
-  lock: string,
-  holder: string,
-  starts: Map<number, number | undefined>,
-): Promise<boolean> {
-  if (!(await gone(lock, starts))) {
-    return false;
-  }
-  const steal = `${lock}.steal`;
-  if (!made(steal, holder)) {
-    try {
-      if (Date.now() - statSync(steal).mtimeMs > UNWRITTEN_MS) {
-        rmSync(steal, { force: true });
-      }
-    } catch {
-      // Gone between the two, which is its taker finishing.
-    }
-    return false;
-  }
-  try {
-    return (await gone(lock, starts)) && removeWhole(lock) && made(lock, holder);
-  } finally {
-    rmSync(steal, { force: true });
-  }
 }
 
 /** Whether the holder [param lock] names has gone, each holder's start read once into [param starts]. */
