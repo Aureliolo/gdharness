@@ -19,6 +19,7 @@ import {
   statSync,
   symlinkSync,
   utimesSync,
+  watch as watchFolder,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -58922,6 +58923,184 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
 }
 
 /**
+ * A hidden PowerShell opening [param path] for [param access] while sharing reads and writes but no
+ * removal, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
+ * closes it after [param forMs], and else at [method letGo] or after 30 s, so a run killed before its
+ * `finally` leaves no process holding a file for good.
+ */
+async function heldOpenByAReader(
+  path: string,
+  access: 'ReadWrite' | 'Read',
+  forMs?: number,
+): Promise<{ letGo(): Promise<void> }> {
+  const reader = spawnHidden(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
+      // second a removal waits on a slow runner.
+      `$f = [IO.File]::Open('${path.replaceAll("'", "''")}', 'Open', '${access}', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(${String(forMs ?? 30_000)}); $f.Close()`,
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  const letGo = async (): Promise<void> => {
+    reader.kill();
+    await exitOf(reader);
+  };
+  try {
+    await new Promise<void>((settle, fail) => {
+      reader.stdout.once('data', () => {
+        settle();
+      });
+      reader.once('exit', () => {
+        fail(new Error(`the reader of ${path} ended before it held the file`));
+      });
+    });
+  } catch (error) {
+    await letGo();
+    throw error;
+  }
+  return { letGo };
+}
+
+/**
+ * Waits until two samples a second apart show the machine under 60% busy at every reading for 30 s,
+ * as [method samplesReadAChildWatchedForMemory] works the share out. Answers null once it is, and the
+ * last busy share when it was not within three minutes.
+ */
+async function untilTheProcessorIsQuiet(): Promise<number | null> {
+  const giveUp = Date.now() + 180_000;
+  let quietSince: number | undefined;
+  let share = 1;
+  let before = await sampled();
+  while (Date.now() < giveUp) {
+    await delay(1100);
+    const after = await sampled();
+    share = (after.machine - before.machine) / ((after.at - before.at) * availableParallelism());
+    before = after;
+    if (share >= 0.6) {
+      quietSince = undefined;
+    } else {
+      quietSince ??= Date.now();
+      if (Date.now() - quietSince >= 30_000) {
+        return null;
+      }
+    }
+  }
+  return share;
+}
+
+/**
+ * Runs [param call], which takes over the dead [param lock] in [param directory] while a reader holds
+ * it open, and lets the reader go 300 ms after the takeover first makes its steal file. The call must
+ * leave the process free to run, shown by an interval that keeps ticking, and answer within 5 s of the
+ * let-go.
+ */
+async function aHeldDeadLockIsTakenOverOnceLetGo(
+  lock: string,
+  directory: string,
+  dead: string,
+  call: () => Promise<unknown>,
+  caller: string,
+): Promise<void> {
+  writeFileSync(lock, dead);
+  const reader = await heldOpenByAReader(lock, 'ReadWrite');
+  let letGoAt = 0;
+  let sawSteal = false;
+  const watcher = watchFolder(directory, (_event, name) => {
+    if (!sawSteal && name === `${basename(lock)}.steal`) {
+      sawSteal = true;
+      setTimeout(() => {
+        letGoAt = Date.now();
+        void reader.letGo();
+      }, 300);
+    }
+  });
+  let last = Date.now();
+  let widest = 0;
+  const ticking = setInterval(() => {
+    const now = Date.now();
+    widest = Math.max(widest, now - last);
+    last = now;
+  }, 20);
+  const running = call().then(
+    () => 'taken',
+    (error: unknown) => `refused: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  try {
+    const outcome = await Promise.race([running, delay(20_000).then(() => 'still waiting after 20 s')]);
+    const tookAt = Date.now();
+    assert.equal(outcome, 'taken', `${caller} takes the dead lock over once the reader lets go`);
+    assert.ok(sawSteal, `${caller} made a steal file while the reader held the lock`);
+    assert.ok(
+      tookAt - letGoAt < 5000,
+      `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
+    );
+    assert.ok(widest <= 500, `${caller} leaves the process free to run: ticks ${String(widest)} ms apart`);
+  } finally {
+    clearInterval(ticking);
+    watcher.close();
+    await reader.letGo();
+    rmSync(lock, { force: true });
+    await running;
+  }
+}
+
+/**
+ * A dead lock a reader holds open is taken over once the reader lets go, by a slot's taker and by a
+ * write waiting its turn, and neither stops the process while it waits. Windows alone, since
+ * elsewhere a reader holds no removal back.
+ */
+async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log(
+      'held-lock takeover regression ran on Windows alone: elsewhere a reader holds no removal back',
+    );
+    return;
+  }
+  const busy = await untilTheProcessorIsQuiet();
+  if (busy !== null) {
+    const said = 'held-lock takeover regression skipped: the processor never stayed under 60% for 30 s';
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`${said}, the last busy share was ${String(busy)}`);
+    }
+    console.log(said);
+    return;
+  }
+  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await exitOf(gone);
+  const started = await ownStart();
+  const dead = JSON.stringify({ pid: gone.pid, started });
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
+  try {
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started });
+    await aHeldDeadLockIsTakenOverOnceLetGo(
+      join(directory, '0.lock'),
+      directory,
+      dead,
+      () => slots.take(AbortSignal.timeout(20_000)),
+      'a slot',
+    );
+    const file = join(project, 'floor.tscn');
+    const lock = writeLockOf(project, file);
+    mkdirSync(dirname(lock), { recursive: true });
+    await aHeldDeadLockIsTakenOverOnceLetGo(
+      lock,
+      dirname(lock),
+      dead,
+      () => inTurnFor(project, file, () => Promise.resolve('written')),
+      'a write turn',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * The slots are freed only once their holder has gone, and taken over by one taker at a time.
  *
  * A lock names its holder by pid and start time, since a pid alone is reissued: a live process with
@@ -59025,22 +59204,8 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
       // remove a file such a tool holds open: the slot is that tool's, not a fault of the run's.
       writeFileSync(second, '');
       utimesSync(second, old, old);
-      const holder = spawnHidden(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `$f = [IO.File]::Open('${second.replaceAll("'", "''")}', 'Open', 'ReadWrite', 'ReadWrite'); 'held'; Start-Sleep 30`,
-        ],
-        { stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const holder = await heldOpenByAReader(second, 'ReadWrite');
       try {
-        await new Promise<void>((settle) => {
-          holder.stdout.once('data', () => {
-            settle();
-          });
-        });
         await assert.rejects(
           slots.take(AbortSignal.timeout(1000)),
           /timeout|abort/i,
@@ -59048,8 +59213,7 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
         );
         assert.equal(existsSync(`${second}.steal`), false, 'and the steal file is given up');
       } finally {
-        holder.kill();
-        await exitOf(holder);
+        await holder.letGo();
       }
     }
 
@@ -60322,29 +60486,12 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
 
     if (process.platform === 'win32') {
       const lock = await slots.take();
-      const reader = spawnHidden(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
-          // second a removal waits on a slow runner.
-          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(300); $f.Close()`,
-        ],
-        { stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const reader = await heldOpenByAReader(lock, 'Read', 300);
       try {
-        await new Promise<void>((settle) => {
-          reader.stdout.once('data', () => {
-            settle();
-          });
-        });
         slots.release(lock);
         assert.equal(existsSync(lock), false, 'a lock given back while another process reads it is removed');
       } finally {
-        reader.kill();
-        await exitOf(reader);
+        await reader.letGo();
       }
     }
   } finally {
@@ -94669,6 +94816,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testNestedErrorsAndDeclaredErrorsAreRead,
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
+  testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,

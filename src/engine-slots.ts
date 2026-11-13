@@ -1326,36 +1326,13 @@ export class EngineSlots {
    * taker has just made in its place is never removed. With [param retake] it makes it again for
    * this process, written as [param holder]. Answers whether that was done.
    */
-  private async cleared(lock: string, retake: boolean, holder: SlotHolder = this.holder): Promise<boolean> {
-    if (!(await this.free(lock))) {
-      return false;
-    }
-    const steal = `${lock}.steal`;
-    if (!this.made(steal)) {
-      try {
-        if (Date.now() - statSync(steal).mtimeMs > UNWRITTEN_MS) {
-          rmSync(steal, { force: true });
-        }
-      } catch {
-        // Gone between the two, which is its taker finishing.
-      }
-      return false;
-    }
-    try {
-      if (!(await this.free(lock))) {
-        return false;
-      }
-      try {
-        rmSync(lock, { force: true });
-      } catch {
-        // Held open by a tool locking the file itself, as the games' tools did before this scheme:
-        // Windows will not remove it, and that tool still holds the slot.
-        return false;
-      }
-      return retake ? this.made(lock, holder) : true;
-    } finally {
-      rmSync(steal, { force: true });
-    }
+  private cleared(lock: string, retake: boolean, holder: SlotHolder = this.holder): Promise<boolean> {
+    return takenOverUnderSteal(
+      lock,
+      () => this.free(lock),
+      (path) => this.made(path, holder),
+      retake,
+    );
   }
 
   private async free(lock: string): Promise<boolean> {
@@ -1383,6 +1360,50 @@ export class EngineSlots {
     }
     const started = (await startTimesOf([pid])).get(pid);
     this.starts.set(pid, { started, readAt: Date.now() });
+  }
+}
+
+/**
+ * Removes [param lock] once [param gone] says its holder has gone, under its steal file, so that a
+ * lock another taker has just made in its place is never removed. [param make] makes a file for this
+ * process, the steal file and with [param retake] the lock again. Answers whether that was done.
+ * It tries the removal once and never waits, because a server calls it from its protocol and its
+ * caller looks again.
+ */
+export async function takenOverUnderSteal(
+  lock: string,
+  gone: () => Promise<boolean>,
+  make: (path: string) => boolean,
+  retake = true,
+): Promise<boolean> {
+  if (!(await gone())) {
+    return false;
+  }
+  const steal = `${lock}.steal`;
+  if (!make(steal)) {
+    try {
+      if (Date.now() - statSync(steal).mtimeMs > UNWRITTEN_MS) {
+        rmSync(steal, { force: true });
+      }
+    } catch {
+      // Gone between the two, which is its taker finishing.
+    }
+    return false;
+  }
+  try {
+    if (!(await gone())) {
+      return false;
+    }
+    try {
+      rmSync(lock, { force: true });
+    } catch {
+      // Held open by a tool locking the file itself: Windows will not remove it, and that tool still
+      // holds the lock.
+      return false;
+    }
+    return retake ? make(lock) : true;
+  } finally {
+    rmSync(steal, { force: true });
   }
 }
 
