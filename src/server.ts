@@ -7667,6 +7667,9 @@ class GodotServer {
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.
             note: uidsLeftNote(after.length),
             ...(imported.extensionNote === undefined ? {} : { extensionNote: imported.extensionNote }),
+            ...(imported.extensionsListed === undefined
+              ? {}
+              : { extensionsListed: imported.extensionsListed }),
             ...(imported.docCacheNote === undefined ? {} : { docCacheNote: imported.docCacheNote }),
           },
         },
@@ -8218,6 +8221,9 @@ class GodotServer {
     Object.assign(extra, engineExtras(imported));
     if (imported.extensionNote !== undefined) {
       extra['extensionNote'] = imported.extensionNote;
+    }
+    if (imported.extensionsListed !== undefined) {
+      extra['extensionsListed'] = imported.extensionsListed;
     }
     if (imported.docCacheNote !== undefined) {
       extra['docCacheNote'] = imported.docCacheNote;
@@ -19430,6 +19436,9 @@ class GodotServer {
     // those are files in the caller's tree that nothing asked for by name.
     const sidecarsBefore = new Set(projectFiles(projectPath, ['.uid', '.import']));
     const imported = engine.ok ? await runImport(engine.value, projectPath) : null;
+    if (imported?.extensionsListed !== undefined) {
+      report['extensionsListed'] = imported.extensionsListed;
+    }
     const writtenByImport = projectFiles(projectPath, ['.uid', '.import']).filter(
       (file) => !sidecarsBefore.has(file),
     );

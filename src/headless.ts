@@ -18,7 +18,7 @@ import type { Sample } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
-import { freeLibraryCopies } from './library-copies.js';
+import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
 import { forceNextImport } from './reimport.js';
@@ -330,6 +330,8 @@ export type ImportOutcome = (
   readonly extensionNote?: string;
   /** Present when a pass crashed on its way out over a stale class reference cache: see {@link docCacheCrash}. */
   readonly docCacheNote?: string;
+  /** The extension manifests the pass wrote into `.godot/extension_list.cfg` before it, when it wrote one. */
+  readonly extensionsListed?: readonly string[];
 };
 
 /**
@@ -379,7 +381,8 @@ function extensionRetryNote(libraries: readonly string[], stillNotLoaded: readon
  * the engine complained about. It is here rather than in the server because it is the same engine
  * boot as every other headless call, and wants the same log-file treatment: the project's own
  * `user://logs/godot.log` is rotated on start, so a boot that used it would rotate a running
- * bench's log out from under it.
+ * bench's log out from under it. The engine is started by [param options].engine, which a suite run
+ * hands in to keep the pass in its slot.
  */
 export async function runImport(
   godotPath: string,
@@ -391,17 +394,30 @@ export async function runImport(
      * resource it has imported reads as up to date to the second, which would then pass it over.
      */
     readonly forcing?: readonly string[];
-    readonly once?: (godotPath: string, projectPath: string) => Promise<ImportOutcome>;
+    readonly engine?: ImportEngine;
   } = {},
 ): Promise<ImportOutcome> {
-  const once = options.once ?? importOnce;
-  const pass = (): Promise<ImportOutcome> => {
+  const engine = options.engine ?? defaultImportEngine(godotPath);
+  const caches = editorCacheDirectory(godotPath);
+  let listed: readonly string[] | undefined;
+  const pass = async (): Promise<ImportOutcome> => {
+    const seeded = seedExtensionList(projectPath);
+    if (seeded !== null && seeded.length > 0) {
+      listed = seeded;
+    }
     for (const target of options.forcing ?? []) {
       forceNextImport(projectPath, target);
     }
     freeLibraryCopies(projectPath);
-    return once(godotPath, projectPath);
+    const cachesBefore = docCachesWritten(caches);
+    const ran = await engine(['--headless', '--path', projectPath, '--import']);
+    return judgeImport(ran, docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import'));
   };
+  const outcome = await twice(pass);
+  return listed === undefined ? outcome : { ...outcome, extensionsListed: listed };
+}
+
+async function twice(pass: () => Promise<ImportOutcome>): Promise<ImportOutcome> {
   const first = await pass();
   const collided = librariesNotCopied(first.messages);
   const crash = first.docCacheNote;
@@ -434,25 +450,30 @@ const NO_BLENDER = 'Blender path is invalid or not set';
 const BLENDER_STOPPED =
   'the import pass stopped at a .blend file and imported nothing: the engine imports .blend files through Blender, which the editor setting filesystem/import/blender/blender_path names, and here it names none. Set it in an editor, or set the project setting filesystem/import/blender/enabled to false with project_settings set, which has the engine leave .blend files unimported.';
 
-async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {
-  const logDir = scratchDirectory('import');
-  const caches = editorCacheDirectory(godotPath);
-  const cachesBefore = docCachesWritten(caches);
-  let ran: EngineRun;
-  try {
-    ran = await runEngine(godotPath, [
-      '--headless',
-      '--log-file',
-      join(logDir, 'engine.log'),
-      '--path',
-      projectPath,
-      '--import',
-    ]);
-  } finally {
-    discard(logDir);
-  }
+/** How an import pass starts its engine, given the arguments every start carries. */
+export type ImportEngine = (args: readonly string[]) => Promise<EngineRun>;
+
+/** The server's start: its own engine with a scratch log file, since the project's log would be rotated. */
+function defaultImportEngine(godotPath: string): ImportEngine {
+  return async (args) => {
+    const logDir = scratchDirectory('import');
+    try {
+      return await runEngine(godotPath, [
+        '--headless',
+        '--log-file',
+        join(logDir, 'engine.log'),
+        ...args.filter((arg) => arg !== '--headless'),
+      ]);
+    } finally {
+      discard(logDir);
+    }
+  };
+}
+
+/** One import pass's outcome, read off the engine run and the doc cache crash it may have met. */
+export function judgeImport(ran: EngineRun, docCacheNote: string | null): ImportOutcome {
   const problems = problemsIn(ran.log);
-  const crash = docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import');
+  const crash = docCacheNote;
   // The engine exits 0 having imported nothing at all, the files before the .blend in the scan
   // included, so the pass is a failure whatever the exit code says.
   if (problems.some((entry) => entry.text.startsWith(NO_BLENDER))) {

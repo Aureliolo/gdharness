@@ -286,7 +286,7 @@ import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/
 import {
   ASIDE,
   answerIn,
-  type ImportOutcome,
+  judgeImport,
   librariesNotCopied,
   notImportedNote,
   RESUMED,
@@ -620,6 +620,7 @@ import {
 } from '../src/suite-inputs.js';
 import {
   COMPILED_SAID,
+  type EngineEnd,
   exitNamed,
   failedOnPushErrors,
   funcOf,
@@ -666,6 +667,7 @@ import {
   importEnd,
   importFault,
   importNeeded,
+  importStartOf,
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
@@ -677,6 +679,7 @@ import {
   sharesSaid,
   silenceWhile,
   startsSaid,
+  suiteImport,
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
@@ -32296,13 +32299,13 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   assert.deepEqual(librariesNotCopied([]), [], 'and nothing is read from a clean pass');
 
   const passes: string[] = [];
-  const stand = (outcomes: ImportOutcome[]) => (): Promise<ImportOutcome> => {
+  const stand = (outcomes: EngineRun[]) => (): Promise<EngineRun> => {
     passes.push('pass');
     const next = outcomes.shift();
     assert.ok(next !== undefined, 'no more passes were expected');
     return Promise.resolve(next);
   };
-  const clean: ImportOutcome = { ok: true, messages: [] };
+  const clean = anImportRun('');
 
   // A resource the caller forces is armed before every pass: the first imported it without the
   // extension, and it reads as up to date to the second otherwise. Read from the sidecar each pass
@@ -32313,7 +32316,7 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
     writeFileSync(sidecar, 'valid=false\n[remap]\n');
   };
   const armed: boolean[] = [];
-  const reading = (outcomes: ImportOutcome[]) => (): Promise<ImportOutcome> => {
+  const reading = (outcomes: EngineRun[]) => (): Promise<EngineRun> => {
     armed.push(!readFileSync(sidecar, 'utf8').includes('valid=false'));
     importedWithoutIt();
     return stand(outcomes)();
@@ -32321,7 +32324,7 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   try {
     importedWithoutIt();
     const retried = await runImport('godot', project, {
-      once: reading([{ ok: true, messages: collided }, clean]),
+      engine: reading([anImportRun(measured), clean]),
       forcing: ['res://good.png'],
     });
     assert.equal(passes.length, 2, 'a pass that could not copy the library is run again');
@@ -32336,7 +32339,10 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
 
     passes.length = 0;
     armed.length = 0;
-    const single = await runImport('godot', project, { once: reading([clean]), forcing: ['res://good.png'] });
+    const single = await runImport('godot', project, {
+      engine: reading([anImportRun('')]),
+      forcing: ['res://good.png'],
+    });
     assert.deepEqual(
       [passes.length, single.librariesRetried, armed],
       [1, undefined, [true]],
@@ -32349,17 +32355,14 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   // The measured first pass also crashed on its way out, so a failed pass is run again as well.
   passes.length = 0;
   const afterACrash = await runImport('godot', 'project', {
-    once: stand([{ ok: false, message: 'the import pass failed (exit 139)', messages: collided }, clean]),
+    engine: stand([anImportRun(measured, 139), anImportRun('')]),
   });
   assert.deepEqual([passes.length, afterACrash.ok, afterACrash.librariesRetried], [2, true, [library]]);
 
   // A second pass that could not copy it either is said to have run without it, not to have loaded it.
   passes.length = 0;
   const twice = await runImport('godot', 'project', {
-    once: stand([
-      { ok: true, messages: collided },
-      { ok: true, messages: collided },
-    ]),
+    engine: stand([anImportRun(measured), anImportRun(measured)]),
   });
   assert.deepEqual(
     [twice.librariesRetried, twice.librariesNotLoaded],
@@ -32370,16 +32373,13 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   assert.match(failedTwice, /still could not load .*this answer is from an import without it/, failedTwice);
   assert.doesNotMatch(failedTwice, /loaded the extension/, 'and not said to have loaded it');
 
-  const quiet = await runImport('godot', 'project', { once: stand([clean]) });
+  const quiet = await runImport('godot', 'project', { engine: stand([clean]) });
   assert.equal(quiet.extensionNote, undefined, 'and a clean pass has no note');
 
-  const pair = new GameLog();
-  pair.append('stderr', 'ERROR: Error copying library: a.dll\nERROR: Error copying library: b.dll\n');
-  pair.finish();
   const both = await runImport('godot', 'project', {
-    once: stand([
-      { ok: true, messages: pair.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries },
-      clean,
+    engine: stand([
+      anImportRun('ERROR: Error copying library: a.dll\nERROR: Error copying library: b.dll\n'),
+      anImportRun(''),
     ]),
   });
   assert.match(
@@ -32557,36 +32557,282 @@ function assertTheEditorCacheDirectoryIsFoundWhereTheEngineLooks(): void {
 
 /** An import pass that failed over a stale doc cache is run again, and its note is carried to the answer. */
 async function assertAnImportThatCrashedOverAStaleDocCacheRunsAgain(): Promise<void> {
-  const outcomes: ImportOutcome[] = [];
-  const stand = (): Promise<ImportOutcome> => {
-    const next = outcomes.shift();
-    assert.ok(next !== undefined, 'no more passes were expected');
-    return Promise.resolve(next);
-  };
-  const failedFirst: ImportOutcome = {
-    ok: false,
-    message: 'the import pass failed (exit code 5): [ DONE ] loading_editor_layout',
-    messages: [],
-    docCacheNote: 'The first import ended badly.',
-  };
-  outcomes.push(failedFirst, { ok: true, messages: [], docCacheNote: 'not the first' });
+  const sc = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
+  try {
+    // A self-contained engine keeps its doc cache beside itself, so the crash is made in a folder of its own.
+    writeFileSync(join(sc, '._sc_'), '');
+    const godot = join(sc, 'godot.exe');
+    const cache = join(sc, 'editor_data', 'cache', 'editor_doc_cache-4.6.res');
+    let written = 0;
+    const rebuildCache = (): void => {
+      mkdirSync(dirname(cache), { recursive: true });
+      writeFileSync(cache, 'cache');
+      written += 1;
+      const at = new Date(1_700_000_000_000 + written * 10_000);
+      utimesSync(cache, at, at);
+    };
+    const calls: string[][] = [];
+    const answering =
+      (steps: ReadonlyArray<() => EngineRun>) =>
+      (args: readonly string[]): Promise<EngineRun> => {
+        calls.push([...args]);
+        const step = steps[calls.length - 1];
+        assert.ok(step !== undefined, 'no more passes were expected');
+        return Promise.resolve(step());
+      };
+    const crashing = (): EngineRun => {
+      rebuildCache();
+      return anImportRun('Godot Engine v4.6\n', 5);
+    };
+    const crashedAgain = await runImport(godot, 'project', {
+      engine: answering([crashing, () => anImportRun('', 0)]),
+    });
+    assert.equal(calls.length, 2, 'a pass that crashed over a stale doc cache is run again');
+    assert.equal(crashedAgain.ok, true, 'and the second pass answers');
+    assert.match(
+      crashedAgain.docCacheNote ?? '',
+      /^The first import ended badly \(exit code 5\) after rebuilding the editor's class reference cache/,
+      'with the first pass’s note',
+    );
+
+    calls.length = 0;
+    const brokeAgain = await runImport(godot, 'project', {
+      engine: answering([crashing, () => anImportRun('ERROR: it broke.\n', 1)]),
+    });
+    assert.equal(calls.length, 2, 'each was run twice');
+    const refused = brokeAgain.ok ? '' : brokeAgain.message;
+    assert.match(
+      refused,
+      /^the import pass failed \(exit code 1\): it broke\. The first import ended badly/,
+      'and a second pass that fails carries the note in the message it is answered with',
+    );
+  } finally {
+    sweep(sc);
+  }
+}
+
+/**
+ * The server and a suite run import through one pass and hand it how the engine starts. Each road of
+ * the pass is walked here with a stand-in start: the judge, the skip rule's text, the forced marks,
+ * the Blender stop, the extension seed, the library retry through a suite's start, the three ends a
+ * watched engine can have, the doc cache crash through a suite's start and an engine this server ended.
+ */
+async function testOneImportPassServesTheServerAndASuiteRun(): Promise<void> {
+  const printedError = anImportRun('ERROR: Failed loading resource: res://a.png\n');
+  const judged = judgeImport(printedError, null);
   assert.deepEqual(
-    await runImport('godot', 'project', { once: stand }),
-    { ok: true, messages: [], docCacheNote: 'The first import ended badly.' },
-    'the second pass answers, with the first pass’s note',
+    [judged.ok, judged.messages.length],
+    [true, 1],
+    'a pass that printed an error and exited 0 is not refused by the judge',
   );
-  outcomes.push(failedFirst, {
-    ok: false,
-    message: 'the import pass failed (exit code 1): it broke.',
-    messages: [],
-  });
-  const twice = await runImport('godot', 'project', { once: stand });
-  assert.equal(
-    twice.ok ? '' : twice.message,
-    'the import pass failed (exit code 1): it broke. The first import ended badly.',
-    'and a second pass that fails carries the note in the message it is answered with',
-  );
-  assert.equal(outcomes.length, 0, 'each was run twice');
+
+  const functionSource = (file: string, marker: string): string => {
+    const source = readFileSync(join('src', file), 'utf8');
+    const from = source.indexOf(marker);
+    assert.ok(from >= 0, `${marker} is in src/${file}`);
+    const to = source.indexOf('\n}\n', from);
+    return source.slice(from, to);
+  };
+  const importing = functionSource('suite-run.ts', 'async function importProject(');
+  for (const wanted of ['importNeeded(', 'suiteImport(', 'importFault(', 'readRun(readLog(log))']) {
+    assert.ok(importing.includes(wanted), `a suite run's import uses ${wanted}`);
+  }
+  for (const unwanted of ['seedExtensionList(', 'staleAgainst(', '.messages']) {
+    assert.ok(!importing.includes(unwanted), `a suite run's import leaves ${unwanted} to the pass`);
+  }
+  for (const handler of [
+    'private async handleRefreshUids(',
+    'private async reimportThroughTheEngine(',
+    'private async rebuildTheUidTable(',
+  ]) {
+    assert.ok(
+      functionSource('server.ts', handler).includes('extensionsListed'),
+      `${handler} names extensionsListed`,
+    );
+  }
+
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-pass-'));
+  try {
+    // A resource changed since its import is named stale, and the suite's pass forces it.
+    const project = join(root, 'stale');
+    mkdirSync(project, { recursive: true });
+    writeImported(project, 'picture.png', 'one');
+    writeFileSync(join(project, 'picture.png'), 'two');
+    assert.deepEqual(
+      staleImports(project).map((one) => one.path),
+      ['res://picture.png'],
+      'the changed picture is stale',
+    );
+    const sidecar = join(project, 'picture.png.import');
+    const written = statSync(sidecar).mtimeMs;
+    let seen = 0;
+    const suiteOutcome = await suiteImport('godot', project, () => {
+      seen = statSync(sidecar).mtimeMs;
+      return Promise.resolve(anImportRun(''));
+    });
+    assert.ok(suiteOutcome.ok, 'the suite pass answers');
+    assert.equal(
+      Math.floor(seen),
+      Math.floor(written) + 2000,
+      'a stale import is marked for the pass before the engine starts',
+    );
+
+    // The Blender stop, with the line at the severity the judge reads.
+    const stopped = await runImport('godot', project, {
+      engine: () => Promise.resolve(anImportRun('ERROR: Blender path is invalid or not set\n')),
+    });
+    assert.ok(
+      !stopped.ok && stopped.message.startsWith('the import pass stopped at a .blend file'),
+      `the Blender stop is a failure: ${JSON.stringify(stopped)}`,
+    );
+
+    // A fresh clone with an extension is listed before the engine starts, and a list there is left alone.
+    const clone = join(root, 'clone');
+    mkdirSync(join(clone, 'a'), { recursive: true });
+    writeFileSync(join(clone, 'a', 'x.gdextension'), '');
+    const list = join(clone, '.godot', 'extension_list.cfg');
+    const argumentsGiven: string[][] = [];
+    let listAtStart: string | null = null;
+    const listing = (args: readonly string[]): Promise<EngineRun> => {
+      argumentsGiven.push([...args]);
+      listAtStart = existsSync(list) ? readFileSync(list, 'utf8') : null;
+      return Promise.resolve(anImportRun(''));
+    };
+    const seeded = await runImport('godot', clone, { engine: listing });
+    assert.equal(listAtStart, 'res://a/x.gdextension\n', 'the list is there when the engine starts');
+    assert.deepEqual(seeded.extensionsListed, ['res://a/x.gdextension'], 'and the pass says it wrote it');
+    writeFileSync(list, 'res://other.gdextension\n');
+    const kept = await runImport('godot', clone, { engine: listing });
+    assert.deepEqual(
+      [kept.extensionsListed, readFileSync(list, 'utf8')],
+      [undefined, 'res://other.gdextension\n'],
+      'a list the engine wrote is left as it is',
+    );
+    for (const args of argumentsGiven) {
+      assert.deepEqual(
+        args,
+        ['--headless', '--path', clone, '--import'],
+        'every start is handed the same arguments',
+      );
+    }
+
+    // The library retry marks before each pass.
+    const marked = join(root, 'marked');
+    mkdirSync(marked, { recursive: true });
+    const second = join(marked, 'b.png.import');
+    writeFileSync(second, '[remap]\n');
+    const base = new Date(1_700_000_000_000);
+    utimesSync(second, base, base);
+    const marks: number[] = [];
+    const outputs = ['ERROR: Error copying library: res://a/x.dll\n', ''];
+    const retried = await runImport('godot', marked, {
+      forcing: ['res://b.png'],
+      engine: () => {
+        marks.push(statSync(second).mtimeMs);
+        utimesSync(second, base, base);
+        return Promise.resolve(anImportRun(outputs.shift() ?? ''));
+      },
+    });
+    assert.deepEqual(
+      [marks, retried.ok, retried.librariesRetried],
+      [[base.getTime() + 2000, base.getTime() + 2000], true, ['res://a/x.dll']],
+      'two passes, and a mark is written before each',
+    );
+
+    // A suite's start: the same retry, with the engine's lines read from the run's log.
+    const log = join(root, 'import.log');
+    let starts = 0;
+    const printing =
+      (lines: readonly string[], end: EngineEnd = { code: 0, signal: null, ended: null }) =>
+      (): Promise<EngineEnd> => {
+        starts += 1;
+        writeFileSync(log, lines[starts - 1] ?? '');
+        return Promise.resolve(end);
+      };
+    const suiteRetried = await runImport('godot', marked, {
+      engine: importStartOf(printing(['ERROR: Error copying library: res://a/x.dll\n', '']), log),
+    });
+    assert.deepEqual(
+      [suiteRetried.ok, suiteRetried.librariesRetried, starts],
+      [true, ['res://a/x.dll'], 2],
+      'a suite run beside an open editor retries the pass that could not copy a library',
+    );
+
+    // The three ends a watched engine can have.
+    const hushed = await importStartOf(
+      () => Promise.resolve({ code: 0, signal: null, ended: 'the engine was silent for 60 s' }),
+      log,
+    )(['--import']);
+    assert.equal(hushed.failure, 'the engine was silent for 60 s', 'an engine gdharness ended is a failure');
+    const exited = await importStartOf(
+      () => Promise.resolve({ code: 5, signal: null, ended: null }),
+      log,
+    )([]);
+    const signalled = await importStartOf(
+      () => Promise.resolve({ code: null, signal: 'SIGSEGV', ended: null }),
+      log,
+    )([]);
+    assert.deepEqual(
+      [
+        exited.exitCode,
+        exited.exitSignal,
+        exited.failure,
+        signalled.exitCode,
+        signalled.exitSignal,
+        signalled.failure,
+      ],
+      [5, null, null, null, 'SIGSEGV', null],
+      'a crash stays an exit code or a signal, for the doc cache check',
+    );
+
+    // A crash over a stale doc cache, through a suite's start.
+    const engineHome = join(root, 'engine');
+    mkdirSync(engineHome, { recursive: true });
+    writeFileSync(join(engineHome, '._sc_'), '');
+    const cache = join(engineHome, 'editor_data', 'cache', 'editor_doc_cache-4.6.res');
+    starts = 0;
+    const crashed = await runImport(join(engineHome, 'godot.exe'), marked, {
+      engine: importStartOf(() => {
+        starts += 1;
+        mkdirSync(dirname(cache), { recursive: true });
+        writeFileSync(cache, 'cache');
+        writeFileSync(log, starts === 1 ? 'Godot Engine v4.6\n' : '');
+        return Promise.resolve({ code: starts === 1 ? 5 : 0, signal: null, ended: null });
+      }, log),
+    });
+    assert.deepEqual(
+      [starts, crashed.ok, (crashed.docCacheNote ?? '').startsWith('The first import ended badly')],
+      [2, true, true],
+      'a suite pass that crashed over a stale doc cache runs again',
+    );
+
+    // An engine this server ended is not started again.
+    starts = 0;
+    const killed = await runImport(join(engineHome, 'godot.exe'), marked, {
+      engine: () => {
+        starts += 1;
+        mkdirSync(dirname(cache), { recursive: true });
+        writeFileSync(cache, 'rebuilt');
+        const later = new Date(Date.now() + 60_000);
+        utimesSync(cache, later, later);
+        return Promise.resolve(anImportRun('Godot Engine v4.6\n', null, 'the engine was ended by SIGKILL'));
+      },
+    });
+    assert.ok(
+      !killed.ok && killed.message.includes('the engine was ended by SIGKILL') && starts === 1,
+      `an engine gdharness ended runs once: ${JSON.stringify(killed)} after ${String(starts)}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/** An engine run that printed [param printed] to stderr and ended as [param exitCode] and [param failure] say. */
+function anImportRun(printed: string, exitCode: number | null = 0, failure: string | null = null): EngineRun {
+  const log = new GameLog();
+  log.append('stderr', printed);
+  log.finish();
+  return { log, exitCode, exitSignal: null, failure };
 }
 
 /** A real engine over a cache whose key was rewritten crashes on its way out, and the import and the export run again. */
@@ -95112,6 +95358,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeepersScratchFoldersAreSweptWhenItIsGone,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
+  testOneImportPassServesTheServerAndASuiteRun,
   testForcingAReimportTouchesOnlyThatResource,
   testAnImportOrExportOverAStaleDocCacheRunsAgain,
   testACrashIsBlamedOnlyOnTheCacheOfTheEnginesOwnVersion,

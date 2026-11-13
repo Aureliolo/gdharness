@@ -1278,7 +1278,8 @@ uid. A reference gets the uid the uid cache holds for its path and no other.
   copied whole.
 
 A file left to be named by path for the first reason is listed under `namedByPath`, with
-`project_import refresh_uids`. That import pass gives the cache its uid. Each headless call is an
+`project_import refresh_uids`. That import pass gives the cache its uid. A suite run and the server
+run the same import pass. Each hands in how the engine is started. Each headless call is an
 engine of its own. So the list gathered in a static on `scene_file.gd` holds that call's saves alone.
 
 ### Library files and open editors
