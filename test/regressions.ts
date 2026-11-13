@@ -40054,6 +40054,9 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
  * could not be called at all. JSON numbers are doubles on both sides, so a RefCounted's instance id,
  * which has its top bit set, came back as a neighbouring id, and a 64-bit seed sent as a number
  * would be stored as a neighbour of the one sent.
+ *
+ * Issue #1609: a parameter that declares no type took a bare 125 as 125.0, so a setter comparing it
+ * with the int it held refused it. It takes the int GDScript reads the literal as.
  */
 async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
   const engine = resolveGodotPath();
@@ -40077,7 +40080,9 @@ async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
           'func echo(number: int) -> int:\n\treturn number\n\n\n' +
           'func digits(number: int) -> String:\n\treturn str(number)\n\n\n' +
           'func counted() -> RefCounted:\n\treturn kept\n\n\n' +
-          'func counted_id() -> String:\n\treturn str(kept.get_instance_id())\n',
+          'func counted_id() -> String:\n\treturn str(kept.get_instance_id())\n\n\n' +
+          'func kind_of(value) -> String:\n\treturn type_string(typeof(value))\n\n\n' +
+          'func kind_of_variant(value: Variant) -> String:\n\treturn type_string(typeof(value))\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -40128,6 +40133,19 @@ async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
       // A number below the bound is still a number.
       const small = await invoke('/root/Main', 'echo', [42]);
       assert.equal(get(small, 'result'), 42, JSON.stringify(small));
+      // A parameter that declares no type, with or without the word Variant, takes a bare whole
+      // number as an int, a fraction as a float and a tagged whole float as the float it names.
+      const kinds: unknown[] = [];
+      for (const method of ['kind_of', 'kind_of_variant']) {
+        for (const sent of [125, 7.5, { _type: 'float', value: 2 }, -3]) {
+          kinds.push(get(await invoke('/root/Main', method, [sent]), 'result'));
+        }
+      }
+      assert.deepEqual(
+        kinds,
+        ['int', 'float', 'float', 'int', 'int', 'float', 'float', 'int'],
+        'an untyped parameter reads a bare whole number as GDScript reads the literal',
+      );
       // Sent as a number it may already be a neighbour, so it is refused and the tag named.
       const bare = await invoke('/root/Main', 'echo', [9007199254740994]);
       assert.match(

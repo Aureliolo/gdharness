@@ -1358,7 +1358,8 @@ is an argument to the next.
 JSON writes 7 and 7.0 alike. A typed property or element says which one it wants, but an untyped
 Array or Dictionary does not. There, a whole float is answered as `{"_type": "float", "value": 7}`,
 and a bare whole number written there becomes an int, as the GDScript literal does. A read written
-back then saves the same types.
+back then saves the same types. A method parameter that declares no type takes a bare whole number
+as an int too.
 
 ### Dictionary keys
 

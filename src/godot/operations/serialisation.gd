@@ -377,6 +377,19 @@ static func acceptable(value: Variant, type: int) -> bool:
 	return given == TYPE_ARRAY and LIST_TYPES.has(type)
 
 
+## [param value] built as [param type] from the fields it carries untagged, or null when it is no
+## such dictionary.
+func _built_untagged(value: Variant, type: int) -> Variant:
+	if not value is Dictionary or type == TYPE_DICTIONARY:
+		return null
+	var fields: Dictionary = value
+	if fields.has("_type") or not untagged_reads_as(fields, type):
+		return null
+	var tagged: Dictionary = fields.duplicate()
+	tagged["_type"] = type_string(type)
+	return deserialize_value(tagged)
+
+
 ## A value from the wire fitted to the type a property or parameter declares. Arguments arrive
 ## as strings often enough, and callv refuses a "2.0" where a float is wanted, so a string that
 ## reads as the wanted scalar is read as one.
@@ -389,19 +402,19 @@ static func acceptable(value: Variant, type: int) -> bool:
 ## scene_node and resource_edit read one: runtime_invoke refused {"x": 140, "y": 300} for a Vector2
 ## argument the editor tools took, so one value was right for one tool and wrong for the next. The
 ## value as sent is what is tagged, since the builders read a nested vector from its own fields.
+##
+## A property or parameter that declares no type reads a bare whole number as the int GDScript reads
+## the literal as, the rule [method untyped_member] keeps for a list that declares none.
 func fitted(value: Variant, type: int) -> Variant:
+	if type == TYPE_NIL:
+		return untyped_member(value)
 	var rebuilt: Variant = deserialize_value(value)
-	if type == TYPE_NIL or typeof(rebuilt) == type:
+	if typeof(rebuilt) == type:
 		return rebuilt
 
-	if value is Dictionary and type != TYPE_DICTIONARY:
-		var fields: Dictionary = value
-		if not fields.has("_type") and untagged_reads_as(fields, type):
-			var tagged: Dictionary = fields.duplicate()
-			tagged["_type"] = type_string(type)
-			var built: Variant = deserialize_value(tagged)
-			if typeof(built) == type:
-				return built
+	var untagged: Variant = _built_untagged(value, type)
+	if typeof(untagged) == type:
+		return untagged
 
 	if rebuilt is Array and LIST_TYPES.has(type):
 		var items: Array = value if value is Array else rebuilt
