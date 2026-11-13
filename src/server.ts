@@ -270,6 +270,7 @@ import {
   scriptsWithoutUid,
   searchProject,
   steppedOverIn,
+  underGdignore,
 } from './project-scan.js';
 import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
@@ -4250,14 +4251,16 @@ function missingScriptReason(projectPath: string, relativePath: string, said: st
  * as the project's, although the engine never loads it: a class renamed elsewhere left one failing
  * to compile. gdharness's addons are loaded, and a link left out holds no script to read.
  */
-function scriptsTheEngineNeverLoads(projectPath: string, scripts: readonly string[]): Record<string, unknown> {
+function scriptsTheEngineNeverLoads(
+  projectPath: string,
+  scripts: readonly string[],
+): Record<string, unknown> {
   const ignored: string[] = [];
   const nested: string[] = [];
   for (const script of scripts.map((one) => one.replace(/^res:\/\//, ''))) {
-    const why = leftOutAt(projectPath, script.split('/').slice(0, -1).join('/'))?.why;
-    if (why === 'gdignore') {
+    if (underGdignore(projectPath, script)) {
       ignored.push(`res://${script}`);
-    } else if (why === 'project') {
+    } else if (leftOutAt(projectPath, script.split('/').slice(0, -1).join('/'))?.why === 'project') {
       nested.push(`res://${script}`);
     }
   }

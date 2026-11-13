@@ -94923,7 +94923,7 @@ function testAMoveIntoAFolderHoldingAProjectIsRefused(): void {
       join(project, 'addons/gdharness_editor/hero.tscn'),
     );
     assert.ok(
-      toAddon.ok || !/the engine does not/.test(toAddon.reason),
+      toAddon.ok || !toAddon.reason.includes('the engine does not'),
       `an installed addon is loaded: ${JSON.stringify(toAddon)}`,
     );
   } finally {
@@ -95001,7 +95001,10 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
     assert.match(behind.reason, /is behind the link res:\/\/shared\//);
     assert.ok(existsSync(join(outside, 'o.gd')), 'and stays where it is');
     const own = planFileMove(project, project, join(project, 'elsewhere'));
-    assert.ok(!own.ok && /The project directory itself cannot be moved/.test(own.reason), 'the folder itself');
+    assert.ok(
+      !own.ok && own.reason.includes('The project directory itself cannot be moved'),
+      'the folder itself',
+    );
 
     const symbol = await renameSymbol(
       {
