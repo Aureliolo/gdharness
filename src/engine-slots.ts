@@ -298,7 +298,7 @@ interface SlotWaiter {
  * which takers behind it take them and it starts on what is free. Written as the machine's queue
  * writes it.
  */
-export const SLOTS_DRAIN_MS = 300_000;
+const SLOTS_DRAIN_MS = 300_000;
 
 /**
  * Each live taker waiting for a slot in [param directory], as its mark names it. A mark's `taker` of
@@ -827,7 +827,7 @@ export class FollowedLanes {
   private async look(): Promise<number> {
     try {
       await this.holdMark();
-      return this.holding ?Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
+      return this.holding ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
     } catch {
       // Held by a reader or unreadable for now, which the next look tries again.
       return 0;

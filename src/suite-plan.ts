@@ -913,7 +913,7 @@ const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
  * A lane gives its slot back between shares, so a run told to hold fewer slots frees them within
  * this long, not after the lane's whole part.
  */
-export const SHARE_MOST_SECONDS = 120;
+const SHARE_MOST_SECONDS = 120;
 
 /**
  * [param units] handed out a share at a time, to lanes that start at different moments.

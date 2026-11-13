@@ -60008,7 +60008,10 @@ function shareCosts(costs: readonly number[], lanes: number): number[] {
 
 /** A share holds at most 120 s, at least the floor while that much is left, and a long suite is alone. */
 function testAShareHoldsNoMoreThanTwoMinutesOfWork(): void {
-  const long = shareCosts(Array.from({ length: 30 }, () => 30), 2);
+  const long = shareCosts(
+    Array.from({ length: 30 }, () => 30),
+    2,
+  );
   assert.ok(
     long.every((cost) => cost <= 120),
     `a long run is cut into shares of 120 s: ${JSON.stringify(long)}`,
@@ -60053,7 +60056,7 @@ async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promi
     });
   };
   const endAll = (): void => {
-    for (const end of [...going.values()]) {
+    for (const end of going.values()) {
       end();
     }
   };
@@ -60062,7 +60065,10 @@ async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promi
   try {
     say(3);
     const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
-    assert.ok(await cameTrue(() => started === 3 && locksHeld() === 3, 10_000), 'three lanes start on three slots');
+    assert.ok(
+      await cameTrue(() => started === 3 && locksHeld() === 3, 10_000),
+      'three lanes start on three slots',
+    );
     say(2);
     endAll();
     assert.ok(
@@ -60081,11 +60087,11 @@ async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promi
       await cameTrue(() => going.size === 0 || locksHeld() === 3, 10_000),
       'a file whose writer has gone tells nothing, so all three lanes go on',
     );
-    let over = false;
+    const over = { done: false };
     void pending.then(() => {
-      over = true;
+      over.done = true;
     });
-    for (let round = 0; round < 2000 && !over; round += 1) {
+    for (let round = 0; round < 2000 && !over.done; round += 1) {
       endAll();
       await delay(5);
     }
@@ -60110,7 +60116,10 @@ async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> 
   const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-pool-'));
   const holder = { pid: process.pid, started: await ownStart() };
   const file = join(pool, 'lanes-1.json');
-  writeFileSync(file, JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }));
+  writeFileSync(
+    file,
+    JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }),
+  );
   const slots = new EngineSlots(machine, 4, holder);
   const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
   const ends: Array<() => void> = [];
@@ -60136,7 +60145,11 @@ async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> 
     }
     const ran = await Promise.race([pending, delay(10_000).then(() => null)]);
     assert.ok(ran !== null, 'a lane told to stop ends with the run, and is not left waiting');
-    assert.equal(suitesRun, 12, `and the one lane told ran every suite once, in ${String(ran.length)} engines`);
+    assert.equal(
+      suitesRun,
+      12,
+      `and the one lane told ran every suite once, in ${String(ran.length)} engines`,
+    );
   } finally {
     sweep(machine);
     sweep(pool);
@@ -60229,7 +60242,10 @@ async function testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent(): Promise<
     lender.kill();
     await ended;
     const after = await slots.takeFree();
-    assert.ok(after !== null && after !== lent, `with the job gone it takes a slot of its own: ${String(after)}`);
+    assert.ok(
+      after !== null && after !== lent,
+      `with the job gone it takes a slot of its own: ${String(after)}`,
+    );
     slots.releaseAll();
   } finally {
     lender.kill();
@@ -61224,10 +61240,28 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
     // Gate work goes before younger side work whenever each began, and side work that has waited two
     // minutes with it. A game never counts as aged. Uploads waited behind side work begun before them.
-    const sideWork = { mark: 'a.json', taker: 'other', since: began - 10_000, game: false, wants: 1 } as const;
+    const sideWork = {
+      mark: 'a.json',
+      taker: 'other',
+      since: began - 10_000,
+      game: false,
+      wants: 1,
+    } as const;
     const gateWork = { mark: 'b.json', taker: 'tier', since: began, game: false, wants: 1 } as const;
-    const agedSide = { mark: 'c.json', taker: 'other', since: began - 121_000, game: false, wants: 1 } as const;
-    const agedGame = { mark: 'd.json', taker: 'other', since: began - 1_200_000, game: true, wants: 1 } as const;
+    const agedSide = {
+      mark: 'c.json',
+      taker: 'other',
+      since: began - 121_000,
+      game: false,
+      wants: 1,
+    } as const;
+    const agedGame = {
+      mark: 'd.json',
+      taker: 'other',
+      since: began - 1_200_000,
+      game: true,
+      wants: 1,
+    } as const;
     assert.deepEqual(
       new SlotLine('other', false, () => began)
         .ahead([sideWork, gateWork, agedSide, agedGame])
