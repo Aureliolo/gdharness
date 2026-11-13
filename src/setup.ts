@@ -366,13 +366,7 @@ export function installAddons(
       writeFileSync(join(addons, name, VERSION_MARKER), `${SERVER_VERSION}\n`);
     }
   } catch (error) {
-    for (const { name, kept } of taken) {
-      rmSync(join(addons, name), { recursive: true, force: true });
-      if (kept) {
-        renameSync(join(previous, name), join(addons, name));
-      }
-    }
-    rmSync(previous, { recursive: true, force: true });
+    putBack(addons, previous, taken);
     if (!addonsExisted && existsSync(addons) && readdirSync(addons).length === 0) {
       rmdirSync(addons);
     }
@@ -381,6 +375,20 @@ export function installAddons(
     rmSync(previous, { recursive: true, force: true });
   }
   return installed;
+}
+
+/** Removes each addon a failed install took over and puts back the one it replaced, from [param previous]. */
+function putBack(
+  addons: string,
+  previous: string,
+  taken: readonly { readonly name: string; readonly kept: boolean }[],
+): void {
+  for (const { name, kept } of taken) {
+    rmSync(join(addons, name), { recursive: true, force: true });
+    if (kept) {
+      renameSync(join(previous, name), join(addons, name));
+    }
+  }
 }
 
 /**

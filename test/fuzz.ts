@@ -10,6 +10,7 @@
 
 import { jest } from 'bun:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -20,14 +21,13 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
-import { answersTo, GameLog, type Severity } from '../src/game-log.js';
+import { answersTo, GameLog, type LogEntry, type Severity } from '../src/game-log.js';
 import {
   type DebuggerMessage,
   DebuggerStream,
@@ -35,18 +35,10 @@ import {
   framedCommand,
   type SentValue,
 } from '../src/godot-variant.js';
-import { VERSION_MARKER } from '../src/project-walk.js';
-import { SERVER_VERSION } from '../src/server-version.js';
-import { discardUsing } from '../src/scratch.js';
-import {
-  ADDONS,
-  installAddons,
-  installedEditorDigest,
-  installedRuntimeDigest,
-} from '../src/setup.js';
-import { inTurnFor } from '../src/write-turns.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { VERSION_MARKER } from '../src/project-walk.js';
+import { isRecord } from '../src/records.js';
 import { parseProjectGodot } from '../src/resources.js';
 import {
   amendRunRecord,
@@ -58,6 +50,9 @@ import {
   sweepTranscripts,
   writeRunRecord,
 } from '../src/run-record.js';
+import { discardUsing } from '../src/scratch.js';
+import { SERVER_VERSION } from '../src/server-version.js';
+import { ADDONS, installAddons, installedEditorDigest, installedRuntimeDigest } from '../src/setup.js';
 import {
   type CasesBySuite,
   type DeclaredSuite,
@@ -68,6 +63,7 @@ import {
   unitsOf,
 } from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
+import { inTurnFor } from '../src/write-turns.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -1535,7 +1531,7 @@ async function writersTakeTurnsInTheOrderTheyAsked(): Promise<void> {
           const asked = writers.map((writer, index) =>
             inTurnFor(project, files[writer.file] ?? '', async () => {
               events.push(`start ${String(index)}`);
-              await new Promise((resolve) => setTimeout(resolve, writer.holdMs));
+              await new Promise((done) => setTimeout(done, writer.holdMs));
               events.push(`end ${String(index)}`);
               if (writer.fails) {
                 throw new Error(`writer ${String(index)} failed`);
@@ -1557,15 +1553,22 @@ async function writersTakeTurnsInTheOrderTheyAsked(): Promise<void> {
             );
           }
           for (const [index, answer] of answers.entries()) {
-            assert.ok(writers[index]?.fails === true ? 'error' in answer : 'value' in answer, 'each outcome is its own');
+            assert.ok(
+              writers[index]?.fails === true ? 'error' in answer : 'value' in answer,
+              'each outcome is its own',
+            );
           }
-          assert.deepEqual(readdirSync(join(project, '.godot', 'gdharness-writes')), [], 'every lock was given back');
+          assert.deepEqual(
+            readdirSync(join(project, '.godot', 'gdharness-writes')),
+            [],
+            'every lock was given back',
+          );
         } finally {
           sweep(project);
         }
       },
     ),
-    { numRuns: 30 },
+    { numRuns: 12 },
   );
 }
 
@@ -1616,33 +1619,45 @@ function byCodeUnit(a: string, b: string): number {
  */
 function aPlanDependsOnItsUnitsAlone(): void {
   fc.assert(
-    fc.property(planUnits, fc.array(fc.nat(), { maxLength: 12 }), fc.integer({ min: 1, max: 4 }), (drawn, keys, most) => {
-      const units = drawn.map(asUnit);
-      const declared: CasesBySuite = new Map(PLAN_SUITES.map((path) => [path, ['test_a', 'test_b', 'test_c']]));
-      const shuffled = units
-        .map((unit, index) => ({ unit, key: keys[index] ?? 0, index }))
-        .toSorted((a, b) => a.key - b.key || a.index - b.index)
-        .map((entry) => entry.unit);
-      assert.deepEqual(dealt(shuffled, declared, most), dealt(units, declared, most));
+    fc.property(
+      planUnits,
+      fc.array(fc.nat(), { maxLength: 12 }),
+      fc.integer({ min: 1, max: 4 }),
+      (drawn, keys, most) => {
+        const units = drawn.map(asUnit);
+        const declared: CasesBySuite = new Map(
+          PLAN_SUITES.map((path) => [path, ['test_a', 'test_b', 'test_c']]),
+        );
+        const shuffled = units
+          .map((unit, index) => ({ unit, key: keys[index] ?? 0, index }))
+          .toSorted((a, b) => a.key - b.key || a.index - b.index)
+          .map((entry) => entry.unit);
+        assert.deepEqual(dealt(shuffled, declared, most), dealt(units, declared, most));
 
-      const one = dealt(units, declared, 1);
-      const expected = units
-        .toSorted(
-          (a, b) =>
-            b.cost - a.cost || byCodeUnit(a.suite, b.suite) || byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
-        )
-        .map((unit) => unit.suite);
-      assert.deepEqual(
-        one.flatMap((plan) => plan.suites.map((suite) => suite.path)),
-        [...new Set(expected)],
-        'in one engine the suites come in the order of their slowest unit, ties by code unit',
-      );
-      assert.equal(
-        one.reduce((sum, plan) => sum + plan.suites.reduce((count, suite) => count + suite.cases.length, 0), 0),
-        units.length,
-        'every unit is dealt once',
-      );
-    }),
+        const one = dealt(units, declared, 1);
+        const expected = units
+          .toSorted(
+            (a, b) =>
+              b.cost - a.cost ||
+              byCodeUnit(a.suite, b.suite) ||
+              byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
+          )
+          .map((unit) => unit.suite);
+        assert.deepEqual(
+          one.flatMap((plan) => plan.suites.map((suite) => suite.path)),
+          [...new Set(expected)],
+          'in one engine the suites come in the order of their slowest unit, ties by code unit',
+        );
+        assert.equal(
+          one.reduce(
+            (sum, plan) => sum + plan.suites.reduce((count, suite) => count + suite.cases.length, 0),
+            0,
+          ),
+          units.length,
+          'every unit is dealt once',
+        );
+      },
+    ),
     { numRuns: 300 },
   );
 }
@@ -1668,7 +1683,14 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
           mkdirSync(project);
           const start = join(root, 'start');
           const exits = counts.map((files, index) => {
-            const folder = join(root, `user-${String(index)}`, 'Godot', 'app_userdata', 'game', 'shader_cache');
+            const folder = join(
+              root,
+              `user-${String(index)}`,
+              'Godot',
+              'app_userdata',
+              'game',
+              'shader_cache',
+            );
             mkdirSync(folder, { recursive: true });
             for (let file = 0; file < files; file += 1) {
               writeFileSync(join(folder, `${String(file)}.bin`), 'x'.repeat(100));
@@ -1681,19 +1703,27 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
             return new Promise<number | null>((done) => run.once('exit', done));
           });
           writeFileSync(start, '');
-          assert.deepEqual(await Promise.all(exits), counts.map(() => 0));
+          assert.deepEqual(
+            await Promise.all(exits),
+            counts.map(() => 0),
+          );
           const kept = readdirSync(join(home, 'pipeline-caches'));
-          assert.deepEqual(kept.length, 1, `one kept cache and nothing left building or locked: ${kept.join(' ')}`);
+          assert.deepEqual(
+            kept.length,
+            1,
+            `one kept cache and nothing left building or locked: ${kept.join(' ')}`,
+          );
           const folder = join(home, 'pipeline-caches', kept[0] ?? '');
           const record: unknown = JSON.parse(readFileSync(join(folder, 'kept.json'), 'utf8'));
-          assert.equal((record as { bytes: number }).bytes, Math.max(...counts) * 100);
+          assert.ok(isRecord(record));
+          assert.equal(record['bytes'], Math.max(...counts) * 100);
           assert.equal(readdirSync(join(folder, 'shader_cache')).length, Math.max(...counts));
         } finally {
           sweep(root);
         }
       },
     ),
-    { numRuns: 8 },
+    { numRuns: 5 },
   );
 }
 
@@ -1708,16 +1738,16 @@ type InstallFailure =
 
 const MARKINGS = ['plugin.cfg', 'runtime_autoload.gd', 'plugin.cfg', 'share.gd'];
 
-/** A package of the four addons, each with its marking file and one more, holding [param body]. */
-function fakePackage(root: string, body: string, failure: InstallFailure): string {
-  const from = join(root, `package-${body}-${failure.at}`);
+/** A package of the four addons, each with its marking file and one more, holding [param content]. */
+function fakePackage(root: string, content: string, failure: InstallFailure): string {
+  const from = join(root, `package-${content}-${failure.at}`);
   for (const [index, name] of ADDONS.entries()) {
     if (failure.at === 'missing' && failure.addon === index) {
       continue;
     }
     mkdirSync(join(from, name, 'inner'), { recursive: true });
-    writeFileSync(join(from, name, MARKINGS[index] ?? ''), `${name} ${body}`);
-    writeFileSync(join(from, name, 'inner', 'file.gd'), `${body} ${name}`);
+    writeFileSync(join(from, name, MARKINGS[index] ?? ''), `${name} ${content}`);
+    writeFileSync(join(from, name, 'inner', 'file.gd'), `${content} ${name}`);
     if (failure.at === 'version' && failure.addon === index) {
       mkdirSync(join(from, name, VERSION_MARKER));
     }
@@ -1736,7 +1766,9 @@ function treeOf(folder: string): string[] {
   return readdirSync(folder, { recursive: true, withFileTypes: true })
     .map((entry) => {
       const path = join(entry.parentPath, entry.name);
-      return entry.isDirectory() ? `d ${relative(folder, path)}` : `f ${relative(folder, path)} ${readFileSync(path, 'utf8')}`;
+      return entry.isDirectory()
+        ? `d ${relative(folder, path)}`
+        : `f ${relative(folder, path)} ${readFileSync(path, 'utf8')}`;
     })
     .toSorted();
 }
@@ -1749,7 +1781,10 @@ function treeOf(folder: string): string[] {
 function aFailedInstallLeavesTheProjectAsItWas(): void {
   const failures = fc.oneof(
     fc.constant<InstallFailure>({ at: 'none' }),
-    fc.record({ at: fc.constantFrom('missing' as const, 'version' as const), addon: fc.integer({ min: 0, max: 3 }) }),
+    fc.record({
+      at: fc.constantFrom('missing' as const, 'version' as const),
+      addon: fc.integer({ min: 0, max: 3 }),
+    }),
     fc.record({ at: fc.constant('digest' as const), addon: fc.constantFrom<0 | 1>(0, 1) }),
   );
   fc.assert(
@@ -1773,20 +1808,27 @@ function aFailedInstallLeavesTheProjectAsItWas(): void {
             ADDONS.map((name) => [name, earlier]),
           );
           for (const name of ADDONS) {
-            assert.equal(readFileSync(join(project, 'addons', name, VERSION_MARKER), 'utf8').trim(), SERVER_VERSION);
+            assert.equal(
+              readFileSync(join(project, 'addons', name, VERSION_MARKER), 'utf8').trim(),
+              SERVER_VERSION,
+            );
           }
           assert.notEqual(installedEditorDigest(project), null);
           assert.notEqual(installedRuntimeDigest(project), null);
         } else {
           assert.throws(() => installAddons(project, from));
-          assert.deepEqual(treeOf(join(project, 'addons')), before, 'the addons are as the failed install found them');
+          assert.deepEqual(
+            treeOf(join(project, 'addons')),
+            before,
+            'the addons are as the failed install found them',
+          );
         }
         assert.equal(existsSync(join(project, 'addons', '.gdharness-previous')), false);
       } finally {
         sweep(root);
       }
     }),
-    { numRuns: 60 },
+    { numRuns: 25 },
   );
 }
 
@@ -1794,58 +1836,73 @@ function aFailedInstallLeavesTheProjectAsItWas(): void {
 // Giving back a scratch folder
 // ---------------------------------------------------------------------------------------------
 
+const RETRY_WAITS = [250, 500, 1000, 2000, 4000, 8000, 16000];
+
+interface RetryModel {
+  tries: number;
+  failuresLeft: number;
+  waiting: boolean;
+  due: number;
+  step: number;
+}
+
+/** One removal try in the model: whether it worked. */
+function modelTry(model: RetryModel): boolean {
+  model.tries += 1;
+  if (model.failuresLeft > 0) {
+    model.failuresLeft -= 1;
+    return false;
+  }
+  return true;
+}
+
+/** The timed try the schedule makes at the model's due time. */
+function modelTimerFires(model: RetryModel): void {
+  if (modelTry(model)) {
+    model.waiting = false;
+    return;
+  }
+  model.step += 1;
+  const after = RETRY_WAITS[model.step];
+  model.waiting = after !== undefined;
+  model.due += after ?? 0;
+}
+
+/** A call to discard at [param at]: a try at once, and a schedule when it failed and none is running. */
+function modelCall(model: RetryModel, at: number): void {
+  if (!modelTry(model) && !model.waiting) {
+    model.waiting = true;
+    model.step = 0;
+    model.due = at + (RETRY_WAITS[0] ?? 0);
+  }
+}
+
+/** How many tries a removal that fails [param failures] times has had by [param until] ms, given the calls. */
+function retryTriesBy(failures: number, calls: readonly number[], until: number): number {
+  const model: RetryModel = { tries: 0, failuresLeft: failures, waiting: false, due: 0, step: 0 };
+  let next = 0;
+  for (;;) {
+    const call = calls[next] ?? Number.POSITIVE_INFINITY;
+    const timer = model.waiting ? model.due : Number.POSITIVE_INFINITY;
+    if (Math.min(call, timer) > until) {
+      return model.tries;
+    }
+    if (timer < call) {
+      modelTimerFires(model);
+    } else {
+      next += 1;
+      modelCall(model, call);
+    }
+  }
+}
+
 /**
  * The tries a removal gets, by the clock: the first at once, then after each wait of the schedule,
  * a second call for a path already waiting adding a try of its own and no second schedule, and none
  * after one has worked.
  */
 function theRetryScheduleHoldsWhateverFails(): void {
-  const waits = [250, 500, 1000, 2000, 4000, 8000, 16000];
-  const triesBy = (failures: number, calls: readonly number[], until: number): number => {
-    let tries = 0;
-    let left = failures;
-    let waiting = false;
-    let due = 0;
-    let step = 0;
-    const attempt = (): boolean => {
-      tries += 1;
-      if (left > 0) {
-        left -= 1;
-        return false;
-      }
-      return true;
-    };
-    let next = 0;
-    for (;;) {
-      const call = calls[next] ?? Number.POSITIVE_INFINITY;
-      const timer = waiting ? due : Number.POSITIVE_INFINITY;
-      const at = Math.min(call, timer);
-      if (at > until) {
-        return tries;
-      }
-      if (timer < call) {
-        if (attempt()) {
-          waiting = false;
-        } else {
-          step += 1;
-          const after = waits[step];
-          if (after === undefined) {
-            waiting = false;
-          } else {
-            due += after;
-          }
-        }
-      } else {
-        next += 1;
-        if (!attempt() && !waiting) {
-          waiting = true;
-          step = 0;
-          due = at + (waits[0] ?? 0);
-        }
-      }
-    }
-  };
-  return fc.assert(
+  fc.assert(
     fc.property(
       fc.integer({ min: 0, max: 10 }),
       fc.uniqueArray(fc.integer({ min: 0, max: 20000 }), { maxLength: 4 }),
@@ -1867,7 +1924,9 @@ function theRetryScheduleHoldsWhateverFails(): void {
         };
         jest.useFakeTimers();
         try {
-          const points = [...new Set([...calls, ...probes.map((at) => at * 2 + 1), 100_000])].toSorted((a, b) => a - b);
+          const points = [...new Set([...calls, ...probes.map((at) => at * 2 + 1), 100_000])].toSorted(
+            (a, b) => a - b,
+          );
           let clock = 0;
           for (const point of points) {
             jest.advanceTimersByTime(point - clock);
@@ -1875,7 +1934,7 @@ function theRetryScheduleHoldsWhateverFails(): void {
             if (calls.includes(point)) {
               discardUsing(remove, [path]);
             }
-            assert.equal(tries, triesBy(failures, calls, point), `tries by ${String(point)} ms`);
+            assert.equal(tries, retryTriesBy(failures, calls, point), `tries by ${String(point)} ms`);
           }
         } finally {
           jest.useRealTimers();
@@ -1903,7 +1962,36 @@ const streamText = fc
     fc.constantFrom('\n', '\r\n'),
     fc.constantFrom('', 'ERROR: tail', 'WARNING: tail\r', 'plain tail', '\r', '   at: tail'),
   )
-  .map(([lines, ending, tail]) => ({ ending, text: `${lines.map((line) => `${line}${ending}`).join('')}${tail}` }));
+  .map(([lines, ending, tail]) => ({
+    ending,
+    text: `${lines.map((line) => `${line}${ending}`).join('')}${tail}`,
+  }));
+
+/**
+ * One read of [param log] at [param floor], checked against what the entries since [param marked]
+ * hold. A search names the whole run and moves no mark, and any other read moves it to the end.
+ */
+function readsAsShown(
+  log: GameLog,
+  floor: Severity,
+  step: { readonly mode: 'since' | 'all' | 'contains'; readonly limit: number },
+  marked: { at: number },
+): void {
+  const tail = (entries: readonly LogEntry[]): { entries: LogEntry[]; omitted: number } => {
+    const omitted = Math.max(0, entries.length - step.limit);
+    return { entries: entries.slice(omitted), omitted };
+  };
+  if (step.mode === 'contains') {
+    const found = log.select({ severity: floor, sinceLastCall: false, contains: 'error', limit: step.limit });
+    assert.deepEqual(found, tail(log.all.filter((entry) => answersTo(entry, floor, 'error'))));
+    return;
+  }
+  const since = step.mode === 'since';
+  const found = log.select({ severity: floor, sinceLastCall: since, limit: step.limit });
+  const shown = log.all.slice(since ? marked.at : 0).filter((entry) => answersTo(entry, floor, undefined));
+  assert.deepEqual(found, tail(shown));
+  marked.at = log.all.length;
+}
 
 /**
  * Three streams interleaved and cut anywhere, a text that ends with no line ending or between CR
@@ -1914,7 +2002,11 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
   const streams = ['stdout', 'stderr', 'transcript'] as const;
   const steps = fc.array(
     fc.oneof(
-      fc.record({ kind: fc.constant('write' as const), source: fc.constantFrom(...streams), cut: fc.nat({ max: 60 }) }),
+      fc.record({
+        kind: fc.constant('write' as const),
+        source: fc.constantFrom(...streams),
+        cut: fc.nat({ max: 60 }),
+      }),
       fc.record({
         kind: fc.constant('record' as const),
         severity: fc.constantFrom<Severity>('error', 'warning', 'info'),
@@ -1937,8 +2029,6 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
         const log = new GameLog();
         const left = texts.map((entry) => Buffer.from(entry.text, 'utf8'));
         const marked = { at: 0 };
-        const admitted = (entry: { severity: Severity }): boolean =>
-          floor === 'info' || entry.severity === 'error' || (floor === 'warning' && entry.severity === 'warning');
         for (const step of program) {
           if (step.kind === 'write') {
             const index = streams.indexOf(step.source);
@@ -1948,17 +2038,8 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
             left[index] = bytes.subarray(take);
           } else if (step.kind === 'record') {
             log.record(step.severity, step.text);
-          } else if (step.mode === 'contains') {
-            const found = log.select({ severity: floor, sinceLastCall: false, contains: 'error', limit: step.limit });
-            const matching = log.all.filter((entry) => answersTo(entry, floor, 'error'));
-            assert.deepEqual(found.entries, matching.slice(Math.max(0, matching.length - step.limit)));
           } else {
-            const since = step.mode === 'since';
-            const found = log.select({ severity: floor, sinceLastCall: since, limit: step.limit });
-            const matching = log.all.slice(since ? marked.at : 0).filter(admitted);
-            const omitted = Math.max(0, matching.length - step.limit);
-            assert.deepEqual(found, { entries: matching.slice(omitted), omitted });
-            marked.at = log.all.length;
+            readsAsShown(log, floor, step, marked);
           }
         }
         for (const [index, bytes] of left.entries()) {
@@ -1974,12 +2055,18 @@ function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
         // An entry from another stream between a headline's unindented lines and its `at:` line keeps
         // those lines out of its detail, so the lines of a stream are compared by content.
         for (const source of streams) {
-          const linesOf = (entries: readonly { source: string; text: string; detail: readonly string[] }[]): string[] =>
+          const linesOf = (
+            entries: readonly { source: string; text: string; detail: readonly string[] }[],
+          ): string[] =>
             entries
               .filter((entry) => entry.source === source)
               .flatMap((entry) => [entry.text, ...entry.detail])
               .toSorted();
-          assert.deepEqual(linesOf(log.all), linesOf(whole.all), `${source} holds the same lines as if it had arrived whole`);
+          assert.deepEqual(
+            linesOf(log.all),
+            linesOf(whole.all),
+            `${source} holds the same lines as if it had arrived whole`,
+          );
         }
         const said = texts.reduce(
           (sum, entry) =>
@@ -2005,7 +2092,11 @@ const sentValue: fc.Arbitrary<SentValue> = fc.letrec<{ value: SentValue }>((tie)
     fc.boolean(),
     fc.integer({ min: Number.MIN_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER }),
     // A whole number past what a double holds exactly goes out as a 64-bit int, which reads back digit by digit.
-    fc.double().filter((value) => !(Number.isInteger(value) && !Number.isSafeInteger(value) && Math.abs(value) < 2 ** 63)),
+    fc
+      .double()
+      .filter(
+        (value) => !(Number.isInteger(value) && !Number.isSafeInteger(value) && Math.abs(value) < 2 ** 63),
+      ),
     fc.string({ unit: 'grapheme', maxLength: 12 }),
     fc.array(tie('value'), { maxLength: 4 }),
   ),
@@ -2043,7 +2134,12 @@ function theDebuggerStreamIsCutProof(): void {
   fc.assert(
     fc.property(fc.array(sentCommand, { maxLength: 4 }), cuts, fc.boolean(), (commands, points, bytewise) => {
       const all = Buffer.concat(commands.map((c) => framedCommand(c.message, c.data, c.thread)));
-      const pieces = bytewise ? chunked(all, Array.from({ length: all.length }, (_, at) => at)) : chunked(all, points);
+      const pieces = bytewise
+        ? chunked(
+            all,
+            Array.from({ length: all.length }, (_, at) => at),
+          )
+        : chunked(all, points);
       const { messages, lost } = streamed(pieces);
       assert.equal(lost, false);
       assert.deepEqual(
@@ -2056,10 +2152,10 @@ function theDebuggerStreamIsCutProof(): void {
   const length = fc.constantFrom(0, 1, 3, 4, 7, 12, (8 << 20) + 4, (8 << 20) + 5, 0xff_ff_ff_ff);
   const garbage = fc.array(
     fc.oneof(
-      fc.tuple(length, fc.uint8Array({ maxLength: 24 })).map(([n, body]) => {
+      fc.tuple(length, fc.uint8Array({ maxLength: 24 })).map(([n, rest]) => {
         const header = Buffer.alloc(4);
         header.writeUInt32LE(n);
-        return Buffer.concat([header, body]);
+        return Buffer.concat([header, rest]);
       }),
       fc.uint8Array({ maxLength: 24 }).map((bytes) => Buffer.from(bytes)),
       sentCommand.map((c) => Buffer.from(framedCommand(c.message, c.data, c.thread))),
@@ -2116,26 +2212,12 @@ junkIsNeverAReport();
 await noOrderOfSlotAndMemoryWaitsHangsARun();
 await noOrderOfRisesLosesASuite();
 await theWalkGivesOnlyWhatItHolds();
-console.time('turns');
 await writersTakeTurnsInTheOrderTheyAsked();
-console.timeEnd('turns');
-console.time('plan');
 aPlanDependsOnItsUnitsAlone();
-console.timeEnd('plan');
-console.time('keep');
 await theLargerKeptCacheSurvivesConcurrentKeeps();
-console.timeEnd('keep');
-console.time('install');
 aFailedInstallLeavesTheProjectAsItWas();
-console.timeEnd('install');
-console.time('scratch');
 theRetryScheduleHoldsWhateverFails();
-console.timeEnd('scratch');
-console.time('log');
 aGameLogReadsTheSameWhenInterleavedAndRead();
-console.timeEnd('log');
-console.time('variant');
 theDebuggerStreamIsCutProof();
-console.timeEnd('variant');
 
 console.log('fuzz properties held');

@@ -68,7 +68,12 @@ export async function inTurnFor<T>(projectPath: string, file: string, write: () 
 /** The last write this server has queued for each lock, which the next one waits behind. */
 const queueTails = new Map<string, Promise<void>>();
 
-async function takeTurn<T>(projectPath: string, file: string, lock: string, write: () => Promise<T>): Promise<T> {
+async function takeTurn<T>(
+  projectPath: string,
+  file: string,
+  lock: string,
+  write: () => Promise<T>,
+): Promise<T> {
   mkdirSync(join(projectPath, '.godot', WRITES_FOLDER), { recursive: true });
   const holder = JSON.stringify({ pid: process.pid, started: await ownStart(), file });
   const starts = new Map<number, number | undefined>();

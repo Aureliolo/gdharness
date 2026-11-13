@@ -9,7 +9,13 @@ import { existsSync } from 'node:fs';
 import { keepPipelineCache } from '../../src/pipeline-cache.js';
 
 const [user, project, godot, home, start] = process.argv.slice(2);
-if (user === undefined || project === undefined || godot === undefined || home === undefined || start === undefined) {
+if (
+  user === undefined ||
+  project === undefined ||
+  godot === undefined ||
+  home === undefined ||
+  start === undefined
+) {
   throw new Error('keep-cache needs a user folder, project, engine, home and start file');
 }
 while (!existsSync(start)) {
