@@ -96990,7 +96990,7 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
     assert.equal(source('res://a.gd'), 'extends Node\n');
     const split = casesOutOfPath(project, 'res://shared/o_test.gd:test_x', undefined);
     assert.ok(split.ok, JSON.stringify(split));
-    assert.equal(split.path, 'res://shared/o_test.gd');
+    assert.deepEqual(split.path, ['res://shared/o_test.gd']);
 
     await withStdioServer(
       async (call) => {
@@ -97043,7 +97043,7 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
         }
         assert.ok(existsSync(join(project, 'a.gd')), 'a.gd stays where it was');
         assert.deepEqual(readdirSync(outside).toSorted(), kept, 'nothing was written outside');
-        assert.deepEqual(kept, ['o.gd', 'tool']);
+        assert.deepEqual(kept, ['back', 'o.gd', 'tool']);
 
         const taken = [
           await call('project_export', {
