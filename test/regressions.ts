@@ -97063,8 +97063,87 @@ async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
       },
       { GODOT_PATH: standInEngine() },
     );
+    await aFileBehindALinkIsReadByTheEngine(project, outside);
   } finally {
     sweep(dirname(project));
+  }
+}
+
+/** With no editor, the headless engine reads a scene and a resource behind a link out, by the path as written. */
+async function aFileBehindALinkIsReadByTheEngine(project: string, outside: string): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('  skipped the engine reads behind a link: Godot not found');
+    return;
+  }
+  writeTree(outside, {
+    's.tscn':
+      '[gd_scene load_steps=6 format=3]\n\n' +
+      '[sub_resource type="Animation" id="Animation_walk"]\n\n' +
+      '[sub_resource type="AnimationLibrary" id="AnimationLibrary_a"]\n' +
+      '_data = {\n&"walk": SubResource("Animation_walk")\n}\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk"]\nanimation = &"walk"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="AnimationNodeStateMachine_a"]\n' +
+      'states/walk/node = SubResource("AnimationNodeAnimation_walk")\n\n' +
+      '[node name="S" type="Node2D"]\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries/ = SubResource("AnimationLibrary_a")\n\n' +
+      '[node name="Tree" type="AnimationTree" parent="."]\n' +
+      'tree_root = SubResource("AnimationNodeStateMachine_a")\nanim_player = NodePath("../Player")\n',
+    'r.tres': '[gd_resource type="Gradient" format=3]\n\n[resource]\n',
+  });
+  const imported = await runImport(godotPath, project);
+  assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-rt-')),
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  try {
+    await server.initialize('linked-read');
+    const refused = 'must name a file inside the project';
+    const tree = parseTextContent(await call('scene_tree', { scenePath: 'res://shared/s.tscn' }));
+    assert.equal(get(tree, 'tree', 'name'), 'S', JSON.stringify(tree));
+    const resource = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://shared/r.tres' }),
+    );
+    assert.equal(get(resource, 'resourceType'), 'Gradient', JSON.stringify(resource));
+    const animations = parseTextContent(
+      await call('scene_animation', {
+        op: 'read',
+        scenePath: 'res://shared/s.tscn',
+        playerNodePath: 'Player',
+      }),
+    );
+    assert.deepEqual(
+      asArray(get(animations, 'animations')).map((entry) => get(entry, 'animationName')),
+      ['walk'],
+      JSON.stringify(animations),
+    );
+    const states = parseTextContent(
+      await call('scene_animation', {
+        op: 'read_states',
+        scenePath: 'res://shared/s.tscn',
+        animTreePath: 'Tree',
+      }),
+    );
+    assert.ok(
+      asArray(get(states, 'states')).some((state) => get(state, 'stateName') === 'walk'),
+      JSON.stringify(states),
+    );
+    for (const answer of [tree, resource, animations, states]) {
+      assert.ok(!JSON.stringify(answer).includes(refused), JSON.stringify(answer));
+    }
+  } finally {
+    await server.stop();
   }
 }
 
