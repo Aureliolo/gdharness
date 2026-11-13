@@ -412,19 +412,38 @@ static func _holds_below(text: String, path: String) -> bool:
 ## [param changed] and every scene in [param texts] that instances or inherits it at any depth.
 static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
 	var kin: Array[String] = [changed]
+	var named: Dictionary[String, PackedStringArray] = {}
+	for scene_path: String in texts:
+		named[scene_path] = _named_in(str(texts[scene_path]), scene_path)
 	var grew: bool = true
 	while grew:
 		grew = false
 		for scene_path: String in texts:
 			if kin.has(scene_path):
 				continue
-			var text: String = texts[scene_path]
 			for one: String in kin:
-				if text.contains(' path="%s"' % one):
+				if named[scene_path].has(one):
 					kin.append(scene_path)
 					grew = true
 					break
 	return kin
+
+
+## Every file [param text] names in an ext_resource, as a res:// path.
+static func _named_in(text: String, scene_path: String) -> PackedStringArray:
+	var named: PackedStringArray = []
+	var each: RegEx = RegEx.create_from_string('\\[ext_resource [^\\n]*path="([^"]+)"')
+	for found: RegExMatch in each.search_all(text):
+		var _added: bool = named.append(_resolved(found.get_string(1), scene_path))
+	return named
+
+
+## [param path] as a res:// path. The engine reads a path with no scheme against the folder of the
+## scene naming it, [param scene_path].
+static func _resolved(path: String, scene_path: String) -> String:
+	if path.contains("://"):
+		return path
+	return scene_path.get_base_dir().path_join(path).simplify_path()
 
 
 ## The text of every .tscn the engine scans into [param texts], keyed by res:// path. The shared
@@ -457,18 +476,18 @@ static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
 ## Whether the scene at [param scene_path] inherits [param changed], through any number of scenes.
 static func _inherits(scene_path: String, changed: String, texts: Dictionary) -> bool:
 	var seen: Array[String] = [scene_path]
-	var base: String = _base_of(str(texts.get(scene_path, "")))
+	var base: String = _base_of(str(texts.get(scene_path, "")), scene_path)
 	while not base.is_empty() and not seen.has(base):
 		if base == changed:
 			return true
 		seen.append(base)
-		base = _base_of(str(texts.get(base, "")))
+		base = _base_of(str(texts.get(base, "")), base)
 	return false
 
 
-## The scene the root of [param text] inherits, or "": a root entry naming an instance and no
-## parent.
-static func _base_of(text: String) -> String:
+## The scene the root of [param text], the scene at [param scene_path], inherits, or "": a root
+## entry naming an instance and no parent.
+static func _base_of(text: String, scene_path: String) -> String:
 	for line: String in text.split("\n"):
 		if not line.begins_with("[node "):
 			continue
@@ -484,7 +503,7 @@ static func _base_of(text: String) -> String:
 			)
 			. search(text)
 		)
-		return named.get_string(1) if named != null else ""
+		return _resolved(named.get_string(1), scene_path) if named != null else ""
 	return ""
 
 

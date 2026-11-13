@@ -90898,6 +90898,100 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
   }
 }
 
+/**
+ * A scene naming the changed one by a path relative to its own folder is followed too, since the
+ * engine loads such a path against that folder. den.tscn instances desk.tscn as `../desk.tscn` and
+ * keeps its lamp editable. study.tscn inherits it as `../desk.tscn`. far.tscn names a desk.tscn of
+ * its own folder, which is another scene.
+ */
+async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('relative follow regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-relative-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-relative-rt-'));
+  const relativeDesk = '[ext_resource type="PackedScene" path="../desk.tscn" id="1_desk"]';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="FollowRelative"\n',
+    'lamp.tscn':
+      '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n\n[node name="Bulb" type="OmniLight3D" parent="."]\n',
+    'desk.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://lamp.tscn" id="1_lamp"]\n\n' +
+      '[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n',
+    'rooms/den.tscn':
+      `[gd_scene format=3]\n\n${relativeDesk}\n\n[node name="Den" type="Node3D"]\n\n` +
+      '[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="Bulb" parent="Desk/Top/DeskLamp"]\nlight_energy = 4.0\n\n' +
+      '[editable path="Desk/Top/DeskLamp"]\n',
+    'rooms/study.tscn':
+      `[gd_scene format=3]\n\n${relativeDesk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
+      '[node name="Top" parent="."]\nvisible = false\n',
+    'rooms/far/desk.tscn': '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n',
+    'rooms/far/far.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="desk.tscn" id="1_desk"]\n\n' +
+      '[node name="Far" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="D" parent="Top" instance=ExtResource("1_desk")]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('follow-relative');
+    const renamed = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: {
+            projectPath: project,
+            op: 'set',
+            scenePath: 'desk.tscn',
+            nodePath: 'Top',
+            properties: { name: 'Surface' },
+          },
+        },
+        240_000,
+      ),
+    );
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).toSorted(),
+      ['res://rooms/den.tscn', 'res://rooms/study.tscn'],
+      JSON.stringify(renamed),
+    );
+    const den = fileOf('rooms/den.tscn');
+    assert.ok(den.includes('[node name="Bulb" parent="Desk/Surface/DeskLamp"]'), den);
+    assert.ok(den.includes('[editable path="Desk/Surface/DeskLamp"]'), den);
+    assert.ok(
+      fileOf('rooms/study.tscn').includes('[node name="Surface" parent="."]'),
+      fileOf('rooms/study.tscn'),
+    );
+    assert.equal(fileOf('rooms/far/far.tscn'), files['rooms/far/far.tscn'], 'a desk.tscn of its own folder');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 /** The reason the follower gives a link out of the project, in place of the scenes behind it. */
 const LINK_OUT_LEFT = 'a link that leads out of the project, so no scene behind it was read or changed';
 
@@ -97353,6 +97447,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
+  testASceneNamingItByARelativePathIsFollowed,
   testASceneBehindALinkOutIsNotFollowed,
   testEachCommandThatFollowsANodeNamesALinkOut,
   testASecondLinkToTheSameFolderOutIsNamedToo,
