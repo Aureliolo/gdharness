@@ -178,16 +178,22 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 ## for a node deleted, the node paths are only named, and the entries are dropped as
 ## [method _without_vanished] says. Answers followed, the scenes rewritten, notFollowed, each one
 ## left as it was with why, and dropped, each only when it names any, with what [param carried]
-## gives.
+## gives. No scene behind a link of [param links_out], each a res:// folder or file that leads out
+## of the project, is read or rewritten, and notFollowed names each link.
 static func follow(
-	changed: String, old_path: String, new_path: String, carried: GdhPaths
+	changed: String,
+	old_path: String,
+	new_path: String,
+	carried: GdhPaths,
+	links_out: PackedStringArray,
 ) -> Dictionary:
 	var run: GdhFollow = GdhFollow.new(changed, old_path, new_path, carried)
-	_read_scenes(run.texts)
+	_read_scenes(run.texts, links_out)
 	var kin: Array[String] = _kin_of(changed, run.texts)
 	for scene_path: String in kin:
 		_follow_scene(scene_path, run)
-	var answer: Dictionary = carried.answer()
+	run.not_followed.append_array(_links_left(links_out))
+	var answer: Dictionary = carried.answer(links_out)
 	if not run.followed.is_empty():
 		answer["followed"] = run.followed
 	if not run.not_followed.is_empty():
@@ -339,10 +345,11 @@ static func _gone(path: String, moves: Dictionary) -> bool:
 ## on a node inside it or adds one below it. Those still load, and the next save of that scene
 ## dropped them, since the packer skips every node under an instance whose children are not
 ## editable. Answers followed, the scenes marked, and notFollowed, each left with why, each only
-## when it names any.
-static func enclose(changed: String, at: String) -> Dictionary:
+## when it names any. No scene behind a link of [param links_out], each a res:// folder or file
+## that leads out of the project, is read or rewritten, and notFollowed names each link.
+static func enclose(changed: String, at: String, links_out: PackedStringArray) -> Dictionary:
 	var texts: Dictionary = {}
-	_read_scenes(texts)
+	_read_scenes(texts, links_out)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
 	for scene_path: String in _kin_of(changed, texts):
@@ -378,6 +385,7 @@ static func enclose(changed: String, at: String) -> Dictionary:
 		file.close()
 		GdhSceneFile.refresh(scene_path)
 		followed.append(scene_path)
+	not_followed.append_array(_links_left(links_out))
 	var answer: Dictionary = {}
 	if not followed.is_empty():
 		answer["followed"] = followed
@@ -421,10 +429,29 @@ static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
 
 ## The text of every .tscn the engine scans into [param texts], keyed by res:// path. The shared
 ## walk leaves out the folders the engine steps over, so a build's copies are not read, and takes in
-## the addons gdharness installed, which the engine loads.
-static func _read_scenes(texts: Dictionary) -> void:
+## the addons gdharness installed, which the engine loads. That less the scenes behind a link of
+## [param links_out].
+static func _read_scenes(texts: Dictionary, links_out: PackedStringArray) -> void:
 	for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
-		texts[path] = FileAccess.get_file_as_string(path)
+		if GdhSceneFile.out_through_link(path, links_out).is_empty():
+			texts[path] = FileAccess.get_file_as_string(path)
+
+
+## A notFollowed row for each of [param links_out], since no scene behind one was read.
+static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	for link: String in links_out:
+		rows.append(
+			{
+				"scenePath": link,
+				"reason":
+				(
+					"a link that leads out of the project, so no scene behind it was read or "
+					+ "changed"
+				),
+			}
+		)
+	return rows
 
 
 ## Whether the scene at [param scene_path] inherits [param changed], through any number of scenes.

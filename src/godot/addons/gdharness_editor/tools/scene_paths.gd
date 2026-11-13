@@ -155,16 +155,16 @@ func put_back(scene_path: String, why: String = "") -> void:
 
 ## The fields an answer gives for what was carried, each only when it names any, once the files
 ## beside the scenes holding rewritten tracks are saved. The tracks of a file that does not save are
-## put back and move to notRetargeted.
-func answer() -> Dictionary:
-	for file: String in _homes:
-		var resource: Resource = _homes[file]
-		var saving: Error = GdhSceneUids.save_keeping_uid(resource, file)
-		if saving == OK:
-			if Engine.is_editor_hint():
-				EditorInterface.get_resource_filesystem().update_file(file)
+## put back and move to notRetargeted. A file behind a link of [param links_out] is not saved, and
+## its tracks are put back the same way.
+func answer(links_out: PackedStringArray) -> Dictionary:
+	# Putting a file's tracks back takes it out of _homes, so the walk is over a copy of the keys.
+	for file: String in _homes.keys():
+		var why: String = GdhSceneFile.out_through_link(file, links_out)
+		if why.is_empty():
+			why = _saved(file)
+		if why.is_empty():
 			continue
-		var why: String = "Failed to save %s: %s" % [file, error_string(saving)]
 		for record: Dictionary in _put_back(func(_record: Dictionary) -> bool: return false, file):
 			retargeted.erase(record)
 			not_retargeted.append(_left(record, why))
@@ -180,6 +180,17 @@ func answer() -> Dictionary:
 	if not scripts_naming.is_empty():
 		fields["scriptsNaming"] = scripts_naming
 	return fields
+
+
+## Saves the resource [member _homes] keeps for [param file], answering "" or why it failed.
+func _saved(file: String) -> String:
+	var resource: Resource = _homes[file]
+	var saving: Error = GdhSceneUids.save_keeping_uid(resource, file)
+	if saving != OK:
+		return "Failed to save %s: %s" % [file, error_string(saving)]
+	if Engine.is_editor_hint():
+		EditorInterface.get_resource_filesystem().update_file(file)
+	return ""
 
 
 ## Names each line of the scripts on [param node], its own and those it extends, that names from

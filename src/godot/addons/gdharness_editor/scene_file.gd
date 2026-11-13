@@ -930,6 +930,37 @@ static func unsaved_in_editor(scene_path: String) -> String:
 	)
 
 
+## The res:// links out of the project the server hands a command in [param args] as linksOut, a
+## folder with a closing slash and a file without. None when it hands none.
+static func links_out_in(args: Dictionary) -> PackedStringArray:
+	var links: PackedStringArray = []
+	var given: Variant = args.get("linksOut", [])
+	if not given is Array:
+		return links
+	var listed: Array = given
+	for link: Variant in listed:
+		var _added: bool = links.append(str(link))
+	return links
+
+
+## Why [param file] is not read or written here when it is one of [param links_out] or lies below
+## one, or "". Case is ignored, since a scene may spell a file in another case where the file system
+## ignores it.
+static func out_through_link(file: String, links_out: PackedStringArray) -> String:
+	var lowered: String = file.to_lower()
+	for link: String in links_out:
+		var held: String = link.to_lower()
+		if lowered == held or (held.ends_with("/") and lowered.begins_with(held)):
+			return (
+				(
+					"%s leads out of the project through the link %s, and only what is inside "
+					+ "the project is written here."
+				)
+				% [file, link]
+			)
+	return ""
+
+
 ## Frees [member root] and answers [param error] as a refusal.
 func refuse(error: String) -> Dictionary:
 	close()

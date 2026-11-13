@@ -504,7 +504,7 @@ func delete_node(args: Dictionary) -> Dictionary:
 		answer["deletedWithIt"] = went
 	if not cut.is_empty():
 		answer["connectionsRemoved"] = cut
-	answer.merge(GdhKin.follow(scene_path, at, "", carried))
+	answer.merge(GdhKin.follow(scene_path, at, "", carried, GdhSceneFile.links_out_in(args)))
 	return answer
 
 
@@ -965,7 +965,11 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	if not sheared.is_empty():
 		answer["sheared"] = sheared
 	if new_path != old_path:
-		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
+		answer.merge(
+			GdhKin.follow(
+				scene_path, old_path, new_path, carried, GdhSceneFile.links_out_in(args)
+			)
+		)
 	return answer
 
 
@@ -1161,8 +1165,9 @@ func save_branch(args: Dictionary) -> Dictionary:
 		carried.put_back(scene_path)
 		return _unwritten(null, branch_path, str(written.get("error", "")))
 	answer["index"] = index
-	answer.merge(carried.answer())
-	answer.merge(GdhKin.enclose(scene_path, at))
+	var links_out: PackedStringArray = GdhSceneFile.links_out_in(args)
+	answer.merge(carried.answer(links_out))
+	answer.merge(GdhKin.enclose(scene_path, at, links_out))
 	if not scripts_out.is_empty():
 		var naming: Array = answer.get_or_add("scriptsNaming", [])
 		naming.append_array(scripts_out)
@@ -1657,7 +1662,11 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	_note_left_out(answer, scene.written_pack, new_path, named, unsaved, source)
 	_note_followed(answer, followed, source)
 	if new_path != old_path:
-		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
+		answer.merge(
+			GdhKin.follow(
+				scene_path, old_path, new_path, carried, GdhSceneFile.links_out_in(args)
+			)
+		)
 	return answer
 
 

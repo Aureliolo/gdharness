@@ -90898,6 +90898,532 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
   }
 }
 
+/** The reason the follower gives a link out of the project, in place of the scenes behind it. */
+const LINK_OUT_LEFT = 'a link that leads out of the project, so no scene behind it was read or changed';
+
+/** desk.tscn of the link-out cases, whose Top moves. */
+const LINKED_DESK =
+  '[gd_scene format=3]\n\n[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+  '[node name="Leg" type="Node3D" parent="."]\n\n[node name="Lamp" type="Node3D" parent="Top"]\n';
+
+/** A scene with its root named [root] keeping a value on desk.tscn's Top/Lamp, named by [deskPath]. */
+function deskKin(root: string, deskPath = 'res://desk.tscn'): string {
+  return (
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${deskPath}" id="1_desk"]\n\n` +
+    `[node name="${root}" type="Node3D"]\n\n[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n` +
+    '[node name="Lamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n'
+  );
+}
+
+/** One value track of an animation on [path]. */
+function linkedTrack(path: string): string {
+  return (
+    'tracks/0/type = "value"\ntracks/0/imported = false\ntracks/0/enabled = true\n' +
+    `tracks/0/path = NodePath("${path}")\ntracks/0/interp = 1\ntracks/0/loop_wrap = true\n` +
+    'tracks/0/keys = {"times": PackedFloat32Array(0, 1), "transitions": PackedFloat32Array(1, 1), "update": 0, "values": [Vector3(0, 0, 0), Vector3(1, 1, 1)]}\n'
+  );
+}
+
+/** An Animation kept in a .tres of its own, named [name], with one track on [path]. */
+function animationFile(name: string, path: string): string {
+  return `[gd_resource type="Animation" format=3]\n\n[resource]\nresource_name = "${name}"\nlength = 1.0\n${linkedTrack(path)}`;
+}
+
+/**
+ * A scene holding Body and Body/Arm, the second unique when [unique], and an AnimationPlayer playing
+ * each of [animations], a res:// path to an Animation file, from one library.
+ */
+function playingScene(animations: readonly string[], unique = false): string {
+  const resources = animations
+    .map((path, at) => `[ext_resource type="Animation" path="${path}" id="${at + 1}_anim"]\n`)
+    .join('');
+  const data = animations.map((_, at) => `&"a${at}": ExtResource("${at + 1}_anim")`).join(', ');
+  return (
+    `[gd_scene format=3]\n\n${resources}\n[sub_resource type="AnimationLibrary" id="lib"]\n_data = {${data}}\n\n` +
+    '[node name="A" type="Node3D"]\n\n[node name="Body" type="Node3D" parent="."]\n\n' +
+    `[node name="Arm" type="Node3D" parent="Body"]\n${unique ? 'unique_name_in_owner = true\n' : ''}\n` +
+    '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {&"": SubResource("lib")}\n'
+  );
+}
+
+/** What a link-out case works on: the project as the server is given it, its own folder, and outside. */
+interface LinkedProject {
+  project: string;
+  real: string;
+  outside: string;
+  call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  fileOf: (file: string) => string;
+}
+
+/**
+ * Runs [body] on a project holding desk.tscn and [files], beside `outside`, a folder holding
+ * [outsideFiles] that no project holds. [link] makes the links once the project is imported, given
+ * the project's own folder and outside, and answers false when the platform refuses one, which
+ * skips the case. With [through] the server is given the project by a junction to it.
+ */
+async function withLinksOut(
+  label: string,
+  fixture: { files: Record<string, string>; outside?: Record<string, string>; through?: boolean },
+  link: (real: string, outside: string) => boolean,
+  body: (at: LinkedProject) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${label} regression skipped (Godot not found)`);
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinlink-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinlink-rt-'));
+  const real = join(root, 'project');
+  const outside = join(root, 'outside');
+  writeTree(real, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Kin"\n',
+    'desk.tscn': LINKED_DESK,
+    ...fixture.files,
+  });
+  mkdirSync(outside, { recursive: true });
+  writeTree(outside, fixture.outside ?? {});
+  const project = fixture.through === true ? join(root, 'via') : real;
+  if (fixture.through === true) {
+    symlinkSync(real, project, 'junction');
+  }
+  let server: ServerProcess | null = null;
+  try {
+    const imported = await runImport(godotPath, real);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    if (!link(real, outside)) {
+      console.log(`${label} regression skipped (the platform refused a link)`);
+      return;
+    }
+    server = new ServerProcess({
+      env: {
+        GODOT_PATH: godotPath,
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+        GDHARNESS_RUNTIME_DIR: runtimeDir,
+      },
+    });
+    await server.initialize('kin-link-out');
+    const serving = server;
+    await body({
+      project,
+      real,
+      outside,
+      call: async (name, args) =>
+        parseTextContent(
+          await serving.request(
+            'tools/call',
+            { name, arguments: { projectPath: project, ...args } },
+            240_000,
+          ),
+        ),
+      fileOf: (file) => readFileSync(join(real, file), 'utf8'),
+    });
+  } finally {
+    await server?.stop();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/** The links an answer's notFollowed names as links out, sorted, each checked for its reason. */
+function linksLeft(answer: unknown): string[] {
+  const rows = asArray(get(answer, 'notFollowed') ?? []).filter(
+    (row) => get(row, 'reason') === LINK_OUT_LEFT,
+  );
+  return rows.map((row) => String(get(row, 'scenePath'))).toSorted();
+}
+
+/** The rename of desk.tscn's Top to Surface every link-out case follows. */
+async function renameTheTop(at: LinkedProject): Promise<unknown> {
+  return await at.call('scene_node', {
+    op: 'set',
+    scenePath: 'desk.tscn',
+    nodePath: 'Top',
+    properties: { name: 'Surface' },
+  });
+}
+
+/**
+ * A scene behind a junction out of the project, in a folder other projects may share, is neither
+ * read nor rewritten by the follower, which names the link instead. room.tscn inside is followed.
+ */
+async function testASceneBehindALinkOutIsNotFollowed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'link-out follow',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://shared/', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.ok(
+        at.fileOf('room.tscn').includes('[node name="Lamp" parent="Desk/Surface"]'),
+        at.fileOf('room.tscn'),
+      );
+      assert.equal(
+        readFileSync(join(at.outside, 'kin.tscn'), 'utf8'),
+        kin,
+        'the scene outside is left as it was',
+      );
+    },
+  );
+}
+
+/**
+ * Each of the four commands that follow a node names the link out and leaves the scene behind it:
+ * a rename, a reparent, a branch saved as its own scene and a delete.
+ */
+async function testEachCommandThatFollowsANodeNamesALinkOut(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'link-out commands',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const answers: [string, unknown][] = [
+        ['set', await renameTheTop(at)],
+        [
+          'reparent',
+          await at.call('scene_node', {
+            op: 'reparent',
+            scenePath: 'desk.tscn',
+            nodePath: 'Surface/Lamp',
+            newParentPath: 'Leg',
+          }),
+        ],
+        [
+          'save_branch',
+          await at.call('scene_node', {
+            op: 'save_branch',
+            scenePath: 'desk.tscn',
+            nodePath: 'Leg',
+            newScenePath: 'leg',
+          }),
+        ],
+        ['delete', await at.call('scene_node', { op: 'delete', scenePath: 'desk.tscn', nodePath: 'Leg' })],
+      ];
+      for (const [op, answer] of answers) {
+        assert.deepEqual(
+          [linksLeft(answer), get(answer, 'followed')],
+          [['res://shared/'], ['res://room.tscn']],
+          `${op}: ${JSON.stringify(answer)}`,
+        );
+      }
+      assert.equal(
+        readFileSync(join(at.outside, 'kin.tscn'), 'utf8'),
+        kin,
+        'the scene outside is left as it was',
+      );
+    },
+  );
+}
+
+/** Two junctions to the same outside folder are each named, and the scene there is left. */
+async function testASecondLinkToTheSameFolderOutIsNamedToo(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'second link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'shared')) && linkTo(outside, join(real, 'Shared2')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://Shared2/', 'res://shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** A file link to a scene outside the project is named as a link and the scene is left. */
+async function testAFileLinkOutIsNotFollowed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'file link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(join(outside, 'kin.tscn'), join(real, 'kin_link.tscn'), 'file'),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://kin_link.tscn', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/**
+ * A junction to a folder of the project is no link out: the scene it reaches is followed and no
+ * link is named. So is one to a folder under a .gdignore, which the engine reaches only through
+ * the junction.
+ */
+async function testASceneReachedByALinkInsideTheProjectIsFollowed(): Promise<void> {
+  await withLinksOut(
+    'link inside',
+    {
+      files: {
+        'real/in.tscn': deskKin('In'),
+        'ignored/.gdignore': '',
+        'ignored/deep/far.tscn': deskKin('Far'),
+      },
+    },
+    (real) =>
+      linkTo(join(real, 'real'), join(real, 'inner')) &&
+      linkTo(join(real, 'ignored', 'deep'), join(real, 'hidden')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      assert.ok(asArray(get(renamed, 'followed')).includes('res://hidden/far.tscn'), JSON.stringify(renamed));
+      for (const file of ['real/in.tscn', 'ignored/deep/far.tscn']) {
+        assert.ok(
+          at.fileOf(file).includes('[node name="Lamp" parent="Desk/Surface"]'),
+          `${file}: ${at.fileOf(file)}`,
+        );
+      }
+    },
+  );
+}
+
+/** A junction out of the project below a folder the follower walks is named by its whole path. */
+async function testALinkOutInsideAWalkedFolderIsNamed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'nested link out',
+    { files: { 'levels/room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'levels', 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://levels/shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://levels/room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** Scenes outside that name desk.tscn by relative paths, which resolve only through the link, are left. */
+async function testRelativePathsBehindALinkOutAreLeft(): Promise<void> {
+  const outside = {
+    'kin.tscn': deskKin('Kin', '../desk.tscn'),
+    'sub/deep.tscn': deskKin('Deep', '../../desk.tscn'),
+  };
+  await withLinksOut(
+    'relative link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside },
+    (real, out) => linkTo(out, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      for (const [file, written] of Object.entries(outside)) {
+        assert.equal(readFileSync(join(at.outside, file), 'utf8'), written, file);
+      }
+    },
+  );
+}
+
+/** A junction whose target is gone leaves the follower working, and is named as the walk names it. */
+async function testADanglingLinkOutLeavesTheFollowerWorking(): Promise<void> {
+  await withLinksOut(
+    'dangling link out',
+    { files: { 'room.tscn': deskKin('Room') } },
+    (real, outside) => linkTo(join(outside, 'gone'), join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(linksLeft(renamed), linksOut(at.project).toSorted(), JSON.stringify(renamed));
+    },
+  );
+}
+
+/** Junctions that lead round in a ring neither hang nor break the follower's walk. */
+async function testARingOfJunctionsDoesNotHangTheFollower(): Promise<void> {
+  await withLinksOut(
+    'junction ring',
+    { files: { 'room.tscn': deskKin('Room'), 'loop/keep.txt': '' } },
+    (real) =>
+      linkTo(join(real, 'ring2'), join(real, 'ring1')) &&
+      linkTo(join(real, 'ring1'), join(real, 'ring2')) &&
+      linkTo(join(real, 'loop'), join(real, 'loop', 'up')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(linksLeft(renamed), linksOut(at.project).toSorted(), JSON.stringify(renamed));
+    },
+  );
+}
+
+/** A project the server is given through a junction still names its own link out and follows inside. */
+async function testAProjectReachedThroughAJunctionNamesItsLinkOut(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'project through a junction',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin }, through: true },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** The sentence the addon gives a file behind [link]. */
+function behindTheLink(file: string, link: string): string {
+  return `${file} leads out of the project through the link ${link}, and only what is inside the project is written here.`;
+}
+
+/** Writes outside/stride.res, a binary Animation with one track on Body/Arm:position, by an engine. */
+async function binaryAnimationInto(outside: string): Promise<void> {
+  const godotPath = resolveGodotPath() ?? '';
+  const making = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinlink-res-'));
+  try {
+    writeTree(making, {
+      'project.godot': 'config_version=5\n',
+      'stride.tres': animationFile('stride', 'Body/Arm:position'),
+      'save.gd':
+        'extends SceneTree\n\n\nfunc _init() -> void:\n\tvar saved: Error = ResourceSaver.save(load("res://stride.tres"), "res://stride.res")\n\tquit(saved)\n',
+    });
+    const engine = spawnHidden(godotPath, ['--headless', '--path', making, '-s', 'res://save.gd'], {
+      stdio: 'ignore',
+    });
+    assert.equal((await exitOf(engine)).code, 0, 'the engine saved stride.res');
+    writeFileSync(join(outside, 'stride.res'), readFileSync(join(making, 'stride.res')));
+  } finally {
+    rmSync(making, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The follower's save leaves each animation or library kept in a file of its own behind a link out,
+ * a .tres and a binary .res alike, puts its track back, and says why. home.tres inside is saved.
+ */
+async function testAnAnimationBehindALinkOutIsNotSaved(): Promise<void> {
+  const walk = animationFile('walk', 'Body/Arm:position');
+  const moves =
+    '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_sway"]\n' +
+    `resource_name = "sway"\nlength = 1.0\n${linkedTrack('Body/Arm:position')}\n[resource]\n_data = {\n&"sway": SubResource("Animation_sway")\n}\n`;
+  const scene = playingScene(['res://shared/walk.tres', 'res://shared/stride.res', 'res://home.tres']);
+  const withLibrary = scene
+    .replace(
+      '[sub_resource type="AnimationLibrary"',
+      '[ext_resource type="AnimationLibrary" path="res://shared/moves.tres" id="9_moves"]\n\n[sub_resource type="AnimationLibrary"',
+    )
+    .replace(
+      'libraries = {&"": SubResource("lib")}',
+      'libraries = {&"": SubResource("lib"), &"moves": ExtResource("9_moves")}',
+    );
+  await withLinksOut(
+    'animation behind a link out',
+    {
+      files: { 'a.tscn': withLibrary, 'home.tres': animationFile('home', 'Body/Arm:position') },
+      outside: { 'walk.tres': walk, 'moves.tres': moves },
+    },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      await binaryAnimationInto(at.outside);
+      const stride = readFileSync(join(at.outside, 'stride.res'));
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      const left = asArray(get(moved, 'notRetargeted')).map((row) => [
+        String(get(row, 'animation')),
+        String(get(row, 'reason')),
+      ]);
+      assert.deepEqual(
+        left.toSorted((a, b) => a.join().localeCompare(b.join())),
+        [
+          ['a0', behindTheLink('res://shared/walk.tres', 'res://shared/')],
+          ['a1', behindTheLink('res://shared/stride.res', 'res://shared/')],
+          ['moves/sway', behindTheLink('res://shared/moves.tres', 'res://shared/')],
+        ],
+        JSON.stringify(moved),
+      );
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [['a2', 'Arm:position']],
+        JSON.stringify(moved),
+      );
+      assert.ok(at.fileOf('home.tres').includes('NodePath("Arm:position")'), at.fileOf('home.tres'));
+      assert.equal(readFileSync(join(at.outside, 'walk.tres'), 'utf8'), walk);
+      assert.equal(readFileSync(join(at.outside, 'moves.tres'), 'utf8'), moves);
+      assert.ok(readFileSync(join(at.outside, 'stride.res')).equals(stride), 'stride.res is left');
+    },
+  );
+}
+
+/** A branch saved as its own scene leaves an animation behind a link out the same way. */
+async function testABranchSavedOutLeavesAnAnimationBehindALinkOut(): Promise<void> {
+  const walk = animationFile('walk', '%Arm:position');
+  await withLinksOut(
+    'branch animation behind a link out',
+    { files: { 'a.tscn': playingScene(['res://shared/walk.tres'], true) }, outside: { 'walk.tres': walk } },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const saved = await at.call('scene_node', {
+        op: 'save_branch',
+        scenePath: 'a.tscn',
+        nodePath: 'Body',
+        newScenePath: 'body',
+      });
+      assert.deepEqual(
+        asArray(get(saved, 'notRetargeted')).map((row) => [get(row, 'animation'), get(row, 'reason')]),
+        [['a0', behindTheLink('res://shared/walk.tres', 'res://shared/')]],
+        JSON.stringify(saved),
+      );
+      assert.equal(get(saved, 'retargeted'), undefined, JSON.stringify(saved));
+      assert.equal(readFileSync(join(at.outside, 'walk.tres'), 'utf8'), walk);
+    },
+  );
+}
+
+/** An animation file a junction to a folder of the project reaches is saved, since it is inside. */
+async function testAnAnimationReachedByALinkInsideIsSaved(): Promise<void> {
+  await withLinksOut(
+    'animation through a link inside',
+    {
+      files: {
+        'a.tscn': playingScene(['res://inner/walk.tres']),
+        'real/walk.tres': animationFile('walk', 'Body/Arm:position'),
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [['a0', 'Arm:position']],
+        JSON.stringify(moved),
+      );
+      assert.equal(get(moved, 'notRetargeted'), undefined, JSON.stringify(moved));
+      assert.ok(
+        at.fileOf('real/walk.tres').includes('NodePath("Arm:position")'),
+        at.fileOf('real/walk.tres'),
+      );
+    },
+  );
+}
+
 /**
  * A node renamed or deleted in a scene is followed into a scene instancing one that inherits it,
  * where the instance's root is the changed scene's root under another scene's name.
@@ -96827,6 +97353,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
+  testASceneBehindALinkOutIsNotFollowed,
+  testEachCommandThatFollowsANodeNamesALinkOut,
+  testASecondLinkToTheSameFolderOutIsNamedToo,
+  testAFileLinkOutIsNotFollowed,
+  testASceneReachedByALinkInsideTheProjectIsFollowed,
+  testALinkOutInsideAWalkedFolderIsNamed,
+  testRelativePathsBehindALinkOutAreLeft,
+  testADanglingLinkOutLeavesTheFollowerWorking,
+  testARingOfJunctionsDoesNotHangTheFollower,
+  testAProjectReachedThroughAJunctionNamesItsLinkOut,
+  testAnAnimationBehindALinkOutIsNotSaved,
+  testABranchSavedOutLeavesAnAnimationBehindALinkOut,
+  testAnAnimationReachedByALinkInsideIsSaved,
   testAMoveIsFollowedThroughAnInheritedInstance,
   testAMovedNodeKeepsThePathsNamingIt,
   testADeleteDropsWhatOtherScenesKeptBelowIt,
