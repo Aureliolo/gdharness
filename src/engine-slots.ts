@@ -904,6 +904,8 @@ export class EngineSlots {
   private readonly passedOver = new Map<string, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
+  /** The last look at the inherited slot, which the next one waits for. */
+  private inheriting: Promise<void> = Promise.resolve();
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
   drawn: SlotsDrawn = { numbers: [] };
   private saidAt = Number.NEGATIVE_INFINITY;
@@ -1034,9 +1036,8 @@ export class EngineSlots {
   async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
     await this.sweep();
-    const inherited = this.inherited === null ? await this.inheritedLock() : null;
+    const inherited = await this.inheritedByOne();
     if (inherited !== null) {
-      this.inherited = inherited;
       return inherited;
     }
     const taker = this.taker();
@@ -1160,6 +1161,26 @@ export class EngineSlots {
     return new Map(
       [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, ahead[at]?.mark ?? '']),
     );
+  }
+
+  /**
+   * The inherited slot for the one take that finds it unused, or null. Looks run one at a time, so
+   * two takes begun together cannot both read it as unused before either has claimed it.
+   */
+  private inheritedByOne(): Promise<string | null> {
+    const claim = this.inheriting.then(async () => {
+      if (this.inherited !== null) {
+        return null;
+      }
+      const lock = await this.inheritedLock();
+      this.inherited = lock;
+      return lock;
+    });
+    this.inheriting = claim.then(
+      () => undefined,
+      () => undefined,
+    );
+    return claim;
   }
 
   /**

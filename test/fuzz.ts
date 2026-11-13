@@ -28,6 +28,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
+import { EngineSlots, ownStart, takenOverUnderSteal } from '../src/engine-slots.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
 import { answersTo, GameLog, type LogEntry, type Severity } from '../src/game-log.js';
 import {
@@ -66,7 +67,7 @@ import {
   type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
-import { MemoryGate, runShares } from '../src/suite-run.js';
+import { MemoryGate, HandedSlot, ordered, type RunOrder, rerunAfterStarving, runShares } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
@@ -2388,6 +2389,343 @@ function theDebuggerStreamIsCutProof(): void {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The order of a run's suites, and what follows an engine that ran out of memory
+// ---------------------------------------------------------------------------------------------
+
+const ORDER_SUITES = [
+  'res://tests/a_test.gd',
+  'res://tests/B_test.gd',
+  'res://tests/ab_test.gd',
+  'res://tests/a_b_test.gd',
+  'res://tests/sub/c_test.gd',
+  'res://tests/Z_test.gd',
+  'res://other/d_test.gd',
+];
+
+const orderUnits = fc.array(
+  fc.record({
+    suite: fc.constantFrom(...ORDER_SUITES),
+    func: fc.constantFrom('test_a', 'test_b', 'test_c'),
+    cost: fc.constant(1),
+  }),
+  { maxLength: 14 },
+);
+
+const orderSeed = fc.oneof(
+  fc.constantFrom(0, 1, 7, 2 ** 31, 2 ** 32 - 1, 2 ** 32, Number.MAX_SAFE_INTEGER),
+  fc.nat(),
+);
+
+function keysOf(units: readonly Unit[]): string[] {
+  return units.map((unit) => `${unit.suite}:${unit.cases.join(',')}`).toSorted(byCodeUnit);
+}
+
+/**
+ * Every order keeps every unit once. A seed names one order whatever order the units were listed
+ * in and whatever the machine's locale sorts first. Reversed runs the suites from the last path to
+ * the first by code unit, and named runs them as the entries name them.
+ */
+function aSuiteOrderKeepsEveryUnitAndRepeats(): void {
+  const entriesOf = fc.array(
+    fc.oneof(
+      fc.constantFrom(...ORDER_SUITES),
+      fc.constantFrom(...ORDER_SUITES).map((path) => `${path}:test_a`),
+      fc.constantFrom('res://tests/', 'res://tests/sub', 'res://other/'),
+    ),
+    { maxLength: 6 },
+  );
+  fc.assert(
+    fc.property(orderUnits, orderSeed, entriesOf, fc.nat(), (listed, seed, selected, turn) => {
+      const units = listed.map(asUnit);
+      const turned = [...units.slice(turn % (units.length + 1)), ...units.slice(0, turn % (units.length + 1))];
+      const orders: RunOrder[] = ['reversed', 'named', seed];
+      for (const order of orders) {
+        const result = ordered(units, order, selected);
+        assert.deepEqual(keysOf(result), keysOf(units), `${String(order)} keeps every unit once`);
+        assert.deepEqual(ordered(units, order, selected), result, `${String(order)} repeats`);
+        const suites = result.map((unit) => unit.suite);
+        if (order === 'reversed') {
+          for (let at = 1; at < suites.length; at += 1) {
+            assert.ok((suites[at - 1] ?? '') >= (suites[at] ?? ''), `reversed by code unit: ${suites.join()}`);
+          }
+        }
+        if (order === 'named') {
+          const rank = (suite: string): number =>
+            selected.findIndex((entry) => {
+              const path = /^(.+\.gd):[^/]*$/.exec(entry)?.[1] ?? entry;
+              return path === suite || suite.startsWith(path.endsWith('/') ? path : `${path}/`);
+            });
+          for (let at = 1; at < suites.length; at += 1) {
+            const before = suites[at - 1] ?? '';
+            const here = suites[at] ?? '';
+            assert.ok(
+              rank(before) < rank(here) || (rank(before) === rank(here) && before <= here),
+              `named: ${before} then ${here}`,
+            );
+          }
+        }
+        // The suites come out in one order whatever order the units were listed in.
+        assert.deepEqual(
+          ordered(turned, order, selected).map((unit) => unit.suite),
+          suites,
+          `${String(order)} does not depend on the listing`,
+        );
+      }
+    }),
+    { numRuns: 200 },
+  );
+}
+
+interface FinishedEngine {
+  readonly index: number;
+  readonly peakBytes?: number;
+  readonly verdict: { readonly passed: boolean; readonly starved: boolean };
+  readonly again?: boolean;
+}
+
+/**
+ * Failed engines run again only once one of them ran out of memory, one at a time, in the order they
+ * ran. Engines that passed are never run again and stay where they were.
+ */
+async function failedEnginesRunAgainOneAtATime(): Promise<void> {
+  const engine = fc.record({
+    passed: fc.boolean(),
+    starved: fc.boolean(),
+    delay: fc.nat({ max: 3 }),
+    againPasses: fc.boolean(),
+  });
+  await fc.assert(
+    fc.asyncProperty(fc.array(engine, { maxLength: 8 }), async (drawn) => {
+      const ran: FinishedEngine[] = drawn.map((one, index) => ({
+        index,
+        verdict: { passed: one.passed, starved: one.starved },
+      }));
+      let going = 0;
+      const calls: number[] = [];
+      const said: string[] = [];
+      const result = await rerunAfterStarving(
+        ran,
+        (line) => said.push(line),
+        async (engineRan) => {
+          going += 1;
+          assert.equal(going, 1, 'engines run again one at a time');
+          calls.push(engineRan.index);
+          const one = drawn[engineRan.index];
+          for (let tick = 0; tick < (one?.delay ?? 0); tick += 1) {
+            await Promise.resolve();
+          }
+          going -= 1;
+          return {
+            index: engineRan.index,
+            verdict: { passed: one?.againPasses === true, starved: false },
+            again: true,
+          };
+        },
+      );
+      const failed = ran.filter((one) => !one.verdict.passed).map((one) => one.index);
+      const rerun = ran.some((one) => one.verdict.starved) && failed.length > 0;
+      assert.deepEqual(calls, rerun ? failed : [], 'every failed engine runs again once, in index order');
+      assert.equal(said.length, rerun ? 1 : 0);
+      assert.equal(result.length, ran.length);
+      for (const [at, one] of ran.entries()) {
+        const now = result[at];
+        assert.equal(now?.index, one.index);
+        if (!rerun || one.verdict.passed) {
+          assert.equal(now, one, 'an engine that passed stays as it was');
+        }
+      }
+    }),
+    { numRuns: 200 },
+  );
+}
+
+type SlotOffer = { readonly kind: 'give' | 'lend'; readonly lock: string } | { readonly kind: 'ended' };
+
+/**
+ * The compile check takes the first slot offered while it still wants one, from a lane giving back
+ * or lending it. A later offer, and any offer after the check ended, is refused, and a lend settles
+ * once the check has ended.
+ */
+async function theCompileCheckTakesOnlyTheFirstSlotOffered(): Promise<void> {
+  const offer: fc.Arbitrary<SlotOffer> = fc.oneof(
+    fc.record({ kind: fc.constantFrom('give', 'lend'), lock: fc.constantFrom('0.lock', '1.lock', '2.lock') }),
+    fc.constant({ kind: 'ended' as const }),
+  );
+  await fc.assert(
+    fc.asyncProperty(fc.boolean(), fc.array(offer, { maxLength: 8 }), async (inALane, offers) => {
+      const handed = new HandedSlot(inALane);
+      let first: string | undefined;
+      let firstKind: 'give' | 'lend' | undefined;
+      let ended = false;
+      const lends: Promise<void>[] = [];
+      let settledLends = 0;
+      for (const step of offers) {
+        if (step.kind === 'ended') {
+          handed.ended();
+          ended = true;
+          continue;
+        }
+        const takes: boolean = !ended && first === undefined && (step.kind === 'give' || inALane);
+        if (step.kind === 'give') {
+          assert.equal(handed.give(step.lock), takes, 'only the first give while wanted is taken');
+        } else {
+          lends.push(
+            handed.lend(step.lock).then(() => {
+              settledLends += 1;
+            }),
+          );
+          await Promise.resolve();
+        }
+        if (takes) {
+          first = step.lock;
+          firstKind = step.kind;
+        }
+      }
+      if (first !== undefined) {
+        assert.equal(await handed.lock, first, 'the lock is the first one offered');
+      }
+      assert.equal(handed.lent, firstKind === 'lend', 'a lend is told it was taken');
+      handed.ended();
+      await Promise.all(lends);
+      assert.equal(settledLends, lends.length, 'every lend settles once the check has ended');
+    }),
+    { numRuns: 200 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The slots of one directory
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The slot an engine's parent holds is lent to one engine of this process at a time, however many
+ * takes begin together, and is lent again once given back. The look at the process tree is a stand-in
+ * that takes as many turns as the draw says.
+ */
+async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
+  const round = fc.record({
+    takes: fc.integer({ min: 1, max: 4 }),
+    ticks: fc.array(fc.nat({ max: 4 }), { minLength: 4, maxLength: 4 }),
+    giveBackInherited: fc.boolean(),
+  });
+  await fc.assert(
+    fc.asyncProperty(fc.array(round, { minLength: 1, maxLength: 4 }), async (rounds) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-inherit-'));
+      try {
+        const slots = new EngineSlots(join(root, 'slots'), 8, { pid: process.pid, started: await ownStart() });
+        let turns: number[] = [];
+        Reflect.set(slots, 'inheritedLock', async (): Promise<string | null> => {
+          for (let tick = 0; tick < (turns.shift() ?? 0); tick += 1) {
+            await Promise.resolve();
+          }
+          return 'inherited.lock';
+        });
+        let inheritedHeld = false;
+        for (const [at, one] of rounds.entries()) {
+          turns = [...one.ticks];
+          const asked: Promise<string | null>[] = [];
+          for (let take = 0; take < one.takes; take += 1) {
+            asked.push(slots.takeFree());
+          }
+          const got = await Promise.all(asked);
+          const inherited = got.filter((lock) => lock === 'inherited.lock').length;
+          assert.equal(
+            inherited,
+            inheritedHeld ? 0 : 1,
+            `round ${String(at)}: ${JSON.stringify(got.map((lock) => (lock === null ? null : basename(lock))))}`,
+          );
+          const real = got.filter((lock): lock is string => lock !== null && lock !== 'inherited.lock');
+          assert.equal(new Set(real).size, real.length, 'no two takes hold one slot');
+          assert.equal(real.length, one.takes - inherited);
+          inheritedHeld = true;
+          for (const lock of real) {
+            slots.release(lock);
+          }
+          if (one.giveBackInherited) {
+            slots.release('inherited.lock');
+            inheritedHeld = false;
+          }
+        }
+        slots.releaseAll();
+      } finally {
+        sweep(root);
+      }
+    }),
+    { numRuns: 40 },
+  );
+}
+
+/**
+ * A take-over reads the lock again under the steal file. A lock replaced by a live holder between
+ * the first look and the steal file is left alone, a steal file another taker holds blocks it, and
+ * the steal file this call made is always given back.
+ */
+async function aTakeOverRereadsTheLockUnderTheStealFile(): Promise<void> {
+  const scene = fc.record({
+    replacedBeforeSteal: fc.boolean(),
+    stealBefore: fc.constantFrom('none', 'fresh', 'old'),
+    retake: fc.boolean(),
+  });
+  await fc.assert(
+    fc.asyncProperty(scene, async ({ replacedBeforeSteal, stealBefore, retake }) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-steal-'));
+      try {
+        const lock = join(root, 'held.lock');
+        const steal = `${lock}.steal`;
+        writeFileSync(lock, 'stale');
+        if (stealBefore !== 'none') {
+          writeFileSync(steal, '');
+          if (stealBefore === 'old') {
+            const longAgo = new Date(Date.now() - 3_600_000);
+            utimesSync(steal, longAgo, longAgo);
+          }
+        }
+        let looks = 0;
+        const taken = await takenOverUnderSteal(
+          lock,
+          () => {
+            looks += 1;
+            const stale = readFileSync(lock, 'utf8') === 'stale';
+            if (looks === 1 && replacedBeforeSteal) {
+              // Another taker replaces the lock after this look judged it.
+              writeFileSync(lock, 'fresh');
+            }
+            return Promise.resolve(stale);
+          },
+          (path) => {
+            try {
+              writeFileSync(path, 'mine', { flag: 'wx' });
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          retake,
+        );
+        const expected = stealBefore === 'none' && !replacedBeforeSteal;
+        assert.equal(taken, expected, JSON.stringify({ looks, stealBefore, replacedBeforeSteal }));
+        if (stealBefore !== 'none') {
+          // A steal file another taker holds blocks this one. One left long ago is removed, and the
+          // take is left to the next look.
+          assert.equal(existsSync(steal), stealBefore === 'fresh', `the ${stealBefore} steal file`);
+          assert.equal(readFileSync(lock, 'utf8'), replacedBeforeSteal ? 'fresh' : 'stale');
+        } else if (replacedBeforeSteal) {
+          assert.equal(readFileSync(lock, 'utf8'), 'fresh', 'a lock made fresh since the look stays');
+        } else {
+          assert.equal(existsSync(lock) ? readFileSync(lock, 'utf8') : null, retake ? 'mine' : null);
+        }
+        if (stealBefore === 'none') {
+          assert.equal(existsSync(steal), false, 'the steal file is given back');
+        }
+      } finally {
+        sweep(root);
+      }
+    }),
+    { numRuns: 60 },
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -2420,5 +2758,10 @@ aGameLogReadsTheSameWhenInterleavedAndRead();
 aFoldedErrorCostsTheSameAtEveryFrame();
 aWideFoldSpreadsNoList();
 theDebuggerStreamIsCutProof();
+aSuiteOrderKeepsEveryUnitAndRepeats();
+await failedEnginesRunAgainOneAtATime();
+await theCompileCheckTakesOnlyTheFirstSlotOffered();
+await anInheritedSlotServesOneTakeAtATime();
+await aTakeOverRereadsTheLockUnderTheStealFile();
 
 console.log('fuzz properties held');

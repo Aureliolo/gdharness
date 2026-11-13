@@ -84,6 +84,7 @@ import {
   versionFault,
 } from './suite-judge.js';
 import {
+  byCodeUnit,
   type CasesBySuite,
   capsFrames,
   type DeclaredSuite,
@@ -111,7 +112,7 @@ import {
 import { getLocalVersion } from './version.js';
 
 /** An order `--order` runs every suite in, in one engine. A number is the seed it is shuffled by. */
-type RunOrder = 'reversed' | 'named' | number;
+export type RunOrder = 'reversed' | 'named' | number;
 
 interface TestOptions {
   readonly projectPath: string;
@@ -485,8 +486,8 @@ function suitesOfEntry(scripts: ProjectScripts, options: TestOptions, path: stri
  * [param units] in the order [param order] asks: reversed by path, in the order [param selected]
  * names them, or shuffled by a seed.
  */
-function ordered(units: readonly Unit[], order: RunOrder, selected: readonly string[]): Unit[] {
-  const sorted = [...units].toSorted((a, b) => a.suite.localeCompare(b.suite));
+export function ordered(units: readonly Unit[], order: RunOrder, selected: readonly string[]): Unit[] {
+  const sorted = [...units].toSorted((a, b) => byCodeUnit(a.suite, b.suite));
   if (order === 'reversed') {
     return sorted.reverse();
   }
@@ -1175,17 +1176,27 @@ async function ranEngines(
   } finally {
     follower?.end();
   }
-  if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
-    say(outOfMemorySaid(ran));
-    const again: EngineRan[] = [];
-    for (const engine of ran) {
-      again.push(
-        engine.verdict.passed ? engine : await runEngine(launch, engine.plan, engine.index, times, 'again'),
-      );
-    }
-    return again;
+  return await rerunAfterStarving(ran, say, (engine) =>
+    runEngine(launch, engine.plan, engine.index, times, 'again'),
+  );
+}
+
+/**
+ * [param ran] as it stands, or once an engine ran out of memory and another failed, with every
+ * failed engine run again by [param runAgain], one after another in the order they ran.
+ */
+export async function rerunAfterStarving<
+  T extends Pick<EngineRan, 'index' | 'peakBytes'> & { readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'> },
+>(ran: readonly T[], say: (line: string) => void, runAgain: (engine: T) => Promise<T>): Promise<T[]> {
+  if (!ran.some((engine) => engine.verdict.starved) || ran.every((engine) => engine.verdict.passed)) {
+    return [...ran];
   }
-  return ran;
+  say(outOfMemorySaid(ran));
+  const again: T[] = [];
+  for (const engine of ran) {
+    again.push(engine.verdict.passed ? engine : await runAgain(engine));
+  }
+  return again;
 }
 
 /** Writes the times the engines measured, saying so where they could not be written. */

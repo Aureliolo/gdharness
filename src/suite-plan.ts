@@ -888,7 +888,7 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
 }
 
 /** Orders two strings by code unit, as every other by-path order here does and whatever the locale. */
-function byCodeUnit(a: string, b: string): number {
+export function byCodeUnit(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
