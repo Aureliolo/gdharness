@@ -8,7 +8,7 @@ import { answerJson, type ToolResponse } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { waitFromEnv } from './launch.js';
-import { isSameDirectory, isWithinRoot, notAGodotProject, resolveWithinProject } from './paths.js';
+import { isSameDirectory, notAGodotProject, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 
@@ -1207,10 +1207,6 @@ async function resolveLSPPaths(
   const notScript = notAScript(contained.relativePath);
   if (notScript !== null) {
     throw new ArgumentRefusal(notScript);
-  }
-
-  if (!isWithinRoot(projectPath, scriptPath)) {
-    throw new ArgumentRefusal('scriptPath resolves outside the project root boundary.');
   }
 
   return { projectPath, scriptPath };

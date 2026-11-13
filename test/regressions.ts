@@ -368,6 +368,7 @@ import {
   isGodotProject,
   isSameDirectory,
   isWithinRoot,
+  linkOutOf,
   notAGodotProject,
   realAsFarAsItExists,
   relativeWithin,
@@ -417,7 +418,6 @@ import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
-  linkOutOf,
   type RenameServices,
   renameSymbol,
   resourcePathOf,
@@ -692,7 +692,7 @@ import {
   wholeTreeSaid,
 } from '../src/suite-run.js';
 import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
-import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
+import { casesOutOfPath, scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -39625,7 +39625,7 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
       const judged = exportedBuild(project, candidate);
       return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
     };
-    assert.match(reason('linked/game.exe'), /^linked\/game\.exe leads outside the project, to .*outside/);
+    assert.match(reason('linked/game.exe'), /leads out of the project through the link res:\/\/linked\//);
     assert.match(reason('export/missing.exe'), /^There is no export\/missing\.exe in the project to start/);
     assert.match(reason('export'), /^export is not a file/);
     assert.match(reason('../outside/game.exe'), /resolves outside the project directory/);
@@ -54338,7 +54338,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         assert.match(await read(request, 'godot://script/main.gd'), /# ours/, 'the project is read');
         const linked = await read(request, 'godot://script/vendor/secret.gd');
         assert.doesNotMatch(linked, /the secret/, `a link out of the project is not followed: ${linked}`);
-        assert.match(linked, /leads outside the project through a link/, linked);
+        assert.match(linked, /through the link res:\/\/vendor\//, linked);
 
         // A search in one place: the folder is read, and a link out of the project is not.
         const inScripts = await call('project_search', {
@@ -54354,7 +54354,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         for (const through of ['res://vendor', 'res://vendor/secret.gd']) {
           assert.equal(
             await call('project_search', { projectPath: ours, query: 'secret', path: through }),
-            `${through} leads outside the project through a link, so it is not searched.`,
+            `Path '${through}' leads out of the project through the link res://vendor/, and only what is inside the project is taken here.`,
           );
         }
         assert.equal(
@@ -96883,16 +96883,12 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
 
     mkdirSync(join(project, 'held'));
     symlinkSync(outside, join(project, 'held', 'far'), 'junction');
-    for (const [given, folder] of [
-      ['res://held', 'held/far'],
-      ['res://shared', 'shared'],
-    ] as const) {
-      const refused = scriptsToDiagnose(project, given);
-      assert.ok(
-        !refused.ok && refused.reason.includes(`${folder} is a link that leads out of the project`),
-        `${given}: ${JSON.stringify(refused)}`,
-      );
-    }
+    const heldRefused = scriptsToDiagnose(project, 'res://held');
+    assert.ok(
+      !heldRefused.ok && heldRefused.reason.includes('held/far is a link that leads out of the project'),
+      JSON.stringify(heldRefused),
+    );
+    assert.deepEqual(scriptsToDiagnose(project, 'res://shared'), { ok: true, value: null });
 
     mkdirSync(join(project, 'real'));
     symlinkSync(join(project, 'real'), join(project, 'inner'), 'junction');
@@ -96904,6 +96900,171 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
     }
   } finally {
     sweep(project, moving, outside);
+  }
+}
+
+/** A project with a folder, a file and a gone-target link out, and one that stays inside. */
+function namedPathProject(): { project: string; outside: string; fileLinks: boolean } {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-named-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'a.gd': 'extends Node\n',
+    'real/r.gd': 'extends Node\n',
+    'linked.gdx/x.gd': 'extends Node\n',
+  });
+  writeTree(outside, { 'o.gd': 'extends Node\n', 'tool/plugin.cfg': '[plugin]\n' });
+  const junction = (target: string, name: string): void => {
+    symlinkSync(target, join(project, name), 'junction');
+  };
+  junction(join(project, 'real'), 'link');
+  junction(outside, 'shared');
+  junction(join(project, 'real', 'old'), 'gone');
+  junction(join(outside, 'later'), 'later');
+  junction(join(project, 'ring2'), 'ring1');
+  junction(join(project, 'ring1'), 'ring2');
+  symlinkSync(join(project, 'real'), join(outside, 'back'), 'junction');
+  mkdirSync(join(project, 'addons'));
+  junction(join(outside, 'tool'), join('addons', 'tool'));
+  let fileLinks = true;
+  try {
+    symlinkSync(join(outside, 'o.gd'), join(project, 'linked.gd'), 'file');
+    symlinkSync(join(outside, 'made.gd'), join(project, 'made.gd'), 'file');
+  } catch {
+    fileLinks = false;
+  }
+  return { project, outside, fileLinks };
+}
+
+/** A path the server's own code names is refused where it leads out through a link, and one for the engine is not. */
+async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
+  const { project, outside, fileLinks } = namedPathProject();
+  try {
+    const refusal = (given: string, link: string): string =>
+      `Path '${given}' leads out of the project through the link ${link}, and only what is inside the project is taken here.`;
+    const reasonOf = (given: string, options?: { root?: boolean }): string => {
+      const found = resolveWithinProject(project, given, options);
+      return found.ok ? `accepted ${found.absolutePath}` : found.reason;
+    };
+    assert.equal(reasonOf('res://shared/o.gd'), refusal('res://shared/o.gd', 'res://shared/'));
+    assert.equal(reasonOf('res://shared', { root: true }), refusal('res://shared', 'res://shared/'));
+    const absolute = join(project, 'shared', 'o.gd');
+    assert.equal(reasonOf(absolute), refusal(absolute, 'res://shared/'));
+    assert.equal(reasonOf('res://shared/new/x.gd'), refusal('res://shared/new/x.gd', 'res://shared/'));
+    if (fileLinks) {
+      assert.equal(reasonOf('res://linked.gd'), refusal('res://linked.gd', 'res://linked.gd'));
+      assert.equal(reasonOf('res://made.gd'), refusal('res://made.gd', 'res://made.gd'));
+    } else {
+      console.log('  skipped the file links: the platform refuses one');
+    }
+    assert.deepEqual(resolveWithinProject(project, 'res://linked.gdx/x.gd'), {
+      ok: true,
+      absolutePath: join(project, 'linked.gdx', 'x.gd'),
+      relativePath: 'linked.gdx/x.gd',
+    });
+    assert.deepEqual(resolveWithinProject(project, 'res://link/r.gd'), {
+      ok: true,
+      absolutePath: join(project, 'link', 'r.gd'),
+      relativePath: 'link/r.gd',
+    });
+    rmSync(join(project, 'real', 'old'), { recursive: true, force: true });
+    assert.equal(resolveWithinProject(project, 'res://gone/x.gd').ok, true, 'a link whose target is gone');
+    assert.equal(reasonOf('res://later/x.gd'), refusal('res://later/x.gd', 'res://later/'));
+    assert.equal(reasonOf('res://later', { root: true }), refusal('res://later', 'res://later/'));
+    assert.equal(linkOutOf(project, join(project, 'later', 'x.gd')), 'res://later/');
+    assert.equal(resolveWithinProject(project, 'res://ring1/x.gd').ok, true, 'a ring of links');
+    assert.equal(resolveWithinProject(project, 'res://shared/back/r.gd').ok, true, 'out and back in');
+
+    for (const given of ['res://shared/o.gd', 'res://later/x.gd', 'addons/tool/plugin.cfg']) {
+      const found = resolveWithinProject(project, given, { forTheEngine: true });
+      assert.ok(found.ok, `${given}: ${JSON.stringify(found)}`);
+    }
+    assert.match(reasonOf('../outside/o.gd'), /resolves outside the project directory/);
+    const stillRefused = resolveWithinProject(project, '../outside/o.gd', { forTheEngine: true });
+    assert.ok(!stillRefused.ok && stillRefused.reason.includes('resolves outside the project directory'));
+
+    assert.deepEqual(scriptsToDiagnose(project, 'res://shared'), { ok: true, value: null });
+    const source = projectSourceOf(project);
+    assert.equal(source('res://shared/o.gd'), null);
+    assert.equal(source('res://a.gd'), 'extends Node\n');
+    const split = casesOutOfPath(project, 'res://shared/o_test.gd:test_x', undefined);
+    assert.ok(split.ok, JSON.stringify(split));
+    assert.equal(split.path, 'res://shared/o_test.gd');
+
+    await withStdioServer(
+      async (call) => {
+        const through = 'through the link res://shared/';
+        const answers = [
+          await call('script_diagnostics', { projectPath: project, scriptPath: 'res://shared/o.gd' }),
+          await call('script_diagnostics', { projectPath: project, scriptPath: ['res://shared/o.gd'] }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://shared/o.gd',
+            symbol: 'Shared',
+            newName: 'Common',
+          }),
+          await call('project_search', { projectPath: project, query: 'extends', path: 'res://shared' }),
+        ];
+        for (const answer of answers) {
+          assert.ok(answer.includes(through), answer);
+        }
+        const kept = readdirSync(outside).toSorted();
+        const moves = [
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://a.gd',
+            newPath: 'res://shared/a.gd',
+          }),
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://a.gd',
+            newPath: 'res://later/a.gd',
+          }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://a.gd',
+            symbol: 'A',
+            newName: 'B',
+            newScriptPath: 'res://shared/a.gd',
+          }),
+        ];
+        for (const [at, link] of [
+          [0, 'res://shared/'],
+          [1, 'res://later/'],
+          [2, 'res://shared/'],
+        ] as const) {
+          const said = String(moves[at]);
+          assert.ok(said.includes(`through the link ${link}`), said);
+        }
+        assert.ok(existsSync(join(project, 'a.gd')), 'a.gd stays where it was');
+        assert.deepEqual(readdirSync(outside).toSorted(), kept, 'nothing was written outside');
+        assert.deepEqual(kept, ['o.gd', 'tool']);
+
+        const taken = [
+          await call('project_export', {
+            op: 'run',
+            projectPath: project,
+            outputPath: 'res://shared/game.exe',
+          }),
+          await call('project_settings', {
+            op: 'disable_plugin',
+            projectPath: project,
+            pluginName: 'tool',
+          }),
+        ];
+        for (const answer of taken) {
+          assert.doesNotMatch(answer, /through the link/, answer);
+        }
+      },
+      { GODOT_PATH: standInEngine() },
+    );
+  } finally {
+    sweep(dirname(project));
   }
 }
 
@@ -97349,6 +97510,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenameOfAScriptInANestedProjectIsRefused,
   testAMoveIntoAFolderHoldingAProjectIsRefused,
   testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
+  testANamedPathBehindALinkOutIsRefused,
   testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,

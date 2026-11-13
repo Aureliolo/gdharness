@@ -8,9 +8,8 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
-import { statOf } from './listed-reads.js';
 import { LSPTimeout } from './lsp_client.js';
-import { relativeWithin } from './paths.js';
+import { linkOutOf, relativeWithin } from './paths.js';
 import { ignoredTexts, linksOut, type ProjectText, type Reach, scanProject } from './project-scan.js';
 import {
   ClassGraph,
@@ -114,28 +113,6 @@ const WHAT: Record<DeclarationKind, string> = {
 export function resourcePathOf(projectPath: string, absolute: string): string | null {
   const inside = relativeWithin(onDiskSpelling(projectPath), onDiskSpelling(absolute));
   return inside === null || inside === '' ? null : `res://${inside}`;
-}
-
-/**
- * The link [param absolute], a path in the project as written, goes out of the project by, as a
- * `res://` path in the caller's spelling with a closing slash for a folder. It is the shortest
- * leading part whose real place lies outside the project. Null where no part leaves.
- */
-export function linkOutOf(projectPath: string, absolute: string): string | null {
-  const written = relativeWithin(projectPath, absolute);
-  if (written === null || written === '') {
-    return null;
-  }
-  const realProject = onDiskSpelling(projectPath);
-  const steps = written.split('/');
-  for (const [index] of steps.entries()) {
-    const part = join(projectPath, ...steps.slice(0, index + 1));
-    if (relativeWithin(realProject, onDiskSpelling(part)) === null) {
-      const isFolder = index < steps.length - 1 || statOf(part)?.isDirectory() === true;
-      return `res://${steps.slice(0, index + 1).join('/')}${isFolder ? '/' : ''}`;
-    }
-  }
-  return null;
 }
 
 /**

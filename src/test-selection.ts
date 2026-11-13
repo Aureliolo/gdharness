@@ -34,7 +34,8 @@ export function casesOutOfPath(
   const whole: string[] = [];
   const path = entries.map((entry) => {
     const caseAt = typeof entry === 'string' ? CASE_AFTER_SCRIPT.exec(entry.trim()) : null;
-    const suite = caseAt === null ? null : resolveWithinProject(projectPath, caseAt[1] ?? '');
+    const suite =
+      caseAt === null ? null : resolveWithinProject(projectPath, caseAt[1] ?? '', { forTheEngine: true });
     if (caseAt === null || suite === null || !suite.ok) {
       if (typeof entry === 'string') {
         whole.push(entry);

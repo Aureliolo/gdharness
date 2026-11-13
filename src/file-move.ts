@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { relativeWithin } from './paths.js';
+import { linkOutOf, relativeWithin } from './paths.js';
 import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
@@ -41,7 +41,6 @@ import {
   changedReport,
   type LeftAloneDetail,
   leftAloneReport,
-  linkOutOf,
   onDiskSpelling,
   resourcePathOf,
   summaryOf,

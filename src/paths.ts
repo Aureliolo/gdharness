@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
@@ -72,6 +72,89 @@ export function realAsFarAsItExists(path: string): string {
       at = parent;
     }
   }
+}
+
+/** How many links one path is followed through before it is taken to run in a ring. */
+const MOST_LINKS = 40;
+
+/** Where the link [param at] points, or null when [param at] is not a link. */
+function linkTarget(at: string): string | null {
+  try {
+    return lstatSync(at).isSymbolicLink() ? readlinkSync(at) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where [param path] leads: `realAsFarAsItExists`, except that a climb stopping at a name that is a
+ * link goes on from the link's target, which `realpath` cannot do for a link whose target is gone.
+ * A write through such a link makes the file at its target, so that is where the path leads. After
+ * [constant MOST_LINKS] links the path is answered as written, since nothing opens through a ring.
+ */
+function whereItLeads(path: string): string {
+  let current = resolve(path);
+  for (let followed = 0; followed < MOST_LINKS; followed++) {
+    const missing: string[] = [];
+    let at = current;
+    let existing: string | null = null;
+    while (existing === null) {
+      try {
+        existing = realpathSync.native(at);
+      } catch {
+        const parent = dirname(at);
+        if (parent === at) {
+          return resolve(path);
+        }
+        missing.unshift(basename(at));
+        at = parent;
+      }
+    }
+    const [first, ...rest] = missing;
+    if (first === undefined) {
+      return existing;
+    }
+    const link = join(existing, first);
+    const target = linkTarget(link);
+    if (target === null) {
+      return join(link, ...rest);
+    }
+    current = join(resolve(dirname(link), target), ...rest);
+  }
+  return resolve(path);
+}
+
+/**
+ * The link [param absolute], a path in the project as written, goes out of the project by, as a
+ * `res://` path in the caller's spelling with a closing slash for a folder. It is the shortest
+ * leading part whose real place lies outside the project. Null where no part leaves.
+ */
+export function linkOutOf(projectPath: string, absolute: string): string | null {
+  const written = relativeWithin(projectPath, absolute);
+  if (written === null || written === '') {
+    return null;
+  }
+  const realProject = realAsFarAsItExists(resolve(projectPath));
+  const steps = written.split('/');
+  for (const [index] of steps.entries()) {
+    const part = join(projectPath, ...steps.slice(0, index + 1));
+    if (relativeWithin(realProject, whereItLeads(part)) === null) {
+      return `res://${steps.slice(0, index + 1).join('/')}${isFolderAt(part, index < steps.length - 1) ? '/' : ''}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether the link [param part] names a folder. A link whose target is gone cannot say, so a name
+ * without an extension is read as a folder, since every file a project holds has one.
+ */
+function isFolderAt(part: string, hasMore: boolean): boolean {
+  if (hasMore) {
+    return true;
+  }
+  const found = statSync(part, { throwIfNoEntry: false });
+  return found === undefined ? !/.\.[^.]+$/.test(basename(part)) : found.isDirectory();
 }
 
 /**
@@ -277,7 +360,7 @@ function colonRefusal(trimmed: string, withoutScheme: string): string | null {
 export function resolveWithinProject(
   projectPath: string,
   candidatePath: string,
-  options: { root?: boolean } = {},
+  options: { root?: boolean; forTheEngine?: boolean } = {},
 ): Containment {
   const trimmed = candidatePath.trim();
   if (trimmed === '') {
@@ -324,13 +407,24 @@ export function resolveWithinProject(
     return { ok: false, reason: `Path '${trimmed}' is the project directory itself, not a file in it.` };
   }
 
+  if (
+    options.forTheEngine !== true &&
+    relativeWithin(realAsFarAsItExists(root), whereItLeads(absolutePath)) === null
+  ) {
+    const link = linkOutOf(root, absolutePath) ?? `res://${relativePath}`;
+    return {
+      ok: false,
+      reason: `Path '${trimmed}' leads out of the project through the link ${link}, and only what is inside the project is taken here.`,
+    };
+  }
+
   return { ok: true, absolutePath, relativePath };
 }
 
 /**
- * An exported build to start, which must already be a file inside the project, judged by where it
- * really is. Followed through links because this is a file this server will run: a link inside the
- * project pointing at any program on the machine would otherwise be started as the game.
+ * An exported build to start, which must already be a file inside the project. The gate has
+ * refused a link out of the project, so a link inside it pointing at any program on the machine is
+ * never started as the game.
  */
 export function exportedBuild(projectPath: string, candidatePath: string): Containment {
   const found = resolveWithinProject(projectPath, candidatePath);
@@ -344,12 +438,6 @@ export function exportedBuild(projectPath: string, candidatePath: string): Conta
     return {
       ok: false,
       reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
-    };
-  }
-  if (!isWithinRoot(realAsFarAsItExists(projectPath), real)) {
-    return {
-      ok: false,
-      reason: `${found.relativePath} leads outside the project, to ${real}, so it is not started.`,
     };
   }
   if (!statSync(real).isFile()) {

@@ -21,7 +21,6 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  realpathSync,
   rmdirSync,
   statSync,
   writeFileSync,
@@ -276,13 +275,7 @@ import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
-import {
-  type NameTaken,
-  type RenameOutcome,
-  renameSymbol,
-  resourcePathOf,
-  writeLeftAloneDetail,
-} from './rename-symbol.js';
+import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -4119,7 +4112,7 @@ function resolveTestEntries(
         reason: `${argument}${wasList ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
-    const location = resolveWithinProject(projectPath, entry);
+    const location = resolveWithinProject(projectPath, entry, { forTheEngine: true });
     if (!location.ok) {
       return { ok: false, reason: location.reason };
     }
@@ -6849,7 +6842,9 @@ class GodotServer {
     args: OperationParams,
     project: { readonly value: { readonly path: string } },
   ): Promise<ToolResponse> {
-    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
+    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '', {
+      forTheEngine: true,
+    });
     if (!located.ok) {
       return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
     }
@@ -7531,7 +7526,7 @@ class GodotServer {
       if (value === undefined) {
         continue;
       }
-      const location = resolveWithinProject(projectPath, value);
+      const location = resolveWithinProject(projectPath, value, { forTheEngine: true });
       if (!location.ok) {
         const kept = keptInside(value);
         const solutions =
@@ -7580,7 +7575,7 @@ class GodotServer {
           resolved.push(source);
           continue;
         }
-        const location = resolveWithinProject(projectPath, texture);
+        const location = resolveWithinProject(projectPath, texture, { forTheEngine: true });
         if (!location.ok) {
           return { ok: false, response: this.createErrorResponse(location.reason, PATH_SOLUTIONS) };
         }
@@ -7600,7 +7595,9 @@ class GodotServer {
   ): Checked<OperationParams> {
     const pluginName = readNonEmptyString(args, 'pluginName');
     if (pluginName !== undefined) {
-      const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
+      const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`, {
+        forTheEngine: true,
+      });
       if (!plugin.ok) {
         return {
           ok: false,
@@ -8593,16 +8590,6 @@ class GodotServer {
     if (place !== null && !existsSync(place.absolutePath)) {
       return this.createErrorResponse(nothingToSearchAt(project.value.path, place.relativePath));
     }
-    // The search reads nothing behind a link out of the project, but the place asked for is opened through one,
-    // so a link inside the project naming a folder outside it would be searched whole.
-    if (
-      place !== null &&
-      !isWithinRoot(realpathSync.native(project.value.path), realpathSync.native(place.absolutePath))
-    ) {
-      return this.createErrorResponse(
-        `res://${place.relativePath} leads outside the project through a link, so it is not searched.`,
-      );
-    }
     return this.runProjectSearch(args, project.value.path, place);
   }
 
@@ -8642,7 +8629,8 @@ class GodotServer {
       return project.response;
     }
     const given = readNonEmptyString(args, 'outputPath');
-    const output = given === undefined ? null : resolveWithinProject(project.value.path, given);
+    const output =
+      given === undefined ? null : resolveWithinProject(project.value.path, given, { forTheEngine: true });
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
@@ -8699,7 +8687,9 @@ class GodotServer {
     const preset = readString(args, 'preset') ?? '';
     const given = readString(args, 'outputPath');
     const output =
-      given === undefined || given === '' ? null : resolveWithinProject(project.value.path, given);
+      given === undefined || given === ''
+        ? null
+        : resolveWithinProject(project.value.path, given, { forTheEngine: true });
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
@@ -8821,7 +8811,9 @@ class GodotServer {
       return project.response;
     }
     const preset = readNonEmptyString(args, 'preset') ?? '';
-    const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '');
+    const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '', {
+      forTheEngine: true,
+    });
     if (!output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
@@ -10750,7 +10742,7 @@ class GodotServer {
     why: Unanswered,
   ): Promise<{ answers: OperationParams[]; classesRebuiltFirst: string[] } | { refusal: ToolResponse }> {
     const resPaths = scripts.map((script) => {
-      const contained = resolveWithinProject(projectPath, script);
+      const contained = resolveWithinProject(projectPath, script, { forTheEngine: true });
       return contained.ok ? `res://${contained.relativePath}` : script;
     });
     const checked = await this.compileScripts(projectPath, resPaths);
@@ -12885,7 +12877,8 @@ class GodotServer {
       return suites.response;
     }
     const scene = suites.value === null ? readNonEmptyString(args, 'scene') : SUITES_SCENE;
-    const sceneToRun = scene !== undefined ? resolveWithinProject(project.value.path, scene) : null;
+    const sceneToRun =
+      scene !== undefined ? resolveWithinProject(project.value.path, scene, { forTheEngine: true }) : null;
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
@@ -18903,6 +18896,9 @@ class GodotServer {
    * An editor this server opened is waited for first, since one importing the project as it starts
    * is no engine to boot a second beside. One that never connects leaves the file to read all the
    * same.
+   *
+   * The engine is handed the path as the caller wrote it, so a file behind a link is read where the
+   * link leads.
    */
   private async readFromFile(
     args: OperationParams,
@@ -18920,15 +18916,13 @@ class GodotServer {
     if (this.editorHasOpen(projectPath)) {
       return this.byTheEditor(await throughTheEditor(), 'reads');
     }
-    const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '');
+    const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '', {
+      forTheEngine: true,
+    });
     if (!where.ok) {
       return this.createErrorResponse(where.reason);
     }
-    const file = resourcePathOf(projectPath, where.absolutePath);
-    if (file === null) {
-      return this.createErrorResponse(`${pathKey} must name a file inside the project.`);
-    }
-    const outcome = await this.operation(operation, paramsFor(file), projectPath);
+    const outcome = await this.operation(operation, paramsFor(`res://${where.relativePath}`), projectPath);
     if (!outcome.ok) {
       return this.answer(outcome);
     }
@@ -18989,7 +18983,9 @@ class GodotServer {
     const written =
       readNonEmptyString(contained.value, 'scenePath') ?? readNonEmptyString(contained.value, 'resourcePath');
     const target =
-      effect === 'writes' && written !== undefined ? resolveWithinProject(projectPath, written) : null;
+      effect === 'writes' && written !== undefined
+        ? resolveWithinProject(projectPath, written, { forTheEngine: true })
+        : null;
     return target?.ok === true ? await inTurnFor(projectPath, target.absolutePath, run) : await run();
   }
 
