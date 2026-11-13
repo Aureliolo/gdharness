@@ -2153,6 +2153,8 @@ function engineArguments(launch: Launch, plan: EnginePlan, directory: string, fi
     '-rc',
     '1',
     '--',
+    // The engine keeps --accessibility to itself, so the runner is told to ask for the tree.
+    ...(plan.accessible ? ['--ask-for-the-tree'] : []),
     '--suites-in',
     files.suites,
     '--skipping-in',

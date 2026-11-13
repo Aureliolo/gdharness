@@ -9351,6 +9351,8 @@ class GodotServer {
       '-rc',
       '1',
       '--',
+      // The engine keeps --accessibility to itself, so the runner is told to ask for the tree.
+      ...(windowed && accessible.length > 0 ? ['--ask-for-the-tree'] : []),
       '--suites-in',
       suitesFile,
       '--skipping-in',

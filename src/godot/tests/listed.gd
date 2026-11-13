@@ -72,6 +72,9 @@ const COMPILED: String = "gdharness compiled every script together"
 ## A suite loads from the end of the suite before it, or from the session's opening, until gdUnit4
 ## reports it begun, and its `before()` runs from there to its first case.
 const TIMING: String = "gdharness timing:"
+## Asks for the accessibility tree before the first suite, for an engine started with
+## `--accessibility always` ([GdhTreeAsk]).
+const ASK_FOR_THE_TREE: String = "--ask-for-the-tree"
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
 ## Ends the runner's own arguments: everything after it is gdUnit4's options, for a run with no
@@ -90,6 +93,7 @@ const WALK_ENDED: String = "gdharness: the engine's shutdown cleared every scrip
 const WALK_HOLD: StringName = &"gdharness_scripts_held_past_the_shutdown_walk"
 
 var _runner: GdhRunner = null
+var _asking: GdhTreeAsk = null
 
 
 ## Here rather than in [method _initialize]: Godot loads the script given with `-s` and makes its
@@ -110,21 +114,23 @@ func _initialize() -> void:
 		GdhReached.current.autoloaded()
 	_runner = started(given)
 	_runner.own_path = get_script().resource_path
-	if GdhTreeAsk.wanted():
-		_added_once_asked(GdhTreeAsk.new())
-		return
+	if GdhTreeAsk.wanted(given):
+		_asking = GdhTreeAsk.new()
+		var refused: String = _asking.start()
+		if refused.is_empty():
+			var _connected: int = process_frame.connect(_add_once_answered)
+			return
+		print("%s: %s" % [GdhTreeAsk.UNASKED, refused])
 	root.add_child(_runner)
 
 
-## Adds the runner once [param asking] has its answer, so a suite's first case runs with the tree
-## already built. The engine answers the question between frames, so the wait is frame by frame.
-func _added_once_asked(asking: GdhTreeAsk) -> void:
-	var refused: String = asking.start()
-	while refused.is_empty() and not asking.over():
-		await process_frame
-	var said: String = refused if not refused.is_empty() else asking.outcome()
-	if not said.is_empty():
-		print("%s: %s" % [GdhTreeAsk.UNASKED, said])
+## Adds the runner once the tree has been asked for, so a suite's first case runs with it built. The
+## engine answers the question between frames, so it is looked at frame by frame.
+func _add_once_answered() -> void:
+	if not _asking.over():
+		return
+	process_frame.disconnect(_add_once_answered)
+	print(_asking.outcome())
 	root.add_child(_runner)
 
 
@@ -742,6 +748,8 @@ class GdhFreshFrame:
 class GdhTreeAsk:
 	extends RefCounted
 
+	## Printed with how long the question took.
+	const ASKED: String = "gdharness asked for the accessibility tree"
 	## Printed before why the tree was not asked for.
 	const UNASKED: String = "gdharness could not ask for the accessibility tree"
 	## How long starting PowerShell and loading UI Automation may take. A cold start on a loaded
@@ -759,20 +767,21 @@ $null = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetFirstChild($win
 	var _pid: int = 0
 	var _began_ms: int = 0
 
-	## Whether the engine runs with the tree on, windowed on Windows, where the question is asked.
-	static func wanted() -> bool:
-		if OS.get_name() != "Windows" or DisplayServer.get_name() == "headless":
-			return false
-		var args: PackedStringArray = OS.get_cmdline_args()
-		var at: int = args.find("--accessibility")
-		return at >= 0 and at + 1 < args.size() and args[at + 1] == "always"
+	## Whether [param given] asks for the tree and the engine is windowed on Windows, where the
+	## question is put. The engine keeps `--accessibility` to itself, so the caller says it again.
+	static func wanted(given: PackedStringArray) -> bool:
+		return (
+			given.has(ASK_FOR_THE_TREE)
+			and OS.get_name() == "Windows"
+			and DisplayServer.get_name() != "headless"
+		)
 
 	## Starts the client, or answers why it could not.
 	func start() -> String:
 		var handle: int = DisplayServer.window_get_native_handle(DisplayServer.WINDOW_HANDLE)
 		if handle == 0:
 			return "the engine has no window to ask"
-		# The system's own PowerShell by its path, so a powershell.exe earlier on PATH is not what runs.
+		# The system's own PowerShell by its path, so no powershell.exe earlier on PATH runs.
 		var shell: String = OS.get_environment("SystemRoot").path_join(
 			"System32/WindowsPowerShell/v1.0/powershell.exe"
 		)
@@ -795,13 +804,15 @@ $null = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetFirstChild($win
 	func over() -> bool:
 		return not OS.is_process_running(_pid) or Time.get_ticks_msec() - _began_ms > WAIT_MS
 
-	## Empty once the client has asked, or why it did not.
+	## The line saying how long the question took, or why it was not asked.
 	func outcome() -> String:
 		if OS.is_process_running(_pid):
 			var _killed: Error = OS.kill(_pid)
-			return "UI Automation did not answer within %.0f s" % (WAIT_MS / 1000.0)
+			return "%s: UI Automation did not answer within %.0f s" % [UNASKED, WAIT_MS / 1000.0]
 		var code: int = OS.get_process_exit_code(_pid)
-		return "" if code == 0 else "the UI Automation client exited with code %d" % code
+		if code != 0:
+			return "%s: the UI Automation client exited with code %d" % [UNASKED, code]
+		return "%s in %d ms" % [ASKED, Time.get_ticks_msec() - _began_ms]
 
 
 ## The rows of one parameterised case an engine runs: those named, or every row but those.
