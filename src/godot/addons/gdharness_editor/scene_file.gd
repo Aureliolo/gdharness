@@ -985,7 +985,9 @@ static func _ends_inside(file: String, any_case: bool) -> bool:
 ## [constant MOST_LINKS] links, which is a ring. A link whose target is gone leads to that target.
 static func _followed(path: String) -> String:
 	var parts: PackedStringArray = path.replace("\\", "/").simplify_path().split("/")
-	var disk: DirAccess = DirAccess.create(DirAccess.ACCESS_FILESYSTEM)
+	var disk: DirAccess = DirAccess.open(parts[0] + "/")
+	if disk == null:
+		return ""
 	var current: String = parts[0]
 	var index: int = 1
 	var links: int = 0
