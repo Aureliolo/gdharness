@@ -91,9 +91,23 @@ const WALK_BEGAN: String = "gdharness: the engine's shutdown began clearing scri
 const WALK_ENDED: String = "gdharness: the engine's shutdown cleared every script"
 ## The meta of the theme database holding the scripts [method GdhShutdownWalk.hold] keeps.
 const WALK_HOLD: StringName = &"gdharness_scripts_held_past_the_shutdown_walk"
+## The folder an engine that takes more than one share looks in for the next. As each share ends
+## the engine prints [constant SHARE_ENDED], `<number> exit <code>`, and waits for
+## `next-<number>.txt` there: the arguments that follow `--` for the next share, one a line, or
+## [constant NO_MORE_SHARES] to exit with the code of the share that ended. The caller cuts the log
+## at those lines.
+const SHARES_IN: String = "--shares-in"
+const SHARE_ENDED: String = "gdharness share ended"
+const NO_MORE_SHARES: String = "stop"
+## How often the engine looks for the file of the next share.
+const SHARE_POLL_SECONDS: float = 0.02
+## Printed in place of the start time by a share that runs in an engine already started.
+const REUSED: String = "gdharness timing: reused engine, compiled together"
 
 var _runner: GdhRunner = null
 var _asking: GdhTreeAsk = null
+var _shares_in: String = ""
+var _shares_ended: int = 0
 
 
 ## Here rather than in [method _initialize]: Godot loads the script given with `-s` and makes its
@@ -114,6 +128,9 @@ func _initialize() -> void:
 		GdhReached.current.autoloaded()
 	_runner = started(given)
 	_runner.own_path = get_script().resource_path
+	_shares_in = argument_after(given, SHARES_IN)
+	if not _shares_in.is_empty():
+		_runner.on_share_end = share_ended
 	if GdhTreeAsk.wanted(given):
 		_asking = GdhTreeAsk.new()
 		var refused: String = _asking.start()
@@ -131,6 +148,40 @@ func _add_once_answered() -> void:
 		return
 	process_frame.disconnect(_add_once_answered)
 	print(_asking.outcome())
+	root.add_child(_runner)
+
+
+## Called by the runner as its share ends, in an engine started with [constant SHARES_IN]. Says so
+## in the log, waits for the caller to hand over the next share, and runs it with a runner of its
+## own in this engine, or exits with the code of the share that ended.
+func share_ended(code: int) -> void:
+	GdhReached.stop()
+	print("%s %d exit %d" % [SHARE_ENDED, _shares_ended, code])
+	_shares_ended += 1
+	var next_file: String = _shares_in.path_join("next-%d.txt" % _shares_ended)
+	while not FileAccess.file_exists(next_file):
+		await create_timer(SHARE_POLL_SECONDS).timeout
+	var wanted: String = FileAccess.get_file_as_string(next_file)
+	var _removed: Error = DirAccess.remove_absolute(next_file)
+	if wanted == NO_MORE_SHARES:
+		_runner.exits_the_engine = true
+		quit(code)
+		return
+	var args: PackedStringArray = wanted.split("\n", false)
+	var walk: Array[GDScript] = _runner.walk_scripts
+	_runner.queue_free()
+	# The old runner frees itself, and the engine's record of it, before the next is made.
+	await process_frame
+	await process_frame
+	var into: String = argument_after(args, REACHED_OUT)
+	if not into.is_empty():
+		GdhReached.start(into)
+	if GdhReached.current != null:
+		GdhReached.current.autoloaded()
+	_runner = started(args, walk)
+	_runner.own_path = get_script().resource_path
+	_runner.reused = true
+	_runner.on_share_end = share_ended
 	root.add_child(_runner)
 
 
@@ -167,10 +218,13 @@ func compile_only(given: PackedStringArray) -> void:
 ## The runner over the suites [param given] lists, to be added to the tree, which starts it. Shared
 ## by this script and the suites scene of the tests addon, which loads this file from where the
 ## server ships it and calls this, since the addon itself names no gdUnit4 class.
-static func started(given: PackedStringArray) -> GdhRunner:
-	# First, so the marker is older than every script the run loads.
-	var oldest: Array[GDScript] = []
-	if GdhShutdownWalk.guarded():
+static func started(
+	given: PackedStringArray, walk: Array[GDScript] = []
+) -> GdhRunner:
+	# First, so the marker is older than every script the run loads. An engine's later shares keep
+	# the marker the first made.
+	var oldest: Array[GDScript] = walk
+	if oldest.is_empty() and GdhShutdownWalk.guarded():
 		oldest = GdhShutdownWalk.marker(WALK_ENDED)
 	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
 	var at: int = given.find(GDUNIT)
@@ -444,11 +498,21 @@ class GdhRunner:
 	## microseconds ([constant TIMING]).
 	var suite_load_began: int = 0
 	var suite_began: int = 0
+	## Called with the exit code as the share ends, instead of the engine exiting, in an engine that
+	## takes more shares ([constant SHARES_IN]).
+	var on_share_end: Callable = Callable()
+	## Whether this share runs in an engine that started for an earlier one.
+	var reused: bool = false
+	## Whether the engine exits with this runner, which holds the scripts past the shutdown walk.
+	var exits_the_engine: bool = false
 
 	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
-	## an engine whose walk can stop part way ([GdhShutdownWalk]).
+	## an engine whose walk can stop part way ([GdhShutdownWalk]). A share an engine goes on from
+	## leaves that to the one that exits.
 	func _notification(what: int) -> void:
 		if what != NOTIFICATION_EXIT_TREE or not GdhShutdownWalk.guarded():
+			return
+		if on_share_end.is_valid() and not exits_the_engine:
 			return
 		var also: Array[GDScript] = walk_scripts.duplicate()
 		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
@@ -464,6 +528,21 @@ class GdhRunner:
 		if _executor != null:
 			var suite_stage: GdUnitTestSuiteExecutionStage = _executor._executeStage
 			suite_stage._stage_test = GdhFreshFrame.new(suite_stage._stage_test)
+
+	## As gdUnit4's runner ends, except that an engine taking more shares ends the share and hands
+	## the exit to its caller, which says whether another follows.
+	func quit(code: int) -> void:
+		if not on_share_end.is_valid():
+			await super(code)
+			return
+		set_process(false)
+		await GdUnitMemoryObserver.gc_on_guarded_instances()
+		if not _is_editor_debug_run:
+			GdUnitTools.dispose_all()
+			await get_tree().process_frame
+		await get_tree().process_frame
+		await get_tree().physics_frame
+		var _ended: Variant = on_share_end.call(code)
 
 	func get_cmdline_args() -> PackedStringArray:
 		if not given.is_empty():
@@ -539,12 +618,15 @@ class GdhRunner:
 		match event.type():
 			GdUnitEvent.SESSION_START:
 				suite_load_began = now
-				print(
-					(
-						"%s started %d ms, compiled together %d ms"
-						% [TIMING, milliseconds(now), milliseconds(compiled_usec)]
+				if reused:
+					print("%s %d ms" % [REUSED, milliseconds(compiled_usec)])
+				else:
+					print(
+						(
+							"%s started %d ms, compiled together %d ms"
+							% [TIMING, milliseconds(now), milliseconds(compiled_usec)]
+						)
 					)
-				)
 				if not GdhIndexedSession.indexes_itself(_test_session):
 					_test_session = GdhIndexedSession.of(_test_session)
 				var tree: SceneTree = get_tree()
@@ -997,6 +1079,10 @@ class GdhReached:
 	extends ResourceFormatLoader
 
 	static var current: GdhReached = null
+	## What the autoloads asked for, which an engine that takes more shares reports again for each,
+	## since its later shares load none of them.
+	static var autoload_reached: PackedStringArray = []
+	static var autoloads_seen: bool = false
 
 	var _file: FileAccess = null
 	## Loads on other threads ask too, as a threaded load runs its own.
@@ -1066,6 +1152,11 @@ class GdhReached:
 
 	## Writes the line for the autoloads, which have all been loaded by now.
 	func autoloaded() -> void:
+		if autoloads_seen:
+			_fresh = autoload_reached.duplicate()
+		else:
+			autoload_reached = _fresh.duplicate()
+			autoloads_seen = true
 		written({ "autoloads": true })
 
 	## Writes the line of the suite at [param suite], which is about to begin, with what the cache

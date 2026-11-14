@@ -24,8 +24,9 @@ when the command line itself is wrong.
 ## Engine options
 
 - `--engines N`: the engines a run starts with at once, 4 by default, and the most at once unless a
-  gate's lanes file names more. A run handed out a share at a time starts one engine per share, so
-  in total it may start more engines than this.
+  gate's lanes file names more. A run handed out a share at a time starts an engine again only for
+  a lane whose engine ended (it crashed or was ended), whose lane was told to stop, or that waited
+  for a slot, so in total it may start more engines than this.
 - `--slots DIR`: the slot directory, the machine's own by default (see
   [Engine slots](#engine-slots)).
 - `--slot-count N`: how many slots that directory has. By default it is half the processors, at
@@ -128,8 +129,8 @@ output can still read it there. It holds:
 - `index` and `lane`.
 - `startedAfter`: the seconds after the command started that it got a slot and began.
 - `seconds`, and `dealt`, the seconds the times kept had it at.
-- `startSeconds`: its start until gdUnit4 began, null when it never did. `compiledSeconds` is
-  the part spent compiling its suites together.
+- `startSeconds`: its start until gdUnit4 began, null when it never did or when it ran in an engine
+  started for an earlier share. `compiledSeconds` is the part spent compiling its suites together.
 - `passed` and `windowed`.
 - `suites`: the suites it was handed.
 - `peakBytes`: the most memory it was read holding, or null when it was never read.
@@ -260,7 +261,21 @@ That deal needs every slot the run uses free as it begins. Another run or tool m
 gate's export, say). Then the run says how many were free and hands the work out a share at a time.
 
 Each slot it holds starts an engine on a share. An engine starts in each other slot as that slot
-comes free. An engine that ends is followed in its slot by one on the next share.
+comes free. An engine that finishes its share while shares remain runs the next in the same
+process, so a share after the first pays no engine start. A lane that is told to stop (see
+[a gate's lanes file](#a-gates-lanes-file)), or whose engine crashed or was ended, takes its next
+share in an engine started for it.
+
+Each share is judged on the lines the engine printed for it, with its own cases, failures,
+timeouts, deadline and peak memory. The memory gate admits a share in a running engine at the most
+its suites were seen to hold, once the share before it has ended. A share in an engine that ran
+out of memory runs again alone, and only that share does. What the engine reports as leaked at exit
+is attributed to the share it ran last.
+
+The run and the engine pass shares through the folder named by `--shares-in` (see
+[Starting the runner yourself](#starting-the-runner-yourself)). A share in an engine already
+started has no start time of its own, so its `startSeconds` is null and the start figures below
+read only the engines that started.
 
 ### Shares
 
@@ -1016,6 +1031,10 @@ gdUnit4's own options, then these after `--`:
   them, so every script that does not compile is named.
 - `--expected-out FILE`: write each suite's `GDHARNESS_EXPECTED_ERRORS` and
   `GDHARNESS_EXPECTED_WARNINGS` there, as JSON under `errors` and `warnings`.
+- `--shares-in DIR`: take more shares after the first. As each share ends the runner prints
+  `gdharness share ended <n> exit <code>` and waits for `DIR/next-<n+1>.txt`. The file holds the
+  arguments for the next share, one a line, as they follow `--` here, or `stop` to exit with the
+  code of the share that ended.
 
 ### Inherited cases
 

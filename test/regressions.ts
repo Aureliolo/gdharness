@@ -694,6 +694,7 @@ import {
   reportsFault,
   roomSaid,
   runShares,
+  type ShareReuse,
   sharesSaid,
   silenceWhile,
   startsSaid,
@@ -60373,6 +60374,472 @@ async function testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor(): Pr
   assert.ok(costs.length <= 17, `engines started, 21 before: ${String(costs.length)}`);
 }
 
+/** What a stand-in engine answers for a share: its number, and the start time it printed if it started. */
+interface StandInRan {
+  readonly index: number;
+  readonly printed: { readonly started: { readonly seconds: number } | null };
+}
+
+/**
+ * Stand-in engines that run every share their lane draws after the first, counting the engines
+ * started and the shares run. [param between] runs once a share has begun, before the engine asks for
+ * the next.
+ */
+function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<void> = () => delay(1)): {
+  engines: () => number;
+  shares: EnginePlan[];
+  holds: Array<((bytes: number) => void) | undefined>;
+  run: (
+    plan: EnginePlan,
+    index: number,
+    lock: string,
+    holds?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ) => Promise<StandInRan>;
+} {
+  let engines = 0;
+  const shares: EnginePlan[] = [];
+  const holds: Array<((bytes: number) => void) | undefined> = [];
+  const ranOf = (index: number, first: boolean): StandInRan => ({
+    index,
+    printed: { started: first ? { seconds: 10 } : null },
+  });
+  const run = async (
+    plan: EnginePlan,
+    index: number,
+    _lock: string,
+    held?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ): Promise<StandInRan> => {
+    engines += 1;
+    shares.push(plan);
+    holds.push(held);
+    let at = index;
+    let first = true;
+    await between(plan, shares.length);
+    for (let next = await reuse?.next(); next !== undefined && next !== null; next = await reuse?.next()) {
+      reuse?.done(ranOf(at, first));
+      first = false;
+      at = next.index;
+      shares.push(next.plan);
+      holds.push(next.holds);
+      await between(next.plan, shares.length);
+    }
+    return ranOf(at, first);
+  };
+  return { engines: () => engines, shares, holds, run };
+}
+
+/** An engine that finishes its share while shares remain runs the next in the same process. */
+async function testAnEngineFinishingItsShareTakesTheNextInTheSameProcess(): Promise<void> {
+  const units = Array.from({ length: 40 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const rig = reusingEngines();
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 2, [], {}, rig.run);
+  assert.equal(rig.engines(), 2, 'one engine started for each of the two lanes');
+  assert.ok(rig.shares.length >= 8, `and the shares dealt outnumber them: ${String(rig.shares.length)}`);
+  assert.equal(ran.length, rig.shares.length, 'every share has a result of its own');
+  assert.deepEqual(
+    ran.map((one) => one.index),
+    Array.from({ length: rig.shares.length }, (_, at) => at),
+    'numbered in the order they were dealt',
+  );
+  assert.deepEqual(
+    rig.shares.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    units.map((unit) => unit.suite).toSorted(),
+    'and every suite ran once',
+  );
+}
+
+/** When no share remains the engine exits, and a lane still waiting for a slot stops waiting. */
+async function testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting(): Promise<void> {
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const released: string[] = [];
+  let stopped = 0;
+  const slots = {
+    take: (signal?: AbortSignal): Promise<string> =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          stopped += 1;
+          reject(new Error('stopped waiting'));
+        });
+      }),
+    release: (lock: string): void => {
+      released.push(lock);
+    },
+  };
+  let stoppedAtTheLastShare = -1;
+  const rig = reusingEngines(async (_plan, shares) => {
+    if (shares === 4) {
+      await delay(50);
+      stoppedAtTheLastShare = stopped;
+    }
+  });
+  const ran = await Promise.race([
+    runShares(slots, units, declared, 3, ['A'], {}, rig.run),
+    delay(10_000).then(() => null),
+  ]);
+  assert.ok(ran !== null, 'the run ends although two lanes never got a slot');
+  assert.equal(rig.engines(), 1, 'the one slot held ran every share in one engine');
+  assert.equal(ran.length, 4, 'with a result for each share');
+  assert.equal(stoppedAtTheLastShare, 2, 'and both waiting lanes stopped waiting while the last share ran');
+  assert.deepEqual(released, ['A'], 'the slot goes back once, after the engine exits');
+}
+
+/**
+ * A share run in an engine already started is admitted by memory on its own, once the share before it
+ * has ended, at what its own suites were seen to hold.
+ */
+async function testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn(): Promise<void> {
+  const gib = 1024 ** 3;
+  const events: string[] = [];
+  class RecordingGate extends MemoryGate {
+    override admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+      events.push(`admit ${String(need() / gib)}`);
+      return super.admit(signal, need).then((admitted) => {
+        const ended = admitted.ended;
+        return Object.assign(admitted, {
+          ended: () => {
+            events.push('ended');
+            ended();
+          },
+        });
+      });
+    }
+  }
+  const gate = new RecordingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(64 * gib), 5);
+  const units = ['s0', 's1', 's2'].map((name) => SHARE_UNIT(name, 120));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const peaks = [5, 3, 1];
+  const times = Object.fromEntries(
+    units.map((unit, at) => [
+      unit.suite,
+      { seconds: 120, cases: { test_one: 120 }, peak: (peaks[at] ?? 0) * gib },
+    ]),
+  );
+  const rig = reusingEngines();
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  await runShares(slots, units, declared, 1, ['N'], times, rig.run, undefined, gate);
+  assert.deepEqual(
+    events,
+    ['admit 5', 'ended', 'admit 3', 'ended', 'admit 1', 'ended'],
+    'each share is admitted at its own need after the one before it ended',
+  );
+  assert.equal(new Set(rig.holds).size, 3, 'and told what the engine holds through its own admission');
+}
+
+/** A lane told fewer lanes gives its slot back after its share instead of drawing another. */
+async function testALaneToldToStopGivesItsSlotBackBetweenShares(): Promise<void> {
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const events: string[] = [];
+  let told: number | null = null;
+  const waiting: Array<() => void> = [];
+  const slots = {
+    take: (): Promise<string> => {
+      events.push('take');
+      return Promise.resolve('B');
+    },
+    release: (lock: string): void => {
+      events.push(`release ${lock}`);
+    },
+  };
+  const raised = {
+    ceiling: 1,
+    told: (): Promise<number | null> => Promise.resolve(told),
+    untilTold: (_lane: number, signal: AbortSignal): Promise<void> =>
+      new Promise((resume, reject) => {
+        waiting.push(resume);
+        signal.addEventListener('abort', () => {
+          reject(new Error('the run is over'));
+        });
+      }),
+    past: (_above: number, signal: AbortSignal): Promise<number> =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new Error('the run is over'));
+        });
+      }),
+  };
+  const rig = reusingEngines((_plan, shares) => {
+    if (shares === 1) {
+      told = 0;
+    }
+    return delay(1);
+  });
+  const pending = runShares(slots, units, declared, 1, ['A'], {}, rig.run, undefined, undefined, raised);
+  assert.ok(await cameTrue(() => waiting.length === 1, 5000), 'the lane parks once told to stop');
+  assert.deepEqual(events, ['release A'], 'having given its slot back');
+  assert.equal(rig.shares.length, 1, 'after one share, not drawing a second for the engine it had');
+  told = 1;
+  for (const resume of waiting) {
+    resume();
+  }
+  const ran = await pending;
+  assert.equal(rig.engines(), 2, 'and a new engine starts when it is told to go on');
+  assert.equal(ran.length, 4, 'every share ran');
+  assert.deepEqual(events, ['release A', 'take', 'release B'], 'in a slot it took again');
+}
+
+/** One suite of the shared-engine runs, whose one case runs [param body] and then passes. */
+function sharedEngineSuite(body: string): string {
+  return `extends GdUnitTestSuite\n\nfunc test_it() -> void:\n${body}\tassert_bool(true).is_true()\n`;
+}
+
+/**
+ * Runs `gdharness test` over [param suites], each kept as 40 s of work so each is a share of its own,
+ * with [param slotCount] slots for the two engines it asks for. With one slot the second engine never
+ * gets one, and the first takes every share.
+ */
+function sharedEngineRun(
+  engines: { godotPath: string; gdunit: string },
+  suites: Readonly<Record<string, string>>,
+  slotCount: number,
+  extra: readonly string[] = [],
+): { said: string; status: number | null; result: RunResult; cleanup: () => void } {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shared-engine-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shared-engine-slots-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\nconfig/name="SharedEngine"\n',
+    ...Object.fromEntries(Object.entries(suites).map(([name, body]) => [`tests/${name}_test.gd`, body])),
+  });
+  cpSync(engines.gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+  const times = join(project, 'gate', 'suite-times.json');
+  const resultFile = join(project, 'gate', 'result.json');
+  mkdirSync(dirname(times), { recursive: true });
+  writeFileSync(
+    times,
+    JSON.stringify(
+      Object.fromEntries(
+        Object.keys(suites).map((name) => [
+          `res://tests/${name}_test.gd`,
+          { seconds: 40, cases: { test_it: 40 } },
+        ]),
+      ),
+    ),
+  );
+  const ran = spawnSyncHidden(
+    process.execPath,
+    [
+      'build/cli.js',
+      'test',
+      project,
+      '--slots',
+      slots,
+      '--times',
+      times,
+      '--result',
+      resultFile,
+      '--engines',
+      '2',
+      '--slot-count',
+      String(slotCount),
+      ...extra,
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, GODOT_PATH: engines.godotPath },
+      timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+    },
+  );
+  const said = `${ran.stdout}${ran.stderr}`;
+  return {
+    said,
+    status: ran.status,
+    result: readRunResult(resultFile),
+    cleanup: () => {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(slots, { recursive: true, force: true });
+    },
+  };
+}
+
+/** With Godot, a run dealt shares over one slot starts one engine for three shares. */
+function testARunDealtSharesOverOneSlotStartsOneEngineForThem(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(''), b: sharedEngineSuite(''), c: sharedEngineSuite('') },
+    1,
+  );
+  try {
+    assert.equal(run.status, 0, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.suites),
+      [['res://tests/a_test.gd'], ['res://tests/b_test.gd'], ['res://tests/c_test.gd']],
+      `three shares, a suite each: ${run.said}`,
+    );
+    assert.match(
+      run.said,
+      /^Before its first suite the engine spent /m,
+      `and one engine was started for them: ${run.said}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * A share run in an engine already started has no start time of its own, so the figure the share
+ * floor and the run's line on starts are read from is the first share's alone.
+ */
+function testAShareInAReusedEngineHasNoStartTime(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(engines, { a: sharedEngineSuite(''), b: sharedEngineSuite('') }, 1);
+  try {
+    assert.equal(run.status, 0, run.said);
+    const starts = run.result.engines.map((engine) => engine.startSeconds);
+    assert.ok(
+      (starts[0] ?? 0) > 0 && starts[1] === null,
+      `the first share has the start its engine took, and the share after it none rather than 0: ${JSON.stringify(starts)}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * Each share of an engine that takes several is judged on its own lines: a crash fails the share it
+ * happened in, the shares before it keep their results, and the run goes on in a new engine.
+ */
+function testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    {
+      a: sharedEngineSuite(''),
+      b: sharedEngineSuite('\tOS.crash("deliberate")\n'),
+      c: sharedEngineSuite(''),
+    },
+    1,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => [engine.suites[0], engine.passed]),
+      [
+        ['res://tests/a_test.gd', true],
+        ['res://tests/b_test.gd', false],
+        ['res://tests/c_test.gd', true],
+      ],
+      `only the share that crashed failed: ${run.said}`,
+    );
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.startSeconds === null),
+      [false, true, false],
+      `the share after the crash started an engine of its own: ${JSON.stringify(run.result.engines)}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * A share that ran out of memory in an engine that took several runs again alone, and each share has
+ * the figure for what the engine held while it ran.
+ */
+function testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const starving =
+    '\tawait get_tree().create_timer(1.5).timeout\n\tprinterr("ERROR: Parameter \\"mem\\" is null.\\n   at: alloc_static (core/os/memory.cpp:75)")\n\tassert_int(1).is_equal(2)\n';
+  const waiting = '\tawait get_tree().create_timer(1.5).timeout\n';
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(waiting), b: sharedEngineSuite(starving), c: sharedEngineSuite(waiting) },
+    1,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.match(
+      run.said,
+      /The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB, engine 2 \d+\.\d GB\./,
+      `every share has the figure for what its engine held while it ran: ${run.said}`,
+    );
+    const logs = run.result.logs ?? '';
+    assert.deepEqual(
+      ['engine-0-again', 'engine-1-again', 'engine-2-again'].map((name) => existsSync(join(logs, name))),
+      [false, true, false],
+      `only the share that ran out of memory ran again: ${logs}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** A suite that hangs in an engine taken over for a later share is ended by the deadline counted from its share. */
+function testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    {
+      a: sharedEngineSuite('\tawait get_tree().create_timer(8.0).timeout\n'),
+      b: sharedEngineSuite('\tawait get_tree().create_timer(60.0).timeout\n'),
+    },
+    1,
+    ['--deadline', '12'],
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    const passed = run.result.engines.map((engine) => engine.passed);
+    assert.deepEqual(passed, [true, false], `the hung share failed, the one before it passed: ${run.said}`);
+    assert.match(run.said, /the engine ran past the 12 s deadline/, run.said);
+    const seconds = run.result.engines.map((engine) => engine.seconds);
+    assert.ok(
+      (seconds[1] ?? 0) >= 10,
+      `after the 12 s of its own, not the 12 s of the engine: ${JSON.stringify(seconds)}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** A run whose slots were all free as it began deals its engines their parts and reuses none. */
+function testARunNotDealtInSharesStartsEveryEngineForItsOwnPart(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(''), b: sharedEngineSuite('\tassert_int(1).is_equal(2)\n') },
+    2,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.doesNotMatch(run.said, /a share at a time/, run.said);
+    const logs = run.result.engines.map((engine) => engine.log ?? '');
+    assert.equal(logs.length, 2, 'two engines ran');
+    for (const log of logs) {
+      assert.equal(basename(log), 'engine.log', 'each wrote the log it always has');
+      assert.equal(existsSync(join(dirname(log), 'process.log')), false, 'and none was handed shares');
+      assert.equal(existsSync(join(dirname(log), 'shares')), false);
+    }
+    assert.ok(
+      run.result.engines.every((engine) => engine.startSeconds !== null),
+      'every engine has its start',
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
 /** A run's lanes read the lanes file before each share and give a slot back when told fewer. */
 async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promise<void> {
   const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fall-'));
@@ -101206,6 +101673,16 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
+  testAnEngineFinishingItsShareTakesTheNextInTheSameProcess,
+  testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting,
+  testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn,
+  testALaneToldToStopGivesItsSlotBackBetweenShares,
+  testARunDealtSharesOverOneSlotStartsOneEngineForThem,
+  testAShareInAReusedEngineHasNoStartTime,
+  testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn,
+  testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone,
+  testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
+  testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
   testAParkedLanesSlotGoesToTheMachineNotTheCheck,
   testARunBegunAtItsCeilingStillFollowsTheLanesFile,
