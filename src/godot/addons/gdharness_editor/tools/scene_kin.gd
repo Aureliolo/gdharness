@@ -178,8 +178,9 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 ## for a node deleted, the node paths are only named, and the entries are dropped as
 ## [method _without_vanished] says. Answers followed, the scenes rewritten, notFollowed, each one
 ## left as it was with why, and dropped, each only when it names any, with what [param carried]
-## gives. No scene behind a link of [param links_out], each a res:// folder or file that leads out
-## of the project, is read or rewritten, and notFollowed names each link.
+## gives. No scene reached only through a link of [param links_out], each a res:// folder or file
+## that leads out of the project, is read or rewritten, and notFollowed names each link. A scene
+## is one file on disk however it is spelt, so it is followed once, under one spelling.
 static func follow(
 	changed: String,
 	old_path: String,
@@ -187,9 +188,9 @@ static func follow(
 	carried: GdhPaths,
 	links_out: PackedStringArray,
 ) -> Dictionary:
-	var run: GdhFollow = GdhFollow.new(changed, old_path, new_path, carried)
-	_read_scenes(run.texts, links_out)
-	var kin: Array[String] = _kin_of(changed, run.texts)
+	var scenes: GdhScenes = GdhScenes.new(links_out)
+	var run: GdhFollow = GdhFollow.new(scenes.one(changed), old_path, new_path, carried, scenes)
+	var kin: Array[String] = _kin_of(run.changed, scenes)
 	for scene_path: String in kin:
 		_follow_scene(scene_path, run)
 	run.not_followed.append_array(_links_left(links_out))
@@ -213,10 +214,10 @@ static func _follow_scene(scene_path: String, run: GdhFollow) -> void:
 		return
 	var tree: Dictionary = read["tree"]
 	var moves: Dictionary = {}
-	for at: String in _placements(scene_path, tree, run.changed, run.texts):
+	for at: String in _placements(scene_path, tree, run.changed, run.scenes):
 		var moved_to: String = "" if run.new_path.is_empty() else _under(at, run.new_path)
 		moves[_under(at, run.old_path)] = moved_to
-	var text: String = run.texts[scene_path]
+	var text: String = run.scenes.texts[scene_path]
 	var unsaved: String = GdhSceneFile.unsaved_in_editor(scene_path)
 	var vanished: Array[Dictionary] = []
 	var rewritten: String = text
@@ -242,7 +243,7 @@ static func _store_scene(
 	if not unsaved.is_empty():
 		run.not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 		return false
-	var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(GdhSceneFile.written_at(scene_path), FileAccess.WRITE)
 	if file == null or not file.store_string(rewritten):
 		run.not_followed.append(
 			{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
@@ -345,14 +346,13 @@ static func _gone(path: String, moves: Dictionary) -> bool:
 ## on a node inside it or adds one below it. Those still load, and the next save of that scene
 ## dropped them, since the packer skips every node under an instance whose children are not
 ## editable. Answers followed, the scenes marked, and notFollowed, each left with why, each only
-## when it names any. No scene behind a link of [param links_out], each a res:// folder or file
-## that leads out of the project, is read or rewritten, and notFollowed names each link.
-static func enclose(changed: String, at: String, links_out: PackedStringArray) -> Dictionary:
-	var texts: Dictionary = {}
-	_read_scenes(texts, links_out)
+## when it names any. Links are kept to as [method follow] says.
+static func enclose(asked: String, at: String, links_out: PackedStringArray) -> Dictionary:
+	var scenes: GdhScenes = GdhScenes.new(links_out)
+	var changed: String = scenes.one(asked)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
-	for scene_path: String in _kin_of(changed, texts):
+	for scene_path: String in _kin_of(changed, scenes):
 		if scene_path == changed:
 			continue
 		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
@@ -361,9 +361,9 @@ static func enclose(changed: String, at: String, links_out: PackedStringArray) -
 			continue
 		var tree: Dictionary = read["tree"]
 		var moves: Dictionary = {}
-		for root: String in _placements(scene_path, tree, changed, texts):
+		for root: String in _placements(scene_path, tree, changed, scenes):
 			moves[_under(root, at)] = _under(root, at)
-		var text: String = texts[scene_path]
+		var text: String = scenes.texts[scene_path]
 		var marks: PackedStringArray = []
 		for path: String in moves:
 			var mark: String = '[editable path="%s"]' % path
@@ -375,7 +375,9 @@ static func enclose(changed: String, at: String, links_out: PackedStringArray) -
 		if not unsaved.is_empty():
 			not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 			continue
-		var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+		var file: FileAccess = FileAccess.open(
+			GdhSceneFile.written_at(scene_path), FileAccess.WRITE
+		)
 		if (file == null
 				or not file.store_string(text.rstrip("\n") + "\n\n" + "\n".join(marks) + "\n")):
 			not_followed.append(
@@ -409,16 +411,19 @@ static func _holds_below(text: String, path: String) -> bool:
 	return false
 
 
-## [param changed] and every scene in [param texts] that instances or inherits it at any depth.
-static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
+## [param changed] and every scene of [param scenes] that instances or inherits it at any depth.
+static func _kin_of(changed: String, scenes: GdhScenes) -> Array[String]:
 	var kin: Array[String] = [changed]
 	var named: Dictionary[String, PackedStringArray] = {}
-	for scene_path: String in texts:
-		named[scene_path] = _named_in(str(texts[scene_path]), scene_path)
+	for scene_path: String in scenes.texts:
+		var spelt: PackedStringArray = []
+		for path: String in _named_in(str(scenes.texts[scene_path]), scene_path):
+			var _added: bool = spelt.append(scenes.one(path))
+		named[scene_path] = spelt
 	var grew: bool = true
 	while grew:
 		grew = false
-		for scene_path: String in texts:
+		for scene_path: String in scenes.texts:
 			if kin.has(scene_path):
 				continue
 			for one: String in kin:
@@ -458,18 +463,9 @@ static func _resolved(path: String, scene_path: String) -> String:
 	return scene_path.get_base_dir().path_join(path).simplify_path()
 
 
-## The text of every .tscn the engine scans into [param texts], keyed by res:// path. The shared
-## walk leaves out the folders the engine steps over, so a build's copies are not read, and takes in
-## the addons gdharness installed, which the engine loads. That less the scenes behind a link of
-## [param links_out].
-static func _read_scenes(texts: Dictionary, links_out: PackedStringArray) -> void:
-	for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
-		if not GdhSceneFile.behind_a_link_out(path, links_out):
-			texts[path] = FileAccess.get_file_as_string(path)
-
-
-## A notFollowed row for each of [param links_out] that can hold a scene, since no scene behind one
-## was read: a folder, or a file with a scene's extension.
+## A notFollowed row for each of [param links_out] that can hold a scene, since no scene reached
+## only through one was read: a folder, or a file with a scene's extension. A scene behind one that
+## is also reached another way was read that way, so the row does not speak of every scene there.
 static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
 	var rows: Array[Dictionary] = []
 	for link: String in links_out:
@@ -480,8 +476,8 @@ static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
 				"scenePath": link,
 				"reason":
 				(
-					"a link that leads out of the project, so no scene behind it was read or "
-					+ "changed"
+					"a link that leads out of the project, so no scene reached only through it "
+					+ "was read or changed"
 				),
 			}
 		)
@@ -489,14 +485,15 @@ static func _links_left(links_out: PackedStringArray) -> Array[Dictionary]:
 
 
 ## Whether the scene at [param scene_path] inherits [param changed], through any number of scenes.
-static func _inherits(scene_path: String, changed: String, texts: Dictionary) -> bool:
-	var seen: Array[String] = [scene_path]
-	var base: String = _base_of(str(texts.get(scene_path, "")), scene_path)
+static func _inherits(scene_path: String, changed: String, scenes: GdhScenes) -> bool:
+	var at: String = scenes.one(scene_path)
+	var seen: Array[String] = [at]
+	var base: String = scenes.one(_base_of(str(scenes.texts.get(at, "")), at))
 	while not base.is_empty() and not seen.has(base):
 		if base == changed:
 			return true
 		seen.append(base)
-		base = _base_of(str(texts.get(base, "")), base)
+		base = scenes.one(_base_of(str(scenes.texts.get(base, "")), base))
 	return false
 
 
@@ -525,26 +522,26 @@ static func _base_of(text: String, scene_path: String) -> String:
 ## [param changed] or of a scene inheriting it. The tree lays out every instance inside another, so
 ## those are found by walking it.
 static func _placements(
-	scene_path: String, tree: Dictionary, changed: String, texts: Dictionary
+	scene_path: String, tree: Dictionary, changed: String, scenes: GdhScenes
 ) -> Array[String]:
 	var placements: Array[String] = []
-	if _inherits(scene_path, changed, texts):
+	if _inherits(scene_path, changed, scenes):
 		placements.append(".")
-	_instances_in(tree, changed, texts, placements)
+	_instances_in(tree, changed, scenes, placements)
 	return placements
 
 
 static func _instances_in(
-	entry: Dictionary, changed: String, texts: Dictionary, placements: Array[String]
+	entry: Dictionary, changed: String, scenes: GdhScenes, placements: Array[String]
 ) -> void:
-	var instanced: String = str(entry.get("instanceOf", ""))
-	if instanced == changed or (not instanced.is_empty() and _inherits(instanced, changed, texts)):
+	var instanced: String = scenes.one(str(entry.get("instanceOf", "")))
+	if instanced == changed or (not instanced.is_empty() and _inherits(instanced, changed, scenes)):
 		placements.append(str(entry["path"]))
 	var children: Array = entry.get("children", [])
 	for child: Variant in children:
 		if child is Dictionary:
 			var below: Dictionary = child
-			_instances_in(below, changed, texts, placements)
+			_instances_in(below, changed, scenes, placements)
 
 
 ## [param text] with every path [param moves] names, and every path below one, moved.
@@ -622,23 +619,104 @@ static func _without_ids(line: String, ids: String) -> String:
 	return RegEx.create_from_string(" %s=PackedInt32Array\\([^)]*\\)" % ids).sub(line, "")
 
 
-## What [method follow] works on and records: the move, the text of every scene, and the scenes
-## followed, left as they were with why, and the entries dropped.
+## What [method follow] works on and records: the move, every scene, and the scenes followed, left
+## as they were with why, and the entries dropped.
 class GdhFollow:
 	var changed: String
 	var old_path: String
 	var new_path: String
 	var carried: GdhPaths
-	var texts: Dictionary = {}
+	var scenes: GdhScenes
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
 	var dropped: Array[Dictionary] = []
 
 
 	func _init(
-		changed_scene: String, from_path: String, to_path: String, paths: GdhPaths
+		changed_scene: String,
+		from_path: String,
+		to_path: String,
+		paths: GdhPaths,
+		read: GdhScenes,
 	) -> void:
 		changed = changed_scene
 		old_path = from_path
 		new_path = to_path
 		carried = paths
+		scenes = read
+
+
+## Every .tscn the engine scans, each read once under one spelling. The shared walk leaves out the
+## folders the engine steps over, so a build's copies are not read, and takes in the addons
+## gdharness installed, which the engine loads. A scene reached only through a link out of the
+## project is not read. A link inside the project reaches one file by two paths, and a scene may
+## name it by either, so each file is known by where it lies on disk with every link followed.
+class GdhScenes:
+	## The text of each scene read, keyed by the spelling it was read under.
+	var texts: Dictionary = {}
+	## The spelling read for each file on disk, keyed by its path with every name as listed. A key
+	## is matched exactly: no case fold the engine has is the file system's own, which keeps s and
+	## ſ apart, so a path in another case than the file's is no spelling of it.
+	var _spelt: Dictionary = {}
+	## Where each res:// folder asked about lies on disk, "" where a link on it cannot be followed.
+	var _folders: Dictionary = {}
+	var _project: String = ""
+	var _disk: DirAccess = null
+
+
+	func _init(links_out: PackedStringArray) -> void:
+		_project = GdhSceneFile.disk_project()
+		_folders["res://"] = _project
+		if not _project.is_empty():
+			_disk = DirAccess.open(_project.get_slice("/", 0) + "/")
+		for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
+			if GdhSceneFile.behind_a_link_out(path, links_out):
+				continue
+			var file: String = _file(path)
+			var held: String = str(_spelt.get(file, ""))
+			if file.is_empty() or held.is_empty():
+				if not file.is_empty():
+					_spelt[file] = path
+				texts[path] = FileAccess.get_file_as_string(path)
+			elif _plain(path, file) and not _plain(held, file):
+				# The path with no link on it is the one the engine and the caller most likely use.
+				_spelt[file] = path
+				texts[path] = texts[held]
+				var _erased: bool = texts.erase(held)
+
+
+	## The spelling [param path], a scene's res:// path spelt any way, was read under, or
+	## [param path] when no scene read lies at that file.
+	func one(path: String) -> String:
+		if texts.has(path) or not path.begins_with("res://"):
+			return path
+		if path.get_extension().to_lower() != "tscn":
+			return path
+		return str(_spelt.get(_file(path), path))
+
+
+	## Where the res:// [param path] lies on disk, each name as [param path] spells it, or "".
+	func _file(path: String) -> String:
+		if _disk == null:
+			return ""
+		return GdhSceneFile.disk_entry(_disk, _folder(path.get_base_dir()), path.get_file())
+
+
+	func _folder(folder: String) -> String:
+		if _folders.has(folder):
+			return _folders[folder]
+		var parent: String = folder.get_base_dir()
+		var found: String = (
+			"" if parent == folder else GdhSceneFile.disk_entry(
+				_disk,
+				_folder(parent),
+				folder.get_file(),
+			)
+		)
+		_folders[folder] = found
+		return found
+
+
+	func _plain(path: String, file: String) -> bool:
+		var spelt: String = _project.path_join(path.trim_prefix("res://"))
+		return file == spelt

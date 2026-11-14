@@ -2,6 +2,8 @@
 extends RefCounted
 ## How a scene or resource a tool saves keeps naming files by uid, as the editor's saves do.
 
+const GdhSceneFile = preload("scene_file.gd")
+
 ## The files a headless save named by path alone because the uid cache holds no uid for them,
 ## gathered for the answer to the call that saved, the one call its engine runs.
 static var by_path: PackedStringArray = []
@@ -13,7 +15,8 @@ static var by_path: PackedStringArray = []
 ## imported the project has none, and a resave dropped the uid from the header, so every reference
 ## made through it stopped resolving. Read from the file itself, since the loader does not answer it
 ## for a text scene there, and a new file is given one as the editor gives it.
-static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
+static func save_keeping_uid(resource: Resource, asked_path: String) -> Error:
+	var file_path: String = GdhSceneFile.written_at(asked_path)
 	if Engine.is_editor_hint():
 		var saved: Error = ResourceSaver.save(resource, file_path)
 		return saved if saved != OK else _as_the_editor_writes(file_path)
