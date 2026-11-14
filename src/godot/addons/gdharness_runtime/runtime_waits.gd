@@ -487,7 +487,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 
 	var current: Variant = watched["value"]
 	if compare in [">=", "<=", ">", "<"]:
-		return await _wait_in_order(node, params, current, timeout_ms)
+		return await _wait_in_order(node, params, watched, timeout_ms)
 	var by_name: Array = _enum_by_name(watched, params["value"], node_path)
 	var sent: Variant = _named_value(by_name, params["value"])
 	var wanted: Variant = _wanted_value(watched, sent)
@@ -496,7 +496,9 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if refused.is_empty():
 		refused = _wait_refused(watched, sent, wanted, node_path, property)
 	if not refused.is_empty():
-		return { "type": "error", "message": refused }
+		return GdhPaths.with_read_errors(
+			{ "type": "error", "message": refused }, watched.get("errors", [])
+		)
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
@@ -664,8 +666,10 @@ static func _property_wait_unasked(property: String, params: Dictionary) -> Stri
 ## truncates: 31.5 on a whole-number property became 31, and a wait for "at least 31.5" was met at
 ## 31.
 func _wait_in_order(
-	node: Node, params: Dictionary, current: Variant, timeout_ms: int
+	node: Node, params: Dictionary, watched: Dictionary, timeout_ms: int
 ) -> Dictionary:
+	var current: Variant = watched["value"]
+	var read_errors: Array = watched.get("errors", [])
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var compare: String = str(params.get("compare", ""))
@@ -674,38 +678,32 @@ func _wait_in_order(
 	# came with it, since no number would make the wait answerable.
 	var unordered: String = _no_order(current, node_path, property, compare)
 	if not unordered.is_empty():
-		return { "type": "error", "message": unordered }
+		return GdhPaths.with_read_errors({ "type": "error", "message": unordered }, read_errors)
 	var number: Variant = given
 	if given is String:
 		var text: String = given
 		number = GdhRead.json_or_null(text)
 	if typeof(number) != TYPE_INT and typeof(number) != TYPE_FLOAT:
-		return {
-			"type": "error",
-			"message":
-			(
-				"compare %s puts a number in order, and the value to wait for is %s: give a number."
-				% [compare, str(given)]
-			),
-		}
+		return GdhPaths.with_read_errors(
+			{ "type": "error", "message": _not_a_number(compare, given) }, read_errors
+		)
 	var limit: float = GdhRead.as_float(number)
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
-	var read_errors: Array = []
 	while not _in_order(compare, limit, current) and Time.get_ticks_msec() - started < timeout_ms:
 		await _host.get_tree().process_frame
 		frames += 1
 		if not is_instance_valid(node):
 			return { "type": "error", "message": "%s was freed while waiting" % node_path }
-		var watched: Dictionary = _watched(node, node_path, property)
-		if watched.has("message"):
-			return watched
-		current = watched["value"]
-		read_errors = watched.get("errors", [])
+		var looked: Dictionary = _watched(node, node_path, property)
+		if looked.has("message"):
+			return looked
+		current = looked["value"]
+		read_errors = looked.get("errors", [])
 		unordered = _no_order(current, node_path, property, compare)
 		if not unordered.is_empty():
-			return { "type": "error", "message": unordered }
+			return GdhPaths.with_read_errors({ "type": "error", "message": unordered }, read_errors)
 
 	var met: bool = _in_order(compare, limit, current)
 	var answer: Dictionary = {
@@ -723,6 +721,12 @@ func _wait_in_order(
 	if not read_errors.is_empty():
 		answer["errors"] = read_errors
 	return answer
+
+
+## Why [param given] cannot be the value of a wait by order under [param compare].
+static func _not_a_number(compare: String, given: Variant) -> String:
+	var asked: String = "compare %s puts a number in order, and the value to wait for is %s"
+	return (asked + ": give a number.") % [compare, str(given)]
 
 
 ## Why [param current] cannot be put in order, or "" when it is a number.

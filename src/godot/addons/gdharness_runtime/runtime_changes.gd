@@ -55,7 +55,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	var slot: Dictionary = GdhValues.slot_declared(holder, named)
 	var fitting: Dictionary = _value_for(value, slot, old_value, reached, node, node_path)
 	if fitting.has("message"):
-		return fitting
+		return GdhPaths.with_read_errors(fitting, read_errors)
 	read_errors.append_array(GdhPaths.take_read_errors())
 	var given: Variant = fitting["value"]
 	# A component of a vector or a transform is written into a copy, which is put back where it was
@@ -66,7 +66,10 @@ func set_property(params: Dictionary) -> Dictionary:
 	if copied:
 		var unwritable: String = GdhPaths.unwritable_copy(chain)
 		if not unwritable.is_empty():
-			return { "type": "error", "message": unwritable }
+			return GdhPaths.with_read_errors(
+				{ "type": "error", "message": unwritable },
+				read_errors,
+			)
 	# The write alone, setter included, which is where a property's cost is. Listened to as a call
 	# is, since a setter refusing a value says why only in what it reports.
 	var caught: GdhCallErrors = GdhCallErrors.new()
@@ -78,12 +81,14 @@ func set_property(params: Dictionary) -> Dictionary:
 	var elapsed: int = Time.get_ticks_usec() - began
 	OS.remove_logger(caught)
 	var now: Variant = GdhPaths.read_under(holder, named)
+	read_errors.append_array(GdhPaths.take_read_errors())
 	if copied:
 		var again: Dictionary = GdhPaths.walk_to(target, node_path, property)
 		if again.has("message"):
-			return again
+			return GdhPaths.with_read_errors(again, read_errors)
 		var reread: Variant = again["holder"]
 		now = GdhPaths.read_under(reread, named) if GdhPaths.can_read(reread, named) else null
+		read_errors.append_array(GdhPaths.take_read_errors())
 	# Read back rather than trusted. The engine drops a write it will not take without a word, and
 	# the answer then showed the old value as the new one, shaped as a success: a typed container
 	# refusing a plain list did exactly that. A value the property changed on the way in, a setter
@@ -102,10 +107,13 @@ func set_property(params: Dictionary) -> Dictionary:
 	var already: bool = held_already(given, old_value)
 	var unmoved: bool = GdhValues.comparable(now, old_value) and now == old_value
 	if unmoved and not already:
-		return {
-			"type": "error",
-			"message": _left_as_it_was(reached, given, now, slot, caught.raised),
-		}
+		return GdhPaths.with_read_errors(
+			{
+				"type": "error",
+				"message": _left_as_it_was(reached, given, now, slot, caught.raised),
+			},
+			read_errors
+		)
 
 	var answer: Dictionary = {
 		"type": "property_set",
@@ -528,12 +536,15 @@ func call_method(params: Dictionary) -> Dictionary:
 	# nowhere near the argument. A wrong argument costs a refusal, never the session's game.
 	var count: String = _argument_count_refused(holder, named, args.size())
 	if not count.is_empty():
-		return { "type": "error", "message": "%s.%s %s" % [reached["called"], named, count] }
+		return GdhPaths.with_read_errors(
+			{ "type": "error", "message": "%s.%s %s" % [reached["called"], named, count] },
+			walk_errors
+		)
 	var given: GdhArguments = GdhArguments.new(named, node, node_path)
 	for index: int in args.size():
 		var refused: Dictionary = _take_argument(given, args[index], index, reached)
 		if not refused.is_empty():
-			return refused
+			return GdhPaths.with_read_errors(refused, walk_errors)
 	walk_errors.append_array(GdhPaths.take_read_errors())
 	var deserialized_args: Array = given.values
 	var outside: PackedStringArray = PackedStringArray(given.outside)
@@ -556,10 +567,13 @@ func call_method(params: Dictionary) -> Dictionary:
 	var elapsed: int = Time.get_ticks_usec() - began
 
 	if not caught.refused.is_empty():
-		return {
-			"type": "error",
-			"message": _call_refused(reached, named, caught.refused, given.by_engine_class),
-		}
+		return GdhPaths.with_read_errors(
+			{
+				"type": "error",
+				"message": _call_refused(reached, named, caught.refused, given.by_engine_class),
+			},
+			walk_errors
+		)
 
 	var answer: Dictionary = {
 		"type": "method_result",
@@ -770,13 +784,17 @@ static func _call_refused(
 	return message + "."
 
 
-## Puts [param walked], what the engine reported to the steps of the path, ahead of the errors
-## [param answer] already holds.
+## Puts [param walked], what the engine reported to the steps of the path, after the errors
+## [param answer] already holds, and counts what the cut leaves out beside those already counted.
 static func _keep_walk_errors(answer: Dictionary, walked: Array[String]) -> void:
 	if walked.is_empty():
 		return
-	var own: Array = answer.get("errors", [])
-	answer["errors"] = (walked + own).slice(0, ERRORS_KEPT)
+	var all: Array = answer.get("errors", [])
+	all.append_array(walked)
+	var hidden: int = int(answer.get("errors_not_shown", 0)) + maxi(all.size() - ERRORS_KEPT, 0)
+	answer["errors"] = all.slice(0, ERRORS_KEPT)
+	if hidden > 0:
+		answer["errors_not_shown"] = hidden
 
 
 ## Puts the first [constant ERRORS_KEPT] of [param reported] in [param answer] under [param field],

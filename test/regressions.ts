@@ -49300,8 +49300,58 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
     async ({ server, project }) => {
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Node\n\nvar held: Node\n\n\nfunc take(_node: Node) -> void:\n\tpass\n\n\n' +
-          'func fail() -> void:\n\tpush_error("the game failed on its own")\n',
+        [
+          'extends Node',
+          '',
+          'var held: Node',
+          'var count: int = 0',
+          'var locked: int = 0:',
+          '\tset(_value):',
+          '\t\tpass',
+          'var nodes: Array[Node] = []',
+          'var loud: Node:',
+          '\tget:',
+          '\t\tpush_error("loud getter")',
+          '\t\treturn self',
+          '',
+          '',
+          'func take(_node: Node) -> void:',
+          '\tpass',
+          '',
+          '',
+          'func take2(_first: Node, _second: Node) -> void:',
+          '\tpass',
+          '',
+          '',
+          'func one(_value: int) -> void:',
+          '\tpass',
+          '',
+          '',
+          'func noisy() -> Node:',
+          '\tpush_error("noisy step")',
+          '\treturn self',
+          '',
+          '',
+          'func noisy25() -> Node:',
+          '\tfor _round: int in 25:',
+          '\t\tpush_error("noisy step")',
+          '\treturn self',
+          '',
+          '',
+          'func drop_later() -> void:',
+          '\tget_tree().create_timer(0.5).timeout.connect($Rows/Who/Kid.queue_free)',
+          '',
+          '',
+          'func add_later() -> void:',
+          '\tget_tree().create_timer(0.5).timeout.connect(',
+          '\t\tfunc() -> void: $Rows/Pad.add_child(Label.new())',
+          '\t)',
+          '',
+          '',
+          'func fail() -> void:',
+          '\tpush_error("the game failed on its own")',
+          '',
+        ].join('\n'),
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -49509,6 +49559,146 @@ async function testAnObjectTargetPathSaysWhatItsStepsReported(): Promise<void> {
       /The engine reported: .*Node not found/,
       'a step that errors says so',
     );
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/** A second argument of get_child that is not a bool is the engine's to read, not the addon's fault. */
+async function testAChildStepWithAnOddSecondArgumentRaisesNoScriptError(): Promise<void> {
+  await withAReadingGame('child step argument regression', async ({ ask, counted }) => {
+    const who = '/root/Main/Rows/Who';
+    const read = async (step: string): Promise<string> =>
+      await ask('runtime_inspect', { op: 'property', nodePath: who, property: `${step}:name` });
+    assert.equal(get(JSON.parse(await read('get_child(0, 1)')), 'value'), 'Kid');
+    await read('get_child(0, "x")');
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the addon raised nothing itself');
+  });
+}
+
+/** A wait on a child step waits for the child to come or go, as it does for any other step. */
+async function testAWaitOnAChildStepWaitsForTheChild(): Promise<void> {
+  await withAReadingGame('child wait regression', async ({ ask, counted }) => {
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'drop_later' });
+    const gone: unknown = JSON.parse(
+      await ask('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main/Rows/Who',
+        property: 'get_child(0)',
+        value: null,
+        timeoutMs: 5000,
+      }),
+    );
+    assert.equal(get(gone, 'met'), true, JSON.stringify(gone));
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'add_later' });
+    const came: unknown = JSON.parse(
+      await ask('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main/Rows/Pad',
+        property: 'get_child(0)',
+        compare: '!=',
+        value: null,
+        timeoutMs: 5000,
+      }),
+    );
+    assert.equal(get(came, 'met'), true, JSON.stringify(came));
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** Every refusal after a successful walk carries the errors the walk's steps made. */
+async function testARefusalAfterAWalkCarriesTheWalksErrors(): Promise<void> {
+  await withAReadingGame('refusal after walk regression', async ({ ask, counted }) => {
+    const game = '/root/Main';
+    const answers: Record<string, string> = {
+      'value it cannot fit': await ask('runtime_invoke', {
+        op: 'set',
+        nodePath: game,
+        property: 'noisy():count',
+        value: 1.5,
+      }),
+      'setter that kept the old value': await ask('runtime_invoke', {
+        op: 'set',
+        nodePath: game,
+        property: 'noisy():locked',
+        value: 5,
+      }),
+      'wrong argument count': await ask('runtime_invoke', {
+        op: 'call',
+        nodePath: game,
+        method: 'noisy():one',
+        args: [],
+      }),
+      'refused argument': await ask('runtime_invoke', {
+        op: 'call',
+        nodePath: game,
+        method: 'noisy():take',
+        args: ['/root/Main/Nope'],
+      }),
+      'wait met on the first look': await ask('runtime_wait', {
+        op: 'until',
+        nodePath: game,
+        property: 'noisy():count',
+        compare: '>=',
+        value: 0,
+        timeoutMs: 1000,
+      }),
+    };
+    for (const [what, answer] of Object.entries(answers)) {
+      assert.match(answer, /noisy step/, `${what}: ${answer}`);
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** Two paths in one request each keep the errors their steps made. */
+async function testTwoPathsInOneRequestKeepBothSetsOfErrors(): Promise<void> {
+  await withAReadingGame('two paths regression', async ({ ask, counted }) => {
+    const first = '/root/Main:noisy()';
+    const second = '/root/Main/Rows:get_parent()';
+    const called = await ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'take2',
+      args: [first, second],
+    });
+    assert.match(called, /noisy step/, `a call with two path arguments: ${called}`);
+    const written = await ask('runtime_invoke', {
+      op: 'set',
+      nodePath: '/root/Main',
+      property: 'nodes',
+      value: [first, second],
+    });
+    assert.match(written, /noisy step/, `a typed array of two paths: ${written}`);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** The errors of the call itself come first, and a cut counts what it leaves out. */
+async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
+  await withAReadingGame('walk error cut regression', async ({ ask }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noisy25():fail' }),
+    );
+    const errors = asArray(get(answer, 'errors')).map(text);
+    assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
+    assert.equal(errors.length, 20);
+    assert.ok(asNumber(get(answer, 'errors_not_shown')) >= 1, JSON.stringify(answer));
+  });
+}
+
+/** A property step whose getter errors is reported in the answer and kept out of the verdict. */
+async function testAPropertyStepWhoseGetterErrorsIsReported(): Promise<void> {
+  await withAReadingGame('getter step regression', async ({ ask, counted }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'loud:name' }),
+    );
+    assert.equal(get(answer, 'value'), 'Main');
+    assert.match(asArray(get(answer, 'errors')).map(text).join('\n'), /loud getter/);
     const verdict = await counted();
     assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
   });
@@ -101216,6 +101406,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFindIndexStepPastTheChildrenIsNotThere,
   testAFindStepThatErrorsReturnsTheErrorAndStaysClean,
   testEveryPathOpSaysWhatAReadStepReported,
+  testAChildStepWithAnOddSecondArgumentRaisesNoScriptError,
+  testAWaitOnAChildStepWaitsForTheChild,
+  testARefusalAfterAWalkCarriesTheWalksErrors,
+  testTwoPathsInOneRequestKeepBothSetsOfErrors,
+  testWalkErrorsDoNotPushOutTheCallsOwn,
+  testAPropertyStepWhoseGetterErrorsIsReported,
   testACallArgumentPathSaysWhatItsStepsReported,
   testAnObjectTargetPathSaysWhatItsStepsReported,
   testAGamesOwnErrorStillCountsBesideReads,
