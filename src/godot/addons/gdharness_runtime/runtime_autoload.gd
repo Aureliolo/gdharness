@@ -9,6 +9,7 @@ extends Node
 ## wanted. Both directions of the socket carry one JSON object per line. Every request names an
 ## id and the reply carries it back.
 
+const GdhCallErrors = preload("call_errors.gd")
 const GdhErrorReport = preload("error_report.gd")
 const GdhFrames = preload("runtime_frames.gd")
 const GdhRead = preload("reading.gd")
@@ -891,8 +892,16 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 	var waits: Object = _modules.get(WAITS)
 	if waits != null:
 		var _seen: Variant = waits.call(&"saw_call", command, params)
+	# The errors the request's reads make are gathered while the handler runs up to its first
+	# await, and a handler that reads after an await binds the collector again. They go into the
+	# answer whatever it is, so no route that reads can leave them out.
+	var errors: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
+	var before: GdhCallErrors.Collected = GdhCallErrors.bind(errors)
 	var answer: Variant = await handler.call(params)
-	return answer
+	var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
+	var result: Dictionary = answer
+	GdhCallErrors.attach(result, errors)
+	return result
 
 
 func _ping(_params: Dictionary) -> Dictionary:

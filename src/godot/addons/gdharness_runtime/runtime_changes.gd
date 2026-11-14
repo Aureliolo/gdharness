@@ -43,20 +43,18 @@ func set_property(params: Dictionary) -> Dictionary:
 	# which is how a typed container refusing a write is told from one accepting it.
 	var reached: Dictionary = GdhPaths.walk_to(target, node_path, property)
 	if reached.has("message"):
-		return GdhPaths.with_read_errors(reached)
+		return reached
 
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	var no_place: String = _no_place(reached)
 	if not no_place.is_empty():
-		return GdhPaths.with_read_errors({ "type": "error", "message": no_place })
+		return { "type": "error", "message": no_place }
 	var old_value: Variant = GdhPaths.read_under(holder, named)
-	var read_errors: Array[String] = GdhPaths.take_read_errors()
 	var slot: Dictionary = GdhValues.slot_declared(holder, named)
 	var fitting: Dictionary = _value_for(value, slot, old_value, reached, node, node_path)
 	if fitting.has("message"):
-		return GdhPaths.with_read_errors(fitting, read_errors)
-	read_errors.append_array(GdhPaths.take_read_errors())
+		return fitting
 	var given: Variant = fitting["value"]
 	# A component of a vector or a transform is written into a copy, which is put back where it was
 	# read from, setter and all. The read back is then taken off the game again, since the copy here
@@ -66,10 +64,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	if copied:
 		var unwritable: String = GdhPaths.unwritable_copy(chain)
 		if not unwritable.is_empty():
-			return GdhPaths.with_read_errors(
-				{ "type": "error", "message": unwritable },
-				read_errors,
-			)
+			return { "type": "error", "message": unwritable }
 	# The write alone, setter included, which is where a property's cost is. Listened to as a call
 	# is, since a setter refusing a value says why only in what it reports.
 	var caught: GdhCallErrors = GdhCallErrors.new()
@@ -81,14 +76,12 @@ func set_property(params: Dictionary) -> Dictionary:
 	var elapsed: int = Time.get_ticks_usec() - began
 	OS.remove_logger(caught)
 	var now: Variant = GdhPaths.read_under(holder, named)
-	read_errors.append_array(GdhPaths.take_read_errors())
 	if copied:
 		var again: Dictionary = GdhPaths.walk_to(target, node_path, property)
 		if again.has("message"):
-			return GdhPaths.with_read_errors(again, read_errors)
+			return again
 		var reread: Variant = again["holder"]
 		now = GdhPaths.read_under(reread, named) if GdhPaths.can_read(reread, named) else null
-		read_errors.append_array(GdhPaths.take_read_errors())
 	# Read back rather than trusted. The engine drops a write it will not take without a word, and
 	# the answer then showed the old value as the new one, shaped as a success: a typed container
 	# refusing a plain list did exactly that. A value the property changed on the way in, a setter
@@ -107,13 +100,10 @@ func set_property(params: Dictionary) -> Dictionary:
 	var already: bool = held_already(given, old_value)
 	var unmoved: bool = GdhValues.comparable(now, old_value) and now == old_value
 	if unmoved and not already:
-		return GdhPaths.with_read_errors(
-			{
-				"type": "error",
-				"message": _left_as_it_was(reached, given, now, slot, caught.raised),
-			},
-			read_errors
-		)
+		return {
+			"type": "error",
+			"message": _left_as_it_was(reached, given, now, slot, caught.raised),
+		}
 
 	var answer: Dictionary = {
 		"type": "property_set",
@@ -125,8 +115,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 	if already and unmoved:
 		answer["unchanged"] = true
-	read_errors.append_array(caught.raised)
-	_keep_reported(answer, "errors", read_errors)
+	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
 	if holder is Object:
 		var owner: Object = holder
@@ -495,6 +484,8 @@ static func _instead_of_a_call(reached: Dictionary, method: String, sort: String
 
 
 func call_method(params: Dictionary) -> Dictionary:
+	# Held across the method's awaits, after which another request may be the one reads add to.
+	var request_errors: GdhCallErrors.Collected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var method: String = str(params.get("method", ""))
 	var args: Array = params.get("args", [])
@@ -513,7 +504,7 @@ func call_method(params: Dictionary) -> Dictionary:
 	# `_game:run:advance` answers half of what a node holds and refuses the other half.
 	var reached: Dictionary = GdhPaths.walk_to(target, node_path, method)
 	if reached.has("message"):
-		return GdhPaths.with_read_errors(reached)
+		return reached
 
 	# A list or a map answers the calls a path makes on one, and nothing else: said in those terms
 	# rather than as "has no method", which reads as a misspelling of a method that was never going
@@ -525,8 +516,7 @@ func call_method(params: Dictionary) -> Dictionary:
 	var named: String = reached["name"]
 	var not_called: String = _not_callable(holder, named, str(reached["called"]))
 	if not not_called.is_empty():
-		return GdhPaths.with_read_errors({ "type": "error", "message": not_called })
-	var walk_errors: Array[String] = GdhPaths.take_read_errors()
+		return { "type": "error", "message": not_called }
 	if not GdhPaths.method_of(named).is_empty():
 		named = GdhPaths.method_of(named)
 
@@ -536,16 +526,12 @@ func call_method(params: Dictionary) -> Dictionary:
 	# nowhere near the argument. A wrong argument costs a refusal, never the session's game.
 	var count: String = _argument_count_refused(holder, named, args.size())
 	if not count.is_empty():
-		return GdhPaths.with_read_errors(
-			{ "type": "error", "message": "%s.%s %s" % [reached["called"], named, count] },
-			walk_errors
-		)
+		return { "type": "error", "message": "%s.%s %s" % [reached["called"], named, count] }
 	var given: GdhArguments = GdhArguments.new(named, node, node_path)
 	for index: int in args.size():
 		var refused: Dictionary = _take_argument(given, args[index], index, reached)
 		if not refused.is_empty():
-			return GdhPaths.with_read_errors(refused, walk_errors)
-	walk_errors.append_array(GdhPaths.take_read_errors())
+			return refused
 	var deserialized_args: Array = given.values
 	var outside: PackedStringArray = PackedStringArray(given.outside)
 
@@ -567,13 +553,10 @@ func call_method(params: Dictionary) -> Dictionary:
 	var elapsed: int = Time.get_ticks_usec() - began
 
 	if not caught.refused.is_empty():
-		return GdhPaths.with_read_errors(
-			{
-				"type": "error",
-				"message": _call_refused(reached, named, caught.refused, given.by_engine_class),
-			},
-			walk_errors
-		)
+		return {
+			"type": "error",
+			"message": _call_refused(reached, named, caught.refused, given.by_engine_class),
+		}
 
 	var answer: Dictionary = {
 		"type": "method_result",
@@ -589,10 +572,11 @@ func call_method(params: Dictionary) -> Dictionary:
 		if not named_result.is_empty():
 			answer["result_named"] = named_result
 	_note_call(answer, awaited, outside, caught, named)
-	_keep_walk_errors(answer, walk_errors)
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
+		var before: GdhCallErrors.Collected = GdhCallErrors.bind(request_errors)
 		answer.merge(_read_off_result(result, asked))
+		var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
 	return answer
 
 
@@ -694,7 +678,7 @@ func _called_on_value(reached: Dictionary, params: Dictionary) -> Dictionary:
 		var asked_of_it: Variant = params.get("properties")
 		if _reads_the_result(asked_of_it):
 			listed.merge(_read_off_result(answered, asked_of_it))
-		return GdhPaths.with_read_errors(listed)
+		return listed
 	var why: String = (
 		"%s:%s takes no arguments" % [reached["called"], spelled]
 		if answers
@@ -782,20 +766,6 @@ static func _call_refused(
 			% checked
 		)
 	return message + "."
-
-
-## Puts [param walked], what the engine reported to the steps of the path, after the errors
-## [param answer] already holds, and counts what the cut leaves out beside those already counted.
-static func _keep_walk_errors(answer: Dictionary, walked: Array[String]) -> void:
-	if walked.is_empty():
-		return
-	var all: Array = answer.get("errors", [])
-	all.append_array(walked)
-	var hidden: int = answer.get("errors_not_shown", 0)
-	hidden += maxi(all.size() - ERRORS_KEPT, 0)
-	answer["errors"] = all.slice(0, ERRORS_KEPT)
-	if hidden > 0:
-		answer["errors_not_shown"] = hidden
 
 
 ## Puts the first [constant ERRORS_KEPT] of [param reported] in [param answer] under [param field],

@@ -9,8 +9,6 @@ const GdhSerialisation = preload("serialisation.gd")
 const GdhValues = preload("runtime_values.gd")
 ## What the server is told raised the errors a read makes, as it is for a debugger call.
 const READ_MARK: String = "path read"
-## The most errors a walk keeps, which is enough to see what its steps ran into.
-const MOST_READ_ERRORS: int = 20
 ## The calls a path makes on a list or a map: those that take no arguments and change nothing.
 ##
 ## Named rather than asked of the engine, because asking about a method a list does not have logs an
@@ -281,9 +279,6 @@ const READS_ONLY: String = (
 	", and a path, which a wait reads every frame, only calls methods that read"
 )
 
-## The errors reported to the reads of the walk in progress. See [method take_read_errors].
-static var _read_errors: Array[String] = []
-
 
 ## What [param reaching] names something on, which is the node itself until the name has a colon
 ## in it, and the last name along that path.
@@ -316,11 +311,7 @@ static var _read_errors: Array[String] = []
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle. Answers `chain` as
 ## well, each holder walked through and the step taken off it, for [method write_back].
-static func walk_to(
-	node: Object, node_path: String, reaching: String, keep_errors: bool = false
-) -> Dictionary:
-	if not keep_errors:
-		_read_errors.clear()
+static func walk_to(node: Object, node_path: String, reaching: String) -> Dictionary:
 	var parts: PackedStringArray = steps_of(reaching)
 	var holder: Variant = node
 	var called: String = node_path
@@ -388,24 +379,19 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 		reaching = path.substr(colon + 1)
 	if reaching.is_empty():
 		return { "message": "%s names nothing past the node" % path }
-	var reached: Dictionary = walk_to(start, start_path, reaching, true)
+	var reached: Dictionary = walk_to(start, start_path, reaching)
 	if reached.has("message"):
-		return with_read_errors({ "message": str(reached["message"]) })
+		return { "message": str(reached["message"]) }
 	var holder: Variant = reached["holder"]
 	var name: String = reached["name"]
 	if not can_read(holder, name):
-		return with_read_errors({ "message": nothing_there(holder, name, str(reached["called"])) })
+		return { "message": nothing_there(holder, name, str(reached["called"])) }
 	var value: Variant = read_under(holder, name)
 	if not value is Object or not is_instance_valid(value):
-		return with_read_errors(
-			{
-				"message":
-				(
-					"%s:%s holds %s, not an object"
-					% [reached["called"], name, type_string(typeof(value))]
-				),
-			}
-		)
+		return {
+			"message":
+			"%s:%s holds %s, not an object" % [reached["called"], name, type_string(typeof(value))],
+		}
 	return { "object": value }
 
 
@@ -1024,8 +1010,8 @@ static func read_under(holder: Variant, named: String) -> Variant:
 
 
 ## The answer of [param method] on [param object], with what the engine reported while it ran kept
-## for [method take_read_errors] and announced to the server, so a read's error is the read's and
-## not the game's. A child past the last one answers null without asking the engine.
+## for the request's answer and announced to the server, so a read's error is the read's and not
+## the game's. A child past the last one answers null without asking the engine.
 static func _called_reading(object: Object, method: String, args: Array) -> Variant:
 	if not _child_gone(object, method, args).is_empty():
 		return null
@@ -1040,35 +1026,11 @@ static func _called_reading(object: Object, method: String, args: Array) -> Vari
 static func _keep_reports(caught: GdhCallErrors) -> void:
 	OS.remove_logger(caught)
 	var reported: Array[String] = caught.errors()
-	if not reported.is_empty():
-		caught.announce(READ_MARK)
-		_read_errors.append_array(reported)
-
-
-## The errors the engine reported to the reads since the last walk began, which the answer to the
-## op that walked carries under `errors`. Empties what it takes.
-static func take_read_errors() -> Array[String]:
-	var taken: Array[String] = _read_errors.slice(0, MOST_READ_ERRORS)
-	_read_errors.clear()
-	return taken
-
-
-## [param answer] with the errors the reads made so far under `errors`, when there are any. A
-## refusal reaches the caller as its message alone, so the errors go into the message.
-static func with_read_errors(answer: Dictionary, earlier: Array = []) -> Dictionary:
-	var taken: Array[String] = []
-	taken.append_array(earlier)
-	taken.append_array(take_read_errors())
-	taken = taken.slice(0, MOST_READ_ERRORS)
-	if taken.is_empty():
-		return answer
-	if answer.has("message"):
-		answer["message"] = "%s. The engine reported: %s" % [
-			str(answer["message"]).trim_suffix("."), " | ".join(taken),
-		]
-	else:
-		answer["errors"] = taken
-	return answer
+	if reported.is_empty():
+		return
+	caught.announce(READ_MARK)
+	for text: String in reported:
+		GdhCallErrors.note(text)
 
 
 ## Where [param named] lands in a list of [param size], or -1 for a step that is not in it.
