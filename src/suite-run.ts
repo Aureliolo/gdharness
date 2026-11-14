@@ -2228,6 +2228,11 @@ export async function runShares<
     };
     const reuse: ShareReuse<T> = {
       next: async () => {
+        // An engine about to exit keeps its admission until it has, so memory is not offered to
+        // another engine while this one still holds it.
+        if (empty() || (await fallenPast(at))) {
+          return null;
+        }
         going?.ended();
         going = undefined;
         const following = await drawnInPlace(at);

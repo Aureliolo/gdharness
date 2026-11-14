@@ -542,7 +542,7 @@ class GdhRunner:
 			await get_tree().process_frame
 		await get_tree().process_frame
 		await get_tree().physics_frame
-		var _ended: Variant = on_share_end.call(code)
+		on_share_end.call_deferred(code)
 
 	func get_cmdline_args() -> PackedStringArray:
 		if not given.is_empty():

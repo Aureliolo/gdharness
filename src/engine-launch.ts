@@ -797,9 +797,11 @@ function handedTheNext(watch: Watch, to: number, code: number): void {
   watch.deciding = shares
     .ended({ number, from, to, end })
     .then((next) => {
-      watch.shareFrom = to;
-      watch.peakBytes = 0;
-      watch.holds = next?.holds;
+      if (next !== null) {
+        watch.shareFrom = to;
+        watch.peakBytes = 0;
+        watch.holds = next.holds;
+      }
       handedOver(shares.directory, number + 1, next?.args ?? null);
     })
     .catch((error: unknown) => {
