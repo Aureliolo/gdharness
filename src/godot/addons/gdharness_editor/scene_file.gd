@@ -335,7 +335,7 @@ static func _keep_ids(file_path: String, keep: Dictionary) -> Error:
 					changed = true
 	if not changed:
 		return OK
-	var file: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(GdhSceneUids.written_at(file_path), FileAccess.WRITE)
 	if file == null:
 		return FileAccess.get_open_error()
 	if not file.store_string("\n".join(lines)):
@@ -788,7 +788,7 @@ func _unmade_waits() -> String:
 ## Adds [param lines] to the file just saved, answering "" or why they could not be added.
 func _keep_unmade(lines: PackedStringArray) -> String:
 	var saved: String = FileAccess.get_file_as_string(path)
-	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(GdhSceneUids.written_at(path), FileAccess.WRITE)
 	if file == null:
 		return (
 			"%s was saved without %s, and could not be opened again to put it back: %s"

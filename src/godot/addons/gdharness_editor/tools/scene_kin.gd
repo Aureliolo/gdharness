@@ -243,7 +243,7 @@ static func _store_scene(
 	if not unsaved.is_empty():
 		run.not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 		return false
-	var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(GdhSceneUids.written_at(scene_path), FileAccess.WRITE)
 	if file == null or not file.store_string(rewritten):
 		run.not_followed.append(
 			{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
@@ -375,7 +375,9 @@ static func enclose(asked: String, at: String, links_out: PackedStringArray) -> 
 		if not unsaved.is_empty():
 			not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 			continue
-		var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+		var file: FileAccess = FileAccess.open(
+			GdhSceneUids.written_at(scene_path), FileAccess.WRITE
+		)
 		if (file == null
 				or not file.store_string(text.rstrip("\n") + "\n\n" + "\n".join(marks) + "\n")):
 			not_followed.append(
@@ -652,8 +654,10 @@ class GdhFollow:
 class GdhScenes:
 	## The text of each scene read, keyed by the spelling it was read under.
 	var texts: Dictionary = {}
-	## The spelling read for each file on disk.
+	## The spelling read for each file on disk, keyed by its path with every name as listed.
 	var _spelt: Dictionary = {}
+	## Each key of [member _spelt] by its upper case, for a spelling in another case to find it.
+	var _folded: Dictionary = {}
 	## Where each res:// folder asked about lies on disk, "" where a link on it cannot be followed.
 	var _folders: Dictionary = {}
 	var _project: String = ""
@@ -671,14 +675,17 @@ class GdhScenes:
 			if GdhSceneFile.behind_a_link_out(path, links_out):
 				continue
 			var file: String = _file(path)
-			var held: String = str(_spelt.get(file, ""))
-			if file.is_empty() or held.is_empty():
+			var known: String = _known(file)
+			if known.is_empty():
 				if not file.is_empty():
 					_spelt[file] = path
+					_folded[file.to_upper()] = file
 				texts[path] = FileAccess.get_file_as_string(path)
-			elif _plain(path, file) and not _plain(held, file):
+				continue
+			var held: String = _spelt[known]
+			if _plain(path, file) and not _plain(held, known):
 				# The path with no link on it is the one the engine and the caller most likely use.
-				_spelt[file] = path
+				_spelt[known] = path
 				texts[path] = texts[held]
 				var _erased: bool = texts.erase(held)
 
@@ -690,17 +697,27 @@ class GdhScenes:
 			return path
 		if path.get_extension().to_lower() != "tscn":
 			return path
-		return str(_spelt.get(_file(path), path))
+		var known: String = _known(_file(path))
+		return path if known.is_empty() else str(_spelt[known])
 
 
-	## Where the res:// [param path] lies on disk, in one case where case is ignored, or "".
+	## The key of [member _spelt] that [param file], a path on disk, names, or "". The name as
+	## listed wins. Where the file system ignores case, another case finds it next. The fold is
+	## to upper case one character at a time, as NTFS compares names, so files the file system holds
+	## apart, such as k and the Kelvin sign, stay apart where a lowering would join them.
+	func _known(file: String) -> String:
+		if _spelt.has(file):
+			return file
+		if file.is_empty() or not _any_case:
+			return ""
+		return str(_folded.get(file.to_upper(), ""))
+
+
+	## Where the res:// [param path] lies on disk, each name as [param path] spells it, or "".
 	func _file(path: String) -> String:
 		if _disk == null:
 			return ""
-		var there: String = GdhSceneFile.disk_entry(
-			_disk, _folder(path.get_base_dir()), path.get_file()
-		)
-		return there.to_lower() if _any_case else there
+		return GdhSceneFile.disk_entry(_disk, _folder(path.get_base_dir()), path.get_file())
 
 
 	func _folder(folder: String) -> String:
@@ -720,4 +737,4 @@ class GdhScenes:
 
 	func _plain(path: String, file: String) -> bool:
 		var spelt: String = _project.path_join(path.trim_prefix("res://"))
-		return file == (spelt.to_lower() if _any_case else spelt)
+		return file == spelt or (_any_case and file.to_upper() == spelt.to_upper())

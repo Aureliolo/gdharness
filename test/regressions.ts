@@ -93466,6 +93466,108 @@ async function testAMoveAndADeleteAskedThroughALinkInsideAreFollowed(): Promise<
   );
 }
 
+/**
+ * Files the file system holds apart are followed apart, though lowering their names joins them: k
+ * and the Kelvin sign, i and the dotted capital I. Where the platform joins them itself, it skips.
+ */
+async function testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed(): Promise<void> {
+  const scenes = ['k.tscn', 'K.tscn', 'i.tscn', 'İ.tscn'];
+  await withLinksOut(
+    'names lowering joins',
+    { files: Object.fromEntries(scenes.map((file, at) => [file, deskKin(`Kin${at}`)])) },
+    (real) => {
+      const held = readdirSync(real).filter((file) => scenes.includes(file));
+      if (held.length !== scenes.length) {
+        console.log(`names lowering joins: the platform keeps only ${JSON.stringify(held)}`);
+      }
+      return held.length === scenes.length;
+    },
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        followedOf(renamed),
+        scenes.map((file) => `res://${file}`).toSorted(),
+        JSON.stringify(renamed),
+      );
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      for (const file of scenes) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
+/**
+ * Where the file system ignores case, a scene naming another in another case is its kin, and an
+ * edit asked in another case follows the scenes naming it. Linux keeps case, so there it skips.
+ */
+async function testAScenePathInAnotherCaseIsFollowed(): Promise<void> {
+  const rooms = ['room.tscn', 'room2.tscn', 'room3.tscn'];
+  await withLinksOut(
+    'path in another case',
+    {
+      files: {
+        'room.tscn': deskKin('Room', 'res://DESK.tscn'),
+        'room2.tscn': deskKin('Room2'),
+        'Sub/mid.tscn': deskHeir('Mid'),
+        'room3.tscn': deskKin('Room3', 'res://sub/MID.tscn'),
+      },
+    },
+    () => process.platform !== 'linux',
+    async (at) => {
+      for (const [scenePath, from, to] of [
+        ['desk.tscn', 'Top', 'Surface'],
+        ['DESK.tscn', 'Surface', 'Top'],
+      ] as const) {
+        const renamed = await at.call('scene_node', {
+          op: 'set',
+          scenePath,
+          nodePath: from,
+          properties: { name: to },
+        });
+        const said = `${scenePath}: ${JSON.stringify(renamed)}`;
+        assert.deepEqual(
+          followedOf(renamed),
+          rooms.map((file) => `res://${file}`),
+          said,
+        );
+        assert.equal(get(renamed, 'notFollowed'), undefined, said);
+        for (const file of rooms) {
+          assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
+        }
+      }
+    },
+  );
+}
+
+/**
+ * An edit asked through a file link inside the project writes the file the link leads to and
+ * leaves the link a link, so the scenes naming either path are followed.
+ */
+async function testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths(): Promise<void> {
+  await withLinksOut(
+    'edit through a file link',
+    { files: { 'room.tscn': deskKin('Room', 'res://copy.tscn'), 'room2.tscn': deskKin('Room2') } },
+    (real) => linkTo(join(real, 'desk.tscn'), join(real, 'copy.tscn'), 'file'),
+    async (at) => {
+      const copy = join(at.real, 'copy.tscn');
+      const renamed = await at.call('scene_node', {
+        op: 'set',
+        scenePath: 'copy.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      assert.ok(readlinkSync(copy).length > 0, `copy.tscn is no link any more: ${JSON.stringify(renamed)}`);
+      assert.ok(at.fileOf('desk.tscn').includes('[node name="Surface"'), at.fileOf('desk.tscn'));
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      for (const file of ['room.tscn', 'room2.tscn']) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
 /** A project the server is given through a junction still names its own link out and follows inside. */
 async function testAProjectReachedThroughAJunctionNamesItsLinkOut(): Promise<void> {
   const kin = deskKin('Kin');
@@ -100966,6 +101068,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASceneWithNoTieToTheEditGetsNoRow,
   testEachSceneIsFollowedOnceUnderOnePath,
   testAMoveAndADeleteAskedThroughALinkInsideAreFollowed,
+  testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed,
+  testAScenePathInAnotherCaseIsFollowed,
+  testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testALinkOutInsideAWalkedFolderIsNamed,
   testRelativePathsBehindALinkOutAreLeft,
   testADanglingLinkOutLeavesTheFollowerWorking,
