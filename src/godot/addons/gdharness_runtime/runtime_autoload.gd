@@ -897,12 +897,8 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 	# answer whatever it is, so no route that reads can leave them out.
 	var errors: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
 	var before: GdhCallErrors.Collected = GdhCallErrors.bind(errors)
-	var answer: Variant = handler.call(params)
+	var answer: Variant = await handler.call(params)
 	var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
-	if answer is Object:
-		var state: Object = answer
-		if state != null and state.get_class() == "GDScriptFunctionState":
-			answer = await Signal(state, &"completed")
 	var result: Dictionary = answer
 	GdhCallErrors.attach(result, errors)
 	return result
