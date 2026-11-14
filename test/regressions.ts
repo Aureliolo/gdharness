@@ -92823,11 +92823,17 @@ interface LinkedProject {
  * Runs [body] on a project holding desk.tscn and [files], beside `outside`, a folder holding
  * [outsideFiles] that no project holds. [link] makes the links once the project is imported, given
  * the project's own folder and outside, and answers false when the platform refuses one, which
- * skips the case. With [through] the server is given the project by a junction to it.
+ * skips the case. With [through] the server is given the project by a junction to it, and with
+ * [spelt] by the path it answers for the project's own folder.
  */
 async function withLinksOut(
   label: string,
-  fixture: { files: Record<string, string>; outside?: Record<string, string>; through?: boolean },
+  fixture: {
+    files: Record<string, string>;
+    outside?: Record<string, string>;
+    through?: boolean;
+    spelt?: (real: string) => string;
+  },
   link: (real: string, outside: string) => boolean,
   body: (at: LinkedProject) => Promise<void>,
 ): Promise<void> {
@@ -92850,7 +92856,7 @@ async function withLinksOut(
   });
   mkdirSync(outside, { recursive: true });
   writeTree(outside, fixture.outside ?? {});
-  const project = fixture.through === true ? join(root, 'via') : real;
+  const project = fixture.through === true ? join(root, 'via') : (fixture.spelt?.(real) ?? real);
   if (fixture.through === true) {
     symlinkSync(real, project, 'junction');
   }
@@ -93522,75 +93528,64 @@ async function eachFollowedApart(label: string, scenes: readonly string[]): Prom
 }
 
 /**
- * Where the file system ignores case, a scene naming another in another case is its kin, and an
- * edit asked in another case follows the scenes naming it. Linux keeps case, so there it skips.
+ * A project given by a path in another case than the disk holds, a lower-case drive letter or an
+ * upper-case folder, still follows a scene reached through a junction inside once. Linux keeps
+ * case, so there it skips, and the drive letter is tried on Windows only.
  */
-async function testAScenePathInAnotherCaseIsFollowed(): Promise<void> {
-  const rooms = ['room.tscn', 'room2.tscn', 'room3.tscn'];
-  await withLinksOut(
-    'path in another case',
-    {
-      files: {
-        'room.tscn': deskKin('Room', 'res://DESK.tscn'),
-        'room2.tscn': deskKin('Room2'),
-        'Sub/mid.tscn': deskHeir('Mid'),
-        'room3.tscn': deskKin('Room3', 'res://sub/MID.tscn'),
-      },
-    },
-    () => process.platform !== 'linux',
-    async (at) => {
-      for (const [scenePath, from, to] of [
-        ['desk.tscn', 'Top', 'Surface'],
-        ['DESK.tscn', 'Surface', 'Top'],
-      ] as const) {
-        const renamed = await at.call('scene_node', {
-          op: 'set',
-          scenePath,
-          nodePath: from,
-          properties: { name: to },
-        });
-        const said = `${scenePath}: ${JSON.stringify(renamed)}`;
+async function testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce(): Promise<void> {
+  const spellings: [string, (real: string) => string][] = [
+    ['upper-case folder', (real) => join(dirname(real), basename(real).toUpperCase())],
+  ];
+  if (process.platform === 'win32') {
+    spellings.push(['lower-case drive', (real) => real.charAt(0).toLowerCase() + real.slice(1)]);
+  }
+  for (const [label, spelt] of spellings) {
+    await withLinksOut(
+      `project as ${label}`,
+      { files: { 'real/mid.tscn': deskKin('Mid') }, spelt },
+      (real) => process.platform !== 'linux' && linkTo(join(real, 'real'), join(real, 'inner')),
+      async (at) => {
+        const renamed = await renameTheTop(at);
         assert.deepEqual(
-          followedOf(renamed),
-          rooms.map((file) => `res://${file}`),
-          said,
+          get(renamed, 'followed'),
+          ['res://real/mid.tscn'],
+          `${label}: ${JSON.stringify(renamed)}`,
         );
-        assert.equal(get(renamed, 'notFollowed'), undefined, said);
-        for (const file of rooms) {
-          assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
-        }
-      }
-    },
-  );
+        const deleted = await at.call('scene_node', {
+          op: 'delete',
+          scenePath: 'desk.tscn',
+          nodePath: 'Surface/Lamp',
+        });
+        assert.deepEqual(
+          asArray(get(deleted, 'dropped')).map((row) => get(row, 'scenePath')),
+          ['res://real/mid.tscn'],
+          `${label}: ${JSON.stringify(deleted)}`,
+        );
+      },
+    );
+  }
 }
 
 /**
- * A scene naming a path that matches two files only by letter case is not followed into either,
- * and its one row says so. Linux keeps case, so there it skips.
+ * An edit asked by a path in another case than the disk holds is refused with the stored spelling,
+ * since a save under the asked spelling renames the file. Linux keeps case, so there it skips.
  */
-async function testAPathMatchingTwoFilesByCaseIsNotFollowedAndSaysSo(): Promise<void> {
-  const room = deskKin('Room', 'res://S.tscn');
-  const heirs = { 's.tscn': deskHeir('Es'), 'ſ.tscn': deskHeir('LongEs') };
+async function testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName(): Promise<void> {
   await withLinksOut(
-    'path matching two files by case',
-    { files: { 'room.tscn': room, ...heirs } },
-    (real) => process.platform !== 'linux' && readdirSync(real).filter((file) => file in heirs).length === 2,
+    'edit asked in another case',
+    { files: { 's.tscn': LINKED_DESK } },
+    () => process.platform !== 'linux',
     async (at) => {
-      const renamed = await renameTheTop(at);
-      const rows = asArray(get(renamed, 'notFollowed') ?? []);
-      assert.equal(rows.length, 1, JSON.stringify(renamed));
-      assert.equal(get(rows[0], 'scenePath'), 'res://room.tscn', JSON.stringify(renamed));
-      assert.equal(
-        get(rows[0], 'reason'),
-        'names res://S.tscn, which matches more than one file by letter case ' +
-          '(res://s.tscn, res://ſ.tscn), so it was not followed. Name it in the case the file has on disk.',
-        JSON.stringify(renamed),
-      );
-      assert.equal(get(renamed, 'followed'), undefined, JSON.stringify(renamed));
-      assert.equal(at.fileOf('room.tscn'), room);
-      for (const [file, written] of Object.entries(heirs)) {
-        assert.equal(at.fileOf(file), written, file);
-      }
+      const said = await at.say('scene_node', {
+        op: 'set',
+        scenePath: 'S.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      assert.ok(said.includes('res://S.tscn is stored as res://s.tscn. Name it as stored.'), said);
+      assert.ok(readdirSync(at.real).includes('s.tscn'), JSON.stringify(readdirSync(at.real)));
+      assert.ok(!readdirSync(at.real).includes('S.tscn'), JSON.stringify(readdirSync(at.real)));
+      assert.equal(at.fileOf('s.tscn'), LINKED_DESK);
     },
   );
 }
@@ -101144,8 +101139,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveAndADeleteAskedThroughALinkInsideAreFollowed,
   testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed,
   testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed,
-  testAScenePathInAnotherCaseIsFollowed,
-  testAPathMatchingTwoFilesByCaseIsNotFollowedAndSaysSo,
+  testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce,
+  testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,
   testALinkOutInsideAWalkedFolderIsNamed,

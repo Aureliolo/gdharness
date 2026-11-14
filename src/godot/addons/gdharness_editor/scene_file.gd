@@ -154,9 +154,13 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	return {}
 
 
-## Why a write to the scene at [member path] is refused before it loads, or "": the editor holds
-## unsaved changes to it, or it names a file that is gone.
+## Why a write to the scene at [member path] is refused before it loads, or "": the path spells
+## the file in another case than the disk holds it, the editor holds unsaved changes to it, or it
+## names a file that is gone.
 func _barred_from_writing() -> String:
+	var stored: String = stored_as(path)
+	if not stored.is_empty():
+		return "%s is stored as %s. Name it as stored." % [path, stored]
 	_opened_sha = FileAccess.get_sha256(path)
 	_opened_at = path
 	var held_back: String = unsaved_in_editor(path)
@@ -1057,9 +1061,59 @@ static func _followed(given: String) -> String:
 	return current
 
 
-## Where the project's folder lies on disk, each link on the way followed, or "" when one cannot be.
+## Where the project's folder lies on disk, each link on the way followed and each name spelt as
+## its folder lists it, or "" when a link cannot be followed. A link's target is read in the
+## disk's own spelling, and the project may be given in another, such as a lower-case drive.
 static func disk_project() -> String:
-	return _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	var led: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	if led.is_empty() or not OS.get_name() in ["Windows", "macOS"]:
+		return led
+	var parts: PackedStringArray = led.split("/")
+	var top: String = parts[0].to_upper() + "/"
+	return top + "/".join(_as_listed(top, parts.slice(1)))
+
+
+## [param names], the parts of a path below the folder [param folder], each as the folder above it
+## lists it. A part spelt in another case takes the listed spelling the disk says is the same entry.
+## A part with no such entry stays as given.
+static func _as_listed(folder: String, names: PackedStringArray) -> PackedStringArray:
+	var listed: PackedStringArray = []
+	var at: String = folder.trim_suffix("/")
+	for name: String in names:
+		var stored: String = name
+		var listing: DirAccess = DirAccess.open(at + "/")
+		if listing != null:
+			listing.include_hidden = true
+			var entries: PackedStringArray = listing.get_files() + listing.get_directories()
+			if not entries.has(name):
+				stored = _same_entry(listing, at, name, entries)
+		var _added: bool = listed.append(stored)
+		at = at + "/" + stored
+	return listed
+
+
+## The one of [param entries], listed in [param at], that the disk says is [param name] there, or
+## [param name]. The case fold only narrows the entries to ask about, and the disk decides.
+static func _same_entry(
+	listing: DirAccess, at: String, name: String, entries: PackedStringArray
+) -> String:
+	for entry: String in entries:
+		if (entry.to_upper() == name.to_upper()
+				and listing.is_equivalent(at + "/" + entry, at + "/" + name)):
+			return entry
+	return name
+
+
+## The res:// spelling the disk holds for [param file], a res:// path, when it holds it in another
+## case, or "". A save renames a new file over the old one under the spelling it is given, so a
+## write asked in another case would rename the file.
+static func stored_as(file: String) -> String:
+	if not OS.get_name() in ["Windows", "macOS"] or not file.begins_with("res://"):
+		return ""
+	var names: PackedStringArray = file.trim_prefix("res://").split("/", false)
+	var listed: PackedStringArray = _as_listed(ProjectSettings.globalize_path("res://"), names)
+	var stored: String = "res://" + "/".join(listed)
+	return "" if stored == file else stored
 
 
 ## Where [param name] in [param folder], a folder on disk with no link left on its path, leads:
@@ -1089,12 +1143,17 @@ static func written_at(file_path: String) -> String:
 	var inside: String = disk_project()
 	if led.is_empty() or inside.is_empty():
 		return file_path
-	# Both ends are taken where they lie on disk, so a project opened through a junction, or under
-	# another spelling of its folder, still finds a target the link names by the real folder.
-	var top: String = inside + "/"
-	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
-	if led.begins_with(top) or (any_case and led.to_upper().begins_with(top.to_upper())):
-		return "res://" + led.substr(top.length())
+	# The disk says which folder above the target is the project's, so neither a junction to the
+	# project nor another spelling of its folder hides the target.
+	var disk_root: DirAccess = DirAccess.open(inside.get_slice("/", 0) + "/")
+	var above: String = led.get_base_dir()
+	while disk_root != null:
+		if disk_root.is_equivalent(above, inside):
+			return "res://" + led.substr(above.trim_suffix("/").length() + 1)
+		var parent: String = above.get_base_dir()
+		if parent == above:
+			break
+		above = parent
 	return file_path
 
 
