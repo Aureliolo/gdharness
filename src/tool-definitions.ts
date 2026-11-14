@@ -1956,7 +1956,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          "start: with profile: true, time the calls scripts make through engine methods (callv, emit_signal, any Node method). Each function then carries engineMs, and its selfMs leaves those calls out. Without it the profiler does not time them: they stay in the caller's selfMs, no row has engineMs and scriptMs can count that work twice. Refused without profile: true. Risk: on Linux and macOS a game whose script calls free() on an object through an untyped or dynamic call can crash, an engine fault in every Godot version, so leave it off unless the split is needed. Default false.",
+          "start: with profile: true, time the calls scripts make through engine methods (callv, emit_signal, any Node method). Each function then carries engineMs, and its selfMs leaves those calls out. Without it the profiler does not time them: they stay in the caller's selfMs, no row has engineMs and scriptMs can count that work twice. Refused without profile: true. The engine's native-call timing is not thread-safe in any Godot version, so on every platform a game whose GDScript calls engine methods on more than one thread (Thread, WorkerThreadPool) can crash or corrupt strings. A script that calls free() on an object through an untyped or dynamic call has the engine read the freed object, which crashes games on Linux and macOS and is not safe on Windows either. Refused for a project whose scripts name Thread or WorkerThreadPool, unless engineCallsOnThreads: true. Leave it off unless the split is needed. Default false.",
+      },
+      engineCallsOnThreads: {
+        type: 'boolean',
+        ops: ['start'],
+        description:
+          'start: with engineCalls: true, time engine calls in a project whose scripts name Thread or WorkerThreadPool, at the risk of the crash engineCalls names. Default false.',
       },
       callersOf: {
         type: 'string',
