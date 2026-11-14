@@ -92760,7 +92760,8 @@ async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
 }
 
 /** The reason the follower gives a link out of the project, in place of the scenes behind it. */
-const LINK_OUT_LEFT = 'a link that leads out of the project, so no scene behind it was read or changed';
+const LINK_OUT_LEFT =
+  'a link that leads out of the project, so no scene reached only through it was read or changed';
 
 /** desk.tscn of the link-out cases, whose Top moves. */
 const LINKED_DESK =
@@ -93187,6 +93188,280 @@ async function testARingOfJunctionsDoesNotHangTheFollower(): Promise<void> {
       const renamed = await renameTheTop(at);
       assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
       assert.deepEqual(linksLeft(renamed), linksOut(at.project).toSorted(), JSON.stringify(renamed));
+    },
+  );
+}
+
+/** The parent desk.tscn's Lamp has in the scene file [scene], or undefined when it has none. */
+function lampParent(scene: string): string | undefined {
+  return /name="Lamp" parent="([^"]+)"/.exec(scene)?.[1];
+}
+
+/** The scenes [answer] names as followed, sorted. */
+function followedOf(answer: unknown): string[] {
+  return asArray(get(answer, 'followed') ?? [])
+    .map(String)
+    .toSorted();
+}
+
+/** Each scene [answer] names both as followed and as not followed, which none may be. */
+function followedAndNot(answer: unknown): string[] {
+  const followed = new Set(followedOf(answer));
+  return asArray(get(answer, 'notFollowed') ?? [])
+    .map((row) => String(get(row, 'scenePath')))
+    .filter((path) => followed.has(path));
+}
+
+/** A scene inheriting desk.tscn, named [root]. */
+function deskHeir(root: string): string {
+  return (
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://desk.tscn" id="1_desk"]\n\n' +
+    `[node name="${root}" instance=ExtResource("1_desk")]\n`
+  );
+}
+
+/**
+ * A scene inheriting desk.tscn behind a junction inside the project is one scene by either path:
+ * a scene instancing it by the junction and one instancing it by its own folder are both followed.
+ */
+async function testAnHeirNamedByEitherPathOfALinkInsideIsFollowed(): Promise<void> {
+  await withLinksOut(
+    'heir by either path',
+    {
+      files: {
+        'real/mid.tscn': deskHeir('Mid'),
+        'room.tscn': deskKin('Room', 'res://inner/mid.tscn'),
+        'room2.tscn': deskKin('Room2', 'res://real/mid.tscn'),
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      for (const file of ['room.tscn', 'room2.tscn']) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
+/**
+ * An edit asked by either path of a scene behind a junction inside the project follows the scenes
+ * naming it by either path.
+ */
+async function testAnEditAskedByEitherPathOfALinkInsideFollowsBoth(): Promise<void> {
+  await withLinksOut(
+    'edit by either path',
+    {
+      files: {
+        'real/desk.tscn': LINKED_DESK,
+        'room.tscn': deskKin('Room', 'res://real/desk.tscn'),
+        'room2.tscn': deskKin('Room2', 'res://inner/desk.tscn'),
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      for (const [scenePath, from, to] of [
+        ['inner/desk.tscn', 'Top', 'Surface'],
+        ['real/desk.tscn', 'Surface', 'Top'],
+      ] as const) {
+        const renamed = await at.call('scene_node', {
+          op: 'set',
+          scenePath,
+          nodePath: from,
+          properties: { name: to },
+        });
+        const said = `${scenePath}: ${JSON.stringify(renamed)}`;
+        assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], said);
+        assert.equal(get(renamed, 'notFollowed'), undefined, said);
+        for (const file of ['room.tscn', 'room2.tscn']) {
+          assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
+        }
+      }
+    },
+  );
+}
+
+/**
+ * A scene the engine reaches only through a link out that leads back into a folder under a
+ * .gdignore is left as it was, and the only row is the link's, which says so.
+ */
+async function testASceneOnlyALinkOutReachesIsLeftAndSaidSo(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'only through a link out',
+    { files: { 'hide/.gdignore': '', 'hide/deep/kin.tscn': kin } },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'hide', 'deep'), join(outside, 'back')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.equal(get(renamed, 'followed'), undefined, JSON.stringify(renamed));
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://shared/', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.equal(at.fileOf('hide/deep/kin.tscn'), kin, 'the scene only the link reaches is left');
+    },
+  );
+}
+
+/**
+ * A link out that leads back to the project's own folder reaches the same files, so an edit asked
+ * by either path follows the scenes naming the scene by either path.
+ */
+async function testALinkOutBackToTheProjectFollowsTheSameScenes(): Promise<void> {
+  await withLinksOut(
+    'link out back to the project',
+    {
+      files: {
+        'room.tscn': deskKin('Room'),
+        'room2.tscn': deskKin('Room2', 'res://shared/back/desk.tscn'),
+      },
+    },
+    (real, outside) => linkTo(outside, join(real, 'shared')) && linkTo(real, join(outside, 'back')),
+    async (at) => {
+      for (const [scenePath, from, to] of [
+        ['shared/back/desk.tscn', 'Top', 'Surface'],
+        ['desk.tscn', 'Surface', 'Top'],
+      ] as const) {
+        const renamed = await at.call('scene_node', {
+          op: 'set',
+          scenePath,
+          nodePath: from,
+          properties: { name: to },
+        });
+        const said = `${scenePath}: ${JSON.stringify(renamed)}`;
+        assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], said);
+        assert.deepEqual(
+          get(renamed, 'notFollowed'),
+          [{ scenePath: 'res://shared/', reason: LINK_OUT_LEFT }],
+          said,
+        );
+        assert.ok(at.fileOf('desk.tscn').includes(`[node name="${to}"`), at.fileOf('desk.tscn'));
+        for (const file of ['room.tscn', 'room2.tscn']) {
+          assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
+        }
+      }
+    },
+  );
+}
+
+/**
+ * A scene file that is a link out of the project is not read: its one row is the link's, though
+ * the scene there names a scene through a junction inside.
+ */
+async function testAFileLinkOutIsNotRead(): Promise<void> {
+  const kin = deskKin('Kin').replace(
+    '[node name="Kin"',
+    '[ext_resource type="PackedScene" path="res://inner/lamp.tscn" id="2_lamp"]\n\n[node name="Kin"',
+  );
+  await withLinksOut(
+    'file link out unread',
+    {
+      files: {
+        'room.tscn': deskKin('Room'),
+        'real/lamp.tscn': '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n',
+      },
+      outside: { 'kin.tscn': kin },
+    },
+    (real, outside) =>
+      linkTo(join(real, 'real'), join(real, 'inner')) &&
+      linkTo(join(outside, 'kin.tscn'), join(real, 'out.tscn'), 'file'),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://out.tscn', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** A scene naming another through a junction inside, with no tie to the edited scene, gets no row. */
+async function testASceneWithNoTieToTheEditGetsNoRow(): Promise<void> {
+  const hall =
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://inner/lamp.tscn" id="1_lamp"]\n\n' +
+    '[node name="Hall" type="Node3D"]\n\n[node name="Lamp" parent="." instance=ExtResource("1_lamp")]\n';
+  await withLinksOut(
+    'no tie to the edit',
+    {
+      files: {
+        'room.tscn': deskKin('Room'),
+        'hall.tscn': hall,
+        'real/lamp.tscn': '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n',
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      assert.equal(at.fileOf('hall.tscn'), hall);
+    },
+  );
+}
+
+/**
+ * A scene the engine reaches by two paths through a junction inside is followed once, under the
+ * path with no link on it, and no row names a scene that was followed.
+ */
+async function testEachSceneIsFollowedOnceUnderOnePath(): Promise<void> {
+  await withLinksOut(
+    'followed once',
+    { files: { 'real/room.tscn': deskKin('Room') } },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://real/room.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(followedAndNot(renamed), [], JSON.stringify(renamed));
+      const deleted = await at.call('scene_node', {
+        op: 'delete',
+        scenePath: 'desk.tscn',
+        nodePath: 'Surface',
+      });
+      assert.deepEqual(get(deleted, 'followed'), ['res://real/room.tscn'], JSON.stringify(deleted));
+      assert.deepEqual(followedAndNot(deleted), [], JSON.stringify(deleted));
+      assert.deepEqual(
+        asArray(get(deleted, 'dropped')).map((row) => get(row, 'scenePath')),
+        ['res://real/room.tscn'],
+        JSON.stringify(deleted),
+      );
+    },
+  );
+}
+
+/** A reparent and a delete asked by a junction's path follow a scene naming the other path. */
+async function testAMoveAndADeleteAskedThroughALinkInsideAreFollowed(): Promise<void> {
+  await withLinksOut(
+    'move and delete through a link',
+    { files: { 'real/desk.tscn': LINKED_DESK, 'room.tscn': deskKin('Room', 'res://real/desk.tscn') } },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'inner/desk.tscn',
+        nodePath: 'Top/Lamp',
+        newParentPath: 'Leg',
+      });
+      assert.deepEqual(followedOf(moved), ['res://room.tscn'], JSON.stringify(moved));
+      assert.equal(lampParent(at.fileOf('room.tscn')), 'Desk/Leg', at.fileOf('room.tscn'));
+      const deleted = await at.call('scene_node', {
+        op: 'delete',
+        scenePath: 'inner/desk.tscn',
+        nodePath: 'Leg',
+      });
+      assert.deepEqual(followedOf(deleted), ['res://room.tscn'], JSON.stringify(deleted));
+      assert.deepEqual(
+        asArray(get(deleted, 'dropped')).map((row) => [get(row, 'scenePath'), get(row, 'nodePath')]),
+        [['res://room.tscn', 'Desk/Leg/Lamp']],
+        JSON.stringify(deleted),
+      );
+      assert.equal(lampParent(at.fileOf('room.tscn')), undefined, at.fileOf('room.tscn'));
     },
   );
 }
@@ -100683,6 +100958,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASecondLinkToTheSameFolderOutIsNamedToo,
   testAFileLinkOutIsNotFollowed,
   testASceneReachedByALinkInsideTheProjectIsFollowed,
+  testAnHeirNamedByEitherPathOfALinkInsideIsFollowed,
+  testAnEditAskedByEitherPathOfALinkInsideFollowsBoth,
+  testASceneOnlyALinkOutReachesIsLeftAndSaidSo,
+  testALinkOutBackToTheProjectFollowsTheSameScenes,
+  testAFileLinkOutIsNotRead,
+  testASceneWithNoTieToTheEditGetsNoRow,
+  testEachSceneIsFollowedOnceUnderOnePath,
+  testAMoveAndADeleteAskedThroughALinkInsideAreFollowed,
   testALinkOutInsideAWalkedFolderIsNamed,
   testRelativePathsBehindALinkOutAreLeft,
   testADanglingLinkOutLeavesTheFollowerWorking,

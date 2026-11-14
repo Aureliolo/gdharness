@@ -1057,6 +1057,25 @@ static func _followed(given: String) -> String:
 	return current
 
 
+## Where the project's folder lies on disk, each link on the way followed, or "" when one cannot be.
+static func disk_project() -> String:
+	return _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+
+
+## Where [param name] in [param folder], a folder on disk with no link left on its path, leads:
+## the entry itself, or where it points when it is a link, each further link followed. Answers ""
+## when [param folder] is "" or a ring or a link that cannot be read stops the following. Only the
+## last part is asked about, so a caller walking down a tree pays one look per entry.
+static func disk_entry(disk: DirAccess, folder: String, name: String) -> String:
+	if folder.is_empty():
+		return ""
+	var there: String = folder.path_join(name)
+	if not disk.is_link(there):
+		return there
+	var target: String = _target_of(disk, there, folder)
+	return "" if target.is_empty() else _followed(target)
+
+
 ## The absolute path the link [param at], found in the folder [param folder], points to.
 static func _target_of(disk: DirAccess, at: String, folder: String) -> String:
 	var target: String = disk.read_link(at).replace("\\", "/")
