@@ -2931,7 +2931,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   assert.deepEqual(
-    callSitesOf(assigned, 'level', new Set(), true).map((one) => [one.line, one.access]),
+    callSitesOf(assigned, 'level', true).map((one) => [one.line, one.access]),
     [
       [4, 'write'],
       ...Array.from({ length: 12 }, (_, index) => [index + 9, 'write']),
@@ -3459,6 +3459,186 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://works/maker.gd', 18],
     ],
     "Maker's is reached by its own bare call and through self",
+  );
+  // A use through a class by name, or through a variable declared as one, runs what that class
+  // dispatches the name to: a class named is bound to what it resolves, and an object may be of any
+  // class below its declared one. Names are looked up as the engine does, a local first, then the
+  // class it is written in, the classes it extends and the class around it, the globals last. A
+  // receiver the text gives no class, untyped or a call's result, is kept.
+  const yardTool = [
+    'class_name Tool',
+    'extends RefCounted',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const yardUser = [
+    'extends Node',
+    '',
+    'const B := preload("res://yard/sub.gd")',
+    'var held: Tool',
+    '',
+    'func go(given: SubTool, odd: Other, base: Tool, loose, Tool: Other) -> void:',
+    '\tSubTool.make()',
+    '\tFancyTool.make()',
+    '\tOther.make()',
+    '\tgiven.tick()',
+    '\todd.tick()',
+    '\tbase.tick()',
+    '\tloose.tick()',
+    '\tB.make()',
+    '\tTool.tick()',
+    '\tOther.new().tick()',
+    '\tSubTool.new().tick()',
+    '\tSubTool \\',
+    '\t\t.make()',
+    '\tself.held.tick()',
+    '\tvar d := {}',
+    '\td["k"].tick()',
+    '\tvar made := loose.get_it()',
+    '\tmade.tick()',
+    '',
+    '',
+    'const Same = Same',
+    '',
+    '',
+    'func again() -> void:',
+    '\tSame.make()',
+    '\tTool.make()',
+    '',
+  ].join('\n');
+  const yardOuter = [
+    'class_name Outer',
+    'extends RefCounted',
+    '',
+    'class Inner:',
+    '\tstatic func make() -> int:',
+    '\t\treturn 1',
+    '',
+    'class Deeper extends Inner:',
+    '\tfunc go() -> void:',
+    '\t\tInner.make()',
+    '',
+    'class Box:',
+    '\tstatic func make() -> int:',
+    '\t\treturn 2',
+    '\tclass Box:',
+    '\t\tstatic func make() -> int:',
+    '\t\t\treturn 3',
+    '\t\tfunc go() -> void:',
+    '\t\t\tBox.make()',
+    '',
+  ].join('\n');
+  const yardCaller = [
+    'extends Node',
+    '',
+    'var crate: Outer.Inner',
+    '',
+    'func go() -> void:',
+    '\tOuter.Inner.make()',
+    '\tOuter.Box.make()',
+    '\tcrate.make()',
+    '\tOuter.Deeper.make()',
+    '',
+  ].join('\n');
+  const yardHolder = ['class_name Holder', 'extends Node', '', 'var made: Tool', 'var Other: Tool', ''].join(
+    '\n',
+  );
+  const yardHeld = [
+    'extends Holder',
+    '',
+    'func go() -> void:',
+    '\tmade.tick()',
+    '\tOther.tick()',
+    '\tself.made.tick()',
+    '',
+  ].join('\n');
+  const yard = [
+    ['res://yard/tool.gd', yardTool],
+    ['res://yard/sub.gd', 'class_name SubTool\nextends Tool\n'],
+    [
+      'res://yard/fancy.gd',
+      yardTool.replace('class_name Tool\nextends RefCounted', 'class_name FancyTool\nextends Tool'),
+    ],
+    ['res://yard/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://yard/user.gd', yardUser],
+    ['res://yard/outer.gd', yardOuter],
+    ['res://yard/caller.gd', yardCaller],
+    ['res://yard/holder.gd', yardHolder],
+    ['res://yard/held.gd', yardHeld],
+  ] as const;
+  const yardAt = (name: string, script: string): number[] =>
+    callersOf(totals({}), name, yard)
+      .sites.filter((one) => one.script === `res://yard/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    yardAt('Tool.make', 'user'),
+    [7, 14, 19, 31, 32],
+    'Tool.make through a subclass that inherits it, by name, by a preloaded constant and split by a backslash, and through a constant the text cannot read, but not through FancyTool or Other, which declare their own',
+  );
+  assert.deepEqual(
+    yardAt('FancyTool.make', 'user'),
+    [8, 31],
+    'a static call is bound to the class named, so neither SubTool nor Tool by name reaches the override',
+  );
+  assert.deepEqual(
+    yardAt('Tool.tick', 'user'),
+    [10, 12, 13, 17, 20, 22, 24],
+    'objects of Tool and of a subclass, typed or made with new(), a member through self, and the untyped, indexed and undeclared receivers, but not Other, nor a parameter named Tool declared as Other',
+  );
+  assert.deepEqual(
+    yardAt('FancyTool.tick', 'user'),
+    [12, 13, 20, 22, 24],
+    'an object declared as Tool may be a FancyTool, and one declared as SubTool or made as one may not',
+  );
+  assert.deepEqual(
+    yardAt('Other.tick', 'user'),
+    [11, 13, 15, 16, 22, 24],
+    "Other's own objects, the parameter named Tool among them, and the receivers the text gives no class",
+  );
+  assert.deepEqual(
+    [yardAt('Tool.tick', 'held'), yardAt('Other.tick', 'held')],
+    [[4, 5, 6], []],
+    'an inherited variable is read as its declared class, also where it is named like a class',
+  );
+  assert.deepEqual(
+    [
+      yardAt('Outer.Inner.make', 'caller'),
+      yardAt('Outer.Inner.make', 'outer'),
+      yardAt('Outer.Box.make', 'caller'),
+      yardAt('Outer.Box.make', 'outer'),
+      yardAt('Outer.Box.Box.make', 'outer'),
+    ],
+    [[6, 8, 9], [10], [7], [], [19]],
+    'a dotted name, a variable declared as one and an inner class that inherits the function, each read in its own scope',
+  );
+  const docked = [
+    ['res://dock/harbour.gd', 'class_name Harbour\nextends Node\n'],
+    ['res://dock/quay.gd', 'class_name Quay\nextends Harbour\n'],
+    ['res://dock/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    [
+      'res://dock/user.gd',
+      [
+        'extends Node',
+        '',
+        'func go(q: Quay, o: Other, h: Harbour) -> void:',
+        '\tq.add_child(null)',
+        '\to.add_child(null)',
+        '\th.add_child(null)',
+        '',
+      ].join('\n'),
+    ],
+  ] as const;
+  assert.deepEqual(
+    callersOf(totals({}), 'Harbour.add_child', docked).sites.map((one) => one.line),
+    [4, 6],
+    'asked about a function the class does not declare, a use through a class related to it counts and one through an unrelated class does not',
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [

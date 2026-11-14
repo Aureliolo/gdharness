@@ -998,17 +998,18 @@ function parametersOf(text: string, from: number): string[] {
 const DOTTED = `${NAME}(?:\\.${NAME})*`;
 
 /**
- * The class [param text], a line declaring [param name], gives it: written after a colon, the class
- * whose `new()` it is assigned, or the class it is cast to with `as`. Its last part for a dotted
- * inner class, and null when the line says none.
+ * The class [param text], a line declaring [param name], gives it, as written: after a colon, the
+ * class whose `new()` it is assigned, or the class it is cast to with `as`. Null when the line says
+ * none.
  */
-function declaredClass(text: string, name: string): string | null {
+export function declaredClass(text: string, name: string): string | null {
   const word = `(?<![\\p{L}\\p{N}_.])${escapedForPattern(name)}`;
-  const found =
+  return (
     new RegExp(`${word}\\s*:\\s*(${DOTTED})`, 'u').exec(text)?.[1] ??
     new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\(`, 'u').exec(text)?.[1] ??
-    new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1];
-  return found === undefined ? null : found.slice(found.lastIndexOf('.') + 1);
+    new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1] ??
+    null
+  );
 }
 
 /**
@@ -1083,34 +1084,86 @@ function scopeVerdict(
   return patterns.declares.test(text) ? 'binds' : 'passes';
 }
 
-/**
- * The identifier written before the dot that ends just before [param offset] in [param code], and
- * whether it is itself a member of something written before it.
- */
-function receiverBefore(code: string, offset: number): { name: string; dotted: boolean } | null {
-  let at = offset - 1;
-  while (at >= 0 && /\s/.test(code[at] ?? '')) {
+/** Where [param code] at or before [param from] stops being white space or a line continuation. */
+function skippedBack(code: string, from: number): number {
+  let at = from;
+  while (at >= 0 && /[\s\\]/.test(code[at] ?? '')) {
     at -= 1;
   }
+  return at;
+}
+
+/**
+ * Where a `.new()` ending at the `)` at [param close] in [param code] starts its receiver, before the
+ * dot ahead of `new`. Null for any other call, whose result the text gives no class.
+ */
+function constructedBefore(code: string, close: number): number | null {
+  const open = openingParenBefore(code, close - 1);
+  if (open < 0) {
+    return null;
+  }
+  const callee = wordBefore(code, open - 1);
+  const dot = skippedBack(code, callee.start - 1);
+  return callee.word === 'new' && code[dot] === '.' ? skippedBack(code, dot - 1) : null;
+}
+
+/**
+ * The names written before the dot that ends just before [param offset] in [param code], first one
+ * first, and whether they end in `.new()`. Null where the receiver is anything else, such as a
+ * call's result, an index, a node path or a literal, whose class the text does not give.
+ */
+function receiverPathBefore(code: string, offset: number): { names: string[]; made: boolean } | null {
+  let at = skippedBack(code, offset - 1);
   if (code[at] !== '.') {
     return null;
   }
-  at -= 1;
-  while (at >= 0 && /\s/.test(code[at] ?? '')) {
-    at -= 1;
+  at = skippedBack(code, at - 1);
+  const made = code[at] === ')';
+  if (made) {
+    const before = constructedBefore(code, at);
+    if (before === null) {
+      return null;
+    }
+    at = before;
   }
-  let start = at + 1;
-  while (start > 0 && isIdentifierPart(code[start - 1])) {
-    start -= 1;
+  const names: string[] = [];
+  for (;;) {
+    const { word, start } = wordBefore(code, at);
+    if (!/^[\p{L}_]/u.test(word)) {
+      return null;
+    }
+    names.unshift(word);
+    const before = skippedBack(code, start - 1);
+    if (code[before] !== '.' || code[before - 1] === '.') {
+      return opensReceiver(code[before], word) ? { names, made } : null;
+    }
+    at = skippedBack(code, before - 1);
   }
-  if (start > at) {
-    return null;
+}
+
+/**
+ * Whether [param word], with [param before] the character ahead of it, can start a receiver: not a
+ * node path's `$` or `%`, and no keyword but `self` and `super`, which a blanked string leaves.
+ */
+function opensReceiver(before: string | undefined, word: string): boolean {
+  if (before === '$' || before === '%') {
+    return false;
   }
-  let before = start - 1;
-  while (before >= 0 && /\s/.test(code[before] ?? '')) {
-    before -= 1;
-  }
-  return { name: code.slice(start, at + 1), dotted: code[before] === '.' };
+  return !KEYWORDS.has(word) || word === 'self' || word === 'super';
+}
+
+/**
+ * What a member use is written on, read as far as the text says: a local of the function with the
+ * class its declaration gives, `self`, or a name looked up from the class it is written in. Then
+ * the names written after that, and whether the path ends in `.new()`.
+ */
+export interface Receiver {
+  readonly start: 'local' | 'self' | 'name';
+  /** For a local, the class its declaration gives it as written, null when it gives none. */
+  readonly type: string | null;
+  /** The names after the start. For a name looked up, that name first. */
+  readonly names: readonly string[];
+  readonly made: boolean;
 }
 
 /** What a class declares by a name that, written bare in it, means that member and no function. */
@@ -1130,9 +1183,7 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * A bare name that is something else at that place is not the function: a parameter or local of
  * that name, or a variable, constant, signal or enum the class itself declares by it. Read as the
  * function, `made.bare_lift = lift` in a helper taking `lift: int` was listed as `lift` handed on
- * as a Callable. A member call whose receiver is one of [param otherClasses], or a local or a
- * variable of the class declared as one, is another class's method and is left out for a caller
- * asking about one class: `made.lift(by)` with `var made: Outcome` above it is Outcome's.
+ * as a Callable.
  *
  * With [param property] the name is a variable's, whose get and set blocks run wherever it is read or
  * assigned, so the class's own variable of that name is what is being looked for rather than
@@ -1141,15 +1192,18 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * `sinks = value` in the set block of `sinks` is not a place that sets it.
  *
  * A use written bare, through `self` or through `super` runs whichever function of that name the
- * engine dispatches it to from the class holding it, and [param onSelf] says whether that can be
- * the one asked about: a bare `_settle()` in a script of an unrelated class calls that script's own.
+ * engine dispatches it to from the class holding it, and `onSelf` says whether that can be the one
+ * asked about: a bare `_settle()` in a script of an unrelated class calls that script's own. A use
+ * through anything else whose class the text names, such as a class, a typed local or a variable of
+ * the class, runs what that class dispatches it to, and `onReceiver` says the same of it:
+ * `made.lift(by)` with `var made: Outcome` above it is Outcome's. A receiver the text gives no class,
+ * such as an untyped local or a call's result, may be anything, so the use is kept.
  */
 export function callSitesOf(
   source: string,
   name: string,
-  otherClasses: ReadonlySet<string> = new Set(),
   property = false,
-  onSelf: SelfDispatch = () => true,
+  dispatch: { readonly onSelf?: SelfDispatch; readonly onReceiver?: ReceiverDispatch } = {},
 ): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
@@ -1160,13 +1214,13 @@ export function callSitesOf(
     source,
     name,
     property,
-    otherClasses,
     code,
     codeLines,
     lines,
     shape,
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
-    onSelf,
+    onSelf: dispatch.onSelf ?? (() => true),
+    onReceiver: dispatch.onReceiver ?? (() => true),
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1177,12 +1231,14 @@ export function callSitesOf(
 /** Whether a use at [param offset] written bare, through `self` or through `super` can reach the function asked about. */
 export type SelfDispatch = (offset: number, how: 'bare' | 'self' | 'super') => boolean;
 
+/** Whether a member use at [param offset] on [param receiver] can reach the function asked about. */
+export type ReceiverDispatch = (offset: number, receiver: Receiver) => boolean;
+
 /** What one `callSitesOf` call reads from, worked out once. */
 interface CallScan {
   readonly source: string;
   readonly name: string;
   readonly property: boolean;
-  readonly otherClasses: ReadonlySet<string>;
   readonly code: string;
   readonly codeLines: readonly string[];
   readonly lines: Lines;
@@ -1190,16 +1246,7 @@ interface CallScan {
   /** The zero-based line ranges of the property's own get and set blocks. */
   readonly accessors: readonly (readonly [number, number])[];
   readonly onSelf: SelfDispatch;
-}
-
-/** The class a variable of the class body holding [param at] is declared as, read off its own line. */
-function memberClass(scan: CallScan, member: string, at: number): string | null {
-  const declared = bodyHolding(scan.shape.body, at).declarations.find(
-    (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
-  );
-  return declared === undefined
-    ? null
-    : declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member);
+  readonly onReceiver: ReceiverDispatch;
 }
 
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
@@ -1233,21 +1280,29 @@ function accessorsIn(
   ];
 }
 
-/** Whether a member call is this class's: not another class's method of the same name. */
-function isOwnMemberCall(scan: CallScan, offset: number, index: number): boolean {
-  const receiver = receiverBefore(scan.code, offset);
-  if (receiver === null || scan.otherClasses.size === 0) {
+/**
+ * Whether a member use at [param offset], on line [param index], can reach the function asked
+ * about. A local of the receiver's first name hides a class or member of that name, as in GDScript.
+ */
+function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean {
+  const path = receiverPathBefore(scan.code, offset);
+  if (path === null) {
     return true;
   }
-  if (scan.otherClasses.has(receiver.name)) {
-    return false;
+  const { names, made } = path;
+  const [first = '', ...rest] = names;
+  if (first === 'self' || first === 'super') {
+    return rest.length === 0 && !made
+      ? scan.onSelf(offset, first)
+      : scan.onReceiver(offset, { start: 'self', type: null, names: rest, made });
   }
-  if (receiver.dotted) {
-    return true;
-  }
-  const typed =
-    localAt(scan.codeLines, index, receiver.name)?.type ?? memberClass(scan, receiver.name, offset);
-  return typed === null || !scan.otherClasses.has(typed);
+  const local = localAt(scan.codeLines, index, first);
+  return scan.onReceiver(
+    offset,
+    local === null
+      ? { start: 'name', type: null, names, made }
+      : { start: 'local', type: local.type, names: rest, made },
+  );
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
@@ -1271,11 +1326,7 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
   if (!one.afterDot) {
     return isBareFunctionUse(scan, one.offset, index) && scan.onSelf(one.offset, 'bare');
   }
-  const receiver = receiverBefore(scan.code, one.offset);
-  if (receiver !== null && !receiver.dotted && (receiver.name === 'self' || receiver.name === 'super')) {
-    return scan.onSelf(one.offset, receiver.name);
-  }
-  return isOwnMemberCall(scan, one.offset, index);
+  return isMemberUseKept(scan, one.offset, index);
 }
 
 function callSiteAt(scan: CallScan, one: Occurrence): CallSite {
