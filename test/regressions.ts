@@ -63671,12 +63671,17 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     }
     // A mark that let a slot left to it stand, as a wait for memory under an older release does.
     late.release(join(directory, '1.lock'));
-    await delay(Math.max(0, firstLeft + SLOT_YIELD_MS - Date.now()));
-    assert.equal(
-      await late.takeFree(),
-      join(directory, '1.lock'),
-      'and the process leaves a waiter that let a slot stand no other',
-    );
+    // A clock set to the yield's end, since a timer may wake before the wall clock reaches it.
+    try {
+      Date.now = () => firstLeft + SLOT_YIELD_MS;
+      assert.equal(
+        await late.takeFree(),
+        join(directory, '1.lock'),
+        'and the process leaves a waiter that let a slot stand no other',
+      );
+    } finally {
+      Date.now = realNow;
+    }
     late.releaseAll();
 
     const timing = new EngineSlots(directory, 2, me, undefined, () => 'timing');
