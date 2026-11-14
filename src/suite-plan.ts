@@ -888,7 +888,7 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
 }
 
 /** Orders two strings by code unit, as every other by-path order here does and whatever the locale. */
-function byCodeUnit(a: string, b: string): number {
+export function byCodeUnit(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
@@ -903,10 +903,18 @@ function slowestFirst(a: Unit, b: Unit): number {
 }
 
 /**
- * The least work a share holds, while there is that much left: a share is an engine started, which
- * costs about [constant ENGINE_START_SECONDS] before its first case.
+ * The least work a share holds, while there is that much left, in engine starts: a share is an
+ * engine started, which costs [method Shares.startSeconds] before its first case, so a share of six
+ * starts' work pays a seventh of it again.
  */
-const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
+const SHARE_FLOOR_STARTS = 6;
+
+/**
+ * The most work a share holds, apart from one suite longer than that, which is a share of its own.
+ * A lane gives its slot back between shares, so a run told to hold fewer slots frees them within
+ * this long, not after the lane's whole part.
+ */
+const SHARE_MOST_SECONDS = 120;
 
 /**
  * [param units] handed out a share at a time, to lanes that start at different moments.
@@ -917,7 +925,8 @@ const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
  * suites from there, and the run ends as late as running the suites after the export. Here each
  * lane, as it starts or finishes an engine, is handed a share of what is left: the windowed units
  * first and whole, then the slowest headless units up to [param lanes] parts of what is left, never
- * less than [constant SHARE_FLOOR_SECONDS] while that much remains. The shares shrink as the work
+ * less than [constant SHARE_FLOOR_STARTS] engine starts while that much remains, and never more than
+ * [constant SHARE_MOST_SECONDS]. The shares shrink as the work
  * runs out, so the lanes end close together however late each began. A run whose lanes rise widens
  * the parts, so a lane joining late is handed a part cut for the lanes there are now.
  */
@@ -927,6 +936,8 @@ export class Shares {
   private readonly declared: CasesBySuite;
   private readonly all: readonly Unit[];
   private lanes: number;
+  /** What the engines of this run took before their first suite, in seconds, as they ended. */
+  private readonly starts: number[] = [];
 
   constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
     this.windowed = units.filter((unit) => unit.windowed);
@@ -939,6 +950,30 @@ export class Shares {
   /** Raises the lanes the next shares are cut for. A number at or below the present one changes nothing. */
   widen(lanes: number): void {
     this.lanes = Math.max(this.lanes, lanes);
+  }
+
+  /**
+   * Notes what an engine of this run took before its first suite, which its output says as
+   * `gdharness timing: started`, compiling the suites together included.
+   */
+  noteStart(seconds: number): void {
+    if (Number.isFinite(seconds) && seconds > 0) {
+      this.starts.push(seconds);
+    }
+  }
+
+  /**
+   * What starting an engine costs, as this run's engines have shown. The constant stands with them
+   * as one more reading, and the lower of the two middle ones is taken when there is an even number.
+   * Nothing is read before two engines have shown a start, so one start alone changes nothing, fast or
+   * slow, and it takes two engines starting alike to move it.
+   */
+  startSeconds(): number {
+    if (this.starts.length < 2) {
+      return ENGINE_START_SECONDS;
+    }
+    const readings = [ENGINE_START_SECONDS, ...this.starts].toSorted((a, b) => a - b);
+    return readings[Math.floor((readings.length - 1) / 2)] ?? ENGINE_START_SECONDS;
   }
 
   /** Whether every unit has been handed out. */
@@ -970,7 +1005,8 @@ export class Shares {
   /** The headless units a share takes, and those left for the shares after it. */
   private headlessSplit(): { share: Unit[]; rest: Unit[] } {
     const left = this.headless.reduce((sum, unit) => sum + unit.cost, 0);
-    const target = Math.max(SHARE_FLOOR_SECONDS, left / this.lanes);
+    const floor = SHARE_FLOOR_STARTS * this.startSeconds();
+    const target = Math.min(SHARE_MOST_SECONDS, Math.max(floor, left / this.lanes));
     const share: Unit[] = [];
     const rest: Unit[] = [];
     let cost = 0;
@@ -1022,8 +1058,8 @@ export function windowedSaid(plans: readonly EnginePlan[]): string {
 }
 
 /**
- * The suites saying they run headless that a windowed engine holds, which happens only in an
- * ordered run, one engine, with a suite in it needing a window.
+ * The suites saying they run headless that a windowed engine holds, which happens only to a suite
+ * that also declares it needs the accessibility tree.
  */
 export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly Unit[]): string[] {
   const said = new Set(units.filter((unit) => unit.headless).map((unit) => unit.suite));
@@ -1033,15 +1069,28 @@ export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly 
     .filter((path) => said.has(path));
 }
 
-/** Every unit in one engine, in the order given. */
-export function inOneEngine(units: readonly Unit[], declared: CasesBySuite): EnginePlan {
-  return planOf(
-    units,
-    declared,
-    units.some((unit) => unit.windowed),
-    0,
-    units,
-  );
+/**
+ * Every unit in the order given, in one engine for the windowed units and one for the rest, each
+ * keeping that order. A headless engine follows the windowed one in its slot, and a run with only
+ * one kind is one engine.
+ */
+export function inEngines(units: readonly Unit[], declared: CasesBySuite): EnginePlan[] {
+  const windowed = units.filter((unit) => unit.windowed);
+  const headless = units.filter((unit) => !unit.windowed);
+  return [
+    ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0, units)] : []),
+    ...(headless.length > 0 ? [planOf(headless, declared, false, 0, units)] : []),
+  ];
+}
+
+/** What a set of suites splits into: those needing a window and the rest, each in the order given. */
+export function splitByWindow<T extends { readonly windowed: boolean }>(
+  suites: readonly T[],
+): { readonly windowed: T[]; readonly headless: T[] } {
+  return {
+    windowed: suites.filter((suite) => suite.windowed),
+    headless: suites.filter((suite) => !suite.windowed),
+  };
 }
 
 /**

@@ -49,11 +49,14 @@ when the command line itself is wrong.
   once.
 - `--import`: import the project in an engine of its own before the suites. Without it, a project
   is still imported first [when it is out of date](#when-a-run-imports-first).
-- `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
-  shuffled by a number. It finds suites that depend on the order they run in.
-- `--order named`: the suites you name, in one engine, in the order you name them. To replay a case
-  that fails only after others, name the `suites` list of an engine from the result file. Then halve
-  it until one suite before the failing one is left.
+- `--order reversed` or `--order SEED`: the suites in reverse order of path or shuffled by a number,
+  in one engine. It finds suites that depend on the order they run in. Suites needing a window run
+  in a windowed engine of their own, first, and the others in a headless one after it. The order
+  holds within each engine.
+- `--order named`: the suites you name, in the order you name them within their engine. Suites
+  needing a window run first, in an engine of their own. To replay a case that fails only after
+  others, name the `suites` list of an engine from the result file. Then halve it until one suite
+  before the failing one is left.
 
 ## Reuse options
 
@@ -262,8 +265,14 @@ comes free. An engine that ends is followed in its slot by one on the next share
 ### Shares
 
 The windowed suites go out first and whole. After them, a share is the slowest units that fit in
-what is left divided by the run's engines. It is never less than 30 seconds while that much is
-left, since every share starts an engine.
+what is left divided by the run's engines. It is never less than six engine starts' work while that
+much is left, since every share starts an engine, and never more than 120 seconds. A suite longer
+than that is a share of its own.
+
+An engine start is read from the run's own engines: the seconds each took before its first suite,
+which the run prints as "Before their first suite the engines spent". Until two engines have
+shown it, a start counts 5 seconds, so the floor is 30. The middle reading of theirs and the 5
+seconds is taken (the lower of two middle ones), so one start, fast or slow, never sets it alone.
 
 The shares shrink as the work runs out. A slot freed partway through takes on part of what is
 left, rather than a part fixed when the run began. Once everything is handed out, the run stops
@@ -482,8 +491,8 @@ idle. With `--engines 1` the run is that one slot, the windowed engine and then 
 machine with room for fewer engines than asked for, the slots run one after the other. The line
 announcing the run says so.
 
-An ordered run (`--order`) is one engine, so a suite in it needing a window gives the whole run
-one. Before it starts, the run names each suite declaring `false` that runs with the window.
+An ordered run (`--order`) is one engine, or two when it mixes the kinds: a windowed engine for the
+suites needing a window and a headless one after it. Each keeps the order of the run within it.
 
 ### How the windowed engine runs
 
@@ -502,10 +511,12 @@ draws nothing. So the runner puts the window back before each suite begins.
 
 ### Windows in `project_test`
 
-The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
-needs a window the whole run has one, started as above. The answer's `windowNote` names the suites
-that needed it and those declaring `false` that shared it. On a machine with no display the run
-stays headless, and the note says so.
+The `project_test` tool reads the suites the same way. A run whose suites all need a window, or all
+do not, is one engine, with a window if they need one, started as above. A named set mixing the two
+kinds runs as two engines, the windowed suites with a window and the others headless, one after the
+other, and the answer is the sum of both with `engines` set to 2. The answer's `windowNote` names
+the suites that needed a window. On a machine with no display the run stays headless, and the note
+says so.
 
 ### macOS runners
 
@@ -687,8 +698,8 @@ They are the same for every tool on the machine. The directory is the first of t
 4. `~/.cache/gdharness/slots` everywhere else.
 
 The count is `GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0. Otherwise it is
-half the processors the machine offers, rounded down, and at least one. A command's `--slots` and
-`--slot-count` come before both.
+half the processors the machine offers, rounded down, held to the physical memory above 16 GiB at
+1.5 GiB an engine, and at least one. A command's `--slots` and `--slot-count` come before both.
 
 `--engines` is how many engines one run would like, and is not the slot count. A gate passes
 `--engines` for the lanes its run begins on, and names a lanes file where the run may grow. It
@@ -750,7 +761,16 @@ ones.
 - Give each, in turn, the first free slot of those it may take now (below, aged by its own `since`)
   not given to one before it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
-  its coming free. From then on, leave that waiter nothing.
+  its coming free. From then on, leave that waiter nothing, unless it has looked since. A waiter
+  says it looks by touching `<mark name without .json>.seen` beside its mark at each look, and
+  removes the file with its mark. Count the 5 seconds from the later of the first time you left it
+  a slot and its last look. A mark with no such file looks since it was made.
+- A mark may also hold `wants`, a whole number above 1, for a taker waiting for that many slots at
+  once. It is ahead that many times for its first 300 seconds of waiting, and once after. Any other
+  `wants` counts as 1.
+- A program inside a timing or a heavy job is lent the job's slot in `GODOT_ENGINE_TIMED`. It runs one
+  engine at a time on that slot and takes no other while the job lives. While the slot is in use it
+  waits for it alone and puts down no waiting mark.
 - A waiter that leaves a free slot untaken is waiting for something else, such as memory.
 - A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
 
@@ -838,12 +858,18 @@ it holds one as long as it plays.
   `{"lanes", "pid", "started", "written"}`. `lanes` is a whole number of 1 or more and `written` is
   in milliseconds. It is written at each change and every five seconds.
 - The run begins on `--engines` and holds up to `lanes` lanes, fewer only for want of work, memory,
-  processors or free machine slots. The number never falls. A file missing, older than ten seconds
-  or written by a process that has gone adds no lane. With the variable unset or empty the run
-  holds `--engines`.
+  processors or free machine slots. A file missing, older than ten seconds or written by a process
+  that has gone tells nothing, and the lanes the run has go on. With the variable unset or empty the
+  run holds `--engines`.
+- A lane reads the number again after each wait (for a slot, for the compile check, for memory) and
+  right before it draws a share. A lane numbered at or past it gives its machine slot back to the
+  machine, waits for the number to grow, and takes a slot again when it does. Lanes count from 0.
+  It ends once every share is handed out. An engine already running finishes its share first. A
+  run with several lanes follows the file this way even when it began on every lane it may have.
 - A run that can grow makes `<lanes file>.follows` as a lock is made, and takes one whose holder has
   gone over under its steal file. Until a live mark stands, the writer holds no more than the
-  number it told. A run that cannot grow makes none.
+  number it told. A run that cannot grow reads the number for a fall and makes no mark. A run reads
+  the number for a fall whether or not it holds the mark, and rises only while it holds it.
 - The run removes its mark at once when it reaches its ceiling of processors, pool count or work,
   and otherwise once every share is handed out.
 - The engine that compiles every script together counts as one of the lanes. It runs in a lane's

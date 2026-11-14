@@ -391,6 +391,7 @@ import {
   gdUnitFailsOnPushErrors,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
+  splitByWindow,
   TEST_DIRECTORIES,
   viewportOf,
   windowNeedsOf,
@@ -403,6 +404,19 @@ import {
   selectTests,
   suiteFilesUnder,
 } from './test-selection.js';
+import {
+  caseIgnored,
+  ENGINE_START_FLOOR_MS,
+  mergedTestAnswers,
+  NOT_SUITES_NOTE,
+  notRunSaid,
+  notStartedAnswer,
+  notSuitesVerdict,
+  timeLeft,
+  unmatchedSaid,
+  withNotRun,
+  withNotSuites,
+} from './test-split.js';
 import {
   asParams,
   type OperationParams,
@@ -3594,7 +3608,7 @@ const PROPERTY_PLACES =
 
 /** What a callers answer says about where its places come from. */
 const CALLERS_FOUND_BY_NAME =
-  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless one class was asked about and it is called through another class by name or through a variable declared as one. Each place carries the profile's numbers for the function it is written in.";
+  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless one class was asked about and it is called through another class by name or through a variable declared as one, or written bare or through self or super where the engine would send it to another class's own function of that name. Each place carries the profile's numbers for the function it is written in.";
 
 /**
  * [param projectPath]'s scripts read off disk by `res://` path, null for one that is not a file
@@ -4083,12 +4097,283 @@ function headlessWindowNote(needing: readonly string[], accessible: readonly str
   return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${WINDOW_NEEDED_WHY} Run under xvfb-run to give it a display.`;
 }
 
+/** The JSON a test run answered, or null for a refusal or any answer that is not a run's. */
+function answeredAsARun(answer: ToolResponse): Record<string, unknown> | null {
+  const text = answer.content.findLast((part) => part.type === 'text');
+  try {
+    const json: unknown = JSON.parse(text?.type === 'text' ? text.text : '');
+    return isRecord(json) && typeof json['passed'] === 'boolean' ? json : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The text parts before the JSON of [param answer], each naming the [param kind] of engine it is from. */
+function explanationsOf(answer: ToolResponse, kind: string): { type: 'text'; text: string }[] {
+  return answer.content
+    .slice(0, -1)
+    .flatMap((part) =>
+      part.type === 'text' ? [{ type: 'text' as const, text: `The ${kind} engine: ${part.text}` }] : [],
+    );
+}
+
+/** The kinds of engine a cut run has, in the order they run. */
+const ENGINE_KINDS = ['windowed', 'headless'] as const;
+
+/** The engines a project_test run is cut into, as the arguments each is given on top of the call's. */
+export interface TestEnginePlan {
+  readonly halves: OperationParams[];
+  /** The scripts declaring cases that are no suite, which a folder run names and fails for. */
+  readonly notSuites: string[];
+  /** The cases asked for by name in a script that is no suite, as `script:test_case`. */
+  readonly notRun: string[];
+  readonly root: string;
+}
+
+/**
+ * The engines a run of [param paths] in the project at [param root] is cut into on a machine with a
+ * display, or null when it is one engine as it stands. A set mixing suites needing a window with
+ * suites that do not is cut after `ignore` and `tests` are applied, so a kind with no case left
+ * gets no engine. Whatever a single run would refuse is left to it.
+ */
+export function enginesOfTestRun(
+  root: string,
+  paths: readonly string[],
+  args: OperationParams,
+): TestEnginePlan | null {
+  const present = paths.filter((path) => existsSync(join(root, path.slice('res://'.length))));
+  const missing = paths.filter((path) => !present.includes(path));
+  const scripts = new ProjectScripts(root);
+  const asked = scripts.searchedAsTold(present);
+  const uncollected = scripts.uncollectedUnder(present);
+  const refused =
+    (present.some((path) => !path.endsWith('.gd')) && envValue('GDHARNESS_SUITE_FILES_ONLY') !== undefined) ||
+    asked.length === 0 ||
+    gdUnit4Unusable(root) !== null ||
+    scriptsWithoutCases(root, asked).length > 0 ||
+    uncollected.some((one) => present.includes(one.path)) ||
+    present.some((path) => !path.endsWith('.gd') && scripts.suitesUnder([path]).length === 0);
+  const selection = refused ? null : selectTests(root, asked, args['tests']);
+  if (selection === null || !selection.ok) {
+    return null;
+  }
+  const ignore = readStringArray(args, 'ignore') ?? [];
+  const chosen: { path: string; windowed: boolean; suite: boolean; cases: readonly string[] }[] =
+    selection.value === null
+      ? asked
+          .flatMap((path) =>
+            path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
+          )
+          .filter((suite, at, all) => all.findIndex((one) => one.path === suite.path) === at)
+          .map((suite) => ({ path: suite.path, windowed: suite.windowed, suite: true, cases: suite.cases }))
+      : selection.value.suites.map((path) => {
+          const suite = scripts.suite(path);
+          return {
+            path,
+            windowed: suite?.windowed ?? false,
+            suite: suite !== null,
+            cases: (selection.value?.selected ?? [])
+              .filter((one) => one.suite === path)
+              .map((one) => one.test),
+          };
+        });
+  const live = chosen.filter(
+    (one) => one.suite && one.cases.some((test) => !caseIgnored(one.path, test, ignore)),
+  );
+  const running = splitByWindow(live);
+  if (running.windowed.length === 0 && running.headless.length === 0) {
+    return null;
+  }
+  if (running.windowed.length === 0) {
+    // Suites needing a window are all left out, so the single run gives what is left no window.
+    return null;
+  }
+  if (running.headless.length === 0) {
+    return null;
+  }
+  // A case asked for in a script that is no suite is handed to no engine, and answered as not run.
+  const all = splitByWindow(chosen.filter((one) => one.suite));
+  const notRun =
+    selection.value === null
+      ? []
+      : selection.value.selected
+          .filter((one) => chosen.some((script) => script.path === one.suite && !script.suite))
+          .map((one) => `${basename(one.suite, '.gd')}:${one.test}`);
+  const half = (group: readonly { path: string }[], also: readonly string[]): OperationParams => ({
+    path: [...group.map((suite) => suite.path), ...also],
+    ...(selection.value === null
+      ? {}
+      : {
+          tests: selection.value.selected
+            .filter((one) => group.some((suite) => suite.path === one.suite))
+            .map((one) => `${one.suite}:${one.test}`),
+        }),
+  });
+  return {
+    halves: [half(all.windowed, missing), half(all.headless, [])],
+    notSuites: selection.value === null ? uncollectedSaid(uncollected) : [],
+    notRun,
+    root,
+  };
+}
+
+/** What an engine of a cut run finished, as the record of a cut call holds it. */
+interface RanEngine {
+  readonly paths: readonly string[];
+  readonly finished: readonly string[];
+  readonly failing: NonNullable<CutTestRun['suitesFailing']>;
+}
+
+/** What the engine that answered [param json] for [param half] had finished. */
+function ranEngineOf(half: OperationParams, json: Record<string, unknown>): RanEngine {
+  const paths = readStringArray(half, 'path') ?? [];
+  const absent = new Set(readStringArray(json, 'missing') ?? []);
+  const failedList = Array.isArray(json['failed']) ? json['failed'] : [];
+  const suites = Array.isArray(json['suites']) ? json['suites'] : [];
+  return {
+    paths,
+    finished: paths.filter((path) => path.endsWith('.gd') && !absent.has(path)),
+    failing: suites.flatMap((suite: unknown) => {
+      if (!isRecord(suite) || typeof suite['path'] !== 'string') {
+        return [];
+      }
+      const errors = typeof suite['errors'] === 'number' ? suite['errors'] : 0;
+      const failures = typeof suite['failures'] === 'number' ? suite['failures'] : 0;
+      return errors + failures === 0
+        ? []
+        : [
+            {
+              path: suite['path'],
+              errors,
+              failures,
+              failed: failedList.flatMap((one: unknown) =>
+                isRecord(one) && one['path'] === suite['path'] && typeof one['name'] === 'string'
+                  ? [one['name']]
+                  : [],
+              ),
+            },
+          ];
+    }),
+  };
+}
+
+/**
+ * Keeps the record of a call cut off after the engine in [param ran] last, the one that answered:
+ * every suite still to run, in [param rest], and what the engines before it finished. An engine cut
+ * inside keeps its own record, which this adds to. One that answered whole is among what finished.
+ */
+function keepCutAcross(
+  root: string,
+  ran: readonly RanEngine[],
+  rest: readonly OperationParams[],
+  since: number,
+): void {
+  const left = rest.flatMap((half) => readStringArray(half, 'path') ?? []);
+  const kept = takeCutTestRun(root);
+  const inner = kept !== null && Date.parse(kept.cutAt) >= since ? kept : null;
+  if (inner === null && left.length === 0) {
+    // Nothing of this call to keep, so a record an earlier cut call left stays as it was.
+    if (kept !== null) {
+      keepCutTestRun(root, kept);
+    }
+    return;
+  }
+  const done = inner === null ? ran : ran.slice(0, -1);
+  keepCutTestRun(root, {
+    cutAt: inner?.cutAt ?? new Date().toISOString(),
+    paths: [...done.flatMap((one) => one.paths), ...(inner?.paths ?? []), ...left],
+    suitesFinished: [...done.flatMap((one) => one.finished), ...(inner?.suitesFinished ?? [])],
+    suitesFailing: [...done.flatMap((one) => one.failing), ...(inner?.suitesFailing ?? [])],
+    ...(inner?.suiteRunning === undefined ? {} : { suiteRunning: inner.suiteRunning }),
+  });
+}
+
+/** How a call cut into engines starts them, so that a run of it can be driven without any. */
+export interface EngineRunner {
+  run(args: OperationParams): Promise<ToolResponse>;
+  aborted(): boolean;
+  now(): number;
+}
+
+/** The runner of a call being answered: [param run] for each engine, the call's own signal and the clock. */
+export function engineRunnerOf(run: (args: OperationParams) => Promise<ToolResponse>): EngineRunner {
+  return {
+    run,
+    aborted: () => callSignal()?.aborted === true,
+    now: () => Date.now(),
+  };
+}
+
+/**
+ * Runs the engines of [param plan] one after the other, under one limit for the whole call, and
+ * answers them as one run. An engine with too little of the limit left is not started, and the
+ * answer names its suites as not run.
+ */
+export async function runEngines(
+  plan: TestEnginePlan,
+  args: OperationParams,
+  runner: EngineRunner,
+): Promise<ToolResponse> {
+  const limit = readPositiveNumber(args, 'timeoutMs') ?? TEST_TIMEOUT_MS;
+  const began = runner.now();
+  const answers: ToolResponse[] = [];
+  const parsed: Record<string, unknown>[] = [];
+  const explained: { type: 'text'; text: string }[] = [];
+  const ran: RanEngine[] = [];
+  for (const [at, half] of plan.halves.entries()) {
+    const left = timeLeft(limit, began, runner.now());
+    if (at > 0 && left < ENGINE_START_FLOOR_MS) {
+      parsed.push(
+        notStartedAnswer(ENGINE_KINDS[at] ?? 'next', readStringArray(half, 'path') ?? [], limit, left),
+      );
+      continue;
+    }
+    const answer = await runner.run({ ...args, ...half, timeoutMs: at === 0 ? limit : left });
+    const json = answeredAsARun(answer);
+    // A refusal or an answer of another shape is the whole answer, since there is nothing to add to.
+    if (json === null) {
+      return answer;
+    }
+    answers.push(answer);
+    parsed.push(json);
+    ran.push(ranEngineOf(half, json));
+    // What an engine without a report said of itself, which the merged answer would otherwise lose.
+    explained.push(...explanationsOf(answer, ENGINE_KINDS[at] ?? 'next'));
+    if (runner.aborted()) {
+      keepCutAcross(plan.root, ran, plan.halves.slice(at + 1), began);
+      return answer;
+    }
+  }
+  const merged = mergedTestAnswers(parsed, ENGINE_KINDS);
+  withNotSuites(merged, plan.notSuites);
+  withNotRun(merged, plan.notRun);
+  return {
+    content: [...explained, { type: 'text', text: answerJson(merged) }],
+    ...(answers.some((answer) => answer.isError === true) ? { isError: true } : {}),
+  };
+}
+
+/**
+ * The suites of a run that need a window and the accessibility tree among them, less those whose
+ * every case [param casesOf] gives is left out by [param ignore]: by the suite's name, a piece of
+ * its path or the case by name.
+ */
+export function windowedNeeds(
+  needs: ReturnType<typeof windowNeedsOf>,
+  casesOf: (path: string) => readonly string[],
+  ignore: readonly string[],
+): { needing: string[]; accessible: string[] } {
+  const kept = (paths: readonly string[]): string[] =>
+    paths.filter((path) => casesOf(path).some((test) => !caseIgnored(path, test, ignore)));
+  return { needing: kept(needs.needing), accessible: kept(needs.accessible) };
+}
+
 /**
  * What a test run says about [param needing], the suites gdharness test would give a window: that
  * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
  * the run had none, that the machine has no display.
  */
-function windowNoteFor(
+export function windowNoteFor(
   needing: readonly string[],
   sharing: readonly string[] | null,
   accessible: readonly string[],
@@ -4105,7 +4390,7 @@ function windowNoteFor(
   const shared =
     sharing.length === 0
       ? ''
-      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since the run is one engine: run ${sharing.length === 1 ? 'it' : 'them'} without the windowed suites to run ${sharing.length === 1 ? 'it' : 'them'} headless.`;
+      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless, and ${sharing.length === 1 ? 'every case of it was' : 'every case of each was'} left out, so ${sharing.length === 1 ? 'it' : 'none'} ran no case in the window.`;
   return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''}${tree} ${why}${shared}`;
 }
 
@@ -9150,7 +9435,7 @@ class GodotServer {
     }
     const args: OperationParams =
       split.path === given['path'] ? given : { ...given, path: split.path, tests: split.tests };
-    const ran = await this.runTests(args);
+    const ran = await this.runInEngines(args);
     if (callSignal()?.aborted === true) {
       return ran;
     }
@@ -9159,6 +9444,40 @@ class GodotServer {
     const answer = unminted.length === 0 ? ran : withUidsMissing(ran, unminted);
     const previous = takeCutTestRun(project.value.path);
     return previous === null ? answer : withPreviousCut(answer, previous);
+  }
+
+  /**
+   * A run of a named set that mixes suites needing a window with suites that do not, in the two
+   * engines gdharness test gives them, answered as one run. A suite measuring the display server or
+   * its frames reads a different engine once a window is there. Any other run is one engine.
+   */
+  private async runInEngines(args: OperationParams): Promise<ToolResponse> {
+    const plan = this.enginesOfTestRun(args);
+    if (plan === null) {
+      return await this.runTests(args);
+    }
+    return await runEngines(
+      plan,
+      args,
+      engineRunnerOf(async (given) => await this.runTests(given)),
+    );
+  }
+
+  /**
+   * The arguments of the two engines a run is cut into, or null when it is one: a path list with
+   * suites needing a window and suites not needing one, on a machine with a display, that
+   * the checks of a single run have nothing to refuse.
+   */
+  private enginesOfTestRun(args: OperationParams): TestEnginePlan | null {
+    const project = this.project(args);
+    const paths = project.ok ? testPathsIn(project.value.path, args['path']) : null;
+    if (!project.ok || paths === null || !paths.ok) {
+      return null;
+    }
+    if (resolveHeadless(undefined, { platform: process.platform, variables: process.env })) {
+      return null;
+    }
+    return enginesOfTestRun(project.value.path, paths.value, args);
   }
 
   private async runTests(args: OperationParams): Promise<ToolResponse> {
@@ -9315,8 +9634,11 @@ class GodotServer {
     // server answered six errors pointing at the game. A suite left out whole by ignore is not run.
     const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
     const needs = windowNeedsOf(scripts, selection.value?.suites ?? asked);
-    const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
-    const accessible = needs.accessible.filter((path) => !leftOut.has(basename(path, '.gd')));
+    const casesOf = (path: string): readonly string[] =>
+      selection.value === null
+        ? (scripts.suite(path)?.cases ?? [])
+        : selection.value.selected.filter((one) => one.suite === path).map((one) => one.test);
+    const { needing, accessible } = windowedNeeds(needs, casesOf, readStringArray(args, 'ignore') ?? []);
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
     const engine = await this.engine(project.value.path);
@@ -10311,9 +10633,7 @@ class GodotServer {
         casesUnrunnable.length > 0
           ? `${casesUnrunnable.length === 1 ? 'one case' : `${String(casesUnrunnable.length)} cases`} skipped as gdUnit4 cannot run ${casesUnrunnable.length === 1 ? 'it' : 'them'} as declared`
           : undefined,
-        notSuites.length > 0
-          ? `${notSuites.length === 1 ? 'one script declares' : `${String(notSuites.length)} scripts declare`} cases gdUnit4 never runs`
-          : undefined,
+        notSuites.length > 0 ? notSuitesVerdict(notSuites.length) : undefined,
       ]
         .filter((part) => part !== undefined)
         .join('; '),
@@ -10424,9 +10744,7 @@ class GodotServer {
     const { casesNotRun, missingNote, rowsMismatched, testsNotRun } = s;
     return [
       missingNote,
-      testsNotRun.length > 0
-        ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
-        : undefined,
+      testsNotRun.length > 0 ? notRunSaid(testsNotRun) : undefined,
       casesNotRun.length > 0
         ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
         : undefined,
@@ -10443,18 +10761,14 @@ class GodotServer {
       casesUnrunnable.length > 0
         ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
         : undefined,
-      notSuites.length > 0
-        ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
-        : undefined,
+      notSuites.length > 0 ? NOT_SUITES_NOTE : undefined,
       briefed > 0
         ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver. Pass one case's suite path to see its reports.`
         : undefined,
       notApplied.length > 0
         ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
         : undefined,
-      unmatched.length > 0
-        ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
-        : undefined,
+      unmatched.length > 0 ? unmatchedSaid(unmatched) : undefined,
       uncaughtNote(uncaught),
     ];
   }

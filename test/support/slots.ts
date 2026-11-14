@@ -13,8 +13,39 @@ import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
 import { ENDED_SUFFIX, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE, WAITING_FOLDER } from '../../src/engine-slots.js';
 
-process.env[SLOTS_VARIABLE] ??= join(tmpdir(), 'gdharness-test-slots');
-process.env[SLOT_COUNT_VARIABLE] ??= String(Math.min(MOST_ENGINES, availableParallelism()));
+/**
+ * The variables that tell a process how it takes engine slots, whichever program set them: the
+ * queue's jobs and gates set them for what they start, so a run inside one inherits them.
+ */
+export const SLOT_VARIABLES = [
+  'GODOT_ENGINE_HELD',
+  'GODOT_ENGINE_LANES',
+  'GODOT_ENGINE_SHARE',
+  'GODOT_ENGINE_SHARE_COUNT',
+  SLOTS_VARIABLE,
+  SLOT_COUNT_VARIABLE,
+  'GODOT_ENGINE_STARVING',
+  'GODOT_ENGINE_TIER',
+  'GODOT_ENGINE_TIMED',
+  // The marker of a job the machine's queue runs, which nothing here reads but a program started
+  // inside the job would.
+  ['GODOT', 'TOOLS', 'JOB'].join('_'),
+];
+
+/**
+ * Leaves the process with the slot variables of a bare shell and the suite's own slot directory and
+ * count, so a result does not depend on the shell that started it, a queue job or a gate included.
+ * A fixture sets what it needs itself.
+ */
+export function withTheSuitesOwnSlotVariables(): void {
+  for (const name of SLOT_VARIABLES) {
+    delete process.env[name];
+  }
+  process.env[SLOTS_VARIABLE] = join(tmpdir(), 'gdharness-test-slots');
+  process.env[SLOT_COUNT_VARIABLE] = String(Math.min(MOST_ENGINES, availableParallelism()));
+}
+
+withTheSuitesOwnSlotVariables();
 
 /**
  * What is left in the slot directory [param slots]: every lock, and every wait mark as

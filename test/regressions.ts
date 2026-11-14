@@ -513,6 +513,8 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
+  engineRunnerOf,
+  enginesOfTestRun,
   enterASilentCrash,
   exportAnswer,
   exportPresetRefusal,
@@ -535,6 +537,7 @@ import {
   profileOnStart,
   projectSourceOf,
   repeatingScriptError,
+  runEngines,
   runIsUp,
   runtimeVerdict,
   scanWaitAnswer,
@@ -543,11 +546,14 @@ import {
   settingsNamedBy,
   staleCopyNote,
   stopVerdict,
+  type TestEnginePlan,
   testPathsIn,
   timedOutVerdict,
   transcriptNote,
   uidsLeftNote,
   unmodelledAnswer,
+  windowedNeeds,
+  windowNoteFor,
   withoutUidUnder,
   withPreviousCut,
   withUidsMissing,
@@ -649,7 +655,7 @@ import {
   GUESS_WINDOW_SETTING,
   gdUnitFailsOnPushErrors,
   headlessInAWindow,
-  inOneEngine,
+  inEngines,
   lanesOf,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
@@ -658,6 +664,7 @@ import {
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
+  splitByWindow,
   splitPastFor,
   timesAfter,
   type Unit,
@@ -672,6 +679,7 @@ import {
   compileUnlessUnchanged,
   engineSaid,
   enginesCutFor,
+  followedAt,
   HandedSlot,
   importEnd,
   importFault,
@@ -695,6 +703,15 @@ import {
 } from '../src/suite-run.js';
 import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
 import { casesOutOfPath, scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
+import {
+  mergedTestAnswers,
+  NOT_SUITES_NOTE,
+  notSuitesVerdict,
+  timeLeft,
+  unmatchedSaid,
+  withNotSuites,
+} from '../src/test-split.js';
+import type { OperationParams } from '../src/tool-args.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -748,7 +765,7 @@ import {
   unheldPort,
 } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
-import { leftInSlots } from './support/slots.js';
+import { leftInSlots, SLOT_VARIABLES, withTheSuitesOwnSlotVariables } from './support/slots.js';
 import {
   endEnginesLeft,
   leftBehindBy,
@@ -3148,13 +3165,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.deepEqual(
     placedAt('Placed.lift'),
     [
-      ['res://core/lifts.gd', 13, false],
-      ['res://core/lifts.gd', 20, true],
       ['res://core/stowed.gd', 7, true],
       ['res://core/stowed.gd', 8, true],
       ['res://core/stowed.gd', 9, true],
     ],
-    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Shelved',
+    'the calls in a class extending Placed, and none of the locals, the call through Shelved or the bare uses in Lifts, which extends RefCounted',
   );
   assert.deepEqual(
     placedAt('lift'),
@@ -3216,6 +3231,275 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     paidAt('lift'),
     [10, 12, 14, 15, 16, 17, 18, 20, 22],
     'and asked by bare name, every one is listed',
+  );
+  // A bare, self or super use of the name runs the function its class dispatches to. With one class
+  // asked about, a bare or self use counts in that class, in a class above it, whose object may be
+  // one, and in a class below it, by name, by path or as an inner class, unless a class on the way
+  // down declares the function again. A super use counts where the nearest class above declaring
+  // the function is the one asked about. A chain through a script the project does not hold counts.
+  const harbour = [
+    'class_name Harbour',
+    'extends Node',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+    '',
+    'func dock() -> void:',
+    '\t_moor(1)',
+    '',
+  ].join('\n');
+  const quay = [
+    'class_name Quay',
+    'extends Harbour',
+    '',
+    '',
+    'func tie() -> void:',
+    '\t_moor(2)',
+    '\tself._moor(3)',
+    '\tsuper._moor(4)',
+    '',
+  ].join('\n');
+  const pier = ['extends "res://port/harbour.gd"', '', '', 'func tie() -> void:', '\t_moor(5)', ''].join(
+    '\n',
+  );
+  const inn = [
+    'class_name Inn',
+    'extends Node',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+    '',
+    'func rest() -> void:',
+    '\t_moor(6)',
+    '\tself._moor(7)',
+    '\tvar later := _moor',
+    '\tlater.call(8)',
+    '',
+    '',
+    'class Cellar:',
+    '\textends Harbour',
+    '',
+    '\tfunc fill() -> void:',
+    '\t\t_moor(9)',
+    '',
+    '',
+    'class Vault extends Harbour:',
+    '\tfunc fill() -> void:',
+    '\t\t_moor(10)',
+    '',
+    '',
+    'class Loft:',
+    '\tfunc _moor(x: int) -> void:',
+    '\t\tprint(x)',
+    '',
+    '\tfunc sweep() -> void:',
+    '\t\t_moor(11)',
+    '',
+  ].join('\n');
+  const berth = [
+    'class_name Berth',
+    'extends Quay',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tsuper._moor(x)',
+    '',
+    '',
+    'func land() -> void:',
+    '\t_moor(12)',
+    '',
+  ].join('\n');
+  const drift = ['extends "res://gone/wreck.gd"', '', '', 'func go() -> void:', '\t_moor(13)', ''].join('\n');
+  const skiff = [
+    'class_name Skiff',
+    'extends "res://gone/hull.gd"',
+    '',
+    '',
+    'func row() -> void:',
+    '\tsuper._moor(14)',
+    '',
+  ].join('\n');
+  const raft = [
+    'class_name Raft',
+    'extends "res://gone/hull.gd"',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+  ].join('\n');
+  const port = [
+    ['res://port/harbour.gd', harbour],
+    ['res://port/quay.gd', quay],
+    ['res://port/pier.gd', pier],
+    ['res://port/inn.gd', inn],
+    ['res://port/berth.gd', berth],
+    ['res://port/drift.gd', drift],
+    ['res://port/skiff.gd', skiff],
+    ['res://port/raft.gd', raft],
+  ] as const;
+  const mooredAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, port).sites.map((one) => [one.script, one.line, one.called]);
+  assert.deepEqual(
+    mooredAt('Harbour._moor'),
+    [
+      ['res://port/berth.gd', 6, true],
+      ['res://port/drift.gd', 5, true],
+      ['res://port/harbour.gd', 10, true],
+      ['res://port/inn.gd', 20, true],
+      ['res://port/inn.gd', 25, true],
+      ['res://port/pier.gd', 5, true],
+      ['res://port/quay.gd', 6, true],
+      ['res://port/quay.gd', 7, true],
+      ['res://port/quay.gd', 8, true],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'Harbour, its subclasses by name, by path and inside Inn either way, Berth super call and the missing chains, but not Inn, Loft or a bare call in Berth, which runs its own',
+  );
+  assert.deepEqual(
+    mooredAt('Quay._moor'),
+    mooredAt('Harbour._moor'),
+    'a class that only inherits the function is asked about as the class it inherits it from, its own super call included',
+  );
+  assert.deepEqual(
+    callersOf(totals({}), 'Raft._moor', port)
+      .sites.filter((one) => one.script === 'res://port/inn.gd')
+      .map((one) => one.line),
+    [10, 11, 12, 20, 25, 33],
+    'asked about a class whose chain passes through a missing script, a class may sit above it, so no use on self is left out',
+  );
+  assert.deepEqual(
+    mooredAt('Berth._moor'),
+    [
+      ['res://port/berth.gd', 10, true],
+      ['res://port/drift.gd', 5, true],
+      ['res://port/harbour.gd', 10, true],
+      ['res://port/quay.gd', 6, true],
+      ['res://port/quay.gd', 7, true],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'asked about the override, the calls above it that may run on a Berth, but no super call, which runs Harbour',
+  );
+  assert.deepEqual(
+    mooredAt('Inn.Loft._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/inn.gd', 33, true],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'an inner class asked about by name is that class, not the script around it',
+  );
+  assert.deepEqual(
+    mooredAt('Inn._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/inn.gd', 10, true],
+      ['res://port/inn.gd', 11, true],
+      ['res://port/inn.gd', 12, false],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'asked about Inn, its own bare call, self call and Callable are listed, and no Harbour line',
+  );
+  assert.equal(mooredAt('_moor').length, 15, 'and with no class asked about, every use is listed');
+  // A bare call to a static function is bound to the class it is written in, and one through self
+  // runs on whatever the object is.
+  const maker = [
+    'class_name Maker',
+    'extends RefCounted',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func build() -> int:',
+    '\treturn make()',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+    '',
+    'func again() -> int:',
+    '\treturn self.make()',
+    '',
+  ].join('\n');
+  const fancy = [
+    'class_name Fancy',
+    'extends Maker',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 2',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const works = [
+    ['res://works/maker.gd', maker],
+    ['res://works/fancy.gd', fancy],
+  ] as const;
+  const madeAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, works).sites.map((one) => [one.script, one.line]);
+  assert.deepEqual(
+    madeAt('Fancy.make'),
+    [['res://works/maker.gd', 18]],
+    "Fancy's static function is reached through self on a Fancy, never by Maker's bare call",
+  );
+  assert.deepEqual(
+    madeAt('Maker.make'),
+    [
+      ['res://works/maker.gd', 10],
+      ['res://works/maker.gd', 18],
+    ],
+    "Maker's is reached by its own bare call and through self",
+  );
+  // A property the profile has no row for is asked about as the class declares it.
+  const hull = [
+    'class_name Hull',
+    'extends Node',
+    '',
+    'var speed: int = 0',
+    '',
+    '',
+    'func go() -> void:',
+    '\tspeed = 2',
+    '\tprint(speed)',
+    '',
+  ].join('\n');
+  const mast = [
+    'class_name Mast',
+    'extends Node',
+    '',
+    'var speed: int = 0',
+    '',
+    '',
+    'func go() -> void:',
+    '\tself.speed = 1',
+    '',
+  ].join('\n');
+  const sailed = callersOf(totals({}), 'Hull.speed', [
+    ['res://sea/hull.gd', hull],
+    ['res://sea/keel.gd', 'class_name Keel\nextends Hull\n\n\nfunc go() -> void:\n\tspeed = 3\n'],
+    ['res://sea/mast.gd', mast],
+  ]);
+  assert.deepEqual(
+    [sailed.property, sailed.sites.map((one) => [one.script, one.line, one.access])],
+    [
+      true,
+      [
+        ['res://sea/hull.gd', 8, 'write'],
+        ['res://sea/hull.gd', 9, 'read'],
+        ['res://sea/keel.gd', 6, 'write'],
+      ],
+    ],
+    "Hull's own reads and writes and its subclass's, as a property, and not Mast's speed",
   );
 
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the
@@ -59984,6 +60268,796 @@ function testARestartedCountDoesNotTakeWorkFromBeforeTheRestart(): void {
  * an editor plays inherits the editor's environment and runs the editor's executable, so it takes a
  * slot of its own.
  */
+const SHARE_UNIT = (suite: string, cost: number): Unit => ({
+  suite: `res://${suite}.gd`,
+  cases: ['test_one'],
+  cost,
+  timed: true,
+  windowed: false,
+  accessible: false,
+  headless: false,
+});
+
+/** The cost of each share a lane is handed from units of [param costs], one lane's draws in turn. */
+function shareCosts(costs: readonly number[], lanes: number): number[] {
+  const units = costs.map((cost, at) => SHARE_UNIT(`s${String(at)}`, cost));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const shares = new Shares(units, declared, lanes);
+  const drawn: number[] = [];
+  for (let plan = shares.next(0); plan !== null; plan = shares.next(0)) {
+    drawn.push(plan.cost);
+  }
+  return drawn;
+}
+
+/** A share holds at most 120 s, at least the floor while that much is left, and a long suite is alone. */
+function testAShareHoldsNoMoreThanTwoMinutesOfWork(): void {
+  const long = shareCosts(
+    Array.from({ length: 30 }, () => 30),
+    2,
+  );
+  assert.ok(
+    long.every((cost) => cost <= 120),
+    `a long run is cut into shares of 120 s: ${JSON.stringify(long)}`,
+  );
+  assert.ok(long.length >= 8, '900 s makes at least eight of them');
+  assert.equal(
+    long.reduce((sum, cost) => sum + cost, 0),
+    900,
+    'holding every unit once',
+  );
+  assert.deepEqual(
+    shareCosts([300, 10, 10], 1),
+    [300, 20],
+    'a suite over 120 s is a share of its own, the rest after it',
+  );
+  assert.deepEqual(shareCosts([10, 10, 10, 10], 4), [30, 10], 'the floor of 30 s beats left over lanes');
+  assert.deepEqual(shareCosts([], 3), [], 'nothing left makes no share');
+  assert.deepEqual(shareCosts([120], 1), [120], 'a suite of exactly 120 s is one share');
+}
+
+/** The shares of [param count] units of 1 s, the engines' starts [param starts] noted after the first. */
+function sharesAfterStarts(starts: readonly number[], count = 600): { first: number; later: number } {
+  const units = Array.from({ length: count }, (_, at) => SHARE_UNIT(`s${String(at)}`, 1));
+  const shares = new Shares(units, new Map(units.map((unit) => [unit.suite, ['test_one']])), 300);
+  const first = shares.next(0)?.cost ?? 0;
+  for (const seconds of starts) {
+    shares.noteStart(seconds);
+  }
+  return { first, later: shares.next(0)?.cost ?? 0 };
+}
+
+/**
+ * A share's floor is six engine starts, read off the engines of the run once two have shown it. No
+ * start is read from one alone, and one slow start among others sets nothing.
+ */
+function testAShareFloorIsWhatTheRunsEnginesTookToStart(): void {
+  assert.deepEqual(sharesAfterStarts([]), { first: 30, later: 30 }, 'with no start seen it is 30 s');
+  assert.equal(sharesAfterStarts([8, 8]).later, 48, 'two starts of 8 s make it 48 s');
+  assert.equal(
+    sharesAfterStarts([14.2, 8.3, 11, 9]).later,
+    54,
+    'starts of 8 to 14 s make it 54 s, six times the middle of them and the 5 s',
+  );
+  assert.equal(sharesAfterStarts([300]).later, 30, 'one start alone changes nothing, however slow');
+  assert.equal(sharesAfterStarts([8, 8, 8, 300]).later, 48, 'and a slow one among the rest sets nothing');
+  assert.equal(
+    sharesAfterStarts([2, 2, 2]).later,
+    12,
+    'engines that start in 2 s make it 12 s, since the middle reading is theirs',
+  );
+  assert.equal(sharesAfterStarts([0, -3, Number.NaN]).later, 30, 'nor one that is no time');
+  assert.equal(sharesAfterStarts([0.3]).later, 30, 'one fast start alone changes nothing either');
+  assert.equal(sharesAfterStarts([0.3, 10]).later, 30, 'nor does a fast one beside a slow one');
+}
+
+/**
+ * A run of many suites over fewer free slots than engines asked for starts no engine for less than the
+ * start-sized floor while that much work is left: engines taking 10 s to start make the floor 60 s.
+ */
+async function testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor(): Promise<void> {
+  const units = Array.from({ length: 550 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 2.7));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const costs: number[] = [];
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 6, [], {}, async (plan, index) => {
+    costs.push(plan.cost);
+    await delay(2);
+    return { index, printed: { started: { seconds: 10 } } };
+  });
+  const total = costs.reduce((sum, cost) => sum + cost, 0);
+  assert.ok(Math.abs(total - 550 * 2.7) < 0.001, 'every suite is handed out once');
+  assert.equal(ran.length, costs.length, 'one result for each engine started');
+  const small = costs.slice(0, -1).filter((cost) => cost < 60 - 2.7);
+  assert.deepEqual(small, [], `no share but the last holds less than 60 s: ${JSON.stringify(costs)}`);
+  assert.ok(costs.length <= 17, `engines started, 21 before: ${String(costs.length)}`);
+}
+
+/** A run's lanes read the lanes file before each share and give a slot back when told fewer. */
+async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promise<void> {
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fall-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-pool-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const file = join(pool, 'lanes-1.json');
+  const say = (lanes: number, pid = process.pid): void => {
+    writeFileSync(file, JSON.stringify({ lanes, pid, started: holder.started, written: Date.now() }));
+  };
+  const locksHeld = (): number => readdirSync(machine).filter((name) => name.endsWith('.lock')).length;
+  const slots = new EngineSlots(machine, 4, holder);
+  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+  const going = new Map<number, () => void>();
+  let started = 0;
+  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
+    started += 1;
+    return new Promise((done) => {
+      going.set(index, () => {
+        going.delete(index);
+        done({ index });
+      });
+    });
+  };
+  const endAll = (): void => {
+    for (const end of going.values()) {
+      end();
+    }
+  };
+  const units = Array.from({ length: 30 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  try {
+    say(3);
+    const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
+    assert.ok(
+      await cameTrue(() => started === 3 && locksHeld() === 3, 10_000),
+      'three lanes start on three slots',
+    );
+    say(2);
+    endAll();
+    assert.ok(
+      await cameTrue(() => started === 5 && locksHeld() === 2, 10_000),
+      `told two, the third lane gives its slot back: ${String(started)} started, ${String(locksHeld())} slots held`,
+    );
+    say(3);
+    endAll();
+    assert.ok(
+      await cameTrue(() => started === 8 && locksHeld() === 3, 10_000),
+      `told three again, it takes a slot and goes on: ${String(started)} started, ${String(locksHeld())} held`,
+    );
+    say(1, 2 ** 31 - 1);
+    endAll();
+    assert.ok(
+      await cameTrue(() => going.size === 0 || locksHeld() === 3, 10_000),
+      'a file whose writer has gone tells nothing, so all three lanes go on',
+    );
+    const over = { done: false };
+    void pending.then(() => {
+      over.done = true;
+    });
+    for (let round = 0; round < 2000 && !over.done; round += 1) {
+      endAll();
+      await delay(5);
+    }
+    const ran = await Promise.race([pending, delay(20_000).then(() => null)]);
+    assert.ok(ran !== null, 'the run ends once every share is handed out');
+    assert.deepEqual(
+      ran.map((one) => one.index),
+      Array.from({ length: started }, (_, at) => at),
+      'every engine ran once, in order',
+    );
+    assert.equal(locksHeld(), 0, 'and no slot is left held');
+  } finally {
+    endAll();
+    sweep(machine);
+    sweep(pool);
+  }
+}
+
+/**
+ * A mark that cannot be taken, because another reader holds it or the take failed, hides nothing of
+ * the number the file tells: the run still falls to it. It only stops the run rising above it.
+ */
+async function testAMarkNotTakenStillLetsTheRunFallToTheLanesTold(): Promise<void> {
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-nomark-'));
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-nomark-machine-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const real = new EngineSlots(pool, 1, holder);
+  const tells = (lanes: number): string => {
+    const file = join(pool, `lanes-${String(lanes)}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify({ lanes, pid: process.pid, started: holder.started, written: Date.now() }),
+    );
+    return file;
+  };
+  const refused = (failing: 'false' | 'throws'): Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'> => ({
+    holder,
+    countIn: (path, key) => real.countIn(path, key),
+    takeFile: () => (failing === 'false' ? Promise.resolve(false) : Promise.reject(new Error('busy'))),
+  });
+  try {
+    for (const failing of ['false', 'throws'] as const) {
+      const file = tells(1);
+      assert.equal(
+        await new FollowedLanes(refused(failing), file, 4, 5).told(),
+        1,
+        `the number is read when the mark take ${failing === 'false' ? 'is refused' : 'throws'}`,
+      );
+    }
+
+    const rising = new FollowedLanes(refused('false'), tells(3), 4, 5);
+    const stop = new AbortController();
+    const grown = await Promise.race([
+      rising.past(1, stop.signal).then(
+        () => 'rose',
+        () => 'aborted',
+      ),
+      delay(300).then(() => 'waits'),
+    ]);
+    stop.abort();
+    assert.equal(grown, 'waits', 'but it rises above the number only with the mark held');
+
+    let running = 0;
+    let most = 0;
+    let suitesRun = 0;
+    const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+    const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+    const ran = await runShares(
+      new EngineSlots(machine, 4, holder),
+      units,
+      declared,
+      3,
+      [],
+      {},
+      async (plan, index) => {
+        running += 1;
+        most = Math.max(most, running);
+        suitesRun += plan.suites.length;
+        await delay(150);
+        running -= 1;
+        return { index };
+      },
+      undefined,
+      undefined,
+      new FollowedLanes(refused('false'), tells(1), 4, 5),
+    );
+    assert.ok(ran.length > 1, 'the run deals more than one share');
+    assert.equal(suitesRun, 12, 'and every suite once');
+    assert.equal(most, 1, 'and runs one engine at a time under the one lane told');
+  } finally {
+    sweep(pool);
+    sweep(machine);
+  }
+}
+
+/**
+ * A lane parked by a fall ends when the run fails, with shares still left. It neither loops on the
+ * lanes file nor takes the follows mark back once the run has ended its follower.
+ */
+async function testAParkedLaneEndsWhenTheRunFails(): Promise<void> {
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fail-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fail-pool-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const file = join(pool, 'lanes-1.json');
+  writeFileSync(
+    file,
+    JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }),
+  );
+  const slots = new EngineSlots(machine, 4, holder);
+  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+  let reads = 0;
+  const told = followed.told.bind(followed);
+  followed.told = async (): Promise<number | null> => {
+    reads += 1;
+    return await told();
+  };
+  const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const run = async (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
+    await delay(300);
+    throw new Error(`engine ${String(index)} could not be started`);
+  };
+  try {
+    const failed = await runShares(
+      slots,
+      units,
+      declared,
+      3,
+      [],
+      {},
+      run,
+      undefined,
+      undefined,
+      followed,
+    ).then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    assert.match(failed ?? '', /could not be started/, 'the engine failure ends the run');
+    followed.end();
+    const after = reads;
+    const began = Date.now();
+    await delay(400);
+    assert.ok(Date.now() - began < 800, 'and the process is not kept busy by a parked lane');
+    assert.ok(
+      reads - after <= 2,
+      `the lanes file is not read again once the run has ended: ${String(reads - after)}`,
+    );
+    assert.equal(existsSync(`${file}${FOLLOWS_SUFFIX}`), false, 'and no follows mark is written after it');
+  } finally {
+    followed.end();
+    sweep(machine);
+    sweep(pool);
+  }
+}
+
+/**
+ * A run told one lane runs one engine at a time, and the lanes parked behind it end with the run once
+ * its last share is out.
+ */
+async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> {
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-pool-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const file = join(pool, 'lanes-1.json');
+  writeFileSync(
+    file,
+    JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }),
+  );
+  const slots = new EngineSlots(machine, 4, holder);
+  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+  const ends: Array<() => void> = [];
+  let suitesRun = 0;
+  let running = 0;
+  let mostRunning = 0;
+  let lastStart = Date.now();
+  const run = (plan: EnginePlan, index: number): Promise<{ index: number }> =>
+    new Promise((done) => {
+      suitesRun += plan.suites.length;
+      running += 1;
+      lastStart = Date.now();
+      mostRunning = Math.max(mostRunning, running);
+      ends.push(() => {
+        running -= 1;
+        done({ index });
+      });
+    });
+  const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  try {
+    const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
+    // Engines end once no other has started for a while, so every lane that is to run has begun.
+    for (let round = 0; round < 1000; round += 1) {
+      if (Date.now() - lastStart >= 600) {
+        for (const end of ends.splice(0)) {
+          end();
+        }
+      }
+      if (await Promise.race([pending.then(() => true), delay(20).then(() => false)])) {
+        break;
+      }
+    }
+    const ran = await Promise.race([pending, delay(10_000).then(() => null)]);
+    assert.ok(ran !== null, 'a lane told to stop ends with the run, and is not left waiting');
+    assert.equal(
+      suitesRun,
+      12,
+      `and the one lane told ran every suite once, in ${String(ran.length)} engines`,
+    );
+    assert.equal(mostRunning, 1, 'with one engine at a time, since the other two lanes were told to stop');
+  } finally {
+    sweep(machine);
+    sweep(pool);
+  }
+}
+
+/** A follower that tells [param told] lanes and waits until the run has handed out every share. */
+function toldLanes(
+  ceiling: number,
+  told: () => number | Promise<number>,
+): NonNullable<Parameters<typeof runShares>[9]> {
+  return {
+    ceiling,
+    past: () => Promise.resolve(ceiling),
+    told: async () => await told(),
+    untilTold: (_lane, signal) =>
+      new Promise<void>((over) => {
+        if (signal.aborted) {
+          over();
+          return;
+        }
+        signal.addEventListener(
+          'abort',
+          () => {
+            over();
+          },
+          { once: true },
+        );
+      }),
+  };
+}
+
+/**
+ * A two-lane run whose second lane is held in a wait for a slot or for memory while the file falls to
+ * one lane. Answers the engines started and the slots given back to the machine once the wait ended.
+ */
+async function secondLaneHeldInAWhileTheFileFalls(
+  wait: 'slot' | 'memory',
+): Promise<{ started: number; released: string[] }> {
+  const released: string[] = [];
+  const takes: Array<(lock: string) => void> = [];
+  const slots = {
+    take: () =>
+      new Promise<string>((taken) => {
+        takes.push(taken);
+      }),
+    release: (lock: string) => {
+      released.push(lock);
+    },
+  };
+  let told = 2;
+  let free = 0;
+  let started = 0;
+  let finishing = false;
+  const ends: Array<() => void> = [];
+  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
+    new Promise((done) => {
+      started += 1;
+      if (finishing) {
+        done({ index });
+      } else {
+        ends.push(() => {
+          done({ index });
+        });
+      }
+    });
+  const memory = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
+  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const pending = runShares(
+    slots,
+    units,
+    declared,
+    2,
+    wait === 'slot' ? ['T0'] : ['T0', 'T1'],
+    {},
+    run,
+    undefined,
+    memory,
+    toldLanes(2, () => told),
+  );
+  try {
+    if (wait === 'slot') {
+      assert.ok(await cameTrue(() => takes.length === 1, 5000), 'the second lane waits for a slot');
+    } else {
+      await delay(150);
+    }
+    assert.equal(started, 1, 'the first lane is running its share');
+    told = 1;
+    if (wait === 'memory') {
+      free = 2 ** 40;
+    }
+    takes[0]?.('N1');
+    await delay(200);
+    const snapshot = { started, released: [...released] };
+    finishing = true;
+    for (const end of ends.splice(0)) {
+      end();
+    }
+    const over = await Promise.race([pending, delay(10_000).then(() => null)]);
+    assert.ok(over !== null, `the run ends (${wait})`);
+    return snapshot;
+  } finally {
+    finishing = true;
+    for (const end of ends.splice(0)) {
+      end();
+    }
+  }
+}
+
+/** A lane reads the lanes file after the waits that can outlast a fall, and draws no share past it. */
+async function testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited(): Promise<void> {
+  const afterTheSlot = await secondLaneHeldInAWhileTheFileFalls('slot');
+  assert.equal(afterTheSlot.started, 1, 'a lane whose slot came after the fall starts no engine');
+  assert.deepEqual(afterTheSlot.released, ['N1'], 'and gives the slot it was handed back to the machine');
+  const afterMemory = await secondLaneHeldInAWhileTheFileFalls('memory');
+  assert.equal(afterMemory.started, 1, 'a lane that memory admitted after the fall starts no engine');
+  assert.deepEqual(afterMemory.released, ['T1'], 'and gives its slot back to the machine');
+}
+
+/** A lane told to stop gives its slot to the machine, and a compile check still waiting takes its own. */
+async function testAParkedLanesSlotGoesToTheMachineNotTheCheck(): Promise<void> {
+  const released: string[] = [];
+  const slots = {
+    take: () => Promise.resolve('N'),
+    release: (lock: string) => {
+      released.push(lock);
+    },
+  };
+  const handed = new HandedSlot(true);
+  let reads = 0;
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  // The first lane reads the file a moment after the second, which is told it is past the number.
+  const raised = toldLanes(2, async () => {
+    reads += 1;
+    if (reads === 1) {
+      await delay(100);
+    }
+    return 1;
+  });
+  const pending = runShares(
+    slots,
+    units,
+    declared,
+    2,
+    ['T0', 'T1'],
+    {},
+    (_plan, index) => Promise.resolve({ index }),
+    handed,
+    undefined,
+    raised,
+  );
+  try {
+    const given = await Promise.race([handed.lock, delay(2000).then(() => null)]);
+    assert.equal(given, 'T0', 'the check runs in the slot of the lane that went on, not the parked one');
+    assert.deepEqual(released, ['T1'], 'the parked lane gave its slot to the machine');
+  } finally {
+    handed.ended();
+  }
+  assert.ok((await Promise.race([pending, delay(10_000).then(() => null)])) !== null, 'the run ends');
+}
+
+/** A run begun on every lane it may have still follows the file, for a fall, and is handed shares. */
+async function testARunBegunAtItsCeilingStillFollowsTheLanesFile(): Promise<void> {
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-ceiling-'));
+  try {
+    const holder = { pid: process.pid, started: await ownStart() };
+    const file = join(pool, 'lanes-1.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ lanes: 2, pid: process.pid, started: holder.started, written: Date.now() }),
+    );
+    const flat = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5, false);
+    assert.equal(await flat.told(), 2, 'a run that cannot rise still reads the number, for a fall');
+    assert.equal(existsSync(`${file}.follows`), false, 'and holds no mark, since it has no lane to add');
+    const rising = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+    assert.equal(await rising.told(), 2, 'a run that can rise reads it too');
+    assert.equal(existsSync(`${file}.follows`), true, 'and holds the mark that tells the writer it may grow');
+    rising.end();
+  } finally {
+    sweep(pool);
+  }
+  assert.deepEqual(
+    followedAt('lanes.json', 4, 4),
+    { file: 'lanes.json', ceiling: 4 },
+    'four of four follows',
+  );
+  assert.deepEqual(
+    followedAt('lanes.json', 6, 3),
+    { file: 'lanes.json', ceiling: 6 },
+    'three of six follows',
+  );
+  assert.deepEqual(
+    followedAt('lanes.json', 2, 3),
+    { file: 'lanes.json', ceiling: 3 },
+    'more lanes than the ceiling follows with the lanes it has',
+  );
+  assert.equal(followedAt('lanes.json', 1, 1), null, 'one lane has no lane to give back');
+}
+
+/**
+ * How many slots a machine counts: half the processors, held to the memory above 16 GiB at 1.5 GiB
+ * an engine, and a variable replaces either.
+ */
+function testTheSlotCountIsHeldToTheMemoryThereIs(): void {
+  const gib = 1024 ** 3;
+  const count = (processors: number, memory: number, env: NodeJS.ProcessEnv = {}): number =>
+    machineSlots(
+      { directory: null, count: null },
+      { env, platform: 'linux', processors, memory, home: join(sep, 'home'), cwd: join(sep, 'work') },
+    ).count;
+  assert.equal(count(32, 12 * gib), 1, 'memory below 16 GiB still counts one slot');
+  assert.equal(count(32, 16 * gib), 1, 'and exactly 16 GiB');
+  assert.equal(count(32, 24 * gib), 5, 'memory caps below half the processors: 8 GiB is five engines');
+  assert.equal(count(8, 64 * gib), 4, 'half the processors caps below the memory');
+  assert.equal(count(1, 64 * gib), 1, 'one processor is one slot');
+  assert.equal(count(32, 12 * gib, { GODOT_ENGINE_SLOT_COUNT: '7' }), 7, 'the variable overrides the memory');
+  assert.equal(count(2, 64 * gib, { GODOT_ENGINE_SLOT_COUNT: '9' }), 9, 'and the processors');
+}
+
+/**
+ * A waiting mark naming `wants` above 1 has that many free slots left to it for its first drain, one
+ * after, and a `wants` that is no whole number above 1 counts one.
+ */
+async function testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-wants-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    const take = async (wants: unknown, waitedMs: number): Promise<[string | null, number[]]> => {
+      writeFileSync(
+        join(marks, '1-1.json'),
+        JSON.stringify({ ...me, taker: 'other', since: (Date.now() - waitedMs) / 1000, wants }),
+      );
+      const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
+      try {
+        const lock = await newcomer.takeFree();
+        return [lock === null ? null : basename(lock), [...(newcomer.drawn.left ?? [])]];
+      } finally {
+        newcomer.releaseAll();
+      }
+    };
+    assert.deepEqual(await take(3, 60_000), ['0.lock', [1, 2, 3]], 'three left to a mark wanting three');
+    assert.deepEqual(await take(3, 299_000), ['0.lock', [1, 2, 3]], 'to the end of its drain');
+    const past = await take(3, 301_000);
+    assert.deepEqual([past[0] !== null, past[1].length], [true, 1], 'one once the drain is past');
+    assert.deepEqual(await take(4, 10_000), [null, [0, 1, 2, 3]], 'and all four to a mark wanting four');
+    for (const odd of [undefined, 1, 0, -2, 1.5, '3', null, true]) {
+      const one = await take(odd, 60_000);
+      assert.deepEqual([one[0] !== null, one[1].length], [true, 1], `${JSON.stringify(odd)} counts one`);
+    }
+    assert.equal(slotWaiters(directory)[0]?.wants, 1, 'a mark read with no usable wants says one');
+  } finally {
+    sweep(directory);
+  }
+}
+
+/**
+ * A program inside a timing or a heavy job runs on the slot the job lends, one engine at a time,
+ * and takes none beside it. Once the lender has gone it takes slots as any program does.
+ */
+async function testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-job-'));
+  const lender = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const had = process.env['GODOT_ENGINE_TIMED'];
+  try {
+    const pid = lender.pid;
+    assert.ok(typeof pid === 'number', 'the lender needs a live process');
+    const started = (await startTimesOf([pid])).get(pid);
+    assert.ok(started !== undefined, 'and a start');
+    const lent = join(directory, '0.lock');
+    writeFileSync(lent, JSON.stringify({ pid, started }));
+    process.env['GODOT_ENGINE_TIMED'] = lent;
+    const me = { pid: process.pid, started: await ownStart() };
+    const slots = new EngineSlots(directory, 3, me);
+    assert.equal(await slots.takeFree(), lent, 'the first engine runs on the lent slot');
+    assert.equal(await slots.takeFree(), null, 'the second waits rather than take another');
+    assert.equal(readdirSync(directory).filter((name) => name.endsWith('.lock')).length, 1, 'none was made');
+    slots.release(lent);
+    assert.equal(await slots.takeFree(), lent, 'and the lent slot serves the next once it is free');
+    slots.release(lent);
+    const ended = new Promise((over) => lender.once('exit', over));
+    lender.kill();
+    await ended;
+    const after = await slots.takeFree();
+    assert.ok(
+      after !== null && after !== lent,
+      `with the job gone it takes a slot of its own: ${String(after)}`,
+    );
+    slots.releaseAll();
+  } finally {
+    lender.kill();
+    if (had === undefined) {
+      delete process.env['GODOT_ENGINE_TIMED'];
+    } else {
+      process.env['GODOT_ENGINE_TIMED'] = had;
+    }
+    sweep(directory);
+  }
+}
+
+/**
+ * A taker waiting for several slots at once keeps the slots left to it while it looks, which it says
+ * by touching the note beside its mark, and a newcomer in a take loop of its own, looking again
+ * and again from one set of slots, leaves them to it for its drain. One that stopped looking
+ * loses them after five seconds.
+ */
+async function testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-looks-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    const mark = join(marks, '1-1.json');
+    writeFileSync(
+      mark,
+      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 10_000) / 1000, wants: 3 }),
+    );
+    const looked = (): void => {
+      const note = join(marks, '1-1.seen');
+      closeSync(openSync(note, 'a'));
+      const now = new Date();
+      utimesSync(note, now, now);
+    };
+    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
+    const line = new SlotLine('other');
+    const look = async (): Promise<[string | null, number[]]> => {
+      const lock = await newcomer.takeFree(false, 0, line);
+      const left = [...(newcomer.drawn.left ?? [])];
+      if (lock !== null) {
+        newcomer.release(lock);
+      }
+      return [lock === null ? null : basename(lock), left];
+    };
+    for (let second = 0; second < 8; second += 1) {
+      looked();
+      assert.deepEqual(
+        await look(),
+        ['0.lock', [1, 2, 3]],
+        `second ${String(second)}: the three slots stay left to the waiter while it looks`,
+      );
+      await delay(1000);
+    }
+    let lost = false;
+    for (let second = 0; second < 8 && !lost; second += 1) {
+      const [lock, left] = await look();
+      lost = left.length === 0;
+      assert.ok(lock !== null, 'the newcomer takes a slot');
+      await delay(1000);
+    }
+    assert.ok(lost, 'a waiter that stopped looking loses the slots five seconds on');
+  } finally {
+    sweep(directory);
+  }
+}
+
+/**
+ * A take inside a job whose lent slot is in use waits for that slot alone: it puts down no mark in
+ * the machine's waiting folder, so another program's free slot is not left idle for it.
+ */
+async function testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-lentwait-'));
+  const lender = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const had = process.env['GODOT_ENGINE_TIMED'];
+  const waiting = new AbortController();
+  try {
+    const pid = lender.pid;
+    assert.ok(typeof pid === 'number', 'the lender needs a live process');
+    const started = (await startTimesOf([pid])).get(pid);
+    assert.ok(started !== undefined, 'and a start');
+    const lent = join(directory, '0.lock');
+    writeFileSync(lent, JSON.stringify({ pid, started }));
+    process.env['GODOT_ENGINE_TIMED'] = lent;
+    const me = { pid: process.pid, started: await ownStart() };
+    const inside = new EngineSlots(directory, 2, me);
+    assert.equal(await inside.take(), lent, 'the first take runs on the lent slot');
+    let blocked = 0;
+    const second = inside.take(waiting.signal, undefined, () => {
+      blocked += 1;
+    });
+    second.catch(() => undefined);
+    assert.ok(await cameTrue(() => blocked === 1, 5000), 'the second take waits, and says so once');
+    await delay(1500);
+    assert.equal(blocked, 1, 'once');
+    const marked = existsSync(join(directory, WAITING_FOLDER))
+      ? readdirSync(join(directory, WAITING_FOLDER))
+      : [];
+    assert.deepEqual(marked, [], 'and it marks no wait in the machine');
+    delete process.env['GODOT_ENGINE_TIMED'];
+    const outsider = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    const free = await outsider.takeFree();
+    process.env['GODOT_ENGINE_TIMED'] = lent;
+    assert.equal(
+      free === null ? null : basename(free),
+      '1.lock',
+      'another program takes the free slot at once',
+    );
+    outsider.releaseAll();
+    inside.release(lent);
+    assert.equal(await second, lent, 'and the waiting take gets the lent slot once it is free');
+    inside.releaseAll();
+  } finally {
+    waiting.abort();
+    lender.kill();
+    if (had === undefined) {
+      delete process.env['GODOT_ENGINE_TIMED'];
+    } else {
+      process.env['GODOT_ENGINE_TIMED'] = had;
+    }
+    sweep(directory);
+  }
+}
+
 async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
   const tree: ProcessTree = new Map([
     [10, { parent: 9, command: '"C:\\tools\\Bun.exe" x gdharness test' }],
@@ -60223,6 +61297,92 @@ async function testAStarvedMeasurementHoldsSideEngines(): Promise<void> {
     } else {
       process.env['GODOT_ENGINE_STARVING'] = before;
     }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A one-off held back by a starved measurement says nothing of looking, so the takers behind it are
+ * not kept from a free slot by it. The same look with the claim gone says it looks.
+ */
+async function testATakerHeldBackByAClaimDoesNotSayItLooks(): Promise<void> {
+  const claimer = process.ppid;
+  const read = (await startTimesOf([claimer])).get(claimer);
+  assert.ok(read !== undefined, 'the fixture needs the start of a live process that is not this one');
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-look-'));
+  const claimFile = join(directory, STARVED_FILE);
+  const before = process.env['GODOT_ENGINE_STARVING'];
+  delete process.env['GODOT_ENGINE_STARVING'];
+  try {
+    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
+    writeFileSync(
+      claimFile,
+      JSON.stringify({ pid: claimer, started: Math.round(read), what: 'the bench of /p', starved: 7200 }),
+    );
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    const line = new SlotLine('other');
+    line.mark = 'held-1.json';
+    const note = join(directory, WAITING_FOLDER, 'held-1.seen');
+    assert.equal(
+      await outside.takeFree(false, ONE_OFF_AGED_MS, line),
+      null,
+      'the claim holds the aged one-off',
+    );
+    assert.equal(existsSync(note), false, 'and a taker it holds back does not say it looks');
+    rmSync(claimFile);
+    const lock = await outside.takeFree(false, ONE_OFF_AGED_MS, line);
+    assert.ok(lock !== null, 'with the claim gone the same look takes a slot');
+    assert.equal(existsSync(note), true, 'and says it looks');
+    outside.release(lock);
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_ENGINE_STARVING'];
+    } else {
+      process.env['GODOT_ENGINE_STARVING'] = before;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A game held back by the games limit says nothing of looking either, and says it once the limit
+ * lets it take a slot.
+ */
+async function testAGameHeldBackByTheGamesLimitDoesNotSayItLooks(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-games-look-'));
+  try {
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    mkdirSync(join(directory, QUEUED_FOLDER));
+    mkdirSync(join(directory, WAITING_FOLDER));
+    writeFileSync(
+      join(directory, QUEUED_FOLDER, 'ticket.json'),
+      JSON.stringify({ pid: process.pid, started: holder.started }),
+    );
+    const sessions = new EngineSlots(directory, 16, holder, undefined, () => 'other');
+    const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
+    assert.ok(
+      games.every((lock) => lock !== null),
+      'two games take the kept slots games may hold',
+    );
+    const line = new SlotLine('other', true);
+    line.mark = 'game-1.json';
+    const note = join(directory, WAITING_FOLDER, 'game-1.seen');
+    assert.equal(await sessions.takeFree(true, 0, line), null, 'a third game waits');
+    assert.equal(sessions.drawn.limit, 'games', 'held by the games limit');
+    assert.equal(existsSync(note), false, 'and a game it holds back does not say it looks');
+    const first = games[0];
+    assert.ok(first !== undefined, 'the first game holds a slot');
+    sessions.release(first);
+    const third = await sessions.takeFree(true, 0, line);
+    assert.ok(third !== null, 'with the limit allowing it, the third game takes a slot');
+    assert.equal(existsSync(note), true, 'and says it looks');
+    sessions.release(third);
+    const second = games[1];
+    if (second !== undefined) {
+      sessions.release(second);
+    }
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -60956,7 +62116,14 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       'read in whole milliseconds, as a take reads its own clock',
     );
     const tied = new SlotLine('other', false, () => began);
-    const waiter = { mark: '1-1.json', taker: 'other', since: began, game: false } as const;
+    const waiter = {
+      mark: '1-1.json',
+      taker: 'other',
+      since: began,
+      game: false,
+      wants: 1,
+      seen: began,
+    } as const;
     assert.deepEqual(
       tied.ahead([waiter]).map((one) => one.mark),
       ['1-1.json'],
@@ -60966,10 +62133,38 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
     // Gate work goes before younger side work whenever each began, and side work that has waited two
     // minutes with it. A game never counts as aged. Uploads waited behind side work begun before them.
-    const sideWork = { mark: 'a.json', taker: 'other', since: began - 10_000, game: false } as const;
-    const gateWork = { mark: 'b.json', taker: 'tier', since: began, game: false } as const;
-    const agedSide = { mark: 'c.json', taker: 'other', since: began - 121_000, game: false } as const;
-    const agedGame = { mark: 'd.json', taker: 'other', since: began - 1_200_000, game: true } as const;
+    const sideWork = {
+      mark: 'a.json',
+      taker: 'other',
+      since: began - 10_000,
+      game: false,
+      wants: 1,
+      seen: began,
+    } as const;
+    const gateWork = {
+      mark: 'b.json',
+      taker: 'tier',
+      since: began,
+      game: false,
+      wants: 1,
+      seen: began,
+    } as const;
+    const agedSide = {
+      mark: 'c.json',
+      taker: 'other',
+      since: began - 121_000,
+      game: false,
+      wants: 1,
+      seen: began,
+    } as const;
+    const agedGame = {
+      mark: 'd.json',
+      taker: 'other',
+      since: began - 1_200_000,
+      game: true,
+      wants: 1,
+      seen: began,
+    } as const;
     assert.deepEqual(
       new SlotLine('other', false, () => began)
         .ahead([sideWork, gateWork, agedSide, agedGame])
@@ -60985,6 +62180,8 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
 
     const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    // Before the take, which notes when it first left the slot as it answers.
+    const leftBy = Date.now();
     const first = await late.takeFree();
     // Read after the take, which notes when it first left the slot before it answers.
     const firstLeft = Date.now();
@@ -60996,13 +62193,17 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       /It leaves free slot 1 to takers that began waiting before it, which go first\.$/,
     );
 
-    let now = Date.now();
-    const line = new SlotLine('other', false, () => now);
+    const line = new SlotLine('other');
     assert.equal(await late.takeFree(false, 0, line), null, 'a take with its place in line leaves it too');
-    now += SLOT_YIELD_MS - 1;
-    assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
-    now += 1;
-    assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    const realNow = Date.now;
+    try {
+      Date.now = () => leftBy + SLOT_YIELD_MS - 1;
+      assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
+      Date.now = () => leftBy + SLOT_YIELD_MS + 100;
+      assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    } finally {
+      Date.now = realNow;
+    }
     // A mark that let a slot left to it stand, as a wait for memory under an older release does.
     late.release(join(directory, '1.lock'));
     await delay(Math.max(0, firstLeft + SLOT_YIELD_MS - Date.now()));
@@ -61313,6 +62514,418 @@ function testAnInnerClassBaseIsFollowedToTheInnerClass(): void {
  * is dealt to the windowed engine, which alone starts with the tree on. One that also says it runs
  * headless is refused, since the tree needs a window.
  */
+/**
+ * A project_test run of a mixed set is cut into a windowed engine and a headless one after `ignore`
+ * and `tests` are applied, keeps every refusal of a single run, says what an engine without a report
+ * said, and is one call for time and for a cut-off.
+ */
+function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-engines-'));
+  const suite = (window: string, funcs: string[]): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      ...(window === '' ? [] : [`const GDHARNESS_NEEDS_WINDOW: bool = ${window}`, '']),
+      ...funcs.flatMap((func) => ['', `func ${func}() -> void:`, '\tassert_bool(true).is_true()', '']),
+    ].join('\n');
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'addons/gdUnit4/plugin.cfg': '[plugin]\n',
+    'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends Node\n',
+    'tests/menu_test.gd': suite('true', ['test_menu']),
+    'tests/stood_test.gd': suite('false', ['test_stood', 'test_stood_two']),
+    'tests/plain_test.gd': suite('', ['test_plain']),
+  });
+  const folder = (args: Record<string, unknown>): ReturnType<typeof enginesOfTestRun> =>
+    enginesOfTestRun(project, ['res://tests'], args);
+  const kept = process.env['GDHARNESS_SUITE_FILES_ONLY'];
+  try {
+    const plain = folder({});
+    assert.deepEqual(
+      plain?.halves.map((half) => half['path']),
+      [['res://tests/menu_test.gd'], ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
+      'a folder holding both kinds is two engines, the windowed one first',
+    );
+    // A single run refuses a folder when only suite files may be named, and a cut run has to as well.
+    process.env['GDHARNESS_SUITE_FILES_ONLY'] = '1';
+    assert.equal(folder({}), null, 'the refusal is left to the single run, before any cut');
+    delete process.env['GDHARNESS_SUITE_FILES_ONLY'];
+
+    // Cases left out by ignore leave a kind with nothing to run, and that kind gets no engine.
+    const named = (...entries: string[]): ReturnType<typeof enginesOfTestRun> =>
+      enginesOfTestRun(project, ['res://tests/menu_test.gd', 'res://tests/stood_test.gd'], {
+        ignore: entries,
+      });
+    assert.equal(
+      named('stood_test:test_stood', 'stood_test:test_stood_two'),
+      null,
+      'every case of the headless kind left out by name leaves one windowed engine',
+    );
+    assert.equal(named('tests/stood'), null, 'as does a piece of its path');
+    assert.equal(
+      named('menu_test:test_menu'),
+      null,
+      'and the windowed kind left out leaves one engine, which the single run gives no window',
+    );
+    assert.equal(named('stood_test:test_stood')?.halves.length, 2, 'a case left in each kind is two engines');
+    assert.equal(
+      named('stood_test:test_stood:1')?.halves.length,
+      2,
+      'one row of a case leaves the case in the kind',
+    );
+
+    // A case asked for by name in a script that is no suite is handed to no engine, and answered as
+    // not run, since an engine refuses a script that is no suite.
+    writeTree(project, {
+      'tests/helper_cases.gd': 'extends Node\n\n\nfunc test_helper() -> void:\n\tpass\n',
+    });
+    const asked = folder({
+      tests: ['helper_cases:test_helper', 'menu_test:test_menu', 'stood_test:test_stood'],
+    });
+    assert.deepEqual(
+      asked?.halves.map((half) => [half['path'], half['tests']]),
+      [
+        [['res://tests/menu_test.gd'], ['res://tests/menu_test.gd:test_menu']],
+        [['res://tests/stood_test.gd'], ['res://tests/stood_test.gd:test_stood']],
+      ],
+      'the script that is no suite is handed to no engine',
+    );
+    assert.deepEqual(asked.notRun, ['helper_cases:test_helper'], 'and its case is named as not run');
+    // A folder run names the scripts left out, to fail the run as a single run does.
+    assert.equal(folder({})?.notSuites.length, 1, 'a folder run names the one script that is no suite');
+  } finally {
+    if (kept === undefined) {
+      delete process.env['GDHARNESS_SUITE_FILES_ONLY'];
+    } else {
+      process.env['GDHARNESS_SUITE_FILES_ONLY'] = kept;
+    }
+  }
+
+  const failedAnswer = {
+    passed: false,
+    verdict: 'passed',
+    note: `${unmatchedSaid(['stood_test:test_stood'])} Other.`,
+    ignoreUnmatched: ['stood_test:test_stood'],
+  };
+  const matched = { passed: true, verdict: 'passed', ignored: ['stood_test:test_stood'] };
+  const mixed = mergedTestAnswers([failedAnswer, matched], ['windowed', 'headless']);
+  assert.ok(
+    !String(mixed['note']).includes('left nothing out'),
+    'an entry one engine matched is not said unmatched',
+  );
+  assert.equal(mixed['ignoreUnmatched'], undefined);
+  const dead = mergedTestAnswers(
+    [
+      { passed: false, hung: false, timedOut: true, arguments: ['--resolution', '1x1'], note: 'a' },
+      { passed: false, hung: true, timedOut: true, arguments: ['--headless'], note: 'b' },
+    ],
+    ['windowed', 'headless'],
+  );
+  assert.equal(dead['hung'], true, 'hung when either engine hung');
+  assert.deepEqual(
+    dead['arguments'],
+    { windowed: ['--resolution', '1x1'], headless: ['--headless'] },
+    'each command line apart, under its engine',
+  );
+  const failing: Record<string, unknown> = { passed: true, verdict: 'passed', note: 'Ran.' };
+  withNotSuites(failing, ['helper_cases.gd declares cases']);
+  assert.deepEqual(
+    [failing['passed'], failing['verdict'], failing['notSuites']],
+    [false, notSuitesVerdict(1), ['helper_cases.gd declares cases']],
+    'passed and the verdict agree',
+  );
+  assert.ok(String(failing['note']).includes(NOT_SUITES_NOTE), 'and the note says what was left out');
+
+  // One limit for the call: the second engine gets what the first left.
+  assert.equal(timeLeft(600_000, 1000, 61_000), 540_000);
+  assert.equal(timeLeft(1000, 0, 5000), 0, 'and never a made-up floor');
+  rmSync(project, { recursive: true, force: true });
+}
+
+/**
+ * A run cut into engines, driven through runEngines with an engine that answers what it is told, so
+ * the wiring of every part of the merged answer is held without a window.
+ */
+async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-driven-'));
+  const windowedPath = 'res://tests/menu_test.gd';
+  const headlessPaths = ['res://tests/plain_test.gd', 'res://tests/stood_test.gd'];
+  const plan = (extra: Partial<TestEnginePlan> = {}): TestEnginePlan => ({
+    halves: [{ path: [windowedPath] }, { path: headlessPaths }],
+    notSuites: [],
+    notRun: [],
+    root,
+    ...extra,
+  });
+  const reply = (...parts: Array<string | Record<string, unknown>>): ToolResponse => ({
+    content: parts.map((part) => ({
+      type: 'text',
+      text: typeof part === 'string' ? part : JSON.stringify(part),
+    })),
+  });
+  const driven = (
+    answers: ToolResponse[],
+    options: { aborted?: (call: number) => boolean; clock?: number[]; during?: (call: number) => void } = {},
+  ): { seen: OperationParams[]; run: () => Promise<ToolResponse> } => {
+    const seen: OperationParams[] = [];
+    const clock = options.clock ?? [0];
+    let ticks = 0;
+    return {
+      seen,
+      run: async () =>
+        await runEngines(
+          plan(),
+          { timeoutMs: 20_000 },
+          {
+            run: (given) => {
+              seen.push(given);
+              options.during?.(seen.length);
+              return Promise.resolve(answers[seen.length - 1] ?? reply({ passed: true }));
+            },
+            aborted: () => options.aborted?.(seen.length) ?? false,
+            now: () => clock[Math.min(ticks++, clock.length - 1)] ?? 0,
+          },
+        ),
+    };
+  };
+  const jsonOfLast = (response: ToolResponse): Record<string, unknown> => {
+    const last = response.content.at(-1);
+    const parsed: unknown = JSON.parse(last?.type === 'text' ? last.text : '{}');
+    return isRecord(parsed) ? parsed : {};
+  };
+
+  // The explanations of an engine without a report, and the flags and command lines of both.
+  const ended = driven([
+    reply('The engine stopped in X.', {
+      passed: false,
+      verdict: 'timed out',
+      hung: false,
+      timedOut: false,
+      silentForMs: 20,
+      arguments: ['--w'],
+    }),
+    reply('The engine hung in Y.', {
+      passed: false,
+      verdict: 'timed out; hung',
+      hung: true,
+      timedOut: true,
+      silentForMs: 30,
+      arguments: ['--h'],
+    }),
+  ]);
+  const dead = await ended.run();
+  assert.deepEqual(
+    dead.content.slice(0, -1).map((part) => (part.type === 'text' ? part.text : '')),
+    ['The windowed engine: The engine stopped in X.', 'The headless engine: The engine hung in Y.'],
+    'each engine without a report keeps its explanation, named for the engine',
+  );
+  const deadJson = jsonOfLast(dead);
+  assert.deepEqual(
+    [deadJson['hung'], deadJson['timedOut'], deadJson['silentForMs'], deadJson['arguments']],
+    [true, true, 30, { windowed: ['--w'], headless: ['--h'] }],
+    'hung and timed out when either was, the longest silence, and the command lines apart',
+  );
+
+  // A folder's non-suite scripts and the cases asked for in one fail the run as a single run does.
+  const failed = await runEngines(
+    plan({ notSuites: ['helper_cases.gd declares cases'], notRun: ['helper_cases:test_helper'] }),
+    {},
+    {
+      run: () => Promise.resolve(reply({ passed: true, verdict: 'passed', tests: 1 })),
+      aborted: () => false,
+      now: () => 0,
+    },
+  );
+  const failedJson = jsonOfLast(failed);
+  assert.deepEqual(
+    [
+      failedJson['passed'],
+      failedJson['verdict'],
+      failedJson['notSuites'],
+      failedJson['testsNotRun'],
+      failedJson['engines'],
+    ],
+    [
+      false,
+      `${notSuitesVerdict(1)}; not run: helper_cases:test_helper`,
+      ['helper_cases.gd declares cases'],
+      ['helper_cases:test_helper'],
+      2,
+    ],
+    'a script that is no suite and a case asked for in one are failures, with the verdict saying so',
+  );
+
+  // One limit for the call: the second engine gets what the first, its rebuild and its import left.
+  const timed = driven([reply({ passed: true, tests: 1 }), reply({ passed: true, tests: 1 })], {
+    clock: [1000, 1000, 13_000],
+  });
+  await timed.run();
+  assert.deepEqual(
+    timed.seen.map((call) => call['timeoutMs']),
+    [20_000, 8000],
+    'the second engine is handed what is left of the call, and the first the whole of it',
+  );
+
+  // With almost none left the headless engine is not started, and the answer says why in the caller's number.
+  const spent = driven([reply({ passed: false, verdict: 'timed out', tests: 0 })], { clock: [0, 0, 19_000] });
+  const spentAnswer = jsonOfLast(await spent.run());
+  assert.equal(spent.seen.length, 1, 'no second engine is started');
+  assert.deepEqual(spentAnswer['suitesNotRun'], headlessPaths, 'its suites are named as not run');
+  assert.equal(
+    spentAnswer['verdict'],
+    'timed out; the headless engine was not started: only 1000 ms of the timeoutMs of 20000 ms was left, and an engine needs 5000 ms to start',
+    'the verdict says what was left and what an engine needs, in the caller own numbers',
+  );
+  assert.doesNotMatch(JSON.stringify(spentAnswer), /\b1 ms\b/, 'no sentence blames a limit of 1 ms');
+  assert.equal(spentAnswer['engines'], 1, 'one engine ran');
+  assert.match(
+    String(spentAnswer['note']),
+    /^Ran as one engine, the windowed one\. The headless suites were not started\./,
+    'and the note does not say two engines ran',
+  );
+  assert.doesNotMatch(String(spentAnswer['note']), /two engines/);
+
+  // A cut inside the headless engine keeps the windowed engine's results beside what is not yet run.
+  const cutInside = driven(
+    [
+      reply({
+        passed: false,
+        verdict: '1 failed',
+        failed: [{ path: windowedPath, name: 'test_menu', status: 'failed' }],
+        suites: [{ path: windowedPath, failures: 1, errors: 0 }],
+      }),
+      reply({ passed: false, verdict: 'cut' }),
+    ],
+    {
+      aborted: (call) => call === 2,
+      during: (call) => {
+        if (call === 2) {
+          keepCutTestRun(root, {
+            cutAt: new Date(Date.now() + 5).toISOString(),
+            paths: headlessPaths,
+            suitesFinished: [headlessPaths[0] ?? ''],
+            suiteRunning: headlessPaths[1] ?? '',
+          });
+        }
+      },
+      clock: [Date.now()],
+    },
+  );
+  await cutInside.run();
+  const record = takeCutTestRun(root);
+  assert.ok(record !== null, 'a record is kept');
+  assert.deepEqual(record.paths, [windowedPath, ...headlessPaths], 'every suite of the call is named');
+  assert.deepEqual(
+    record.suitesFinished,
+    [windowedPath, headlessPaths[0]],
+    'the windowed engine finished, and so did the headless suite before the cut',
+  );
+  assert.deepEqual(
+    record.suitesFailing?.map((suite) => [suite.path, suite.failed]),
+    [[windowedPath, ['test_menu']]],
+    'and the windowed engine failures are kept',
+  );
+  assert.equal(record.suiteRunning, headlessPaths[1], 'with the suite that was running');
+
+  // A cut after the windowed engine answered whole keeps the headless suites not yet run.
+  const between = driven([reply({ passed: true, tests: 1 })], { aborted: () => true, clock: [Date.now()] });
+  await between.run();
+  assert.equal(between.seen.length, 1, 'the headless engine never starts');
+  const betweenRecord = takeCutTestRun(root);
+  assert.ok(betweenRecord !== null, 'a record is kept');
+  assert.deepEqual(betweenRecord.paths, [windowedPath, ...headlessPaths]);
+  assert.deepEqual(betweenRecord.suitesFinished, [windowedPath]);
+
+  // A record an earlier cut call left stays when this call is cut as its last engine answers.
+  const earlier: CutTestRun = { cutAt: '2000-01-01T00:00:00.000Z', paths: ['res://tests/old_test.gd'] };
+  keepCutTestRun(root, earlier);
+  const lastCut = driven([reply({ passed: true, tests: 1 }), reply({ passed: true, tests: 1 })], {
+    aborted: (call) => call === 2,
+    clock: [Date.now()],
+  });
+  await lastCut.run();
+  assert.deepEqual(takeCutTestRun(root), earlier, 'the earlier record is kept as a single run keeps it');
+
+  // A path that was not there is not a suite that finished.
+  const gone = 'res://tests/gone_test.gd';
+  await runEngines(
+    plan({ halves: [{ path: [windowedPath, gone] }, { path: headlessPaths }] }),
+    {},
+    {
+      run: () => Promise.resolve(reply({ passed: false, missing: [gone] })),
+      aborted: () => true,
+      now: () => 0,
+    },
+  );
+  assert.deepEqual(takeCutTestRun(root)?.suitesFinished, [windowedPath], 'a missing path is not finished');
+
+  // Through the runner a call is answered with: its own signal ends the run, and its clock is read.
+  const spanned: unknown[] = [];
+  const slowEngine = async (given: OperationParams, abort?: AbortController): Promise<ToolResponse> => {
+    spanned.push(given['timeoutMs']);
+    await new Promise((settle) => setTimeout(settle, 60));
+    abort?.abort();
+    return reply({ passed: true, tests: 1 });
+  };
+  await runEngines(
+    plan(),
+    { timeoutMs: 20_000 },
+    engineRunnerOf(async (given) => await slowEngine(given)),
+  );
+  assert.equal(spanned[0], 20_000);
+  assert.ok(Number(spanned[1]) <= 19_950, `the clock is read between engines: ${String(spanned[1])}`);
+  const controller = new AbortController();
+  await withCallSignal(controller.signal, async () => {
+    await runEngines(
+      plan(),
+      { timeoutMs: 20_000 },
+      engineRunnerOf(async (given) => await slowEngine(given, controller)),
+    );
+  });
+  assert.equal(spanned.length, 3, 'the call signal ends the run before the second engine');
+  assert.deepEqual(
+    takeCutTestRun(root)?.paths,
+    [windowedPath, ...headlessPaths],
+    'and the run is kept as cut',
+  );
+
+  // A suite needing a window needs none once ignore leaves out every case it would run, by its name,
+  // a piece of its path or each case by name, on a machine with a display or without one.
+  const needs = {
+    needing: ['res://tests/menu_test.gd'],
+    headless: [],
+    accessible: ['res://tests/menu_test.gd'],
+  };
+  const menuCases = (): readonly string[] => ['test_menu', 'test_menu_two'];
+  const neededWith = (...ignore: string[]): ReturnType<typeof windowedNeeds> =>
+    windowedNeeds(needs, menuCases, ignore);
+  assert.deepEqual(neededWith(), {
+    needing: ['res://tests/menu_test.gd'],
+    accessible: ['res://tests/menu_test.gd'],
+  });
+  assert.deepEqual(neededWith('menu_test'), { needing: [], accessible: [] }, 'left out by name');
+  assert.deepEqual(neededWith('tests/menu'), { needing: [], accessible: [] }, 'by a piece of its path');
+  assert.deepEqual(
+    neededWith('menu_test:test_menu', 'menu_test:test_menu_two'),
+    { needing: [], accessible: [] },
+    'and by every case',
+  );
+  assert.deepEqual(
+    neededWith('menu_test:test_menu').needing,
+    ['res://tests/menu_test.gd'],
+    'a case left in keeps the window',
+  );
+
+  // A headless suite whose every case was left out is said to have run no case, not to have shared a window.
+  const note = windowNoteFor(['res://tests/menu_test.gd'], ['res://tests/stood_test.gd'], []);
+  assert.match(
+    note,
+    /stood_test\.gd says it runs headless, and every case of it was left out, so it ran no case in the window\.$/,
+  );
+  assert.doesNotMatch(note, /also declares/, 'and the reason is not an accessibility declaration');
+  rmSync(root, { recursive: true, force: true });
+}
+
 function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-tree-'));
   const cases = (...names: string[]): string =>
@@ -61859,15 +63472,17 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       handed,
       [
         [0, true, [suiteNamed('scene')]],
-        [1, false, [suiteNamed('h0'), suiteNamed('h4')]],
-        [0, false, [suiteNamed('h1'), suiteNamed('h7')]],
+        [1, false, [suiteNamed('h0')]],
+        [0, false, [suiteNamed('h1')]],
         [2, false, [suiteNamed('h2')]],
         [0, false, [suiteNamed('h3')]],
+        [1, false, [suiteNamed('h4')]],
         [2, false, [suiteNamed('h5')]],
         [1, false, [suiteNamed('h6')]],
+        [0, false, [suiteNamed('h7')]],
         [2, false, [suiteNamed('h8')]],
       ],
-      'the windowed suite first and alone, then the slowest up to a third of what is left, shrinking as it runs out',
+      'the windowed suite first and alone, then the slowest up to a third of what is left and never over two minutes, shrinking as it runs out',
     );
     assert.deepEqual(
       handed.flatMap(([, , suitePaths]) => suitePaths).toSorted(),
@@ -61943,16 +63558,81 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     });
     assert.deepEqual(turned, ['0:30', '1:10', '2:20', '3:5'], 'every answer in the order given');
     assert.equal(most, 2, 'two at a time and no more');
-    assert.deepEqual(
-      headlessInAWindow([inOneEngine(lone, loneDeclared)], lone),
-      ['res://tests/stood_test.gd'],
-      'and in an ordered run',
+    // An ordered run is one windowed engine and one headless engine, each in the order given.
+    const orderedPlans = inEngines(
+      [lone[1], lone[0], lone[2]].filter((one) => one !== undefined),
+      loneDeclared,
     );
     assert.deepEqual(
-      headlessInAWindow([inOneEngine(lone.slice(1), loneDeclared)], lone),
+      orderedPlans.map((plan) => [plan.lane, plan.windowed, plan.suites.map((s) => s.path)]),
+      [
+        [0, true, ['res://tests/menu_test.gd']],
+        [0, false, ['res://tests/stood_test.gd', 'res://tests/plain_test.gd']],
+      ],
+      'the windowed suite alone in a windowed engine, the others headless after it in the order given',
+    );
+    assert.deepEqual(
+      headlessInAWindow(orderedPlans, lone),
       [],
-      'but not in an engine with no window',
+      'so a suite saying it runs headless is not given a window',
     );
+    assert.deepEqual(
+      inEngines(lone.slice(1), loneDeclared).map((plan) => plan.windowed),
+      [false],
+      'a set with no windowed suite is one headless engine',
+    );
+    assert.deepEqual(
+      inEngines(
+        [lone[0]].filter((one) => one !== undefined),
+        loneDeclared,
+      ).map((plan) => plan.windowed),
+      [true],
+      'and one with only windowed suites is one windowed engine',
+    );
+    const kinds = splitByWindow([
+      { path: 'a', windowed: true },
+      { path: 'b', windowed: false },
+      { path: 'c', windowed: true },
+      { path: 'd', windowed: false },
+    ]);
+    assert.deepEqual(
+      [kinds.windowed.map((one) => one.path), kinds.headless.map((one) => one.path)],
+      [
+        ['a', 'c'],
+        ['b', 'd'],
+      ],
+      'a set splits by what needs a window, each kind in the order given',
+    );
+    const mixed = mergedTestAnswers([
+      { passed: true, verdict: 'passed', tests: 3, failures: 0, windowed: true, windowNote: 'w', failed: [] },
+      {
+        passed: false,
+        verdict: '1 failed',
+        tests: 5,
+        failures: 1,
+        failed: [{ name: 'x' }],
+        ignoreUnmatched: ['z'],
+      },
+    ]);
+    assert.deepEqual(
+      [
+        mixed['passed'],
+        mixed['verdict'],
+        mixed['tests'],
+        mixed['failures'],
+        mixed['engines'],
+        mixed['windowed'],
+      ],
+      [false, '1 failed', 8, 1, 2, true],
+      'two answers are one run: counts added, failed when either failed, and two engines said',
+    );
+    assert.deepEqual(mixed['failed'], [{ name: 'x' }]);
+    assert.equal(
+      mixed['ignoreUnmatched'],
+      undefined,
+      'an ignore entry only one engine could not match left something out',
+    );
+    assert.match(String(mixed['note']), /^Ran as two engines/);
 
     // The room a run has, from the processors and the memory handed in: what is asked for when
     // both have it, and otherwise fewer, with what held it.
@@ -62130,7 +63810,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'every row in one engine is the case whole there',
     );
     assert.deepEqual(
-      sharesOf([inOneEngine(rowUnits, rowDeclared)], lone_.path),
+      sharesOf(inEngines(rowUnits, rowDeclared), lone_.path),
       [[['test_only'], null]],
       'as in an ordered run',
     );
@@ -64167,6 +65847,7 @@ async function checksTheMachineSlotsAndTheirWaitMessages(): Promise<void> {
     env,
     platform,
     processors,
+    memory: 64 * 1024 ** 3,
     home: join(sep, 'home', 'me'),
     cwd: join(sep, 'work'),
   });
@@ -64462,7 +66143,12 @@ async function checksTheCommandWaitsBehindTheSlotHeld(fixture: MachineSlotFixtur
     await delay(100);
   }
   assert.deepEqual(
-    [classes.exitCode, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
+    [
+      classes.exitCode,
+      holderOf(readFileSync(ours, 'utf8'))?.pid,
+      // Without the note beside the mark that says the command still looks.
+      leftInSlots(slots).filter((name) => !name.endsWith('.seen')),
+    ],
     [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
     `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
   );
@@ -65896,9 +67582,13 @@ async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
   // The shares are cut for the lanes there are now.
   const eight = eightSuitesOf(8, 1);
   const shares = new Shares(eight.units, eight.declared, 2);
-  assert.equal(shares.next(0)?.suites.length, 4, 'two lanes are each handed half of what is left');
+  assert.equal(
+    shares.next(0)?.suites.length,
+    3,
+    'two lanes are each handed half of what is left, up to 120 s',
+  );
   shares.widen(4);
-  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 160 s left is one suite');
+  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 200 s left is one suite');
   shares.widen(1);
   assert.equal(shares.next(2)?.suites.length, 1, 'a number below the present one lowers nothing');
 
@@ -68359,15 +70049,22 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
             assert.doesNotMatch(run.said, /runs with a window here/, run.said);
           }
         }
-        // An ordered run is one engine, so the suite has to share the window, and the run says so
-        // before it starts.
-        const shared = test('--order', 'reversed', 'tests/window_test.gd', 'tests/stood_test.gd');
-        assert.ok(
-          shared.said.includes(
-            'res://tests/stood_test.gd says it runs headless and runs with a window here, since an ordered run is one engine and a suite in it needs a window. Run it without the windowed suites to run it headless.',
-          ),
-          shared.said,
-        );
+        // An ordered run keeps its order within each kind and runs the two kinds in two engines, so
+        // the suite saying it runs headless is not given the window.
+        for (const order of [
+          ['--order', 'reversed'],
+          ['--order', '7'],
+          ['--order', 'named'],
+        ]) {
+          const ordered = test(...order, 'tests/window_test.gd', 'tests/stood_test.gd');
+          assert.equal(ordered.status, 0, ordered.said);
+          assert.match(
+            ordered.said,
+            /in 2 suites over 2 engines, [^\n]*one of them windowed and followed in its slot by a headless one\.$/m,
+            ordered.said,
+          );
+          assert.doesNotMatch(ordered.said, /runs with a window here/, ordered.said);
+        }
         theAccessibilityTreeIsBuilt();
       } else {
         console.log(`test command windowed case skipped: ${windowed}`);
@@ -70443,7 +72140,8 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         /** A suite standing a scene up through the scene runner is given a window, and one declaring false runs headless alone. */
         const windowedSuites = async (): Promise<void> => {
           // A suite standing a scene up through the scene runner and declaring nothing is given a
-          // window, as gdharness test gives it one, and one declaring false beside it shares it.
+          // window, as gdharness test gives it one, and one declaring false beside it runs in a second
+          // engine without it, and asserts the display server there is the headless one.
           writeTree(project, {
             'win/stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
             'win/shown_test.gd': [
@@ -70458,7 +72156,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               '',
             ].join('\n'),
             'win/quiet_test.gd':
-              'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_bool(true).is_true()\n',
+              'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_str(DisplayServer.get_name()).is_equal("headless")\n',
           });
           const noDisplay = resolveHeadless(undefined, {
             platform: process.platform,
@@ -70491,9 +72189,14 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                   true,
                   2,
                   true,
-                  `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
+                  `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why}`,
                 ],
                 JSON.stringify(shown),
+              );
+              assert.equal(
+                get(shown, 'engines'),
+                2,
+                `the two kinds ran in two engines: ${JSON.stringify(shown)}`,
               );
               const theTreeIsBuiltForAnAccessibilitySuite = async (): Promise<void> => {
                 // A suite asking for the accessibility tree gets a window with the tree on, and its case
@@ -70575,6 +72278,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             ),
             'quiet',
           );
+          assert.equal(get(quiet, 'engines'), undefined, 'a set of one kind is one engine, with no count');
           assert.deepEqual(
             [get(quiet, 'passed'), get(quiet, 'tests'), get(quiet, 'windowed'), get(quiet, 'windowNote')],
             [true, 1, undefined, undefined],
@@ -70593,6 +72297,26 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             [get(ignoring, 'passed'), get(ignoring, 'tests'), get(ignoring, 'windowed')],
             [true, 1, undefined],
             JSON.stringify(ignoring),
+          );
+          // The same when only the cases of that suite are left out: one headless engine, no window,
+          // and the suite saying it runs headless sees the headless display server.
+          const casesIgnored = jsonOf(
+            await call(
+              'project_test',
+              { projectPath: project, path: 'win', ignore: ['shown_test:test_shown'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+            'casesIgnored',
+          );
+          assert.deepEqual(
+            [
+              get(casesIgnored, 'passed'),
+              get(casesIgnored, 'tests'),
+              get(casesIgnored, 'windowed'),
+              get(casesIgnored, 'engines'),
+            ],
+            [true, 1, undefined, undefined],
+            JSON.stringify(casesIgnored),
           );
           rmSync(join(project, 'win'), { recursive: true, force: true });
         };
@@ -99470,8 +101194,26 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
+  testATakerHeldBackByAClaimDoesNotSayItLooks,
+  testAGameHeldBackByTheGamesLimitDoesNotSayItLooks,
   testGatesInTheQueueKeepTheirSlots,
   testARunFollowsTheLanesAGateWrites,
+  testAShareHoldsNoMoreThanTwoMinutesOfWork,
+  testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
+  testAFallWhileEveryShareIsOutEndsTheParkedLanes,
+  testAParkedLaneEndsWhenTheRunFails,
+  testAMarkNotTakenStillLetsTheRunFallToTheLanesTold,
+  testEverySlotVariableTheSourcesReadIsClearedForAFixture,
+  testAShareFloorIsWhatTheRunsEnginesTookToStart,
+  testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
+  testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
+  testAParkedLanesSlotGoesToTheMachineNotTheCheck,
+  testARunBegunAtItsCeilingStillFollowsTheLanesFile,
+  testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking,
+  testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing,
+  testTheSlotCountIsHeldToTheMemoryThereIs,
+  testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
+  testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
@@ -99479,6 +101221,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
+  testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut,
+  testACutRunIsDrivenThroughItsEngines,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
@@ -99829,9 +101573,26 @@ function saidOfAFailure(error: unknown): string | undefined {
       : String(error);
 }
 
+/** Every slot variable the sources read is one a fixture starts without. */
+function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
+  const named = new Set<string>();
+  for (const file of readdirSync('src', { recursive: true, encoding: 'utf8' })) {
+    if (file.endsWith('.ts')) {
+      for (const match of readFileSync(join('src', file), 'utf8').matchAll(/GODOT_ENGINE_[A-Z_]+/g)) {
+        named.add(match[0]);
+      }
+    }
+  }
+  assert.ok(named.size >= 9, `the sources name the slot variables: ${String(named.size)}`);
+  for (const name of named) {
+    assert.ok(SLOT_VARIABLES.includes(name), `${name} is cleared before a fixture runs`);
+  }
+}
+
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */
 async function runOneRegression(test: RegressionCase, run: RegressionRun): Promise<void> {
   const { failed, ranPast, deadlineMs, budgetMs, runEnds } = run;
+  withTheSuitesOwnSlotVariables();
   sweepingFor(test.name);
   let passed = true;
   const began = Date.now();

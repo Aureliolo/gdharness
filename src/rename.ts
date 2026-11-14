@@ -118,13 +118,19 @@ interface ClassNode {
 export class ClassGraph {
   readonly nodes = new Map<ClassId, ClassNode>();
   readonly declared: ReadonlyMap<string, string>;
+  /** Each script's classes, its own body first. */
+  private readonly inFile = new Map<string, ClassNode[]>();
 
   constructor(scripts: ReadonlyMap<string, Script>, declared: ReadonlyMap<string, string>) {
     this.declared = declared;
     for (const script of scripts.values()) {
+      const held: ClassNode[] = [];
+      this.inFile.set(script.path, held);
       const add = (body: ClassBody, inner: string[]): void => {
         const id = classId(script.path, inner);
-        this.nodes.set(id, { id, file: script.path, inner, body, parent: null, native: null });
+        const node: ClassNode = { id, file: script.path, inner, body, parent: null, native: null };
+        this.nodes.set(id, node);
+        held.push(node);
         for (const child of body.inner) {
           if (child.name !== null) {
             add(child, [...inner, child.name]);
@@ -176,6 +182,41 @@ export class ClassGraph {
     return found;
   }
 
+  /** The class a global name such as `Outer.Inner` names, or null where no script declares it. */
+  named(name: string): ClassId | null {
+    const [first = '', ...rest] = name.split('.');
+    const file = this.declared.get(first);
+    const id = file === undefined ? null : classId(file, rest);
+    return id !== null && this.nodes.has(id) ? id : null;
+  }
+
+  /**
+   * The class whose own [param name] a use resolved from [param id] reaches: [param id] or the
+   * nearest class above it declaring the name as [param kind]. Undefined where none does, and null
+   * where the chain breaks before one does.
+   */
+  resolvedFrom(id: ClassId, name: string, kind: DeclarationKind): ClassId | null | undefined {
+    const found = [id, ...this.ancestors(id)].find((one) => this.declaration(one, name)?.kind === kind);
+    if (found !== undefined) {
+      return found;
+    }
+    return this.nativeBase(id) === null ? null : undefined;
+  }
+
+  /** The project class [param id] extends, or null where it extends a native class or a missing script. */
+  parentOf(id: ClassId): ClassId | null {
+    return this.nodes.get(id)?.parent ?? null;
+  }
+
+  /** Whether [param id] declares a static function named [param name]. */
+  declaresStatic(id: ClassId, name: string): boolean {
+    return (
+      this.nodes
+        .get(id)
+        ?.body.declarations.some((one) => one.name === name && one.kind === 'func' && one.isStatic) === true
+    );
+  }
+
   /** The native class at the bottom of [param id]'s chain, or null where the chain is broken. */
   nativeBase(id: ClassId): string | null {
     const chain = [id, ...this.ancestors(id)];
@@ -197,13 +238,8 @@ export class ClassGraph {
   bodyAt(file: string, offset: number): ClassId {
     let best = classId(file, []);
     let depth = 0;
-    for (const node of this.nodes.values()) {
-      if (
-        node.file === file &&
-        node.inner.length > depth &&
-        node.body.start <= offset &&
-        offset <= node.body.end
-      ) {
+    for (const node of this.inFile.get(file) ?? []) {
+      if (node.inner.length > depth && node.body.start <= offset && offset <= node.body.end) {
         best = node.id;
         depth = node.inner.length;
       }

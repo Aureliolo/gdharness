@@ -33,7 +33,8 @@
  * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
  * is `$XDG_CACHE_HOME/gdharness/slots` where that variable is set, else
  * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`. The count is half
- * the processors, at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
+ * the processors, but no more than the physical memory above 16 GiB holds at 1.5 GiB an engine, and
+ * at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
  * replace either, and a command's `--slots` and `--slot-count` replace those ({@link machineSlots}).
  *
  * The games' own tools take slots in this directory the same way, which is the point of it: the
@@ -51,10 +52,11 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   watch,
   writeSync,
 } from 'node:fs';
-import { availableParallelism, homedir } from 'node:os';
+import { availableParallelism, homedir, totalmem } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -95,6 +97,10 @@ export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
  * one slot to five left the machine about half idle while gates waited in line for engines.
  */
 const PROCESSORS_A_SLOT = 2;
+/** The memory one slot stands for, as the machine's queue counts it. */
+const ENGINE_MEMORY_BYTES = 1536 * 1024 ** 2;
+/** The physical memory no slot stands for: editors, language servers and sessions. */
+const OUTSIDE_MEMORY_BYTES = 16 * 1024 ** 3;
 
 /** Where the slots are and how many there are. */
 interface SlotsChosen {
@@ -107,6 +113,8 @@ interface SlotsMachine {
   readonly env: NodeJS.ProcessEnv;
   readonly platform: NodeJS.Platform;
   readonly processors: number;
+  /** The physical memory in bytes. */
+  readonly memory: number;
   readonly home: string;
   readonly cwd: string;
 }
@@ -125,6 +133,7 @@ export function machineSlots(
     env: process.env,
     platform: process.platform,
     processors: availableParallelism(),
+    memory: totalmem(),
     home: homedir(),
     cwd: process.cwd(),
   },
@@ -139,7 +148,9 @@ export function machineSlots(
   if (count === null && counted !== undefined) {
     count = wholeFlag(counted, SLOT_COUNT_VARIABLE);
   }
-  return { directory, count: count ?? Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT)) };
+  const byProcessors = Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT));
+  const byMemory = Math.floor((machine.memory - OUTSIDE_MEMORY_BYTES) / ENGINE_MEMORY_BYTES);
+  return { directory, count: count ?? Math.max(1, Math.min(byProcessors, byMemory)) };
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -187,6 +198,29 @@ export function endedNoteOf(mark: string): string {
   return `${mark.replace(/\.json$/, '')}${ENDED_SUFFIX}`;
 }
 
+/** What follows a mark's name in the file whose time says when its taker last looked. */
+const SEEN_SUFFIX = '.seen';
+
+/** The file beside [param mark] that its taker writes at each look. */
+function seenNoteOf(mark: string): string {
+  return `${mark.replace(/\.json$/, '')}${SEEN_SUFFIX}`;
+}
+
+/**
+ * Sets the time of the look note beside [param mark] to now, making it first where it is not there.
+ * Only the time changes after the first look, so the folder a take watches stays quiet.
+ */
+function lookNoted(mark: string): void {
+  const note = seenNoteOf(mark);
+  try {
+    closeSync(openSync(note, 'a'));
+    const now = new Date();
+    utimesSync(note, now, now);
+  } catch {
+    // The wait is marked alive by its mark's own time instead, which costs a moment, never a slot.
+  }
+}
+
 /**
  * When [param mark] was made, in seconds since the epoch, or undefined when it cannot be read. Summed
  * from whole seconds and nanoseconds as Python's `st_mtime` is, so a reader in Python matching a
@@ -205,7 +239,7 @@ export function markBegan(mark: string): number | undefined {
 function endedNotesSwept(marks: string): void {
   let names: string[];
   try {
-    names = readdirSync(marks).filter((name) => name.endsWith(ENDED_SUFFIX));
+    names = readdirSync(marks).filter((name) => name.endsWith(ENDED_SUFFIX) || name.endsWith(SEEN_SUFFIX));
   } catch {
     return;
   }
@@ -265,7 +299,9 @@ export const ONE_OFF_AGED_MS = 120_000;
  * How long a take leaves a free slot to a taker waiting longer that may take it, past which it takes
  * the slot itself. One waiting ahead takes a slot within a moment of its coming free, woken as the
  * lock goes, so one left that long is one it cannot take after all, a mark misread or a taker the
- * queue has paused, and a slot never stands idle longer while someone waits who may take it.
+ * queue has paused, and a slot never stands idle longer while someone waits who may take it. A taker
+ * that has looked since, which it says by touching the note beside its mark, is still taking, so the
+ * time counts from its last look.
  */
 export const SLOT_YIELD_MS = 5000;
 
@@ -279,7 +315,18 @@ interface SlotWaiter {
   /** When it began to wait, in milliseconds since the epoch. */
   readonly since: number;
   readonly game: boolean;
+  /** How many slots it waits for at once: above 1 only for a job needing several, else 1. */
+  readonly wants: number;
+  /** When it last looked, in milliseconds, or when its mark was made where it never says. */
+  readonly seen: number;
 }
+
+/**
+ * How long a taker waiting for several slots at once has the slots freed meanwhile left to it, past
+ * which takers behind it take them and it starts on what is free. Written as the machine's queue
+ * writes it.
+ */
+const SLOTS_DRAIN_MS = 300_000;
 
 /**
  * Each live taker waiting for a slot in [param directory], as its mark names it. A mark's `taker` of
@@ -319,11 +366,19 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
     return null;
   }
   const parsed: unknown = JSON.parse(content);
-  const { taker, since }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+  const { taker, since, wants }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
   if (taker === MEMORY_TAKER) {
     return null;
   }
+  let seen = madeAt;
+  try {
+    seen = statSync(join(marks, seenNoteOf(mark))).mtimeMs;
+  } catch {
+    // No look written: the wait has only its mark's time to show it is alive.
+  }
   return {
+    wants: typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? wants : 1,
+    seen,
     mark,
     taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
@@ -366,8 +421,8 @@ export class SlotLine {
   readonly since: number;
   /** The name of its own waiting mark once it has one. */
   mark: string | undefined;
-  /** The slots it leaves to those ahead, each with when it first left it. */
-  private left = new Map<number, number>();
+  /** The slots it leaves to those ahead at its last look. */
+  private left = new Set<number>();
 
   readonly taker: SlotTaker;
   readonly game: boolean;
@@ -414,17 +469,17 @@ export class SlotLine {
 
   /**
    * Those of [param numbers] it may take now, the order kept: it leaves out each of [param theirs],
-   * the free slots those ahead take first, until it has left it {@link SLOT_YIELD_MS}.
+   * the free slots those ahead take first. How long a taker ahead is waited for is counted by the
+   * take, per taker, not per slot, so a wait for several slots keeps all of them for its drain.
    */
   admitted(numbers: readonly number[], theirs: ReadonlySet<number>): number[] {
-    const now = this.clock();
-    this.left = new Map([...theirs].map((slot) => [slot, this.left.get(slot) ?? now]));
-    return numbers.filter((slot) => !theirs.has(slot) || now - (this.left.get(slot) ?? now) >= SLOT_YIELD_MS);
+    this.left = new Set(theirs);
+    return numbers.filter((slot) => !theirs.has(slot));
   }
 
   /** The free slots it leaves to those waiting longer, lowest first. */
   leaves(): number[] {
-    return [...this.left.keys()].toSorted((a, b) => a - b);
+    return [...this.left].toSorted((a, b) => a - b);
   }
 }
 
@@ -709,12 +764,17 @@ export class FolderChanges {
  * A process following the lanes file a gate's paced portion writes in the pool. It reads the number
  * as the spare count is read and holds a mark beside the file as a lock is held, so the portion
  * grows past the number it told only while a run stands behind it. It takes no lock in the pool.
+ * A run that cannot rise above the lanes it began on only reads the number, for a fall, and holds no
+ * mark, since the portion has nothing to gain from a run that cannot take more lanes.
  */
 export class FollowedLanes {
   readonly ceiling: number;
+  /** Whether it may still hold the mark: false for a run that cannot rise, and once the mark is given back. */
+  private rises: boolean;
   private readonly mark: string;
   private changes: FolderChanges | null = null;
   private holding = false;
+  private taking: Promise<boolean> | null = null;
 
   private readonly slots: Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'>;
   private readonly file: string;
@@ -725,10 +785,12 @@ export class FollowedLanes {
     file: string,
     ceiling: number,
     lookMs = SLOT_LOOK_MS,
+    rises = true,
   ) {
     this.slots = slots;
     this.file = file;
     this.ceiling = ceiling;
+    this.rises = rises;
     this.lookMs = lookMs;
     this.mark = `${file}${FOLLOWS_SUFFIX}`;
   }
@@ -748,14 +810,45 @@ export class FollowedLanes {
         throw signal.reason;
       }
       const said = await this.look();
-      if (said > above) {
+      // Only a run holding the mark may rise, as the writer grows no further for another.
+      if (said > above && (this.holding || !this.rises)) {
         if (said >= this.ceiling) {
           this.end();
+          // A run at its ceiling goes on reading the number for a fall, without the mark.
+          this.rises = false;
         }
         return said;
       }
       this.changes ??= new FolderChanges(dirname(this.file));
       await this.changes.next(this.lookMs, SLOT_SETTLE_MS, signal);
+    }
+  }
+
+  /**
+   * The lanes the file tells now, at most the ceiling, or null while it tells none: its writer has
+   * gone or it holds no number. A mark held by another reader does not hide the number.
+   */
+  async told(): Promise<number | null> {
+    const said = await this.look();
+    return said > 0 ? said : null;
+  }
+
+  /**
+   * Settles once the file tells a number above [param lane] or tells none, and at once when
+   * [param signal] aborts. A lane at or past the number told waits here for it to grow.
+   */
+  async untilTold(lane: number, signal: AbortSignal): Promise<void> {
+    const changes = new FolderChanges(dirname(this.file));
+    try {
+      while (!signal.aborted) {
+        const told = await this.told();
+        if (told === null || lane < told) {
+          return;
+        }
+        await changes.next(this.lookMs, SLOT_SETTLE_MS, signal);
+      }
+    } finally {
+      changes.close();
     }
   }
 
@@ -774,15 +867,44 @@ export class FollowedLanes {
     });
   }
 
-  /** The lanes the file tells now, at most the ceiling, and 0 while the mark is not held or a look fails. */
+  /**
+   * The lanes the file tells now, at most the ceiling, and 0 while it cannot be read. The mark is
+   * tried first but the number is read without it: a mark another reader holds, or one that failed
+   * to be taken, only stops the run rising, never the fall the number tells.
+   */
   private async look(): Promise<number> {
+    if (this.rises) {
+      try {
+        await this.holdMark();
+      } catch {
+        // Held by a reader or failed for now, which the next look tries again.
+      }
+    }
     try {
-      this.holding ||= await this.slots.takeFile(this.mark);
-      return this.holding ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling) : 0;
+      return Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling);
     } catch {
-      // Held by a reader or unreadable for now, which the next look tries again.
       return 0;
     }
+  }
+
+  /**
+   * Takes the mark unless it is held. Looks begun together share one attempt: the lanes of a run
+   * ask at once, and a failing attempt finishing after a succeeding one must not undo it.
+   */
+  private async holdMark(): Promise<void> {
+    if (this.holding) {
+      return;
+    }
+    this.taking ??= this.slots.takeFile(this.mark).finally(() => {
+      this.taking = null;
+    });
+    const took = await this.taking;
+    if (took && !this.rises) {
+      // Ended while the mark was being taken, so it is given straight back.
+      giveBackSlot(this.mark, this.slots.holder.pid);
+      return;
+    }
+    this.holding = took;
   }
 
   /** Gives the mark back while it names this process, and stops watching. */
@@ -904,6 +1026,13 @@ export class EngineSlots {
   private readonly passedOver = new Map<string, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
+  /**
+   * Whether the inherited slot is one a timing or a heavy job lends, which a program inside it takes
+   * no slot beside: its engines wait for the lent one, as a job started inside a job does.
+   */
+  private jobLent = false;
+  /** The last look at the inherited slot, which the next one waits for. */
+  private inheriting: Promise<void> = Promise.resolve();
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
   drawn: SlotsDrawn = { numbers: [] };
   private saidAt = Number.NEGATIVE_INFINITY;
@@ -946,6 +1075,7 @@ export class EngineSlots {
     const began = line.since;
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
+    let lentWaitSaid = false;
     let changes: FolderChanges | undefined;
     try {
       for (;;) {
@@ -954,7 +1084,14 @@ export class EngineSlots {
         if (lock !== null) {
           return lock;
         }
-        if (mark === undefined) {
+        if (this.waitsOnTheLentSlot()) {
+          // The wait is for the slot the job lent alone, which no other program could take, so
+          // nothing in the machine's waiting folder says it waits.
+          if (!lentWaitSaid) {
+            lentWaitSaid = true;
+            blocked?.();
+          }
+        } else if (mark === undefined) {
           mark = this.waitMarked(line);
           blocked?.();
         }
@@ -1034,10 +1171,12 @@ export class EngineSlots {
   async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
     await this.sweep();
-    const inherited = this.inherited === null ? await this.inheritedLock() : null;
+    const inherited = await this.inheritedByOne();
     if (inherited !== null) {
-      this.inherited = inherited;
       return inherited;
+    }
+    if (this.waitsOnTheLentSlot()) {
+      return null;
     }
     const taker = this.taker();
     if (await this.starvedOutFor(taker)) {
@@ -1054,11 +1193,21 @@ export class EngineSlots {
     if (game && this.drawn.limit === 'kept' && (await this.gamesFillTheKeptSlots())) {
       return null;
     }
+    if (line?.mark !== undefined) {
+      // A look that may take something says its taker still looks, so the slots left to a wait for
+      // several last its drain. A taker held back says nothing and stops holding the takers behind it.
+      lookNoted(join(this.directory, WAITING_FOLDER, line.mark));
+    }
     const tried =
       taker === 'timing'
         ? this.drawn.numbers
         : await this.leftAfterThoseAhead(line ?? new SlotLine(taker, game), queued);
     return await this.lockOneOf(tried, game);
+  }
+
+  /** Whether this process runs inside a job, whose lent slot it already holds and no take can add to. */
+  private waitsOnTheLentSlot(): boolean {
+    return this.inherited !== null && this.jobLent;
   }
 
   /** Locks the first of [param slots] that is made fresh or taken over, and answers its path. */
@@ -1110,7 +1259,7 @@ export class EngineSlots {
     }
     const ahead = placed
       .ahead(waiting)
-      .filter((one) => now - (this.passedOver.get(one.mark) ?? now) < SLOT_YIELD_MS);
+      .filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS);
     const claims = await this.claimedAhead(ahead, queued);
     for (const mark of claims.values()) {
       if (!this.passedOver.has(mark)) {
@@ -1148,7 +1297,11 @@ export class EngineSlots {
     }
     const now = Date.now();
     const drawn: (readonly number[])[] = [];
-    for (const one of ahead) {
+    // A taker waiting for several slots at once is ahead once for each, for its first drain.
+    const places = ahead.flatMap((one) =>
+      Array.from({ length: now - one.since < SLOTS_DRAIN_MS ? one.wants : 1 }, () => one),
+    );
+    for (const one of places) {
       const aged = one.taker === 'other' && !one.game && now - one.since >= ONE_OFF_AGED_MS;
       const theirs = slotsDrawnOn(
         this.count,
@@ -1158,8 +1311,28 @@ export class EngineSlots {
       drawn.push(theirs.numbers);
     }
     return new Map(
-      [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, ahead[at]?.mark ?? '']),
+      [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, places[at]?.mark ?? '']),
     );
+  }
+
+  /**
+   * The inherited slot for the one take that finds it unused, or null. Looks run one at a time, so
+   * two takes begun together cannot both read it as unused before either has claimed it.
+   */
+  private inheritedByOne(): Promise<string | null> {
+    const claim = this.inheriting.then(async () => {
+      if (this.inherited !== null) {
+        return null;
+      }
+      const lock = await this.inheritedLock();
+      this.inherited = lock;
+      return lock;
+    });
+    this.inheriting = claim.then(
+      () => undefined,
+      () => undefined,
+    );
+    return claim;
   }
 
   /**
@@ -1169,6 +1342,23 @@ export class EngineSlots {
    * so the variable alone would put it on the editor's slot.
    */
   private async inheritedLock(): Promise<string | null> {
+    this.jobLent = false;
+    const engines = await this.engineLock();
+    if (engines !== null) {
+      return engines;
+    }
+    const lent = nonEmpty(process.env[TIMED_VARIABLE]);
+    const content = lent === undefined ? null : readWhole(lent);
+    const holder = content === null ? null : holderOf(content);
+    if (lent === undefined || holder === null || holder.pid === process.pid || (await this.free(lent))) {
+      return null;
+    }
+    this.jobLent = true;
+    return lent;
+  }
+
+  /** The lock of the engine above this process, which [constant HELD_VARIABLE] names, or null. */
+  private async engineLock(): Promise<string | null> {
     const lock = nonEmpty(process.env[HELD_VARIABLE]);
     const content = lock === undefined ? null : readWhole(lock);
     const holder = content === null ? null : holderOf(content);
@@ -1257,6 +1447,7 @@ export class EngineSlots {
     this.marks.delete(mark);
     writeWhole(endedNoteOf(mark), JSON.stringify({ began, ended: Date.now() / 1000 }));
     removeWhole(mark);
+    removeWhole(seenNoteOf(mark));
   }
 
   /** Which of the slots [param numbers] a live game editor_run started holds. */
