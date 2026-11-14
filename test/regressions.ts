@@ -60169,6 +60169,83 @@ async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promi
 }
 
 /**
+ * A mark that cannot be taken, because another reader holds it or the take failed, hides nothing of
+ * the number the file tells: the run still falls to it. It only stops the run rising above it.
+ */
+async function testAMarkNotTakenStillLetsTheRunFallToTheLanesTold(): Promise<void> {
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-nomark-'));
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-nomark-machine-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const real = new EngineSlots(pool, 1, holder);
+  const tells = (lanes: number): string => {
+    const file = join(pool, `lanes-${String(lanes)}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify({ lanes, pid: process.pid, started: holder.started, written: Date.now() }),
+    );
+    return file;
+  };
+  const refused = (failing: 'false' | 'throws'): Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'> => ({
+    holder,
+    countIn: (path, key) => real.countIn(path, key),
+    takeFile: () => (failing === 'false' ? Promise.resolve(false) : Promise.reject(new Error('busy'))),
+  });
+  try {
+    for (const failing of ['false', 'throws'] as const) {
+      const file = tells(1);
+      assert.equal(
+        await new FollowedLanes(refused(failing), file, 4, 5).told(),
+        1,
+        `the number is read when the mark take ${failing === 'false' ? 'is refused' : 'throws'}`,
+      );
+    }
+
+    const rising = new FollowedLanes(refused('false'), tells(3), 4, 5);
+    const stop = new AbortController();
+    const grown = await Promise.race([
+      rising.past(1, stop.signal).then(
+        () => 'rose',
+        () => 'aborted',
+      ),
+      delay(300).then(() => 'waits'),
+    ]);
+    stop.abort();
+    assert.equal(grown, 'waits', 'but it rises above the number only with the mark held');
+
+    let running = 0;
+    let most = 0;
+    let suitesRun = 0;
+    const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+    const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+    const ran = await runShares(
+      new EngineSlots(machine, 4, holder),
+      units,
+      declared,
+      3,
+      [],
+      {},
+      async (plan, index) => {
+        running += 1;
+        most = Math.max(most, running);
+        suitesRun += plan.suites.length;
+        await delay(150);
+        running -= 1;
+        return { index };
+      },
+      undefined,
+      undefined,
+      new FollowedLanes(refused('false'), tells(1), 4, 5),
+    );
+    assert.ok(ran.length > 1, 'the run deals more than one share');
+    assert.equal(suitesRun, 12, 'and every suite once');
+    assert.equal(most, 1, 'and runs one engine at a time under the one lane told');
+  } finally {
+    sweep(pool);
+    sweep(machine);
+  }
+}
+
+/**
  * A lane parked by a fall ends when the run fails, with shares still left. It neither loops on the
  * lanes file nor takes the follows mark back once the run has ended its follower.
  */
@@ -100288,6 +100365,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
   testAFallWhileEveryShareIsOutEndsTheParkedLanes,
   testAParkedLaneEndsWhenTheRunFails,
+  testAMarkNotTakenStillLetsTheRunFallToTheLanesTold,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,

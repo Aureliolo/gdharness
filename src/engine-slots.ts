@@ -810,7 +810,8 @@ export class FollowedLanes {
         throw signal.reason;
       }
       const said = await this.look();
-      if (said > above) {
+      // Only a run holding the mark may rise, as the writer grows no further for another.
+      if (said > above && (this.holding || !this.rises)) {
         if (said >= this.ceiling) {
           this.end();
           // A run at its ceiling goes on reading the number for a fall, without the mark.
@@ -825,7 +826,7 @@ export class FollowedLanes {
 
   /**
    * The lanes the file tells now, at most the ceiling, or null while it tells none: its writer has
-   * gone, it holds no number, or another reader holds the mark.
+   * gone or it holds no number. A mark held by another reader does not hide the number.
    */
   async told(): Promise<number | null> {
     const said = await this.look();
@@ -866,17 +867,22 @@ export class FollowedLanes {
     });
   }
 
-  /** The lanes the file tells now, at most the ceiling, and 0 while the mark is not held or a look fails. */
+  /**
+   * The lanes the file tells now, at most the ceiling, and 0 while it cannot be read. The mark is
+   * tried first but the number is read without it: a mark another reader holds, or one that failed
+   * to be taken, only stops the run rising, never the fall the number tells.
+   */
   private async look(): Promise<number> {
-    try {
-      if (this.rises) {
+    if (this.rises) {
+      try {
         await this.holdMark();
+      } catch {
+        // Held by a reader or failed for now, which the next look tries again.
       }
-      return this.holding || !this.rises
-        ? Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling)
-        : 0;
+    }
+    try {
+      return Math.min(await this.slots.countIn(this.file, 'lanes'), this.ceiling);
     } catch {
-      // Held by a reader or unreadable for now, which the next look tries again.
       return 0;
     }
   }
