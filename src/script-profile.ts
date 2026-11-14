@@ -923,17 +923,26 @@ const CALL_SITES = 40;
 interface Named {
   readonly id: ClassId;
   readonly object: boolean;
+  /** For an object, that it is of this class and of none below it. */
+  readonly exact?: boolean;
 }
+
+/**
+ * What a class declares that is seen from inside the classes it holds. Its variables, signals and
+ * functions, static ones included, are not: Godot reads the global class of that name instead.
+ */
+const SEEN_FROM_INSIDE: ReadonlySet<DeclarationKind> = new Set(['const', 'enum', 'enumValue', 'class']);
 
 /**
  * Reads the class a receiver names the way the engine looks a name up from the class body it is
  * written in: that class, the classes it extends with theirs, then the class around it, and the
- * global classes last. A variable or constant found on the way is what its declaration gives it.
+ * global classes last. A variable or constant found on the way is what its declaration gives it,
+ * and so is a local constant the use is in scope of.
  */
 class ClassScope {
   private readonly graph: ClassGraph;
   private readonly scripts: ReadonlyMap<string, Script>;
-  private readonly scopes = new Map<ClassId, ClassId[]>();
+  private readonly scopes = new Map<ClassId, readonly { readonly id: ClassId; readonly whole: boolean }[]>();
   private readonly codeLines = new Map<string, string[]>();
   /** The declarations being read, so a constant naming itself ends rather than looping. */
   private readonly reading = new Set<string>();
@@ -952,7 +961,8 @@ class ClassScope {
     if (named === null || !receiver.made) {
       return named;
     }
-    return named.object ? null : { id: named.id, object: true };
+    // `new()` makes an object of exactly that class, never of one below it.
+    return named.object ? null : { id: named.id, object: true, exact: true };
   }
 
   private start(at: ClassId, receiver: Receiver): Named | null {
@@ -960,16 +970,26 @@ class ClassScope {
       return { id: at, object: true };
     }
     if (receiver.start === 'local') {
-      return receiver.type === null ? null : this.typed(at, receiver.type);
+      const { type, constant } = receiver;
+      if (type !== null) {
+        return this.typed(at, type);
+      }
+      return constant === undefined ? null : this.constant(at, constant.name, constant.text, constant.code);
     }
     return this.looked(at, receiver.names[0] ?? '');
   }
 
-  /** What [param name] written in [param at] names. */
+  /**
+   * What [param name] written in [param at] names. Every member of the class and of the classes it
+   * extends is seen, but of the classes around them only what belongs to no object.
+   */
   private looked(at: ClassId, name: string): Named | null {
-    const owner = this.scopeOf(at).find((one) => this.graph.declaration(one, name) !== undefined);
+    const owner = this.scopeOf(at).find(({ id, whole }) => {
+      const kind = this.graph.declaration(id, name)?.kind;
+      return kind !== undefined && (whole || SEEN_FROM_INSIDE.has(kind));
+    });
     if (owner !== undefined) {
-      return this.declared(owner, name);
+      return this.declared(owner.id, name);
     }
     const global = this.graph.named(name);
     return global === null ? null : { id: global, object: false };
@@ -1047,18 +1067,22 @@ class ClassScope {
     return lines;
   }
 
-  /** The classes a name written in [param at] is looked up in, in the engine's order. */
-  private scopeOf(at: ClassId): ClassId[] {
+  /**
+   * The classes a name written in [param at] is looked up in, in the engine's order, each saying
+   * whether it is [param at] or a class it extends, whose every member is seen.
+   */
+  private scopeOf(at: ClassId): readonly { readonly id: ClassId; readonly whole: boolean }[] {
     const cached = this.scopes.get(at);
     if (cached !== undefined) {
       return cached;
     }
-    const found: ClassId[] = [];
+    const chain = new Set([at, ...this.graph.ancestors(at)]);
+    const found: { id: ClassId; whole: boolean }[] = [];
     const visit = (id: ClassId | null): void => {
-      if (id === null || found.includes(id)) {
+      if (id === null || found.some((one) => one.id === id)) {
         return;
       }
-      found.push(id);
+      found.push({ id, whole: chain.has(id) });
       visit(this.graph.parentOf(id));
       visit(this.graph.outerOf(id));
     };
@@ -1080,7 +1104,8 @@ interface ScriptDispatch {
  * or one below it that does not declare the name again resolves to it, or only its own class does
  * for a static function written bare. A `super` use counts where the class above the one it is
  * written in resolves to it. A use on an object of a class the receiver names counts as a `self`
- * use in that class does, and a use on the class itself as a static call bound to it. A use whose
+ * use in that class does. A use on the class itself, or on an object `new()` made of it, counts as
+ * a static call bound to that class does. A use whose
  * chain passes through a script the project does not hold counts, since it may.
  */
 class Dispatch {
@@ -1112,7 +1137,7 @@ class Dispatch {
       onSelf: (offset, how) => this.reaches(this.graph.bodyAt(script, offset), how),
       onReceiver: (offset, receiver) => {
         const named = scope.named(this.graph.bodyAt(script, offset), receiver);
-        return named === null || this.from(named.id, !named.object);
+        return named === null || this.from(named.id, !named.object || named.exact === true);
       },
     };
   }

@@ -3622,23 +3622,137 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ['res://dock/harbour.gd', 'class_name Harbour\nextends Node\n'],
     ['res://dock/quay.gd', 'class_name Quay\nextends Harbour\n'],
     ['res://dock/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://dock/lost.gd', 'class_name Lost\nextends "res://dock/missing.gd"\n'],
     [
       'res://dock/user.gd',
       [
         'extends Node',
         '',
-        'func go(q: Quay, o: Other, h: Harbour) -> void:',
+        'func go(q: Quay, o: Other, h: Harbour, l: Lost) -> void:',
         '\tq.add_child(null)',
         '\to.add_child(null)',
         '\th.add_child(null)',
+        '\tl.add_child(null)',
         '',
       ].join('\n'),
     ],
   ] as const;
   assert.deepEqual(
-    callersOf(totals({}), 'Harbour.add_child', docked).sites.map((one) => one.line),
-    [4, 6],
-    'asked about a function the class does not declare, a use through a class related to it counts and one through an unrelated class does not',
+    [
+      callersOf(totals({}), 'Harbour.add_child', docked).sites.map((one) => one.line),
+      callersOf(totals({}), 'Quay.add_child', docked).sites.map((one) => one.line),
+    ],
+    [
+      [4, 6, 7],
+      [4, 6, 7],
+    ],
+    'asked about a function the class does not declare, a use through a class above it, below it or past a missing script counts, and one through an unrelated class does not',
+  );
+  // A match pattern binds in its own branch only, and a header's parameters may sit on later lines.
+  // new() makes exactly the class named. A constant, in the class or in a function, holds the class
+  // it preloads or names. An inner class sees its outer class's constants, never its variables.
+  const laneUser = [
+    'class_name User',
+    'extends Node',
+    '',
+    'const Alias = Other',
+    'const Near := preload("other.gd")',
+    'var Helper: Other',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+    '',
+    'func matched(v: Variant) -> void:',
+    '\tmatch v:',
+    '\t\t[var Other]:',
+    '\t\t\tOther.make()',
+    '\t\t_:',
+    '\t\t\tOther.make()',
+    '\t\t\ttick()',
+    '',
+    '',
+    'func split(',
+    '\tOther: Kid,',
+    ') -> void:',
+    '\tOther.make()',
+    '',
+    '',
+    'func wrapped(',
+    '\t\tOther: Kid) -> void:',
+    '\tOther.make()',
+    '',
+    '',
+    'func made() -> void:',
+    '\tBase.new().tick()',
+    '\tKid.new().tick()',
+    '\tOther.create().tick()',
+    '\tconst M := preload("res://lane/other.gd")',
+    '\tM.make()',
+    '\tconst N = Other',
+    '\tN.make()',
+    '\tAlias.make()',
+    '\tNear.make()',
+    '',
+    '',
+    'class Inside:',
+    '\tfunc go() -> void:',
+    '\t\tHelper.make()',
+    '\t\tAlias.make()',
+    '',
+  ].join('\n');
+  const lane = [
+    ['res://lane/base.gd', yardTool.replace('class_name Tool', 'class_name Base')],
+    [
+      'res://lane/kid.gd',
+      yardTool.replace('class_name Tool\nextends RefCounted', 'class_name Kid\nextends Base'),
+    ],
+    ['res://lane/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://lane/helper.gd', yardTool.replace('class_name Tool', 'class_name Helper')],
+    ['res://lane/user.gd', laneUser],
+    [
+      'res://lane/outer.gd',
+      'class_name Outer\nextends RefCounted\n\nclass Box:\n\tstatic func make() -> int:\n\t\treturn 1\n\nclass Mid:\n\tpass\n',
+    ],
+    [
+      'res://lane/far.gd',
+      'class_name Far\nextends RefCounted\n\nclass Box:\n\tstatic func make() -> int:\n\t\treturn 2\n',
+    ],
+    ['res://lane/mid.gd', 'extends Outer.Mid\n\n\nfunc go() -> void:\n\tBox.make()\n'],
+  ] as const;
+  const laneAt = (name: string, script = 'user'): number[] =>
+    callersOf(totals({}), name, lane)
+      .sites.filter((one) => one.script === `res://lane/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    laneAt('Kid.make'),
+    [16, 25, 30],
+    "the match binding in its own branch and the parameters of split headers, but not the other branch's Other, the constants holding Other or the outer variable",
+  );
+  assert.deepEqual(
+    laneAt('Other.make'),
+    [16, 18, 38, 40, 41, 42, 48],
+    'Other through the other branch, local and class constants preloading or naming it, relatively too, and the outer constant seen from the inner class',
+  );
+  assert.deepEqual(
+    laneAt('Helper.make'),
+    [16, 47],
+    "an inner class does not see the outer class's variable, so Helper there is the global class",
+  );
+  assert.deepEqual(
+    [laneAt('User.tick'), laneAt('Base.tick'), laneAt('Kid.tick')],
+    [
+      [19, 36],
+      [34, 36],
+      [35, 36],
+    ],
+    'a bare call in the other branch, an object new() made is of exactly that class, and a call result may be anything',
+  );
+  assert.deepEqual(
+    [laneAt('Outer.Box.make', 'mid'), laneAt('Far.Box.make', 'mid')],
+    [[5], []],
+    "a name is looked up in the class around the class extended, as the engine's analyser does",
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [

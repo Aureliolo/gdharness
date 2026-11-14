@@ -1020,39 +1020,113 @@ export function declaredClass(text: string, name: string): string | null {
  *
  * Walked upwards: a line indented less than the last is a block holding this one, and a line at the
  * same depth is an earlier statement of the same block, whose declarations are in scope. Lines more
- * deeply indented belong to blocks already closed, so what they declare is not.
+ * deeply indented belong to blocks already closed, so what they declare is not. A statement split
+ * over lines, such as a function header with a parameter on each, is read whole from its first
+ * line. A match pattern binds only in its own branch, so another branch's pattern binds nothing.
  */
-function localAt(lines: readonly string[], index: number, name: string): { type: string | null } | null {
+function localAt(
+  lines: readonly string[],
+  index: number,
+  name: string,
+): { type: string | null; line: number } | null {
   const word = escapedForPattern(name);
   const declares = new RegExp(`(?<![\\p{L}\\p{N}_.])(?:var|const)\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
   const iterates = new RegExp(`^\\s*for\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
-  const local = (text: string): { type: string | null } => ({ type: declaredClass(text, name) });
-  const own = lines[index] ?? '';
-  const headerOnOwnLine = FUNC_LINE.exec(own) ?? LAMBDA_HEADER.exec(own);
-  if (headerOnOwnLine !== null && parametersOf(own, headerOnOwnLine.index).includes(name)) {
-    return local(own);
+  const local = (text: string, line: number) => ({ type: declaredClass(text, name), line });
+  const ownStart = statementStart(lines, index);
+  const own = joinedFrom(lines, ownStart);
+  const onOwnLine = ownHeaderVerdict(own, name);
+  if (onOwnLine !== 'passes') {
+    return onOwnLine === 'binds' ? local(own, ownStart) : null;
   }
-  if (FUNC_LINE.test(own)) {
-    return null;
-  }
-  let depth = indentOf(own);
-  for (let at = index - 1; at >= 0; at -= 1) {
-    const text = lines[at] ?? '';
-    const indent = indentOf(text);
-    if (text.trim() === '' || indent > depth) {
+  let depth = indentOf(lines[ownStart] ?? '');
+  for (let at = ownStart - 1; at >= 0; at -= 1) {
+    if (isInsideClosedBlock(lines[at] ?? '', depth)) {
       continue;
     }
+    at = statementStart(lines, at);
+    const text = joinedFrom(lines, at);
+    const indent = indentOf(text);
     const enclosing = indent < depth;
     depth = indent;
     const verdict = scopeVerdict(text, name, enclosing, depth === 0, { declares, iterates });
-    if (verdict === 'binds') {
-      return local(text);
+    if (verdict === 'binds' && (enclosing || !isMatchBranch(lines, at))) {
+      return local(text, at);
     }
     if (verdict === 'ends') {
       return null;
     }
   }
   return null;
+}
+
+/**
+ * What the statement [param own] holding the place asked about says of the local [param name]: a
+ * function or lambda header taking it binds it, and a function header that does not ends the walk.
+ */
+function ownHeaderVerdict(own: string, name: string): 'binds' | 'ends' | 'passes' {
+  const header = FUNC_LINE.exec(own) ?? LAMBDA_HEADER.exec(own);
+  if (header !== null && parametersOf(own, header.index).includes(name)) {
+    return 'binds';
+  }
+  return FUNC_LINE.test(own) ? 'ends' : 'passes';
+}
+
+/** Whether the line [param text] says nothing of a place at [param depth]: blank, or in a block already closed. */
+function isInsideClosedBlock(text: string, depth: number): boolean {
+  return text.trim() === '' || indentOf(text) > depth;
+}
+
+/** The sum of what the brackets of [param text] open and close. */
+function bracketsOpenedBy(text: string): number {
+  let open = 0;
+  for (const character of text) {
+    open += bracketDelta(character);
+  }
+  return open;
+}
+
+/** Where the statement holding line [param at] of [param lines] starts: earlier when the line closes brackets. */
+function statementStart(lines: readonly string[], at: number): number {
+  if (!/[)\]}]/.test(lines[at] ?? '')) {
+    return at;
+  }
+  let open = bracketsOpenedBy(lines[at] ?? '');
+  let start = at;
+  while (open < 0 && start > 0 && at - start < STATEMENT_LINES) {
+    start -= 1;
+    open += bracketsOpenedBy(lines[start] ?? '');
+  }
+  return open < 0 ? at : start;
+}
+
+/** The statement starting at line [param at] of [param lines], with the lines its open brackets run on to. */
+function joinedFrom(lines: readonly string[], at: number): string {
+  let text = lines[at] ?? '';
+  if (!/[([{]/.test(text)) {
+    return text;
+  }
+  let open = bracketsOpenedBy(text);
+  for (let next = at + 1; open > 0 && next < lines.length && next - at < STATEMENT_LINES; next += 1) {
+    text += `\n${lines[next] ?? ''}`;
+    open += bracketsOpenedBy(lines[next] ?? '');
+  }
+  return text;
+}
+
+/** How many lines one statement is read across at most. */
+const STATEMENT_LINES = 64;
+
+/** Whether line [param at] of [param lines] is a branch of a match, the block holding it. */
+function isMatchBranch(lines: readonly string[], at: number): boolean {
+  const indent = indentOf(lines[at] ?? '');
+  for (let above = at - 1; above >= 0; above -= 1) {
+    const text = lines[above] ?? '';
+    if (text.trim() !== '' && indentOf(text) < indent) {
+      return /^\s*match\b/u.test(text);
+    }
+  }
+  return false;
 }
 
 /**
@@ -1164,6 +1238,11 @@ export interface Receiver {
   /** The names after the start. For a name looked up, that name first. */
   readonly names: readonly string[];
   readonly made: boolean;
+  /**
+   * For a local constant, its name and its declaration's line, as written and with strings and
+   * comments blanked, so a class it is given by `preload` or by name can be read.
+   */
+  readonly constant?: { readonly name: string; readonly text: string; readonly code: string };
 }
 
 /** What a class declares by a name that, written bare in it, means that member and no function. */
@@ -1323,12 +1402,27 @@ function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean
       : scan.onReceiver(offset, { start: 'self', type: null, names: rest, made });
   }
   const local = scan.mayBeLocal(first) ? localAt(scan.codeLines, index, first) : null;
-  return scan.onReceiver(
-    offset,
-    local === null
-      ? { start: 'name', type: null, names, made }
-      : { start: 'local', type: local.type, names: rest, made },
-  );
+  if (local === null) {
+    return scan.onReceiver(offset, { start: 'name', type: null, names, made });
+  }
+  const constant = localConstant(scan, first, local.line);
+  return scan.onReceiver(offset, {
+    start: 'local',
+    type: local.type,
+    names: rest,
+    made,
+    ...(constant === null ? {} : { constant }),
+  });
+}
+
+/** The declaration on line [param line] when it declares [param name] as a constant, as `Receiver` carries it. */
+function localConstant(scan: CallScan, name: string, line: number): NonNullable<Receiver['constant']> | null {
+  const code = scan.codeLines[line] ?? '';
+  if (!new RegExp(`^\\s*const\\s+${escapedForPattern(name)}(?![\\p{L}\\p{N}_])`, 'u').test(code)) {
+    return null;
+  }
+  const start = scan.lines.offsetOf({ line, character: 0 });
+  return { name, text: start === null ? code : scan.lines.lineAt(start), code };
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
