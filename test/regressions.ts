@@ -63674,10 +63674,11 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     // A clock set to the yield's end, since a timer may wake before the wall clock reaches it.
     try {
       Date.now = () => firstLeft + SLOT_YIELD_MS;
+      const stood = await late.takeFree();
       assert.equal(
-        await late.takeFree(),
+        stood,
         join(directory, '1.lock'),
-        'and the process leaves a waiter that let a slot stand no other',
+        `and the process leaves a waiter that let a slot stand no other: drew ${JSON.stringify(late.drawn)}, at ${String(Date.now())} with the first left by ${String(firstLeft)}, waiters ${JSON.stringify(slotWaiters(directory))}, files ${JSON.stringify(readdirSync(directory, { recursive: true }))}`,
       );
     } finally {
       Date.now = realNow;
