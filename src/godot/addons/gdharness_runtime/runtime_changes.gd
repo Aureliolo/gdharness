@@ -56,6 +56,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	var fitting: Dictionary = _value_for(value, slot, old_value, reached, node, node_path)
 	if fitting.has("message"):
 		return fitting
+	read_errors.append_array(GdhPaths.take_read_errors())
 	var given: Variant = fitting["value"]
 	# A component of a vector or a transform is written into a copy, which is put back where it was
 	# read from, setter and all. The read back is then taken off the game again, since the copy here
@@ -533,6 +534,7 @@ func call_method(params: Dictionary) -> Dictionary:
 		var refused: Dictionary = _take_argument(given, args[index], index, reached)
 		if not refused.is_empty():
 			return refused
+	walk_errors.append_array(GdhPaths.take_read_errors())
 	var deserialized_args: Array = given.values
 	var outside: PackedStringArray = PackedStringArray(given.outside)
 

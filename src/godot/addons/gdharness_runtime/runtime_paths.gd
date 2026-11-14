@@ -387,17 +387,22 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 		return { "message": "%s names nothing past the node" % path }
 	var reached: Dictionary = walk_to(start, start_path, reaching)
 	if reached.has("message"):
-		return { "message": str(reached["message"]) }
+		return with_read_errors({ "message": str(reached["message"]) })
 	var holder: Variant = reached["holder"]
 	var name: String = reached["name"]
 	if not can_read(holder, name):
-		return { "message": nothing_there(holder, name, str(reached["called"])) }
+		return with_read_errors({ "message": nothing_there(holder, name, str(reached["called"])) })
 	var value: Variant = read_under(holder, name)
 	if not value is Object or not is_instance_valid(value):
-		return {
-			"message":
-			"%s:%s holds %s, not an object" % [reached["called"], name, type_string(typeof(value))],
-		}
+		return with_read_errors(
+			{
+				"message":
+				(
+					"%s:%s holds %s, not an object"
+					% [reached["called"], name, type_string(typeof(value))]
+				),
+			}
+		)
 	return { "object": value }
 
 

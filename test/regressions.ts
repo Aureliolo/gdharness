@@ -49300,7 +49300,8 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
     async ({ server, project }) => {
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Node\n\n\nfunc fail() -> void:\n\tpush_error("the game failed on its own")\n',
+        'extends Node\n\nvar held: Node\n\n\nfunc take(_node: Node) -> void:\n\tpass\n\n\n' +
+          'func fail() -> void:\n\tpush_error("the game failed on its own")\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -49465,6 +49466,49 @@ async function testEveryPathOpSaysWhatAReadStepReported(): Promise<void> {
     });
     assert.match(past, /has 0 children/, 'an index past the children is not there');
     assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * A path given as a call's argument takes the same steps a property path does. An index past the
+ * children is refused as not there, and an engine error a step makes comes back in the refusal and
+ * stays out of the run's errors.
+ */
+async function testACallArgumentPathSaysWhatItsStepsReported(): Promise<void> {
+  await withAReadingGame('call argument path regression', async ({ ask, counted }) => {
+    const take = (path: string): Promise<string> =>
+      ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'take', args: [path] });
+    const past = await take('/root/Main/Rows/When:get_child(0)');
+    assert.match(past, /has 0 children/, 'an index past the children is not there');
+    assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    assert.match(
+      await take('/root/Main/Rows/When:get_node("missing"):get_parent()'),
+      /The engine reported: .*Node not found/,
+      'a step that errors says so',
+    );
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * A path given as the value of a write to an object slot takes the same steps a property path
+ * does, with the same answers.
+ */
+async function testAnObjectTargetPathSaysWhatItsStepsReported(): Promise<void> {
+  await withAReadingGame('object target path regression', async ({ ask, counted }) => {
+    const hold = (path: string): Promise<string> =>
+      ask('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'held', value: path });
+    const past = await hold('/root/Main/Rows/When:get_child(0)');
+    assert.match(past, /has 0 children/, 'an index past the children is not there');
+    assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    assert.match(
+      await hold('/root/Main/Rows/When:get_node("missing"):get_parent()'),
+      /The engine reported: .*Node not found/,
+      'a step that errors says so',
+    );
     const verdict = await counted();
     assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
   });
@@ -101172,6 +101216,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFindIndexStepPastTheChildrenIsNotThere,
   testAFindStepThatErrorsReturnsTheErrorAndStaysClean,
   testEveryPathOpSaysWhatAReadStepReported,
+  testACallArgumentPathSaysWhatItsStepsReported,
+  testAnObjectTargetPathSaysWhatItsStepsReported,
   testAGamesOwnErrorStillCountsBesideReads,
   testIndexStepsInsideTheChildrenStillRead,
   testAPlayedGamesConsoleKeepsItsOrder,
