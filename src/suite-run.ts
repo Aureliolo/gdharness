@@ -1319,6 +1319,7 @@ export class MemoryGate {
   private readonly lookMs: number;
   private readonly going = new Set<Admitted>();
   private turn: Promise<unknown> = Promise.resolve();
+  private askers = 0;
 
   constructor(slots: Pick<EngineSlots, 'markWaiting'>, read: () => Promise<number>, lookMs = MEMORY_LOOK_MS) {
     this.slots = slots;
@@ -1332,9 +1333,19 @@ export class MemoryGate {
    * others draw theirs.
    */
   admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+    this.askers += 1;
     const admitted = this.turn.then(() => this.room(signal, need));
     this.turn = admitted.catch(() => undefined);
+    const settled = (): void => {
+      this.askers -= 1;
+    };
+    admitted.then(settled, settled);
     return admitted;
+  }
+
+  /** How many callers are waiting to be admitted. */
+  get waiting(): number {
+    return this.askers;
   }
 
   private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
@@ -2229,8 +2240,9 @@ export async function runShares<
     const reuse: ShareReuse<T> = {
       next: async () => {
         // An engine about to exit keeps its admission until it has, so memory is not offered to
-        // another engine while this one still holds it.
-        if (empty() || (await fallenPast(at))) {
+        // another engine while this one still holds it. The same goes while another lane waits
+        // for memory, which takes the next share in an engine of its own once this one is gone.
+        if (empty() || (memory?.waiting ?? 0) > 0 || (await fallenPast(at))) {
           return null;
         }
         going?.ended();
