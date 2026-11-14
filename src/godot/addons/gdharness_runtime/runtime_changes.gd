@@ -791,7 +791,8 @@ static func _keep_walk_errors(answer: Dictionary, walked: Array[String]) -> void
 		return
 	var all: Array = answer.get("errors", [])
 	all.append_array(walked)
-	var hidden: int = int(answer.get("errors_not_shown", 0)) + maxi(all.size() - ERRORS_KEPT, 0)
+	var hidden: int = answer.get("errors_not_shown", 0)
+	hidden += maxi(all.size() - ERRORS_KEPT, 0)
 	answer["errors"] = all.slice(0, ERRORS_KEPT)
 	if hidden > 0:
 		answer["errors_not_shown"] = hidden

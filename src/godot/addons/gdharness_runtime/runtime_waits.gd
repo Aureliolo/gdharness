@@ -496,9 +496,8 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if refused.is_empty():
 		refused = _wait_refused(watched, sent, wanted, node_path, property)
 	if not refused.is_empty():
-		return GdhPaths.with_read_errors(
-			{ "type": "error", "message": refused }, watched.get("errors", [])
-		)
+		var first_errors: Array = watched.get("errors", [])
+		return GdhPaths.with_read_errors({ "type": "error", "message": refused }, first_errors)
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
