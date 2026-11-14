@@ -231,6 +231,15 @@ import {
   notAScript,
 } from './lsp_client.js';
 import { nearest, withNearestFiles } from './nearest.js';
+import {
+  diffAnswer,
+  isSnapshotCounts,
+  type KeptSnapshot,
+  mismatchedRuns,
+  SnapshotStore,
+  SPAWNING_START,
+  snapshotAnswer,
+} from './object-snapshot.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
   exportedBuild,
@@ -1203,6 +1212,9 @@ const KEEPER_ANSWER_MS = 15_000;
  * for the game to stop and then for the next line of script, and its stack is read after that.
  */
 const KEEPER_DEBUG_MS = PAUSE_MS + STEP_MS + 2 * READ_MS;
+
+/** How long a snapshot is given: the game's own wait to serialise, then its slices. */
+const SNAPSHOT_ASK_MS = 120_000;
 
 /**
  * How long a run's keeper is given to write the exit of a game already seen to have gone.
@@ -5382,6 +5394,8 @@ class GodotServer {
   private readonly classRebuilds = new Map<string, Promise<ClassRebuild>>();
   /** The pending calls answered while the kept game was held, whose timing counts the hold. */
   private readonly heldWhilePending = new Set<number>();
+  /** The object snapshots taken while this server runs, by the id each answer named. */
+  private readonly objectSnapshots = new SnapshotStore();
   // The game hands the errors an evaluate raises to whatever call it is held inside.
   private readonly evaluatedWhilePending = new Set<number>();
   private readonly listedRunner = shippedListedRunner();
@@ -7144,6 +7158,8 @@ class GodotServer {
       case 'debug_control':
       case 'debug_state':
         return await this.handleDebugSession(tool, op, args);
+      case 'debug_objects':
+        return await this.handleDebugObjects(op, args);
       default:
         throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
     }
@@ -7318,6 +7334,84 @@ class GodotServer {
           : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
       ...(editor ? this.breakpointsAtRisk() : {}),
     });
+  }
+
+  /** A snapshot of the running game's objects, or the classes that changed between two kept ones. */
+  private async handleDebugObjects(op: string, args: OperationParams): Promise<ToolResponse> {
+    if (op !== 'diff') {
+      const taken = await this.takeObjectSnapshot();
+      return 'refusal' in taken ? taken.refusal : this.jsonTextResponse(snapshotAnswer(taken));
+    }
+    const before = this.objectSnapshots.find(readString(args, 'before') ?? '');
+    if ('refused' in before) {
+      return this.createErrorResponse(before.refused, [...before.solutions]);
+    }
+    const afterId = readNonEmptyString(args, 'after');
+    const after =
+      afterId === undefined ? await this.takeObjectSnapshot() : this.objectSnapshots.find(afterId);
+    if ('refusal' in after) {
+      return after.refusal;
+    }
+    if ('refused' in after) {
+      return this.createErrorResponse(after.refused, [...after.solutions]);
+    }
+    const refused = mismatchedRuns(before, after);
+    if (refused !== null) {
+      return this.createErrorResponse(refused.refused, [...refused.solutions]);
+    }
+    return this.jsonTextResponse(diffAnswer(before, after));
+  }
+
+  /** A snapshot of the game this server started, kept, or the refusal saying what it needs. */
+  private async takeObjectSnapshot(): Promise<KeptSnapshot | { refusal: ToolResponse }> {
+    const kept = this.keptRun();
+    if (kept === null) {
+      return { refusal: this.noSnapshotToTake() };
+    }
+    const answered = await askTheKeepersDebugger(kept.keeper, { op: 'snapshot' }, SNAPSHOT_ASK_MS);
+    if ('unreached' in answered) {
+      return {
+        refusal: this.createErrorResponse(
+          `The debugger of the running game did not answer: ${String(answered.unreached)}.`,
+          ['editor_status says whether it is still running'],
+        ),
+      };
+    }
+    if (typeof answered['refused'] === 'string') {
+      const next = answered['next'];
+      return {
+        refusal: this.createErrorResponse(answered['refused'], typeof next === 'string' ? [next] : []),
+      };
+    }
+    if (!isSnapshotCounts(answered)) {
+      return {
+        refusal: this.createErrorResponse(
+          `The game's debugger answered a snapshot with ${JSON.stringify(answered).slice(0, 200)}, which holds no counts.`,
+        ),
+      };
+    }
+    return this.objectSnapshots.keep(kept.keeper, kept.pid, answered, kept.projectPath ?? '');
+  }
+
+  /** Why no snapshot can be taken now: no game, one that has ended, or one the editor plays. */
+  private noSnapshotToTake(): ToolResponse {
+    const game = this.activeProcess;
+    const start = SPAWNING_START;
+    if (game?.throughEditor === true && !exited(game)) {
+      return this.createErrorResponse(
+        "The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way.",
+        [
+          `editor_run stop, then ${start}`,
+          "The editor's ObjectDB Profiler tab takes and compares snapshots of the played game by hand",
+        ],
+      );
+    }
+    return this.createErrorResponse(
+      game === null || exited(game)
+        ? 'No game is running, so there are no objects to count.'
+        : 'The running game has no debugger here to ask for a snapshot.',
+      [start],
+    );
   }
 
   /** The debug controls and the debug state, answered by the game's keeper or by the editor's adapter. */
