@@ -49,11 +49,14 @@ when the command line itself is wrong.
   once.
 - `--import`: import the project in an engine of its own before the suites. Without it, a project
   is still imported first [when it is out of date](#when-a-run-imports-first).
-- `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
-  shuffled by a number. It finds suites that depend on the order they run in.
-- `--order named`: the suites you name, in one engine, in the order you name them. To replay a case
-  that fails only after others, name the `suites` list of an engine from the result file. Then halve
-  it until one suite before the failing one is left.
+- `--order reversed` or `--order SEED`: the suites in reverse order of path or shuffled by a number,
+  in one engine. It finds suites that depend on the order they run in. Suites needing a window run
+  in a windowed engine of their own, first, and the others in a headless one after it. The order
+  holds within each engine.
+- `--order named`: the suites you name, in the order you name them within their engine. Suites
+  needing a window run first, in an engine of their own. To replay a case that fails only after
+  others, name the `suites` list of an engine from the result file. Then halve it until one suite
+  before the failing one is left.
 
 ## Reuse options
 
@@ -488,8 +491,8 @@ idle. With `--engines 1` the run is that one slot, the windowed engine and then 
 machine with room for fewer engines than asked for, the slots run one after the other. The line
 announcing the run says so.
 
-An ordered run (`--order`) is one engine, so a suite in it needing a window gives the whole run
-one. Before it starts, the run names each suite declaring `false` that runs with the window.
+An ordered run (`--order`) is one engine, or two when it mixes the kinds: a windowed engine for the
+suites needing a window and a headless one after it. Each keeps the order of the run within it.
 
 ### How the windowed engine runs
 
@@ -508,10 +511,12 @@ draws nothing. So the runner puts the window back before each suite begins.
 
 ### Windows in `project_test`
 
-The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
-needs a window the whole run has one, started as above. The answer's `windowNote` names the suites
-that needed it and those declaring `false` that shared it. On a machine with no display the run
-stays headless, and the note says so.
+The `project_test` tool reads the suites the same way. A run whose suites all need a window, or all
+do not, is one engine, with a window if they need one, started as above. A named set mixing the two
+kinds runs as two engines, the windowed suites with a window and the others headless, one after the
+other, and the answer is the sum of both with `engines` set to 2. The answer's `windowNote` names
+the suites that needed a window. On a machine with no display the run stays headless, and the note
+says so.
 
 ### macOS runners
 

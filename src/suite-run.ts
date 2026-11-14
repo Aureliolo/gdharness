@@ -92,7 +92,7 @@ import {
   type EnginePlan,
   gdUnitFailsOnPushErrors,
   headlessInAWindow,
-  inOneEngine,
+  inEngines,
   lanesOf,
   ProjectScripts,
   peakOf,
@@ -111,7 +111,10 @@ import {
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
 
-/** An order `--order` runs every suite in, in one engine. A number is the seed it is shuffled by. */
+/**
+ * An order `--order` runs the suites of an engine in. A windowed engine runs first when suites need
+ * a window, and the order holds within each engine. A number is the seed it is shuffled by.
+ */
 export type RunOrder = 'reversed' | 'named' | number;
 
 interface TestOptions {
@@ -137,7 +140,10 @@ interface TestOptions {
   readonly wholeTree: boolean;
   readonly reachAlso: readonly string[];
   readonly importFirst: boolean;
-  /** Every suite in one engine in this order: `reversed`, as `named`, or shuffled by the seed. */
+  /**
+   * The order within an engine, which is every suite in one unless suites need a window: `reversed`,
+   * as `named`, or shuffled by the seed. The windowed engine runs first.
+   */
   readonly order: RunOrder | null;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
@@ -983,7 +989,7 @@ async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): 
   const plans =
     options.order === null
       ? dealt(units, declared, room.engines)
-      : [inOneEngine(ordered(units, options.order, options.selected), declared)];
+      : inEngines(ordered(units, options.order, options.selected), declared);
   return { times, byMemory, room, memoryHeld, units, splitPast, plans };
 }
 
@@ -997,10 +1003,10 @@ function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: D
     options.order === null
       ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
       : options.order === 'reversed'
-        ? ', in reverse order of path'
+        ? `, in reverse order of path${windowedSaid(plans)}`
         : options.order === 'named'
-          ? ', in the order named'
-          : `, shuffled by ${String(options.order)}`;
+          ? `, in the order named${windowedSaid(plans)}`
+          : `, shuffled by ${String(options.order)}${windowedSaid(plans)}`;
   const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
   return `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`;
 }
@@ -1019,7 +1025,7 @@ function announceDeal(
   if (windowedAnyway.length > 0) {
     const one = windowedAnyway.length === 1;
     say(
-      `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+      `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since ${one ? 'it also declares' : 'each also declares'} GDHARNESS_ACCESSIBILITY, which needs one.`,
     );
   }
   sayWhatWasCutUp(deal, say);
