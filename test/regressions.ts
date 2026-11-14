@@ -3184,10 +3184,10 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'and with no class asked about, the call through another class is listed as the note says',
   );
   // A receiver declared as another class is that class's object, whichever way it was declared: a
-  // typed local, a new(), a cast, a typed parameter, a variable of the class. Reported from game-b
-  // on 1.1.61, `result.apply(...)` with `var result: Effect` above it. What says nothing about the
-  // class stays: an untyped local, a receiver that is a member of something else, a variable
-  // declared as the class asked about, and a for variable, whose scope is not read.
+  // typed local, a new(), a cast, a variable of the class. Reported from game-b on 1.1.61,
+  // `result.apply(...)` with `var result: Effect` above it. What says nothing about the class
+  // stays: an untyped local, a receiver that is a member of something else, a variable declared as
+  // the class asked about, and a parameter or for variable, which are locals whose scope is not read.
   const paying = [
     'class_name Prize',
     'extends RefCounted',
@@ -3224,8 +3224,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     paidAt('Placed.lift'),
-    [17, 18, 20, 22],
-    'the receivers declared as Outcome are left out, and the Placed, dotted, untyped and for ones kept',
+    [15, 17, 18, 20, 22],
+    'the locals declared as Outcome are left out, and the parameter, Placed, dotted, untyped and for ones kept',
   );
   assert.deepEqual(
     paidAt('lift'),
@@ -3584,23 +3584,23 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.deepEqual(
     yardAt('FancyTool.make', 'user'),
-    [8, 31],
-    'a static call is bound to the class named, so neither SubTool nor Tool by name reaches the override',
+    [8, 31, 32],
+    'a static call is bound to the class named, so SubTool by name does not reach the override, and Tool, named like a parameter in the script, is kept',
   );
   assert.deepEqual(
     yardAt('Tool.tick', 'user'),
-    [10, 12, 13, 17, 20, 22, 24],
-    'objects of Tool and of a subclass, typed or made with new(), a member through self, and the untyped, indexed and undeclared receivers, but not Other, nor a parameter named Tool declared as Other',
+    [10, 11, 12, 13, 15, 17, 20, 22, 24],
+    'objects of Tool and of a subclass made with new(), a member through self, the parameters, which are locals, and the untyped, indexed and undeclared receivers, but not Other',
   );
   assert.deepEqual(
     yardAt('FancyTool.tick', 'user'),
-    [12, 13, 20, 22, 24],
-    'an object declared as Tool may be a FancyTool, and one declared as SubTool or made as one may not',
+    [10, 11, 12, 13, 15, 20, 22, 24],
+    'an object made as SubTool may not be a FancyTool',
   );
   assert.deepEqual(
     yardAt('Other.tick', 'user'),
-    [11, 13, 15, 16, 22, 24],
-    "Other's own objects, the parameter named Tool among them, and the receivers the text gives no class",
+    [10, 11, 12, 13, 15, 16, 22, 24],
+    "Other's own objects, the parameters and the receivers the text gives no class",
   );
   assert.deepEqual(
     [yardAt('Tool.tick', 'held'), yardAt('Other.tick', 'held')],
@@ -3628,7 +3628,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       [
         'extends Node',
         '',
-        'func go(q: Quay, o: Other, h: Harbour, l: Lost) -> void:',
+        'func go() -> void:',
+        '\tvar q: Quay = null',
+        '\tvar o: Other = null',
+        '\tvar h: Harbour = null',
+        '\tvar l: Lost = null',
         '\tq.add_child(null)',
         '\to.add_child(null)',
         '\th.add_child(null)',
@@ -3643,16 +3647,15 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       callersOf(totals({}), 'Quay.add_child', docked).sites.map((one) => one.line),
     ],
     [
-      [4, 6, 7],
-      [4, 6, 7],
+      [8, 10, 11],
+      [8, 10, 11],
     ],
     'asked about a function the class does not declare, a use through a class above it, below it or past a missing script counts, and one through an unrelated class does not',
   );
-  // A name its function declares otherwise than once as a parameter, constant or statement var may
-  // be that local, so its uses are kept: a match binding, in any branch. A header's parameters may
-  // sit on later lines. new() makes exactly the class named. A constant, in the class or in a
-  // function, holds the class it preloads or names. An inner class sees its outer class's
-  // constants, never its variables.
+  // A name the script declares as a local may be that local, so its uses are kept: a match binding,
+  // in any branch, a parameter, also on a header's later lines, and a function's constant. new()
+  // makes exactly the class named. A class constant holds the class it preloads or names. An inner
+  // class sees its outer class's constants, never its variables.
   const laneUser = [
     'class_name User',
     'extends Node',
@@ -3729,18 +3732,18 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     laneAt('Kid.make'),
-    [16, 18, 25, 30],
-    'the match binding in either branch and the parameters of split headers, but not the constants holding Other or the outer variable',
+    [16, 18, 25, 30, 38, 40],
+    'the match binding in either branch, the parameters of split headers and the local constants, but not the class constants holding Other or the outer variable',
   );
   assert.deepEqual(
     laneAt('Other.make'),
-    [16, 18, 38, 40, 41, 42, 48],
-    'Other through the other branch, local and class constants preloading or naming it, relatively too, and the outer constant seen from the inner class',
+    [16, 18, 25, 30, 38, 40, 41, 42, 48],
+    'every local named Other or holding a class, the class constants preloading or naming it, relatively too, and the outer constant seen from the inner class',
   );
   assert.deepEqual(
     laneAt('Helper.make'),
-    [16, 18, 47],
-    "an inner class does not see the outer class's variable, so Helper there is the global class",
+    [16, 18, 25, 30, 38, 40, 47],
+    "the locals, and Helper in the inner class, which does not see the outer class's variable, so it is the global class",
   );
   assert.deepEqual(
     [laneAt('User.tick'), laneAt('Base.tick'), laneAt('Kid.tick')],
@@ -3871,6 +3874,100 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [coveAt('Box.open', 'box'), coveAt('Other.open', 'box')],
     [[18], []],
     "a script's own class_name is read before the constant of that name it inherits",
+  );
+  // A function's constant is a local like any other, whatever block or lambda holds it. A local
+  // outside any function, in a class variable's lambda or a get block, keeps its name's uses too.
+  // A line at column 0 inside brackets or after a backslash does not end its function.
+  const reef = [
+    ['res://reef/other.gd', coveClass('Other')],
+    ['res://reef/kid.gd', coveClass('Kid')],
+    [
+      'res://reef/consts.gd',
+      [
+        'extends Node',
+        '',
+        '',
+        'func c1(x: bool) -> void:',
+        '\tif x:',
+        '\t\tconst Other = preload("res://reef/kid.gd")',
+        '\t\tOther.open()',
+        '\tOther.open()',
+        '',
+        '',
+        'func c2() -> void:',
+        '\tOther.open()',
+        '\tconst Other = preload("res://reef/kid.gd")',
+        '\tOther.open()',
+        '',
+        '',
+        'func c3() -> void:',
+        '\tvar f := func() -> void:',
+        '\t\tconst Other = preload("res://reef/kid.gd")',
+        '\t\tOther.open()',
+        '\tf.call()',
+        '\tOther.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/outside.gd',
+      [
+        'extends Node',
+        '',
+        'var cb := func(Other: Kid) -> String: return Other.open()',
+        'var held: String:',
+        '\tget:',
+        '\t\tvar Other := Kid.new()',
+        '\t\treturn Other.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/split.gd',
+      [
+        'extends Node',
+        '',
+        '',
+        'func f() -> String:',
+        '\tvar arr := [',
+        '1]',
+        '\tvar Other: Kid = Kid.new()',
+        '\treturn Other.open()',
+        '',
+        '',
+        'func g() -> String:',
+        '\tvar sum := 1 + \\',
+        '2',
+        '\tvar Other: Kid = Kid.new()',
+        '\treturn Other.open()',
+        '',
+      ].join('\n'),
+    ],
+  ] as const;
+  const reefAt = (name: string, script: string): number[] =>
+    callersOf(totals({}), name, reef)
+      .sites.filter((one) => one.script === `res://reef/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    [reefAt('Kid.open', 'consts'), reefAt('Other.open', 'consts')],
+    [
+      [7, 8, 12, 14, 20, 22],
+      [7, 8, 12, 14, 20, 22],
+    ],
+    "a function's constant is kept for either class, inside its block, after it, above it and outside its lambda",
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'outside'), reefAt('Other.open', 'outside')],
+    [
+      [3, 7],
+      [3, 7],
+    ],
+    "a class variable's lambda parameter and a get block's local are kept for either class",
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'split'), reefAt('Other.open', 'split')],
+    [[8, 15], []],
+    'a column-0 line inside brackets or after a backslash carries on its function, whose typed var holds',
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [
