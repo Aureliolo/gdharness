@@ -3183,11 +3183,9 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ],
     'and with no class asked about, the call through another class is listed as the note says',
   );
-  // A receiver declared as another class is that class's object, whichever way it was declared: a
-  // typed local, a new(), a cast, a variable of the class. Reported from game-b on 1.1.61,
-  // `result.apply(...)` with `var result: Effect` above it. What says nothing about the class
-  // stays: an untyped local, a receiver that is a member of something else, a variable declared as
-  // the class asked about, and a parameter or for variable, which are locals whose scope is not read.
+  // A class variable declared as another class is that class's object. A local of any kind is kept,
+  // typed or not, since its scope is not read. So is a receiver that is a member of something else,
+  // and a variable declared as the class asked about.
   const paying = [
     'class_name Prize',
     'extends RefCounted',
@@ -3224,8 +3222,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     paidAt('Placed.lift'),
-    [15, 17, 18, 20, 22],
-    'the locals declared as Outcome are left out, and the parameter, Placed, dotted, untyped and for ones kept',
+    [10, 12, 14, 15, 17, 18, 20, 22],
+    'the class variable declared as Outcome is left out, and the locals, Placed and dotted ones kept',
   );
   assert.deepEqual(
     paidAt('lift'),
@@ -3628,11 +3626,12 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       [
         'extends Node',
         '',
+        'var q: Quay = null',
+        'var o: Other = null',
+        'var h: Harbour = null',
+        'var l: Lost = null',
+        '',
         'func go() -> void:',
-        '\tvar q: Quay = null',
-        '\tvar o: Other = null',
-        '\tvar h: Harbour = null',
-        '\tvar l: Lost = null',
         '\tq.add_child(null)',
         '\to.add_child(null)',
         '\th.add_child(null)',
@@ -3647,8 +3646,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       callersOf(totals({}), 'Quay.add_child', docked).sites.map((one) => one.line),
     ],
     [
-      [8, 10, 11],
-      [8, 10, 11],
+      [9, 11, 12],
+      [9, 11, 12],
     ],
     'asked about a function the class does not declare, a use through a class above it, below it or past a missing script counts, and one through an unrelated class does not',
   );
@@ -3853,22 +3852,14 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.deepEqual(
     [
-      coveAt('Other.tick', 'lam', 34).filter((line) => line >= 28),
-      coveAt('Kid.tick', 'lam', 34).filter((line) => line >= 28),
-    ],
-    [[29, 31], [29]],
-    'a typed var of the function holds from the line after it, and a use above it is kept',
-  );
-  assert.deepEqual(
-    [
-      coveAt('Other.tick', 'lam').filter((line) => line >= 34),
-      coveAt('Kid.tick', 'lam').filter((line) => line >= 34),
+      coveAt('Other.tick', 'lam').filter((line) => line >= 28),
+      coveAt('Kid.tick', 'lam').filter((line) => line >= 28),
     ],
     [
-      [36, 38],
-      [36, 38],
+      [29, 31, 36, 38],
+      [29, 31, 36, 38],
     ],
-    'a name its function declares twice is kept for either class, even where one of them is typed',
+    'a typed local is kept for either class, above its declaration and after it',
   );
   assert.deepEqual(
     [coveAt('Box.open', 'box'), coveAt('Other.open', 'box')],
@@ -3877,7 +3868,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   // A function's constant is a local like any other, whatever block or lambda holds it. A local
   // outside any function, in a class variable's lambda or a get block, keeps its name's uses too.
-  // A line at column 0 inside brackets or after a backslash does not end its function.
+  // A line at column 0 inside brackets or after a backslash does not end its inner class. A class
+  // variable has a class only where it is typed, by annotation or by a new() ending its line.
   const reef = [
     ['res://reef/other.gd', coveClass('Other')],
     ['res://reef/kid.gd', coveClass('Kid')],
@@ -3927,19 +3919,42 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       [
         'extends Node',
         '',
-        '',
-        'func f() -> String:',
-        '\tvar arr := [',
-        '1]',
-        '\tvar Other: Kid = Kid.new()',
-        '\treturn Other.open()',
+        'var Kid: Other',
         '',
         '',
-        'func g() -> String:',
-        '\tvar sum := 1 + \\',
+        'class In0:',
+        '\tconst Kid = preload("res://reef/kid.gd")',
+        '',
+        '\tfunc g() -> void:',
+        '\t\tprint(',
+        '0)',
+        '\t\tKid.open()',
+        '\t\tvar sum := 1 + \\',
         '2',
-        '\tvar Other: Kid = Kid.new()',
-        '\treturn Other.open()',
+        '\t\tKid.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/members.gd',
+      [
+        'extends Node',
+        '',
+        'var made := Kid.new()',
+        'var cast = Other.new() as Other',
+        'var chained := Other.new().call("tick")',
+        '',
+        '',
+        'func go() -> void:',
+        '\tmade.tick()',
+        '\tcast.tick()',
+        '\tchained.tick()',
+        '',
+        '',
+        'func typed() -> void:',
+        '\tconst Kid = preload("res://reef/other.gd")',
+        '\tvar Base: Kid = Kid.new()',
+        '\tBase.open()',
         '',
       ].join('\n'),
     ],
@@ -3966,8 +3981,21 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.deepEqual(
     [reefAt('Kid.open', 'split'), reefAt('Other.open', 'split')],
-    [[8, 15], []],
-    'a column-0 line inside brackets or after a backslash carries on its function, whose typed var holds',
+    [[12, 15], []],
+    'a column-0 line inside brackets or after a backslash carries on the inner class, whose constant holds',
+  );
+  assert.deepEqual(
+    [reefAt('Kid.tick', 'members'), reefAt('Other.tick', 'members')],
+    [
+      [9, 10, 11],
+      [10, 11],
+    ],
+    'a class variable inferred from a new() ending its line is of that class, and one cast with as or given a call result may hold anything',
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'members'), reefAt('Other.open', 'members')],
+    [[17], [17]],
+    'a typed local is kept for either class, also when a constant of the function names its type',
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [

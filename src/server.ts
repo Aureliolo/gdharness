@@ -3608,7 +3608,7 @@ const PROPERTY_PLACES =
 
 /** What a callers answer says about where its places come from. */
 const CALLERS_FOUND_BY_NAME =
-  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless one class was asked about and the engine would send the use to another class's own function of that name, read off the class it is written in, a class named before the dot or a variable declared as one. A receiver named like a local anywhere in its script is kept. Each place carries the profile's numbers for the function it is written in.";
+  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too, unless one class was asked about and the engine would send the use to another class's own function of that name, read off the class it is written in, a class named before the dot or a class variable typed as one. A receiver named like a local anywhere in its script is kept. Each place carries the profile's numbers for the function it is written in.";
 
 /**
  * [param projectPath]'s scripts read off disk by `res://` path, null for one that is not a file

@@ -438,6 +438,8 @@ interface SourceLine {
   readonly start: number;
   readonly text: string;
   readonly indent: number;
+  /** Whether it carries on the line above, inside open brackets or after a backslash. */
+  readonly continued: boolean;
 }
 
 /** What reading a script's lines needs, and the class_name found along the way. */
@@ -620,7 +622,8 @@ function parseBody(
     if (state.openEnum !== null) {
       state.openEnum = continueEnum(state.openEnum, line.text, state.declarations);
       state.index += 1;
-    } else if (line.text.trim() === '' || line.indent > indent) {
+    } else if (line.text.trim() === '' || line.indent > indent || line.continued) {
+      // A line carrying on the one above belongs to it, wherever it is indented.
       state.index += 1;
     } else if (line.indent < indent) {
       break;
@@ -647,9 +650,13 @@ export function shapeOf(source: string): ScriptShape {
   const code = codeOf(source, regionsOf(source));
   const lines: SourceLine[] = [];
   let start = 0;
+  let depth = 0;
+  let joined = false;
   for (const text of code.split('\n')) {
-    lines.push({ start, text, indent: indentOf(text) });
+    lines.push({ start, text, indent: indentOf(text), continued: depth > 0 || joined });
     start += text.length + 1;
+    depth = Math.max(0, depth + bracketsOpenedBy(text));
+    joined = /\\\s*$/u.test(text);
   }
   const reader: ShapeReader = { source, code, lines, className: null };
   const { body } = parseBody(reader, null, null, 0, 0, 0);
@@ -1002,16 +1009,16 @@ function parametersOf(text: string, from: number): string[] {
 const DOTTED = `${NAME}(?:\\.${NAME})*`;
 
 /**
- * The class [param text], a line declaring [param name], gives it, as written: after a colon, the
- * class whose `new()` it is assigned, or the class it is cast to with `as`. Null when the line says
- * none.
+ * The class [param text], a line declaring [param name], gives it, as written: after a colon, or
+ * inferred with `:=` from a `new()` that ends the line. Both make the variable typed, so the engine
+ * refuses any value outside that class and those below it. Null for anything else: an untyped
+ * variable may later hold anything, whatever it starts with.
  */
 export function declaredClass(text: string, name: string): string | null {
   const word = `(?<![\\p{L}\\p{N}_.])${escapedForPattern(name)}`;
   return (
     new RegExp(`${word}\\s*:\\s*(${DOTTED})`, 'u').exec(text)?.[1] ??
-    new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\(`, 'u').exec(text)?.[1] ??
-    new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1] ??
+    new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\([^()]*\\)\\s*$`, 'u').exec(text)?.[1] ??
     null
   );
 }
@@ -1166,14 +1173,12 @@ function opensReceiver(before: string | undefined, word: string): boolean {
 }
 
 /**
- * What a member use is written on, read as far as the text says: a local of the function with the
- * class its declaration gives, `self`, or a name looked up from the class it is written in. Then
- * the names written after that, and whether the path ends in `.new()`.
+ * What a member use is written on, read as far as the text says: `self`, or a name looked up from
+ * the class it is written in. Then the names written after that, and whether the path ends in
+ * `.new()`.
  */
 export interface Receiver {
-  readonly start: 'local' | 'self' | 'name';
-  /** For a local, the class its declaration gives it as written, null when it gives none. */
-  readonly type: string | null;
+  readonly start: 'self' | 'name';
   /** The names after the start. For a name looked up, that name first. */
   readonly names: readonly string[];
   readonly made: boolean;
@@ -1223,7 +1228,6 @@ export function callSitesOf(
   const codeLines = code.split('\n');
   const lines = new Lines(source);
   const shape = shapeOf(source);
-  const functions = new FunctionsOf(codeLines);
   let locals: ReadonlySet<string> | null = null;
   const scan: CallScan = {
     source,
@@ -1241,7 +1245,6 @@ export function callSitesOf(
       locals ??= localNamesOf(code, lines, shape.body);
       return locals;
     },
-    namesAt: (line) => functions.namesAt(line),
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1272,22 +1275,6 @@ interface CallScan {
   readonly readsReceivers: boolean;
   /** Every name the script declares as a local anywhere, worked out the first time it is asked for. */
   readonly locals: () => ReadonlySet<string>;
-  /**
-   * What the function holding zero-based line [param line] declares, null outside any function or
-   * where the end of the function is in doubt.
-   */
-  readonly namesAt: (line: number) => FunctionNames | null;
-}
-
-/** What one function declares, read off its whole text, header and lambdas included. */
-interface FunctionNames {
-  /** How often each name is declared: as a parameter, a lambda's parameter, or by var, const or for. */
-  readonly counts: ReadonlyMap<string, number>;
-  /**
-   * The zero-based line of each `var` that is a statement of the function's own block, not of a
-   * block or lambda inside it. It holds from the next line to the end of the function.
-   */
-  readonly statements: ReadonlyMap<string, number>;
 }
 
 const DECLARED_IN_BODY = new RegExp(`(?<![\\p{L}\\p{N}_.])(var|const|for)\\s+(${NAME})`, 'gu');
@@ -1327,129 +1314,6 @@ function localNamesOf(code: string, lines: Lines, body: ClassBody): Set<string> 
   return names;
 }
 
-/** A named function's lines, and which of them carry on a statement begun above them. */
-interface FunctionSpan {
-  readonly first: number;
-  readonly last: number;
-  /** Whether every bracket closes and no line ends in a backslash, so the span is where it ends. */
-  readonly certain: boolean;
-  readonly continued: ReadonlySet<number>;
-}
-
-/** The named functions of a script's code, each read for what it declares the first time it is asked. */
-class FunctionsOf {
-  private readonly lines: readonly string[];
-  /** Each function's span, in order, found the first time one is asked for. */
-  private spans: FunctionSpan[] | null = null;
-  private readonly read = new Map<number, FunctionNames>();
-
-  constructor(lines: readonly string[]) {
-    this.lines = lines;
-  }
-
-  private spansOf(): FunctionSpan[] {
-    if (this.spans !== null) {
-      return this.spans;
-    }
-    this.spans = [];
-    for (let at = 0; at < this.lines.length; at += 1) {
-      const text = this.lines[at] ?? '';
-      if (text.includes('func') && FUNC_LINE.test(text)) {
-        const span = this.spanFrom(at);
-        this.spans.push(span);
-        at = span.last;
-      }
-    }
-    return this.spans;
-  }
-
-  namesAt(line: number): FunctionNames | null {
-    const span = this.spansOf().find(({ first, last }) => first <= line && line <= last);
-    if (span === undefined || !span.certain) {
-      return null;
-    }
-    let names = this.read.get(span.first);
-    if (names === undefined) {
-      names = this.namesIn(span);
-      this.read.set(span.first, names);
-    }
-    return names;
-  }
-
-  /**
-   * The function whose header starts at [param header]: every line up to one indented no deeper
-   * than the header that starts a statement. A line inside open brackets or after a backslash
-   * carries on the one above, wherever it is indented.
-   */
-  private spanFrom(header: number): FunctionSpan {
-    const indent = indentOf(this.lines[header] ?? '');
-    const continued = new Set<number>();
-    let depth = bracketsOpenedBy(this.lines[header] ?? '');
-    let joined = /\\\s*$/u.test(this.lines[header] ?? '');
-    let certain = depth >= 0;
-    let last = header;
-    for (let next = header + 1; next < this.lines.length; next += 1) {
-      const text = this.lines[next] ?? '';
-      const carries = depth > 0 || joined;
-      if (!carries && text.trim() !== '' && indentOf(text) <= indent) {
-        break;
-      }
-      if (carries) {
-        continued.add(next);
-      }
-      depth += bracketsOpenedBy(text);
-      certain &&= depth >= 0;
-      joined = /\\\s*$/u.test(text);
-      last = next;
-    }
-    return { first: header, last, certain: certain && depth === 0 && !joined, continued };
-  }
-
-  private namesIn(span: FunctionSpan): FunctionNames {
-    const counts = new Map<string, number>();
-    const count = (name: string): void => {
-      counts.set(name, (counts.get(name) ?? 0) + 1);
-    };
-    const statements = new Map<string, number>();
-    const indent = this.bodyIndent(span);
-    for (let line = span.first; line <= span.last; line += 1) {
-      const own = this.lines[line] ?? '';
-      if (!(own.includes('var') || own.includes('const') || own.includes('for'))) {
-        continue;
-      }
-      for (const match of own.matchAll(DECLARED_IN_BODY)) {
-        const name = match[2] ?? '';
-        count(name);
-        if (
-          match[1] === 'var' &&
-          match.index === indent &&
-          indentOf(own) === indent &&
-          !span.continued.has(line)
-        ) {
-          statements.set(name, line);
-        }
-      }
-    }
-    const text = this.lines.slice(span.first, span.last + 1).join('\n');
-    for (const match of text.matchAll(FUNC_WORD)) {
-      parametersOf(text, match.index).forEach(count);
-    }
-    return { counts, statements };
-  }
-
-  /** How deeply [param span] indents its own block's statements, past the header's own lines. */
-  private bodyIndent(span: FunctionSpan): number {
-    let indent = Number.POSITIVE_INFINITY;
-    for (let at = span.first + 1; at <= span.last; at += 1) {
-      const text = this.lines[at] ?? '';
-      if (!span.continued.has(at) && text.trim() !== '') {
-        indent = Math.min(indent, indentOf(text));
-      }
-    }
-    return indent;
-  }
-}
-
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
 function blockUnder(codeLines: readonly string[], declared: number): readonly [number, number] {
   const indent = (codeLines[declared] ?? '').search(/\S|$/);
@@ -1482,12 +1346,11 @@ function accessorsIn(
 }
 
 /**
- * Whether a member use at [param offset], on line [param index], can reach the function asked
- * about. A receiver whose first name the script declares as a local anywhere may be that local, so
- * it is kept. The exception is a name its function declares once, as a `var` of the function's own
- * block on an earlier line, which says its class.
+ * Whether a member use at [param offset] can reach the function asked about. A receiver whose first
+ * name the script declares as a local anywhere may be that local, so
+ * it is kept.
  */
-function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean {
+function isMemberUseKept(scan: CallScan, offset: number): boolean {
   const path = scan.readsReceivers ? receiverPathBefore(scan.code, offset) : null;
   if (path === null) {
     return true;
@@ -1497,23 +1360,9 @@ function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean
   if (first === 'self' || first === 'super') {
     return rest.length === 0 && !made
       ? scan.onSelf(offset, first)
-      : scan.onReceiver(offset, { start: 'self', type: null, names: rest, made });
+      : scan.onReceiver(offset, { start: 'self', names: rest, made });
   }
-  if (!scan.locals().has(first)) {
-    return scan.onReceiver(offset, { start: 'name', type: null, names, made });
-  }
-  const declared = scan.namesAt(index);
-  const statement = declared?.statements.get(first);
-  if (
-    declared === null ||
-    statement === undefined ||
-    declared.counts.get(first) !== 1 ||
-    index <= statement
-  ) {
-    return true;
-  }
-  const type = declaredClass(scan.codeLines[statement] ?? '', first);
-  return scan.onReceiver(offset, { start: 'local', type, names: rest, made });
+  return scan.locals().has(first) || scan.onReceiver(offset, { start: 'name', names, made });
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
@@ -1537,7 +1386,7 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
   if (!one.afterDot) {
     return isBareFunctionUse(scan, one.offset, index) && scan.onSelf(one.offset, 'bare');
   }
-  return isMemberUseKept(scan, one.offset, index);
+  return isMemberUseKept(scan, one.offset);
 }
 
 function callSiteAt(scan: CallScan, one: Occurrence): CallSite {

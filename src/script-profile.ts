@@ -936,8 +936,7 @@ const SEEN_FROM_INSIDE: ReadonlySet<DeclarationKind> = new Set(['const', 'enum',
 /**
  * Reads the class a receiver names the way the engine looks a name up from the class body it is
  * written in: that class, the classes it extends with theirs, then the class around it, and the
- * global classes last. A variable or constant found on the way is what its declaration gives it,
- * and so is a typed `var` of a function's own block, the one local read.
+ * global classes last. A variable or constant found on the way is what its declaration gives it.
  */
 class ClassScope {
   private readonly graph: ClassGraph;
@@ -969,9 +968,6 @@ class ClassScope {
   private start(at: ClassId, receiver: Receiver): Named | null {
     if (receiver.start === 'self') {
       return { id: at, object: true };
-    }
-    if (receiver.start === 'local') {
-      return receiver.type === null ? null : this.typed(at, receiver.type);
     }
     return this.looked(at, receiver.names[0] ?? '');
   }
