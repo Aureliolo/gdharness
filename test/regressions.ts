@@ -60060,8 +60060,8 @@ function testAShareFloorIsWhatTheRunsEnginesTookToStart(): void {
   assert.equal(sharesAfterStarts([8, 8, 8, 300]).later, 48, 'and a slow one among the rest sets nothing');
   assert.equal(
     sharesAfterStarts([2, 2, 2]).later,
-    30,
-    'a start under the 5 s taken with none seen is not trusted',
+    12,
+    'engines that start in 2 s make it 12 s, since the middle reading is theirs',
   );
   assert.equal(sharesAfterStarts([0, -3, Number.NaN]).later, 30, 'nor one that is no time');
 }
