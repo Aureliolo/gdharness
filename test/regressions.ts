@@ -49309,6 +49309,14 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           '\tset(_value):',
           '\t\tpass',
           'var nodes: Array[Node] = []',
+          'var list: Array = [1, 2]',
+          'var _reads: int = 0',
+          'var flaky: int:',
+          '\tget:',
+          '\t\t_reads += 1',
+          '\t\tif _reads == 2:',
+          '\t\t\tpush_error("flaky read")',
+          '\t\treturn _reads',
           'var loud: Node:',
           '\tget:',
           '\t\tpush_error("loud getter")',
@@ -49334,8 +49342,12 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           '',
           'func noisy25() -> Node:',
           '\tfor _round: int in 25:',
-          '\t\tpush_error("noisy step")',
+          '\t\tpush_error("noisy step %d" % _round)',
           '\treturn self',
+          '',
+          '',
+          'func reset_flaky() -> void:',
+          '\t_reads = 0',
           '',
           '',
           'func drop_later() -> void:',
@@ -49687,7 +49699,78 @@ async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
     const errors = asArray(get(answer, 'errors')).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
     assert.equal(errors.length, 20);
-    assert.ok(asNumber(get(answer, 'errors_not_shown')) >= 1, JSON.stringify(answer));
+    assert.equal(get(answer, 'errors_not_shown'), 6, 'the game raised 26 and 20 are shown');
+    const read: unknown = JSON.parse(
+      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'noisy25():name' }),
+    );
+    assert.equal(asArray(get(read, 'errors')).length, 20);
+    assert.equal(get(read, 'errors_not_shown'), 5, 'a read that raised 25 shows 20');
+  });
+}
+
+/** The errors of reading a call's result with `properties` come back in the call's answer. */
+async function testAResultReadWithPropertiesReportsItsStepErrors(): Promise<void> {
+  await withAReadingGame('result properties regression', async ({ ask, counted }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main/Rows',
+        method: 'get_parent',
+        properties: ['noisy():name'],
+      }),
+    );
+    assert.match(asArray(get(answer, 'errors')).map(text).join('\n'), /noisy step/);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A call on a list or a map that is refused still carries the errors of the path's steps. */
+async function testAListCallRefusalCarriesTheStepErrors(): Promise<void> {
+  await withAReadingGame('list call refusal regression', async ({ ask, counted }) => {
+    for (const [method, args] of [
+      ['noisy():list:size', [1]],
+      ['noisy():list:bogus', []],
+    ] as const) {
+      const said = await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method, args });
+      assert.match(said, /The engine reported: .*noisy step/, `${method}: ${said}`);
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A wait keeps the errors of every look it took, not only the last. */
+async function testAWaitKeepsTheErrorsOfEveryLook(): Promise<void> {
+  await withAReadingGame('wait looks regression', async ({ ask, counted }) => {
+    for (const args of [{ compare: '>=', value: 5 }, { value: 5 }]) {
+      await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'reset_flaky' });
+      const said = await ask('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'flaky',
+        timeoutMs: 5000,
+        ...args,
+      });
+      assert.match(said, /flaky read/, `${JSON.stringify(args)}: ${said}`);
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A property watch reports the errors its readings made when its recording is collected. */
+async function testAPropertyWatchReportsItsReadingsErrors(): Promise<void> {
+  await withAReadingGame('watch errors regression', async ({ ask, counted }) => {
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'reset_flaky' });
+    const armed: unknown = JSON.parse(
+      await ask('runtime_wait', { op: 'watch', nodePath: '/root/Main', property: 'flaky' }),
+    );
+    await ask('runtime_wait', { op: 'frames', frames: 6 });
+    const recorded = await ask('runtime_wait', { op: 'recorded', watch: get(armed, 'watch') });
+    assert.match(recorded, /flaky read/, recorded);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
   });
 }
 
@@ -101411,6 +101494,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARefusalAfterAWalkCarriesTheWalksErrors,
   testTwoPathsInOneRequestKeepBothSetsOfErrors,
   testWalkErrorsDoNotPushOutTheCallsOwn,
+  testAResultReadWithPropertiesReportsItsStepErrors,
+  testAListCallRefusalCarriesTheStepErrors,
+  testAWaitKeepsTheErrorsOfEveryLook,
+  testAPropertyWatchReportsItsReadingsErrors,
   testAPropertyStepWhoseGetterErrorsIsReported,
   testACallArgumentPathSaysWhatItsStepsReported,
   testAnObjectTargetPathSaysWhatItsStepsReported,

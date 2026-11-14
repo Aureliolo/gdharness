@@ -2,6 +2,7 @@ extends RefCounted
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
+const GdhCallErrors = preload("call_errors.gd")
 const GdhChanges = preload("runtime_changes.gd")
 const GdhDeclared = preload("declared_values.gd")
 const GdhPaths = preload("runtime_paths.gd")
@@ -312,7 +313,7 @@ func _watch_property(node_path: String, property: String) -> Dictionary:
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
-	var watched: Dictionary = _watched(node, node_path, property)
+	var watched: Dictionary = _watched(node, node_path, property, GdhCallErrors.bound())
 	if watched.has("message"):
 		return watched
 	var trace: GdhTrace = GdhTrace.new(node, node_path, property)
@@ -361,7 +362,7 @@ func _record(trace: GdhTrace) -> void:
 				"%s was freed %d frames after the watch was armed" % [trace.node_path, frame]
 			)
 			return
-		var watched: Dictionary = _watched(node, trace.node_path, trace.property)
+		var watched: Dictionary = _watched(node, trace.node_path, trace.property, trace.errors)
 		if watched.has("message"):
 			trace.ended = "%d frames after the watch was armed: %s" % [frame, watched["message"]]
 			return
@@ -447,12 +448,16 @@ func recorded(params: Dictionary) -> Dictionary:
 		)
 	if not trace.ended.is_empty():
 		answer["ended"] = trace.ended
+	GdhCallErrors.attach(answer, trace.errors)
 	return answer
 
 
 ## Waits until a property reads as the value given, or until something under the path says what
 ## was given, or the time runs out, and answers with what it read last either way.
 func wait_until(params: Dictionary) -> Dictionary:
+	# Every look of the wait adds to the request's collector, which another request may replace
+	# as the bound one while the wait is suspended.
+	var request_errors: GdhCallErrors.Collected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var says: String = str(params.get("says", ""))
@@ -481,13 +486,13 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# met" after the whole timeout, which is what a game that never reached the state answers too,
 	# so a mistyped name and a condition that did not happen read the same. The property read
 	# refuses that typo in one call, and two tools disagreeing about it is the fault.
-	var watched: Dictionary = _watched(node, node_path, property)
+	var watched: Dictionary = _watched(node, node_path, property, request_errors)
 	if watched.has("message"):
 		return watched
 
 	var current: Variant = watched["value"]
 	if compare in [">=", "<=", ">", "<"]:
-		return await _wait_in_order(node, params, watched, timeout_ms)
+		return await _wait_in_order(node, params, current, timeout_ms)
 	var by_name: Array = _enum_by_name(watched, params["value"], node_path)
 	var sent: Variant = _named_value(by_name, params["value"])
 	var wanted: Variant = _wanted_value(watched, sent)
@@ -496,8 +501,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if refused.is_empty():
 		refused = _wait_refused(watched, sent, wanted, node_path, property)
 	if not refused.is_empty():
-		var first_errors: Array = watched.get("errors", [])
-		return GdhPaths.with_read_errors({ "type": "error", "message": refused }, first_errors)
+		return { "type": "error", "message": refused }
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
@@ -516,7 +520,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		frames += 1
 		if not is_instance_valid(node):
 			return { "type": "error", "message": "%s was freed while waiting" % node_path }
-		watched = _watched(node, node_path, property)
+		watched = _watched(node, node_path, property, request_errors)
 		if watched.has("message"):
 			return watched
 		current = watched["value"]
@@ -564,8 +568,6 @@ func _condition_answer(
 		var outside: String = _outside_declared(owner, declaration, wanted)
 		if not outside.is_empty():
 			answer["outside_declared"] = outside
-	if watched.has("errors"):
-		answer["errors"] = watched["errors"]
 	return answer
 
 
@@ -665,10 +667,9 @@ static func _property_wait_unasked(property: String, params: Dictionary) -> Stri
 ## truncates: 31.5 on a whole-number property became 31, and a wait for "at least 31.5" was met at
 ## 31.
 func _wait_in_order(
-	node: Node, params: Dictionary, watched: Dictionary, timeout_ms: int
+	node: Node, params: Dictionary, current: Variant, timeout_ms: int
 ) -> Dictionary:
-	var current: Variant = watched["value"]
-	var read_errors: Array = watched.get("errors", [])
+	var request_errors: GdhCallErrors.Collected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var compare: String = str(params.get("compare", ""))
@@ -677,15 +678,20 @@ func _wait_in_order(
 	# came with it, since no number would make the wait answerable.
 	var unordered: String = _no_order(current, node_path, property, compare)
 	if not unordered.is_empty():
-		return GdhPaths.with_read_errors({ "type": "error", "message": unordered }, read_errors)
+		return { "type": "error", "message": unordered }
 	var number: Variant = given
 	if given is String:
 		var text: String = given
 		number = GdhRead.json_or_null(text)
 	if typeof(number) != TYPE_INT and typeof(number) != TYPE_FLOAT:
-		return GdhPaths.with_read_errors(
-			{ "type": "error", "message": _not_a_number(compare, given) }, read_errors
-		)
+		return {
+			"type": "error",
+			"message":
+			(
+				"compare %s puts a number in order, and the value to wait for is %s: give a number."
+				% [compare, str(given)]
+			),
+		}
 	var limit: float = GdhRead.as_float(number)
 
 	var started: int = Time.get_ticks_msec()
@@ -695,14 +701,13 @@ func _wait_in_order(
 		frames += 1
 		if not is_instance_valid(node):
 			return { "type": "error", "message": "%s was freed while waiting" % node_path }
-		var looked: Dictionary = _watched(node, node_path, property)
-		if looked.has("message"):
-			return looked
-		current = looked["value"]
-		read_errors = looked.get("errors", [])
+		var watched: Dictionary = _watched(node, node_path, property, request_errors)
+		if watched.has("message"):
+			return watched
+		current = watched["value"]
 		unordered = _no_order(current, node_path, property, compare)
 		if not unordered.is_empty():
-			return GdhPaths.with_read_errors({ "type": "error", "message": unordered }, read_errors)
+			return { "type": "error", "message": unordered }
 
 	var met: bool = _in_order(compare, limit, current)
 	var answer: Dictionary = {
@@ -717,15 +722,7 @@ func _wait_in_order(
 	}
 	if not met:
 		answer["waited_for"] = _values.serialize(number)
-	if not read_errors.is_empty():
-		answer["errors"] = read_errors
 	return answer
-
-
-## Why [param given] cannot be the value of a wait by order under [param compare].
-static func _not_a_number(compare: String, given: Variant) -> String:
-	var asked: String = "compare %s puts a number in order, and the value to wait for is %s"
-	return (asked + ": give a number.") % [compare, str(given)]
 
 
 ## Why [param current] cannot be put in order, or "" when it is a number.
@@ -853,24 +850,32 @@ static func _enum_by_name(watched: Dictionary, sent: Variant, node_path: String)
 ## node every time rather than read off the holder found at the start, because a game replaces what
 ## its nodes hold: a run object built afresh each day would leave a wait watching the day before. A
 ## step that has gone in the meantime ends the wait with what went.
-static func _watched(node: Node, node_path: String, property: String) -> Dictionary:
+static func _watched(
+	node: Node, node_path: String, property: String, errors: GdhCallErrors.Collected
+) -> Dictionary:
+	var before: GdhCallErrors.Collected = GdhCallErrors.bind(errors)
+	var looked: Dictionary = _look(node, node_path, property)
+	var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
+	return looked
+
+
+## One look at [param property] of [param node], which [method _watched] reads the errors of.
+static func _look(node: Node, node_path: String, property: String) -> Dictionary:
 	var reached: Dictionary = GdhPaths.walk_to(node, node_path, property)
 	if reached.has("message"):
-		return GdhPaths.with_read_errors(reached)
+		return reached
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	var missing: String = GdhPaths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
-		return GdhPaths.with_read_errors({ "type": "error", "message": missing })
+		return { "type": "error", "message": missing }
 	var slot: Dictionary = _declared_slot(holder, named)
-	return GdhPaths.with_read_errors(
-		{
-			"value": GdhPaths.read_under(holder, named),
-			"declared": slot["type"],
-			"declaration": slot["declared"],
-			"holder": holder,
-		}
-	)
+	return {
+		"value": GdhPaths.read_under(holder, named),
+		"declared": slot["type"],
+		"declaration": slot["declared"],
+		"holder": holder,
+	}
 
 
 ## What [param named] is declared with on [param holder], as [method GdhValues.slot_declared]
@@ -1030,6 +1035,8 @@ class GdhTrace:
 	var elapsed_ms: int = 0
 	var ended: String = ""
 	var collected: bool = false
+	## The errors the watch's readings make, which the recording answers with.
+	var errors: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
 	var _last: Variant = null
 	var _seen: bool = false
 

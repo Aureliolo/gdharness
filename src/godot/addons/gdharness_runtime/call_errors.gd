@@ -8,6 +8,11 @@ extends Logger
 ## the method's own, raised on its way through.
 
 const REFUSED: String = "Error calling method from 'callv': "
+## The most errors an answer lists, and so the most a request's reads add to one.
+const ERRORS_KEPT: int = 20
+
+## Where the errors the reads of the request in progress make are gathered. See [method bind].
+static var _bound: Collected = null
 
 ## The engine's reason for refusing the call, without [constant REFUSED], or "" when it ran.
 var refused: String = ""
@@ -23,6 +28,49 @@ var ended_at: Dictionary = {}
 var raised_in: Array[String] = []
 ## The engine file the refusal in [member refused] was reported from.
 var refused_in: String = ""
+
+
+## Makes [param collector] the one reads add their errors to, and answers the one it replaced. A
+## request opens one when it starts. Code that resumes after an await binds the request's again,
+## since another request may have run in between.
+static func bind(collector: Collected) -> Collected:
+	var before: Collected = _bound
+	_bound = collector
+	return before
+
+
+## The collector reads are adding to now, or null outside a request.
+static func bound() -> Collected:
+	return _bound
+
+
+## Adds [param text], an error a read made, to the collector bound now.
+static func note(text: String) -> void:
+	if _bound != null:
+		_bound.add(text)
+
+
+## Puts what [param found] gathered in [param answer]. An answer that lists errors gets them after
+## the ones it holds, cut to [constant ERRORS_KEPT] with the rest counted under errors_not_shown.
+## A refusal reaches the caller as its message alone, so the errors go into the message.
+static func attach(answer: Dictionary, found: Collected) -> void:
+	if found.is_empty():
+		return
+	var lines: Array[String] = found.lines()
+	if answer.has("message"):
+		var shown: String = " | ".join(lines.slice(0, ERRORS_KEPT))
+		if lines.size() > ERRORS_KEPT:
+			shown += " | and %d more" % (lines.size() - ERRORS_KEPT)
+		var refusal: String = str(answer["message"]).trim_suffix(".")
+		answer["message"] = "%s. The engine reported: %s" % [refusal, shown]
+		return
+	var all: Array = answer.get("errors", [])
+	all.append_array(lines)
+	var hidden: int = answer.get("errors_not_shown", 0)
+	hidden += maxi(all.size() - ERRORS_KEPT, 0)
+	answer["errors"] = all.slice(0, ERRORS_KEPT)
+	if hidden > 0:
+		answer["errors_not_shown"] = hidden
 
 
 ## Every error the engine reported while the call ran, the refusal first, a line each.
@@ -81,3 +129,26 @@ func _log_error(
 		raised_in.append(file)
 	if error_type == ERROR_TYPE_SCRIPT and not ended_at.has(function):
 		ended_at[function] = "%s:%d" % [file, line]
+
+
+## The errors the reads of one request made, each distinct text once with how often it came.
+class Collected:
+	extends RefCounted
+	var texts: Array[String] = []
+	var counts: Dictionary[String, int] = {}
+
+	func add(text: String) -> void:
+		if not counts.has(text):
+			texts.append(text)
+		counts[text] = counts.get(text, 0) + 1
+
+	func is_empty() -> bool:
+		return texts.is_empty()
+
+	## A line for each distinct text, with its count after it when it came more than once.
+	func lines() -> Array[String]:
+		var listed: Array[String] = []
+		for text: String in texts:
+			var times: int = counts[text]
+			listed.append(text if times == 1 else "%s (x%d)" % [text, times])
+		return listed
