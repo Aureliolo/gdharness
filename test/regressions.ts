@@ -91742,6 +91742,86 @@ function testTheAddonJudgesALinkChainByWhereItEnds(): void {
 }
 
 /**
+ * The project is opened through one spelling of its folder (a substituted drive here, a short 8.3
+ * name on a runner whose temp folder has one) while the engine reads a link's target in another. A
+ * path out through a link and back into the project is inside, and one that stays out is outside.
+ */
+function testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('link chain spelling regression skipped (Godot not found)');
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('link chain spelling regression skipped (a drive substitution is Windows only)');
+    return;
+  }
+  const letter = 'WVUTSRQPONMLKJIHGF'.split('').find((candidate) => !existsSync(`${candidate}:/`));
+  if (letter === undefined) {
+    console.log('link chain spelling regression skipped (no free drive letter)');
+    return;
+  }
+  const drive = `${letter}:`;
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelling-'));
+  let mapped = false;
+  try {
+    writeTree(join(sandbox, 'project'), { 'project.godot': 'config_version=5\n', 'real/a.tres': '' });
+    writeTree(join(sandbox, 'outside'), { 'c.tres': '' });
+    cpSync('src/godot/addons/gdharness_editor', join(sandbox, 'project', 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    mapped = spawnSyncHidden('subst', [drive, sandbox], { encoding: 'utf8' }).status === 0;
+    if (!mapped) {
+      console.log('link chain spelling regression skipped (the platform refused a drive substitution)');
+      return;
+    }
+    const project = `${drive}/project`;
+    const outside = `${drive}/outside`;
+    symlinkSync(outside, `${project}/shared`, 'junction');
+    symlinkSync(`${project}/real`, `${outside}/back`, 'junction');
+    writeFileSync(
+      `${project}/runner.gd`,
+      [
+        'extends SceneTree',
+        '',
+        'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar links: PackedStringArray = ["res://shared/"]',
+        '\tvar paths: Array[String] = ["res://shared/back/a.tres", "res://shared/c.tres"]',
+        '\tvar refused: Array[bool] = []',
+        '\tfor path: String in paths:',
+        '\t\trefused.append(not GdhSceneFile.out_through_link(path, links).is_empty())',
+        '\tprint("SPELT " + JSON.stringify(refused))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+      encoding: 'utf8',
+      timeout: 120000,
+    });
+    const said = `${run.stdout}\n${run.stderr}`;
+    const answered = /SPELT (\[.*\])/.exec(said)?.[1];
+    assert.ok(answered !== undefined, said);
+    assert.deepEqual(
+      JSON.parse(answered),
+      [false, true],
+      `back into the project is inside, and c.tres is outside: ${said}`,
+    );
+  } finally {
+    if (mapped) {
+      spawnSyncHidden('subst', [drive, '/d'], { encoding: 'utf8' });
+    }
+    sweep(sandbox);
+  }
+}
+
+/**
  * A path that runs through more links than the addon follows is refused for that reason, not as one
  * that leads out, whether it would have ended inside the project or outside. At the limit it is judged.
  */
@@ -98815,6 +98895,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnimationReachedByALinkInsideIsSaved,
   testAnAnimationReachedByALinkBackInIsSaved,
   testTheAddonJudgesALinkChainByWhereItEnds,
+  testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay,
   testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt,
   testAnAbsolutePathIsRespeltOnlyWhereCaseIsIgnored,
   testALinkChainTooLongToFollowIsNotSaidToLeadOut,

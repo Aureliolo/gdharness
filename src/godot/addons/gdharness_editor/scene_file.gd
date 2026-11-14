@@ -994,16 +994,36 @@ static func link_out_over(file: String, links_out: PackedStringArray) -> String:
 ## Where [param file], a res:// path, ends once each link on it is followed: "inside" the project,
 ## as a path out through one link and back in through another does, "outside" it, or "unknown"
 ## when a ring, more than [constant MOST_LINKS] links or a link that cannot be read stops the
-## following. Only link targets are read, never file contents.
+## following. Only link targets are read, never file contents. The project's folder and where a link
+## ends can be spelt differently (a short 8.3 name against the long one, a substituted drive against
+## its folder), so the end is inside when a folder above it is the project's folder on disk.
 static func _ends_at(file: String, any_case: bool) -> String:
 	var inside: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
 	var led: String = _followed(ProjectSettings.globalize_path(file))
 	if inside.is_empty() or led.is_empty():
 		return "unknown"
-	if any_case:
-		inside = inside.to_lower()
-		led = led.to_lower()
-	return "inside" if led == inside or led.begins_with(inside + "/") else "outside"
+	var held: String = inside.to_lower() if any_case else inside
+	var there: String = led.to_lower() if any_case else led
+	if there == held or there.begins_with(held + "/"):
+		return "inside"
+	return "inside" if _is_below(led, inside) else "outside"
+
+
+## Whether [param led] is the absolute folder [param inside] or lies below it, whatever way each
+## is spelt, by asking the disk whether a folder above [param led] is [param inside].
+static func _is_below(led: String, inside: String) -> bool:
+	var disk: DirAccess = DirAccess.open(inside.get_slice("/", 0) + "/")
+	if disk == null:
+		return false
+	var above: String = led
+	while above.contains("/"):
+		if disk.is_equivalent(above, inside):
+			return true
+		var parent: String = above.get_base_dir()
+		if parent == above or parent.ends_with(":"):
+			break
+		above = parent
+	return false
 
 
 ## Where the absolute path [param given] leads, each link on it followed in turn, or "" after
