@@ -521,6 +521,19 @@ const HOOKS_GD = [
   // The scan thread clears its own flag, and a small project's scan can end between two reads.
   '\t\t\t\t"stillScanning": filesystem.is_scanning(),',
   '\t\t\t}',
+  // What the editor's own delete does for each file it removed: read the gone path again, which
+  // takes the file out of the editor's list and its uid out of the uid table. A scan alone drops the
+  // file and keeps the uid naming it.
+  '\t\t"forget":',
+  '\t\t\tvar files: EditorFileSystem = EditorInterface.get_resource_filesystem()',
+  '\t\t\tvar gone_paths: Array = fields.get("paths", [])',
+  '\t\t\tfor gone: Variant in gone_paths:',
+  '\t\t\t\tfiles.update_file(str(gone))',
+  '\t\t\treturn {"forgotten": gone_paths.size()}',
+  '\t\t"uid_known":',
+  '\t\t\treturn {"known": ResourceUID.has_id(ResourceUID.text_to_id(str(fields.get("uid", ""))))}',
+  '\t\t"listed":',
+  '\t\t\treturn {"listed": EditorInterface.get_resource_filesystem().get_filesystem_path(path) != null}',
   '\t\t"scan_due":',
   '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
   '\t\t\tvar due: bool = scene_file.get("scan_due")',
@@ -4448,22 +4461,67 @@ async function testAWriteThroughTheEditorBehindALinkOutIsRefused({
  * link to the file it names beside it. An editor saves by writing a new file and swapping it in for
  * the old, and on Windows that swap does not carry a write through a link to the file it leads to.
  * These hold that every write the editor makes through a link lands on that file.
+ *
+ * Runs [body] on the folder, then takes it out of the project and the editor again. A link and its
+ * target are two paths to one file, so a scene saved with a uid names it twice, and every engine
+ * scanning the project after warns "UID duplicate detected" for the cases that follow.
  */
-function fileLinksIn(
-  project: string,
+async function withFileLinksIn(
+  { call, project }: Editor,
   folder: string,
-  files: Record<string, string>,
-  links: Record<string, string>,
-): string {
+  fixture: { files: Record<string, string>; links: Record<string, string> },
+  body: (at: string) => Promise<void>,
+): Promise<void> {
   const at = join(project, folder);
   mkdirSync(at);
-  for (const [name, written] of Object.entries(files)) {
+  for (const [name, written] of Object.entries(fixture.files)) {
     writeFileSync(join(at, name), written);
   }
-  for (const [name, target] of Object.entries(links)) {
+  for (const [name, target] of Object.entries(fixture.links)) {
     symlinkSync(join(at, target), join(at, name), 'file');
   }
-  return at;
+  let passed = false;
+  try {
+    await body(at);
+    passed = true;
+  } finally {
+    const left = await forgetFolder(call, project, folder);
+    if (passed) {
+      assert.deepEqual(left, [], `the editor still holds what ${folder} held`);
+    }
+  }
+}
+
+/**
+ * Deletes the folder [folder] of [project] and settles the editor as its own delete does, each gone
+ * path read again, since a scan alone keeps the uid of a file it drops. Answers what the editor still
+ * holds of it afterwards.
+ */
+async function forgetFolder(call: Editor['call'], project: string, folder: string): Promise<string[]> {
+  const at = join(project, folder);
+  // The scans the case's writes asked for, run while the files are still there to be read.
+  await call('editor_rescan', { projectPath: project });
+  const names = readdirSync(at);
+  const uids = new Set<string>();
+  for (const name of names) {
+    const uid = /^\[gd_\w+ [^\]]*uid="(uid:\/\/\w+)"/.exec(readFileSync(join(at, name), 'utf8'))?.[1];
+    if (uid !== undefined) {
+      uids.add(uid);
+    }
+  }
+  rmSync(at, { recursive: true, force: true });
+  await hook(project, { op: 'forget', paths: names.map((name) => `res://${folder}/${name}`) });
+  await call('editor_rescan', { projectPath: project });
+  const left: string[] = [];
+  for (const uid of uids) {
+    if (get(await hook(project, { op: 'uid_known', uid }), 'known') === true) {
+      left.push(uid);
+    }
+  }
+  if (get(await hook(project, { op: 'listed', path: `res://${folder}/` }), 'listed') === true) {
+    left.push(`res://${folder}/`);
+  }
+  return left;
 }
 
 /** Asserts that [path] is still a link and that the file it leads to holds [pattern]. */
@@ -4473,113 +4531,118 @@ function linkKeptHolding(path: string, target: string, pattern: RegExp, answer: 
 }
 
 /** A scene the follower rewrites that is a file link stays one, and the file it leads to is changed. */
-async function testAKinSceneThatIsAFileLinkKeepsItsLink({ call, project }: Editor): Promise<void> {
-  const at = fileLinksIn(
-    project,
-    'kinlink',
-    {
-      'desk.tscn':
-        '[gd_scene format=3]\n\n[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
-        '[node name="Lamp" type="Node3D" parent="Top"]\n',
-      // Not a scene's name, so the link is the only path the follower finds the room by.
-      'room.txt':
-        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kinlink/desk.tscn" id="1_desk"]\n\n' +
-        '[node name="Room" type="Node3D"]\n\n[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
-        '[node name="Lamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n',
-    },
-    { 'room.tscn': 'room.txt' },
-  );
-  const renamed = await call('scene_node', {
-    projectPath: project,
-    op: 'set',
-    scenePath: 'res://kinlink/desk.tscn',
-    nodePath: 'Top',
-    properties: { name: 'Surface' },
+async function testAKinSceneThatIsAFileLinkKeepsItsLink(editor: Editor): Promise<void> {
+  const files = {
+    'desk.tscn':
+      '[gd_scene format=3]\n\n[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="Lamp" type="Node3D" parent="Top"]\n',
+    // Not a scene's name, so the link is the only path the follower finds the room by.
+    'room.txt':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kinlink/desk.tscn" id="1_desk"]\n\n' +
+      '[node name="Room" type="Node3D"]\n\n[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="Lamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n',
+  };
+  await withFileLinksIn(editor, 'kinlink', { files, links: { 'room.tscn': 'room.txt' } }, async (at) => {
+    const renamed = await editor.call('scene_node', {
+      projectPath: editor.project,
+      op: 'set',
+      scenePath: 'res://kinlink/desk.tscn',
+      nodePath: 'Top',
+      properties: { name: 'Surface' },
+    });
+    assert.deepEqual(get(renamed, 'followed'), ['res://kinlink/room.tscn'], JSON.stringify(renamed));
+    linkKeptHolding(
+      join(at, 'room.tscn'),
+      join(at, 'room.txt'),
+      /name="Lamp" parent="Desk\/Surface"/,
+      renamed,
+    );
   });
-  assert.deepEqual(get(renamed, 'followed'), ['res://kinlink/room.tscn'], JSON.stringify(renamed));
-  linkKeptHolding(join(at, 'room.tscn'), join(at, 'room.txt'), /name="Lamp" parent="Desk\/Surface"/, renamed);
 }
 
 /** A node made another class through a file link keeps its unique_id, and the link stays one. */
-async function testAChangeOfTypeThroughAFileLinkKeepsTheLink({ call, project }: Editor): Promise<void> {
-  const at = fileLinksIn(
-    project,
-    'idlink',
-    {
-      'held.tscn':
-        '[gd_scene format=3]\n\n[node name="Kept" type="Node2D"]\n\n' +
-        '[node name="Panel" type="Node2D" parent="." unique_id=418027365]\n',
-    },
-    { 'kept.tscn': 'held.tscn' },
-  );
-  const retyped = await call('scene_node', {
-    projectPath: project,
-    op: 'change_type',
-    scenePath: 'res://idlink/kept.tscn',
-    nodePath: 'Panel',
-    nodeType: 'Marker2D',
+async function testAChangeOfTypeThroughAFileLinkKeepsTheLink(editor: Editor): Promise<void> {
+  const files = {
+    'held.tscn':
+      '[gd_scene format=3]\n\n[node name="Kept" type="Node2D"]\n\n' +
+      '[node name="Panel" type="Node2D" parent="." unique_id=418027365]\n',
+  };
+  await withFileLinksIn(editor, 'idlink', { files, links: { 'kept.tscn': 'held.tscn' } }, async (at) => {
+    const retyped = await editor.call('scene_node', {
+      projectPath: editor.project,
+      op: 'change_type',
+      scenePath: 'res://idlink/kept.tscn',
+      nodePath: 'Panel',
+      nodeType: 'Marker2D',
+    });
+    linkKeptHolding(
+      join(at, 'kept.tscn'),
+      join(at, 'held.tscn'),
+      /^\[node name="Panel" type="Marker2D" parent="\." unique_id=418027365\]$/m,
+      retyped,
+    );
   });
-  linkKeptHolding(
-    join(at, 'kept.tscn'),
-    join(at, 'held.tscn'),
-    /^\[node name="Panel" type="Marker2D" parent="\." unique_id=418027365\]$/m,
-    retyped,
-  );
 }
 
 /**
  * A connection the engine cannot make is put back by a write through a file link on the file it
  * leads to, and the link stays one.
  */
-async function testAConnectionPutBackThroughAFileLinkKeepsTheLink({ call, project }: Editor): Promise<void> {
-  const at = fileLinksIn(
-    project,
+async function testAConnectionPutBackThroughAFileLinkKeepsTheLink(editor: Editor): Promise<void> {
+  const files = {
+    // Binds to a method the root lacks, which the engine refuses to make as the scene loads.
+    'quitting.tscn':
+      '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
+      '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n',
+  };
+  await withFileLinksIn(
+    editor,
     'unmadelink',
-    {
-      // Binds to a method the root lacks, which the engine refuses to make as the scene loads.
-      'quitting.tscn':
-        '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
-        '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n',
+    { files, links: { 'quits.tscn': 'quitting.tscn' } },
+    async (at) => {
+      const relabelled = await editor.call('scene_node', {
+        projectPath: editor.project,
+        op: 'set',
+        scenePath: 'res://unmadelink/quits.tscn',
+        nodePath: 'Quit',
+        properties: { text: 'Quit' },
+      });
+      assert.match(
+        readFileSync(join(at, 'quitting.tscn'), 'utf8'),
+        /text = "Quit"/,
+        JSON.stringify(relabelled),
+      );
+      linkKeptHolding(join(at, 'quits.tscn'), join(at, 'quitting.tscn'), /method="_on_quit"/, relabelled);
     },
-    { 'quits.tscn': 'quitting.tscn' },
   );
-  const relabelled = await call('scene_node', {
-    projectPath: project,
-    op: 'set',
-    scenePath: 'res://unmadelink/quits.tscn',
-    nodePath: 'Quit',
-    properties: { text: 'Quit' },
-  });
-  assert.match(readFileSync(join(at, 'quitting.tscn'), 'utf8'), /text = "Quit"/, JSON.stringify(relabelled));
-  linkKeptHolding(join(at, 'quits.tscn'), join(at, 'quitting.tscn'), /method="_on_quit"/, relabelled);
 }
 
 /**
  * A scene saved through a file link to a file not named as a scene is saved in the asked format
  * into that file. The file keeps its uid and nothing else is left beside it.
  */
-async function testASaveThroughAFileLinkToAnotherNameIsMade({ call, project }: Editor): Promise<void> {
-  const at = fileLinksIn(
-    project,
-    'savelink',
-    {
-      'room.txt':
-        '[gd_scene format=3 uid="uid://droomhw2x"]\n\n[node name="Room" type="Node2D"]\n\n' +
-        '[node name="Top" type="Node2D" parent="."]\n',
-    },
-    { 'room.tscn': 'room.txt' },
-  );
-  const before = readdirSync(at).toSorted();
-  const renamed = await call('scene_node', {
-    projectPath: project,
-    op: 'set',
-    scenePath: 'res://savelink/room.tscn',
-    nodePath: 'Top',
-    properties: { name: 'Surface' },
+async function testASaveThroughAFileLinkToAnotherNameIsMade(editor: Editor): Promise<void> {
+  const files = {
+    'room.txt':
+      '[gd_scene format=3 uid="uid://droomhw2x"]\n\n[node name="Room" type="Node2D"]\n\n' +
+      '[node name="Top" type="Node2D" parent="."]\n',
+  };
+  await withFileLinksIn(editor, 'savelink', { files, links: { 'room.tscn': 'room.txt' } }, async (at) => {
+    const before = readdirSync(at).toSorted();
+    const renamed = await editor.call('scene_node', {
+      projectPath: editor.project,
+      op: 'set',
+      scenePath: 'res://savelink/room.tscn',
+      nodePath: 'Top',
+      properties: { name: 'Surface' },
+    });
+    linkKeptHolding(join(at, 'room.tscn'), join(at, 'room.txt'), /\[node name="Surface"/, renamed);
+    assert.match(
+      readFileSync(join(at, 'room.txt'), 'utf8'),
+      /^\[gd_scene format=3 uid="uid:\/\/droomhw2x"\]/,
+    );
+    assert.deepEqual(readdirSync(at).toSorted(), before);
   });
-  linkKeptHolding(join(at, 'room.tscn'), join(at, 'room.txt'), /\[node name="Surface"/, renamed);
-  assert.match(readFileSync(join(at, 'room.txt'), 'utf8'), /^\[gd_scene format=3 uid="uid:\/\/droomhw2x"\]/);
-  assert.deepEqual(readdirSync(at).toSorted(), before);
 }
 
 /**
