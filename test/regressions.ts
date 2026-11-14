@@ -2931,7 +2931,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   assert.deepEqual(
-    callSitesOf(assigned, 'level', new Set(), true).map((one) => [one.line, one.access]),
+    callSitesOf(assigned, 'level', true).map((one) => [one.line, one.access]),
     [
       [4, 'write'],
       ...Array.from({ length: 12 }, (_, index) => [index + 9, 'write']),
@@ -3183,10 +3183,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ],
     'and with no class asked about, the call through another class is listed as the note says',
   );
-  // A receiver declared as another class is that class's object, whichever way it was declared: a
-  // typed local, a new(), a cast, a typed parameter, a typed for variable, a variable of the class.
-  // Reported from game-b on 1.1.61, `result.apply(...)` with `var result: Effect` above it. What says
-  // nothing about the class stays: an untyped local, a receiver that is a member of something else,
+  // A class variable declared as another class is that class's object. A local of any kind is kept,
+  // typed or not, since its scope is not read. So is a receiver that is a member of something else,
   // and a variable declared as the class asked about.
   const paying = [
     'class_name Prize',
@@ -3224,8 +3222,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     paidAt('Placed.lift'),
-    [17, 18, 20],
-    'the receivers declared as Outcome are left out, and the Placed, dotted and untyped ones kept',
+    [10, 12, 14, 15, 17, 18, 20, 22],
+    'the class variable declared as Outcome is left out, and the locals, Placed and dotted ones kept',
   );
   assert.deepEqual(
     paidAt('lift'),
@@ -3459,6 +3457,545 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://works/maker.gd', 18],
     ],
     "Maker's is reached by its own bare call and through self",
+  );
+  // A use through a class by name, or through a variable declared as one, runs what that class
+  // dispatches the name to: a class named is bound to what it resolves, and an object may be of any
+  // class below its declared one. Names are looked up as the engine does, a local first, then the
+  // class it is written in, the classes it extends and the class around it, the globals last. A
+  // receiver the text gives no class, untyped or a call's result, is kept.
+  const yardTool = [
+    'class_name Tool',
+    'extends RefCounted',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const yardUser = [
+    'extends Node',
+    '',
+    'const B := preload("res://yard/sub.gd")',
+    'var held: Tool',
+    '',
+    'func go(given: SubTool, odd: Other, base: Tool, loose, Tool: Other) -> void:',
+    '\tSubTool.make()',
+    '\tFancyTool.make()',
+    '\tOther.make()',
+    '\tgiven.tick()',
+    '\todd.tick()',
+    '\tbase.tick()',
+    '\tloose.tick()',
+    '\tB.make()',
+    '\tTool.tick()',
+    '\tOther.new().tick()',
+    '\tSubTool.new().tick()',
+    '\tSubTool \\',
+    '\t\t.make()',
+    '\tself.held.tick()',
+    '\tvar d := {}',
+    '\td["k"].tick()',
+    '\tvar made := loose.get_it()',
+    '\tmade.tick()',
+    '',
+    '',
+    'const Same = Same',
+    '',
+    '',
+    'func again() -> void:',
+    '\tSame.make()',
+    '\tTool.make()',
+    '',
+  ].join('\n');
+  const yardOuter = [
+    'class_name Outer',
+    'extends RefCounted',
+    '',
+    'class Inner:',
+    '\tstatic func make() -> int:',
+    '\t\treturn 1',
+    '',
+    'class Deeper extends Inner:',
+    '\tfunc go() -> void:',
+    '\t\tInner.make()',
+    '',
+    'class Box:',
+    '\tstatic func make() -> int:',
+    '\t\treturn 2',
+    '\tclass Box:',
+    '\t\tstatic func make() -> int:',
+    '\t\t\treturn 3',
+    '\t\tfunc go() -> void:',
+    '\t\t\tBox.make()',
+    '',
+  ].join('\n');
+  const yardCaller = [
+    'extends Node',
+    '',
+    'var crate: Outer.Inner',
+    '',
+    'func go() -> void:',
+    '\tOuter.Inner.make()',
+    '\tOuter.Box.make()',
+    '\tcrate.make()',
+    '\tOuter.Deeper.make()',
+    '',
+  ].join('\n');
+  const yardHolder = ['class_name Holder', 'extends Node', '', 'var made: Tool', 'var Other: Tool', ''].join(
+    '\n',
+  );
+  const yardHeld = [
+    'extends Holder',
+    '',
+    'func go() -> void:',
+    '\tmade.tick()',
+    '\tOther.tick()',
+    '\tself.made.tick()',
+    '',
+  ].join('\n');
+  const yard = [
+    ['res://yard/tool.gd', yardTool],
+    ['res://yard/sub.gd', 'class_name SubTool\nextends Tool\n'],
+    [
+      'res://yard/fancy.gd',
+      yardTool.replace('class_name Tool\nextends RefCounted', 'class_name FancyTool\nextends Tool'),
+    ],
+    ['res://yard/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://yard/user.gd', yardUser],
+    ['res://yard/outer.gd', yardOuter],
+    ['res://yard/caller.gd', yardCaller],
+    ['res://yard/holder.gd', yardHolder],
+    ['res://yard/held.gd', yardHeld],
+  ] as const;
+  const yardAt = (name: string, script: string): number[] =>
+    callersOf(totals({}), name, yard)
+      .sites.filter((one) => one.script === `res://yard/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    yardAt('Tool.make', 'user'),
+    [7, 14, 19, 31, 32],
+    'Tool.make through a subclass that inherits it, by name, by a preloaded constant and split by a backslash, and through a constant the text cannot read, but not through FancyTool or Other, which declare their own',
+  );
+  assert.deepEqual(
+    yardAt('FancyTool.make', 'user'),
+    [8, 31, 32],
+    'a static call is bound to the class named, so SubTool by name does not reach the override, and Tool, named like a parameter in the script, is kept',
+  );
+  assert.deepEqual(
+    yardAt('Tool.tick', 'user'),
+    [10, 11, 12, 13, 15, 17, 20, 22, 24],
+    'objects of Tool and of a subclass made with new(), a member through self, the parameters, which are locals, and the untyped, indexed and undeclared receivers, but not Other',
+  );
+  assert.deepEqual(
+    yardAt('FancyTool.tick', 'user'),
+    [10, 11, 12, 13, 15, 20, 22, 24],
+    'an object made as SubTool may not be a FancyTool',
+  );
+  assert.deepEqual(
+    yardAt('Other.tick', 'user'),
+    [10, 11, 12, 13, 15, 16, 22, 24],
+    "Other's own objects, the parameters and the receivers the text gives no class",
+  );
+  assert.deepEqual(
+    [yardAt('Tool.tick', 'held'), yardAt('Other.tick', 'held')],
+    [[4, 5, 6], []],
+    'an inherited variable is read as its declared class, also where it is named like a class',
+  );
+  assert.deepEqual(
+    [
+      yardAt('Outer.Inner.make', 'caller'),
+      yardAt('Outer.Inner.make', 'outer'),
+      yardAt('Outer.Box.make', 'caller'),
+      yardAt('Outer.Box.make', 'outer'),
+      yardAt('Outer.Box.Box.make', 'outer'),
+    ],
+    [[6, 8, 9], [10], [7], [], [19]],
+    'a dotted name, a variable declared as one and an inner class that inherits the function, each read in its own scope',
+  );
+  const docked = [
+    ['res://dock/harbour.gd', 'class_name Harbour\nextends Node\n'],
+    ['res://dock/quay.gd', 'class_name Quay\nextends Harbour\n'],
+    ['res://dock/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://dock/lost.gd', 'class_name Lost\nextends "res://dock/missing.gd"\n'],
+    [
+      'res://dock/user.gd',
+      [
+        'extends Node',
+        '',
+        'var q: Quay = null',
+        'var o: Other = null',
+        'var h: Harbour = null',
+        'var l: Lost = null',
+        '',
+        'func go() -> void:',
+        '\tq.add_child(null)',
+        '\to.add_child(null)',
+        '\th.add_child(null)',
+        '\tl.add_child(null)',
+        '',
+      ].join('\n'),
+    ],
+  ] as const;
+  assert.deepEqual(
+    [
+      callersOf(totals({}), 'Harbour.add_child', docked).sites.map((one) => one.line),
+      callersOf(totals({}), 'Quay.add_child', docked).sites.map((one) => one.line),
+    ],
+    [
+      [9, 11, 12],
+      [9, 11, 12],
+    ],
+    'asked about a function the class does not declare, a use through a class above it, below it or past a missing script counts, and one through an unrelated class does not',
+  );
+  // A name the script declares as a local may be that local, so its uses are kept: a match binding,
+  // in any branch, a parameter, also on a header's later lines, and a function's constant. new()
+  // makes exactly the class named. A class constant holds the class it preloads or names. An inner
+  // class sees its outer class's constants, never its variables.
+  const laneUser = [
+    'class_name User',
+    'extends Node',
+    '',
+    'const Near := preload("other.gd")',
+    'const Alias = Near',
+    'var Helper: Other',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+    '',
+    'func matched(v: Variant) -> void:',
+    '\tmatch v:',
+    '\t\t[var Other]:',
+    '\t\t\tOther.make()',
+    '\t\t_:',
+    '\t\t\tOther.make()',
+    '\t\t\ttick()',
+    '',
+    '',
+    'func split(',
+    '\tOther: Kid,',
+    ') -> void:',
+    '\tOther.make()',
+    '',
+    '',
+    'func wrapped(',
+    '\t\tOther: Kid) -> void:',
+    '\tOther.make()',
+    '',
+    '',
+    'func made() -> void:',
+    '\tBase.new().tick()',
+    '\tKid.new().tick()',
+    '\tOther.create().tick()',
+    '\tconst M := preload("res://lane/other.gd")',
+    '\tM.make()',
+    '\tconst N = Near',
+    '\tN.make()',
+    '\tAlias.make()',
+    '\tNear.make()',
+    '',
+    '',
+    'class Inside:',
+    '\tfunc go() -> void:',
+    '\t\tHelper.make()',
+    '\t\tAlias.make()',
+    '',
+  ].join('\n');
+  const lane = [
+    ['res://lane/base.gd', yardTool.replace('class_name Tool', 'class_name Base')],
+    [
+      'res://lane/kid.gd',
+      yardTool.replace('class_name Tool\nextends RefCounted', 'class_name Kid\nextends Base'),
+    ],
+    ['res://lane/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://lane/helper.gd', yardTool.replace('class_name Tool', 'class_name Helper')],
+    ['res://lane/user.gd', laneUser],
+    [
+      'res://lane/outer.gd',
+      'class_name Outer\nextends RefCounted\n\nclass Box:\n\tstatic func make() -> int:\n\t\treturn 1\n\nclass Mid:\n\tpass\n',
+    ],
+    [
+      'res://lane/far.gd',
+      'class_name Far\nextends RefCounted\n\nclass Box:\n\tstatic func make() -> int:\n\t\treturn 2\n',
+    ],
+    ['res://lane/mid.gd', 'extends Outer.Mid\n\n\nfunc go() -> void:\n\tBox.make()\n'],
+  ] as const;
+  const laneAt = (name: string, script = 'user'): number[] =>
+    callersOf(totals({}), name, lane)
+      .sites.filter((one) => one.script === `res://lane/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    laneAt('Kid.make'),
+    [16, 18, 25, 30, 38, 40],
+    'the match binding in either branch, the parameters of split headers and the local constants, but not the class constants holding Other or the outer variable',
+  );
+  assert.deepEqual(
+    laneAt('Other.make'),
+    [16, 18, 25, 30, 38, 40, 41, 42, 48],
+    'every local named Other or holding a class, the class constants preloading or naming it, relatively too, and the outer constant seen from the inner class',
+  );
+  assert.deepEqual(
+    laneAt('Helper.make'),
+    [16, 18, 25, 30, 38, 40, 47],
+    "the locals, and Helper in the inner class, which does not see the outer class's variable, so it is the global class",
+  );
+  assert.deepEqual(
+    [laneAt('User.tick'), laneAt('Base.tick'), laneAt('Kid.tick')],
+    [
+      [19, 36],
+      [34, 36],
+      [35, 36],
+    ],
+    'a bare call in the other branch, an object new() made is of exactly that class, and a call result may be anything',
+  );
+  assert.deepEqual(
+    [laneAt('Outer.Box.make', 'mid'), laneAt('Far.Box.make', 'mid')],
+    [[5], []],
+    "a name is looked up in the class around the class extended, as the engine's analyser does",
+  );
+  // A local declared in a lambda, a lambda's parameter or a match binding used in its own guard may
+  // be the receiver, so the use is kept for either class. So is a use above the typed var of the
+  // same name. A script's own class_name is read before a member it inherits by that name.
+  const coveClass = (name: string, base = 'RefCounted'): string =>
+    [
+      `class_name ${name}`,
+      `extends ${base}`,
+      '',
+      '',
+      'static func open() -> String:',
+      `\treturn "${name}.open"`,
+      '',
+      '',
+      'static func take(_f: Callable) -> String:',
+      `\treturn "${name}.take"`,
+      '',
+      '',
+      'func tick() -> Variant:',
+      '\treturn null',
+      '',
+    ].join('\n');
+  const coveLam = [
+    'extends Node',
+    '',
+    'var target: Kid',
+    'signal done',
+    '',
+    '',
+    'func a() -> void:',
+    '\tdone.connect(func():',
+    '\t\tvar Other := Kid.new()',
+    '\t\tvar target := Other.new()',
+    '\t)',
+    '\tOther.open()',
+    '\ttarget.tick()',
+    '',
+    '',
+    'func b() -> String:',
+    '\treturn Other.take(',
+    '\t\tfunc(Other: Kid) -> void: pass',
+    '\t)',
+    '',
+    '',
+    'func c(v: Variant) -> void:',
+    '\tmatch v:',
+    '\t\tvar Other when Other is Kid and Other.tick() == null:',
+    '\t\t\tpass',
+    '',
+    '',
+    'func d() -> void:',
+    '\ttarget.tick()',
+    '\tvar target: Other = Other.new()',
+    '\ttarget.tick()',
+    '',
+    '',
+    'func e() -> void:',
+    '\tvar f := func(target: Kid) -> void:',
+    '\t\ttarget.tick()',
+    '\tvar target: Other = Other.new()',
+    '\ttarget.tick()',
+    '\tf.call(Kid.new())',
+    '',
+  ].join('\n');
+  const cove = [
+    ['res://cove/other.gd', coveClass('Other')],
+    ['res://cove/kid.gd', coveClass('Kid')],
+    [
+      'res://cove/base.gd',
+      'class_name CoveBase\nextends RefCounted\n\nconst Box = preload("res://cove/other.gd")\n',
+    ],
+    ['res://cove/box.gd', `${coveClass('Box', 'CoveBase')}\n\nfunc go() -> String:\n\treturn Box.open()\n`],
+    ['res://cove/lam.gd', coveLam],
+  ] as const;
+  const coveAt = (name: string, script: string, below = Number.POSITIVE_INFINITY): number[] =>
+    callersOf(totals({}), name, cove)
+      .sites.filter((one) => one.script === `res://cove/${script}.gd` && one.line < below)
+      .map((one) => one.line);
+  assert.deepEqual(
+    [
+      coveAt('Other.open', 'lam'),
+      coveAt('Kid.open', 'lam'),
+      coveAt('Other.tick', 'lam', 28),
+      coveAt('Kid.tick', 'lam', 28),
+    ],
+    [[12], [12], [13, 24], [13, 24]],
+    "a lambda's own locals and a match binding in its guard leave the receiver unread, so it is kept for either class",
+  );
+  assert.deepEqual(
+    [coveAt('Other.take', 'lam'), coveAt('Kid.take', 'lam')],
+    [[17], [17]],
+    "a lambda's parameter later in the statement leaves the receiver on its first line unread",
+  );
+  assert.deepEqual(
+    [
+      coveAt('Other.tick', 'lam').filter((line) => line >= 28),
+      coveAt('Kid.tick', 'lam').filter((line) => line >= 28),
+    ],
+    [
+      [29, 31, 36, 38],
+      [29, 31, 36, 38],
+    ],
+    'a typed local is kept for either class, above its declaration and after it',
+  );
+  assert.deepEqual(
+    [coveAt('Box.open', 'box'), coveAt('Other.open', 'box')],
+    [[18], []],
+    "a script's own class_name is read before the constant of that name it inherits",
+  );
+  // A function's constant is a local like any other, whatever block or lambda holds it. A local
+  // outside any function, in a class variable's lambda or a get block, keeps its name's uses too.
+  // A line at column 0 inside brackets or after a backslash does not end its inner class. A class
+  // variable has a class only where it is typed, by annotation or by a new() ending its line.
+  const reef = [
+    ['res://reef/other.gd', coveClass('Other')],
+    ['res://reef/kid.gd', coveClass('Kid')],
+    [
+      'res://reef/consts.gd',
+      [
+        'extends Node',
+        '',
+        '',
+        'func c1(x: bool) -> void:',
+        '\tif x:',
+        '\t\tconst Other = preload("res://reef/kid.gd")',
+        '\t\tOther.open()',
+        '\tOther.open()',
+        '',
+        '',
+        'func c2() -> void:',
+        '\tOther.open()',
+        '\tconst Other = preload("res://reef/kid.gd")',
+        '\tOther.open()',
+        '',
+        '',
+        'func c3() -> void:',
+        '\tvar f := func() -> void:',
+        '\t\tconst Other = preload("res://reef/kid.gd")',
+        '\t\tOther.open()',
+        '\tf.call()',
+        '\tOther.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/outside.gd',
+      [
+        'extends Node',
+        '',
+        'var cb := func(Other: Kid) -> String: return Other.open()',
+        'var held: String:',
+        '\tget:',
+        '\t\tvar Other := Kid.new()',
+        '\t\treturn Other.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/split.gd',
+      [
+        'extends Node',
+        '',
+        'var Kid: Other',
+        '',
+        '',
+        'class In0:',
+        '\tconst Kid = preload("res://reef/kid.gd")',
+        '',
+        '\tfunc g() -> void:',
+        '\t\tprint(',
+        '0)',
+        '\t\tKid.open()',
+        '\t\tvar sum := 1 + \\',
+        '2',
+        '\t\tKid.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/members.gd',
+      [
+        'extends Node',
+        '',
+        'var made := Kid.new()',
+        'var cast = Other.new() as Other',
+        'var chained := Other.new().call("tick")',
+        '',
+        '',
+        'func go() -> void:',
+        '\tmade.tick()',
+        '\tcast.tick()',
+        '\tchained.tick()',
+        '',
+        '',
+        'func typed() -> void:',
+        '\tconst Kid = preload("res://reef/other.gd")',
+        '\tvar Base: Kid = Kid.new()',
+        '\tBase.open()',
+        '',
+      ].join('\n'),
+    ],
+  ] as const;
+  const reefAt = (name: string, script: string): number[] =>
+    callersOf(totals({}), name, reef)
+      .sites.filter((one) => one.script === `res://reef/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    [reefAt('Kid.open', 'consts'), reefAt('Other.open', 'consts')],
+    [
+      [7, 8, 12, 14, 20, 22],
+      [7, 8, 12, 14, 20, 22],
+    ],
+    "a function's constant is kept for either class, inside its block, after it, above it and outside its lambda",
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'outside'), reefAt('Other.open', 'outside')],
+    [
+      [3, 7],
+      [3, 7],
+    ],
+    "a class variable's lambda parameter and a get block's local are kept for either class",
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'split'), reefAt('Other.open', 'split')],
+    [[12, 15], []],
+    'a column-0 line inside brackets or after a backslash carries on the inner class, whose constant holds',
+  );
+  assert.deepEqual(
+    [reefAt('Kid.tick', 'members'), reefAt('Other.tick', 'members')],
+    [
+      [9, 10, 11],
+      [10, 11],
+    ],
+    'a class variable inferred from a new() ending its line is of that class, and one cast with as or given a call result may hold anything',
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'members'), reefAt('Other.open', 'members')],
+    [[17], [17]],
+    'a typed local is kept for either class, also when a constant of the function names its type',
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [
