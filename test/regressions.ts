@@ -91765,14 +91765,9 @@ function testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay(): void {
     return;
   }
   const drive = `${letter}:`;
-  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelling-'));
+  const sandbox = chainSandbox();
   let mapped = false;
   try {
-    writeTree(join(sandbox, 'project'), { 'project.godot': 'config_version=5\n', 'real/a.tres': '' });
-    writeTree(join(sandbox, 'outside'), { 'c.tres': '' });
-    cpSync('src/godot/addons/gdharness_editor', join(sandbox, 'project', 'addons', 'gdharness_editor'), {
-      recursive: true,
-    });
     mapped = spawnSyncHidden('subst', [drive, sandbox], { encoding: 'utf8' }).status === 0;
     if (!mapped) {
       console.log('link chain spelling regression skipped (the platform refused a drive substitution)');
@@ -91782,41 +91777,122 @@ function testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay(): void {
     const outside = `${drive}/outside`;
     symlinkSync(outside, `${project}/shared`, 'junction');
     symlinkSync(`${project}/real`, `${outside}/back`, 'junction');
-    writeFileSync(
-      `${project}/runner.gd`,
-      [
-        'extends SceneTree',
-        '',
-        'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
-        '',
-        '',
-        'func _init() -> void:',
-        '\tvar links: PackedStringArray = ["res://shared/"]',
-        '\tvar paths: Array[String] = ["res://shared/back/a.tres", "res://shared/c.tres"]',
-        '\tvar refused: Array[bool] = []',
-        '\tfor path: String in paths:',
-        '\t\trefused.append(not GdhSceneFile.out_through_link(path, links).is_empty())',
-        '\tprint("SPELT " + JSON.stringify(refused))',
-        '\tquit(0)',
-        '',
-      ].join('\n'),
-    );
-    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
-      encoding: 'utf8',
-      timeout: 120000,
-    });
-    const said = `${run.stdout}\n${run.stderr}`;
-    const answered = /SPELT (\[.*\])/.exec(said)?.[1];
-    assert.ok(answered !== undefined, said);
     assert.deepEqual(
-      JSON.parse(answered),
+      chainJudged(godotPath, project, ['res://shared/back/a.tres', 'res://shared/c.tres']),
       [false, true],
-      `back into the project is inside, and c.tres is outside: ${said}`,
+      'back into the project is inside, and c.tres is outside',
     );
   } finally {
     if (mapped) {
       spawnSyncHidden('subst', [drive, '/d'], { encoding: 'utf8' });
     }
+    sweep(sandbox);
+  }
+}
+
+/**
+ * Which of [paths], res:// paths below the link `res://shared/`, the addon of the project at
+ * [project] refuses, run in an engine opened on [project] as it is spelt there.
+ */
+function chainJudged(godotPath: string, project: string, paths: readonly string[]): boolean[] {
+  writeFileSync(
+    `${project}/runner.gd`,
+    [
+      'extends SceneTree',
+      '',
+      'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tvar links: PackedStringArray = ["res://shared/"]',
+      `\tvar paths: Array[String] = ${JSON.stringify(paths)}`,
+      '\tvar refused: Array[bool] = []',
+      '\tfor path: String in paths:',
+      '\t\trefused.append(not GdhSceneFile.out_through_link(path, links).is_empty())',
+      '\tprint("JUDGED " + JSON.stringify(refused))',
+      '\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  const said = `${run.stdout}\n${run.stderr}`;
+  const answered = /JUDGED (\[.*\])/.exec(said)?.[1];
+  assert.ok(answered !== undefined, said);
+  return asArray(JSON.parse(answered)).map(Boolean);
+}
+
+/** A project to judge link chains in: the addon, a.tres in real/, and outside/ beside it. */
+function chainSandbox(): string {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelling-'));
+  writeTree(join(sandbox, 'project'), { 'project.godot': 'config_version=5\n', 'real/a.tres': '' });
+  writeTree(join(sandbox, 'outside'), { 'c.tres': '' });
+  cpSync('src/godot/addons/gdharness_editor', join(sandbox, 'project', 'addons', 'gdharness_editor'), {
+    recursive: true,
+  });
+  return sandbox;
+}
+
+/**
+ * The project is opened through a link to its folder, as a temp folder reached through /private is
+ * on macOS, and the links name the project by that spelling. Back into the project is inside.
+ */
+function testTheAddonJudgesALinkChainWhereTheProjectIsOpenedThroughALink(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('link chain open-through-a-link regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = chainSandbox();
+  try {
+    const opened = join(sandbox, 'opened');
+    symlinkSync(join(sandbox, 'project'), opened, 'junction');
+    symlinkSync(join(sandbox, 'outside'), join(opened, 'shared'), 'junction');
+    symlinkSync(join(opened, 'real'), join(sandbox, 'outside', 'back'), 'junction');
+    assert.deepEqual(
+      chainJudged(godotPath, opened, ['res://shared/back/a.tres', 'res://shared/c.tres']),
+      [false, true],
+      'back into the project is inside, and c.tres is outside',
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A link whose target does not exist is a chain that cannot be followed, whether or not the platform
+ * names the missing target when asked where the link points.
+ */
+function testALinkToAMissingTargetIsAChainThatCannotBeFollowed(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('missing link target regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = chainSandbox();
+  try {
+    const project = join(sandbox, 'project');
+    symlinkSync(join(sandbox, 'outside'), join(project, 'shared'), 'junction');
+    try {
+      symlinkSync(join(project, 'nowhere'), join(sandbox, 'outside', 'ghost'), 'dir');
+    } catch {
+      console.log('missing link target regression skipped (the platform refused a link)');
+      return;
+    }
+    assert.deepEqual(
+      chainJudged(godotPath, project, ['res://shared/ghost/x.tres', 'res://shared/c.tres']),
+      [true, true],
+      'a link into a folder that is not there is refused, though its target is inside the project',
+    );
+  } finally {
     sweep(sandbox);
   }
 }
@@ -98896,6 +98972,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnimationReachedByALinkBackInIsSaved,
   testTheAddonJudgesALinkChainByWhereItEnds,
   testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay,
+  testTheAddonJudgesALinkChainWhereTheProjectIsOpenedThroughALink,
+  testALinkToAMissingTargetIsAChainThatCannotBeFollowed,
   testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt,
   testAnAbsolutePathIsRespeltOnlyWhereCaseIsIgnored,
   testALinkChainTooLongToFollowIsNotSaidToLeadOut,

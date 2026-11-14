@@ -1027,7 +1027,7 @@ static func _is_below(led: String, inside: String) -> bool:
 
 
 ## Where the absolute path [param given] leads, each link on it followed in turn, or "" after
-## [constant MOST_LINKS] links, which is a ring. A link whose target is gone leads to that target.
+## [constant MOST_LINKS] links, which is a ring, or when a link's target is gone or cannot be read.
 static func _followed(given: String) -> String:
 	var parts: PackedStringArray = given.replace("\\", "/").simplify_path().split("/")
 	var disk: DirAccess = DirAccess.open(parts[0] + "/")
@@ -1067,7 +1067,10 @@ static func _target_of(disk: DirAccess, at: String, folder: String) -> String:
 		target = target.trim_prefix(prefix)
 	if not target.is_absolute_path():
 		target = folder.path_join(target)
-	return target.simplify_path()
+	target = target.simplify_path()
+	# Linux and macOS name the target of a dangling link and Windows does not, so a target that is
+	# not there is unreadable everywhere.
+	return target if disk.dir_exists(target) or disk.file_exists(target) else ""
 
 
 ## Frees [member root] and answers [param error] as a refusal.
