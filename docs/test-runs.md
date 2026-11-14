@@ -863,7 +863,8 @@ it holds one as long as it plays.
   run with several lanes follows the file this way even when it began on every lane it may have.
 - A run that can grow makes `<lanes file>.follows` as a lock is made, and takes one whose holder has
   gone over under its steal file. Until a live mark stands, the writer holds no more than the
-  number it told. A run that cannot grow reads the number for a fall and makes no mark.
+  number it told. A run that cannot grow reads the number for a fall and makes no mark. A run reads
+  the number for a fall whether or not it holds the mark, and rises only while it holds it.
 - The run removes its mark at once when it reaches its ceiling of processors, pool count or work,
   and otherwise once every share is handed out.
 - The engine that compiles every script together counts as one of the lanes. It runs in a lane's

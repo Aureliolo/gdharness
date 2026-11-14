@@ -749,7 +749,7 @@ import {
   unheldPort,
 } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
-import { leftInSlots } from './support/slots.js';
+import { leftInSlots, SLOT_VARIABLES, withTheSuitesOwnSlotVariables } from './support/slots.js';
 import {
   endEnginesLeft,
   leftBehindBy,
@@ -100366,6 +100366,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFallWhileEveryShareIsOutEndsTheParkedLanes,
   testAParkedLaneEndsWhenTheRunFails,
   testAMarkNotTakenStillLetsTheRunFallToTheLanesTold,
+  testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
@@ -100733,9 +100734,26 @@ function saidOfAFailure(error: unknown): string | undefined {
       : String(error);
 }
 
+/** Every slot variable the sources read is one a fixture starts without. */
+function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
+  const named = new Set<string>();
+  for (const file of readdirSync('src', { recursive: true, encoding: 'utf8' })) {
+    if (file.endsWith('.ts')) {
+      for (const match of readFileSync(join('src', file), 'utf8').matchAll(/GODOT_ENGINE_[A-Z_]+/g)) {
+        named.add(match[0]);
+      }
+    }
+  }
+  assert.ok(named.size >= 9, `the sources name the slot variables: ${String(named.size)}`);
+  for (const name of named) {
+    assert.ok(SLOT_VARIABLES.includes(name), `${name} is cleared before a fixture runs`);
+  }
+}
+
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */
 async function runOneRegression(test: RegressionCase, run: RegressionRun): Promise<void> {
   const { failed, ranPast, deadlineMs, budgetMs, runEnds } = run;
+  withTheSuitesOwnSlotVariables();
   sweepingFor(test.name);
   let passed = true;
   const began = Date.now();
