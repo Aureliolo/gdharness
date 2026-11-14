@@ -937,7 +937,7 @@ const SEEN_FROM_INSIDE: ReadonlySet<DeclarationKind> = new Set(['const', 'enum',
  * Reads the class a receiver names the way the engine looks a name up from the class body it is
  * written in: that class, the classes it extends with theirs, then the class around it, and the
  * global classes last. A variable or constant found on the way is what its declaration gives it,
- * and so is a local constant the use is in scope of.
+ * and so is a parameter or constant its function declares that name by and by nothing else.
  */
 class ClassScope {
   private readonly graph: ClassGraph;
@@ -986,13 +986,24 @@ class ClassScope {
   private looked(at: ClassId, name: string): Named | null {
     const owner = this.scopeOf(at).find(({ id, whole }) => {
       const kind = this.graph.declaration(id, name)?.kind;
-      return kind !== undefined && (whole || SEEN_FROM_INSIDE.has(kind));
+      return this.isOwnName(id, name) || (kind !== undefined && (whole || SEEN_FROM_INSIDE.has(kind)));
     });
+    if (owner !== undefined && this.isOwnName(owner.id, name)) {
+      return { id: owner.id, object: false };
+    }
     if (owner !== undefined) {
       return this.declared(owner.id, name);
     }
     const global = this.graph.named(name);
     return global === null ? null : { id: global, object: false };
+  }
+
+  /**
+   * Whether [param name] is the class_name of [param id], a script's own class. The engine reads it
+   * before that class's members, inherited ones included. An inner class's own name loses to them.
+   */
+  private isOwnName(id: ClassId, name: string): boolean {
+    return this.graph.outerOf(id) === null && this.graph.declared.get(name) === fileOf(id);
   }
 
   /** What the member [param name] of [param id], its own or inherited, names. */
@@ -1092,10 +1103,10 @@ class ClassScope {
   }
 }
 
-/** What a script's uses on self and on other receivers can reach, as `callSitesOf` asks. */
+/** What a script's uses on self and on other receivers can reach, as `callSitesOf` asks. Absent counts every use. */
 interface ScriptDispatch {
-  readonly onSelf: SelfDispatch;
-  readonly onReceiver: ReceiverDispatch;
+  readonly onSelf?: SelfDispatch;
+  readonly onReceiver?: ReceiverDispatch;
 }
 
 /**
@@ -1192,9 +1203,9 @@ function dispatchOf(
   name: string,
   rowsSayProperty: boolean,
 ): { property: boolean; forScript: (script: string) => ScriptDispatch } {
-  const every: ScriptDispatch = { onSelf: () => true, onReceiver: () => true };
+  // With no class asked about nothing is left out, so no receiver is read.
   if (asked === null) {
-    return { property: rowsSayProperty, forScript: () => every };
+    return { property: rowsSayProperty, forScript: () => ({}) };
   }
   const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
   const graph = new ClassGraph(scripts, declaredIn(scripts));
@@ -1214,7 +1225,7 @@ function dispatchOf(
         const named = scope.named(graph.bodyAt(script, offset), receiver);
         return named === null || (target !== null && related(graph, named.id, target));
       };
-    return { property, forScript: (script) => ({ onSelf: every.onSelf, onReceiver: onReceiver(script) }) };
+    return { property, forScript: (script) => ({ onReceiver: onReceiver(script) }) };
   }
   const dispatch = new Dispatch(graph, target, reached, name, kind);
   return { property, forScript: (script) => dispatch.forScript(script, scope) };

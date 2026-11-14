@@ -3184,10 +3184,10 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'and with no class asked about, the call through another class is listed as the note says',
   );
   // A receiver declared as another class is that class's object, whichever way it was declared: a
-  // typed local, a new(), a cast, a typed parameter, a typed for variable, a variable of the class.
-  // Reported from game-b on 1.1.61, `result.apply(...)` with `var result: Effect` above it. What says
-  // nothing about the class stays: an untyped local, a receiver that is a member of something else,
-  // and a variable declared as the class asked about.
+  // typed local, a new(), a cast, a typed parameter, a variable of the class. Reported from game-b
+  // on 1.1.61, `result.apply(...)` with `var result: Effect` above it. What says nothing about the
+  // class stays: an untyped local, a receiver that is a member of something else, a variable
+  // declared as the class asked about, and a for variable, whose scope is not read.
   const paying = [
     'class_name Prize',
     'extends RefCounted',
@@ -3224,8 +3224,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     paidAt('Placed.lift'),
-    [17, 18, 20],
-    'the receivers declared as Outcome are left out, and the Placed, dotted and untyped ones kept',
+    [17, 18, 20, 22],
+    'the receivers declared as Outcome are left out, and the Placed, dotted, untyped and for ones kept',
   );
   assert.deepEqual(
     paidAt('lift'),
@@ -3648,15 +3648,17 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ],
     'asked about a function the class does not declare, a use through a class above it, below it or past a missing script counts, and one through an unrelated class does not',
   );
-  // A match pattern binds in its own branch only, and a header's parameters may sit on later lines.
-  // new() makes exactly the class named. A constant, in the class or in a function, holds the class
-  // it preloads or names. An inner class sees its outer class's constants, never its variables.
+  // A name its function declares otherwise than once as a parameter, constant or statement var may
+  // be that local, so its uses are kept: a match binding, in any branch. A header's parameters may
+  // sit on later lines. new() makes exactly the class named. A constant, in the class or in a
+  // function, holds the class it preloads or names. An inner class sees its outer class's
+  // constants, never its variables.
   const laneUser = [
     'class_name User',
     'extends Node',
     '',
-    'const Alias = Other',
     'const Near := preload("other.gd")',
+    'const Alias = Near',
     'var Helper: Other',
     '',
     '',
@@ -3690,7 +3692,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\tOther.create().tick()',
     '\tconst M := preload("res://lane/other.gd")',
     '\tM.make()',
-    '\tconst N = Other',
+    '\tconst N = Near',
     '\tN.make()',
     '\tAlias.make()',
     '\tNear.make()',
@@ -3727,8 +3729,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     laneAt('Kid.make'),
-    [16, 25, 30],
-    "the match binding in its own branch and the parameters of split headers, but not the other branch's Other, the constants holding Other or the outer variable",
+    [16, 18, 25, 30],
+    'the match binding in either branch and the parameters of split headers, but not the constants holding Other or the outer variable',
   );
   assert.deepEqual(
     laneAt('Other.make'),
@@ -3737,7 +3739,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.deepEqual(
     laneAt('Helper.make'),
-    [16, 47],
+    [16, 18, 47],
     "an inner class does not see the outer class's variable, so Helper there is the global class",
   );
   assert.deepEqual(
@@ -3753,6 +3755,123 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [laneAt('Outer.Box.make', 'mid'), laneAt('Far.Box.make', 'mid')],
     [[5], []],
     "a name is looked up in the class around the class extended, as the engine's analyser does",
+  );
+  // A local declared in a lambda, a lambda's parameter or a match binding used in its own guard may
+  // be the receiver, so the use is kept for either class. So is a use above the typed var of the
+  // same name. A script's own class_name is read before a member it inherits by that name.
+  const coveClass = (name: string, base = 'RefCounted'): string =>
+    [
+      `class_name ${name}`,
+      `extends ${base}`,
+      '',
+      '',
+      'static func open() -> String:',
+      `\treturn "${name}.open"`,
+      '',
+      '',
+      'static func take(_f: Callable) -> String:',
+      `\treturn "${name}.take"`,
+      '',
+      '',
+      'func tick() -> Variant:',
+      '\treturn null',
+      '',
+    ].join('\n');
+  const coveLam = [
+    'extends Node',
+    '',
+    'var target: Kid',
+    'signal done',
+    '',
+    '',
+    'func a() -> void:',
+    '\tdone.connect(func():',
+    '\t\tvar Other := Kid.new()',
+    '\t\tvar target := Other.new()',
+    '\t)',
+    '\tOther.open()',
+    '\ttarget.tick()',
+    '',
+    '',
+    'func b() -> String:',
+    '\treturn Other.take(',
+    '\t\tfunc(Other: Kid) -> void: pass',
+    '\t)',
+    '',
+    '',
+    'func c(v: Variant) -> void:',
+    '\tmatch v:',
+    '\t\tvar Other when Other is Kid and Other.tick() == null:',
+    '\t\t\tpass',
+    '',
+    '',
+    'func d() -> void:',
+    '\ttarget.tick()',
+    '\tvar target: Other = Other.new()',
+    '\ttarget.tick()',
+    '',
+    '',
+    'func e() -> void:',
+    '\tvar target: Other = Other.new()',
+    '\tvar f := func() -> void:',
+    '\t\tvar target := Kid.new()',
+    '\t\ttarget.tick()',
+    '\ttarget.tick()',
+    '\tf.call()',
+    '',
+  ].join('\n');
+  const cove = [
+    ['res://cove/other.gd', coveClass('Other')],
+    ['res://cove/kid.gd', coveClass('Kid')],
+    [
+      'res://cove/base.gd',
+      'class_name CoveBase\nextends RefCounted\n\nconst Box = preload("res://cove/other.gd")\n',
+    ],
+    ['res://cove/box.gd', `${coveClass('Box', 'CoveBase')}\n\nfunc go() -> String:\n\treturn Box.open()\n`],
+    ['res://cove/lam.gd', coveLam],
+  ] as const;
+  const coveAt = (name: string, script: string, below = Number.POSITIVE_INFINITY): number[] =>
+    callersOf(totals({}), name, cove)
+      .sites.filter((one) => one.script === `res://cove/${script}.gd` && one.line < below)
+      .map((one) => one.line);
+  assert.deepEqual(
+    [
+      coveAt('Other.open', 'lam'),
+      coveAt('Kid.open', 'lam'),
+      coveAt('Other.tick', 'lam', 28),
+      coveAt('Kid.tick', 'lam', 28),
+    ],
+    [[12], [12], [13, 24], [13, 24]],
+    "a lambda's own locals and a match binding in its guard leave the receiver unread, so it is kept for either class",
+  );
+  assert.deepEqual(
+    [coveAt('Other.take', 'lam'), coveAt('Kid.take', 'lam')],
+    [[17], [17]],
+    "a lambda's parameter later in the statement leaves the receiver on its first line unread",
+  );
+  assert.deepEqual(
+    [
+      coveAt('Other.tick', 'lam', 34).filter((line) => line >= 28),
+      coveAt('Kid.tick', 'lam', 34).filter((line) => line >= 28),
+    ],
+    [[29, 31], [29]],
+    'a typed var of the function holds from the line after it, and a use above it is kept',
+  );
+  assert.deepEqual(
+    [
+      coveAt('Other.tick', 'lam').filter((line) => line >= 34),
+      coveAt('Kid.tick', 'lam').filter((line) => line >= 34),
+    ],
+    [
+      [38, 39],
+      [38, 39],
+    ],
+    'a name its function declares twice is kept for either class, even where one of them is typed',
+  );
+  assert.deepEqual(
+    [coveAt('Box.open', 'box'), coveAt('Other.open', 'box')],
+    [[18], []],
+    "a script's own class_name is read before the constant of that name it inherits",
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [

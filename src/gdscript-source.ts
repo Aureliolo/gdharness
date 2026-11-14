@@ -1020,61 +1020,39 @@ export function declaredClass(text: string, name: string): string | null {
  *
  * Walked upwards: a line indented less than the last is a block holding this one, and a line at the
  * same depth is an earlier statement of the same block, whose declarations are in scope. Lines more
- * deeply indented belong to blocks already closed, so what they declare is not. A statement split
- * over lines, such as a function header with a parameter on each, is read whole from its first
- * line. A match pattern binds only in its own branch, so another branch's pattern binds nothing.
+ * deeply indented belong to blocks already closed, so what they declare is not.
  */
-function localAt(
-  lines: readonly string[],
-  index: number,
-  name: string,
-): { type: string | null; line: number } | null {
+function localAt(lines: readonly string[], index: number, name: string): { type: string | null } | null {
   const word = escapedForPattern(name);
   const declares = new RegExp(`(?<![\\p{L}\\p{N}_.])(?:var|const)\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
   const iterates = new RegExp(`^\\s*for\\s+${word}(?![\\p{L}\\p{N}_])`, 'u');
-  const local = (text: string, line: number) => ({ type: declaredClass(text, name), line });
-  const ownStart = statementStart(lines, index);
-  const own = joinedFrom(lines, ownStart);
-  const onOwnLine = ownHeaderVerdict(own, name);
-  if (onOwnLine !== 'passes') {
-    return onOwnLine === 'binds' ? local(own, ownStart) : null;
+  const local = (text: string): { type: string | null } => ({ type: declaredClass(text, name) });
+  const own = lines[index] ?? '';
+  const headerOnOwnLine = FUNC_LINE.exec(own) ?? LAMBDA_HEADER.exec(own);
+  if (headerOnOwnLine !== null && parametersOf(own, headerOnOwnLine.index).includes(name)) {
+    return local(own);
   }
-  let depth = indentOf(lines[ownStart] ?? '');
-  for (let at = ownStart - 1; at >= 0; at -= 1) {
-    if (isInsideClosedBlock(lines[at] ?? '', depth)) {
+  if (FUNC_LINE.test(own)) {
+    return null;
+  }
+  let depth = indentOf(own);
+  for (let at = index - 1; at >= 0; at -= 1) {
+    const text = lines[at] ?? '';
+    const indent = indentOf(text);
+    if (text.trim() === '' || indent > depth) {
       continue;
     }
-    at = statementStart(lines, at);
-    const text = joinedFrom(lines, at);
-    const indent = indentOf(text);
     const enclosing = indent < depth;
     depth = indent;
     const verdict = scopeVerdict(text, name, enclosing, depth === 0, { declares, iterates });
-    if (verdict === 'binds' && (enclosing || !isMatchBranch(lines, at))) {
-      return local(text, at);
+    if (verdict === 'binds') {
+      return local(text);
     }
     if (verdict === 'ends') {
       return null;
     }
   }
   return null;
-}
-
-/**
- * What the statement [param own] holding the place asked about says of the local [param name]: a
- * function or lambda header taking it binds it, and a function header that does not ends the walk.
- */
-function ownHeaderVerdict(own: string, name: string): 'binds' | 'ends' | 'passes' {
-  const header = FUNC_LINE.exec(own) ?? LAMBDA_HEADER.exec(own);
-  if (header !== null && parametersOf(own, header.index).includes(name)) {
-    return 'binds';
-  }
-  return FUNC_LINE.test(own) ? 'ends' : 'passes';
-}
-
-/** Whether the line [param text] says nothing of a place at [param depth]: blank, or in a block already closed. */
-function isInsideClosedBlock(text: string, depth: number): boolean {
-  return text.trim() === '' || indentOf(text) > depth;
 }
 
 /** The sum of what the brackets of [param text] open and close. */
@@ -1084,49 +1062,6 @@ function bracketsOpenedBy(text: string): number {
     open += bracketDelta(character);
   }
   return open;
-}
-
-/** Where the statement holding line [param at] of [param lines] starts: earlier when the line closes brackets. */
-function statementStart(lines: readonly string[], at: number): number {
-  if (!/[)\]}]/.test(lines[at] ?? '')) {
-    return at;
-  }
-  let open = bracketsOpenedBy(lines[at] ?? '');
-  let start = at;
-  while (open < 0 && start > 0 && at - start < STATEMENT_LINES) {
-    start -= 1;
-    open += bracketsOpenedBy(lines[start] ?? '');
-  }
-  return open < 0 ? at : start;
-}
-
-/** The statement starting at line [param at] of [param lines], with the lines its open brackets run on to. */
-function joinedFrom(lines: readonly string[], at: number): string {
-  let text = lines[at] ?? '';
-  if (!/[([{]/.test(text)) {
-    return text;
-  }
-  let open = bracketsOpenedBy(text);
-  for (let next = at + 1; open > 0 && next < lines.length && next - at < STATEMENT_LINES; next += 1) {
-    text += `\n${lines[next] ?? ''}`;
-    open += bracketsOpenedBy(lines[next] ?? '');
-  }
-  return text;
-}
-
-/** How many lines one statement is read across at most. */
-const STATEMENT_LINES = 64;
-
-/** Whether line [param at] of [param lines] is a branch of a match, the block holding it. */
-function isMatchBranch(lines: readonly string[], at: number): boolean {
-  const indent = indentOf(lines[at] ?? '');
-  for (let above = at - 1; above >= 0; above -= 1) {
-    const text = lines[above] ?? '';
-    if (text.trim() !== '' && indentOf(text) < indent) {
-      return /^\s*match\b/u.test(text);
-    }
-  }
-  return false;
 }
 
 /**
@@ -1289,7 +1224,7 @@ export function callSitesOf(
   const codeLines = code.split('\n');
   const lines = new Lines(source);
   const shape = shapeOf(source);
-  let declared: ReadonlySet<string> | null = null;
+  const functions = new FunctionsOf(codeLines);
   const scan: CallScan = {
     source,
     name,
@@ -1301,10 +1236,8 @@ export function callSitesOf(
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
     onSelf: dispatch.onSelf ?? (() => true),
     onReceiver: dispatch.onReceiver ?? (() => true),
-    mayBeLocal: (one) => {
-      declared ??= localNamesIn(code);
-      return declared.has(one);
-    },
+    readsReceivers: dispatch.onSelf !== undefined || dispatch.onReceiver !== undefined,
+    namesAt: (line) => functions.namesAt(line),
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1331,27 +1264,153 @@ interface CallScan {
   readonly accessors: readonly (readonly [number, number])[];
   readonly onSelf: SelfDispatch;
   readonly onReceiver: ReceiverDispatch;
-  /** Whether [param name] is declared anywhere in the script as a local could be, read once. */
-  readonly mayBeLocal: (name: string) => boolean;
+  /** Whether a member use's receiver is read at all: not when nothing would leave it out. */
+  readonly readsReceivers: boolean;
+  /** What the function holding zero-based line [param line] declares, null outside any function. */
+  readonly namesAt: (line: number) => FunctionNames | null;
+}
+
+/** What one function declares, read off its whole text, header and lambdas included. */
+interface FunctionNames {
+  /** How often each name is declared: as a parameter, a lambda's parameter, or by var, const or for. */
+  readonly counts: ReadonlyMap<string, number>;
+  /** The class each of the function's own parameters is declared as, null where none is written. */
+  readonly parameters: ReadonlyMap<string, string | null>;
+  /** The zero-based line of each `const`. */
+  readonly constants: ReadonlyMap<string, number>;
+  /**
+   * The zero-based line of each `var` that is a statement of the function's own block, not of a
+   * block or lambda inside it. It holds from the next line to the end of the function.
+   */
+  readonly statements: ReadonlyMap<string, number>;
+}
+
+const DECLARED_IN_BODY = new RegExp(`(?<![\\p{L}\\p{N}_.])(var|const|for)\\s+(${NAME})`, 'gu');
+const FUNC_WORD = /(?<![\p{L}\p{N}_.])func(?![\p{L}\p{N}_])/gu;
+
+/** The named functions of a script's code, each read for what it declares the first time it is asked. */
+class FunctionsOf {
+  private readonly lines: readonly string[];
+  /** Each function's first and last line, in order. */
+  private readonly spans: (readonly [number, number])[] = [];
+  private readonly read = new Map<number, FunctionNames>();
+
+  constructor(lines: readonly string[]) {
+    this.lines = lines;
+    for (let at = 0; at < lines.length; at += 1) {
+      if (FUNC_LINE.test(lines[at] ?? '')) {
+        const last = this.lastLineOf(at);
+        this.spans.push([at, last]);
+        at = last;
+      }
+    }
+  }
+
+  namesAt(line: number): FunctionNames | null {
+    const span = this.spans.find(([first, last]) => first <= line && line <= last);
+    if (span === undefined) {
+      return null;
+    }
+    let names = this.read.get(span[0]);
+    if (names === undefined) {
+      names = this.namesIn(span[0], span[1]);
+      this.read.set(span[0], names);
+    }
+    return names;
+  }
+
+  /** The last line of the function whose header starts at [param header]: past its header, then while indented under it. */
+  private lastLineOf(header: number): number {
+    const indent = indentOf(this.lines[header] ?? '');
+    let last = header;
+    for (let open = bracketsOpenedBy(this.lines[header] ?? ''); open > 0 && last + 1 < this.lines.length; ) {
+      last += 1;
+      open += bracketsOpenedBy(this.lines[last] ?? '');
+    }
+    for (let next = last + 1; next < this.lines.length; next += 1) {
+      const text = this.lines[next] ?? '';
+      if (text.trim() !== '' && indentOf(text) <= indent) {
+        break;
+      }
+      last = next;
+    }
+    return last;
+  }
+
+  private namesIn(first: number, last: number): FunctionNames {
+    const text = this.lines.slice(first, last + 1).join('\n');
+    const counts = new Map<string, number>();
+    const count = (name: string): void => {
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    };
+    const constants = new Map<string, number>();
+    const statements = new Map<string, number>();
+    const indent = this.bodyIndent(first, last);
+    for (const match of text.matchAll(DECLARED_IN_BODY)) {
+      const name = match[2] ?? '';
+      const line = first + (text.slice(0, match.index).match(/\n/g)?.length ?? 0);
+      count(name);
+      if (match[1] === 'const') {
+        constants.set(name, line);
+      }
+      const own = this.lines[line] ?? '';
+      if (match[1] === 'var' && indentOf(own) === indent && /^\s*var\s/u.test(own)) {
+        statements.set(name, line);
+      }
+    }
+    return { counts, parameters: parametersIn(text, count), constants, statements };
+  }
+
+  /** How deeply the function from [param first] to [param last] indents its own block's statements. */
+  private bodyIndent(first: number, last: number): number {
+    let header = first;
+    for (let open = bracketsOpenedBy(this.lines[first] ?? ''); open > 0 && header < last; ) {
+      header += 1;
+      open += bracketsOpenedBy(this.lines[header] ?? '');
+    }
+    let indent = Number.POSITIVE_INFINITY;
+    for (let at = header + 1; at <= last; at += 1) {
+      const text = this.lines[at] ?? '';
+      if (text.trim() !== '') {
+        indent = Math.min(indent, indentOf(text));
+      }
+    }
+    return indent;
+  }
 }
 
 /**
- * Every name [param code] declares with `var`, `const` or `for`, or takes as a parameter of a
- * function or lambda: more than the locals of any one place, and never fewer.
+ * The classes the function [param text] declares its own parameters as. Every `func` in it, its
+ * lambdas' included, hands each parameter to [param count].
  */
-function localNamesIn(code: string): Set<string> {
-  const names = new Set<string>();
-  for (const match of code.matchAll(
-    new RegExp(`(?<![\\p{L}\\p{N}_.])(?:var|const|for)\\s+(${NAME})`, 'gu'),
-  )) {
-    names.add(match[1] ?? '');
-  }
-  for (const match of code.matchAll(/(?<![\p{L}\p{N}_.])func(?![\p{L}\p{N}_])/gu)) {
-    for (const parameter of parametersOf(code, match.index)) {
-      names.add(parameter);
+function parametersIn(text: string, count: (name: string) => void): Map<string, string | null> {
+  const parameters = new Map<string, string | null>();
+  // The first `func` is the function's own header, whose parameters hold in all of its body.
+  for (const [at, match] of [...text.matchAll(FUNC_WORD)].entries()) {
+    const taken = parametersOf(text, match.index);
+    for (const name of taken) {
+      count(name);
+    }
+    if (at === 0) {
+      const header = text.slice(0, closingParenAfter(text, match.index) + 1);
+      for (const name of taken) {
+        parameters.set(name, declaredClass(header, name));
+      }
     }
   }
-  return names;
+  return parameters;
+}
+
+/** Where the bracket group opened by the first `(` after [param from] in [param text] closes. */
+function closingParenAfter(text: string, from: number): number {
+  let depth = 0;
+  for (let at = text.indexOf('(', from); at !== -1 && at < text.length; at += 1) {
+    depth += bracketDelta(text[at]);
+    if (depth === 0) {
+      return at;
+    }
+  }
+  return text.length - 1;
 }
 
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
@@ -1387,10 +1446,12 @@ function accessorsIn(
 
 /**
  * Whether a member use at [param offset], on line [param index], can reach the function asked
- * about. A local of the receiver's first name hides a class or member of that name, as in GDScript.
+ * about. A receiver whose first name its function declares may be that local, so it is kept. The
+ * exception is a name declared there once: as the function's own parameter, as a constant, or as a
+ * `var` of the function's own block on an earlier line. Each of those says its class.
  */
 function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean {
-  const path = receiverPathBefore(scan.code, offset);
+  const path = scan.readsReceivers ? receiverPathBefore(scan.code, offset) : null;
   if (path === null) {
     return true;
   }
@@ -1401,26 +1462,51 @@ function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean
       ? scan.onSelf(offset, first)
       : scan.onReceiver(offset, { start: 'self', type: null, names: rest, made });
   }
-  const local = scan.mayBeLocal(first) ? localAt(scan.codeLines, index, first) : null;
-  if (local === null) {
+  const declared = scan.namesAt(index);
+  if (declared === null || !declared.counts.has(first)) {
     return scan.onReceiver(offset, { start: 'name', type: null, names, made });
   }
-  const constant = localConstant(scan, first, local.line);
-  return scan.onReceiver(offset, {
-    start: 'local',
-    type: local.type,
-    names: rest,
-    made,
-    ...(constant === null ? {} : { constant }),
-  });
+  return isLocalUseKept(scan, offset, index, declared, path);
 }
 
-/** The declaration on line [param line] when it declares [param name] as a constant, as `Receiver` carries it. */
-function localConstant(scan: CallScan, name: string, line: number): NonNullable<Receiver['constant']> | null {
-  const code = scan.codeLines[line] ?? '';
-  if (!new RegExp(`^\\s*const\\s+${escapedForPattern(name)}(?![\\p{L}\\p{N}_])`, 'u').test(code)) {
+/** [method isMemberUseKept] for a receiver whose first name the function holding it declares. */
+function isLocalUseKept(
+  scan: CallScan,
+  offset: number,
+  index: number,
+  declared: FunctionNames,
+  { names, made }: { names: readonly string[]; made: boolean },
+): boolean {
+  const [first = '', ...rest] = names;
+  if ((declared.counts.get(first) ?? 0) > 1) {
+    return true;
+  }
+  const local = { start: 'local', names: rest, made } as const;
+  const parameter = declared.parameters.get(first);
+  if (parameter !== undefined) {
+    return scan.onReceiver(offset, { ...local, type: parameter });
+  }
+  const statement = declared.statements.get(first);
+  if (statement !== undefined) {
+    return (
+      index <= statement ||
+      scan.onReceiver(offset, { ...local, type: declaredClass(scan.codeLines[statement] ?? '', first) })
+    );
+  }
+  const constant = localConstant(scan, first, declared.constants.get(first));
+  return constant === null || scan.onReceiver(offset, { ...local, type: null, constant });
+}
+
+/** The constant [param name] declared on line [param line], as `Receiver` carries it, or null. */
+function localConstant(
+  scan: CallScan,
+  name: string,
+  line: number | undefined,
+): NonNullable<Receiver['constant']> | null {
+  if (line === undefined) {
     return null;
   }
+  const code = scan.codeLines[line] ?? '';
   const start = scan.lines.offsetOf({ line, character: 0 });
   return { name, text: start === null ? code : scan.lines.lineAt(start), code };
 }
