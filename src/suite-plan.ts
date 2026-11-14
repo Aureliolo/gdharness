@@ -965,9 +965,13 @@ export class Shares {
   /**
    * What starting an engine costs, as this run's engines have shown. The constant stands with them
    * as one more reading, and the lower of the two middle ones is taken when there is an even number.
-   * So one slow start alone changes nothing, and it takes two engines starting alike to move it.
+   * Nothing is read before two engines have shown a start, so one start alone changes nothing, fast or
+   * slow, and it takes two engines starting alike to move it.
    */
   startSeconds(): number {
+    if (this.starts.length < 2) {
+      return ENGINE_START_SECONDS;
+    }
     const readings = [ENGINE_START_SECONDS, ...this.starts].toSorted((a, b) => a - b);
     return readings[Math.floor((readings.length - 1) / 2)] ?? ENGINE_START_SECONDS;
   }

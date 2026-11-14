@@ -269,7 +269,7 @@ than that is a share of its own.
 An engine start is read from the run's own engines: the seconds each took before its first suite,
 which the run prints as "Before their first suite the engines spent". Until two engines have
 shown it, a start counts 5 seconds, so the floor is 30. The middle reading of theirs and the 5
-seconds is taken (the lower of two middle ones), so one slow start never sets it.
+seconds is taken (the lower of two middle ones), so one start, fast or slow, never sets it alone.
 
 The shares shrink as the work runs out. A slot freed partway through takes on part of what is
 left, rather than a part fixed when the run began. Once everything is handed out, the run stops

@@ -1172,10 +1172,6 @@ export class EngineSlots {
     if (this.waitsOnTheLentSlot()) {
       return null;
     }
-    if (line?.mark !== undefined) {
-      // Every look says its taker still looks, so the slots left to a wait for several last its drain.
-      lookNoted(join(this.directory, WAITING_FOLDER, line.mark));
-    }
     const taker = this.taker();
     if (await this.starvedOutFor(taker)) {
       return null;
@@ -1190,6 +1186,11 @@ export class EngineSlots {
     );
     if (game && this.drawn.limit === 'kept' && (await this.gamesFillTheKeptSlots())) {
       return null;
+    }
+    if (line?.mark !== undefined) {
+      // A look that may take something says its taker still looks, so the slots left to a wait for
+      // several last its drain. A taker held back says nothing and stops holding the takers behind it.
+      lookNoted(join(this.directory, WAITING_FOLDER, line.mark));
     }
     const tried =
       taker === 'timing'

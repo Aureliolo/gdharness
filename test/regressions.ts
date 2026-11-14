@@ -60064,6 +60064,8 @@ function testAShareFloorIsWhatTheRunsEnginesTookToStart(): void {
     'engines that start in 2 s make it 12 s, since the middle reading is theirs',
   );
   assert.equal(sharesAfterStarts([0, -3, Number.NaN]).later, 30, 'nor one that is no time');
+  assert.equal(sharesAfterStarts([0.3]).later, 30, 'one fast start alone changes nothing either');
+  assert.equal(sharesAfterStarts([0.3, 10]).later, 30, 'nor does a fast one beside a slow one');
 }
 
 /**
@@ -60161,6 +60163,67 @@ async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promi
     assert.equal(locksHeld(), 0, 'and no slot is left held');
   } finally {
     endAll();
+    sweep(machine);
+    sweep(pool);
+  }
+}
+
+/**
+ * A lane parked by a fall ends when the run fails, with shares still left. It neither loops on the
+ * lanes file nor takes the follows mark back once the run has ended its follower.
+ */
+async function testAParkedLaneEndsWhenTheRunFails(): Promise<void> {
+  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fail-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fail-pool-'));
+  const holder = { pid: process.pid, started: await ownStart() };
+  const file = join(pool, 'lanes-1.json');
+  writeFileSync(
+    file,
+    JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }),
+  );
+  const slots = new EngineSlots(machine, 4, holder);
+  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
+  let reads = 0;
+  const told = followed.told.bind(followed);
+  followed.told = async (): Promise<number | null> => {
+    reads += 1;
+    return await told();
+  };
+  const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const run = async (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
+    await delay(300);
+    throw new Error(`engine ${String(index)} could not be started`);
+  };
+  try {
+    const failed = await runShares(
+      slots,
+      units,
+      declared,
+      3,
+      [],
+      {},
+      run,
+      undefined,
+      undefined,
+      followed,
+    ).then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    assert.match(failed ?? '', /could not be started/, 'the engine failure ends the run');
+    followed.end();
+    const after = reads;
+    const began = Date.now();
+    await delay(400);
+    assert.ok(Date.now() - began < 800, 'and the process is not kept busy by a parked lane');
+    assert.ok(
+      reads - after <= 2,
+      `the lanes file is not read again once the run has ended: ${String(reads - after)}`,
+    );
+    assert.equal(existsSync(`${file}${FOLLOWS_SUFFIX}`), false, 'and no follows mark is written after it');
+  } finally {
+    followed.end();
     sweep(machine);
     sweep(pool);
   }
@@ -60868,6 +60931,50 @@ async function testAStarvedMeasurementHoldsSideEngines(): Promise<void> {
     assert.ok(freed !== null, 'a claim whose claimer has gone holds nothing');
     assert.equal(existsSync(claimFile), false, 'and is removed');
     outside.release(freed);
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_ENGINE_STARVING'];
+    } else {
+      process.env['GODOT_ENGINE_STARVING'] = before;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A one-off held back by a starved measurement says nothing of looking, so the takers behind it are
+ * not kept from a free slot by it. The same look with the claim gone says it looks.
+ */
+async function testATakerHeldBackByAClaimDoesNotSayItLooks(): Promise<void> {
+  const claimer = process.ppid;
+  const read = (await startTimesOf([claimer])).get(claimer);
+  assert.ok(read !== undefined, 'the fixture needs the start of a live process that is not this one');
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-look-'));
+  const claimFile = join(directory, STARVED_FILE);
+  const before = process.env['GODOT_ENGINE_STARVING'];
+  delete process.env['GODOT_ENGINE_STARVING'];
+  try {
+    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
+    writeFileSync(
+      claimFile,
+      JSON.stringify({ pid: claimer, started: Math.round(read), what: 'the bench of /p', starved: 7200 }),
+    );
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    const line = new SlotLine('other');
+    line.mark = 'held-1.json';
+    const note = join(directory, WAITING_FOLDER, 'held-1.seen');
+    assert.equal(
+      await outside.takeFree(false, ONE_OFF_AGED_MS, line),
+      null,
+      'the claim holds the aged one-off',
+    );
+    assert.equal(existsSync(note), false, 'and a taker it holds back does not say it looks');
+    rmSync(claimFile);
+    const lock = await outside.takeFree(false, ONE_OFF_AGED_MS, line);
+    assert.ok(lock !== null, 'with the claim gone the same look takes a slot');
+    assert.equal(existsSync(note), true, 'and says it looks');
+    outside.release(lock);
   } finally {
     if (before === undefined) {
       delete process.env['GODOT_ENGINE_STARVING'];
@@ -100174,11 +100281,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
+  testATakerHeldBackByAClaimDoesNotSayItLooks,
   testGatesInTheQueueKeepTheirSlots,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
   testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
   testAFallWhileEveryShareIsOutEndsTheParkedLanes,
+  testAParkedLaneEndsWhenTheRunFails,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,

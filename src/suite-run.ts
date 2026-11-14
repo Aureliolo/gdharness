@@ -2014,8 +2014,14 @@ export async function runShares<
   // The share this lane would draw now, read at each look. A run following a lanes file reads it
   // between the admission and the draw, and asks again if the share it would draw has grown.
   const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
-  /** Whether the lanes file tells fewer lanes than lane [param at] belongs to. */
+  /**
+   * Whether the lanes file tells fewer lanes than lane [param at] belongs to. Once the run is over
+   * it reads nothing and answers no, so a lane parked when another failed ends instead of looping.
+   */
   const fallenPast = async (at: number): Promise<boolean> => {
+    if (handedOut.signal.aborted) {
+      return false;
+    }
     const told = (await raised?.told?.()) ?? null;
     return raised?.untilTold !== undefined && told !== null && at >= told;
   };
