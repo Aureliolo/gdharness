@@ -61404,7 +61404,7 @@ function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
       ],
       'the script that is no suite is handed to no engine',
     );
-    assert.deepEqual(asked?.notRun, ['helper_cases:test_helper'], 'and its case is named as not run');
+    assert.deepEqual(asked.notRun, ['helper_cases:test_helper'], 'and its case is named as not run');
     // A folder run names the scripts left out, to fail the run as a single run does.
     assert.equal(folder({})?.notSuites.length, 1, 'a folder run names the one script that is no suite');
   } finally {
@@ -61482,6 +61482,7 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
     options: { aborted?: (call: number) => boolean; clock?: number[]; during?: (call: number) => void } = {},
   ): { seen: OperationParams[]; run: () => Promise<ToolResponse> } => {
     const seen: OperationParams[] = [];
+    const clock = options.clock ?? [0];
     let ticks = 0;
     return {
       seen,
@@ -61490,20 +61491,21 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
           plan(),
           { timeoutMs: 20_000 },
           {
-            run: async (given) => {
+            run: (given) => {
               seen.push(given);
               options.during?.(seen.length);
-              return answers[seen.length - 1] ?? reply({ passed: true });
+              return Promise.resolve(answers[seen.length - 1] ?? reply({ passed: true }));
             },
             aborted: () => options.aborted?.(seen.length) ?? false,
-            now: () => options.clock?.[Math.min(ticks++, (options.clock?.length ?? 1) - 1)] ?? 0,
+            now: () => clock[Math.min(ticks++, clock.length - 1)] ?? 0,
           },
         ),
     };
   };
   const jsonOfLast = (response: ToolResponse): Record<string, unknown> => {
     const last = response.content.at(-1);
-    return JSON.parse(last?.type === 'text' ? last.text : '{}') as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(last?.type === 'text' ? last.text : '{}');
+    return isRecord(parsed) ? parsed : {};
   };
 
   // The explanations of an engine without a report, and the flags and command lines of both.
@@ -61512,7 +61514,7 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
       passed: false,
       verdict: 'timed out',
       hung: false,
-      timedOut: true,
+      timedOut: false,
       silentForMs: 30,
       arguments: ['--w'],
     }),
@@ -61520,7 +61522,7 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
       passed: false,
       verdict: 'timed out; hung',
       hung: true,
-      timedOut: false,
+      timedOut: true,
       silentForMs: 20,
       arguments: ['--h'],
     }),
@@ -61543,7 +61545,7 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
     plan({ notSuites: ['helper_cases.gd declares cases'], notRun: ['helper_cases:test_helper'] }),
     {},
     {
-      run: async () => reply({ passed: true, verdict: 'passed', tests: 1 }),
+      run: () => Promise.resolve(reply({ passed: true, verdict: 'passed', tests: 1 })),
       aborted: () => false,
       now: () => 0,
     },
@@ -61618,26 +61620,28 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
   );
   await cutInside.run();
   const record = takeCutTestRun(root);
-  assert.deepEqual(record?.paths, [windowedPath, ...headlessPaths], 'every suite of the call is named');
+  assert.ok(record !== null, 'a record is kept');
+  assert.deepEqual(record.paths, [windowedPath, ...headlessPaths], 'every suite of the call is named');
   assert.deepEqual(
-    record?.suitesFinished,
+    record.suitesFinished,
     [windowedPath, headlessPaths[0]],
     'the windowed engine finished, and so did the headless suite before the cut',
   );
   assert.deepEqual(
-    record?.suitesFailing?.map((suite) => [suite.path, suite.failed]),
+    record.suitesFailing?.map((suite) => [suite.path, suite.failed]),
     [[windowedPath, ['test_menu']]],
     'and the windowed engine failures are kept',
   );
-  assert.equal(record?.suiteRunning, headlessPaths[1], 'with the suite that was running');
+  assert.equal(record.suiteRunning, headlessPaths[1], 'with the suite that was running');
 
   // A cut after the windowed engine answered whole keeps the headless suites not yet run.
   const between = driven([reply({ passed: true, tests: 1 })], { aborted: () => true, clock: [Date.now()] });
   await between.run();
   assert.equal(between.seen.length, 1, 'the headless engine never starts');
   const betweenRecord = takeCutTestRun(root);
-  assert.deepEqual(betweenRecord?.paths, [windowedPath, ...headlessPaths]);
-  assert.deepEqual(betweenRecord?.suitesFinished, [windowedPath]);
+  assert.ok(betweenRecord !== null, 'a record is kept');
+  assert.deepEqual(betweenRecord.paths, [windowedPath, ...headlessPaths]);
+  assert.deepEqual(betweenRecord.suitesFinished, [windowedPath]);
 
   // A suite whose cases are all left out of the window gets no window in its engine.
   const needs = {
@@ -71021,6 +71025,26 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             [get(ignoring, 'passed'), get(ignoring, 'tests'), get(ignoring, 'windowed')],
             [true, 1, undefined],
             JSON.stringify(ignoring),
+          );
+          // The same when only the cases of that suite are left out: one headless engine, no window,
+          // and the suite saying it runs headless sees the headless display server.
+          const casesIgnored = jsonOf(
+            await call(
+              'project_test',
+              { projectPath: project, path: 'win', ignore: ['shown_test:test_shown'] },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+            'casesIgnored',
+          );
+          assert.deepEqual(
+            [
+              get(casesIgnored, 'passed'),
+              get(casesIgnored, 'tests'),
+              get(casesIgnored, 'windowed'),
+              get(casesIgnored, 'engines'),
+            ],
+            [true, 1, undefined, undefined],
+            JSON.stringify(casesIgnored),
           );
           rmSync(join(project, 'win'), { recursive: true, force: true });
         };

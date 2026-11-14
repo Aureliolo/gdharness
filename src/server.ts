@@ -4220,7 +4220,7 @@ export function enginesOfTestRun(
 }
 
 /** What an engine of a cut run finished, as the record of a cut call holds it. */
-export interface RanEngine {
+interface RanEngine {
   readonly paths: readonly string[];
   readonly finished: readonly string[];
   readonly failing: NonNullable<CutTestRun['suitesFailing']>;
@@ -4230,7 +4230,7 @@ export interface RanEngine {
 function ranEngineOf(half: OperationParams, json: Record<string, unknown>): RanEngine {
   const paths = readStringArray(half, 'path') ?? [];
   const absent = new Set(readStringArray(json, 'missing') ?? []);
-  const failedCases = Array.isArray(json['failed']) ? json['failed'] : [];
+  const failedList = Array.isArray(json['failed']) ? json['failed'] : [];
   const suites = Array.isArray(json['suites']) ? json['suites'] : [];
   return {
     paths,
@@ -4248,7 +4248,7 @@ function ranEngineOf(half: OperationParams, json: Record<string, unknown>): RanE
               path: suite['path'],
               errors,
               failures,
-              failed: failedCases.flatMap((one: unknown) =>
+              failed: failedList.flatMap((one: unknown) =>
                 isRecord(one) && one['path'] === suite['path'] && typeof one['name'] === 'string'
                   ? [one['name']]
                   : [],
@@ -4264,7 +4264,7 @@ function ranEngineOf(half: OperationParams, json: Record<string, unknown>): RanE
  * every suite still to run, in [param rest], and what the engines before it finished. An engine cut
  * inside keeps its own record, which this adds to. One that answered whole is among what finished.
  */
-export function keepCutAcross(
+function keepCutAcross(
   root: string,
   ran: readonly RanEngine[],
   rest: readonly OperationParams[],
