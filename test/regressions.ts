@@ -94985,6 +94985,34 @@ async function editThroughAFileLink(label: string, through: boolean): Promise<vo
   );
 }
 
+/**
+ * A scene saved through a file link to a file not named as a scene is saved in the asked format
+ * into that file. The link stays one, the file keeps its uid and nothing else is left beside it.
+ */
+async function testASaveThroughAFileLinkToAnotherNameKeepsTheLink(): Promise<void> {
+  const room = LINKED_DESK.replace('[gd_scene format=3]', '[gd_scene format=3 uid="uid://droomhw2x"]');
+  await withLinksOut(
+    'save through a file link to another name',
+    { files: { 'room.txt': room } },
+    (real) => linkTo(join(real, 'room.txt'), join(real, 'room.tscn'), 'file'),
+    async (at) => {
+      const before = readdirSync(at.real).toSorted();
+      // The text, so that a refusal says why.
+      const said = await at.say('scene_node', {
+        op: 'set',
+        scenePath: 'room.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      assert.ok(readlinkSync(join(at.real, 'room.tscn')).length > 0, said);
+      const saved = at.fileOf('room.txt');
+      assert.ok(saved.includes('[node name="Surface"'), `${said}\n${saved}`);
+      assert.ok(saved.startsWith('[gd_scene format=3 uid="uid://droomhw2x"]'), saved);
+      assert.deepEqual(readdirSync(at.real).toSorted(), before);
+    },
+  );
+}
+
 /** A project the server is given through a junction still names its own link out and follows inside. */
 async function testAProjectReachedThroughAJunctionNamesItsLinkOut(): Promise<void> {
   const kin = deskKin('Kin');
@@ -102492,6 +102520,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProjectGivenByItsShortNameFollowsLinkedScenesOnce,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,
+  testASaveThroughAFileLinkToAnotherNameKeepsTheLink,
   testALinkOutInsideAWalkedFolderIsNamed,
   testRelativePathsBehindALinkOutAreLeft,
   testADanglingLinkOutLeavesTheFollowerWorking,

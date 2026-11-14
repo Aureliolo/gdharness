@@ -17,6 +17,7 @@
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -4440,6 +4441,145 @@ async function testAWriteThroughTheEditorBehindALinkOutIsRefused({
     }
     rmSync(outside, { recursive: true, force: true });
   }
+}
+
+/**
+ * Writes [files] into a new folder [folder] of [project] and makes each of [links] there a file
+ * link to the file it names beside it. An editor saves by writing a new file and swapping it in for
+ * the old, and on Windows that swap does not carry a write through a link to the file it leads to.
+ * These hold that every write the editor makes through a link lands on that file.
+ */
+function fileLinksIn(
+  project: string,
+  folder: string,
+  files: Record<string, string>,
+  links: Record<string, string>,
+): string {
+  const at = join(project, folder);
+  mkdirSync(at);
+  for (const [name, written] of Object.entries(files)) {
+    writeFileSync(join(at, name), written);
+  }
+  for (const [name, target] of Object.entries(links)) {
+    symlinkSync(join(at, target), join(at, name), 'file');
+  }
+  return at;
+}
+
+/** Asserts that [path] is still a link and that the file it leads to holds [pattern]. */
+function linkKeptHolding(path: string, target: string, pattern: RegExp, answer: unknown): void {
+  assert.ok(lstatSync(path).isSymbolicLink(), `${path} is no link any more: ${JSON.stringify(answer)}`);
+  assert.match(readFileSync(target, 'utf8'), pattern, JSON.stringify(answer));
+}
+
+/** A scene the follower rewrites that is a file link stays one, and the file it leads to is changed. */
+async function testAKinSceneThatIsAFileLinkKeepsItsLink({ call, project }: Editor): Promise<void> {
+  const at = fileLinksIn(
+    project,
+    'kinlink',
+    {
+      'desk.tscn':
+        '[gd_scene format=3]\n\n[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+        '[node name="Lamp" type="Node3D" parent="Top"]\n',
+      // Not a scene's name, so the link is the only path the follower finds the room by.
+      'room.txt':
+        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://kinlink/desk.tscn" id="1_desk"]\n\n' +
+        '[node name="Room" type="Node3D"]\n\n[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
+        '[node name="Lamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n',
+    },
+    { 'room.tscn': 'room.txt' },
+  );
+  const renamed = await call('scene_node', {
+    projectPath: project,
+    op: 'set',
+    scenePath: 'res://kinlink/desk.tscn',
+    nodePath: 'Top',
+    properties: { name: 'Surface' },
+  });
+  assert.deepEqual(get(renamed, 'followed'), ['res://kinlink/room.tscn'], JSON.stringify(renamed));
+  linkKeptHolding(join(at, 'room.tscn'), join(at, 'room.txt'), /name="Lamp" parent="Desk\/Surface"/, renamed);
+}
+
+/** A node made another class through a file link keeps its unique_id, and the link stays one. */
+async function testAChangeOfTypeThroughAFileLinkKeepsTheLink({ call, project }: Editor): Promise<void> {
+  const at = fileLinksIn(
+    project,
+    'idlink',
+    {
+      'held.tscn':
+        '[gd_scene format=3]\n\n[node name="Kept" type="Node2D"]\n\n' +
+        '[node name="Panel" type="Node2D" parent="." unique_id=418027365]\n',
+    },
+    { 'kept.tscn': 'held.tscn' },
+  );
+  const retyped = await call('scene_node', {
+    projectPath: project,
+    op: 'change_type',
+    scenePath: 'res://idlink/kept.tscn',
+    nodePath: 'Panel',
+    nodeType: 'Marker2D',
+  });
+  linkKeptHolding(
+    join(at, 'kept.tscn'),
+    join(at, 'held.tscn'),
+    /^\[node name="Panel" type="Marker2D" parent="\." unique_id=418027365\]$/m,
+    retyped,
+  );
+}
+
+/**
+ * A connection the engine cannot make is put back by a write through a file link on the file it
+ * leads to, and the link stays one.
+ */
+async function testAConnectionPutBackThroughAFileLinkKeepsTheLink({ call, project }: Editor): Promise<void> {
+  const at = fileLinksIn(
+    project,
+    'unmadelink',
+    {
+      // Binds to a method the root lacks, which the engine refuses to make as the scene loads.
+      'quitting.tscn':
+        '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
+        '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n',
+    },
+    { 'quits.tscn': 'quitting.tscn' },
+  );
+  const relabelled = await call('scene_node', {
+    projectPath: project,
+    op: 'set',
+    scenePath: 'res://unmadelink/quits.tscn',
+    nodePath: 'Quit',
+    properties: { text: 'Quit' },
+  });
+  assert.match(readFileSync(join(at, 'quitting.tscn'), 'utf8'), /text = "Quit"/, JSON.stringify(relabelled));
+  linkKeptHolding(join(at, 'quits.tscn'), join(at, 'quitting.tscn'), /method="_on_quit"/, relabelled);
+}
+
+/**
+ * A scene saved through a file link to a file not named as a scene is saved in the asked format
+ * into that file. The file keeps its uid and nothing else is left beside it.
+ */
+async function testASaveThroughAFileLinkToAnotherNameIsMade({ call, project }: Editor): Promise<void> {
+  const at = fileLinksIn(
+    project,
+    'savelink',
+    {
+      'room.txt':
+        '[gd_scene format=3 uid="uid://droomhw2x"]\n\n[node name="Room" type="Node2D"]\n\n' +
+        '[node name="Top" type="Node2D" parent="."]\n',
+    },
+    { 'room.tscn': 'room.txt' },
+  );
+  const before = readdirSync(at).toSorted();
+  const renamed = await call('scene_node', {
+    projectPath: project,
+    op: 'set',
+    scenePath: 'res://savelink/room.tscn',
+    nodePath: 'Top',
+    properties: { name: 'Surface' },
+  });
+  linkKeptHolding(join(at, 'room.tscn'), join(at, 'room.txt'), /\[node name="Surface"/, renamed);
+  assert.match(readFileSync(join(at, 'room.txt'), 'utf8'), /^\[gd_scene format=3 uid="uid:\/\/droomhw2x"\]/);
+  assert.deepEqual(readdirSync(at).toSorted(), before);
 }
 
 /**
@@ -9286,6 +9426,13 @@ async function main(): Promise<void> {
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],
     ['testABakeReadsOnlyItsOwnScene', testABakeReadsOnlyItsOwnScene],
     ['testAWriteThroughTheEditorBehindALinkOutIsRefused', testAWriteThroughTheEditorBehindALinkOutIsRefused],
+    ['testAKinSceneThatIsAFileLinkKeepsItsLink', testAKinSceneThatIsAFileLinkKeepsItsLink],
+    ['testAChangeOfTypeThroughAFileLinkKeepsTheLink', testAChangeOfTypeThroughAFileLinkKeepsTheLink],
+    [
+      'testAConnectionPutBackThroughAFileLinkKeepsTheLink',
+      testAConnectionPutBackThroughAFileLinkKeepsTheLink,
+    ],
+    ['testASaveThroughAFileLinkToAnotherNameIsMade', testASaveThroughAFileLinkToAnotherNameIsMade],
     ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],
