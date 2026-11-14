@@ -1240,9 +1240,6 @@ export function callSitesOf(
   dispatch: { readonly onSelf?: SelfDispatch; readonly onReceiver?: ReceiverDispatch } = {},
   read?: { readonly regions: Region[]; readonly shape: ScriptShape; readonly lines: Lines },
 ): CallSite[] {
-  if (!source.includes(name)) {
-    return [];
-  }
   const regions = read?.regions ?? regionsOf(source);
   const code = codeOf(source, regions);
   const codeLines = code.split('\n');
