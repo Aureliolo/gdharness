@@ -915,14 +915,16 @@ function withinNumbersOf(
 const CALL_SITES = 40;
 
 /**
- * Whether the class holding an offset of a script is [param asked] or inherits from it, for a bare
- * use of a name there. Every place counts when no class was asked about, when no script declares
- * it, or where a chain passes through a script the project does not hold.
+ * Whether a use of [param name] on self, or through `super`, at an offset of a script can run
+ * [param asked]'s function of that name, as the engine dispatches it. Every place counts when no
+ * class was asked about, when no script declares it, or where a chain passes through a script the
+ * project does not hold.
  */
-function askedChain(
+function dispatchesTo(
   listed: readonly (readonly [string, string])[],
   asked: string | null,
-): (script: string, offset: number) => boolean {
+  name: string,
+): (script: string, offset: number, throughSuper: boolean) => boolean {
   if (asked === null) {
     return () => true;
   }
@@ -932,7 +934,13 @@ function askedChain(
   if (target === null) {
     return () => true;
   }
-  return (script, offset) => graph.isOrInherits(graph.bodyAt(script, offset), target) !== false;
+  return (script, offset, throughSuper) => {
+    const at = graph.bodyAt(script, offset);
+    const reaches = throughSuper
+      ? graph.superUseReaches(at, target, name)
+      : graph.selfUseReaches(at, target, name);
+    return reaches !== false;
+  };
 }
 
 /**
@@ -943,8 +951,8 @@ function askedChain(
  * Found by name in the source, because the engine's profiler counts calls and time per function and
  * records nothing about who made them. A place is a caller only if the name there is this function:
  * a method of the same name on another class is found as well, which the answer says. When one class
- * was asked about, a call through another class the project declares is left out, and so is a bare
- * one in a class that neither is that class nor inherits from it.
+ * was asked about, a call through another class the project declares is left out, and so is a bare,
+ * `self` or `super` one the engine would send to another class's function of that name.
  */
 export function callersOf(
   totals: ProfileTotals,
@@ -985,9 +993,11 @@ export function callersOf(
       }
     }
   }
-  const inChain = askedChain(listed, asked);
+  const reaches = dispatchesTo(listed, asked, bare);
   const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, otherClasses, property, (offset) => inChain(script, offset)).map((site) => {
+    callSitesOf(source, bare, otherClasses, property, (offset, throughSuper) =>
+      reaches(script, offset, throughSuper),
+    ).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };

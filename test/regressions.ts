@@ -3215,9 +3215,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [10, 12, 14, 15, 16, 17, 18, 20, 22],
     'and asked by bare name, every one is listed',
   );
-  // A bare use of the name belongs to the class it is written in. With one class asked about, it
-  // counts where that class is the one asked about or inherits from it, by name, by path or as an
-  // inner class, and also where the chain passes through a script the project does not hold.
+  // A bare, self or super use of the name runs the function its class dispatches to. With one class
+  // asked about, a bare or self use counts in that class, in a class above it, whose object may be
+  // one, and in a class below it, by name, by path or as an inner class, unless a class on the way
+  // down declares the function again. A super use counts where the nearest class above declaring
+  // the function is the one asked about. A chain through a script the project does not hold counts.
   const harbour = [
     'class_name Harbour',
     'extends Node',
@@ -3261,9 +3263,16 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\tlater.call(8)',
     '',
     '',
-    'class Cellar extends Harbour:',
+    'class Cellar:',
+    '\textends Harbour',
+    '',
     '\tfunc fill() -> void:',
     '\t\t_moor(9)',
+    '',
+    '',
+    'class Vault extends Harbour:',
+    '\tfunc fill() -> void:',
+    '\t\t_moor(10)',
     '',
     '',
     'class Loft:',
@@ -3271,15 +3280,29 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\t\tprint(x)',
     '',
     '\tfunc sweep() -> void:',
-    '\t\t_moor(10)',
+    '\t\t_moor(11)',
     '',
   ].join('\n');
-  const drift = ['extends "res://gone/wreck.gd"', '', '', 'func go() -> void:', '\t_moor(11)', ''].join('\n');
+  const berth = [
+    'class_name Berth',
+    'extends Quay',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tsuper._moor(x)',
+    '',
+    '',
+    'func land() -> void:',
+    '\t_moor(12)',
+    '',
+  ].join('\n');
+  const drift = ['extends "res://gone/wreck.gd"', '', '', 'func go() -> void:', '\t_moor(13)', ''].join('\n');
   const port = [
     ['res://port/harbour.gd', harbour],
     ['res://port/quay.gd', quay],
     ['res://port/pier.gd', pier],
     ['res://port/inn.gd', inn],
+    ['res://port/berth.gd', berth],
     ['res://port/drift.gd', drift],
   ] as const;
   const mooredAt = (name: string): unknown[] =>
@@ -3287,15 +3310,36 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.deepEqual(
     mooredAt('Harbour._moor'),
     [
+      ['res://port/berth.gd', 6, true],
       ['res://port/drift.gd', 5, true],
       ['res://port/harbour.gd', 10, true],
-      ['res://port/inn.gd', 18, true],
+      ['res://port/inn.gd', 20, true],
+      ['res://port/inn.gd', 25, true],
       ['res://port/pier.gd', 5, true],
       ['res://port/quay.gd', 6, true],
       ['res://port/quay.gd', 7, true],
       ['res://port/quay.gd', 8, true],
     ],
-    'Harbour, its subclasses by name, by path and inside Inn, and the chain through a missing script, but not Inn or Loft',
+    'Harbour, its subclasses by name, by path and inside Inn either way, Berth super call and the missing chain, but not Inn, Loft or a bare call in Berth, which runs its own',
+  );
+  assert.deepEqual(
+    mooredAt('Berth._moor'),
+    [
+      ['res://port/berth.gd', 10, true],
+      ['res://port/drift.gd', 5, true],
+      ['res://port/harbour.gd', 10, true],
+      ['res://port/quay.gd', 6, true],
+      ['res://port/quay.gd', 7, true],
+    ],
+    'asked about the override, the calls above it that may run on a Berth, but no super call, which runs Harbour',
+  );
+  assert.deepEqual(
+    mooredAt('Inn.Loft._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/inn.gd', 33, true],
+    ],
+    'an inner class asked about by name is that class, not the script around it',
   );
   assert.deepEqual(
     mooredAt('Inn._moor'),
@@ -3307,7 +3351,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ],
     'asked about Inn, its own bare call, self call and Callable are listed, and no Harbour line',
   );
-  assert.equal(mooredAt('_moor').length, 11, 'and with no class asked about, every use is listed');
+  assert.equal(mooredAt('_moor').length, 14, 'and with no class asked about, every use is listed');
 
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the
   // profiler goes on: it and its caller are the addon's, not the game's, so they are left out of the
