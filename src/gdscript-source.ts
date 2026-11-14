@@ -659,7 +659,11 @@ export function shapeOf(source: string): ScriptShape {
 const FUNC_LINE = new RegExp(`^[ \\t]*${ANNOTATIONS}(?:static\\s+)?func\\s+(${NAME})\\s*\\(`, 'u');
 
 function indentOf(text: string): number {
-  return /^[ \t]*/.exec(text)?.[0].length ?? 0;
+  let at = 0;
+  while (at < text.length && (text[at] === ' ' || text[at] === '\t')) {
+    at += 1;
+  }
+  return at;
 }
 
 /**
@@ -1274,8 +1278,10 @@ interface CallScan {
 interface FunctionNames {
   /** How often each name is declared: as a parameter, a lambda's parameter, or by var, const or for. */
   readonly counts: ReadonlyMap<string, number>;
-  /** The class each of the function's own parameters is declared as, null where none is written. */
-  readonly parameters: ReadonlyMap<string, string | null>;
+  /** The function's own parameters. */
+  readonly parameters: ReadonlySet<string>;
+  /** The function's header up to the bracket closing its parameters, which says their classes. */
+  readonly header: string;
   /** The zero-based line of each `const`. */
   readonly constants: ReadonlyMap<string, number>;
   /**
@@ -1291,23 +1297,32 @@ const FUNC_WORD = /(?<![\p{L}\p{N}_.])func(?![\p{L}\p{N}_])/gu;
 /** The named functions of a script's code, each read for what it declares the first time it is asked. */
 class FunctionsOf {
   private readonly lines: readonly string[];
-  /** Each function's first and last line, in order. */
-  private readonly spans: (readonly [number, number])[] = [];
+  /** Each function's first and last line, in order, found the first time one is asked for. */
+  private spans: (readonly [number, number])[] | null = null;
   private readonly read = new Map<number, FunctionNames>();
 
   constructor(lines: readonly string[]) {
     this.lines = lines;
-    for (let at = 0; at < lines.length; at += 1) {
-      if (FUNC_LINE.test(lines[at] ?? '')) {
+  }
+
+  private spansOf(): (readonly [number, number])[] {
+    if (this.spans !== null) {
+      return this.spans;
+    }
+    this.spans = [];
+    for (let at = 0; at < this.lines.length; at += 1) {
+      const text = this.lines[at] ?? '';
+      if (text.includes('func') && FUNC_LINE.test(text)) {
         const last = this.lastLineOf(at);
         this.spans.push([at, last]);
         at = last;
       }
     }
+    return this.spans;
   }
 
   namesAt(line: number): FunctionNames | null {
-    const span = this.spans.find(([first, last]) => first <= line && line <= last);
+    const span = this.spansOf().find(([first, last]) => first <= line && line <= last);
     if (span === undefined) {
       return null;
     }
@@ -1338,7 +1353,6 @@ class FunctionsOf {
   }
 
   private namesIn(first: number, last: number): FunctionNames {
-    const text = this.lines.slice(first, last + 1).join('\n');
     const counts = new Map<string, number>();
     const count = (name: string): void => {
       counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -1346,19 +1360,24 @@ class FunctionsOf {
     const constants = new Map<string, number>();
     const statements = new Map<string, number>();
     const indent = this.bodyIndent(first, last);
-    for (const match of text.matchAll(DECLARED_IN_BODY)) {
-      const name = match[2] ?? '';
-      const line = first + (text.slice(0, match.index).match(/\n/g)?.length ?? 0);
-      count(name);
-      if (match[1] === 'const') {
-        constants.set(name, line);
-      }
+    for (let line = first; line <= last; line += 1) {
       const own = this.lines[line] ?? '';
-      if (match[1] === 'var' && indentOf(own) === indent && /^\s*var\s/u.test(own)) {
-        statements.set(name, line);
+      if (!(own.includes('var') || own.includes('const') || own.includes('for'))) {
+        continue;
+      }
+      for (const match of own.matchAll(DECLARED_IN_BODY)) {
+        const name = match[2] ?? '';
+        count(name);
+        if (match[1] === 'const') {
+          constants.set(name, line);
+        }
+        if (match[1] === 'var' && match.index === indent && indentOf(own) === indent) {
+          statements.set(name, line);
+        }
       }
     }
-    return { counts, parameters: parametersIn(text, count), constants, statements };
+    const text = this.lines.slice(first, last + 1).join('\n');
+    return { counts, ...parametersIn(text, count), constants, statements };
   }
 
   /** How deeply the function from [param first] to [param last] indents its own block's statements. */
@@ -1380,11 +1399,15 @@ class FunctionsOf {
 }
 
 /**
- * The classes the function [param text] declares its own parameters as. Every `func` in it, its
+ * The function [param text]'s own parameters and the header declaring them. Every `func` in it, its
  * lambdas' included, hands each parameter to [param count].
  */
-function parametersIn(text: string, count: (name: string) => void): Map<string, string | null> {
-  const parameters = new Map<string, string | null>();
+function parametersIn(
+  text: string,
+  count: (name: string) => void,
+): Pick<FunctionNames, 'parameters' | 'header'> {
+  let parameters: readonly string[] = [];
+  let header = '';
   // The first `func` is the function's own header, whose parameters hold in all of its body.
   for (const [at, match] of [...text.matchAll(FUNC_WORD)].entries()) {
     const taken = parametersOf(text, match.index);
@@ -1392,13 +1415,11 @@ function parametersIn(text: string, count: (name: string) => void): Map<string, 
       count(name);
     }
     if (at === 0) {
-      const header = text.slice(0, closingParenAfter(text, match.index) + 1);
-      for (const name of taken) {
-        parameters.set(name, declaredClass(header, name));
-      }
+      header = text.slice(0, closingParenAfter(text, match.index) + 1);
+      parameters = taken;
     }
   }
-  return parameters;
+  return { parameters: new Set(parameters), header };
 }
 
 /** Where the bracket group opened by the first `(` after [param from] in [param text] closes. */
@@ -1482,9 +1503,8 @@ function isLocalUseKept(
     return true;
   }
   const local = { start: 'local', names: rest, made } as const;
-  const parameter = declared.parameters.get(first);
-  if (parameter !== undefined) {
-    return scan.onReceiver(offset, { ...local, type: parameter });
+  if (declared.parameters.has(first)) {
+    return scan.onReceiver(offset, { ...local, type: declaredClass(declared.header, first) });
   }
   const statement = declared.statements.get(first);
   if (statement !== undefined) {

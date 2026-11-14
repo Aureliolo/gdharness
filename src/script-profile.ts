@@ -944,6 +944,7 @@ class ClassScope {
   private readonly scripts: ReadonlyMap<string, Script>;
   private readonly scopes = new Map<ClassId, readonly { readonly id: ClassId; readonly whole: boolean }[]>();
   private readonly codeLines = new Map<string, string[]>();
+  private readonly lookups = new Map<string, Named | null>();
   /** The declarations being read, so a constant naming itself ends rather than looping. */
   private readonly reading = new Set<string>();
 
@@ -984,26 +985,29 @@ class ClassScope {
    * extends is seen, but of the classes around them only what belongs to no object.
    */
   private looked(at: ClassId, name: string): Named | null {
-    const owner = this.scopeOf(at).find(({ id, whole }) => {
-      const kind = this.graph.declaration(id, name)?.kind;
-      return this.isOwnName(id, name) || (kind !== undefined && (whole || SEEN_FROM_INSIDE.has(kind)));
-    });
-    if (owner !== undefined && this.isOwnName(owner.id, name)) {
-      return { id: owner.id, object: false };
+    const key = `${at}\n${name}`;
+    let named = this.lookups.get(key);
+    if (named === undefined) {
+      named = this.lookedUp(at, name);
+      this.lookups.set(key, named);
     }
-    if (owner !== undefined) {
-      return this.declared(owner.id, name);
-    }
-    const global = this.graph.named(name);
-    return global === null ? null : { id: global, object: false };
+    return named;
   }
 
   /**
-   * Whether [param name] is the class_name of [param id], a script's own class. The engine reads it
-   * before that class's members, inherited ones included. An inner class's own name loses to them.
+   * A scope class whose class_name is [param name] answers before its members, inherited ones
+   * included, as the engine reads it. An inner class's own name loses to them.
    */
-  private isOwnName(id: ClassId, name: string): boolean {
-    return this.graph.outerOf(id) === null && this.graph.declared.get(name) === fileOf(id);
+  private lookedUp(at: ClassId, name: string): Named | null {
+    const global = this.graph.named(name);
+    const owner = this.scopeOf(at).find(({ id, whole }) => {
+      const kind = this.graph.declaration(id, name)?.kind;
+      return id === global || (kind !== undefined && (whole || SEEN_FROM_INSIDE.has(kind)));
+    });
+    if (owner === undefined || owner.id === global) {
+      return global === null ? null : { id: global, object: false };
+    }
+    return this.declared(owner.id, name);
   }
 
   /** What the member [param name] of [param id], its own or inherited, names. */
@@ -1122,6 +1126,7 @@ interface ScriptDispatch {
 class Dispatch {
   /** The classes whose objects, or those of a class below them, resolve the name to `reached`. */
   private readonly above = new Set<ClassId>();
+  private readonly reachedFrom = new Map<string, boolean>();
   private readonly graph: ClassGraph;
   private readonly target: ClassId;
   private readonly reached: ClassId;
@@ -1167,6 +1172,16 @@ class Dispatch {
 
   /** Whether a use resolved from [param at], or from any class below it unless [param bound], reaches it. */
   private from(at: ClassId, bound: boolean): boolean {
+    const key = `${at}\n${bound}`;
+    let reaches = this.reachedFrom.get(key);
+    if (reaches === undefined) {
+      reaches = this.reachesFrom(at, bound);
+      this.reachedFrom.set(key, reaches);
+    }
+    return reaches;
+  }
+
+  private reachesFrom(at: ClassId, bound: boolean): boolean {
     const own = this.graph.resolvedFrom(at, this.name, this.kind);
     if (own === null) {
       return true;

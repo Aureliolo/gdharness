@@ -3812,12 +3812,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
     '',
     'func e() -> void:',
-    '\tvar target: Other = Other.new()',
-    '\tvar f := func() -> void:',
-    '\t\tvar target := Kid.new()',
+    '\tvar f := func(target: Kid) -> void:',
     '\t\ttarget.tick()',
+    '\tvar target: Other = Other.new()',
     '\ttarget.tick()',
-    '\tf.call()',
+    '\tf.call(Kid.new())',
     '',
   ].join('\n');
   const cove = [
@@ -3863,8 +3862,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       coveAt('Kid.tick', 'lam').filter((line) => line >= 34),
     ],
     [
-      [38, 39],
-      [38, 39],
+      [36, 38],
+      [36, 38],
     ],
     'a name its function declares twice is kept for either class, even where one of them is typed',
   );
