@@ -391,6 +391,7 @@ import {
   gdUnitFailsOnPushErrors,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
+  splitByWindow,
   TEST_DIRECTORIES,
   viewportOf,
   windowNeedsOf,
@@ -403,6 +404,7 @@ import {
   selectTests,
   suiteFilesUnder,
 } from './test-selection.js';
+import { listOf, mergedTestAnswers } from './test-split.js';
 import {
   asParams,
   type OperationParams,
@@ -4105,7 +4107,7 @@ function windowNoteFor(
   const shared =
     sharing.length === 0
       ? ''
-      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since the run is one engine: run ${sharing.length === 1 ? 'it' : 'them'} without the windowed suites to run ${sharing.length === 1 ? 'it' : 'them'} headless.`;
+      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since ${sharing.length === 1 ? 'it also declares' : 'each also declares'} GDHARNESS_ACCESSIBILITY, which needs one.`;
   return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''}${tree} ${why}${shared}`;
 }
 
@@ -9150,7 +9152,7 @@ class GodotServer {
     }
     const args: OperationParams =
       split.path === given['path'] ? given : { ...given, path: split.path, tests: split.tests };
-    const ran = await this.runTests(args);
+    const ran = await this.runInEngines(args);
     if (callSignal()?.aborted === true) {
       return ran;
     }
@@ -9159,6 +9161,110 @@ class GodotServer {
     const answer = unminted.length === 0 ? ran : withUidsMissing(ran, unminted);
     const previous = takeCutTestRun(project.value.path);
     return previous === null ? answer : withPreviousCut(answer, previous);
+  }
+
+  /**
+   * A run of a named set that mixes suites needing a window with suites that do not, in the two
+   * engines gdharness test gives them, answered as one run. A suite measuring the display server or
+   * its frames reads a different engine once a window is there. Any other run is one engine.
+   */
+  private async runInEngines(args: OperationParams): Promise<ToolResponse> {
+    const halves = this.enginesOfTestRun(args);
+    if (halves === null) {
+      return await this.runTests(args);
+    }
+    const answers: ToolResponse[] = [];
+    const parsed: Record<string, unknown>[] = [];
+    for (const half of halves.halves) {
+      const answer = await this.runTests({ ...args, ...half });
+      const text = answer.content.findLast((part) => part.type === 'text');
+      let json: unknown;
+      try {
+        json = JSON.parse(text?.type === 'text' ? text.text : '');
+      } catch {
+        json = null;
+      }
+      // A refusal or an answer of another shape is the whole answer, since there is nothing to add to.
+      if (!isRecord(json) || typeof json['passed'] !== 'boolean') {
+        return answer;
+      }
+      answers.push(answer);
+      parsed.push(json);
+      if (callSignal()?.aborted === true) {
+        return answer;
+      }
+    }
+    const merged = mergedTestAnswers(parsed);
+    if (halves.notSuites.length > 0) {
+      merged['passed'] = false;
+      merged['notSuites'] = [...halves.notSuites, ...listOf(merged['notSuites'])];
+    }
+    return {
+      content: [{ type: 'text', text: answerJson(merged) }],
+      ...(answers.some((answer) => answer.isError === true) ? { isError: true } : {}),
+    };
+  }
+
+  /**
+   * The arguments of the two engines a run is cut into, or null when it is one: a path list with
+   * suites needing a window and suites not needing one, on a machine with a display, that
+   * the checks of a single run have nothing to refuse.
+   */
+  private enginesOfTestRun(
+    args: OperationParams,
+  ): { halves: [OperationParams, OperationParams]; notSuites: string[] } | null {
+    const project = this.project(args);
+    const paths = project.ok ? testPathsIn(project.value.path, args['path']) : null;
+    if (!project.ok || paths === null || !paths.ok) {
+      return null;
+    }
+    if (resolveHeadless(undefined, { platform: process.platform, variables: process.env })) {
+      return null;
+    }
+    const root = project.value.path;
+    const present = paths.value.filter((path) => existsSync(join(root, path.slice('res://'.length))));
+    const missing = paths.value.filter((path) => !present.includes(path));
+    const scripts = new ProjectScripts(root);
+    const asked = scripts.searchedAsTold(present);
+    const uncollected = scripts.uncollectedUnder(present);
+    const refused =
+      asked.length === 0 ||
+      gdUnit4Unusable(root) !== null ||
+      scriptsWithoutCases(root, asked).length > 0 ||
+      uncollected.some((one) => present.includes(one.path)) ||
+      present.some((path) => !path.endsWith('.gd') && scripts.suitesUnder([path]).length === 0);
+    const selection = refused ? null : selectTests(root, asked, args['tests']);
+    if (selection === null || !selection.ok) {
+      return null;
+    }
+    const found = asked.flatMap((path) =>
+      path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
+    );
+    const chosen = found.filter(
+      (suite, at) =>
+        found.findIndex((one) => one.path === suite.path) === at &&
+        (selection.value === null || selection.value.suites.includes(suite.path)),
+    );
+    const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
+    const running = splitByWindow(chosen.filter((suite) => !leftOut.has(basename(suite.path, '.gd'))));
+    if (running.windowed.length === 0 || running.headless.length === 0) {
+      return null;
+    }
+    const all = splitByWindow(chosen);
+    const half = (group: readonly { path: string }[], also: readonly string[]): OperationParams => ({
+      path: [...group.map((suite) => suite.path), ...also],
+      ...(selection.value === null
+        ? {}
+        : {
+            tests: selection.value.selected
+              .filter((one) => group.some((suite) => suite.path === one.suite))
+              .map((one) => `${one.suite}:${one.test}`),
+          }),
+    });
+    return {
+      halves: [half(all.windowed, missing), half(all.headless, [])],
+      notSuites: selection.value === null ? uncollectedSaid(uncollected) : [],
+    };
   }
 
   private async runTests(args: OperationParams): Promise<ToolResponse> {

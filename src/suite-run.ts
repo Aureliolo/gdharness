@@ -91,7 +91,7 @@ import {
   type EnginePlan,
   gdUnitFailsOnPushErrors,
   headlessInAWindow,
-  inOneEngine,
+  inEngines,
   lanesOf,
   ProjectScripts,
   peakOf,
@@ -982,7 +982,7 @@ async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): 
   const plans =
     options.order === null
       ? dealt(units, declared, room.engines)
-      : [inOneEngine(ordered(units, options.order, options.selected), declared)];
+      : inEngines(ordered(units, options.order, options.selected), declared);
   return { times, byMemory, room, memoryHeld, units, splitPast, plans };
 }
 
@@ -996,10 +996,10 @@ function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: D
     options.order === null
       ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
       : options.order === 'reversed'
-        ? ', in reverse order of path'
+        ? `, in reverse order of path${windowedSaid(plans)}`
         : options.order === 'named'
-          ? ', in the order named'
-          : `, shuffled by ${String(options.order)}`;
+          ? `, in the order named${windowedSaid(plans)}`
+          : `, shuffled by ${String(options.order)}${windowedSaid(plans)}`;
   const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
   return `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`;
 }
@@ -1018,7 +1018,7 @@ function announceDeal(
   if (windowedAnyway.length > 0) {
     const one = windowedAnyway.length === 1;
     say(
-      `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+      `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since ${one ? 'it also declares' : 'each also declares'} GDHARNESS_ACCESSIBILITY, which needs one.`,
     );
   }
   sayWhatWasCutUp(deal, say);

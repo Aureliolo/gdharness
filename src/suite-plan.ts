@@ -1022,8 +1022,8 @@ export function windowedSaid(plans: readonly EnginePlan[]): string {
 }
 
 /**
- * The suites saying they run headless that a windowed engine holds, which happens only in an
- * ordered run, one engine, with a suite in it needing a window.
+ * The suites saying they run headless that a windowed engine holds, which happens only to a suite
+ * that also declares it needs the accessibility tree.
  */
 export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly Unit[]): string[] {
   const said = new Set(units.filter((unit) => unit.headless).map((unit) => unit.suite));
@@ -1033,15 +1033,28 @@ export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly 
     .filter((path) => said.has(path));
 }
 
-/** Every unit in one engine, in the order given. */
-export function inOneEngine(units: readonly Unit[], declared: CasesBySuite): EnginePlan {
-  return planOf(
-    units,
-    declared,
-    units.some((unit) => unit.windowed),
-    0,
-    units,
-  );
+/**
+ * Every unit in the order given, in one engine for the windowed units and one for the rest, each
+ * keeping that order. A headless engine follows the windowed one in its slot, and a run with only
+ * one kind is one engine.
+ */
+export function inEngines(units: readonly Unit[], declared: CasesBySuite): EnginePlan[] {
+  const windowed = units.filter((unit) => unit.windowed);
+  const headless = units.filter((unit) => !unit.windowed);
+  return [
+    ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0, units)] : []),
+    ...(headless.length > 0 ? [planOf(headless, declared, false, 0, units)] : []),
+  ];
+}
+
+/** What a set of suites splits into: those needing a window and the rest, each in the order given. */
+export function splitByWindow<T extends { readonly windowed: boolean }>(
+  suites: readonly T[],
+): { readonly windowed: T[]; readonly headless: T[] } {
+  return {
+    windowed: suites.filter((suite) => suite.windowed),
+    headless: suites.filter((suite) => !suite.windowed),
+  };
 }
 
 /**

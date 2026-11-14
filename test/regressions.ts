@@ -649,7 +649,7 @@ import {
   GUESS_WINDOW_SETTING,
   gdUnitFailsOnPushErrors,
   headlessInAWindow,
-  inOneEngine,
+  inEngines,
   lanesOf,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
@@ -658,6 +658,7 @@ import {
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
+  splitByWindow,
   splitPastFor,
   timesAfter,
   type Unit,
@@ -695,6 +696,7 @@ import {
 } from '../src/suite-run.js';
 import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
 import { casesOutOfPath, scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
+import { mergedTestAnswers } from '../src/test-split.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -61943,16 +61945,81 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     });
     assert.deepEqual(turned, ['0:30', '1:10', '2:20', '3:5'], 'every answer in the order given');
     assert.equal(most, 2, 'two at a time and no more');
-    assert.deepEqual(
-      headlessInAWindow([inOneEngine(lone, loneDeclared)], lone),
-      ['res://tests/stood_test.gd'],
-      'and in an ordered run',
+    // An ordered run is one windowed engine and one headless engine, each in the order given.
+    const orderedPlans = inEngines(
+      [lone[1], lone[0], lone[2]].filter((one) => one !== undefined),
+      loneDeclared,
     );
     assert.deepEqual(
-      headlessInAWindow([inOneEngine(lone.slice(1), loneDeclared)], lone),
+      orderedPlans.map((plan) => [plan.lane, plan.windowed, plan.suites.map((s) => s.path)]),
+      [
+        [0, true, ['res://tests/menu_test.gd']],
+        [0, false, ['res://tests/stood_test.gd', 'res://tests/plain_test.gd']],
+      ],
+      'the windowed suite alone in a windowed engine, the others headless after it in the order given',
+    );
+    assert.deepEqual(
+      headlessInAWindow(orderedPlans, lone),
       [],
-      'but not in an engine with no window',
+      'so a suite saying it runs headless is not given a window',
     );
+    assert.deepEqual(
+      inEngines(lone.slice(1), loneDeclared).map((plan) => plan.windowed),
+      [false],
+      'a set with no windowed suite is one headless engine',
+    );
+    assert.deepEqual(
+      inEngines(
+        [lone[0]].filter((one) => one !== undefined),
+        loneDeclared,
+      ).map((plan) => plan.windowed),
+      [true],
+      'and one with only windowed suites is one windowed engine',
+    );
+    const kinds = splitByWindow([
+      { path: 'a', windowed: true },
+      { path: 'b', windowed: false },
+      { path: 'c', windowed: true },
+      { path: 'd', windowed: false },
+    ]);
+    assert.deepEqual(
+      [kinds.windowed.map((one) => one.path), kinds.headless.map((one) => one.path)],
+      [
+        ['a', 'c'],
+        ['b', 'd'],
+      ],
+      'a set splits by what needs a window, each kind in the order given',
+    );
+    const mixed = mergedTestAnswers([
+      { passed: true, verdict: 'passed', tests: 3, failures: 0, windowed: true, windowNote: 'w', failed: [] },
+      {
+        passed: false,
+        verdict: '1 failed',
+        tests: 5,
+        failures: 1,
+        failed: [{ name: 'x' }],
+        ignoreUnmatched: ['z'],
+      },
+    ]);
+    assert.deepEqual(
+      [
+        mixed['passed'],
+        mixed['verdict'],
+        mixed['tests'],
+        mixed['failures'],
+        mixed['engines'],
+        mixed['windowed'],
+      ],
+      [false, '1 failed', 8, 1, 2, true],
+      'two answers are one run: counts added, failed when either failed, and two engines said',
+    );
+    assert.deepEqual(mixed['failed'], [{ name: 'x' }]);
+    assert.equal(
+      mixed['ignoreUnmatched'],
+      undefined,
+      'an ignore entry only one engine could not match left something out',
+    );
+    assert.match(String(mixed['note']), /^Ran as two engines/);
 
     // The room a run has, from the processors and the memory handed in: what is asked for when
     // both have it, and otherwise fewer, with what held it.
@@ -62130,7 +62197,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'every row in one engine is the case whole there',
     );
     assert.deepEqual(
-      sharesOf([inOneEngine(rowUnits, rowDeclared)], lone_.path),
+      sharesOf(inEngines(rowUnits, rowDeclared), lone_.path),
       [[['test_only'], null]],
       'as in an ordered run',
     );
@@ -68359,15 +68426,22 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
             assert.doesNotMatch(run.said, /runs with a window here/, run.said);
           }
         }
-        // An ordered run is one engine, so the suite has to share the window, and the run says so
-        // before it starts.
-        const shared = test('--order', 'reversed', 'tests/window_test.gd', 'tests/stood_test.gd');
-        assert.ok(
-          shared.said.includes(
-            'res://tests/stood_test.gd says it runs headless and runs with a window here, since an ordered run is one engine and a suite in it needs a window. Run it without the windowed suites to run it headless.',
-          ),
-          shared.said,
-        );
+        // An ordered run keeps its order within each kind and runs the two kinds in two engines, so
+        // the suite saying it runs headless is not given the window.
+        for (const order of [
+          ['--order', 'reversed'],
+          ['--order', '7'],
+          ['--order', 'named'],
+        ]) {
+          const ordered = test(...order, 'tests/window_test.gd', 'tests/stood_test.gd');
+          assert.equal(ordered.status, 0, ordered.said);
+          assert.match(
+            ordered.said,
+            /in 2 suites over 2 engines, [^\n]*one of them windowed and followed in its slot by a headless one\.$/m,
+            ordered.said,
+          );
+          assert.doesNotMatch(ordered.said, /runs with a window here/, ordered.said);
+        }
         theAccessibilityTreeIsBuilt();
       } else {
         console.log(`test command windowed case skipped: ${windowed}`);
@@ -70443,7 +70517,8 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         /** A suite standing a scene up through the scene runner is given a window, and one declaring false runs headless alone. */
         const windowedSuites = async (): Promise<void> => {
           // A suite standing a scene up through the scene runner and declaring nothing is given a
-          // window, as gdharness test gives it one, and one declaring false beside it shares it.
+          // window, as gdharness test gives it one, and one declaring false beside it runs in a second
+          // engine without it, and asserts the display server there is the headless one.
           writeTree(project, {
             'win/stood.tscn': '[gd_scene format=3]\n\n[node name="Stood" type="Control"]\n',
             'win/shown_test.gd': [
@@ -70458,7 +70533,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               '',
             ].join('\n'),
             'win/quiet_test.gd':
-              'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_bool(true).is_true()\n',
+              'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n\n\nfunc test_quiet() -> void:\n\tassert_str(DisplayServer.get_name()).is_equal("headless")\n',
           });
           const noDisplay = resolveHeadless(undefined, {
             platform: process.platform,
@@ -70491,9 +70566,14 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                   true,
                   2,
                   true,
-                  `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
+                  `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why}`,
                 ],
                 JSON.stringify(shown),
+              );
+              assert.equal(
+                get(shown, 'engines'),
+                2,
+                `the two kinds ran in two engines: ${JSON.stringify(shown)}`,
               );
               const theTreeIsBuiltForAnAccessibilitySuite = async (): Promise<void> => {
                 // A suite asking for the accessibility tree gets a window with the tree on, and its case
@@ -70575,6 +70655,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             ),
             'quiet',
           );
+          assert.equal(get(quiet, 'engines'), undefined, 'a set of one kind is one engine, with no count');
           assert.deepEqual(
             [get(quiet, 'passed'), get(quiet, 'tests'), get(quiet, 'windowed'), get(quiet, 'windowNote')],
             [true, 1, undefined, undefined],
