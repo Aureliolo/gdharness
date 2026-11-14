@@ -19,6 +19,7 @@ import { runLine } from '../src/runner.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { argumentShape, renderToolsMarkdown } from '../src/tool-reference.js';
+import { slug } from './doc-slug.js';
 
 const DOCS = 'docs';
 const THEME = join(DOCS, 'theme');
@@ -468,14 +469,6 @@ const AGENT_GUIDE = {
   text: 'agent.md',
   summary: 'Do this to install gdharness into a project. Terse, imperative, for an agent.',
 } as const;
-
-/** A heading's own link, from its words: what a reader copies to point somebody at a section. */
-function slug(heading: string): string {
-  return heading
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/g, '-')
-    .replaceAll(/^-|-$/g, '');
-}
 
 marked.use({
   renderer: {

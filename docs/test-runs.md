@@ -263,9 +263,10 @@ gate's export, say). Then the run says how many were free and hands the work out
 
 Each slot it holds starts an engine on a share. An engine starts in each other slot as that slot
 comes free. An engine that finishes its share while shares remain runs the next in the same
-process, so a share after the first pays no engine start. A lane that is told to stop (see the
-lanes file below), or whose engine crashed or was ended, takes its next share in an engine started
-for it.
+process, so a share after the first pays no engine start. A lane that is told to stop (see
+[a gate's lanes file](#a-gates-lanes-file)), or whose engine crashed or was ended, takes its next
+share in an engine started for it. So does a lane whose next share does not fit in the memory left
+at once, since an engine never waits for memory while it holds its own.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
 timeouts, deadline and peak memory. The memory gate admits a share in a running engine at the most
