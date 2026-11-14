@@ -49328,6 +49328,10 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           '\tget:',
           '\t\tpush_error("loud getter")',
           '\t\treturn self',
+          'var grumble: Node:',
+          '\tget:',
+          '\t\tpush_error("grumble getter")',
+          '\t\treturn self',
           '',
           '',
           'func take(_node: Node) -> void:',
@@ -49804,6 +49808,8 @@ async function testAnEvictedWatchStopsReading(): Promise<void> {
  */
 async function testOverlappingRequestsKeepTheirOwnErrors(): Promise<void> {
   await withAReadingGame('overlap regression', async ({ ask, counted }) => {
+    // The order matters: the call awaits, so a request that starts after it and is still waiting
+    // when the call resumes is the one the game last bound.
     const waiting = ask('runtime_wait', {
       op: 'until',
       nodePath: '/root/Main',
@@ -49811,19 +49817,29 @@ async function testOverlappingRequestsKeepTheirOwnErrors(): Promise<void> {
       value: 'never',
       timeoutMs: 2500,
     });
-    await delay(300);
-    const [called, found, read] = await Promise.all([
-      ask('runtime_invoke', {
-        op: 'call',
-        nodePath: '/root/Main',
-        method: 'slow',
-        properties: ['noisy():name'],
-      }),
+    await delay(100);
+    const calling = ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'slow',
+      properties: ['noisy():name'],
+    });
+    await delay(100);
+    const ordering = ask('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'grumble:count',
+      compare: '>=',
+      value: 5,
+      timeoutMs: 2500,
+    });
+    await delay(200);
+    const [found, read] = await Promise.all([
       ask('runtime_inspect', {
         op: 'find',
         className: 'Label',
         nodePath: '/root/Main/Rows',
-        property: 'odd():name',
+        property: 'get_node("/root/Main"):odd():name',
       }),
       ask('runtime_inspect', {
         op: 'property',
@@ -49831,15 +49847,17 @@ async function testOverlappingRequestsKeepTheirOwnErrors(): Promise<void> {
         property: 'get_node("missing"):name',
       }),
     ]);
-    const waited = await waiting;
+    const [called, waited, ordered] = await Promise.all([calling, waiting, ordering]);
     assert.match(called, /noisy step/, called);
-    assert.doesNotMatch(called, /loud getter|odd step|Node not found/, called);
+    assert.doesNotMatch(called, /loud getter|grumble getter|odd step|Node not found/, called);
     assert.match(found, /odd step/, found);
-    assert.doesNotMatch(found, /loud getter|noisy step|Node not found/, found);
+    assert.doesNotMatch(found, /loud getter|grumble getter|noisy step|Node not found/, found);
     assert.match(read, /Node not found/, read);
-    assert.doesNotMatch(read, /loud getter|noisy step|odd step/, read);
+    assert.doesNotMatch(read, /loud getter|grumble getter|noisy step|odd step/, read);
     assert.match(waited, /loud getter/, waited);
-    assert.doesNotMatch(waited, /noisy step|odd step|Node not found/, waited);
+    assert.doesNotMatch(waited, /grumble getter|noisy step|odd step|Node not found/, waited);
+    assert.match(ordered, /grumble getter/, ordered);
+    assert.doesNotMatch(ordered, /loud getter|noisy step|odd step|Node not found/, ordered);
     const verdict = await counted();
     assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
   });
