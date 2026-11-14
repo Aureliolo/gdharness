@@ -23,8 +23,11 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -4358,6 +4361,81 @@ async function testABakeReadsOnlyItsOwnScene({ call, project }: Editor): Promise
   // from 220 to 280 and 20 to 80.
   const inOthers = points.filter(([x = 0, y = 0]) => x >= 219 && x <= 281 && y >= 19 && y <= 81);
   assert.deepEqual(inOthers, [], `the open scene's wall is not carved: ${listed}`);
+}
+
+/**
+ * With an editor serving the project, a scene write and a save of the editor's copy behind a link
+ * out of the project are refused as they are with none, and so is an animation edit whose library
+ * is kept in a file behind one. Nothing outside is written.
+ */
+async function testAWriteThroughTheEditorBehindALinkOutIsRefused({
+  attempt,
+  project,
+}: Editor): Promise<void> {
+  const scene = '[gd_scene format=3]\n\n[node name="S" type="Node3D"]\n';
+  const library =
+    '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_walk"]\n' +
+    'resource_name = "walk"\nlength = 1.0\n\n[resource]\n_data = {\n&"walk": SubResource("Animation_walk")\n}\n';
+  const player =
+    '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://shared/anims.tres" id="1_lib"]\n\n' +
+    '[node name="A" type="Node3D"]\n\n[node name="Player" type="AnimationPlayer" parent="."]\n' +
+    'libraries = {&"": ExtResource("1_lib")}\n';
+  const outside = mkdtempSync(join(realpathSync.native(tmpdir()), 'gdharness-editor-out-'));
+  const shared = join(project, 'shared');
+  writeFileSync(join(outside, 's.tscn'), scene);
+  writeFileSync(join(outside, 'anims.tres'), library);
+  writeFileSync(join(project, 'a.tscn'), player);
+  symlinkSync(outside, shared, 'junction');
+  try {
+    const through = 'through the link res://shared/';
+    const added = await attempt('scene_node', {
+      projectPath: project,
+      op: 'add',
+      scenePath: 'res://shared/s.tscn',
+      nodeName: 'N',
+      nodeType: 'Node3D',
+    });
+    assert.ok(added.text.includes(through), added.text);
+    const saved = await attempt('scene_create', {
+      projectPath: project,
+      op: 'save',
+      scenePath: 'res://shared/s.tscn',
+      from: 'editor',
+    });
+    assert.ok(saved.text.includes(through), saved.text);
+    assert.equal(readFileSync(join(outside, 's.tscn'), 'utf8'), scene);
+
+    const before = readFileSync(join(project, 'a.tscn'), 'utf8');
+    const track = await attempt('scene_animation', {
+      projectPath: project,
+      op: 'add_track',
+      scenePath: 'res://a.tscn',
+      playerNodePath: 'Player',
+      animationName: 'walk',
+      track: {
+        type: 'property',
+        nodePath: '.',
+        property: 'position',
+        keyframes: [{ time: 0, value: { x: 1, y: 2, z: 3 } }],
+      },
+    });
+    assert.ok(
+      track.text.includes(
+        'res://shared/anims.tres leads out of the project through the link res://shared/, and only what is inside the project is written here.',
+      ),
+      track.text,
+    );
+    assert.equal(readFileSync(join(outside, 'anims.tres'), 'utf8'), library);
+    assert.equal(readFileSync(join(project, 'a.tscn'), 'utf8'), before);
+  } finally {
+    // The link first, since a recursive delete of the project must not reach what it leads to.
+    if (process.platform === 'win32') {
+      rmdirSync(shared);
+    } else {
+      unlinkSync(shared);
+    }
+    rmSync(outside, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -9193,6 +9271,7 @@ async function main(): Promise<void> {
     ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],
     ['testABakeReadsOnlyItsOwnScene', testABakeReadsOnlyItsOwnScene],
+    ['testAWriteThroughTheEditorBehindALinkOutIsRefused', testAWriteThroughTheEditorBehindALinkOutIsRefused],
     ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],

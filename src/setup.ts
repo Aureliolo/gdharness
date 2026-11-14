@@ -15,6 +15,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   rmSync,
   statSync,
@@ -321,28 +322,98 @@ function somethingAt(path: string): boolean {
   }
 }
 
-/** Each addon copied whole into the project's addons/, over whatever was there. */
+/** Where an install keeps the addons it replaces until it has finished, a folder Godot does not scan. */
+const PREVIOUS_FOLDER = '.gdharness-previous';
+
+/** Where a whole install moves what it replaced, to be removed. Nothing in it is ever restored. */
+const REPLACED_FOLDER = '.gdharness-replaced';
+
+/**
+ * Each addon copied whole into the project's addons/, over whatever was there. An install that
+ * fails leaves the project as it found it: an editor addon with its markers beside a runtime addon
+ * that never arrived is called current by one reader and refused by another.
+ */
 export function installAddons(
   projectPath: string,
   from: string = shippedAddonsDirectory(),
 ): InstalledAddon[] {
-  const installed: InstalledAddon[] = [];
+  const addons = join(projectPath, 'addons');
+  const addonsExisted = somethingAt(addons);
+  const previous = join(addons, PREVIOUS_FOLDER);
+  restoreInterrupted(addons, previous);
   for (const name of ADDONS) {
     const source = join(from, name);
     if (!existsSync(join(source, addonMarking(name)))) {
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
-    const target = join(projectPath, 'addons', name);
-    const replaced = somethingAt(target);
-    rmSync(target, { recursive: true, force: true });
-    mkdirSync(dirname(target), { recursive: true });
-    cpSync(source, target, { recursive: true });
-    writeFileSync(join(target, VERSION_MARKER), `${SERVER_VERSION}\n`);
-    installed.push({ name, path: target, replaced });
   }
-  writeFileSync(join(projectPath, 'addons', ADDONS[0], DIGEST_MARKER), `${editorAddonDigest(from)}\n`);
-  writeFileSync(join(projectPath, 'addons', RUNTIME_ADDON, DIGEST_MARKER), `${runtimeAddonDigest(from)}\n`);
+  const installed: InstalledAddon[] = [];
+  // The addons whose folder this install has taken over, which a failure puts back.
+  const taken: { readonly name: string; readonly kept: boolean }[] = [];
+  try {
+    for (const name of ADDONS) {
+      const target = join(addons, name);
+      const replaced = somethingAt(target);
+      if (replaced) {
+        mkdirSync(previous, { recursive: true });
+        renameSync(target, join(previous, name));
+      }
+      taken.push({ name, kept: replaced });
+      mkdirSync(addons, { recursive: true });
+      cpSync(join(from, name), target, { recursive: true });
+      installed.push({ name, path: target, replaced });
+    }
+    writeFileSync(join(addons, ADDONS[0], DIGEST_MARKER), `${editorAddonDigest(from)}\n`);
+    writeFileSync(join(addons, RUNTIME_ADDON, DIGEST_MARKER), `${runtimeAddonDigest(from)}\n`);
+    for (const name of ADDONS) {
+      writeFileSync(join(addons, name, VERSION_MARKER), `${SERVER_VERSION}\n`);
+    }
+    // One rename says the install is whole, so a removal cut short after it is never undone.
+    if (somethingAt(previous)) {
+      renameSync(previous, join(addons, REPLACED_FOLDER));
+    }
+  } catch (error) {
+    putBack(addons, previous, taken);
+    if (!addonsExisted && existsSync(addons) && readdirSync(addons).length === 0) {
+      rmdirSync(addons);
+    }
+    throw error;
+  } finally {
+    rmSync(previous, { recursive: true, force: true });
+    rmSync(join(addons, REPLACED_FOLDER), { recursive: true, force: true });
+  }
   return installed;
+}
+
+/**
+ * Puts back the addons an install that was killed had set aside in [param previous], over whatever
+ * it had copied in their place, so the next install starts from the project as it was and a failure
+ * of that one leaves it so. What a whole install replaced is only removed.
+ */
+function restoreInterrupted(addons: string, previous: string): void {
+  rmSync(join(addons, REPLACED_FOLDER), { recursive: true, force: true });
+  if (!somethingAt(previous)) {
+    return;
+  }
+  for (const name of readdirSync(previous)) {
+    rmSync(join(addons, name), { recursive: true, force: true });
+    renameSync(join(previous, name), join(addons, name));
+  }
+  rmSync(previous, { recursive: true, force: true });
+}
+
+/** Removes each addon a failed install took over and puts back the one it replaced, from [param previous]. */
+function putBack(
+  addons: string,
+  previous: string,
+  taken: readonly { readonly name: string; readonly kept: boolean }[],
+): void {
+  for (const { name, kept } of taken) {
+    rmSync(join(addons, name), { recursive: true, force: true });
+    if (kept) {
+      renameSync(join(previous, name), join(addons, name));
+    }
+  }
 }
 
 /**

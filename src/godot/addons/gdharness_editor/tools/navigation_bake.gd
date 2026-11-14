@@ -22,8 +22,10 @@ const SOURCE_MODES: Array[String] = [
 ]
 
 
-## Bakes the region [param region] of [param scene], answering what it now holds or why not.
-static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
+## Bakes the region [param region] of [param scene], answering what it now holds or why not. A
+## file of its own behind a link of [param links_out], which leads out of the project, is refused
+## before the bake.
+static func bake(scene: GdhSceneFile, region: Node, links_out: PackedStringArray) -> Dictionary:
 	var at: String = scene.path_of(region)
 	var flat: bool = region is NavigationRegion2D
 	if not flat and not region is NavigationRegion3D:
@@ -40,6 +42,11 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 	var foreign: Dictionary = _foreign_file(scene, held, at, file, embedded)
 	if not foreign.is_empty():
 		return foreign
+	var behind_a_link: String = (
+		"" if embedded else GdhSceneFile.out_through_link(file, links_out)
+	)
+	if not behind_a_link.is_empty():
+		return scene.refuse(behind_a_link)
 
 	scene.asked(region, [property])
 	if made:

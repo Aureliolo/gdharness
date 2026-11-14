@@ -8,10 +8,9 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
-import { statOf } from './listed-reads.js';
 import { LSPTimeout } from './lsp_client.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, linksOut, type ProjectText, projectTexts } from './project-scan.js';
+import { ignoredTexts, linksOut, type ProjectText, type Reach, scanProject } from './project-scan.js';
 import {
   ClassGraph,
   type ClassId,
@@ -117,28 +116,6 @@ export function resourcePathOf(projectPath: string, absolute: string): string | 
 }
 
 /**
- * The link [param absolute], a path in the project as written, goes out of the project by, as a
- * `res://` path in the caller's spelling with a closing slash for a folder. It is the shortest
- * leading part whose real place lies outside the project. Null where no part leaves.
- */
-export function linkOutOf(projectPath: string, absolute: string): string | null {
-  const written = relativeWithin(projectPath, absolute);
-  if (written === null || written === '') {
-    return null;
-  }
-  const realProject = onDiskSpelling(projectPath);
-  const steps = written.split('/');
-  for (const [index] of steps.entries()) {
-    const part = join(projectPath, ...steps.slice(0, index + 1));
-    if (relativeWithin(realProject, onDiskSpelling(part)) === null) {
-      const isFolder = index < steps.length - 1 || statOf(part)?.isDirectory() === true;
-      return `res://${steps.slice(0, index + 1).join('/')}${isFolder ? '/' : ''}`;
-    }
-  }
-  return null;
-}
-
-/**
  * [param path] as the file system spells it, for a path whose tail does not exist yet too: the
  * nearest directory that exists is resolved and the rest appended. Resolving only paths that exist
  * left a move's target in the spelling it was given, and on Windows that can be an 8.3 short name
@@ -193,6 +170,7 @@ interface RenameContext {
   readonly services: RenameServices;
   readonly declaringPath: string;
   readonly texts: readonly ProjectText[];
+  readonly reach: Reach;
   readonly scripts: ReadonlyMap<string, Script>;
   readonly declaring: Script;
   readonly declared: ReturnType<typeof declaredIn>;
@@ -233,14 +211,7 @@ function checkedRename(
   }
   const declaringPath = resourcePathOf(projectPath, request.scriptPath);
   if (declaringPath === null) {
-    const link = linkOutOf(projectPath, request.scriptPath);
-    return {
-      ok: false,
-      reason:
-        link === null
-          ? `${request.scriptPath} is not inside the project.`
-          : `${request.scriptPath} is behind the link ${link}, which leads out of the project, so ${symbol} is not renamed from here. Rename it in the project that holds the script.`,
-    };
+    return { ok: false, reason: `${request.scriptPath} is not inside the project.` };
   }
   let moveTo: string | null = null;
   if (request.newScriptPath !== null) {
@@ -271,7 +242,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   }
   const { named, moveTo } = checked;
 
-  const texts = projectTexts(projectPath, named === null ? [] : [named]);
+  const { texts, reach } = scanProject(projectPath, named === null ? [] : [named]);
   const scripts = scriptsOf(texts);
   const declaringText = texts.find((file) => (file.realPath ?? file.path) === checked.declaringPath);
   const declaringPath = declaringText?.path ?? checked.declaringPath;
@@ -284,7 +255,16 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   }
   const declared = declaredIn(scripts);
   const isClass = declaring.shape.className?.name === symbol;
-  const context: RenameContext = { request, services, declaringPath, texts, scripts, declaring, declared };
+  const context: RenameContext = {
+    request,
+    services,
+    declaringPath,
+    texts,
+    reach,
+    scripts,
+    declaring,
+    declared,
+  };
   const step = isClass ? await classRenameStep(context) : await memberRenameStep(context);
   if ('ok' in step) {
     return step;
@@ -533,7 +513,7 @@ function renamed(
   step: Planned,
   where: { moveTo: string | null; isClass: boolean },
 ): RenameOutcome {
-  const { request, declaringPath, texts, scripts, declared } = context;
+  const { request, declaringPath, texts, reach, scripts, declared } = context;
   const { projectPath, symbol, newName } = request;
   const { moveTo, isClass } = where;
   const { what, resolvedBy, took, overrides, declaringFiles } = step;
@@ -543,7 +523,7 @@ function renamed(
       {
         texts,
         scripts,
-        moves: new Map([[declaringPath, moveTo]]),
+        moves: new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo])),
         named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },

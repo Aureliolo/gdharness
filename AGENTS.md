@@ -24,6 +24,7 @@
 | `bun run test:ci`                                     | `test:fast` and the regressions.                                                         |
 | `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows. |
 | `bun run test:engine`, `bun run test:editor`          | The engine and editor legs. They need a real Godot.                                      |
+| `bun scripts/shard-weights.ts <run id>`               | Raises the regression weights to a CI run's took lines. Run it after a batch's CI.       |
 
 ## Setup
 

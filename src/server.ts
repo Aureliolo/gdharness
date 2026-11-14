@@ -14,6 +14,7 @@ import {
   closeSync,
   constants,
   copyFileSync,
+  type Dirent,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -21,7 +22,6 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  realpathSync,
   rmdirSync,
   statSync,
   writeFileSync,
@@ -238,8 +238,10 @@ import {
   isSameDirectory,
   isWithinRoot,
   keptInside,
+  listedSpelling,
   notAGodotProject,
   realAsFarAsItExists,
+  relativeWithin,
   resolveWithinProject,
 } from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
@@ -264,6 +266,7 @@ import {
 import { ensureProcessTable } from './process-table.js';
 import {
   folderFiles,
+  linksOut,
   pathsInUidCache,
   projectFiles,
   projectStructure,
@@ -438,6 +441,43 @@ const TYPE_ARGUMENTS: Readonly<Record<string, string>> = {
   create_resource: 'resourceType',
   create_scene: 'rootNodeType',
 };
+
+/**
+ * The editor commands that follow a node into the scenes naming it, or save a file the scene keeps
+ * beside it, which are handed the project's links out as `linksOut`. The addon cannot tell a link
+ * from a folder, and writes nothing behind one.
+ */
+const LINKS_OUT_COMMANDS: ReadonlySet<string> = new Set([
+  'delete_node',
+  'reparent_node',
+  'set_node_properties',
+  'save_branch',
+  'bake_navigation',
+  ...Object.values(EDITOR_CALLS['scene_animation'] ?? {})
+    .filter(([, effect]) => effect === 'writes')
+    .map(([command]) => command),
+]);
+
+/** The arguments of a writing call that name a file it writes, apart from the ones it only reads. */
+const WRITTEN_FILE_ARGUMENTS: readonly string[] = ['scenePath', 'resourcePath', 'newPath', 'newScenePath'];
+
+/**
+ * The arguments of [param command] that name a file it writes, none for a call that [param effect]
+ * says only reads. A save to a `newPath` only reads the scene it copies, so that one is judged by
+ * `newPath` alone.
+ */
+function writtenFilesOf(
+  command: string,
+  args: OperationParams,
+  effect: 'reads' | 'writes',
+): readonly string[] {
+  if (effect === 'reads') {
+    return [];
+  }
+  return command === 'save_scene' && readNonEmptyString(args, 'newPath') !== undefined
+    ? ['newPath']
+    : WRITTEN_FILE_ARGUMENTS;
+}
 
 /**
  * How many answers pass between one update notice and the next.
@@ -798,14 +838,29 @@ const OWN_DEBUGGER =
   ' Its debugger is the keeper holding it rather than the editor, so the debug_* tools answer for it all the same: breakpoints stop it, and debug_control pause breaks into it wherever it is, which the editor offers no way to do.';
 
 /**
+ * The gate's refusal of a path, with what to do instead added where the path leads out through a
+ * link to something that is there.
+ */
+function withRemedyBehindALink(refused: { reason: string; reached?: boolean }, remedy: string): string {
+  return refused.reached === true ? `${refused.reason} ${remedy}` : refused.reason;
+}
+
+/**
  * A file under the project as the project spells it, which is how a caller names it.
  *
- * Both sides resolved, since the adapter's spelling has every symlink followed and the project's
- * as the bridge reports it may not: on macOS every /var/folders project is really under
- * /private/var/folders, and the unresolved root would put its own files outside it.
+ * A path under the project's real root keeps its own steps, so a script behind a link is named by
+ * the link's path. Any other is resolved on both sides, since the editor's spelling has every
+ * symlink followed and the project's as the bridge reports it may not: on macOS every /var/folders
+ * project is really under /private/var/folders, and the unresolved root would put its own files
+ * outside it.
  */
 function projectSpelling(projectPath: string, absolutePath: string): string {
-  return `res://${relative(realAsFarAsItExists(projectPath), realAsFarAsItExists(absolutePath)).replaceAll('\\', '/')}`;
+  const root = realAsFarAsItExists(projectPath);
+  const within = relativeWithin(root, absolutePath);
+  if (within !== null) {
+    return `res://${within}`;
+  }
+  return `res://${relative(root, realAsFarAsItExists(absolutePath)).replaceAll('\\', '/')}`;
 }
 
 /**
@@ -4107,7 +4162,7 @@ function resolveTestEntries(
         reason: `${argument}${wasList ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
-    const location = resolveWithinProject(projectPath, entry);
+    const location = resolveWithinProject(projectPath, entry, { forTheEngine: true });
     if (!location.ok) {
       return { ok: false, reason: location.reason };
     }
@@ -4236,11 +4291,16 @@ function missingScriptReason(projectPath: string, relativePath: string, said: st
   const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
   const folder = dirname(relativePath.replaceAll('\\', '/'));
   const inFolder = join(projectPath, folder);
-  const beside = existsSync(inFolder)
-    ? readdirSync(inFolder, { withFileTypes: true })
-        .filter((entry) => entry.isFile())
-        .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
-    : [];
+  // A step of the path can be a file or a ring of links, which cannot be listed.
+  let listed: Dirent[];
+  try {
+    listed = readdirSync(inFolder, { withFileTypes: true });
+  } catch {
+    listed = [];
+  }
+  const beside = listed
+    .filter((entry) => entry.isFile())
+    .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`);
   return withNearestFiles(said, `res://${relativePath}`, scripts, beside);
 }
 
@@ -4479,12 +4539,7 @@ function nothingToSearchAt(projectPath: string, relativePath: string): string {
   // answered with the project's top-level folders named nothing near it.
   const parts = relativePath.split('/').filter((part) => part !== '');
   let kept = parts.length - 1;
-  while (
-    kept > 0 &&
-    statSync(join(projectPath, ...parts.slice(0, kept)), {
-      throwIfNoEntry: false,
-    })?.isDirectory() !== true
-  ) {
+  while (kept > 0 && !isDirectory(join(projectPath, ...parts.slice(0, kept)))) {
     kept -= 1;
   }
   const within = parts.slice(0, kept).join('/');
@@ -5003,6 +5058,8 @@ interface BreakpointCall {
   readonly located: { readonly relativePath: string; readonly absolutePath: string };
   readonly scriptPath: string;
   readonly line: number;
+  /** Said where the script lies behind a link out of the project and so was not read. */
+  readonly lineNotChecked?: string;
 }
 
 /** What a breakpoint answer says of the game this server started: not told, not taken, or taken. */
@@ -6837,15 +6894,18 @@ class GodotServer {
     args: OperationParams,
     project: { readonly value: { readonly path: string } },
   ): Promise<ToolResponse> {
-    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
+    const given = readString(args, 'scriptPath') ?? '';
+    // The engine loads a script behind a link out of the project, so a breakpoint on one is taken.
+    const located = resolveWithinProject(project.value.path, given, { forTheEngine: true });
     if (!located.ok) {
       return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
     }
-    // Resolved, because the adapter refuses a path that does not start with the project as
-    // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
-    // every /var/folders path is really /private/var/folders.
+    // The project's real root, because the adapter refuses a path that does not start with the
+    // project as it holds it, and on macOS /var/folders is /private/var/folders. The tail follows
+    // no link, as the engine loads it, in its folders' case, since a game matches the exact path.
     const session = this.dapHoldingBreakpointsOf(project.value.path);
-    const scriptPath = realAsFarAsItExists(located.absolutePath);
+    const root = realAsFarAsItExists(project.value.path);
+    const scriptPath = join(root, listedSpelling(root, located.relativePath));
     const line = readPositiveNumber(args, 'line');
     if (line === undefined) {
       return this.createErrorResponse('line is required: the one-based line to stop on.');
@@ -6853,16 +6913,48 @@ class GodotServer {
     // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
     // is kept in the project's set and never stops anything. Removing one is left alone, so a
     // breakpoint on a script since deleted or shortened can still be taken off.
-    if (op === 'set') {
-      if (!existsSync(located.absolutePath)) {
-        return this.missingScript(project.value.path, located.relativePath);
+    const checked = op === 'set' ? this.checkedSetLine(project.value.path, given, located, line) : {};
+    if ('refusal' in checked) {
+      return checked.refusal;
+    }
+    return await this.applyBreakpoint({ op, args, project, session, located, scriptPath, line, ...checked });
+  }
+
+  /**
+   * What a set on [param line] of the script [param given] answers before it is taken: the refusal
+   * of a missing script or a line nothing stops on, or the note that the line went unchecked for a
+   * script behind a link out of the project, which is not read.
+   */
+  private checkedSetLine(
+    projectPath: string,
+    given: string,
+    located: { readonly relativePath: string; readonly absolutePath: string },
+    line: number,
+  ): { refusal: ToolResponse } | { lineNotChecked?: string } {
+    const gate = resolveWithinProject(projectPath, given);
+    const link = gate.ok ? null : (gate.link ?? null);
+    if (!existsSync(located.absolutePath)) {
+      // A link whose target is gone leaves nothing to name a missing script in.
+      if (!gate.ok && link !== null && !existsSync(join(projectPath, link.slice('res://'.length)))) {
+        return { refusal: this.createErrorResponse(gate.reason, PATH_SOLUTIONS) };
+      }
+      return { refusal: this.missingScript(projectPath, located.relativePath) };
+    }
+    if (link === null) {
+      if (statSync(located.absolutePath, { throwIfNoEntry: false })?.isDirectory() === true) {
+        return {
+          refusal: this.createErrorResponse(`res://${located.relativePath} is a folder, not a script.`),
+        };
       }
       const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
-      if (nothing !== null) {
-        return this.createErrorResponse(nothing);
-      }
+      return nothing === null ? {} : { refusal: this.createErrorResponse(nothing) };
     }
-    return await this.applyBreakpoint({ op, args, project, session, located, scriptPath, line });
+    const root = realAsFarAsItExists(projectPath);
+    const linkSteps = listedSpelling(root, link.slice('res://'.length).replace(/\/$/, ''));
+    const script = projectSpelling(projectPath, join(root, listedSpelling(root, located.relativePath)));
+    return {
+      lineNotChecked: `Line ${line} of ${script} was not checked, since the script lies behind the link res://${linkSteps}${link.endsWith('/') ? '/' : ''}, which leads out of the project.`,
+    };
   }
 
   /** A breakpoint handed to the editor's adapter when one is connected, and otherwise held here. */
@@ -6924,6 +7016,7 @@ class GodotServer {
           );
     return this.jsonTextResponse({
       ...answer,
+      ...(call.lineNotChecked === undefined ? {} : { lineNotChecked: call.lineNotChecked }),
       held: this.breakpointsAsProjectSpells(project.value.path, held),
       // The editor's own, as it reported them to this session, so a caller reading the whole
       // set sees the lines the user set by hand as well as the ones set here.
@@ -7519,7 +7612,7 @@ class GodotServer {
       if (value === undefined) {
         continue;
       }
-      const location = resolveWithinProject(projectPath, value);
+      const location = resolveWithinProject(projectPath, value, { forTheEngine: true });
       if (!location.ok) {
         const kept = keptInside(value);
         const solutions =
@@ -7568,7 +7661,7 @@ class GodotServer {
           resolved.push(source);
           continue;
         }
-        const location = resolveWithinProject(projectPath, texture);
+        const location = resolveWithinProject(projectPath, texture, { forTheEngine: true });
         if (!location.ok) {
           return { ok: false, response: this.createErrorResponse(location.reason, PATH_SOLUTIONS) };
         }
@@ -7588,7 +7681,9 @@ class GodotServer {
   ): Checked<OperationParams> {
     const pluginName = readNonEmptyString(args, 'pluginName');
     if (pluginName !== undefined) {
-      const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
+      const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`, {
+        forTheEngine: true,
+      });
       if (!plugin.ok) {
         return {
           ok: false,
@@ -7900,6 +7995,10 @@ class GodotServer {
       timeoutMs: _timeoutMs,
       ...params
     } = contained.value;
+    const behindALink = this.writtenOutThroughALink(project.value.path, contained.value, ['resourcePath']);
+    if (behindALink !== null) {
+      return behindALink;
+    }
     const given = readNonEmptyString(contained.value, 'resourcePath') ?? '';
     const resource = given.startsWith('res://') ? given : `res://${given}`;
     const sidecar = join(project.value.path, `${resource.slice('res://'.length)}.import`);
@@ -8581,16 +8680,6 @@ class GodotServer {
     if (place !== null && !existsSync(place.absolutePath)) {
       return this.createErrorResponse(nothingToSearchAt(project.value.path, place.relativePath));
     }
-    // The search reads nothing behind a link out of the project, but the place asked for is opened through one,
-    // so a link inside the project naming a folder outside it would be searched whole.
-    if (
-      place !== null &&
-      !isWithinRoot(realpathSync.native(project.value.path), realpathSync.native(place.absolutePath))
-    ) {
-      return this.createErrorResponse(
-        `res://${place.relativePath} leads outside the project through a link, so it is not searched.`,
-      );
-    }
     return this.runProjectSearch(args, project.value.path, place);
   }
 
@@ -8630,7 +8719,8 @@ class GodotServer {
       return project.response;
     }
     const given = readNonEmptyString(args, 'outputPath');
-    const output = given === undefined ? null : resolveWithinProject(project.value.path, given);
+    const output =
+      given === undefined ? null : resolveWithinProject(project.value.path, given, { forTheEngine: true });
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
@@ -8687,7 +8777,9 @@ class GodotServer {
     const preset = readString(args, 'preset') ?? '';
     const given = readString(args, 'outputPath');
     const output =
-      given === undefined || given === '' ? null : resolveWithinProject(project.value.path, given);
+      given === undefined || given === ''
+        ? null
+        : resolveWithinProject(project.value.path, given, { forTheEngine: true });
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
@@ -8809,7 +8901,9 @@ class GodotServer {
       return project.response;
     }
     const preset = readNonEmptyString(args, 'preset') ?? '';
-    const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '');
+    const output = resolveWithinProject(project.value.path, readString(args, 'outputPath') ?? '', {
+      forTheEngine: true,
+    });
     if (!output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
@@ -9351,6 +9445,8 @@ class GodotServer {
       '-rc',
       '1',
       '--',
+      // The engine keeps --accessibility to itself, so the runner is told to ask for the tree.
+      ...(windowed && accessible.length > 0 ? ['--ask-for-the-tree'] : []),
       '--suites-in',
       suitesFile,
       '--skipping-in',
@@ -12871,7 +12967,8 @@ class GodotServer {
       return suites.response;
     }
     const scene = suites.value === null ? readNonEmptyString(args, 'scene') : SUITES_SCENE;
-    const sceneToRun = scene !== undefined ? resolveWithinProject(project.value.path, scene) : null;
+    const sceneToRun =
+      scene !== undefined ? resolveWithinProject(project.value.path, scene, { forTheEngine: true }) : null;
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
@@ -18490,6 +18587,10 @@ class GodotServer {
     if (!contained.ok) {
       return contained.response;
     }
+    const behindALink = this.writtenOutThroughALink(project.value.path, contained.value, ['scriptPath']);
+    if (behindALink !== null) {
+      return behindALink;
+    }
     const { op: _op, projectPath: _projectPath, ...params } = contained.value;
     const created = await this.operation('create_script', params, project.value.path);
     const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
@@ -18591,6 +18692,16 @@ class GodotServer {
    */
   private async handleModifyScript(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
+    if (project.ok) {
+      const contained = this.containProjectFiles(args);
+      if (!contained.ok) {
+        return contained.response;
+      }
+      const behindALink = this.writtenOutThroughALink(project.value.path, contained.value, ['scriptPath']);
+      if (behindALink !== null) {
+        return behindALink;
+      }
+    }
     const written = await this.headless('modify_script', args);
     const scriptPath = readNonEmptyString(args, 'scriptPath');
     if (
@@ -18639,7 +18750,9 @@ class GodotServer {
     const projectPath = project.value.path;
     const scriptPath = resolveWithinProject(projectPath, readNonEmptyString(args, 'scriptPath') ?? '');
     if (!scriptPath.ok) {
-      return this.createErrorResponse(scriptPath.reason);
+      return this.createErrorResponse(
+        withRemedyBehindALink(scriptPath, 'Rename it in the project that holds the script.'),
+      );
     }
     if (!existsSync(scriptPath.absolutePath)) {
       return this.missingScript(projectPath, scriptPath.relativePath);
@@ -18889,6 +19002,9 @@ class GodotServer {
    * An editor this server opened is waited for first, since one importing the project as it starts
    * is no engine to boot a second beside. One that never connects leaves the file to read all the
    * same.
+   *
+   * A file inside the project is handed to the engine in the disk's spelling, and one behind a link
+   * out as the caller wrote it, so it is read where the link leads.
    */
   private async readFromFile(
     args: OperationParams,
@@ -18906,14 +19022,15 @@ class GodotServer {
     if (this.editorHasOpen(projectPath)) {
       return this.byTheEditor(await throughTheEditor(), 'reads');
     }
-    const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '');
+    const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '', {
+      forTheEngine: true,
+    });
     if (!where.ok) {
       return this.createErrorResponse(where.reason);
     }
-    const file = resourcePathOf(projectPath, where.absolutePath);
-    if (file === null) {
-      return this.createErrorResponse(`${pathKey} must name a file inside the project.`);
-    }
+    // The engine opens a file inside the project by the spelling the disk holds, and what lies behind
+    // a link out has no place in the project, so it is handed over as written.
+    const file = resourcePathOf(projectPath, where.absolutePath) ?? `res://${where.relativePath}`;
     const outcome = await this.operation(operation, paramsFor(file), projectPath);
     if (!outcome.ok) {
       return this.answer(outcome);
@@ -18935,6 +19052,9 @@ class GodotServer {
    * An editor of the project that is running and has not reached this server holds its own copy of
    * any scene it has open, and a save there would put back what the engine wrote, so a write is
    * refused until that editor connects.
+   *
+   * A write to a file that leads out of the project through a link is refused before either is
+   * asked, since the call describes what is written.
    */
   private async editorOrEngine(
     command: string,
@@ -18951,6 +19071,17 @@ class GodotServer {
       return project.response;
     }
     const projectPath = project.value.path;
+    const behindALink = this.writtenOutThroughALink(
+      projectPath,
+      contained.value,
+      writtenFilesOf(command, contained.value, effect),
+    );
+    if (behindALink !== null) {
+      return behindALink;
+    }
+    const asked: OperationParams = LINKS_OUT_COMMANDS.has(command)
+      ? { ...contained.value, linksOut: linksOut(projectPath) }
+      : contained.value;
     const typeArgument = TYPE_ARGUMENTS[command];
     const typeName = typeArgument === undefined ? '' : (readString(contained.value, typeArgument) ?? '');
     const waited = await this.waitForTheEditorOpenedHere(contained.value, []);
@@ -18958,7 +19089,7 @@ class GodotServer {
       return await this.editorToolThroughTheEditor(
         projectPath,
         { command, askedAs, effect, typeName },
-        contained.value,
+        asked,
       );
     }
     if (effect === 'writes') {
@@ -18968,17 +19099,37 @@ class GodotServer {
       }
     }
     const run = async (): Promise<ToolResponse> =>
-      await this.runEditorToolHeadless(
-        projectPath,
-        { command, arguments: contained.value },
-        effect,
-        typeName,
-      );
+      await this.runEditorToolHeadless(projectPath, { command, arguments: asked }, effect, typeName);
     const written =
       readNonEmptyString(contained.value, 'scenePath') ?? readNonEmptyString(contained.value, 'resourcePath');
     const target =
-      effect === 'writes' && written !== undefined ? resolveWithinProject(projectPath, written) : null;
+      effect === 'writes' && written !== undefined
+        ? resolveWithinProject(projectPath, written, { forTheEngine: true })
+        : null;
     return target?.ok === true ? await inTurnFor(projectPath, target.absolutePath, run) : await run();
+  }
+
+  /**
+   * The refusal of a write to a file that leads out of the project through a link, or null. Each of
+   * [param names] that [param args] gives is judged by where its file really is, and the first
+   * refused is answered. A file that is not there yet is judged by the folder it would land in.
+   */
+  private writtenOutThroughALink(
+    projectPath: string,
+    args: OperationParams,
+    names: readonly string[],
+  ): ToolResponse | null {
+    for (const name of names) {
+      const given = readNonEmptyString(args, name);
+      if (given === undefined) {
+        continue;
+      }
+      const location = resolveWithinProject(projectPath, given);
+      if (!location.ok && location.link !== undefined) {
+        return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
+      }
+    }
+    return null;
   }
 
   /** An editor tool asked of the editor serving the project, with the note a class missing from the cache calls for. */
@@ -19015,6 +19166,14 @@ class GodotServer {
     const command = EDITOR_ANSWERS['scene_create']?.['save'];
     if (command === undefined) {
       throw new Error('scene_create save has no editor command');
+    }
+    const behindALink = this.writtenOutThroughALink(
+      project.value.path,
+      contained.value,
+      writtenFilesOf(command, contained.value, 'writes'),
+    );
+    if (behindALink !== null) {
+      return behindALink;
     }
     if (!this.godotBridge.isConnected()) {
       const refused = await this.noEditorYet(contained.value, [
@@ -19137,7 +19296,7 @@ class GodotServer {
     const projectPath = project.value.path;
     const from = resolveWithinProject(projectPath, readNonEmptyString(args, 'resourcePath') ?? '');
     if (!from.ok) {
-      return this.createErrorResponse(from.reason);
+      return this.createErrorResponse(withRemedyBehindALink(from, 'Move it in the folder it lives in.'));
     }
     const to = resolveWithinProject(projectPath, readNonEmptyString(args, 'newPath') ?? '');
     if (!to.ok) {

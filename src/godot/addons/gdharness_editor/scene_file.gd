@@ -41,6 +41,8 @@ const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhSceneFile = preload("scene_file.gd")
 const GdhSceneUids = preload("scene_uids.gd")
+## How many links one path is followed through before it is taken to run in a ring.
+const MOST_LINKS: int = 40
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
 ## for the editor's files to settle has to wait through as well.
@@ -928,6 +930,147 @@ static func unsaved_in_editor(scene_path: String) -> String:
 		)
 		% scene_path
 	)
+
+
+## The res:// links out of the project the server hands a command in [param args] as linksOut, a
+## folder with a closing slash and a file without. None when it hands none.
+static func links_out_in(args: Dictionary) -> PackedStringArray:
+	var links: PackedStringArray = []
+	var given: Variant = args.get("linksOut", [])
+	if not given is Array:
+		return links
+	var listed: Array = given
+	for link: Variant in listed:
+		var _added: bool = links.append(str(link))
+	return links
+
+
+## Why [param file] is not read or written here when it is one of [param links_out] or lies below
+## one and does not come back into the project, or "". Case is ignored, since a scene may spell a
+## file in another case where the file system ignores it.
+static func out_through_link(file: String, links_out: PackedStringArray) -> String:
+	var link: String = link_out_over(file, links_out)
+	if link.is_empty():
+		return ""
+	var ends: String = _ends_at(file, OS.get_name() in ["Windows", "macOS"])
+	if ends == "inside":
+		return ""
+	if ends == "unknown":
+		return (
+			(
+				"%s runs through links that cannot be followed to the end (more than %d, a "
+				+ "ring, or one that cannot be read), so whether it leads out of the "
+				+ "project is not known, and it is not written here."
+			)
+			% [file, MOST_LINKS]
+		)
+	return (
+		(
+			"%s leads out of the project through the link %s, and only what is inside "
+			+ "the project is written here."
+		)
+		% [file, link]
+	)
+
+
+## Whether [param file] is one of [param links_out] or lies below one, wherever the link ends, so a
+## scene found there is left unread. Case is ignored as [method out_through_link] says.
+static func behind_a_link_out(file: String, links_out: PackedStringArray) -> bool:
+	return not link_out_over(file, links_out).is_empty()
+
+
+## The first of [param links_out] that [param file] is or lies below, or "".
+static func link_out_over(file: String, links_out: PackedStringArray) -> String:
+	# Windows and macOS name a file in any case, Linux only in the case it was made in.
+	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
+	var lowered: String = file.to_lower() if any_case else file
+	for link: String in links_out:
+		var held: String = link.to_lower() if any_case else link
+		if lowered == held or (held.ends_with("/") and lowered.begins_with(held)):
+			return link
+	return ""
+
+
+## Where [param file], a res:// path, ends once each link on it is followed: "inside" the project,
+## as a path out through one link and back in through another does, "outside" it, or "unknown"
+## when a ring, more than [constant MOST_LINKS] links or a link that cannot be read stops the
+## following. Only link targets are read, never file contents. The project's folder and where a link
+## ends can be spelt differently (a short 8.3 name against the long one, a substituted drive against
+## its folder), so the end is inside when a folder above it is the project's folder on disk.
+static func _ends_at(file: String, any_case: bool) -> String:
+	var inside: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	var led: String = _followed(ProjectSettings.globalize_path(file))
+	if inside.is_empty() or led.is_empty():
+		return "unknown"
+	var held: String = inside.to_lower() if any_case else inside
+	var there: String = led.to_lower() if any_case else led
+	if there == held or there.begins_with(held + "/"):
+		return "inside"
+	return "inside" if _is_below(led, inside) else "outside"
+
+
+## Whether [param led] is the absolute folder [param inside] or lies below it, whatever way each
+## is spelt, by asking the disk whether a folder above [param led] is [param inside].
+static func _is_below(led: String, inside: String) -> bool:
+	var disk: DirAccess = DirAccess.open(inside.get_slice("/", 0) + "/")
+	if disk == null:
+		return false
+	var above: String = led
+	while above.contains("/"):
+		if disk.is_equivalent(above, inside):
+			return true
+		var parent: String = above.get_base_dir()
+		if parent == above or parent.ends_with(":"):
+			break
+		above = parent
+	return false
+
+
+## Where the absolute path [param given] leads, each link on it followed in turn, or "" after
+## [constant MOST_LINKS] links, which is a ring, or when a link's target is gone or cannot be read.
+static func _followed(given: String) -> String:
+	var parts: PackedStringArray = given.replace("\\", "/").simplify_path().split("/")
+	var disk: DirAccess = DirAccess.open(parts[0] + "/")
+	if disk == null:
+		return ""
+	var current: String = parts[0]
+	var index: int = 1
+	var links: int = 0
+	while index < parts.size():
+		var next: String = current + "/" + parts[index]
+		index += 1
+		if not disk.is_link(next):
+			current = next
+			continue
+		links += 1
+		if links > MOST_LINKS:
+			return ""
+		var rest: PackedStringArray = parts.slice(index)
+		var target: String = _target_of(disk, next, current)
+		# A link the engine cannot read leads somewhere unknown, which is not inside.
+		if target.is_empty():
+			return ""
+		parts = target.split("/")
+		current = parts[0]
+		index = 1
+		parts.append_array(rest)
+	return current
+
+
+## The absolute path the link [param at], found in the folder [param folder], points to.
+static func _target_of(disk: DirAccess, at: String, folder: String) -> String:
+	var target: String = disk.read_link(at).replace("\\", "/")
+	if target.is_empty():
+		return ""
+	# A junction's target may carry the prefix Windows gives a path that skips its own parsing.
+	for prefix: String in ["//?/", "/??/"]:
+		target = target.trim_prefix(prefix)
+	if not target.is_absolute_path():
+		target = folder.path_join(target)
+	target = target.simplify_path()
+	# Linux and macOS name the target of a dangling link and Windows does not, so a target that is
+	# not there is unreadable everywhere.
+	return target if disk.dir_exists(target) or disk.file_exists(target) else ""
 
 
 ## Frees [member root] and answers [param error] as a refusal.

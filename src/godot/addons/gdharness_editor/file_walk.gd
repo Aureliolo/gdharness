@@ -137,14 +137,19 @@ func find_files(path: String, extension: String, with_ours: bool = false) -> Arr
 	var files: Array[String] = []
 	if is_stepped_over(path) or (not with_ours and is_installed_by_gdharness(path)):
 		return files
+	# A link whose target is gone lists as a folder that does not open. DirAccess.open answers null
+	# for it quietly, where DirAccess.get_directories_at prints an engine error.
+	var at: DirAccess = DirAccess.open(path)
+	if at == null:
+		return files
 	# A folder's folders and then its files, each sorted as DirAccess gives them, so a walk answers
 	# in one order on every platform: in the order the file system kept them, Linux named the scenes
 	# a branch save followed in another order than Windows.
-	for folder: String in DirAccess.get_directories_at(path):
+	for folder: String in at.get_directories():
 		var inner: String = path + folder + "/"
 		if not folder.begins_with(".") and not holds_a_project(inner):
 			files.append_array(find_files(inner, extension, with_ours))
-	for file_name: String in DirAccess.get_files_at(path):
+	for file_name: String in at.get_files():
 		if file_name.ends_with(extension):
 			files.append(path + file_name)
 	return files
@@ -155,11 +160,14 @@ func find_files_with_extensions(path: String, extensions: Array) -> Array[String
 	var files: Array[String] = []
 	if is_stepped_over(path) or is_installed_by_gdharness(path):
 		return files
-	for folder: String in DirAccess.get_directories_at(path):
+	var at: DirAccess = DirAccess.open(path)
+	if at == null:
+		return files
+	for folder: String in at.get_directories():
 		var inner: String = path + folder + "/"
 		if not folder.begins_with(".") and not holds_a_project(inner):
 			files.append_array(find_files_with_extensions(inner, extensions))
-	for file_name: String in DirAccess.get_files_at(path):
+	for file_name: String in at.get_files():
 		if not file_name.begins_with(".") and file_name.get_extension().to_lower() in extensions:
 			files.append(path + file_name)
 	return files

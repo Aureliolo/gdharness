@@ -145,7 +145,8 @@ func _parse_method_args(raw_args: Array) -> Array:
 ## edited in memory while only the scene was saved, which refers to the file, so the edit was
 ## answered as made and was gone. It is saved too. One inside some other file (an imported model,
 ## the scene this one inherits from) is refused, since nothing written here would keep the edit.
-func _homes(scene: GdhSceneFile, held: Array) -> Array:
+## One behind a link of [param links_out], which leads out of the project, is refused too.
+func _homes(scene: GdhSceneFile, held: Array, links_out: PackedStringArray) -> Array:
 	var homes: Dictionary = {}
 	for entry: Array in held:
 		var resource: Resource = entry[0]
@@ -159,6 +160,9 @@ func _homes(scene: GdhSceneFile, held: Array) -> Array:
 			and FileAccess.file_exists(at)
 			and not FileAccess.file_exists(at + ".import")
 		):
+			var behind_a_link: String = GdhSceneFile.out_through_link(at, links_out)
+			if not behind_a_link.is_empty():
+				return [false, behind_a_link]
 			homes[at] = resource
 			continue
 		return [
@@ -202,13 +206,18 @@ func _library_of(player: AnimationPlayer, animation_name: String) -> AnimationLi
 
 ## The state machine at [param state_machine_path] in [param anim_tree], with the files it is kept
 ## in, as [machine, homes, why not].
-func _machine(scene: GdhSceneFile, anim_tree: AnimationTree, state_machine_path: String) -> Array:
+func _machine(
+	scene: GdhSceneFile,
+	anim_tree: AnimationTree,
+	state_machine_path: String,
+	links_out: PackedStringArray
+) -> Array:
 	var sm: AnimationNodeStateMachine = GdhAnimationReads.state_machine(
 		anim_tree, state_machine_path
 	)
 	if not sm:
 		return [null, {}, GdhAnimationReads.no_machine(anim_tree, state_machine_path)]
-	var homes: Array = _homes(scene, [[sm, "state machine"]])
+	var homes: Array = _homes(scene, [[sm, "state machine"]], links_out)
 	if not homes[0]:
 		return [null, {}, homes[1]]
 	return [sm, homes[1], ""]
@@ -306,7 +315,9 @@ func create_animation(args: Dictionary) -> Dictionary:
 	if library[0] == null:
 		return scene.refuse(str(library[1]))
 	var anim_lib: AnimationLibrary = library[0]
-	var homes: Array = _homes(scene, [[anim_lib, "animation library"]])
+	var homes: Array = _homes(
+		scene, [[anim_lib, "animation library"]], GdhSceneFile.links_out_in(args)
+	)
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
 
@@ -496,7 +507,9 @@ func set_animation(args: Dictionary) -> Dictionary:
 	var player: AnimationPlayer = found[1]
 	var anim: Animation = player.get_animation(StringName(animation_name))
 	var homes: Array = _homes(
-		scene, [[_library_of(player, animation_name), "animation library"], [anim, "animation"]]
+		scene,
+		[[_library_of(player, animation_name), "animation library"], [anim, "animation"]],
+		GdhSceneFile.links_out_in(args)
 	)
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
@@ -611,7 +624,7 @@ func rename_animation(args: Dictionary) -> Dictionary:
 	var held: Array = [[library, "animation library"]]
 	for state: Array in states:
 		held.append([state[0], "state playing %s" % animation_name])
-	var homes: Array = _homes(scene, held)
+	var homes: Array = _homes(scene, held, GdhSceneFile.links_out_in(args))
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
 
@@ -658,7 +671,9 @@ func remove_animation(args: Dictionary) -> Dictionary:
 	var scene: GdhSceneFile = found[0]
 	var player: AnimationPlayer = found[1]
 	var library: AnimationLibrary = _library_of(player, animation_name)
-	var homes: Array = _homes(scene, [[library, "animation library"]])
+	var homes: Array = _homes(
+		scene, [[library, "animation library"]], GdhSceneFile.links_out_in(args)
+	)
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
 	var called: String = (

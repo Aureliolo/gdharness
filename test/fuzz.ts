@@ -11,23 +11,37 @@
 import { jest } from 'bun:test';
 import assert from 'node:assert/strict';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
-import { GameLog } from '../src/game-log.js';
+import { answersTo, GameLog, type LogEntry, type Severity } from '../src/game-log.js';
+import {
+  type DebuggerMessage,
+  DebuggerStream,
+  decodeVariant,
+  framedCommand,
+  type SentValue,
+} from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { keepPipelineCache } from '../src/pipeline-cache.js';
+import { VERSION_MARKER } from '../src/project-walk.js';
+import { isRecord } from '../src/records.js';
 import { parseProjectGodot } from '../src/resources.js';
 import {
   amendRunRecord,
@@ -39,14 +53,21 @@ import {
   sweepTranscripts,
   writeRunRecord,
 } from '../src/run-record.js';
+import { discardUsing } from '../src/scratch.js';
+import { SERVER_VERSION } from '../src/server-version.js';
+import { ADDONS, installAddons, installedEditorDigest, installedRuntimeDigest } from '../src/setup.js';
+import { spawnHidden } from '../src/spawn.js';
 import {
   type CasesBySuite,
   type DeclaredSuite,
+  dealt,
   peakOf,
   type SuiteTimes,
+  type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
+import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -1110,7 +1131,11 @@ interface RunSetup {
   readonly freeGiB: number;
   /** What each suite was seen to hold, in GiB, in suite order. */
   readonly peaksGiB: readonly number[];
+  /** The lanes the run is raised by, one answer each, up to the ceiling of {@link RISE_CEILING}. */
+  readonly rises?: readonly number[];
 }
+
+const RISE_CEILING = 6;
 
 interface Ran {
   readonly index: number;
@@ -1172,7 +1197,7 @@ function takeFreeSlots(slots: StandInSlots, count: number): string[] {
 }
 
 /** Starts the run the setup describes, with the scheduler deciding when each wait ends. */
-function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): StartedRun {
+function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; above?: boolean }): StartedRun {
   const slots = new StandInSlots(setup.slotCount);
   if (setup.outsideHolds && setup.slotCount > 1) {
     slots.takeNow();
@@ -1190,6 +1215,29 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
   const gate = new MemoryGate(slots, free, 1);
   const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
   const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
+  // The lanes the run was last raised to, which no more engines than may go at once.
+  let lanesNow = setup.lanes;
+  const rises = [...(setup.rises ?? [])];
+  const raised =
+    setup.rises === undefined
+      ? undefined
+      : {
+          ceiling: RISE_CEILING,
+          past: async (above: number, signal: AbortSignal): Promise<number> => {
+            const by = rises.shift();
+            if (by === undefined) {
+              await new Promise<void>((_, refused) => {
+                signal.addEventListener('abort', () => {
+                  refused(new Error('the asking was ended'));
+                });
+              });
+            }
+            await s.schedule(Promise.resolve(), 'a rise is answered');
+            signal.throwIfAborted();
+            lanesNow = Math.min(RISE_CEILING, above + (by ?? 1));
+            return lanesNow;
+          },
+        };
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
@@ -1208,6 +1256,10 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
     const engine = { need, held: 0 };
     going.set(index, engine);
     peak.engines = Math.max(peak.engines, going.size);
+    assert.ok(going.size <= lanesNow, `${String(going.size)} engines going on ${String(lanesNow)} lanes`);
+    if (going.size > setup.lanes) {
+      peak.above = true;
+    }
     void s.schedule(Promise.resolve(), `engine ${String(index)} tells`).then(() => {
       if (going.get(index) === engine) {
         engine.held = need;
@@ -1220,7 +1272,7 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate)
+  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate, raised)
     .then(
       (ran) => {
         result = ran;
@@ -1320,6 +1372,49 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
   assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
 }
 
+async function noOrderOfRisesLosesASuite(): Promise<void> {
+  const peak: { engines: number; above?: boolean } = { engines: 0 };
+  jest.useFakeTimers();
+  try {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.integer({ min: 1, max: 3 }),
+        fc.integer({ min: 2, max: 3 }),
+        fc.integer({ min: 2, max: 6 }),
+        fc.constantFrom(5, 6.5, 8, 16),
+        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 6, maxLength: 6 }),
+        fc.array(fc.integer({ min: 1, max: 3 }), { maxLength: 3 }),
+        async (s, slotCount, lanes, suites, freeGiB, peaksGiB, rises) => {
+          const started = startRun(
+            s,
+            { slotCount, outsideHolds: false, lanes, suites, freeGiB, peaksGiB, rises },
+            peak,
+          );
+          if (!(await stepUntilEnded(s, started))) {
+            await endHungRun(started);
+            throw new Error(
+              `hung: ${String(suites)} suites over ${String(lanes)} lanes raised by ${rises.join(', ')}`,
+            );
+          }
+          await s.waitIdle();
+          assert.deepEqual(
+            (started.ran() ?? []).flatMap((engine) => engine.suites).toSorted(),
+            suitesOf(suites, peaksGiB)
+              .units.map((unit) => unit.suite)
+              .toSorted(),
+          );
+          assert.equal(started.slots.freeCount, slotCount);
+        },
+      ),
+      { numRuns: 150, seed: 42 },
+    );
+  } finally {
+    jest.useRealTimers();
+  }
+  assert.ok(peak.above === true, 'no run ever had more engines going than the lanes it began on');
+}
+
 /** A stand-in `hold` that takes the blocks named, records each ask and answers after [param turns] microtask turns. */
 function standInHold(
   taken: ReadonlySet<number>,
@@ -1406,6 +1501,893 @@ function theWalkGivesOnlyWhatItHolds(): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Writes to one file, taken in turn
+// ---------------------------------------------------------------------------------------------
+
+interface Writer {
+  readonly file: 0 | 1;
+  readonly holdMs: number;
+  readonly fails: boolean;
+}
+
+/**
+ * Writers to a path, asked in any order and to either of two files, run one at a time per file and
+ * in the order they asked. A writer that throws gives its turn back, so the ones behind it still run.
+ */
+async function writersTakeTurnsInTheOrderTheyAsked(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(
+        fc.record({
+          file: fc.constantFrom<0 | 1>(0, 1),
+          // A hold past the waiters' 100 ms look is what makes them compete for the turn.
+          holdMs: fc.constantFrom(0, 0, 1, 3, 130),
+          fails: fc.boolean(),
+        }),
+        { minLength: 1, maxLength: 7 },
+      ),
+      async (writers: readonly Writer[]) => {
+        const project = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-turns-'));
+        try {
+          const files = [join(project, 'a.tscn'), join(project, 'b.tscn')];
+          const events: string[] = [];
+          const asked = writers.map((writer, index) =>
+            inTurnFor(project, files[writer.file] ?? '', async () => {
+              events.push(`start ${String(index)}`);
+              await new Promise((done) => setTimeout(done, writer.holdMs));
+              events.push(`end ${String(index)}`);
+              if (writer.fails) {
+                throw new Error(`writer ${String(index)} failed`);
+              }
+              return index;
+            }).then(
+              (value) => ({ value }),
+              (error: unknown) => ({ error }),
+            ),
+          );
+          const answers = await Promise.all(asked);
+          for (const file of [0, 1] as const) {
+            const mine = writers.flatMap((writer, index) => (writer.file === file ? [index] : []));
+            const seen = events.filter((event) => mine.includes(Number(event.split(' ')[1])));
+            assert.deepEqual(
+              seen,
+              mine.flatMap((index) => [`start ${String(index)}`, `end ${String(index)}`]),
+              `writers to file ${String(file)} ran one at a time, in the order asked`,
+            );
+          }
+          for (const [index, answer] of answers.entries()) {
+            assert.ok(
+              writers[index]?.fails === true ? 'error' in answer : 'value' in answer,
+              'each outcome is its own',
+            );
+          }
+          assert.deepEqual(
+            readdirSync(join(project, '.godot', 'gdharness-writes')),
+            [],
+            'every lock was given back',
+          );
+        } finally {
+          sweep(project);
+        }
+      },
+    ),
+    { numRuns: 12 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The order a plan deals in
+// ---------------------------------------------------------------------------------------------
+
+const PLAN_SUITES = [
+  'res://a_test.gd',
+  'res://a-b_test.gd',
+  'res://a_b_test.gd',
+  'res://ab_test.gd',
+  'res://B_test.gd',
+  'res://z_test.gd',
+  'res://Z_test.gd',
+  'res://ä_test.gd',
+  'res://a/x_test.gd',
+];
+
+const planUnits = fc.uniqueArray(
+  fc.record({
+    suite: fc.constantFrom(...PLAN_SUITES),
+    func: fc.constantFrom('test_a', 'test_b', 'test_c'),
+    cost: fc.constantFrom(1, 2, 2, 5),
+  }),
+  { selector: (unit) => `${unit.suite}:${unit.func}`, maxLength: 12 },
+);
+
+function asUnit(unit: { suite: string; func: string; cost: number }): Unit {
+  return {
+    suite: unit.suite,
+    cases: [unit.func],
+    cost: unit.cost,
+    timed: true,
+    windowed: false,
+    accessible: false,
+    headless: false,
+  };
+}
+
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Units are dealt slowest first, ties by path then case, all by code unit, so the plan is a function
+ * of the units alone: not of the order they were listed in, nor of the machine's locale.
+ */
+function aPlanDependsOnItsUnitsAlone(): void {
+  fc.assert(
+    fc.property(
+      planUnits,
+      fc.array(fc.nat(), { maxLength: 12 }),
+      fc.integer({ min: 1, max: 4 }),
+      (drawn, keys, most) => {
+        const units = drawn.map(asUnit);
+        const declared: CasesBySuite = new Map(
+          PLAN_SUITES.map((path) => [path, ['test_a', 'test_b', 'test_c']]),
+        );
+        const shuffled = units
+          .map((unit, index) => ({ unit, key: keys[index] ?? 0, index }))
+          .toSorted((a, b) => a.key - b.key || a.index - b.index)
+          .map((entry) => entry.unit);
+        assert.deepEqual(dealt(shuffled, declared, most), dealt(units, declared, most));
+
+        const one = dealt(units, declared, 1);
+        const expected = units
+          .toSorted(
+            (a, b) =>
+              b.cost - a.cost ||
+              byCodeUnit(a.suite, b.suite) ||
+              byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
+          )
+          .map((unit) => unit.suite);
+        assert.deepEqual(
+          one.flatMap((plan) => plan.suites.map((suite) => suite.path)),
+          [...new Set(expected)],
+          'in one engine the suites come in the order of their slowest unit, ties by code unit',
+        );
+        assert.equal(
+          one.reduce(
+            (sum, plan) => sum + plan.suites.reduce((count, suite) => count + suite.cases.length, 0),
+            0,
+          ),
+          units.length,
+          'every unit is dealt once',
+        );
+      },
+    ),
+    { numRuns: 300 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The kept pipeline cache
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Runs that finish together each keep the cache they left, and the larger one stays whichever
+ * process swaps last.
+ */
+async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
+  const child = resolve(import.meta.dir, 'support', 'keep-cache.ts');
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(fc.integer({ min: 1, max: 80 }), { minLength: 2, maxLength: 4 }),
+      async (counts) => {
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-keep-'));
+        try {
+          const home = join(root, 'home');
+          const project = join(root, 'project');
+          mkdirSync(project);
+          const start = join(root, 'start');
+          // One small cache is kept first, and a lock left by a keep that died sits where the swap looks:
+          // the keeps that follow take it over and still leave the largest cache.
+          const first = join(root, 'user-first', 'Godot', 'app_userdata', 'game', 'shader_cache');
+          mkdirSync(first, { recursive: true });
+          writeFileSync(join(first, '0.bin'), 'x'.repeat(100));
+          await keepPipelineCache(join(root, 'user-first'), project, process.execPath, home);
+          const keptFolder = join(
+            home,
+            'pipeline-caches',
+            readdirSync(join(home, 'pipeline-caches'))[0] ?? '',
+          );
+          writeFileSync(`${keptFolder}.lock`, '0');
+          const longAgo = new Date(Date.now() - 3_600_000);
+          utimesSync(`${keptFolder}.lock`, longAgo, longAgo);
+          const exits = counts.map((files, index) => {
+            const folder = join(
+              root,
+              `user-${String(index)}`,
+              'Godot',
+              'app_userdata',
+              'game',
+              'shader_cache',
+            );
+            mkdirSync(folder, { recursive: true });
+            for (let file = 0; file < files; file += 1) {
+              writeFileSync(join(folder, `${String(file)}.bin`), 'x'.repeat(100));
+            }
+            const run = spawnHidden(
+              process.execPath,
+              [child, join(root, `user-${String(index)}`), project, process.execPath, home, start],
+              { stdio: 'ignore' },
+            );
+            return new Promise<number | null>((done) => run.once('exit', done));
+          });
+          writeFileSync(start, '');
+          assert.deepEqual(
+            await Promise.all(exits),
+            counts.map(() => 0),
+          );
+          const kept = readdirSync(join(home, 'pipeline-caches'));
+          assert.deepEqual(
+            kept.length,
+            1,
+            `one kept cache and nothing left building or locked: ${kept.join(' ')}`,
+          );
+          const folder = join(home, 'pipeline-caches', kept[0] ?? '');
+          const record: unknown = JSON.parse(readFileSync(join(folder, 'kept.json'), 'utf8'));
+          assert.ok(isRecord(record));
+          assert.equal(record['bytes'], Math.max(...counts) * 100);
+          assert.equal(readdirSync(join(folder, 'shader_cache')).length, Math.max(...counts));
+        } finally {
+          sweep(root);
+        }
+      },
+    ),
+    { numRuns: 5 },
+  );
+}
+
+/**
+ * However many takers meet one lock whose holder has gone, whatever it holds, exactly one of them
+ * ends up holding it, and the lock names that one.
+ */
+async function exactlyOneTakerHoldsAStaleLock(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.integer({ min: 2, max: 6 }),
+      fc.constantFrom('unwritten', 'deadHolder'),
+      async (takers, kind) => {
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-take-'));
+        try {
+          const lock = join(root, 'held.lock');
+          // A pid no process has: the largest a 32-bit signed id holds.
+          writeFileSync(lock, kind === 'unwritten' ? '0' : JSON.stringify({ pid: 2 ** 31 - 1, started: 1 }));
+          const longAgo = new Date(Date.now() - 3_600_000);
+          utimesSync(lock, longAgo, longAgo);
+          const holders = Array.from(
+            { length: takers },
+            (_, index) => `{"pid":${String(process.pid)},"n":${String(index)}}`,
+          );
+          const got = await Promise.all(holders.map((holder) => tryTake(lock, holder, new Map())));
+          assert.equal(got.filter(Boolean).length, 1, `${String(takers)} takers of a lock held by ${kind}`);
+          assert.equal(readFileSync(lock, 'utf8'), holders[got.indexOf(true)]);
+          assert.equal(existsSync(`${lock}.steal`), false, 'the steal file is given back');
+        } finally {
+          sweep(root);
+        }
+      },
+    ),
+    { numRuns: 30 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Installing the addons
+// ---------------------------------------------------------------------------------------------
+
+type InstallFailure =
+  | { readonly at: 'none' }
+  | { readonly at: 'missing' | 'version'; readonly addon: number }
+  | { readonly at: 'digest'; readonly addon: 0 | 1 };
+
+const MARKINGS = ['plugin.cfg', 'runtime_autoload.gd', 'plugin.cfg', 'share.gd'];
+
+/** A package of the four addons, each with its marking file and one more, holding [param content]. */
+function fakePackage(root: string, content: string, failure: InstallFailure): string {
+  const from = join(root, `package-${content}-${failure.at}`);
+  for (const [index, name] of ADDONS.entries()) {
+    if (failure.at === 'missing' && failure.addon === index) {
+      continue;
+    }
+    mkdirSync(join(from, name, 'inner'), { recursive: true });
+    writeFileSync(join(from, name, MARKINGS[index] ?? ''), `${name} ${content}`);
+    writeFileSync(join(from, name, 'inner', 'file.gd'), `${content} ${name}`);
+    if (failure.at === 'version' && failure.addon === index) {
+      mkdirSync(join(from, name, VERSION_MARKER));
+    }
+  }
+  if (failure.at === 'digest') {
+    mkdirSync(join(from, failure.addon === 0 ? ADDONS[0] : 'gdharness_runtime', '.gdharness-digest'));
+  }
+  return from;
+}
+
+/** Every folder and file under [param folder], with its content, so two trees can be compared. */
+function treeOf(folder: string): string[] {
+  if (!existsSync(folder)) {
+    return ['(absent)'];
+  }
+  return readdirSync(folder, { recursive: true, withFileTypes: true })
+    .map((entry) => {
+      const path = join(entry.parentPath, entry.name);
+      return entry.isDirectory()
+        ? `d ${relative(folder, path)}`
+        : `f ${relative(folder, path)} ${readFileSync(path, 'utf8')}`;
+    })
+    .toSorted();
+}
+
+/**
+ * An install either puts all four addons in with their markers, or leaves the project's addons as
+ * it found them, whichever step fails: a missing addon, a version marker or a digest marker that
+ * cannot be written. A half install is read as current by one reader and refused by another.
+ */
+function aFailedInstallLeavesTheProjectAsItWas(): void {
+  const failures = fc.oneof(
+    fc.constant<InstallFailure>({ at: 'none' }),
+    fc.record({
+      at: fc.constantFrom('missing' as const, 'version' as const),
+      addon: fc.integer({ min: 0, max: 3 }),
+    }),
+    fc.record({ at: fc.constant('digest' as const), addon: fc.constantFrom<0 | 1>(0, 1) }),
+  );
+  fc.assert(
+    fc.property(
+      fc.boolean(),
+      fc.boolean(),
+      failures,
+      fc.option(fc.record({ addon: fc.integer({ min: 0, max: 3 }), partial: fc.boolean() }), {
+        nil: undefined,
+      }),
+      (earlier, hadAddonsFolder, failure, killed) => {
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-install-'));
+        try {
+          const project = join(root, 'project');
+          mkdirSync(project);
+          if (hadAddonsFolder) {
+            mkdirSync(join(project, 'addons', 'other'), { recursive: true });
+          }
+          if (earlier) {
+            installAddons(project, fakePackage(root, 'old', { at: 'none' }));
+          }
+          const before = treeOf(join(project, 'addons'));
+          if (earlier && killed !== undefined) {
+            killAnInstallAt(project, killed.addon, killed.partial);
+          }
+          const from = fakePackage(root, 'new', failure);
+          if (failure.at === 'none') {
+            const installed = installAddons(project, from);
+            assert.deepEqual(
+              installed.map((addon) => [addon.name, addon.replaced]),
+              ADDONS.map((name) => [name, earlier]),
+            );
+            for (const name of ADDONS) {
+              assert.equal(
+                readFileSync(join(project, 'addons', name, VERSION_MARKER), 'utf8').trim(),
+                SERVER_VERSION,
+              );
+            }
+            assert.notEqual(installedEditorDigest(project), null);
+            assert.notEqual(installedRuntimeDigest(project), null);
+          } else {
+            assert.throws(() => installAddons(project, from));
+            assert.deepEqual(
+              treeOf(join(project, 'addons')),
+              before,
+              'the addons are as the failed install found them',
+            );
+          }
+          assert.equal(existsSync(join(project, 'addons', '.gdharness-previous')), false);
+          assert.equal(existsSync(join(project, 'addons', '.gdharness-replaced')), false);
+        } finally {
+          sweep(root);
+        }
+      },
+    ),
+    { numRuns: 25 },
+  );
+}
+
+/**
+ * A whole install whose removal of the addons it replaced was cut short, by a kill or a locked
+ * file, is kept by the next install, which only finishes that removal. A refused rerun then leaves
+ * the whole install, whichever addon the removal had reached.
+ */
+function aWholeInstallOutlivesItsCutShortCleanup(): void {
+  fc.assert(
+    fc.property(fc.integer({ min: 0, max: ADDONS.length }), (reached) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-cleanup-'));
+      try {
+        const project = join(root, 'project');
+        mkdirSync(project);
+        installAddons(project, fakePackage(root, 'old', { at: 'none' }));
+        const replaced = join(root, 'replaced');
+        cpSync(join(project, 'addons'), replaced, { recursive: true });
+        installAddons(project, fakePackage(root, 'new', { at: 'none' }));
+        const whole = treeOf(join(project, 'addons'));
+        // The removal got through the first [reached] addons and stopped.
+        for (const name of ADDONS.slice(reached)) {
+          cpSync(join(replaced, name), join(project, 'addons', '.gdharness-replaced', name), {
+            recursive: true,
+          });
+        }
+        assert.throws(() =>
+          installAddons(project, fakePackage(root, 'refused', { at: 'missing', addon: 0 })),
+        );
+        assert.deepEqual(treeOf(join(project, 'addons')), whole, 'the whole install is kept');
+      } finally {
+        sweep(root);
+      }
+    }),
+    { numRuns: 10 },
+  );
+}
+
+/**
+ * The folder an install killed midway leaves: the addon it had reached set aside in the folder for
+ * replaced addons, and with [param partial] the start of the new copy in its place.
+ */
+function killAnInstallAt(project: string, addon: number, partial: boolean): void {
+  const name = ADDONS[addon] ?? ADDONS[0];
+  const addons = join(project, 'addons');
+  mkdirSync(join(addons, '.gdharness-previous'), { recursive: true });
+  renameSync(join(addons, name), join(addons, '.gdharness-previous', name));
+  if (partial) {
+    mkdirSync(join(addons, name));
+    writeFileSync(join(addons, name, 'half.gd'), 'half');
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Giving back a scratch folder
+// ---------------------------------------------------------------------------------------------
+
+const RETRY_WAITS = [250, 500, 1000, 2000, 4000, 8000, 16000];
+
+interface RetryModel {
+  tries: number;
+  failuresLeft: number;
+  waiting: boolean;
+  due: number;
+  step: number;
+}
+
+/** One removal try in the model: whether it worked. */
+function modelTry(model: RetryModel): boolean {
+  model.tries += 1;
+  if (model.failuresLeft > 0) {
+    model.failuresLeft -= 1;
+    return false;
+  }
+  return true;
+}
+
+/** The timed try the schedule makes at the model's due time. */
+function modelTimerFires(model: RetryModel): void {
+  if (modelTry(model)) {
+    model.waiting = false;
+    return;
+  }
+  model.step += 1;
+  const after = RETRY_WAITS[model.step];
+  model.waiting = after !== undefined;
+  model.due += after ?? 0;
+}
+
+/** A call to discard at [param at]: a try at once, and a schedule when it failed and none is running. */
+function modelCall(model: RetryModel, at: number): void {
+  if (!modelTry(model) && !model.waiting) {
+    model.waiting = true;
+    model.step = 0;
+    model.due = at + (RETRY_WAITS[0] ?? 0);
+  }
+}
+
+/** How many tries a removal that fails [param failures] times has had by [param until] ms, given the calls. */
+function retryTriesBy(failures: number, calls: readonly number[], until: number): number {
+  const model: RetryModel = { tries: 0, failuresLeft: failures, waiting: false, due: 0, step: 0 };
+  let next = 0;
+  for (;;) {
+    const call = calls[next] ?? Number.POSITIVE_INFINITY;
+    const timer = model.waiting ? model.due : Number.POSITIVE_INFINITY;
+    if (Math.min(call, timer) > until) {
+      return model.tries;
+    }
+    if (timer < call) {
+      modelTimerFires(model);
+    } else {
+      next += 1;
+      modelCall(model, call);
+    }
+  }
+}
+
+/**
+ * The tries a removal gets, by the clock: the first at once, then after each wait of the schedule,
+ * a second call for a path already waiting adding a try of its own and no second schedule, and none
+ * after one has worked.
+ */
+function theRetryScheduleHoldsWhateverFails(): void {
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 0, max: 10 }),
+      fc.uniqueArray(fc.integer({ min: 0, max: 20000 }), { maxLength: 4 }),
+      fc.uniqueArray(fc.integer({ min: 0, max: 80000 }), { maxLength: 6 }),
+      (failures, firstCalls, probes) => {
+        const calls = [0, ...firstCalls.map((at) => at * 2 + 1)].toSorted((a, b) => a - b);
+        const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-scratch-'));
+        const path = join(root, 'held');
+        mkdirSync(path);
+        let tries = 0;
+        let left = failures;
+        const remove = (target: string): void => {
+          tries += 1;
+          if (left > 0) {
+            left -= 1;
+            throw new Error('busy');
+          }
+          rmSync(target, { recursive: true, force: true });
+        };
+        jest.useFakeTimers();
+        try {
+          const points = [...new Set([...calls, ...probes.map((at) => at * 2 + 1), 100_000])].toSorted(
+            (a, b) => a - b,
+          );
+          let clock = 0;
+          for (const point of points) {
+            jest.advanceTimersByTime(point - clock);
+            clock = point;
+            if (calls.includes(point)) {
+              discardUsing(remove, [path]);
+            }
+            assert.equal(tries, retryTriesBy(failures, calls, point), `tries by ${String(point)} ms`);
+          }
+        } finally {
+          jest.useRealTimers();
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    ),
+    { numRuns: 100 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The game log, read as it is written
+// ---------------------------------------------------------------------------------------------
+
+type LogStep =
+  | { readonly kind: 'write'; readonly source: 'stdout' | 'stderr' | 'transcript'; readonly cut: number }
+  | { readonly kind: 'record'; readonly severity: Severity; readonly text: string }
+  | { readonly kind: 'read'; readonly mode: 'since' | 'all' | 'contains'; readonly limit: number };
+
+/** The log text of three streams, each with its own line ending and a tail that may lack one. */
+const streamText = fc
+  .tuple(
+    fc.array(logLine, { maxLength: 14 }),
+    fc.constantFrom('\n', '\r\n'),
+    fc.constantFrom('', 'ERROR: tail', 'WARNING: tail\r', 'plain tail', '\r', '   at: tail'),
+  )
+  .map(([lines, ending, tail]) => ({
+    ending,
+    text: `${lines.map((line) => `${line}${ending}`).join('')}${tail}`,
+  }));
+
+/**
+ * One read of [param log] at [param floor], checked against the entries not yet [param covered] by
+ * an earlier read. A search names the whole run and moves no mark, and any other read covers every
+ * entry there is, which a later fold of some of them into an earlier entry does not undo.
+ */
+function readsAsShown(
+  log: GameLog,
+  floor: Severity,
+  step: { readonly mode: 'since' | 'all' | 'contains'; readonly limit: number },
+  covered: Set<LogEntry>,
+): void {
+  const tail = (entries: readonly LogEntry[]): { entries: LogEntry[]; omitted: number } => {
+    const omitted = Math.max(0, entries.length - step.limit);
+    return { entries: entries.slice(omitted), omitted };
+  };
+  if (step.mode === 'contains') {
+    const found = log.select({ severity: floor, sinceLastCall: false, contains: 'error', limit: step.limit });
+    assert.deepEqual(found, tail(log.all.filter((entry) => answersTo(entry, floor, 'error'))));
+    return;
+  }
+  const since = step.mode === 'since';
+  const found = log.select({ severity: floor, sinceLastCall: since, limit: step.limit });
+  const shown = log.all.filter(
+    (entry) => !(since && covered.has(entry)) && answersTo(entry, floor, undefined),
+  );
+  assert.deepEqual(found, tail(shown));
+  for (const entry of log.all) {
+    covered.add(entry);
+  }
+}
+
+/**
+ * Three streams interleaved and cut anywhere, a text that ends with no line ending or between CR
+ * and LF included, each stream reads as if it had arrived whole, and every non-blank line is in one
+ * entry. Reads between the writes show each entry once, and the three marks never move for a search.
+ */
+function aGameLogReadsTheSameWhenInterleavedAndRead(): void {
+  const streams = ['stdout', 'stderr', 'transcript'] as const;
+  const steps = fc.array(
+    fc.oneof(
+      fc.record({
+        kind: fc.constant('write' as const),
+        source: fc.constantFrom(...streams),
+        cut: fc.nat({ max: 60 }),
+      }),
+      fc.record({
+        kind: fc.constant('record' as const),
+        severity: fc.constantFrom<Severity>('error', 'warning', 'info'),
+        text: fc.constantFrom('stopped at a breakpoint', 'Invalid call', ''),
+      }),
+      fc.record({
+        kind: fc.constant('read' as const),
+        mode: fc.constantFrom('since' as const, 'all' as const, 'contains' as const),
+        limit: fc.constantFrom(1, 3, Number.POSITIVE_INFINITY),
+      }),
+    ),
+    { maxLength: 30 },
+  );
+  fc.assert(
+    fc.property(
+      fc.tuple(streamText, streamText, streamText),
+      steps,
+      fc.constantFrom<Severity>('error', 'warning', 'info'),
+      (texts, program: LogStep[], floor) => {
+        const log = new GameLog();
+        const left = texts.map((entry) => Buffer.from(entry.text, 'utf8'));
+        const covered = new Set<LogEntry>();
+        for (const step of program) {
+          if (step.kind === 'write') {
+            const index = streams.indexOf(step.source);
+            const bytes = left[index] ?? Buffer.alloc(0);
+            const take = Math.min(bytes.length, step.cut);
+            log.append(step.source, bytes.subarray(0, take));
+            left[index] = bytes.subarray(take);
+          } else if (step.kind === 'record') {
+            log.record(step.severity, step.text);
+          } else {
+            readsAsShown(log, floor, step, covered);
+          }
+        }
+        for (const [index, bytes] of left.entries()) {
+          log.append(streams[index] ?? 'stdout', bytes);
+        }
+        log.finish();
+
+        const whole = new GameLog();
+        for (const [index, entry] of texts.entries()) {
+          whole.append(streams[index] ?? 'stdout', entry.text);
+        }
+        whole.finish();
+        // Whatever other streams and the debugger put between a headline's unindented lines and its
+        // `at:` line, the entries of a stream fold as they do when it arrives whole.
+        for (const source of streams) {
+          const foldedOf = (reader: GameLog) =>
+            reader.all
+              .filter((entry) => entry.source === source)
+              .map(({ severity, text, detail }) => ({ severity, text, detail }));
+          const scriptsOf = (reader: GameLog): boolean[] =>
+            reader.all
+              .filter((entry) => entry.source === source)
+              .map((entry) => reader.raisedByScript(entry));
+          assert.deepEqual(foldedOf(log), foldedOf(whole), `${source} folds as if it had arrived whole`);
+          assert.deepEqual(scriptsOf(log), scriptsOf(whole), `${source} keeps its script errors`);
+        }
+        assert.deepEqual(
+          log.all.map((entry) => entry.index),
+          log.all.map((_, position) => position),
+          'every entry is numbered by its position',
+        );
+        const said = texts.reduce(
+          (sum, entry) =>
+            sum + entry.text.split('\n').filter((line) => line.replace(/\r$/, '').trim() !== '').length,
+          0,
+        );
+        const kept = whole.all.reduce((sum, entry) => sum + 1 + entry.detail.length, 0);
+        assert.equal(kept, said, 'every non-blank line is in exactly one entry, the unfinished last one too');
+      },
+    ),
+    { numRuns: 200 },
+  );
+}
+
+/**
+ * An error of two lines printed every frame beside a print on stdout folds at the same cost each
+ * frame: 20,000 frames take about 0.15 s, where a fold that scans the whole log took 11 s. The
+ * bound is checked as the frames go, so a slow fold fails after seconds and not minutes.
+ */
+function aFoldedErrorCostsTheSameAtEveryFrame(): void {
+  const frames = 20_000;
+  const bound = 4000;
+  const log = new GameLog();
+  const began = performance.now();
+  for (let tick = 0; tick < frames; tick += 1) {
+    log.append('stdout', `frame ${String(tick)}\n`);
+    log.append(
+      'stderr',
+      `ERROR: bad value\nsecond line ${String(tick)}\n   at: push_error (core/variant/variant_utility.cpp:1024)\n`,
+    );
+    if (tick % 1000 === 999) {
+      assert.ok(
+        performance.now() - began < bound,
+        `${String(tick + 1)} frames took over ${String(bound)} ms`,
+      );
+    }
+  }
+  assert.equal(log.all.length, 2 * frames);
+  assert.deepEqual(log.all.at(-1)?.detail, [
+    `second line ${String(frames - 1)}`,
+    'at: push_error (core/variant/variant_utility.cpp:1024)',
+  ]);
+}
+
+/**
+ * A headline followed by a game's tens of thousands of loose prints folds them without spreading
+ * the list into one call. Node's stack takes about 120,000 arguments and Bun's far more, so a spread
+ * here would pass under Bun and crash every read of that console under Node. Calls given more than
+ * a thousand arguments throw while the log folds.
+ */
+function aWideFoldSpreadsNoList(): void {
+  const count = 20_000;
+  const limit = 1000;
+  const push = Array.prototype.push;
+  const min = Math.min;
+  const refuseMany = (given: readonly unknown[]): void => {
+    if (given.length > limit) {
+      throw new RangeError(`a call was given ${String(given.length)} arguments`);
+    }
+  };
+  const log = new GameLog();
+  const lines = Array.from({ length: count }, (_, at) => `line ${String(at)}\n`).join('');
+  Array.prototype.push = function (this: unknown[], ...given: unknown[]): number {
+    refuseMany(given);
+    return push.apply(this, given);
+  };
+  Math.min = (...given: number[]): number => {
+    refuseMany(given);
+    return min(...given);
+  };
+  try {
+    log.append('transcript', `WARNING: the game's own warning\n${lines}  indented\n`);
+    log.finish();
+  } finally {
+    Array.prototype.push = push;
+    Math.min = min;
+  }
+  assert.equal(log.all.length, 1, JSON.stringify(log.all.slice(0, 3)));
+  assert.equal(log.all[0]?.detail.length, count + 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The debugger stream
+// ---------------------------------------------------------------------------------------------
+
+const sentValue: fc.Arbitrary<SentValue> = fc.letrec<{ value: SentValue }>((tie) => ({
+  value: fc.oneof(
+    { depthSize: 'small', maxDepth: 3 },
+    fc.constant(null),
+    fc.boolean(),
+    fc.integer({ min: Number.MIN_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER }),
+    fc.double(),
+    // A whole double past what it holds exactly is a float still, and so is one a 64-bit int could hold.
+    fc.double({ min: 2 ** 53, max: 2 ** 63, noNaN: true }),
+    fc.double({ min: -(2 ** 63), max: -(2 ** 53), noNaN: true }),
+    // A bigint is an int whatever its size, and reads back as digits once a double cannot hold it.
+    fc.bigInt({ min: -(2n ** 63n), max: 2n ** 63n - 1n }),
+    fc.string({ unit: 'grapheme', maxLength: 12 }),
+    fc.array(tie('value'), { maxLength: 4 }),
+  ),
+})).value;
+
+const sentCommand = fc.record({
+  message: fc.string({ unit: 'grapheme-ascii', minLength: 1, maxLength: 12 }),
+  thread: fc.integer({ min: 0, max: 2 ** 31 - 1 }),
+  data: fc.array(sentValue, { maxLength: 4 }),
+});
+
+/** What the reader makes of a sent value: a bigint as a number while one holds it, else its digits. */
+function readBack(value: SentValue): unknown {
+  if (typeof value === 'bigint') {
+    return Number.isSafeInteger(Number(value)) ? Number(value) : { kind: 'int', values: [value.toString()] };
+  }
+  return Array.isArray(value) ? value.map(readBack) : value;
+}
+
+/** Every message a stream gives for [param pieces], and whether it was out of step after them. */
+function streamed(pieces: readonly Uint8Array[]): { messages: DebuggerMessage[]; lost: boolean } {
+  const stream = new DebuggerStream();
+  const messages: DebuggerMessage[] = [];
+  let lost = false;
+  try {
+    for (const piece of pieces) {
+      messages.push(...stream.push(piece));
+    }
+    stream.push(new Uint8Array(0));
+  } catch (error) {
+    assert.ok(error instanceof RangeError);
+    lost = true;
+  }
+  return { messages, lost };
+}
+
+/**
+ * Commands of any values, joined and cut anywhere down to single bytes, come out as the commands
+ * that went in. Arbitrary bytes, with lengths at the engine's limit, are read the same whole or in
+ * pieces, and fail only with a RangeError.
+ */
+function theDebuggerStreamIsCutProof(): void {
+  fc.assert(
+    fc.property(fc.array(sentCommand, { maxLength: 4 }), cuts, fc.boolean(), (commands, points, bytewise) => {
+      const all = Buffer.concat(commands.map((c) => framedCommand(c.message, c.data, c.thread)));
+      const pieces = bytewise
+        ? chunked(
+            all,
+            Array.from({ length: all.length }, (_, at) => at),
+          )
+        : chunked(all, points);
+      const { messages, lost } = streamed(pieces);
+      assert.equal(lost, false);
+      assert.deepEqual(
+        messages,
+        commands.map((c) => ({ message: c.message, thread: c.thread, data: c.data.map(readBack) })),
+      );
+    }),
+    { numRuns: 150 },
+  );
+  const length = fc.constantFrom(0, 1, 3, 4, 7, 12, (8 << 20) + 4, (8 << 20) + 5, 0xff_ff_ff_ff);
+  const garbage = fc.array(
+    fc.oneof(
+      fc.tuple(length, fc.uint8Array({ maxLength: 24 })).map(([n, rest]) => {
+        const header = Buffer.alloc(4);
+        header.writeUInt32LE(n);
+        return Buffer.concat([header, rest]);
+      }),
+      fc.uint8Array({ maxLength: 24 }).map((bytes) => Buffer.from(bytes)),
+      sentCommand.map((c) => Buffer.from(framedCommand(c.message, c.data, c.thread))),
+      sentCommand.chain((c) =>
+        fc.nat().map((at) => {
+          const framed = Buffer.from(framedCommand(c.message, c.data, c.thread));
+          const flipped = 4 + (at % Math.max(1, framed.length - 4));
+          framed.writeUInt8((framed.readUInt8(flipped) ^ 0xff) & 0xff, flipped);
+          return framed;
+        }),
+      ),
+    ),
+    { maxLength: 5 },
+  );
+  fc.assert(
+    fc.property(garbage, cuts, (parts, points) => {
+      const all = Buffer.concat(parts);
+      const whole = streamed([all]);
+      const pieces = streamed(chunked(all, points));
+      assert.deepEqual(pieces, whole);
+    }),
+    { numRuns: 300 },
+  );
+  fc.assert(
+    fc.property(fc.uint8Array({ maxLength: 40 }), (bytes) => {
+      try {
+        decodeVariant(bytes);
+      } catch (error) {
+        assert.ok(error instanceof RangeError, 'bytes that are no value are refused with a RangeError');
+      }
+    }),
+    { numRuns: 500 },
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -1425,6 +2407,18 @@ logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
 await noOrderOfSlotAndMemoryWaitsHangsARun();
+await noOrderOfRisesLosesASuite();
 await theWalkGivesOnlyWhatItHolds();
+await writersTakeTurnsInTheOrderTheyAsked();
+aPlanDependsOnItsUnitsAlone();
+await theLargerKeptCacheSurvivesConcurrentKeeps();
+await exactlyOneTakerHoldsAStaleLock();
+aFailedInstallLeavesTheProjectAsItWas();
+aWholeInstallOutlivesItsCutShortCleanup();
+theRetryScheduleHoldsWhateverFails();
+aGameLogReadsTheSameWhenInterleavedAndRead();
+aFoldedErrorCostsTheSameAtEveryFrame();
+aWideFoldSpreadsNoList();
+theDebuggerStreamIsCutProof();
 
 console.log('fuzz properties held');

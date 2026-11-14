@@ -12,9 +12,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { cacheHome } from './cache-home.js';
+import { ownStart } from './engine-slots.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
+import { tryTake } from './write-turns.js';
 
 /**
  * A test run's engine gets a user:// of its own, and Godot keeps its pipeline cache there, in
@@ -154,12 +157,12 @@ export function seedPipelineCache(
  * builds none, and a run of one suite fewer than a run of all of them. The caches of projects no
  * longer on disk go at the same time, as test projects do.
  */
-export function keepPipelineCache(
+export async function keepPipelineCache(
   user: string,
   projectPath: string,
   godotPath: string,
   home: string = cacheHome(),
-): void {
+): Promise<void> {
   const engine = engineBuild(godotPath);
   const where = cacheUnder(user);
   if (engine === null || where === null) {
@@ -169,8 +172,7 @@ export function keepPipelineCache(
   const left = join(user, where);
   try {
     const bytes = bytesIn(left);
-    const record = keptRecord(kept);
-    if (bytes === 0 || (record?.engine === engine && bytes <= record.bytes)) {
+    if (bytes === 0 || keptHolds(kept, engine, bytes)) {
       return;
     }
     // Built beside the kept one and swapped in whole, so a run seeding from it meanwhile copies
@@ -180,15 +182,63 @@ export function keepPipelineCache(
     cpSync(left, join(building, NAME), { recursive: true });
     const made: Kept = { project: resolve(projectPath), engine, where: where.split(sep).join('/'), bytes };
     writeFileSync(join(building, RECORD), JSON.stringify(made));
-    rmSync(kept, { recursive: true, force: true });
-    try {
-      renameSync(building, kept);
-    } catch {
+    // The copy takes a while and runs go side by side, so the kept one is read again under the lock
+    // the swap holds: a smaller cache that finished last would otherwise replace a larger one.
+    const swapped = await underLock(`${kept}.lock`, () => {
+      if (keptHolds(kept, engine, bytes)) {
+        return false;
+      }
+      rmSync(kept, { recursive: true, force: true });
+      try {
+        renameSync(building, kept);
+      } catch {
+        return false;
+      }
+      return true;
+    });
+    if (swapped !== true) {
       rmSync(building, { recursive: true, force: true });
     }
     forgetGoneProjects(home);
   } catch {
     // Not kept, so the next run builds its pipelines again.
+  }
+}
+
+/** Whether the cache kept in [param kept] is from [param engine] and holds at least [param bytes]. */
+function keptHolds(kept: string, engine: string, bytes: number): boolean {
+  const record = keptRecord(kept);
+  return record?.engine === engine && bytes <= record.bytes;
+}
+
+/** How long a keep waits for another's swap, which takes milliseconds, before leaving its copy unkept. */
+const LOCK_WAIT_MS = 10_000;
+
+let ownStarted: Promise<number> | undefined;
+
+/** How often a keep waiting for the swap's lock looks at it again. */
+const LOCK_LOOK_MS = 20;
+
+/**
+ * Runs [param swap] holding the lock file [param lock], and answers what it did, or null when the
+ * lock could not be had in time. A lock whose holder has gone is taken over as a write turn's is.
+ */
+async function underLock<T>(lock: string, swap: () => T): Promise<T | null> {
+  // Read once, since on Windows each read is a query of its own.
+  ownStarted ??= ownStart();
+  const holder = JSON.stringify({ pid: process.pid, started: await ownStarted });
+  const starts = new Map<number, number | undefined>();
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (!(await tryTake(lock, holder, starts))) {
+    if (Date.now() > deadline) {
+      return null;
+    }
+    await delay(LOCK_LOOK_MS);
+  }
+  try {
+    return swap();
+  } finally {
+    rmSync(lock, { force: true });
   }
 }
 

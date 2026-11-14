@@ -162,7 +162,7 @@ function announced(line: string): { severity: Severity; text: string; byScript: 
 
 /** The headline a stream printed last, with the entry it made and the lines that may belong to it. */
 interface Headed {
-  readonly index: number;
+  index: number;
   readonly detail: string[];
   continues: boolean;
   /** Entries of unindented lines that followed the headline, until an indented line claims them. */
@@ -173,6 +173,8 @@ interface Headed {
 type Stream = 'stdout' | 'stderr' | 'transcript';
 
 const STREAMS: readonly Stream[] = ['stdout', 'stderr', 'transcript'];
+
+const SEVERITIES: readonly Severity[] = ['error', 'warning', 'info'];
 
 /**
  * What a read at each floor admits, which is also what it has offered the caller.
@@ -382,7 +384,8 @@ export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntr
  * else starts an entry of its own.
  */
 export class GameLog {
-  private readonly entries: LogEntry[] = [];
+  /** The entries, whose index the log renumbers when it folds a line into an earlier entry. */
+  private readonly entries: (LogEntry & { index: number })[] = [];
   private readonly decoders: Record<Stream, StringDecoder> = {
     stdout: new StringDecoder('utf8'),
     stderr: new StringDecoder('utf8'),
@@ -561,13 +564,53 @@ export class GameLog {
 
   /** Moves the lines that followed [param owner]'s headline, now known to be its message, into its detail. */
   private takeLooseLines(owner: Headed): void {
-    const count = owner.loose.length;
-    const tail = this.entries.slice(this.entries.length - count);
-    if (count > 0 && tail.every((entry, at) => entry === owner.loose[at])) {
-      this.entries.length -= count;
-      owner.detail.push(...tail.map((entry) => entry.text.trim()));
-    }
+    const taken = owner.loose.filter((entry) => this.entries[entry.index] === entry);
     owner.loose = [];
+    if (taken.length === 0) {
+      return;
+    }
+    // One push per line, since a spread of a game's hundred thousand loose prints overflows Node's stack.
+    for (const entry of taken) {
+      owner.detail.push(entry.text.trim());
+    }
+    this.removeEntries(taken);
+  }
+
+  /**
+   * Takes [param gone] out of the entries, wherever other streams and the debugger have put entries
+   * between them, and renumbers what follows: an index is a position, and the script-error set, each
+   * stream's last headline and the read marks all count positions. Only what follows the first
+   * removed entry moves, which is nothing but the removed lines when they are the newest, as they
+   * are unless another stream has printed since. A run of per-frame errors costs the same each frame.
+   */
+  private removeEntries(gone: readonly LogEntry[]): void {
+    const dropped = new Set(gone.map((entry) => entry.index));
+    const before = [...dropped].toSorted((a, b) => a - b);
+    const first = before[0] ?? this.entries.length;
+    const shifted = (position: number): number =>
+      position - before.filter((index) => index < position).length;
+    const moved = this.entries.splice(first);
+    const kept = moved.filter((entry) => !dropped.has(entry.index));
+    const scripts = kept.filter((entry) => this.byScript.has(entry.index));
+    for (const entry of moved) {
+      this.byScript.delete(entry.index);
+    }
+    for (const source of STREAMS) {
+      const headline = this.lastHeadline[source];
+      if (headline !== null) {
+        headline.index = shifted(headline.index);
+      }
+    }
+    for (const severity of SEVERITIES) {
+      this.seen[severity] = shifted(this.seen[severity]);
+    }
+    for (const entry of kept) {
+      entry.index = this.entries.length;
+      this.entries.push(entry);
+    }
+    for (const entry of scripts) {
+      this.byScript.add(entry.index);
+    }
   }
 
   /** Takes the error at [param index] as raised by a call whose mark waits for the file its detail names. */

@@ -24,7 +24,7 @@ import {
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, installedByUs, linksOut, projectTexts } from './project-scan.js';
+import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
@@ -41,7 +41,6 @@ import {
   changedReport,
   type LeftAloneDetail,
   leftAloneReport,
-  linkOutOf,
   onDiskSpelling,
   resourcePathOf,
   summaryOf,
@@ -77,10 +76,16 @@ export type MoveOutcome =
     }
   | { readonly ok: false; readonly reason: string; readonly advice?: string[] };
 
-/** Every file under [param directory]. */
+/**
+ * Every file under [param directory]. A link is none of them: it goes with the folder that holds it
+ * in the one rename, and what it leads to stays where it is.
+ */
 function filesUnder(directory: string): string[] {
   return entriesOf(directory).flatMap((entry) => {
     const path = join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      return [];
+    }
     return entry.isDirectory() ? filesUnder(path) : [path];
   });
 }
@@ -182,12 +187,11 @@ function checkedMove(projectPath: string, absoluteFrom: string, absoluteTo: stri
   const from = resourcePathOf(projectPath, absoluteFrom);
   const to = targetPathOf(projectPath, absoluteTo);
   if (from === null) {
-    const link = linkOutOf(projectPath, absoluteFrom);
     return {
       reason:
-        link === null
+        relativeWithin(projectPath, absoluteFrom) === ''
           ? 'The project directory itself cannot be moved. Give a file or a directory in it.'
-          : `${absoluteFrom} is behind the link ${link}, which leads out of the project, so it is not moved from here. Move it in the folder it lives in.`,
+          : `${absoluteFrom} is not inside the project.`,
     };
   }
   if (to === null) {
@@ -315,6 +319,35 @@ function binaryMentions(projectPath: string, moves: ReadonlyMap<string, string>)
   return binaries;
 }
 
+/**
+ * Where each path that names a moving file must point afterwards: the files of [param moves], every
+ * path below a moved folder (a link in it moves with it, so its paths follow), and every other path
+ * that reaches a moving file.
+ */
+function referencesOf(
+  reach: Reach,
+  moves: ReadonlyMap<string, string>,
+  folder: { from: string; to: string } | null,
+): Map<string, string> {
+  const references = new Map(moves);
+  if (folder !== null) {
+    const below = `${folder.from}/`;
+    for (const path of reach.paths()) {
+      if (path.startsWith(below) && !references.has(path)) {
+        references.set(path, `${folder.to}${path.slice(folder.from.length)}`);
+      }
+    }
+  }
+  for (const [source, target] of moves) {
+    for (const other of reach.pathsOf(source)) {
+      if (!references.has(other)) {
+        references.set(other, target);
+      }
+    }
+  }
+  return references;
+}
+
 export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {
   const checked = checkedMove(projectPath, absoluteFrom, absoluteTo);
   if ('reason' in checked) {
@@ -327,25 +360,26 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: collision };
   }
 
-  const texts = projectTexts(projectPath).map((file) =>
-    file.realPath !== undefined && moves.has(file.realPath) && !moves.has(file.path)
-      ? { ...file, path: file.realPath }
-      : file,
-  );
+  const { texts, reach } = scanProject(projectPath);
   const scripts = scriptsOf(texts);
+  // The files that move on disk stay those of `moves`. A text keeps the path the walk reached it by,
+  // which the engine resolves its relative paths against, and `references` says where it goes.
+  const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
+  const placeOf = new Map(texts.map((file) => [file.path, file.realPath ?? file.path]));
+  const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);
   let plan = planMove(
     {
       texts,
       scripts,
-      moves,
+      moves: references,
       named: [from],
       exists: (path) => existsSync(join(projectPath, path.slice('res://'.length))),
     },
     { edits: [], mentions: [] },
   );
   plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from], linksOut(projectPath));
-  const binaries = binaryMentions(projectPath, moves);
-  const afterwards = (path: string): string => moves.get(path) ?? path;
+  const binaries = binaryMentions(projectPath, references);
+  const afterwards = (path: string): string => references.get(path) ?? path;
   const rewrites = rewritesOf(plan, texts, null);
   // A rewrite is written as UTF-8 text, so a file holding any other byte would lose it silently.
   for (const rewrite of rewrites) {
@@ -367,7 +401,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     [from, ...moves.keys()].flatMap((path) => [path, path.replace(/^res:\/\//, '')]),
   );
   const absoluteOf = (path: string): string => join(projectPath, path.slice('res://'.length));
-  const rewritten = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite]));
+  const rewritten = new Map(rewrites.map((rewrite) => [placeOf.get(rewrite.path) ?? rewrite.path, rewrite]));
   const moved: MovedFile[] = [...moves].map(([source, target]) => {
     const rewrite = rewritten.get(source);
     return {
@@ -378,7 +412,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       text: rewrite === undefined ? null : { before: rewrite.before, after: rewrite.after },
     };
   });
-  const inPlace = rewrites.filter((rewrite) => !moves.has(rewrite.path));
+  const inPlace = rewrites.filter((rewrite) => !movesText(rewrite.path));
 
   const graph = new ClassGraph(scripts, declaredIn(scripts));
   const scriptsInOrder = rewrites

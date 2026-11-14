@@ -329,6 +329,20 @@ export interface ProjectText {
   readonly realPath?: string;
 }
 
+/**
+ * Every `res://` path each file of the project is reached by, binary files included. A move of a file
+ * takes them all along, since a reference may name the file by any of them.
+ */
+export interface Reach {
+  /**
+   * [param path] with every other path that reaches the same file: each link to it and its real place
+   * when that lies inside the project. Only [param path] where the walk does not reach it.
+   */
+  readonly pathsOf: (path: string) => readonly string[];
+  /** Every path the walk reaches, and each real place that lies inside the project. */
+  readonly paths: () => Iterable<string>;
+}
+
 /** A text below a folder the scan leaves out, with that folder and why it is left out. */
 export interface IgnoredText extends ProjectText {
   readonly why: 'gdignore' | 'project';
@@ -405,8 +419,13 @@ function textOf(file: Reached, realPath: string | undefined): ProjectText | null
   if (bytes === null || isBinary(bytes)) {
     return null;
   }
-  const text = { path: `res://${file.spelled}`, absolute: file.absolute, text: bytes.toString('utf8') };
-  return realPath === undefined ? text : { ...text, realPath };
+  const text: ProjectText = {
+    path: `res://${file.spelled}`,
+    absolute: file.absolute,
+    text: bytes.toString('utf8'),
+    ...(realPath === undefined ? {} : { realPath }),
+  };
+  return text;
 }
 
 /**
@@ -429,12 +448,52 @@ function pathNamedBy(projectPath: string, named: string, files: readonly Reached
   );
 }
 
+/** Each path of [param files] with every path that reaches the same file and that file's real place inside the project. */
+function pathGroups(realProject: string, files: readonly Reached[]): Map<string, readonly string[]> {
+  const byReal = new Map<string, string[]>();
+  for (const file of files) {
+    const group = byReal.get(file.real) ?? [];
+    group.push(`res://${file.spelled}`);
+    byReal.set(file.real, group);
+  }
+  const byPath = new Map<string, readonly string[]>();
+  for (const [real, group] of byReal) {
+    const inside = relativeWithin(realProject, real);
+    const place = inside === null || inside === '' ? null : `res://${inside}`;
+    if (place !== null && !group.includes(place)) {
+      group.push(place);
+    }
+    for (const path of group) {
+      byPath.set(path, group);
+    }
+  }
+  return byPath;
+}
+
+/** The paths of [param files] grouped by the file they reach, built on the first lookup. */
+function reachOf(realProject: string, files: readonly Reached[]): Reach {
+  let groups: Map<string, readonly string[]> | null = null;
+  const built = (): Map<string, readonly string[]> => (groups ??= pathGroups(realProject, files));
+  return {
+    pathsOf: (path) => built().get(path) ?? [path],
+    paths: () => built().keys(),
+  };
+}
+
 /**
  * Every text file a writer may change, each real file once: under a path in [param named] that
  * reaches it, else its own, else the first the scan reaches it by. None behind a link out of the
  * project. Text holds no NUL in its first eight thousand bytes.
  */
 export function projectTexts(projectPath: string, named: readonly string[] = []): ProjectText[] {
+  return scanProject(projectPath, named).texts;
+}
+
+/** The texts of [param projectTexts], with the paths every file of the same walk is reached by. */
+export function scanProject(
+  projectPath: string,
+  named: readonly string[] = [],
+): { texts: ProjectText[]; reach: Reach } {
   const { files } = reachedFrom(projectPath, projectPath, '');
   const kept = new Map<string, Reached>();
   for (const file of files) {
@@ -456,7 +515,7 @@ export function projectTexts(projectPath: string, named: readonly string[] = [])
       found.push(text);
     }
   }
-  return found;
+  return { texts: found, reach: reachOf(realProject, files) };
 }
 
 /** A folder the scan leaves out for a `.gdignore` or a `project.godot`, whose texts a rename mentions. */

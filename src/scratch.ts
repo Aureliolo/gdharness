@@ -141,9 +141,17 @@ export function discardWith(
  * second later costs nothing.
  */
 export function discard(...paths: (string | null | undefined)[]): Surviving[] {
-  const left = discardWith(remove, paths);
+  return discardUsing(remove, paths);
+}
+
+/** [function discard] with the removal given, so the schedule can be driven by a removal that fails on demand. */
+export function discardUsing(
+  removePath: (path: string) => void,
+  paths: readonly (string | null | undefined)[],
+): Surviving[] {
+  const left = discardWith(removePath, paths);
   for (const { path } of left) {
-    tryAgain(path, 0);
+    tryAgain(path, 0, removePath);
   }
   return left;
 }
@@ -164,7 +172,7 @@ function remove(path: string): void {
   rmSync(path, SWEPT);
 }
 
-function tryAgain(path: string, attempt: number): void {
+function tryAgain(path: string, attempt: number, removePath: (path: string) => void): void {
   if (attempt === 0) {
     if (waiting.has(path)) {
       return;
@@ -183,10 +191,10 @@ function tryAgain(path: string, attempt: number): void {
   }
   setTimeout(() => {
     try {
-      remove(path);
+      removePath(path);
       waiting.delete(path);
     } catch {
-      tryAgain(path, attempt + 1);
+      tryAgain(path, attempt + 1, removePath);
     }
   }, after).unref();
 }

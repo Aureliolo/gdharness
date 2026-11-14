@@ -23,9 +23,9 @@ when the command line itself is wrong.
 
 ## Engine options
 
-- `--engines N`: at most this many engines at once, 4 by default. A run handed out a share at a
-  time starts one engine per share. In total it may start more engines than this, never more at
-  once.
+- `--engines N`: the engines a run starts with at once, 4 by default, and the most at once unless a
+  gate's lanes file names more. A run handed out a share at a time starts one engine per share, so
+  in total it may start more engines than this.
 - `--slots DIR`: the slot directory, the machine's own by default (see
   [Engine slots](#engine-slots)).
 - `--slot-count N`: how many slots that directory has. By default it is half the processors, at
@@ -203,6 +203,10 @@ must also cost more than an engine's even share of the run. That share is the co
 over the engines there is room for. An engine holding part of such a suite skips the rest. The run
 names each suite it dealt out that way.
 
+A run following a gate's lanes file takes that share over the pool's lock count where it is above
+the engines there is room for, and never over more than its processors. A few long suites then have
+the units the run grows on.
+
 A suite within its share is balanced by the rest.
 
 ### Splitting a parameterised case
@@ -230,7 +234,7 @@ it kept whole past that cost.
 Units are dealt slowest first, each to the engine with the least so far. A run starts no more
 engines than the smallest of these:
 
-- `--engines`.
+- `--engines`, or the lanes a gate's file names where that is more.
 - The machine's processors, or `--cores`.
 - What its free memory allows past 4 GB, at the largest peak kept for any suite of the run.
 - What it takes to keep each engine busy for as long as the slowest unit or 5 seconds, whichever
@@ -459,6 +463,11 @@ with that flag, in `gdharness test` and `project_test` alike. It is read like th
 from the suite or a script it extends, or from a class constant. A suite declaring it beside
 `GDHARNESS_NEEDS_WINDOW` false is refused.
 
+The engine sends a control `NOTIFICATION_ACCESSIBILITY_UPDATE` only once something has asked for
+the tree. On Windows the run asks once through UI Automation, as a screen reader does, before the
+first suite starts. A run that could not ask prints why, starting with
+`gdharness could not ask for the accessibility tree`.
+
 ### The windowed engine
 
 All the windowed suites go to one windowed engine, which starts first, counts toward `--engines`
@@ -681,9 +690,9 @@ The count is `GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0.
 half the processors the machine offers, rounded down, and at least one. A command's `--slots` and
 `--slot-count` come before both.
 
-`--engines` is how many engines one run would like, and is not the slot count. A gate given its
-share of the machine passes `--engines` for its share. It passes the machine's directory and count
-for the slots.
+`--engines` is how many engines one run would like, and is not the slot count. A gate passes
+`--engines` for the lanes its run begins on, and names a lanes file where the run may grow. It
+passes the machine's directory and count for the slots.
 
 ### Taking a slot from your own tool
 
@@ -819,6 +828,26 @@ the queue's seats, pool and memory. The file is written through a `.part` file a
 every change and every five seconds while a gate waits. A missing file counts as none, as does one
 older than ten seconds or written by a holder that has gone. A game never takes a spare slot, since
 it holds one as long as it plays.
+
+### A gate's lanes file
+
+- `GODOT_ENGINE_SHARE` is the path of the gate's pool, a slots folder the gate holds alone.
+  `GODOT_ENGINE_SHARE_COUNT` is its number of lock numbers, never the share. A paced run makes no
+  lock there. The program pacing it holds one for each lane.
+- That program sets `GODOT_ENGINE_LANES`, for what it starts, to a file in the pool holding
+  `{"lanes", "pid", "started", "written"}`. `lanes` is a whole number of 1 or more and `written` is
+  in milliseconds. It is written at each change and every five seconds.
+- The run begins on `--engines` and holds up to `lanes` lanes, fewer only for want of work, memory,
+  processors or free machine slots. The number never falls. A file missing, older than ten seconds
+  or written by a process that has gone adds no lane. With the variable unset or empty the run
+  holds `--engines`.
+- A run that can grow makes `<lanes file>.follows` as a lock is made, and takes one whose holder has
+  gone over under its steal file. Until a live mark stands, the writer holds no more than the
+  number it told. A run that cannot grow makes none.
+- The run removes its mark at once when it reaches its ceiling of processors, pool count or work,
+  and otherwise once every share is handed out.
+- The engine that compiles every script together counts as one of the lanes. It runs in a lane's
+  slot before that lane's first suites, and waits for memory as a suite's engine does.
 
 ### Games and the kept slots
 

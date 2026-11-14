@@ -137,10 +137,13 @@ import {
   heldToCores,
   inTurns,
   KEPT_RUN_DIRECTORIES,
+  MEMORY_PER_ENGINE,
   macMemoryLevel,
+  memoryAvailable,
   memoryRoomOf,
   resPathOf,
   roomFor,
+  roomForAnother,
   sweepRunDirectories,
   versionNamed,
   versionPrinted,
@@ -362,9 +365,12 @@ import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from
 import {
   commandProjectRefusal,
   exportedBuild,
+  insideProject,
   isGodotProject,
   isSameDirectory,
   isWithinRoot,
+  linkOutOf,
+  listedSpelling,
   notAGodotProject,
   realAsFarAsItExists,
   relativeWithin,
@@ -414,7 +420,6 @@ import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
-  linkOutOf,
   type RenameServices,
   renameSymbol,
   resourcePathOf,
@@ -664,11 +669,15 @@ import {
 import {
   type Admitted,
   acrossSaid,
+  compileUnlessUnchanged,
   engineSaid,
+  enginesCutFor,
+  HandedSlot,
   importEnd,
   importFault,
   importNeeded,
   importStartOf,
+  lanesSaid,
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
@@ -685,7 +694,7 @@ import {
   wholeTreeSaid,
 } from '../src/suite-run.js';
 import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
-import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
+import { casesOutOfPath, scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -859,6 +868,48 @@ function accessibilityTreeSuite(constant: string): string {
     '\tawait get_tree().process_frame',
     '\tassert_bool(shown.get_accessibility_element().is_valid()) \\',
     '\t\t.override_failure_message("no accessibility element for a Control in the tree") \\',
+    '\t\t.is_true()',
+    '',
+  ].join('\n');
+}
+
+/**
+ * A suite whose control counts the engine's NOTIFICATION_ACCESSIBILITY_UPDATE and makes a
+ * sub-element there, which code describing its parts to a screen reader does.
+ */
+function accessibilityUpdatesSuite(): string {
+  return [
+    'extends GdUnitTestSuite',
+    '',
+    'const GDHARNESS_ACCESSIBILITY: bool = true',
+    '',
+    '',
+    'class Counted:',
+    '\textends Control',
+    '',
+    '\tvar updates: int = 0',
+    '\tvar part: RID = RID()',
+    '',
+    '\tfunc _notification(what: int) -> void:',
+    '\t\tif what != NOTIFICATION_ACCESSIBILITY_UPDATE:',
+    '\t\t\treturn',
+    '\t\tupdates += 1',
+    '\t\tif not part.is_valid():',
+    '\t\t\tpart = DisplayServer.accessibility_create_sub_element(',
+    '\t\t\t\tget_accessibility_element(), DisplayServer.ROLE_STATIC_TEXT',
+    '\t\t\t)',
+    '',
+    '',
+    'func test_updates() -> void:',
+    '\tvar shown: Counted = auto_free(Counted.new())',
+    '\tget_tree().root.add_child(shown)',
+    '\tfor _frame: int in 10:',
+    '\t\tawait get_tree().process_frame',
+    '\tassert_int(shown.updates) \\',
+    '\t\t.override_failure_message("the control was sent no accessibility update") \\',
+    '\t\t.is_greater(0)',
+    '\tassert_bool(DisplayServer.accessibility_has_element(shown.part)) \\',
+    '\t\t.override_failure_message("the sub-element made in the update is not in the tree") \\',
     '\t\t.is_true()',
     '',
   ].join('\n');
@@ -3568,10 +3619,25 @@ function testARealIsShownAsTheEngineHoldsIt(): void {
   );
 }
 
-/** A command carries a number as the number it is: past 64 bits, or a negative zero, it is a float. */
+/**
+ * A command carries a number as the number it is: past 2^53, or a negative zero, it is a float, and
+ * only a bigint is an int that large.
+ */
 function testACommandCarriesANumberAsItIs(): void {
   const read = new DebuggerStream().push(
-    framedCommand('m', [1e300, -0, 2 ** 63, 2 ** 53 + 2, -(2 ** 63), 2 ** 31, -(2 ** 31), 2.5, 7]),
+    framedCommand('m', [
+      1e300,
+      -0,
+      2 ** 63,
+      2 ** 53 + 2,
+      -(2 ** 63),
+      2 ** 31,
+      -(2 ** 31),
+      2.5,
+      7,
+      2n ** 53n + 3n,
+      -(2n ** 63n),
+    ]),
   );
   const [first] = read;
   assert.deepEqual(
@@ -3580,12 +3646,14 @@ function testACommandCarriesANumberAsItIs(): void {
       1e300,
       -0,
       2 ** 63,
-      { kind: 'int', values: ['9007199254740994'] },
-      { kind: 'int', values: ['-9223372036854775808'] },
+      2 ** 53 + 2,
+      -(2 ** 63),
       2 ** 31,
       -(2 ** 31),
       2.5,
       7,
+      { kind: 'int', values: ['9007199254740995'] },
+      { kind: 'int', values: ['-9223372036854775808'] },
     ],
     'each comes back as it was sent',
   );
@@ -11821,7 +11889,7 @@ const READ_IN_WORDS = 163;
  * every pipeline cold. A run that built fewer pipelines leaves the kept cache alone, and another
  * engine build is handed none.
  */
-function testAPipelineCacheIsCarriedToTheNextRun(): void {
+async function testAPipelineCacheIsCarriedToTheNextRun(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
   try {
     const home = join(scratch, 'home');
@@ -11851,7 +11919,7 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
     assert.equal(cached(first), null, 'the first run starts with no cache');
     mkdirSync(join(first, where), { recursive: true });
     writeFileSync(join(first, where, 'pipelines.cache'), 'x'.repeat(100));
-    keepPipelineCache(first, project, godot, home);
+    await keepPipelineCache(first, project, godot, home);
 
     const second = join(scratch, 'second', 'user');
     seedPipelineCache(second, project, godot, home);
@@ -11863,15 +11931,15 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
 
     const headless = run('headless', null);
     rmSync(join(headless, where), { recursive: true, force: true });
-    keepPipelineCache(headless, project, godot, home);
+    await keepPipelineCache(headless, project, godot, home);
     const fewer = run('fewer', 40);
-    keepPipelineCache(fewer, project, godot, home);
+    await keepPipelineCache(fewer, project, godot, home);
     const third = join(scratch, 'third', 'user');
     seedPipelineCache(third, project, godot, home);
     assert.equal(cached(third)?.length, 100, 'a run with no cache or a smaller one leaves the kept cache');
 
     const more = run('more', 200);
-    keepPipelineCache(more, project, godot, home);
+    await keepPipelineCache(more, project, godot, home);
     const fourth = join(scratch, 'fourth', 'user');
     seedPipelineCache(fourth, project, godot, home);
     assert.equal(cached(fourth)?.length, 200, 'a run that built more pipelines replaces it');
@@ -11884,7 +11952,7 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
     // the old build's is good for nothing once the project moves on.
     mkdirSync(join(elsewhere, where), { recursive: true });
     writeFileSync(join(elsewhere, where, 'pipelines.cache'), 'y'.repeat(10));
-    keepPipelineCache(elsewhere, project, other, home);
+    await keepPipelineCache(elsewhere, project, other, home);
     const kept = join(home, 'pipeline-caches');
     assert.equal(readdirSync(kept).length, 1, `one kept cache: ${readdirSync(kept).join(', ')}`);
     const onOther = join(scratch, 'on-other', 'user');
@@ -11897,10 +11965,10 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
     const goneRun = join(scratch, 'gone-run', 'user');
     mkdirSync(join(goneRun, where), { recursive: true });
     writeFileSync(join(goneRun, where, 'pipelines.cache'), 'z');
-    keepPipelineCache(goneRun, gone, godot, home);
+    await keepPipelineCache(goneRun, gone, godot, home);
     assert.equal(readdirSync(kept).length, 2, readdirSync(kept).join(', '));
     rmSync(gone, { recursive: true });
-    keepPipelineCache(more, project, godot, home);
+    await keepPipelineCache(more, project, godot, home);
     assert.equal(
       readdirSync(kept).length,
       1,
@@ -11915,7 +11983,7 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
  * One project is one kept cache however its folder is spelled, and a copy a keep left unfinished
  * is swept once it is old, while one a keep is still building is left.
  */
-function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
+async function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
   try {
     const home = join(scratch, 'home');
@@ -11929,7 +11997,7 @@ function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
     const left = join(scratch, 'left', 'user');
     mkdirSync(join(left, where), { recursive: true });
     writeFileSync(join(left, where, 'pipelines.cache'), 'x'.repeat(50));
-    keepPipelineCache(left, project, godot, home);
+    await keepPipelineCache(left, project, godot, home);
 
     const spellings = [
       linked,
@@ -11964,7 +12032,7 @@ function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
     const more = join(scratch, 'more', 'user');
     mkdirSync(join(more, where), { recursive: true });
     writeFileSync(join(more, where, 'pipelines.cache'), 'x'.repeat(80));
-    keepPipelineCache(more, project, godot, home);
+    await keepPipelineCache(more, project, godot, home);
     assert.deepEqual(
       readdirSync(kept).toSorted(),
       [key, basename(building)].toSorted(),
@@ -39576,7 +39644,7 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
       const judged = exportedBuild(project, candidate);
       return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
     };
-    assert.match(reason('linked/game.exe'), /^linked\/game\.exe leads outside the project, to .*outside/);
+    assert.match(reason('linked/game.exe'), /leads out of the project through the link res:\/\/linked\//);
     assert.match(reason('export/missing.exe'), /^There is no export\/missing\.exe in the project to start/);
     assert.match(reason('export'), /^export is not a file/);
     assert.match(reason('../outside/game.exe'), /resolves outside the project directory/);
@@ -54289,7 +54357,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         assert.match(await read(request, 'godot://script/main.gd'), /# ours/, 'the project is read');
         const linked = await read(request, 'godot://script/vendor/secret.gd');
         assert.doesNotMatch(linked, /the secret/, `a link out of the project is not followed: ${linked}`);
-        assert.match(linked, /leads outside the project through a link/, linked);
+        assert.match(linked, /through the link res:\/\/vendor\//, linked);
 
         // A search in one place: the folder is read, and a link out of the project is not.
         const inScripts = await call('project_search', {
@@ -54305,7 +54373,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         for (const through of ['res://vendor', 'res://vendor/secret.gd']) {
           assert.equal(
             await call('project_search', { projectPath: ours, query: 'secret', path: through }),
-            `${through} leads outside the project through a link, so it is not searched.`,
+            `Path '${through}' leads out of the project through the link res://vendor/, and only what is inside the project is taken here.`,
           );
         }
         assert.equal(
@@ -65721,6 +65789,1171 @@ function testARunOutOfMemoryNamesEveryEngine(): void {
   );
 }
 
+/** Suites of one 40 s case each, which a share holds whole, each seen to hold [param peakGiB]. */
+function eightSuitesOf(
+  count: number,
+  peakGiB: number,
+): { units: ReturnType<typeof unitsOf>; declared: Map<string, string[]>; times: SuiteTimes } {
+  const paths = Array.from({ length: count }, (_, at) => `res://rise_${String(at)}_test.gd`);
+  const suites: DeclaredSuite[] = paths.map((path) => ({
+    path,
+    cases: ['test_one'],
+    windowed: false,
+    headless: false,
+    together: false,
+    accessible: false,
+  }));
+  const times: SuiteTimes = Object.fromEntries(
+    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 }, peak: peakGiB * 1024 ** 3 }]),
+  );
+  return {
+    units: unitsOf(suites, times),
+    declared: new Map(paths.map((path) => [path, ['test_one']])),
+    times,
+  };
+}
+
+/** The engines of a run that is raised, which wait until the case ends them. */
+interface RisingEngines {
+  readonly going: Array<{ readonly lane: number; readonly suites: string[]; end: () => void }>;
+  readonly started: () => number;
+  /** The most engines that were going at the same moment. */
+  readonly most: () => number;
+  readonly run: (plan: EnginePlan, index: number) => Promise<{ index: number; suites: string[] }>;
+}
+
+function risingEngines(): RisingEngines {
+  const going: RisingEngines['going'] = [];
+  let live = 0;
+  let most = 0;
+  return {
+    going,
+    started: () => going.length,
+    most: () => most,
+    run: (plan, index) =>
+      new Promise((finished) => {
+        const suites = plan.suites.map((one) => one.path);
+        live += 1;
+        most = Math.max(most, live);
+        going.push({
+          lane: plan.lane,
+          suites,
+          end: () => {
+            live -= 1;
+            finished({ index, suites });
+          },
+        });
+      }),
+  };
+}
+
+/** Waits until [param until] holds, or fails after [param ms]. */
+async function untilItHolds(what: string, until: () => boolean, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!until()) {
+    assert.ok(Date.now() < deadline, `waited ${String(ms)} ms for ${what}`);
+    await delay(2);
+  }
+}
+
+/**
+ * A stand-in for the lanes a gate raises: answers [param said] once [param when] holds, then pends
+ * until its signal aborts. With [param when] null it never answers, as a stale file's follower does.
+ */
+function raisedTo(
+  ceiling: number,
+  when: (() => boolean) | null,
+  said: number,
+): {
+  readonly raised: { ceiling: number; past: (above: number, signal: AbortSignal) => Promise<number> };
+  readonly asks: Array<{ readonly above: number; readonly signal: AbortSignal }>;
+} {
+  const asks: Array<{ readonly above: number; readonly signal: AbortSignal }> = [];
+  return {
+    asks,
+    raised: {
+      ceiling,
+      past: async (above, signal) => {
+        asks.push({ above, signal });
+        if (asks.length === 1 && when !== null) {
+          await untilItHolds('the engines the rise waits for', when);
+          return said;
+        }
+        await new Promise<void>((_, refused) => {
+          signal.addEventListener('abort', () => {
+            refused(new Error('the asking was ended'));
+          });
+        });
+        return said;
+      },
+    },
+  };
+}
+
+/** A run's lanes rise as the number a gate names does: the shares are cut for them and each starts an engine. */
+async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
+  const gib = 1024 ** 3;
+  // The shares are cut for the lanes there are now.
+  const eight = eightSuitesOf(8, 1);
+  const shares = new Shares(eight.units, eight.declared, 2);
+  assert.equal(shares.next(0)?.suites.length, 4, 'two lanes are each handed half of what is left');
+  shares.widen(4);
+  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 160 s left is one suite');
+  shares.widen(1);
+  assert.equal(shares.next(2)?.suites.length, 1, 'a number below the present one lowers nothing');
+
+  const six = eightSuitesOf(6, 1);
+  const slots = { take: () => Promise.resolve('lock'), release: () => undefined };
+  const taken = ['one', 'two'];
+  const startedRun = (
+    engines: RisingEngines,
+    raised: Parameters<typeof runShares>[9],
+    gate?: MemoryGate,
+    inputs = six,
+    slotsOf: Pick<EngineSlots, 'take' | 'release'> = slots,
+  ): Promise<Array<{ index: number; suites: string[] }>> => {
+    const run = runShares(
+      slotsOf,
+      inputs.units,
+      inputs.declared,
+      2,
+      taken,
+      inputs.times,
+      engines.run,
+      undefined,
+      gate,
+      raised,
+    );
+    run.catch(() => undefined);
+    return run;
+  };
+  const endsWithin = async <T>(pending: Promise<T>, what: string): Promise<T> => {
+    const ended = await Promise.race([pending.then((value) => ({ value })), delay(10_000).then(() => null)]);
+    assert.ok(ended !== null, `${what} ended`);
+    return ended.value;
+  };
+  const endAsTheyCome = async (engines: RisingEngines, pending: Promise<unknown>): Promise<void> => {
+    const over = pending.then(
+      () => true,
+      () => true,
+    );
+    const ended = new Set<number>();
+    while (!(await Promise.race([over, delay(2).then(() => false)]))) {
+      engines.going.forEach((engine, at) => {
+        if (!ended.has(at)) {
+          ended.add(at);
+          engine.end();
+        }
+      });
+    }
+  };
+
+  // Rising mid-run, then the last share's abort of the asking.
+  const rising = risingEngines();
+  const risen = raisedTo(6, () => rising.started() >= 2, 4);
+  const risingRun = startedRun(rising, risen.raised);
+  await untilItHolds('four engines', () => rising.started() >= 4);
+  assert.deepEqual(
+    rising.going.map((engine) => [engine.lane, engine.suites.length]),
+    [
+      [0, 3],
+      [1, 1],
+      [2, 1],
+      [3, 1],
+    ],
+    'four engines go at once, in lanes 0 to 3, the added ones on shares cut for four lanes',
+  );
+  await untilItHolds('the second asking', () => risen.asks.length >= 2);
+  assert.equal(
+    risen.asks[1]?.signal.aborted,
+    true,
+    'the asking ends once the last share is handed out, while its engines still go',
+  );
+  rising.going.forEach((engine) => {
+    engine.end();
+  });
+  const ran = await endsWithin(risingRun, 'the rising run');
+  assert.deepEqual(
+    ran.map((engine) => engine.index),
+    [0, 1, 2, 3],
+    'four engines in index order',
+  );
+  assert.deepEqual(
+    ran.flatMap((engine) => engine.suites).toSorted(),
+    six.units.map((unit) => unit.suite).toSorted(),
+    'every suite once',
+  );
+  assert.deepEqual(
+    risen.asks.map((ask) => ask.above),
+    [2, 4],
+    'asked again from the lanes it was raised to',
+  );
+
+  // At its ceiling a run asks no more.
+  const atCeiling = risingEngines();
+  const ceiling = raisedTo(4, () => atCeiling.started() >= 2, 4);
+  const ceilingRun = startedRun(atCeiling, ceiling.raised);
+  await untilItHolds('four engines at the ceiling', () => atCeiling.started() >= 4);
+  atCeiling.going.forEach((engine) => {
+    engine.end();
+  });
+  const ceilingRan = await endsWithin(ceilingRun, 'the run at its ceiling');
+  assert.deepEqual(
+    ceiling.asks.map((ask) => ask.above),
+    [2],
+    'asked once, at its ceiling no more',
+  );
+  assert.equal(ceilingRan.flatMap((engine) => engine.suites).length, 6, 'every suite once');
+
+  // A number that never rises adds no lane.
+  const unraised = risingEngines();
+  const never = raisedTo(6, null, 4);
+  const neverRun = startedRun(unraised, never.raised);
+  await untilItHolds('two engines', () => unraised.started() >= 2);
+  await endAsTheyCome(unraised, neverRun);
+  assert.equal(unraised.most(), 2, 'never more than two engines at once');
+  assert.deepEqual(
+    [...new Set(unraised.going.map((engine) => engine.lane))].toSorted((a, b) => a - b),
+    [0, 1],
+    'lanes 0 and 1 alone',
+  );
+  assert.equal(never.asks.length, 1, 'the asking went on with nothing to add');
+  assert.equal(never.asks[0]?.signal.aborted, true, 'and ended with the last share');
+
+  // Memory holds an added lane's engine.
+  const heavy = eightSuitesOf(6, 3);
+  const held = risingEngines();
+  const memoryRise = raisedTo(6, () => held.started() >= 2, 4);
+  const memoryRun = startedRun(
+    held,
+    memoryRise.raised,
+    new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(10 * gib), 5),
+    heavy,
+  );
+  await untilItHolds('the rise to be answered', () => memoryRise.asks.length >= 2);
+  await delay(100);
+  assert.equal(held.started(), 2, 'memory for two engines starts two, whatever the lanes');
+  await endAsTheyCome(held, memoryRun);
+  assert.equal(
+    (await memoryRun).flatMap((engine) => engine.suites).length,
+    6,
+    'and every suite is run in the end',
+  );
+
+  // No work left for an added lane: it takes no slot that never comes.
+  const little = eightSuitesOf(2, 1);
+  const idle = risingEngines();
+  const waitingForSlots = {
+    take: (signal?: AbortSignal): Promise<string> =>
+      new Promise((_, refused) => {
+        signal?.addEventListener('abort', () => {
+          refused(new Error('the wait for a slot was ended'));
+        });
+      }),
+    release: () => undefined,
+  };
+  const idleRun = startedRun(
+    idle,
+    { ceiling: 6, past: () => Promise.resolve(4) },
+    undefined,
+    little,
+    waitingForSlots,
+  );
+  await untilItHolds('two engines', () => idle.started() >= 2);
+  idle.going.forEach((engine) => {
+    engine.end();
+  });
+  const idleRan = await endsWithin(idleRun, 'the run with no work for an added lane');
+  assert.equal(idleRan.length, 2, 'two engines, with no bound of its own');
+
+  // The units are cut for the pool's count where the run follows a lanes file.
+  const following = (count: string | undefined, file: string | undefined): NodeJS.ProcessEnv => ({
+    ...(count === undefined ? {} : { [SHARE_COUNT_VARIABLE]: count }),
+    ...(file === undefined ? {} : { [LANES_VARIABLE]: file }),
+  });
+  assert.equal(enginesCutFor(2, 16, following('9', 'lanes.json')), 9, 'the pool count over the engines');
+  assert.equal(enginesCutFor(2, 4, following('9', 'lanes.json')), 4, 'within the processors');
+  assert.equal(enginesCutFor(2, 16, following('9', undefined)), 2, 'a run with no file follows nothing');
+  assert.equal(enginesCutFor(2, 16, following('9', '')), 2, 'an empty variable names no file');
+  assert.equal(enginesCutFor(2, 16, following(undefined, 'lanes.json')), 2, 'no count cuts for the engines');
+  assert.equal(
+    enginesCutFor(2, 16, following('1', 'lanes.json')),
+    2,
+    'a count below the engines lowers nothing',
+  );
+  assert.throws(
+    () => enginesCutFor(2, 16, following('x', 'lanes.json')),
+    (error: unknown) => error instanceof EngineUsageError && error.message.includes(SHARE_COUNT_VARIABLE),
+    'a wrong count is refused by name',
+  );
+  assert.equal(enginesCutFor(2, 16, following('x', undefined)), 2, 'and read by no run that follows nothing');
+
+  // A few long suites have the units to grow on only when cut for the pool's count.
+  const longPaths = ['res://long_a_test.gd', 'res://long_b_test.gd'];
+  const longCases = ['test_a', 'test_b', 'test_c', 'test_d'];
+  const longSuites: DeclaredSuite[] = longPaths.map((path) => ({
+    path,
+    cases: longCases,
+    windowed: false,
+    headless: false,
+    together: false,
+    accessible: false,
+  }));
+  const longTimes: SuiteTimes = Object.fromEntries(
+    longPaths.map((path) => [
+      path,
+      { seconds: 80, cases: Object.fromEntries(longCases.map((name) => [name, 20])), peak: gib },
+    ]),
+  );
+  const longDeclared = new Map(longPaths.map((path) => [path, [...longCases]]));
+  const cutFor = (engines: number): ReturnType<typeof unitsOf> =>
+    unitsOf(longSuites, longTimes, splitPastFor(longSuites, longTimes, engines));
+  const forCount = cutFor(enginesCutFor(2, 16, following('4', 'lanes.json')));
+  assert.equal(forCount.length, 8, 'cut for four lanes, eight units');
+  assert.equal(cutFor(enginesCutFor(2, 16, following('4', undefined))).length, 2, 'cut for two, two units');
+  const longRising = risingEngines();
+  const longRaised = raisedTo(4, () => longRising.started() >= 2, 4);
+  const longRun = startedRun(longRising, longRaised.raised, undefined, {
+    units: forCount,
+    declared: longDeclared,
+    times: longTimes,
+  });
+  await untilItHolds('four engines on a few long suites', () => longRising.started() >= 4);
+  assert.equal(longRising.most(), 4, 'four engines go at once');
+  longRising.going.forEach((engine) => {
+    engine.end();
+  });
+  await endAsTheyCome(longRising, longRun);
+}
+
+/** Suite engines and a stand-in compile check over two lanes, counted together. */
+interface CheckRig {
+  readonly four: ReturnType<typeof eightSuitesOf>;
+  readonly events: string[];
+  readonly released: string[];
+  readonly counted: { live: number; most: number };
+  readonly going: Array<{ readonly lock: string; ended: boolean; readonly end: () => void }>;
+  readonly ran: string[];
+  /** The two lanes over `one` and `two`, handing [param handed] on. */
+  readonly lanes: (handed: HandedSlot, memory?: MemoryGate) => Promise<Array<{ index: number }>>;
+  /** Ends each suite engine as it starts, until [param pending] settles. */
+  readonly endAsTheyCome: (pending: Promise<unknown>) => Promise<void>;
+}
+
+function checkRig(): CheckRig {
+  const four = eightSuitesOf(4, 1);
+  const events: string[] = [];
+  const released: string[] = [];
+  const counted = { live: 0, most: 0 };
+  const going: CheckRig['going'] = [];
+  const ran: string[] = [];
+  const run = (plan: EnginePlan, index: number, lock: string): Promise<{ index: number }> =>
+    new Promise((finished) => {
+      counted.live += 1;
+      counted.most = Math.max(counted.most, counted.live);
+      events.push(`start ${lock}`);
+      going.push({
+        lock,
+        ended: false,
+        end: () => {
+          counted.live -= 1;
+          ran.push(...plan.suites.map((one) => one.path));
+          finished({ index });
+        },
+      });
+    });
+  const lanes = (handed: HandedSlot, memory?: MemoryGate): Promise<Array<{ index: number }>> => {
+    const pending = runShares(
+      {
+        take: () => Promise.reject(new Error('every lane holds a slot')),
+        release: (lock) => {
+          released.push(lock);
+        },
+      },
+      four.units,
+      four.declared,
+      2,
+      ['one', 'two'],
+      four.times,
+      run,
+      handed,
+      memory,
+    );
+    pending.catch(() => undefined);
+    return pending;
+  };
+  const endAsTheyCome = async (pending: Promise<unknown>): Promise<void> => {
+    const over = pending.then(
+      () => true,
+      () => true,
+    );
+    while (!(await Promise.race([over, delay(2).then(() => false)]))) {
+      for (const engine of going.filter((one) => !one.ended)) {
+        engine.ended = true;
+        engine.end();
+      }
+    }
+  };
+  return { four, events, released, counted, going, ran, lanes, endAsTheyCome };
+}
+
+/**
+ * A stand-in compile check: it waits for [param handed]'s slot, counts as an engine, asks
+ * [param memory] once it holds the slot, and ends when told, failing after with [param fails].
+ */
+function standInCheck(
+  rig: CheckRig,
+  handed: HandedSlot,
+  memory?: Pick<MemoryGate, 'admit'>,
+  fails = false,
+): { lock: () => string | null; end: () => void; done: Promise<void> } {
+  let lock: string | null = null;
+  let tell: () => void = () => undefined;
+  const told = new Promise<void>((settled) => {
+    tell = settled;
+  });
+  const done = (async (): Promise<void> => {
+    lock = await handed.lock;
+    rig.counted.live += 1;
+    rig.counted.most = Math.max(rig.counted.most, rig.counted.live);
+    rig.events.push(`check holds ${lock}`);
+    const admitted = await memory?.admit(new AbortController().signal, () => MEMORY_PER_ENGINE);
+    rig.events.push('check admitted');
+    await told;
+    admitted?.ended();
+    rig.counted.live -= 1;
+    rig.events.push('check ended');
+    handed.ended();
+    if (fails) {
+      throw new Error('the stand-in check failed');
+    }
+  })();
+  done.catch(() => undefined);
+  return { lock: () => lock, end: tell, done };
+}
+
+/** Every suite of [param rig] ran once. */
+function everySuiteRanOnce(rig: CheckRig, what: string): void {
+  assert.deepEqual(
+    rig.ran.toSorted(),
+    [...rig.four.declared.keys()].toSorted(),
+    `${what}: every suite ran once`,
+  );
+}
+
+/** A lane lends the check its slot, one suite engine goes beside it, and the slot returns to its lane. */
+async function checksALaneLendsItsSlot(): Promise<void> {
+  const rig = checkRig();
+  const handed = new HandedSlot(true);
+  const check = standInCheck(rig, handed);
+  const run = rig.lanes(handed);
+  await untilItHolds('the check to hold a lane slot', () => check.lock() !== null);
+  await untilItHolds('a suite engine beside it', () => rig.going.length === 1);
+  await delay(50);
+  const lent = check.lock() ?? '';
+  assert.ok(['one', 'two'].includes(lent), `the check holds a lane's slot: ${lent}`);
+  assert.equal(rig.going.length, 1, 'one suite engine goes beside the check, not two');
+  assert.notEqual(rig.going[0]?.lock, lent, "on the other lane's slot");
+  check.end();
+  await check.done;
+  assert.equal(handed.lent, true, 'the slot was lent');
+  await untilItHolds('a suite engine on the lent slot', () => rig.going.some((one) => one.lock === lent));
+  assert.ok(!rig.released.includes(lent), 'the lent slot is not given back while its lane holds it');
+  await rig.endAsTheyCome(run);
+  await run;
+  everySuiteRanOnce(rig, 'a lent slot');
+  assert.ok(rig.counted.most <= 2, `never three engines at once: ${String(rig.counted.most)}`);
+  assert.deepEqual(rig.released.toSorted(), ['one', 'two'], 'both slots go back once the lanes end');
+}
+
+/** A check over before it began, or one that fails, keeps no lane waiting. */
+async function checksAnEndedCheckKeepsNoLaneWaiting(): Promise<void> {
+  const before = checkRig();
+  const over = new HandedSlot(true);
+  over.ended();
+  const run = before.lanes(over);
+  await untilItHolds('two suite engines at once from the start', () => before.going.length === 2);
+  await before.endAsTheyCome(run);
+  await run;
+  everySuiteRanOnce(before, 'a check over before it began');
+  assert.equal(over.lent, false, 'nothing was lent to it');
+
+  const failing = checkRig();
+  const handed = new HandedSlot(true);
+  const check = standInCheck(failing, handed, undefined, true);
+  const failed = failing.lanes(handed);
+  await untilItHolds('the check to hold a lane slot', () => check.lock() !== null);
+  check.end();
+  await assert.rejects(check.done, /the stand-in check failed/);
+  await failing.endAsTheyCome(failed);
+  await failed;
+  everySuiteRanOnce(failing, 'a check that fails');
+}
+
+/** A run naming no lanes file keeps the check beside its lanes, in the first slot a lane is done with. */
+async function checksMainsWayLendsNothing(): Promise<void> {
+  const rig = checkRig();
+  const handed = new HandedSlot();
+  let settled = false;
+  void handed.lock.then(() => {
+    settled = true;
+  });
+  const run = rig.lanes(handed);
+  await untilItHolds('two suite engines at once from the start', () => rig.going.length === 2);
+  assert.equal(settled, false, 'the check has no slot while both lanes go');
+  await rig.endAsTheyCome(run);
+  await run;
+  await delay(0);
+  assert.equal(settled, true, 'the check takes the first slot a lane is done with');
+  assert.equal(handed.lent, false, 'and nothing was lent');
+  assert.equal(rig.released.length, 1, 'the other slot goes back to the machine');
+  everySuiteRanOnce(rig, "main's way");
+}
+
+/** With room for one engine, the check is admitted in its lent slot first and the suites after it. */
+async function checksTheCheckIsAdmittedBeforeItsLane(): Promise<void> {
+  const gib = 1024 ** 3;
+  const read = 5.6 * gib;
+  assert.ok(
+    roomForAnother(read, 0, gib) && !roomForAnother(read, MEMORY_PER_ENGINE, gib),
+    'the read leaves room for one engine',
+  );
+  const rig = checkRig();
+  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(read), 5);
+  const handed = new HandedSlot(true);
+  const check = standInCheck(rig, handed, gate);
+  const run = rig.lanes(handed, gate);
+  await untilItHolds('the check admitted', () => rig.events.includes('check admitted'));
+  await delay(50);
+  assert.equal(rig.going.length, 0, 'no suite engine goes beside the admitted check');
+  const lent = check.lock() ?? '';
+  check.end();
+  await check.done;
+  await rig.endAsTheyCome(run);
+  await run;
+  const firstStart = rig.events.findIndex((event) => event.startsWith('start '));
+  assert.deepEqual(
+    rig.events.slice(0, firstStart),
+    [`check holds ${lent}`, 'check admitted', 'check ended'],
+    `the check holds its slot, is admitted and ends before any suite engine: ${rig.events.join(', ')}`,
+  );
+  assert.ok(rig.events.includes(`start ${lent}`), 'and a suite engine runs on the lent slot');
+  assert.equal(rig.counted.most, 1, 'never two go at once');
+  everySuiteRanOnce(rig, 'tight memory');
+}
+
+/** What the compile check reads of a run, over [param directory]. */
+function checkLaunchIn(
+  directory: string,
+  slots: EngineSlots,
+  godotPath = 'no-engine',
+): Parameters<typeof compileUnlessUnchanged>[0] {
+  return {
+    godotPath,
+    projectPath: join(directory, 'project'),
+    deadlineSeconds: 120,
+    running: new Set(),
+    cores: null,
+    runDirectory: join(directory, 'run'),
+    slots,
+    silenceFloorSeconds: 60,
+  };
+}
+
+/** The real check asks memory once in its lent slot, gives the slot back to its lane after a throw, and its error is read last. */
+async function checksTheRealCheckLendsAndAsks(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lent-check-'));
+  try {
+    const slotsDirectory = join(scratch, 'slots');
+    const slots = new EngineSlots(slotsDirectory, 2, { pid: process.pid, started: await ownStart() });
+    const launch = checkLaunchIn(scratch, slots);
+    const asked: number[] = [];
+    const refusing = {
+      admit: (_signal: AbortSignal, need: () => number): Promise<Admitted> => {
+        asked.push(need());
+        return Promise.reject(new Error('no room for the check'));
+      },
+    };
+    const rig = checkRig();
+    const handed = new HandedSlot(true);
+    const suites = [rig.four.declared.keys().next().value ?? ''].map((path) => ({
+      path,
+      cases: ['test_one'],
+      windowed: false,
+      headless: false,
+      together: false,
+      accessible: false,
+    }));
+    const compiling = compileUnlessUnchanged(launch, suites, null, handed, refusing);
+    compiling.catch(() => undefined);
+    const run = runShares(
+      slots,
+      rig.four.units,
+      rig.four.declared,
+      2,
+      [],
+      rig.four.times,
+      (plan, index, lock) =>
+        new Promise<{ index: number }>((finished) => {
+          rig.going.push({
+            lock,
+            ended: false,
+            end: () => {
+              rig.ran.push(...plan.suites.map((one) => one.path));
+              finished({ index });
+            },
+          });
+        }),
+      handed,
+    );
+    run.catch(() => undefined);
+    const lent = await handed.lock;
+    await untilItHolds('a suite engine on the lent slot', () => rig.going.some((one) => one.lock === lent));
+    assert.equal(handed.lent, true, 'the slot was lent');
+    assert.deepEqual(asked, [MEMORY_PER_ENGINE], 'the check asked memory once, for an engine');
+    assert.ok(existsSync(lent), "the lent slot's lock is still there while its lane holds it");
+    await rig.endAsTheyCome(run);
+    await run;
+    everySuiteRanOnce(rig, 'the real check');
+    await assert.rejects(compiling, /no room for the check/, "the check's error is read after the lanes");
+    assert.deepEqual(leftInSlots(slotsDirectory), [], 'both slots are given back');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** A check that throws before its slot keeps no lending lane waiting. */
+async function checksACheckThrowingBeforeItsSlot(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-thrown-check-'));
+  try {
+    const slots = new EngineSlots(join(scratch, 'slots'), 2, { pid: process.pid, started: await ownStart() });
+    const blocked = join(scratch, 'a file');
+    writeFileSync(blocked, '');
+    const underAFile = { ...checkLaunchIn(scratch, slots), runDirectory: join(blocked, 'run') };
+    const asFolder = checkLaunchIn(join(scratch, 'folder'), slots);
+    mkdirSync(join(asFolder.runDirectory, 'compile', 'suites.txt'), { recursive: true });
+    mkdirSync(join(scratch, 'kept', 'project'), { recursive: true });
+    const unreadable = new ProjectScripts(join(scratch, 'kept', 'project'));
+    const refused = (): never => {
+      throw new Error('the scripts are unreadable');
+    };
+    for (const read of ['projectPath', 'script', 'baseOf']) {
+      Object.defineProperty(unreadable, read, { get: refused });
+    }
+    const throwers: Array<[string, (handed: HandedSlot) => Promise<unknown>]> = [
+      ['a run folder under a file', (handed) => compileUnlessUnchanged(underAFile, [], null, handed)],
+      ['a suites file that is a folder', (handed) => compileUnlessUnchanged(asFolder, [], null, handed)],
+      [
+        'scripts that throw at their first read',
+        (handed) =>
+          compileUnlessUnchanged(
+            checkLaunchIn(join(scratch, 'kept'), slots),
+            [],
+            { file: join(scratch, 'kept.json'), scripts: unreadable, always: [] },
+            handed,
+          ),
+      ],
+    ];
+    for (const [what, start] of throwers) {
+      const rig = checkRig();
+      const handed = new HandedSlot(true);
+      const compiling = start(handed);
+      compiling.catch(() => undefined);
+      const run = rig.lanes(handed);
+      await untilItHolds(`${what}: two suite engines at once from the start`, () => rig.going.length === 2);
+      await rig.endAsTheyCome(run);
+      await run;
+      everySuiteRanOnce(rig, what);
+      assert.deepEqual(rig.released.toSorted(), ['one', 'two'], `${what}: both slots are given back`);
+      await assert.rejects(compiling, Error, `${what}: the error is read from the check's promise`);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** With Godot, the check tells its admission what its engine holds at each look. */
+async function checksTheCheckTellsWhatItHolds(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('compile check readings skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-check-readings-'));
+  try {
+    const slots = new EngineSlots(join(scratch, 'slots'), 1, { pid: process.pid, started: await ownStart() });
+    const launch = checkLaunchIn(scratch, slots, godotPath);
+    // The suite's script waits as it loads, so the check's engine lives past three of its looks.
+    writeTree(launch.projectPath, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="CheckReadings"\n',
+      'tests/slow_test.gd':
+        'extends GdUnitTestSuite\n\n\nstatic func _static_init() -> void:\n\tOS.delay_msec(2000)\n\n\n' +
+        'func test_one() -> void:\n\tassert_bool(true).is_true()\n',
+    });
+    cpSync(gdunit, join(launch.projectPath, 'addons', 'gdUnit4'), { recursive: true });
+    spawnSyncHidden(godotPath, ['--headless', '--path', launch.projectPath, '--import'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const needs: number[] = [];
+    const readings: number[] = [];
+    let readBeforeEnd = -1;
+    const recording = {
+      admit: (_signal: AbortSignal, need: () => number): Promise<Admitted> => {
+        needs.push(need());
+        return Promise.resolve({
+          need: need(),
+          held: 0,
+          ended: () => {
+            readBeforeEnd = readings.length;
+          },
+          holds: (bytes: number) => {
+            readings.push(bytes);
+          },
+        });
+      },
+    };
+    const suite = {
+      path: 'res://tests/slow_test.gd',
+      cases: ['test_one'],
+      windowed: false,
+      headless: false,
+      together: false,
+      accessible: false,
+    };
+    const compiled = await compileUnlessUnchanged(launch, [suite], null, undefined, recording);
+    assert.deepEqual(
+      needs,
+      [MEMORY_PER_ENGINE],
+      `the check is admitted once, for an engine: ${compiled.log}`,
+    );
+    assert.ok(
+      readings.slice(0, readBeforeEnd).some((bytes) => bytes > 0),
+      `the check tells its admission what its engine holds before it ends: ${JSON.stringify(readings)}`,
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A paced run's compile check runs in a slot one of its lanes lends it, so the run holds no more
+ * engines than its lanes. The lane takes it back however the check ends, the check is admitted by
+ * memory as a lane's engine is, and a run naming no lanes file keeps the check beside its lanes.
+ */
+async function testAPacedRunsCompileCheckIsOneOfItsLanes(): Promise<void> {
+  await checksALaneLendsItsSlot();
+  await checksAnEndedCheckKeepsNoLaneWaiting();
+  await checksMainsWayLendsNothing();
+  await checksTheCheckIsAdmittedBeforeItsLane();
+  await checksTheRealCheckLendsAndAsks();
+  await checksACheckThrowingBeforeItsSlot();
+  await checksTheCheckTellsWhatItHolds();
+}
+
+/**
+ * A run in a gate follows the lanes file its paced portion writes: it begins on its own lanes, adds
+ * the rest the file names while work and processors allow, gives its mark back at its ceiling, and
+ * takes no lock in the portion's pool. A stand-in process plays the portion.
+ */
+async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('gate lanes regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const room = roomFor(3, availableParallelism(), (await memoryAvailable()).bytes);
+  if (room.engines < 3) {
+    console.log(`gate lanes regression skipped: under three engines fit, since ${room.held ?? ''}`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-slots-'));
+  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-pool-'));
+  const file = join(pool, 'lanes-1.json');
+  const mark = `${file}${FOLLOWS_SUFFIX}`;
+  const standIn = join(pool, 'portion.cjs');
+  const listings = join(pool, 'listings.jsonl');
+  const testRuns = join(project, '.godot', 'gdharness', 'test-runs');
+  const children: Array<ReturnType<typeof spawnHidden>> = [];
+  const suiteOf = (waits: readonly number[]): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      ...waits.flatMap((seconds, at) => [
+        '',
+        `func test_wait_${String(at)}() -> void:`,
+        `\tawait get_tree().create_timer(${seconds.toFixed(1)}).timeout`,
+        '\tassert_bool(true).is_true()',
+      ]),
+      '',
+    ].join('\n');
+  const gateTimes = join(project, 'gate', 'suite-times.json');
+  const resultFile = join(project, 'gate', 'result.json');
+  const keep = (suites: Record<string, readonly number[]>): void => {
+    mkdirSync(dirname(gateTimes), { recursive: true });
+    writeFileSync(
+      gateTimes,
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(suites).map(([path, costs]) => [
+            path,
+            {
+              seconds: costs.reduce((sum, cost) => sum + cost, 0),
+              cases: Object.fromEntries(costs.map((cost, at) => [`test_wait_${String(at)}`, cost])),
+            },
+          ]),
+        ),
+      ),
+    );
+  };
+  const four = ['a', 'b', 'c', 'd'].map((name) => `tests/${name}_lane_test.gd`);
+  const fourTimed = Object.fromEntries(four.map((path) => [`res://${path}`, [40]]));
+  const standsIn = async (mode: 'onMark' | 'always' | 'never', lanes: number, as?: number): Promise<void> => {
+    rmSync(listings, { force: true });
+    rmSync(file, { force: true });
+    // A run kept from before would show its compile log from the first listing.
+    rmSync(testRuns, { recursive: true, force: true });
+    const child = spawnHidden(
+      process.execPath,
+      [standIn, pool, file, String(lanes), mode, listings, slots, testRuns],
+      { stdio: ['pipe', 'ignore', 'ignore'] },
+    );
+    children.push(child);
+    const began = (await startTimesOf([child.pid ?? 0])).get(child.pid ?? 0);
+    child.stdin.write(`${String(as ?? began ?? Date.now())}\n`);
+    await untilItHolds('the stand-in to list the pool', () => existsSync(listings));
+  };
+  const listed = (): Array<{
+    names: string[];
+    mark: number | null;
+    at: number;
+    locks: number;
+    compile: boolean;
+    suites: boolean;
+  }> =>
+    readFileSync(listings, 'utf8')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => {
+        const one: unknown = JSON.parse(line);
+        const names = get(one, 'names');
+        const held = get(one, 'mark');
+        const at = get(one, 'at');
+        const locks = get(one, 'locks');
+        assert.ok(
+          Array.isArray(names) && typeof at === 'number' && typeof locks === 'number',
+          `a listing names files, locks and a time: ${line}`,
+        );
+        return {
+          names: names.map(String),
+          mark: typeof held === 'number' ? held : null,
+          at,
+          locks,
+          compile: get(one, 'compile') === true,
+          suites: get(one, 'suites') === true,
+        };
+      });
+  /** The most machine slots held at one listing, and whether the compile log was seen. */
+  const slotsSeen = (): { most: number; compiled: boolean; compiledFirst: boolean; withCompile: number } => {
+    const seen = listed();
+    const compiledAt = seen.findIndex((one) => one.compile);
+    const suitesAt = seen.findIndex((one) => one.suites);
+    return {
+      most: Math.max(0, ...seen.map((one) => one.locks)),
+      compiled: compiledAt >= 0,
+      compiledFirst: compiledAt >= 0 && (suitesAt < 0 || compiledAt < suitesAt),
+      withCompile: Math.max(0, ...seen.filter((one) => one.compile).map((one) => one.locks)),
+    };
+  };
+  const runWith = (
+    laneVariable: string | undefined,
+    poolOf: number,
+    ...args: string[]
+  ): { said: string; status: number | null; pid: number } => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      GODOT_PATH: godotPath,
+      [SHARE_COUNT_VARIABLE]: String(poolOf),
+    };
+    delete env[SHARE_VARIABLE];
+    if (laneVariable === undefined) {
+      delete env[LANES_VARIABLE];
+    } else {
+      env[LANES_VARIABLE] = laneVariable;
+    }
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--times',
+        gateTimes,
+        '--result',
+        resultFile,
+        ...args,
+      ],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    return { said: `${ran.stdout}${ran.stderr}`, status: ran.status, pid: ran.pid };
+  };
+  const stands = (): void => {
+    for (const child of children.splice(0)) {
+      child.kill();
+    }
+  };
+  try {
+    writeFileSync(
+      standIn,
+      [
+        "const { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');",
+        "const { join } = require('node:path');",
+        'const [pool, file, lanes, mode, listings, slots, runs] = process.argv.slice(2);',
+        'const read = (folder) => { try { return readdirSync(folder); } catch { return []; } };',
+        // Whether a run's engine named by [param named] has written its log yet.
+        'const logged = (named) => read(runs).some((run) => read(join(runs, run)).some((one) => named(one) && existsSync(join(runs, run, one, "engine.log"))));',
+        'let started = 0;',
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', (line) => { started = Number(line); });",
+        `const mark = file + ${JSON.stringify(FOLLOWS_SUFFIX)};`,
+        'const said = () => writeFileSync(file, JSON.stringify({ lanes: Number(lanes), pid: process.pid, started, written: Date.now() }));',
+        'let wrote = false;',
+        'let last = 0;',
+        'setInterval(() => {',
+        '  const names = readdirSync(pool);',
+        '  let held = null;',
+        '  try { held = JSON.parse(readFileSync(mark, "utf8")).pid; } catch {}',
+        '  const locks = read(slots).filter((name) => name.endsWith(".lock")).length;',
+        '  const compile = logged((one) => one === "compile");',
+        '  const suites = logged((one) => one.startsWith("engine-"));',
+        "  appendFileSync(listings, JSON.stringify({ names, mark: held, at: Date.now(), locks, compile, suites }) + '\\n');",
+        '  if (started === 0 || mode === "never") { return; }',
+        // Written only once a listing has seen the mark, since the run gives it back at its ceiling.
+        '  if (mode === "onMark" && !wrote && held !== null) { said(); wrote = true; }',
+        '  if (mode === "always" && Date.now() - last > 1000) { said(); last = Date.now(); }',
+        '}, 50);',
+        '',
+      ].join('\n'),
+    );
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="GateLanes"\n',
+      ...Object.fromEntries(four.map((path) => [path, suiteOf([8])])),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+
+    // A file raising the run above its two lanes, followed until its ceiling.
+    keep(fourTimed);
+    await standsIn('onMark', 4);
+    const ceiling = Math.min(4, availableParallelism());
+    const followed = runWith(file, 4, '--engines', '2', '--slot-count', '4');
+    const endedAt = Date.now();
+    stands();
+    assert.equal(followed.status, 0, followed.said);
+    const risen = readRunResult(resultFile);
+    assert.ok(risen.dealing.includes(lanesSaid(2, ceiling)), `the rise is said: ${followed.said}`);
+    assert.ok(
+      risen.engines.some((engine) => engine.lane === 2),
+      `an engine ran in an added lane: ${JSON.stringify(risen.engines)}`,
+    );
+    const seen = listed();
+    const marked = seen.findIndex((one) => one.mark !== null);
+    assert.ok(
+      marked >= 0 && seen[marked]?.mark === followed.pid,
+      `the mark names the run while it follows: ${JSON.stringify(seen[marked])}, run ${String(followed.pid)}`,
+    );
+    // Each added engine waits 8 s, so a listing 2 s before the run ended was taken while it lived.
+    assert.ok(
+      seen.slice(marked).some((one) => one.mark === null && one.at < endedAt - 2000),
+      'and is given back at the ceiling while the run still lives',
+    );
+    assert.ok(
+      seen.every((one) => one.names.every((name) => !name.endsWith('.lock'))),
+      'the run takes no lock in the pool',
+    );
+    assert.deepEqual(leftInSlots(slots), [], 'and the machine slots are all given back');
+    assert.equal(existsSync(mark), false, 'no mark is left');
+
+    // A file whose writer has gone adds no lane, and the run leaves no mark. Each run records the
+    // times its suites took, and four quick ones would be dealt to a single engine.
+    keep(fourTimed);
+    writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    await standsIn('never', 4);
+    writeFileSync(
+      file,
+      JSON.stringify({ lanes: 4, pid: gone.pid ?? 0, started: Date.now() - 60_000, written: Date.now() }),
+    );
+    const dead = runWith(file, 4, '--engines', '2', '--slot-count', '4');
+    stands();
+    assert.equal(dead.status, 0, dead.said);
+    assert.deepEqual(
+      [...new Set(readRunResult(resultFile).engines.map((engine) => engine.lane))].toSorted((a, b) => a - b),
+      [0, 1],
+      `a dead file adds no lane to the run's two: ${dead.said}`,
+    );
+    assert.doesNotMatch(dead.said, /raised this run from/, 'and says nothing of a rise');
+    assert.equal(existsSync(mark), false, 'it leaves no mark');
+    const deadSlots = slotsSeen();
+    assert.ok(deadSlots.compiled, 'the compile check ran');
+    assert.ok(
+      deadSlots.most <= 2,
+      `a paced run holds its two lanes, the check in one: ${String(deadSlots.most)}`,
+    );
+
+    // An empty variable names no file.
+    keep(fourTimed);
+    await standsIn('always', 4);
+    const empty = runWith('', 4, '--engines', '2', '--slot-count', '4');
+    stands();
+    assert.equal(empty.status, 0, empty.said);
+    assert.deepEqual(
+      [...new Set(readRunResult(resultFile).engines.map((engine) => engine.lane))].toSorted((a, b) => a - b),
+      [0, 1],
+      `no lane is added to the run's two: ${empty.said}`,
+    );
+    assert.equal(
+      slotsSeen().withCompile,
+      3,
+      'a run naming no lanes file compiles in a slot beside its two lanes',
+    );
+    for (const folder of [pool, project, process.cwd()]) {
+      assert.deepEqual(
+        readdirSync(folder).filter((name) => name.endsWith(FOLLOWS_SUFFIX)),
+        [],
+        `no mark is made in ${folder}`,
+      );
+    }
+
+    // Processors cap the lanes, so a run held to two follows nothing.
+    writeTree(project, {
+      'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
+      'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
+    });
+    keep({
+      'res://tests/a_lane_test.gd': [20, 20, 20, 20],
+      'res://tests/b_lane_test.gd': [20, 20, 20, 20],
+    });
+    await standsIn('always', 9);
+    const held = runWith(file, 9, '--engines', '2', '--cores', '2', '--slot-count', '4');
+    stands();
+    assert.equal(held.status, 0, held.said);
+    assert.ok(
+      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
+      'no lane is added',
+    );
+    assert.doesNotMatch(held.said, /raised this run from/, 'and nothing is said of a rise');
+    assert.doesNotMatch(
+      held.said,
+      /Dealt out case by case/,
+      'the units are cut for the two processors, so neither suite is dealt out',
+    );
+    assert.ok(
+      listed().every((one) => one.mark === null && one.names.every((name) => !name.endsWith(FOLLOWS_SUFFIX))),
+      'no mark stood at any listing',
+    );
+
+    // Two long suites, whole for two engines, are cut for the pool's four so the run has units to grow on.
+    if (availableParallelism() < 3) {
+      console.log('gate lanes few-long-suites case skipped: under three processors cannot raise two lanes');
+    } else {
+      writeTree(project, {
+        'tests/a_lane_test.gd': suiteOf([3, 3, 3, 3]),
+        'tests/b_lane_test.gd': suiteOf([3, 3, 3, 3]),
+      });
+      rmSync(join(project, 'tests', 'c_lane_test.gd'), { force: true });
+      rmSync(join(project, 'tests', 'd_lane_test.gd'), { force: true });
+      // The earlier run recorded what its suites cost, so the 20 s cases are kept again.
+      keep({
+        'res://tests/a_lane_test.gd': [20, 20, 20, 20],
+        'res://tests/b_lane_test.gd': [20, 20, 20, 20],
+      });
+      await standsIn('onMark', 4);
+      const grown = runWith(file, 4, '--engines', '2', '--slot-count', '8');
+      stands();
+      assert.equal(grown.status, 0, grown.said);
+      assert.match(
+        grown.said,
+        /Dealt out case by case.*a_lane_test\.gd.*b_lane_test\.gd|Dealt out case by case.*b_lane_test\.gd.*a_lane_test\.gd/,
+        `both suites are dealt out: ${grown.said}`,
+      );
+      const grownResult = readRunResult(resultFile);
+      assert.ok(
+        grownResult.dealing.includes(lanesSaid(2, Math.min(4, availableParallelism()))),
+        `the rise is said: ${grown.said}`,
+      );
+      assert.ok(
+        grownResult.engines.some((engine) => engine.lane === 2),
+        `an engine ran in an added lane: ${JSON.stringify(grownResult.engines)}`,
+      );
+      assert.equal(existsSync(mark), false, 'no mark is left');
+    }
+
+    // An ordered run cannot grow, so it makes no mark.
+    keep(fourTimed);
+    writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
+    await standsIn('always', 4);
+    const ordered = runWith(file, 4, '--engines', '2', '--slot-count', '4', '--order', 'named', ...four);
+    stands();
+    assert.equal(ordered.status, 0, ordered.said);
+    assert.doesNotMatch(ordered.said, /raised this run from/, 'an ordered run says nothing of a rise');
+    assert.ok(
+      listed().every((one) => one.mark === null),
+      'and no mark stood at any listing',
+    );
+
+    // An ordered run keeps the units it cuts for its engines, so two long suites stay whole in it.
+    writeTree(project, {
+      'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
+      'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
+    });
+    for (const removed of ['c', 'd']) {
+      rmSync(join(project, 'tests', `${removed}_lane_test.gd`), { force: true });
+    }
+    keep({
+      'res://tests/a_lane_test.gd': [20, 20, 20, 20],
+      'res://tests/b_lane_test.gd': [20, 20, 20, 20],
+    });
+    await standsIn('always', 4);
+    const wholeOrdered = runWith(
+      file,
+      4,
+      '--engines',
+      '2',
+      '--slot-count',
+      '4',
+      '--order',
+      'named',
+      'tests/a_lane_test.gd',
+      'tests/b_lane_test.gd',
+    );
+    stands();
+    assert.equal(wholeOrdered.status, 0, wholeOrdered.said);
+    assert.match(wholeOrdered.said, /8 test functions in 2 suites over 1 engine, in the order named/);
+    assert.doesNotMatch(wholeOrdered.said, /Dealt out case by case/, 'no suite is cut for the pool');
+    const orderedSlots = slotsSeen();
+    assert.ok(
+      orderedSlots.most <= 1,
+      `an ordered paced run holds its one lane: ${String(orderedSlots.most)}`,
+    );
+    assert.ok(orderedSlots.compiledFirst, 'its lane lends the check its slot before its first suite engine');
+  } finally {
+    stands();
+    sweep(project, slots, pool);
+  }
+}
+
 /**
  * A test run is held to what its suites were seen to hold: an engine starts once memory covers the
  * most any suite of the run was seen to hold, and the run keeps what each engine held.
@@ -66983,6 +68216,35 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       return pushed;
     };
     const pushed = aBenchmarkSuiteTheEngineVersionAndAnAutoloadThatCannotStart();
+    /** A suite asking for the accessibility tree runs with it on, and its controls are sent updates. */
+    const theAccessibilityTreeIsBuilt = (): void => {
+      // On Linux a window alone builds no tree, so the same case fails there. A GitHub Windows
+      // runner built it for a window alone.
+      writeTree(project, {
+        'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+        'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+      });
+      const tree = test('tests/tree_test.gd');
+      assert.equal(tree.status, 0, tree.said);
+      assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
+      const bare = test('tests/bare_test.gd');
+      assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
+      if (process.platform === 'linux') {
+        assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
+        assert.match(bare.said, /no accessibility element/, bare.said);
+      }
+      rmSync(join(project, 'tests', 'tree_test.gd'));
+      rmSync(join(project, 'tests', 'bare_test.gd'));
+      if (process.platform === 'win32') {
+        // The engine sends a control its updates only once a client has asked for the tree, which
+        // the run does on Windows as a screen reader would.
+        writeTree(project, { 'tests/updates_test.gd': accessibilityUpdatesSuite() });
+        const updates = test('tests/updates_test.gd');
+        assert.equal(updates.status, 0, updates.said);
+        assert.match(updates.said, /^Passed: 1 case in 1 suite/m, updates.said);
+        rmSync(join(project, 'tests', 'updates_test.gd'));
+      }
+    };
     /** The lock a suite's engine runs on names that engine beside the process holding it. */
     const theLockOfASuitesEngine = (): void => {
       // The lock a suite's engine runs on names that engine beside the process holding it, so what
@@ -67106,23 +68368,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
           ),
           shared.said,
         );
-        // A suite asking for the accessibility tree runs with it on. On Linux a window alone builds no
-        // tree, so the same case fails there. A GitHub Windows runner built it for a window alone.
-        writeTree(project, {
-          'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
-          'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
-        });
-        const tree = test('tests/tree_test.gd');
-        assert.equal(tree.status, 0, tree.said);
-        assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
-        const bare = test('tests/bare_test.gd');
-        assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
-        if (process.platform === 'linux') {
-          assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
-          assert.match(bare.said, /no accessibility element/, bare.said);
-        }
-        rmSync(join(project, 'tests', 'tree_test.gd'));
-        rmSync(join(project, 'tests', 'bare_test.gd'));
+        theAccessibilityTreeIsBuilt();
       } else {
         console.log(`test command windowed case skipped: ${windowed}`);
       }
@@ -69296,6 +70542,24 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                 }
                 rmSync(join(project, 'tree'), { recursive: true, force: true });
                 rmSync(join(project, 'bare'), { recursive: true, force: true });
+                if (process.platform === 'win32') {
+                  // Its controls are sent their updates too, since the run asks for the tree.
+                  writeTree(project, { 'updates/updates_test.gd': accessibilityUpdatesSuite() });
+                  const updates = jsonOf(
+                    await call(
+                      'project_test',
+                      { projectPath: project, path: 'updates' },
+                      ENGINE_CALL_TIMEOUT_MS * 3,
+                    ),
+                    'updates',
+                  );
+                  assert.deepEqual(
+                    [get(updates, 'passed'), get(updates, 'tests')],
+                    [true, 1],
+                    JSON.stringify(updates),
+                  );
+                  rmSync(join(project, 'updates'), { recursive: true, force: true });
+                }
               };
               await theTreeIsBuiltForAnAccessibilitySuite();
             }
@@ -89659,6 +90923,1131 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
 }
 
 /**
+ * A scene naming the changed one by a path relative to its own folder is followed too, since the
+ * engine loads such a path against that folder. den.tscn instances desk.tscn as `../desk.tscn` and
+ * keeps its lamp editable. study.tscn inherits it as `../desk.tscn`. far.tscn names a desk.tscn of
+ * its own folder, which is another scene. hall.tscn and annex.tscn name desk.tscn by its uid beside
+ * a stale path, and the engine loads a known uid first.
+ */
+async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('relative follow regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-relative-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-relative-rt-'));
+  const relativeDesk = '[ext_resource type="PackedScene" path="../desk.tscn" id="1_desk"]';
+  const staleDesk =
+    '[ext_resource type="PackedScene" uid="uid://cdeskrel01" path="res://old/desk.tscn" id="1_desk"]';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="FollowRelative"\n',
+    'lamp.tscn':
+      '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n\n[node name="Bulb" type="OmniLight3D" parent="."]\n',
+    'desk.tscn':
+      '[gd_scene format=3 uid="uid://cdeskrel01"]\n\n' +
+      '[ext_resource type="PackedScene" path="res://lamp.tscn" id="1_lamp"]\n\n' +
+      '[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="DeskLamp" parent="Top" instance=ExtResource("1_lamp")]\n',
+    'rooms/den.tscn':
+      `[gd_scene format=3]\n\n${relativeDesk}\n\n[node name="Den" type="Node3D"]\n\n` +
+      '[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="Bulb" parent="Desk/Top/DeskLamp"]\nlight_energy = 4.0\n\n' +
+      '[editable path="Desk/Top/DeskLamp"]\n',
+    'rooms/study.tscn':
+      `[gd_scene format=3]\n\n${relativeDesk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
+      '[node name="Top" parent="."]\nvisible = false\n',
+    'rooms/hall.tscn':
+      `[gd_scene format=3]\n\n${staleDesk}\n\n[node name="Hall" type="Node3D"]\n\n` +
+      '[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n' +
+      '[node name="DeskLamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n',
+    'rooms/annex.tscn':
+      `[gd_scene format=3]\n\n${staleDesk}\n\n[node name="Desk" instance=ExtResource("1_desk")]\n\n` +
+      '[node name="Top" parent="."]\nvisible = false\n',
+    'rooms/far/desk.tscn': '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n',
+    'rooms/far/far.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="desk.tscn" id="1_desk"]\n\n' +
+      '[node name="Far" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+      '[node name="D" parent="Top" instance=ExtResource("1_desk")]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('follow-relative');
+    const renamed = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: {
+            projectPath: project,
+            op: 'set',
+            scenePath: 'desk.tscn',
+            nodePath: 'Top',
+            properties: { name: 'Surface' },
+          },
+        },
+        240_000,
+      ),
+    );
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).toSorted(),
+      ['res://rooms/annex.tscn', 'res://rooms/den.tscn', 'res://rooms/hall.tscn', 'res://rooms/study.tscn'],
+      JSON.stringify(renamed),
+    );
+    assert.ok(
+      fileOf('rooms/hall.tscn').includes('[node name="DeskLamp" parent="Desk/Surface"]'),
+      fileOf('rooms/hall.tscn'),
+    );
+    assert.ok(
+      fileOf('rooms/annex.tscn').includes('[node name="Surface" parent="."]'),
+      fileOf('rooms/annex.tscn'),
+    );
+    const den = fileOf('rooms/den.tscn');
+    assert.ok(den.includes('[node name="Bulb" parent="Desk/Surface/DeskLamp"]'), den);
+    assert.ok(den.includes('[editable path="Desk/Surface/DeskLamp"]'), den);
+    assert.ok(
+      fileOf('rooms/study.tscn').includes('[node name="Surface" parent="."]'),
+      fileOf('rooms/study.tscn'),
+    );
+    assert.equal(fileOf('rooms/far/far.tscn'), files['rooms/far/far.tscn'], 'a desk.tscn of its own folder');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/** The reason the follower gives a link out of the project, in place of the scenes behind it. */
+const LINK_OUT_LEFT = 'a link that leads out of the project, so no scene behind it was read or changed';
+
+/** desk.tscn of the link-out cases, whose Top moves. */
+const LINKED_DESK =
+  '[gd_scene format=3]\n\n[node name="Desk" type="Node3D"]\n\n[node name="Top" type="Node3D" parent="."]\n\n' +
+  '[node name="Leg" type="Node3D" parent="."]\n\n[node name="Lamp" type="Node3D" parent="Top"]\n';
+
+/** A scene with its root named [root] keeping a value on desk.tscn's Top/Lamp, named by [deskPath]. */
+function deskKin(root: string, deskPath = 'res://desk.tscn'): string {
+  return (
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${deskPath}" id="1_desk"]\n\n` +
+    `[node name="${root}" type="Node3D"]\n\n[node name="Desk" parent="." instance=ExtResource("1_desk")]\n\n` +
+    '[node name="Lamp" parent="Desk/Top"]\nvisible = false\n\n[editable path="Desk"]\n'
+  );
+}
+
+/** One value track of an animation on [path]. */
+function linkedTrack(path: string): string {
+  return (
+    'tracks/0/type = "value"\ntracks/0/imported = false\ntracks/0/enabled = true\n' +
+    `tracks/0/path = NodePath("${path}")\ntracks/0/interp = 1\ntracks/0/loop_wrap = true\n` +
+    'tracks/0/keys = {"times": PackedFloat32Array(0, 1), "transitions": PackedFloat32Array(1, 1), "update": 0, "values": [Vector3(0, 0, 0), Vector3(1, 1, 1)]}\n'
+  );
+}
+
+/** An Animation kept in a .tres of its own, named [name], with one track on [path]. */
+function animationFile(name: string, path: string): string {
+  return `[gd_resource type="Animation" format=3]\n\n[resource]\nresource_name = "${name}"\nlength = 1.0\n${linkedTrack(path)}`;
+}
+
+/**
+ * A scene holding Body and Body/Arm, the second unique when [unique], and an AnimationPlayer playing
+ * each of [animations], a res:// path to an Animation file, from one library.
+ */
+function playingScene(animations: readonly string[], unique = false): string {
+  const resources = animations
+    .map((path, at) => `[ext_resource type="Animation" path="${path}" id="${at + 1}_anim"]\n`)
+    .join('');
+  const data = animations.map((_, at) => `&"a${at}": ExtResource("${at + 1}_anim")`).join(', ');
+  return (
+    `[gd_scene format=3]\n\n${resources}\n[sub_resource type="AnimationLibrary" id="lib"]\n_data = {${data}}\n\n` +
+    '[node name="A" type="Node3D"]\n\n[node name="Body" type="Node3D" parent="."]\n\n' +
+    `[node name="Arm" type="Node3D" parent="Body"]\n${unique ? 'unique_name_in_owner = true\n' : ''}\n` +
+    '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {&"": SubResource("lib")}\n'
+  );
+}
+
+/** What a link-out case works on: the project as the server is given it, its own folder, and outside. */
+interface LinkedProject {
+  project: string;
+  real: string;
+  outside: string;
+  call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** The text of the answer, which a refusal is, where `call` reads the JSON of one that is not. */
+  say: (name: string, args: Record<string, unknown>) => Promise<string>;
+  fileOf: (file: string) => string;
+}
+
+/**
+ * Runs [body] on a project holding desk.tscn and [files], beside `outside`, a folder holding
+ * [outsideFiles] that no project holds. [link] makes the links once the project is imported, given
+ * the project's own folder and outside, and answers false when the platform refuses one, which
+ * skips the case. With [through] the server is given the project by a junction to it.
+ */
+async function withLinksOut(
+  label: string,
+  fixture: { files: Record<string, string>; outside?: Record<string, string>; through?: boolean },
+  link: (real: string, outside: string) => boolean,
+  body: (at: LinkedProject) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${label} regression skipped (Godot not found)`);
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinlink-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinlink-rt-'));
+  const real = join(root, 'project');
+  const outside = join(root, 'outside');
+  writeTree(real, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Kin"\n',
+    'desk.tscn': LINKED_DESK,
+    ...fixture.files,
+  });
+  mkdirSync(outside, { recursive: true });
+  writeTree(outside, fixture.outside ?? {});
+  const project = fixture.through === true ? join(root, 'via') : real;
+  if (fixture.through === true) {
+    symlinkSync(real, project, 'junction');
+  }
+  let server: ServerProcess | null = null;
+  try {
+    const imported = await runImport(godotPath, real);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    if (!link(real, outside)) {
+      console.log(`${label} regression skipped (the platform refused a link)`);
+      return;
+    }
+    server = new ServerProcess({
+      env: {
+        GODOT_PATH: godotPath,
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+        GDHARNESS_RUNTIME_DIR: runtimeDir,
+      },
+    });
+    await server.initialize('kin-link-out');
+    const serving = server;
+    await body({
+      project,
+      real,
+      outside,
+      call: async (name, args) =>
+        parseTextContent(
+          await serving.request(
+            'tools/call',
+            { name, arguments: { projectPath: project, ...args } },
+            240_000,
+          ),
+        ),
+      say: async (name, args) =>
+        textOf(
+          await serving.request(
+            'tools/call',
+            { name, arguments: { projectPath: project, ...args } },
+            240_000,
+          ),
+        ) ?? '',
+      fileOf: (file) => readFileSync(join(real, file), 'utf8'),
+    });
+  } finally {
+    await server?.stop();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/** The links an answer's notFollowed names as links out, sorted, each checked for its reason. */
+function linksLeft(answer: unknown): string[] {
+  const rows = asArray(get(answer, 'notFollowed') ?? []).filter(
+    (row) => get(row, 'reason') === LINK_OUT_LEFT,
+  );
+  return rows.map((row) => String(get(row, 'scenePath'))).toSorted();
+}
+
+/** The rename of desk.tscn's Top to Surface every link-out case follows. */
+async function renameTheTop(at: LinkedProject): Promise<unknown> {
+  return await at.call('scene_node', {
+    op: 'set',
+    scenePath: 'desk.tscn',
+    nodePath: 'Top',
+    properties: { name: 'Surface' },
+  });
+}
+
+/**
+ * A scene behind a junction out of the project, in a folder other projects may share, is neither
+ * read nor rewritten by the follower, which names the link instead. room.tscn inside is followed.
+ */
+async function testASceneBehindALinkOutIsNotFollowed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'link-out follow',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://shared/', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.ok(
+        at.fileOf('room.tscn').includes('[node name="Lamp" parent="Desk/Surface"]'),
+        at.fileOf('room.tscn'),
+      );
+      assert.equal(
+        readFileSync(join(at.outside, 'kin.tscn'), 'utf8'),
+        kin,
+        'the scene outside is left as it was',
+      );
+    },
+  );
+}
+
+/**
+ * Each of the four commands that follow a node names the link out and leaves the scene behind it:
+ * a rename, a reparent, a branch saved as its own scene and a delete.
+ */
+async function testEachCommandThatFollowsANodeNamesALinkOut(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'link-out commands',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const answers: [string, unknown][] = [
+        ['set', await renameTheTop(at)],
+        [
+          'reparent',
+          await at.call('scene_node', {
+            op: 'reparent',
+            scenePath: 'desk.tscn',
+            nodePath: 'Surface/Lamp',
+            newParentPath: 'Leg',
+          }),
+        ],
+        [
+          'save_branch',
+          await at.call('scene_node', {
+            op: 'save_branch',
+            scenePath: 'desk.tscn',
+            nodePath: 'Leg',
+            newScenePath: 'leg',
+          }),
+        ],
+        ['delete', await at.call('scene_node', { op: 'delete', scenePath: 'desk.tscn', nodePath: 'Leg' })],
+      ];
+      for (const [op, answer] of answers) {
+        assert.deepEqual(
+          [linksLeft(answer), get(answer, 'followed')],
+          [['res://shared/'], ['res://room.tscn']],
+          `${op}: ${JSON.stringify(answer)}`,
+        );
+      }
+      assert.equal(
+        readFileSync(join(at.outside, 'kin.tscn'), 'utf8'),
+        kin,
+        'the scene outside is left as it was',
+      );
+    },
+  );
+}
+
+/** Two junctions to the same outside folder are each named, and the scene there is left. */
+async function testASecondLinkToTheSameFolderOutIsNamedToo(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'second link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'shared')) && linkTo(outside, join(real, 'Shared2')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://Shared2/', 'res://shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** A file link to a scene outside the project is named as a link and the scene is left. */
+async function testAFileLinkOutIsNotFollowed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'file link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(join(outside, 'kin.tscn'), join(real, 'kin_link.tscn'), 'file'),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://kin_link.tscn', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/**
+ * A junction to a folder of the project is no link out: the scene it reaches is followed and no
+ * link is named. So is one to a folder under a .gdignore, which the engine reaches only through
+ * the junction.
+ */
+async function testASceneReachedByALinkInsideTheProjectIsFollowed(): Promise<void> {
+  await withLinksOut(
+    'link inside',
+    {
+      files: {
+        'real/in.tscn': deskKin('In'),
+        'ignored/.gdignore': '',
+        'ignored/deep/far.tscn': deskKin('Far'),
+      },
+    },
+    (real) =>
+      linkTo(join(real, 'real'), join(real, 'inner')) &&
+      linkTo(join(real, 'ignored', 'deep'), join(real, 'hidden')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      assert.ok(asArray(get(renamed, 'followed')).includes('res://hidden/far.tscn'), JSON.stringify(renamed));
+      for (const file of ['real/in.tscn', 'ignored/deep/far.tscn']) {
+        assert.ok(
+          at.fileOf(file).includes('[node name="Lamp" parent="Desk/Surface"]'),
+          `${file}: ${at.fileOf(file)}`,
+        );
+      }
+    },
+  );
+}
+
+/** A junction out of the project below a folder the follower walks is named by its whole path. */
+async function testALinkOutInsideAWalkedFolderIsNamed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'nested link out',
+    { files: { 'levels/room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin } },
+    (real, outside) => linkTo(outside, join(real, 'levels', 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://levels/shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://levels/room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** Scenes outside that name desk.tscn by relative paths, which resolve only through the link, are left. */
+async function testRelativePathsBehindALinkOutAreLeft(): Promise<void> {
+  const outside = {
+    'kin.tscn': deskKin('Kin', '../desk.tscn'),
+    'sub/deep.tscn': deskKin('Deep', '../../desk.tscn'),
+  };
+  await withLinksOut(
+    'relative link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside },
+    (real, out) => linkTo(out, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      for (const [file, written] of Object.entries(outside)) {
+        assert.equal(readFileSync(join(at.outside, file), 'utf8'), written, file);
+      }
+    },
+  );
+}
+
+/**
+ * A junction whose target is gone leaves the follower working. It holds no scene, so only the live
+ * link beside it is named.
+ */
+async function testADanglingLinkOutLeavesTheFollowerWorking(): Promise<void> {
+  await withLinksOut(
+    'dangling link out',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': deskKin('Kin') } },
+    (real, outside) =>
+      linkTo(join(outside, 'gone'), join(real, 'later')) && linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'engine_messages'), undefined, 'the walk opens no folder that is gone');
+    },
+  );
+}
+
+/**
+ * Where names keep their case, a link out named `Shared` leaves the project's own `shared` folder
+ * followed. Where they do not, the platform refuses the second name and the case skips.
+ */
+async function testALinkOutInAnotherCaseLeavesTheFolderInside(): Promise<void> {
+  await withLinksOut(
+    'link out in another case',
+    {
+      files: { 'room.tscn': deskKin('Room'), 'shared/in.tscn': deskKin('In') },
+      outside: { 'kin.tscn': deskKin('Kin') },
+    },
+    (real, outside) => linkTo(outside, join(real, 'Shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://Shared/'], JSON.stringify(renamed));
+      assert.deepEqual(
+        asArray(get(renamed, 'followed')).map(String).toSorted(),
+        ['res://room.tscn', 'res://shared/in.tscn'],
+        JSON.stringify(renamed),
+      );
+    },
+  );
+}
+
+/**
+ * Only a link that can hold a scene is named: a folder, or a file with a scene's extension. A file
+ * link to a text file is not. A delete in a scene nothing inside names still names the scene link,
+ * since the scene behind it may.
+ */
+async function testALinkOutThatHoldsNoSceneIsNotNamed(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'link out to a text file',
+    {
+      files: { 'room.tscn': deskKin('Room'), 'alone.tscn': LINKED_DESK },
+      outside: { 'kin.tscn': kin, 'notes.txt': 'notes' },
+    },
+    (real, outside) =>
+      linkTo(join(outside, 'notes.txt'), join(real, 'notes_link.txt'), 'file') &&
+      linkTo(join(outside, 'kin.tscn'), join(real, 'kin_link.tscn'), 'file'),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://kin_link.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      const deleted = await at.call('scene_node', { op: 'delete', scenePath: 'alone.tscn', nodePath: 'Leg' });
+      assert.equal(get(deleted, 'deletedNodePath'), 'Leg', JSON.stringify(deleted));
+      assert.deepEqual(linksLeft(deleted), ['res://kin_link.tscn'], JSON.stringify(deleted));
+    },
+  );
+}
+
+/** Junctions that lead round in a ring neither hang nor break the follower's walk. */
+async function testARingOfJunctionsDoesNotHangTheFollower(): Promise<void> {
+  await withLinksOut(
+    'junction ring',
+    { files: { 'room.tscn': deskKin('Room'), 'loop/keep.txt': '' } },
+    (real) =>
+      linkTo(join(real, 'ring2'), join(real, 'ring1')) &&
+      linkTo(join(real, 'ring1'), join(real, 'ring2')) &&
+      linkTo(join(real, 'loop'), join(real, 'loop', 'up')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(linksLeft(renamed), linksOut(at.project).toSorted(), JSON.stringify(renamed));
+    },
+  );
+}
+
+/** A project the server is given through a junction still names its own link out and follows inside. */
+async function testAProjectReachedThroughAJunctionNamesItsLinkOut(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'project through a junction',
+    { files: { 'room.tscn': deskKin('Room') }, outside: { 'kin.tscn': kin }, through: true },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(linksLeft(renamed), ['res://shared/'], JSON.stringify(renamed));
+      assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** The sentence the addon gives a file behind [link]. */
+function behindTheLink(file: string, link: string): string {
+  return `${file} leads out of the project through the link ${link}, and only what is inside the project is written here.`;
+}
+
+/** Writes outside/stride.res, a binary Animation with one track on Body/Arm:position, by an engine. */
+async function binaryAnimationInto(outside: string): Promise<void> {
+  const godotPath = resolveGodotPath() ?? '';
+  const making = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinlink-res-'));
+  try {
+    writeTree(making, {
+      'project.godot': 'config_version=5\n',
+      'stride.tres': animationFile('stride', 'Body/Arm:position'),
+      'save.gd':
+        'extends SceneTree\n\n\nfunc _init() -> void:\n\tvar saved: Error = ResourceSaver.save(load("res://stride.tres"), "res://stride.res")\n\tquit(saved)\n',
+    });
+    const engine = spawnHidden(godotPath, ['--headless', '--path', making, '-s', 'res://save.gd'], {
+      stdio: 'ignore',
+    });
+    assert.equal((await exitOf(engine)).code, 0, 'the engine saved stride.res');
+    writeFileSync(join(outside, 'stride.res'), readFileSync(join(making, 'stride.res')));
+  } finally {
+    rmSync(making, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The follower's save leaves each animation or library kept in a file of its own behind a link out,
+ * a .tres and a binary .res alike, puts its track back, and says why. home.tres inside is saved.
+ */
+async function testAnAnimationBehindALinkOutIsNotSaved(): Promise<void> {
+  const walk = animationFile('walk', 'Body/Arm:position');
+  const moves =
+    '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_sway"]\n' +
+    `resource_name = "sway"\nlength = 1.0\n${linkedTrack('Body/Arm:position')}\n[resource]\n_data = {\n&"sway": SubResource("Animation_sway")\n}\n`;
+  const scene = playingScene(['res://shared/walk.tres', 'res://shared/stride.res', 'res://home.tres']);
+  const withLibrary = scene
+    .replace(
+      '[sub_resource type="AnimationLibrary"',
+      '[ext_resource type="AnimationLibrary" path="res://shared/moves.tres" id="9_moves"]\n\n[sub_resource type="AnimationLibrary"',
+    )
+    .replace(
+      'libraries = {&"": SubResource("lib")}',
+      'libraries = {&"": SubResource("lib"), &"moves": ExtResource("9_moves")}',
+    );
+  await withLinksOut(
+    'animation behind a link out',
+    {
+      files: { 'a.tscn': withLibrary, 'home.tres': animationFile('home', 'Body/Arm:position') },
+      outside: { 'walk.tres': walk, 'moves.tres': moves },
+    },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      await binaryAnimationInto(at.outside);
+      const stride = readFileSync(join(at.outside, 'stride.res'));
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      const left = asArray(get(moved, 'notRetargeted')).map((row) => [
+        String(get(row, 'animation')),
+        String(get(row, 'reason')),
+      ]);
+      assert.deepEqual(
+        left.toSorted((a, b) => a.join().localeCompare(b.join())),
+        [
+          ['a0', behindTheLink('res://shared/walk.tres', 'res://shared/')],
+          ['a1', behindTheLink('res://shared/stride.res', 'res://shared/')],
+          ['moves/sway', behindTheLink('res://shared/moves.tres', 'res://shared/')],
+        ],
+        JSON.stringify(moved),
+      );
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [['a2', 'Arm:position']],
+        JSON.stringify(moved),
+      );
+      assert.ok(at.fileOf('home.tres').includes('NodePath("Arm:position")'), at.fileOf('home.tres'));
+      assert.equal(readFileSync(join(at.outside, 'walk.tres'), 'utf8'), walk);
+      assert.equal(readFileSync(join(at.outside, 'moves.tres'), 'utf8'), moves);
+      assert.ok(readFileSync(join(at.outside, 'stride.res')).equals(stride), 'stride.res is left');
+    },
+  );
+}
+
+/** A branch saved as its own scene leaves an animation behind a link out the same way. */
+async function testABranchSavedOutLeavesAnAnimationBehindALinkOut(): Promise<void> {
+  const walk = animationFile('walk', '%Arm:position');
+  await withLinksOut(
+    'branch animation behind a link out',
+    { files: { 'a.tscn': playingScene(['res://shared/walk.tres'], true) }, outside: { 'walk.tres': walk } },
+    (real, outside) => linkTo(outside, join(real, 'shared')),
+    async (at) => {
+      const saved = await at.call('scene_node', {
+        op: 'save_branch',
+        scenePath: 'a.tscn',
+        nodePath: 'Body',
+        newScenePath: 'body',
+      });
+      assert.deepEqual(
+        asArray(get(saved, 'notRetargeted')).map((row) => [get(row, 'animation'), get(row, 'reason')]),
+        [['a0', behindTheLink('res://shared/walk.tres', 'res://shared/')]],
+        JSON.stringify(saved),
+      );
+      assert.equal(get(saved, 'retargeted'), undefined, JSON.stringify(saved));
+      assert.equal(readFileSync(join(at.outside, 'walk.tres'), 'utf8'), walk);
+    },
+  );
+}
+
+/** An animation file a junction to a folder of the project reaches is saved, since it is inside. */
+async function testAnAnimationReachedByALinkInsideIsSaved(): Promise<void> {
+  await withLinksOut(
+    'animation through a link inside',
+    {
+      files: {
+        'a.tscn': playingScene(['res://inner/walk.tres']),
+        'real/walk.tres': animationFile('walk', 'Body/Arm:position'),
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [['a0', 'Arm:position']],
+        JSON.stringify(moved),
+      );
+      assert.equal(get(moved, 'notRetargeted'), undefined, JSON.stringify(moved));
+      assert.ok(
+        at.fileOf('real/walk.tres').includes('NodePath("Arm:position")'),
+        at.fileOf('real/walk.tres'),
+      );
+    },
+  );
+}
+
+/** The follower saves an animation reached through a link out and then a link back into the project. */
+async function testAnAnimationReachedByALinkBackInIsSaved(): Promise<void> {
+  await withLinksOut(
+    'animation through a link back in',
+    {
+      files: {
+        'a.tscn': playingScene(['res://shared/back/walk.tres']),
+        'real/walk.tres': animationFile('walk', 'Body/Arm:position'),
+      },
+    },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(outside, 'back')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [['a0', 'Arm:position']],
+        JSON.stringify(moved),
+      );
+      assert.equal(get(moved, 'notRetargeted'), undefined, JSON.stringify(moved));
+      assert.ok(
+        at.fileOf('real/walk.tres').includes('NodePath("Arm:position")'),
+        at.fileOf('real/walk.tres'),
+      );
+    },
+  );
+}
+
+/**
+ * The addon judges a path under a link out by where it ends: back inside the project is inside,
+ * and out again, a ring, and a link whose target is gone are judged as the server's gate judges them.
+ */
+function testTheAddonJudgesALinkChainByWhereItEnds(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('link chain regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chain-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  try {
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'real/a.tres': '', 'other/b.tres': '' });
+    writeTree(outside, { 'c.tres': '', 'deeper/d.tres': '' });
+    const links: [string, string][] = [
+      [outside, join(project, 'shared')],
+      [join(project, 'real'), join(outside, 'back')],
+      [join(outside, 'deeper'), join(project, 'real', 'again')],
+      [join(project, 'nowhere'), join(project, 'real', 'hole')],
+      [join(outside, 'loop2'), join(outside, 'loop1')],
+      [join(outside, 'loop1'), join(outside, 'loop2')],
+      [join(outside, 'nowhere'), join(outside, 'gone')],
+    ];
+    for (const [target, at] of links) {
+      symlinkSync(target, at, 'junction');
+    }
+    const paths = [
+      'res://shared/back/a.tres',
+      'res://shared/c.tres',
+      'res://shared/back/again/d.tres',
+      'res://shared/loop1/x.tres',
+      'res://shared/gone/x.tres',
+      'res://shared/back/hole/x.tres',
+      'res://other/b.tres',
+      'res://shared/',
+    ];
+    writeFileSync(
+      join(project, 'runner.gd'),
+      [
+        'extends SceneTree',
+        '',
+        'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar links: PackedStringArray = ["res://shared/"]',
+        `\tvar paths: Array[String] = ${JSON.stringify(paths)}`,
+        '\tvar refused: Array[bool] = []',
+        '\tfor path: String in paths:',
+        '\t\trefused.append(not GdhSceneFile.out_through_link(path, links).is_empty())',
+        '\tprint("CHAIN " + JSON.stringify(refused))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+      encoding: 'utf8',
+      timeout: 120000,
+    });
+    const said = `${run.stdout}\n${run.stderr}`;
+    const answered = /CHAIN (\[.*\])/.exec(said)?.[1];
+    assert.ok(answered !== undefined, said);
+    assert.deepEqual(
+      JSON.parse(answered),
+      // The dangling link inside the chain (hole) is refused: the engine cannot read where it points.
+      [false, true, true, true, true, true, false, true],
+      `${paths.join(' ')}: ${said}`,
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * The project is opened through one spelling of its folder (a substituted drive here, a short 8.3
+ * name on a runner whose temp folder has one) while the engine reads a link's target in another. A
+ * path out through a link and back into the project is inside, and one that stays out is outside.
+ */
+function testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('link chain spelling regression skipped (Godot not found)');
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('link chain spelling regression skipped (a drive substitution is Windows only)');
+    return;
+  }
+  const letter = 'WVUTSRQPONMLKJIHGF'.split('').find((candidate) => !existsSync(`${candidate}:/`));
+  if (letter === undefined) {
+    console.log('link chain spelling regression skipped (no free drive letter)');
+    return;
+  }
+  const drive = `${letter}:`;
+  const sandbox = chainSandbox();
+  let mapped = false;
+  try {
+    mapped = spawnSyncHidden('subst', [drive, sandbox], { encoding: 'utf8' }).status === 0;
+    if (!mapped) {
+      console.log('link chain spelling regression skipped (the platform refused a drive substitution)');
+      return;
+    }
+    const project = `${drive}/project`;
+    const outside = `${drive}/outside`;
+    symlinkSync(outside, `${project}/shared`, 'junction');
+    symlinkSync(`${project}/real`, `${outside}/back`, 'junction');
+    assert.deepEqual(
+      chainJudged(godotPath, project, ['res://shared/back/a.tres', 'res://shared/c.tres']),
+      [false, true],
+      'back into the project is inside, and c.tres is outside',
+    );
+  } finally {
+    if (mapped) {
+      spawnSyncHidden('subst', [drive, '/d'], { encoding: 'utf8' });
+    }
+    sweep(sandbox);
+  }
+}
+
+/**
+ * Which of [paths], res:// paths below the link `res://shared/`, the addon of the project at
+ * [project] refuses, run in an engine opened on [project] as it is spelt there.
+ */
+function chainJudged(godotPath: string, project: string, paths: readonly string[]): boolean[] {
+  writeFileSync(
+    `${project}/runner.gd`,
+    [
+      'extends SceneTree',
+      '',
+      'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tvar links: PackedStringArray = ["res://shared/"]',
+      `\tvar paths: Array[String] = ${JSON.stringify(paths)}`,
+      '\tvar refused: Array[bool] = []',
+      '\tfor path: String in paths:',
+      '\t\trefused.append(not GdhSceneFile.out_through_link(path, links).is_empty())',
+      '\tprint("JUDGED " + JSON.stringify(refused))',
+      '\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  const said = `${run.stdout}\n${run.stderr}`;
+  const answered = /JUDGED (\[.*\])/.exec(said)?.[1];
+  assert.ok(answered !== undefined, said);
+  return asArray(JSON.parse(answered)).map(Boolean);
+}
+
+/** A project to judge link chains in: the addon, a.tres in real/, and outside/ beside it. */
+function chainSandbox(): string {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelling-'));
+  writeTree(join(sandbox, 'project'), { 'project.godot': 'config_version=5\n', 'real/a.tres': '' });
+  writeTree(join(sandbox, 'outside'), { 'c.tres': '' });
+  cpSync('src/godot/addons/gdharness_editor', join(sandbox, 'project', 'addons', 'gdharness_editor'), {
+    recursive: true,
+  });
+  return sandbox;
+}
+
+/**
+ * The project is opened through a link to its folder, as a temp folder reached through /private is
+ * on macOS, and the links name the project by that spelling. Back into the project is inside.
+ */
+function testTheAddonJudgesALinkChainWhereTheProjectIsOpenedThroughALink(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('link chain open-through-a-link regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = chainSandbox();
+  try {
+    const opened = join(sandbox, 'opened');
+    symlinkSync(join(sandbox, 'project'), opened, 'junction');
+    symlinkSync(join(sandbox, 'outside'), join(opened, 'shared'), 'junction');
+    symlinkSync(join(opened, 'real'), join(sandbox, 'outside', 'back'), 'junction');
+    assert.deepEqual(
+      chainJudged(godotPath, opened, ['res://shared/back/a.tres', 'res://shared/c.tres']),
+      [false, true],
+      'back into the project is inside, and c.tres is outside',
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A link whose target does not exist is a chain that cannot be followed, whether or not the platform
+ * names the missing target when asked where the link points.
+ */
+function testALinkToAMissingTargetIsAChainThatCannotBeFollowed(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('missing link target regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = chainSandbox();
+  try {
+    const project = join(sandbox, 'project');
+    symlinkSync(join(sandbox, 'outside'), join(project, 'shared'), 'junction');
+    try {
+      symlinkSync(join(project, 'nowhere'), join(sandbox, 'outside', 'ghost'), 'dir');
+    } catch {
+      console.log('missing link target regression skipped (the platform refused a link)');
+      return;
+    }
+    assert.deepEqual(
+      chainJudged(godotPath, project, ['res://shared/ghost/x.tres', 'res://shared/c.tres']),
+      [true, true],
+      'a link into a folder that is not there is refused, though its target is inside the project',
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A path that runs through more links than the addon follows is refused for that reason, not as one
+ * that leads out, whether it would have ended inside the project or outside. At the limit it is judged.
+ */
+function testALinkChainTooLongToFollowIsNotSaidToLeadOut(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('long link chain regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-chain-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  try {
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'real/a.tres': '' });
+    writeTree(outside, { 'c.tres': '' });
+    // shared leads out, and self in outside leads back to the project, so each pair is two links.
+    symlinkSync(outside, join(project, 'shared'), 'junction');
+    symlinkSync(project, join(outside, 'self'), 'junction');
+    symlinkSync(project, join(project, 'loopback'), 'junction');
+    const pairs = (count: number): string => 'shared/self/'.repeat(count);
+    const paths = [
+      `res://${pairs(20)}real/a.tres`,
+      `res://loopback/${pairs(20)}real/a.tres`,
+      `res://${pairs(20)}shared/c.tres`,
+      `res://${pairs(1)}shared/c.tres`,
+    ];
+    writeFileSync(
+      join(project, 'runner.gd'),
+      [
+        'extends SceneTree',
+        '',
+        'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar links: PackedStringArray = ["res://shared/", "res://loopback/"]',
+        `\tvar paths: Array[String] = ${JSON.stringify(paths)}`,
+        '\tvar said: Array[String] = []',
+        '\tfor given: String in paths:',
+        '\t\tsaid.append(GdhSceneFile.out_through_link(given, links))',
+        '\tprint("LONG " + JSON.stringify(said))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+      encoding: 'utf8',
+      timeout: 120000,
+    });
+    const output = `${run.stdout}\n${run.stderr}`;
+    const answered = /LONG (\[.*\])/.exec(output)?.[1];
+    assert.ok(answered !== undefined, output);
+    const said = asArray(JSON.parse(answered)).map(String);
+    // 40 links ending inside: judged and kept. 41 ending inside: too long, and not said to lead out.
+    assert.equal(said[0], '', output);
+    assert.match(said[1] ?? '', /cannot be followed to the end/, `41 links ending inside: ${said[1]}`);
+    assert.doesNotMatch(said[1] ?? '', /leads out of the project through/, said[1] ?? '');
+    assert.match(said[2] ?? '', /cannot be followed to the end/, `41 links ending outside: ${said[2]}`);
+    assert.match(
+      said[3] ?? '',
+      /leads out of the project through the link/,
+      `3 links ending outside: ${said[3]}`,
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A scene that links give two paths, one through a link out that comes back in, is followed once
+ * under the path that passes through no link: named once in followed, its dropped value listed once.
+ */
+async function testASceneReachedByTwoPathsThroughALinkBackInIsFollowedOnce(): Promise<void> {
+  await withLinksOut(
+    'scene reached by two paths',
+    { files: { 'real/room.tscn': deskKin('Room') } },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(outside, 'back')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://real/room.tscn'], JSON.stringify(renamed));
+      assert.ok(
+        at.fileOf('real/room.tscn').includes('[node name="Lamp" parent="Desk/Surface"]'),
+        at.fileOf('real/room.tscn'),
+      );
+      const deleted = await at.call('scene_node', {
+        op: 'delete',
+        scenePath: 'desk.tscn',
+        nodePath: 'Surface',
+      });
+      assert.deepEqual(get(deleted, 'followed'), ['res://real/room.tscn'], JSON.stringify(deleted));
+      assert.deepEqual(
+        asArray(get(deleted, 'dropped')).map((row) => [get(row, 'scenePath'), get(row, 'entry')]),
+        [['res://real/room.tscn', 'values']],
+        JSON.stringify(deleted),
+      );
+    },
+  );
+}
+
+/** The reasons of the notFollowed rows of [answer] for [scenePath]. */
+function reasonsFor(answer: unknown, scenePath: string): string[] {
+  return asArray(get(answer, 'notFollowed') ?? [])
+    .filter((row) => get(row, 'scenePath') === scenePath)
+    .map((row) => String(get(row, 'reason')));
+}
+
+/**
+ * One animation file named by two spellings in one library is saved, and the follower reads no
+ * scene behind the link out, which keeps its sentence.
+ */
+async function testOneAnimationUnderTwoSpellingsIsSavedAndTheLinkOutKeepsItsSentence(): Promise<void> {
+  await withLinksOut(
+    'animation under two spellings',
+    {
+      files: {
+        'a.tscn': playingScene(['res://shared/back/walk.tres', 'res://real/walk.tres']),
+        'real/walk.tres': animationFile('walk', 'Body/Arm:position'),
+      },
+    },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'real'), join(outside, 'back')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'a.tscn',
+        nodePath: 'Body/Arm',
+        newParentPath: '.',
+      });
+      assert.deepEqual(
+        asArray(get(moved, 'retargeted')).map((row) => [get(row, 'animation'), get(row, 'to')]),
+        [
+          ['a0', 'Arm:position'],
+          ['a1', 'Arm:position'],
+        ],
+        JSON.stringify(moved),
+      );
+      assert.ok(at.fileOf('real/walk.tres').includes('NodePath("Arm:position")'));
+      assert.deepEqual(reasonsFor(moved, 'res://shared/'), [LINK_OUT_LEFT], JSON.stringify(moved));
+    },
+  );
+}
+
+/**
  * A node renamed or deleted in a scene is followed into a scene instancing one that inherits it,
  * where the instance's root is the changed scene's root under another scene's name.
  */
@@ -94998,7 +97387,7 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
 
     const behind = planFileMove(project, join(project, 'shared', 'o.gd'), join(project, 'o.gd'));
     assert.ok(!behind.ok, 'a file behind a link is not moved');
-    assert.match(behind.reason, /is behind the link res:\/\/shared\//);
+    assert.match(behind.reason, /shared[\\/]o\.gd is not inside the project\./);
     assert.ok(existsSync(join(outside, 'o.gd')), 'and stays where it is');
     const own = planFileMove(project, project, join(project, 'elsewhere'));
     assert.ok(
@@ -95017,22 +97406,18 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
     );
     assert.ok(!symbol.ok, 'a script behind a link is not renamed');
-    assert.match(symbol.reason, /is behind the link res:\/\/shared\//);
+    assert.match(symbol.reason, /shared[\\/]o\.gd is not inside the project\./);
     assert.doesNotMatch(symbol.reason, /\.gdignore|project\.godot|starts with a dot/);
     assert.equal(before('o.gd'), kept.o);
 
     mkdirSync(join(project, 'held'));
     symlinkSync(outside, join(project, 'held', 'far'), 'junction');
-    for (const [given, folder] of [
-      ['res://held', 'held/far'],
-      ['res://shared', 'shared'],
-    ] as const) {
-      const refused = scriptsToDiagnose(project, given);
-      assert.ok(
-        !refused.ok && refused.reason.includes(`${folder} is a link that leads out of the project`),
-        `${given}: ${JSON.stringify(refused)}`,
-      );
-    }
+    const heldRefused = scriptsToDiagnose(project, 'res://held');
+    assert.ok(
+      !heldRefused.ok && heldRefused.reason.includes('held/far is a link that leads out of the project'),
+      JSON.stringify(heldRefused),
+    );
+    assert.deepEqual(scriptsToDiagnose(project, 'res://shared'), { ok: true, value: null });
 
     mkdirSync(join(project, 'real'));
     symlinkSync(join(project, 'real'), join(project, 'inner'), 'junction');
@@ -95044,6 +97429,983 @@ async function testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject(): Promi
     }
   } finally {
     sweep(project, moving, outside);
+  }
+}
+
+/** A project with a folder, a file and a gone-target link out, and one that stays inside. */
+function namedPathProject(): { project: string; outside: string; fileLinks: boolean } {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-named-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'a.gd': 'extends Node\n',
+    'real/r.gd': 'extends Node\n',
+    'linked.gdx/x.gd': 'extends Node\n',
+  });
+  writeTree(outside, { 'o.gd': 'extends Node\n', 'tool/plugin.cfg': '[plugin]\n' });
+  const junction = (target: string, name: string): void => {
+    symlinkSync(target, join(project, name), 'junction');
+  };
+  junction(join(project, 'real'), 'link');
+  junction(outside, 'shared');
+  junction(join(project, 'real', 'old'), 'gone');
+  junction(join(outside, 'later'), 'later');
+  junction(join(project, 'ring2'), 'ring1');
+  junction(join(project, 'ring1'), 'ring2');
+  junction(join(project, 'real'), 'my link');
+  junction(outside, 'out link');
+  symlinkSync(join(project, 'real'), join(outside, 'back'), 'junction');
+  // The project named through a link of its own.
+  symlinkSync(project, join(sandbox, 'alias'), 'junction');
+  mkdirSync(join(project, 'addons'));
+  junction(join(outside, 'tool'), join('addons', 'tool'));
+  let fileLinks = true;
+  try {
+    symlinkSync(join(outside, 'o.gd'), join(project, 'linked.gd'), 'file');
+    symlinkSync(join(outside, 'made.gd'), join(project, 'made.gd'), 'file');
+  } catch {
+    fileLinks = false;
+  }
+  return { project, outside, fileLinks };
+}
+
+/** A path the server's own code names is refused where it leads out through a link, and one for the engine is not. */
+async function testANamedPathBehindALinkOutIsRefused(): Promise<void> {
+  const { project, outside, fileLinks } = namedPathProject();
+  try {
+    const refusal = (given: string, link: string): string =>
+      `Path '${given}' leads out of the project through the link ${link}, and only what is inside the project is taken here.`;
+    const reasonOf = (given: string, options?: { root?: boolean }): string => {
+      const found = resolveWithinProject(project, given, options);
+      return found.ok ? `accepted ${found.absolutePath}` : found.reason;
+    };
+    assert.equal(reasonOf('res://shared/o.gd'), refusal('res://shared/o.gd', 'res://shared/'));
+    assert.equal(reasonOf('res://shared', { root: true }), refusal('res://shared', 'res://shared/'));
+    const absolute = join(project, 'shared', 'o.gd');
+    assert.equal(reasonOf(absolute), refusal(absolute, 'res://shared/'));
+    assert.equal(reasonOf('res://shared/new/x.gd'), refusal('res://shared/new/x.gd', 'res://shared/'));
+    if (fileLinks) {
+      assert.equal(reasonOf('res://linked.gd'), refusal('res://linked.gd', 'res://linked.gd'));
+      assert.equal(reasonOf('res://made.gd'), refusal('res://made.gd', 'res://made.gd'));
+    } else {
+      console.log('  skipped the file links: the platform refuses one');
+    }
+    assert.deepEqual(resolveWithinProject(project, 'res://linked.gdx/x.gd'), {
+      ok: true,
+      absolutePath: join(project, 'linked.gdx', 'x.gd'),
+      relativePath: 'linked.gdx/x.gd',
+    });
+    assert.deepEqual(resolveWithinProject(project, 'res://link/r.gd'), {
+      ok: true,
+      absolutePath: join(project, 'link', 'r.gd'),
+      relativePath: 'link/r.gd',
+    });
+    rmSync(join(project, 'real', 'old'), { recursive: true, force: true });
+    assert.equal(resolveWithinProject(project, 'res://gone/x.gd').ok, true, 'a link whose target is gone');
+    assert.equal(reasonOf('res://later/x.gd'), refusal('res://later/x.gd', 'res://later/'));
+    assert.equal(reasonOf('res://later', { root: true }), refusal('res://later', 'res://later/'));
+    assert.equal(linkOutOf(project, join(project, 'later', 'x.gd')), 'res://later/');
+    assert.equal(resolveWithinProject(project, 'res://ring1/x.gd').ok, true, 'a ring of links');
+    assert.equal(resolveWithinProject(project, 'res://shared/back/r.gd').ok, true, 'out and back in');
+    assert.equal(resolveWithinProject(project, 'res://my link/r.gd').ok, true, 'a link with a space');
+    assert.equal(reasonOf('res://out link/o.gd'), refusal('res://out link/o.gd', 'res://out link/'));
+
+    // The project named through a link, and on Windows in another case, answers as under its real path.
+    const named = [join(dirname(project), 'alias')];
+    if (process.platform === 'win32') {
+      named.push(project.toUpperCase());
+    }
+    for (const root of named) {
+      for (const [given, options] of [
+        ['res://ring1/x.gd', undefined],
+        ['res://ring1', { root: true }],
+        ['res://link/r.gd', undefined],
+        ['res://gone/x.gd', undefined],
+        ['res://shared/back/r.gd', undefined],
+        ['res://my link/r.gd', undefined],
+      ] as const) {
+        const found = resolveWithinProject(root, given, options);
+        assert.ok(found.ok, `${root} ${given}: ${JSON.stringify(found)}`);
+      }
+      const refused = resolveWithinProject(root, 'res://shared/o.gd');
+      assert.ok(!refused.ok && refused.reason.includes('through the link res://shared/'), root);
+    }
+
+    for (const given of ['res://shared/o.gd', 'res://later/x.gd', 'addons/tool/plugin.cfg']) {
+      const found = resolveWithinProject(project, given, { forTheEngine: true });
+      assert.ok(found.ok, `${given}: ${JSON.stringify(found)}`);
+    }
+    assert.match(reasonOf('../outside/o.gd'), /resolves outside the project directory/);
+    const stillRefused = resolveWithinProject(project, '../outside/o.gd', { forTheEngine: true });
+    assert.ok(!stillRefused.ok && stillRefused.reason.includes('resolves outside the project directory'));
+
+    assert.deepEqual(scriptsToDiagnose(project, 'res://shared'), { ok: true, value: null });
+    const source = projectSourceOf(project);
+    assert.equal(source('res://shared/o.gd'), null);
+    assert.equal(source('res://a.gd'), 'extends Node\n');
+    const split = casesOutOfPath(project, 'res://shared/o_test.gd:test_x', undefined);
+    assert.ok(split.ok, JSON.stringify(split));
+    assert.deepEqual(split.path, ['res://shared/o_test.gd']);
+
+    await withStdioServer(
+      async (call) => {
+        const through = 'through the link res://shared/';
+        const answers = [
+          await call('script_diagnostics', { projectPath: project, scriptPath: 'res://shared/o.gd' }),
+          await call('script_diagnostics', { projectPath: project, scriptPath: ['res://shared/o.gd'] }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://shared/o.gd',
+            symbol: 'Shared',
+            newName: 'Common',
+          }),
+          await call('project_search', { projectPath: project, query: 'extends', path: 'res://shared' }),
+        ];
+        for (const answer of answers) {
+          assert.ok(answer.includes(through), answer);
+        }
+        // A ring of links under a project named through a link has no file to search, and no fault.
+        const inARing = await call('project_search', {
+          projectPath: join(dirname(project), 'alias'),
+          query: 'extends',
+          path: 'res://ring1/x.gd',
+        });
+        assert.match(inARing, /^There is nothing at res:\/\/ring1\/x\.gd to search\./, inARing);
+        const kept = readdirSync(outside).toSorted();
+        const moves = [
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://a.gd',
+            newPath: 'res://shared/a.gd',
+          }),
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://a.gd',
+            newPath: 'res://later/a.gd',
+          }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://a.gd',
+            symbol: 'A',
+            newName: 'B',
+            newScriptPath: 'res://shared/a.gd',
+          }),
+        ];
+        for (const [at, link] of [
+          [0, 'res://shared/'],
+          [1, 'res://later/'],
+          [2, 'res://shared/'],
+        ] as const) {
+          const said = String(moves[at]);
+          assert.ok(said.includes(`through the link ${link}`), said);
+        }
+        const fromBehind = [
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://shared/o.gd',
+            newPath: 'res://moved.gd',
+          }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://shared/o.gd',
+            symbol: 'Shared',
+            newName: 'Common',
+          }),
+        ];
+        assert.ok(fromBehind[0]?.includes('through the link res://shared/'), String(fromBehind[0]));
+        assert.ok(fromBehind[0]?.endsWith('Move it in the folder it lives in.'), String(fromBehind[0]));
+        assert.ok(
+          fromBehind[1]?.includes('Rename it in the project that holds the script.'),
+          String(fromBehind[1]),
+        );
+        // Nothing is there through a link whose target is gone, so no remedy points at it.
+        const fromGone = [
+          await call('resource_edit', {
+            op: 'move',
+            projectPath: project,
+            resourcePath: 'res://later/x.gd',
+            newPath: 'res://moved.gd',
+          }),
+          await call('script_edit', {
+            op: 'rename',
+            projectPath: project,
+            scriptPath: 'res://later/x.gd',
+            symbol: 'X',
+            newName: 'Y',
+          }),
+        ];
+        for (const said of fromGone) {
+          assert.ok(
+            said.endsWith(
+              "Path 'res://later/x.gd' leads out of the project through the link res://later/, and only what is inside the project is taken here.",
+            ),
+            said,
+          );
+        }
+        const breakpoint = await call('debug_breakpoint', {
+          op: 'set',
+          projectPath: project,
+          scriptPath: 'res://shared/o.gd',
+          line: 1,
+        });
+        // The engine loads the script, so a breakpoint on one is held, with its line unchecked.
+        assert.equal(
+          get(JSON.parse(breakpoint) as unknown, 'lineNotChecked'),
+          'Line 1 of res://shared/o.gd was not checked, since the script lies behind the link res://shared/, which leads out of the project.',
+          breakpoint,
+        );
+        assert.ok(existsSync(join(project, 'a.gd')), 'a.gd stays where it was');
+        assert.deepEqual(readdirSync(outside).toSorted(), kept, 'nothing was written outside');
+        assert.deepEqual(kept, ['back', 'o.gd', 'tool']);
+
+        const taken = [
+          await call('project_export', {
+            op: 'run',
+            projectPath: project,
+            preset: 'Windows',
+            outputPath: 'res://shared/game.exe',
+          }),
+          await call('project_settings', {
+            op: 'disable_plugin',
+            projectPath: project,
+            pluginName: 'tool',
+          }),
+        ];
+        for (const answer of taken) {
+          assert.doesNotMatch(answer, /through the link/, answer);
+        }
+        assert.match(taken[0] ?? '', /export_presets\.cfg/, `the export went past the path: ${taken[0]}`);
+      },
+      { GODOT_PATH: standInEngine() },
+    );
+    await aFileBehindALinkIsReadByTheEngine(project, outside);
+  } finally {
+    sweep(dirname(project));
+  }
+}
+
+/** A value that makes an argument of the type [parameter] present, for a call refused before it is read. */
+function placeholderFor(parameter: object | undefined): unknown {
+  const choices: unknown = parameter === undefined ? undefined : Reflect.get(parameter, 'enum');
+  if (Array.isArray(choices)) {
+    return choices[0];
+  }
+  switch (parameter === undefined ? undefined : Reflect.get(parameter, 'type')) {
+    case 'object':
+      return {};
+    case 'array':
+      return [];
+    case 'integer':
+    case 'number':
+      return 0;
+    case 'boolean':
+      return true;
+    default:
+      return 'x';
+  }
+}
+
+/** What an `outside` folder holds, file by file, to compare before and after a refused write. */
+function holdingOf(folder: string): string {
+  return JSON.stringify(
+    readdirSync(folder, { recursive: true })
+      .map(String)
+      .toSorted()
+      .map((entry) => [
+        entry,
+        statSync(join(folder, entry)).isFile() ? readFileSync(join(folder, entry), 'utf8') : null,
+      ]),
+  );
+}
+
+/** Each op that writes a scene or a resource, with the arguments it needs, naming [scene] or [resource]. */
+function writingCallsBehindTheLink(scene: string, resource: string): [string, Record<string, unknown>][] {
+  const calls: [string, Record<string, unknown>][] = [];
+  for (const [tool, ops] of Object.entries(EDITOR_CALLS)) {
+    const spec = TOOL_SPECS.find((one) => one.name === tool);
+    assert.ok(spec, `${tool} is a tool`);
+    for (const [op] of Object.entries(ops).filter(([, [, effect]]) => effect === 'writes')) {
+      const given: Record<string, unknown> = { op };
+      for (const name of [...spec.requires, ...(spec.operations?.[op]?.requires ?? [])]) {
+        given[name] = valueOfARequiredArgument(name, spec.parameters[name], { scene, resource });
+      }
+      delete given['projectPath'];
+      calls.push([tool, given]);
+    }
+  }
+  return calls;
+}
+
+/** The value a call gives the required argument [name]: the file it writes, or a placeholder. */
+function valueOfARequiredArgument(
+  name: string,
+  parameter: object | undefined,
+  files: { scene: string; resource: string },
+): unknown {
+  if (name === 'scenePath') {
+    return files.scene;
+  }
+  return name === 'resourcePath' ? files.resource : placeholderFor(parameter);
+}
+
+/** A scene file that is itself a link out, and a project named through a link or in another case, are refused alike. */
+async function theSameRefusalForAFileLinkAndANamedProject(
+  call: ToolCall,
+  where: { sandbox: string; project: string; fileLink: boolean },
+): Promise<void> {
+  const { sandbox, project, fileLink } = where;
+  if (fileLink) {
+    const said = await call('scene_create', {
+      op: 'save',
+      projectPath: project,
+      scenePath: 'res://linked.tscn',
+    });
+    assert.ok(said.includes('through the link res://linked.tscn'), said);
+  }
+  const roots = [join(sandbox, 'alias')];
+  if (process.platform === 'win32') {
+    roots.push(project.toUpperCase());
+  }
+  for (const root of roots) {
+    const said = await call('scene_create', {
+      op: 'create',
+      projectPath: root,
+      scenePath: 'res://shared/s.tscn',
+    });
+    assert.ok(said.includes('through the link res://shared/'), `${root}: ${said}`);
+  }
+}
+
+/**
+ * Calls that name a file behind a link out only to read it, or a link back into the project, reach
+ * the engine, which the stand-in engine's own refusal shows.
+ */
+async function theGatePassesWhatIsOnlyRead(call: ToolCall, project: string): Promise<void> {
+  const add = { op: 'add', nodeName: 'N', nodeType: 'Node3D' };
+  const passed: [string, Record<string, unknown>][] = [
+    ['scene_create', { op: 'save_as', scenePath: 'res://shared/s.tscn', newPath: 'res://copy.tscn' }],
+    ['scene_node', { ...add, scenePath: 'res://a.tscn', instancePath: 'res://shared/s.tscn' }],
+    ['scene_node', { ...add, scenePath: 'res://link/in.tscn' }],
+    ['scene_node', { ...add, scenePath: 'res://shared/back/in.tscn' }],
+    ['scene_node', { op: 'get', scenePath: 'res://shared/s.tscn', nodePath: '.' }],
+  ];
+  for (const [name, args] of passed) {
+    const said = await call(name, { projectPath: project, ...args });
+    assert.match(said, /run_editor_tool failed/, `${name} ${JSON.stringify(args)}: ${said}`);
+    assert.doesNotMatch(said, /through the link|does not take/, said);
+  }
+}
+
+/**
+ * Every op that writes a scene or a resource, and the script and import writes, are refused for a
+ * file behind a link out of the project with no editor serving it, and every file outside is left
+ * as it was. What a write only reads, and a link back into the project, pass.
+ */
+async function testAWriteBehindALinkOutIsRefused(): Promise<void> {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-write-link-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  const scene = '[gd_scene format=3]\n\n[node name="A" type="Node3D"]\n';
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'a.tscn': scene,
+    'real/in.tscn': scene,
+  });
+  writeTree(outside, {
+    's.tscn': scene,
+    'r.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+    'o.gd': 'extends Node\n',
+    'i.png': 'not a picture',
+  });
+  linkTo(outside, join(project, 'shared'));
+  linkTo(join(project, 'real'), join(project, 'link'));
+  linkTo(join(outside, 'later'), join(project, 'later'));
+  linkTo(outside, join(project, 'my shared'));
+  linkTo(join(project, 'real'), join(outside, 'back'));
+  linkTo(project, join(sandbox, 'alias'));
+  const fileLink = linkTo(join(outside, 's.tscn'), join(project, 'linked.tscn'), 'file');
+  const kept = holdingOf(outside);
+  try {
+    await withStdioServer(
+      async (call) => {
+        const refused = async (name: string, args: Record<string, unknown>, link: string): Promise<void> => {
+          const said = await call(name, { projectPath: project, ...args });
+          assert.ok(said.includes(`through the link ${link}`), `${name} ${JSON.stringify(args)}: ${said}`);
+          assert.doesNotMatch(said, /does not take/, said);
+        };
+        for (const [tool, given] of writingCallsBehindTheLink('res://shared/s.tscn', 'res://shared/r.tres')) {
+          await refused(tool, given, 'res://shared/');
+        }
+        await refused('scene_create', { op: 'create', scenePath: 'res://shared/new.tscn' }, 'res://shared/');
+        await refused('scene_create', { op: 'create', scenePath: 'res://later/new.tscn' }, 'res://later/');
+        await refused('scene_create', { op: 'save', scenePath: 'res://shared/s.tscn' }, 'res://shared/');
+        await refused(
+          'script_edit',
+          { op: 'modify', scriptPath: 'res://shared/o.gd', modifications: [] },
+          'res://shared/',
+        );
+        await refused('script_edit', { op: 'create', scriptPath: 'res://shared/new.gd' }, 'res://shared/');
+        await refused(
+          'project_import',
+          { op: 'set_options', resourcePath: 'res://shared/i.png', options: { mipmaps: true } },
+          'res://shared/',
+        );
+        await refused(
+          'scene_node',
+          {
+            op: 'save_branch',
+            scenePath: 'res://a.tscn',
+            nodePath: '.',
+            newScenePath: 'res://shared/b.tscn',
+          },
+          'res://shared/',
+        );
+        await refused(
+          'scene_create',
+          { op: 'save_as', scenePath: 'res://a.tscn', newPath: 'res://shared/copy.tscn' },
+          'res://shared/',
+        );
+        // The same file named another way: relative, through a space, a file link, and a project named
+        // through a link or in another case.
+        await refused(
+          'scene_create',
+          { op: 'create', scenePath: 'shared/../shared/s.tscn' },
+          'res://shared/',
+        );
+        await refused(
+          'scene_create',
+          { op: 'create', scenePath: 'res://my shared/s.tscn' },
+          'res://my shared/',
+        );
+        await theSameRefusalForAFileLinkAndANamedProject(call, { sandbox, project, fileLink });
+        await theGatePassesWhatIsOnlyRead(call, project);
+      },
+      { GODOT_PATH: standInEngine() },
+    );
+    assert.equal(holdingOf(outside), kept, 'nothing outside was written');
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/** An AnimationLibrary kept in a .tres of its own, holding the animation walk. */
+const WALK_LIBRARY =
+  '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_walk"]\n' +
+  'resource_name = "walk"\nlength = 1.0\n\n[resource]\n_data = {\n&"walk": SubResource("Animation_walk")\n}\n';
+
+/** An AnimationNodeStateMachine kept in a .tres of its own. */
+const STATE_MACHINE = '[gd_resource type="AnimationNodeStateMachine" format=3]\n\n[resource]\n';
+
+/** A plain absolute path inside the project is spelt as the folders list it, as one named through an alias is. */
+function testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt(): void {
+  const project = tmpDir();
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'real/r.gd': 'extends Node\n' });
+    if (!existsSync(join(project, 'REAL', 'R.GD'))) {
+      console.log('  skipped: this disk tells names apart by case');
+      return;
+    }
+    const found = resolveWithinProject(project, join(project, 'REAL', 'R.GD'));
+    assert.ok(found.ok, JSON.stringify(found));
+    assert.equal(found.relativePath, 'real/r.gd');
+    const named = resolveWithinProject(project, 'res://REAL/R.GD');
+    assert.ok(
+      named.ok && named.relativePath === 'REAL/R.GD',
+      'a res:// path keeps the spelling it was given',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A plain absolute path is respelt as the folders list it only where the platform names files in
+ * any case. Elsewhere another case is another file, so a folder that is not there keeps the path as given.
+ */
+function testAnAbsolutePathIsRespeltOnlyWhereCaseIsIgnored(): void {
+  const project = tmpDir();
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'Real/r.gd': 'extends Node\n' });
+    const folderIgnoresCase = existsSync(join(project, 'real'));
+    // Present with exactly this case: the same answer on both branches.
+    for (const ignoring of [true, false]) {
+      assert.equal(insideProject(project, join(project, 'Real', 'r.gd'), ignoring), 'Real/r.gd');
+    }
+    assert.equal(
+      insideProject(project, join(project, 'real', 'new.gd'), false),
+      'real/new.gd',
+      'where case matters, a folder of another case is not the one named',
+    );
+    if (folderIgnoresCase) {
+      assert.equal(insideProject(project, join(project, 'real', 'new.gd'), true), 'Real/new.gd');
+    } else {
+      console.log('  skipped the respelling branch: this disk tells names apart by case');
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A scene whose AnimationPlayer Player plays the library kept at [library]. */
+function playerOf(library: string): string {
+  return (
+    `[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="${library}" id="1_lib"]\n\n` +
+    '[node name="A" type="Node3D"]\n\n[node name="Player" type="AnimationPlayer" parent="."]\n' +
+    'libraries = {&"": ExtResource("1_lib")}\n'
+  );
+}
+
+/**
+ * A file the scene keeps beside it is not saved behind a link out, whether it is an animation
+ * library or a navigation mesh, and the scene and the file are left as they were. Behind a link
+ * into the project it is saved.
+ */
+async function testAFileBesideTheSceneBehindALinkOutIsNotWritten(): Promise<void> {
+  const nav =
+    '[gd_scene format=3]\n\n[ext_resource type="NavigationMesh" path="res://shared/mesh.tres" id="1_mesh"]\n\n' +
+    '[node name="Nav" type="Node3D"]\n\n[node name="Region" type="NavigationRegion3D" parent="."]\n' +
+    'navigation_mesh = ExtResource("1_mesh")\n';
+  const mesh = '[gd_resource type="NavigationMesh" format=3]\n\n[resource]\n';
+  await withLinksOut(
+    'file beside the scene behind a link out',
+    {
+      files: {
+        'a.tscn': playerOf('res://shared/anims.tres'),
+        'b.tscn': playerOf('res://link/anims.tres'),
+        'nav.tscn': nav,
+        'sm.tscn':
+          '[gd_scene format=3]\n\n[ext_resource type="AnimationNodeStateMachine" path="res://shared/sm.tres" id="1_sm"]\n\n' +
+          '[node name="A" type="Node3D"]\n\n[node name="Tree" type="AnimationTree" parent="."]\ntree_root = ExtResource("1_sm")\n',
+        'real/anims.tres': WALK_LIBRARY,
+        'c.tscn': playerOf('res://shared/back/anims2.tres'),
+        'd.tscn': playerOf('res://shared/back/again/anims.tres'),
+        'navback.tscn': nav.replace('res://shared/mesh.tres', 'res://shared/back/mesh.tres'),
+        'real/anims2.tres': WALK_LIBRARY,
+        'real/mesh.tres': mesh,
+      },
+      outside: {
+        'anims.tres': WALK_LIBRARY,
+        'mesh.tres': mesh,
+        'sm.tres': STATE_MACHINE,
+        'deeper/anims.tres': WALK_LIBRARY,
+      },
+    },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) &&
+      linkTo(join(real, 'real'), join(real, 'link')) &&
+      linkTo(join(real, 'real'), join(outside, 'back')) &&
+      linkTo(join(outside, 'deeper'), join(real, 'real', 'again')),
+    async (at) => {
+      const trackOn = (scenePath: string): Record<string, unknown> => ({
+        op: 'add_track',
+        scenePath,
+        playerNodePath: 'Player',
+        animationName: 'walk',
+        track: {
+          type: 'property',
+          nodePath: '.',
+          property: 'position',
+          keyframes: [{ time: 0, value: { x: 1, y: 2, z: 3 } }],
+        },
+      });
+      const scene = at.fileOf('a.tscn');
+      const refusedTrack = await at.say('scene_animation', trackOn('res://a.tscn'));
+      assert.ok(
+        refusedTrack.includes(behindTheLink('res://shared/anims.tres', 'res://shared/')),
+        refusedTrack,
+      );
+      assert.equal(readFileSync(join(at.outside, 'anims.tres'), 'utf8'), WALK_LIBRARY);
+      assert.equal(at.fileOf('a.tscn'), scene);
+
+      const walk = { scenePath: 'res://a.tscn', playerNodePath: 'Player', animationName: 'walk' };
+      const library = behindTheLink('res://shared/anims.tres', 'res://shared/');
+      for (const args of [
+        { op: 'create', ...walk, animationName: 'run' },
+        { op: 'set', ...walk, length: 2 },
+        { op: 'rename', ...walk, newName: 'stroll' },
+        { op: 'remove', ...walk },
+        { op: 'remove_track', ...walk, track: { type: 'property', nodePath: '.', property: 'position' } },
+      ]) {
+        const said = await at.say('scene_animation', args);
+        assert.ok(said.includes(library), `${args.op}: ${said}`);
+      }
+      const machine = await at.say('scene_animation', {
+        op: 'add_state',
+        scenePath: 'res://sm.tscn',
+        animTreePath: 'Tree',
+        stateName: 'Walk',
+        animationName: 'walk',
+      });
+      assert.ok(machine.includes(behindTheLink('res://shared/sm.tres', 'res://shared/')), machine);
+      assert.equal(readFileSync(join(at.outside, 'sm.tres'), 'utf8'), STATE_MACHINE);
+      assert.equal(at.fileOf('a.tscn'), scene);
+
+      const navScene = at.fileOf('nav.tscn');
+      const baked = await at.say('scene_node', {
+        op: 'bake_navigation',
+        scenePath: 'res://nav.tscn',
+        nodePath: 'Region',
+      });
+      assert.ok(baked.includes(behindTheLink('res://shared/mesh.tres', 'res://shared/')), baked);
+      assert.equal(readFileSync(join(at.outside, 'mesh.tres'), 'utf8'), mesh);
+      assert.equal(at.fileOf('nav.tscn'), navScene);
+
+      const inside = await at.call('scene_animation', trackOn('res://b.tscn'));
+      assert.equal(get(inside, 'trackIndex'), 0, JSON.stringify(inside));
+      assert.ok(at.fileOf('real/anims.tres').includes('tracks/0/path'), at.fileOf('real/anims.tres'));
+
+      // Out through shared and back in through its link to real is inside, and out again is not.
+      const back = await at.call('scene_animation', trackOn('res://c.tscn'));
+      assert.equal(get(back, 'trackIndex'), 0, JSON.stringify(back));
+      assert.ok(at.fileOf('real/anims2.tres').includes('tracks/0/path'), at.fileOf('real/anims2.tres'));
+      const bakedBack = await at.call('scene_node', {
+        op: 'bake_navigation',
+        scenePath: 'res://navback.tscn',
+        nodePath: 'Region',
+      });
+      assert.equal(get(bakedBack, 'savedTo'), 'res://shared/back/mesh.tres', JSON.stringify(bakedBack));
+      const again = await at.say('scene_animation', trackOn('res://d.tscn'));
+      assert.ok(again.includes('leads out of the project through the link res://'), again);
+      assert.equal(readFileSync(join(at.outside, 'deeper', 'anims.tres'), 'utf8'), WALK_LIBRARY);
+    },
+  );
+}
+
+/**
+ * A breakpoint on a script behind a link out of the project is held without the script being read,
+ * the answer says the line went unchecked and names the link, and the script is spelt as the engine
+ * loads it: through the link, in the disk's case. A link whose target is gone is refused.
+ */
+async function testABreakpointBehindALinkOutIsSetUnchecked(): Promise<void> {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-bp-link-'));
+  const project = join(sandbox, 'project');
+  const outside = join(sandbox, 'outside');
+  const alias = join(sandbox, 'alias');
+  const lines = (count: number): string =>
+    `${Array.from({ length: count }, (_, at) => `var ${'xyz'[at] ?? 'w'} := ${at + 1}`).join('\n')}\n`;
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'a.gd': lines(3),
+    'player.gd': lines(2),
+    'real/r.gd': lines(2),
+  });
+  // A folder named like a script, so that any read of it throws.
+  mkdirSync(join(outside, 'o.gd'), { recursive: true });
+  mkdirSync(join(project, 'dir.gd'));
+  writeTree(outside, { 'f.gd': lines(2) });
+  const junction = (target: string, at: string): void => {
+    symlinkSync(target, at, 'junction');
+  };
+  junction(join(project, 'real'), join(project, 'link'));
+  junction(outside, join(project, 'shared'));
+  junction(outside, join(project, 'my shared'));
+  junction(join(outside, 'later'), join(project, 'later'));
+  junction(join(project, 'ring2'), join(project, 'ring1'));
+  junction(join(project, 'ring1'), join(project, 'ring2'));
+  junction(join(project, 'real'), join(outside, 'back'));
+  junction(project, alias);
+  junction(project, join(project, 'loop'));
+  let fileLinks = true;
+  try {
+    symlinkSync(join(outside, 'f.gd'), join(project, 'linked.gd'), 'file');
+    symlinkSync(join(outside, 'made.gd'), join(project, 'made.gd'), 'file');
+  } catch {
+    fileLinks = false;
+    console.log('  skipped the file links: the platform refuses one');
+  }
+  const ignoresCase = existsSync(join(project, 'A.GD'));
+  const realProject = realpathSync.native(project);
+  const linkOutAnswer = (script: string, link: string, line: number): string =>
+    `Line ${line} of ${script} was not checked, since the script lies behind the link ${link}, which leads out of the project.`;
+  try {
+    // A short name is the long one, read on the system drive, which is where 8.3 names are made.
+    if (process.platform === 'win32' && existsSync('C:\\PROGRA~1')) {
+      assert.equal(listedSpelling('C:\\', 'PROGRA~1/Common Files'), 'Program Files/Common Files');
+      // A path under the project's short name is taken as the folders list it.
+      const shortened = resolveWithinProject('C:\\Program Files', 'C:\\PROGRA~1\\COMMON~1', {
+        forTheEngine: true,
+      });
+      assert.ok(shortened.ok && shortened.relativePath === 'Common Files', JSON.stringify(shortened));
+    } else {
+      console.log('  skipped the short name: no 8.3 names here');
+    }
+    await withStdioServer(
+      async (call) => {
+        const answer = async (
+          scriptPath: string,
+          line: number,
+          op = 'set',
+          projectPath = project,
+        ): Promise<string> => await call('debug_breakpoint', { op, projectPath, scriptPath, line });
+        // A refusal or a crash is text, and says so where it is read as an answer.
+        const parsed = (said: string): unknown => {
+          assert.ok(said.startsWith('{'), said);
+          return JSON.parse(said) as unknown;
+        };
+        const heldIn = (said: string): string[] =>
+          asArray(get(parsed(said), 'held')).map(
+            (one) => `${asString(get(one, 'scriptPath'))}:${asArray(get(one, 'lines')).join(',')}`,
+          );
+        const noted = (): Map<string, number[]> => {
+          assert.ok(existsSync(breakpointNotePath(project)), 'the project keeps a note of what is held');
+          return new Map(
+            asArray(
+              get(JSON.parse(readFileSync(breakpointNotePath(project), 'utf8')) as unknown, 'breakpoints'),
+            ).map((one) => [asString(get(one, 'script')), asArray(get(one, 'lines')).map(Number)]),
+          );
+        };
+
+        // A folder link out: the answer names the link once, and nothing reads the script.
+        const behind = await answer('res://shared/o.gd', 2);
+        assert.equal(get(parsed(behind), 'set'), true, behind);
+        assert.equal(
+          get(parsed(behind), 'lineNotChecked'),
+          linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+        );
+        assert.equal(behind.split('the link res://shared/').length - 1, 1, behind);
+        assert.ok(heldIn(behind).includes('res://shared/o.gd:2'), behind);
+        assert.deepEqual(noted().get('shared/o.gd'), [2]);
+        assert.deepEqual(
+          readBreakpointNote(project).find((one) => one.scriptPath.endsWith('o.gd'))?.scriptPath,
+          join(realProject, 'shared', 'o.gd'),
+          'spelt through the link, not by the file under outside',
+        );
+
+        // In another case, the disk's case is held, noted and said.
+        if (ignoresCase) {
+          const cased = await answer('res://Shared/O.gd', 2);
+          assert.ok(heldIn(cased).includes('res://shared/o.gd:2'), cased);
+          assert.ok(!heldIn(cased).some((one) => one.startsWith('res://Shared')), cased);
+          assert.deepEqual(
+            [...noted().keys()].filter((one) => /^shared/i.test(one)),
+            ['shared/o.gd'],
+          );
+          assert.equal(
+            get(parsed(cased), 'lineNotChecked'),
+            linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+          );
+          const player = await answer('res://Player.gd', 1);
+          assert.ok(heldIn(player).includes('res://player.gd:1'), player);
+          assert.deepEqual(noted().get('player.gd'), [1]);
+        } else {
+          console.log('  skipped the case cases: this file system tells case apart');
+        }
+
+        // A link that stays inside the project is read and spelt through the link.
+        assert.equal(
+          await answer('res://link/r.gd', 9),
+          'res://link/r.gd has 2 lines, so there is no line 9 to stop on.',
+        );
+        const inside = await answer('res://link/r.gd', 1);
+        assert.equal(get(parsed(inside), 'lineNotChecked'), undefined, inside);
+        assert.ok(heldIn(inside).includes('res://link/r.gd:1'), inside);
+        assert.deepEqual(noted().get('link/r.gd'), [1]);
+
+        assert.equal(
+          await answer('res://a.gd', 4),
+          'res://a.gd has 3 lines, so there is no line 4 to stop on.',
+        );
+
+        // A link whose target is gone is refused, and nothing is held for it.
+        const dangling = await answer('res://later/x.gd', 1);
+        assert.ok(dangling.includes('through the link res://later/'), dangling);
+        const listed = await call('debug_breakpoint', { op: 'list', projectPath: project });
+        assert.ok(!heldIn(listed).some((one) => one.startsWith('res://later/')), listed);
+
+        // A script missing behind a live link is a missing script.
+        const typo = await answer('res://shared/typo.gd', 1);
+        assert.ok(typo.includes('Script file does not exist: res://shared/typo.gd'), typo);
+        assert.ok(!typo.includes('leads out of the project'), typo);
+
+        // A step that is a file lists nothing, and neither does a ring of links.
+        for (const folder of ['a.gd', 'ring1']) {
+          const removed = parsed(await answer(`res://${folder}/x.gd`, 1, 'remove'));
+          assert.equal(get(removed, 'removed'), false);
+          assert.ok(
+            asString(get(removed, 'why')).includes(
+              `No breakpoint was held on line 1 of res://${folder}/x.gd`,
+            ),
+          );
+          const missing = await answer(`res://${folder}/x.gd`, 1);
+          assert.ok(missing.includes(`Script file does not exist: res://${folder}/x.gd`), missing);
+        }
+
+        // Out and back in through a second link is read, so its line is checked.
+        assert.equal(
+          await answer('res://shared/back/r.gd', 9),
+          'res://shared/back/r.gd has 2 lines, so there is no line 9 to stop on.',
+        );
+
+        // A link with a space in its name.
+        const spaced = await answer('res://my shared/o.gd', 1);
+        assert.equal(
+          get(parsed(spaced), 'lineNotChecked'),
+          linkOutAnswer('res://my shared/o.gd', 'res://my shared/', 1),
+        );
+        assert.ok(heldIn(spaced).includes('res://my shared/o.gd:1'), spaced);
+
+        // A link to a file out of the project, and one whose target is gone.
+        if (fileLinks) {
+          const file = await answer('res://linked.gd', 2);
+          assert.equal(
+            get(parsed(file), 'lineNotChecked'),
+            linkOutAnswer('res://linked.gd', 'res://linked.gd', 2),
+          );
+          assert.ok(heldIn(file).includes('res://linked.gd:2'), file);
+          const gone = await answer('res://made.gd', 1);
+          assert.ok(gone.includes('through the link res://made.gd'), gone);
+          assert.ok(
+            !heldIn(await call('debug_breakpoint', { op: 'list', projectPath: project })).some((one) =>
+              one.startsWith('res://made.gd'),
+            ),
+          );
+        }
+
+        // The project opened through a junction, and on Windows in upper case, answers as under its path.
+        const named = [alias];
+        if (process.platform === 'win32') {
+          named.push(project.toUpperCase());
+        }
+        const before = heldIn(await call('debug_breakpoint', { op: 'list', projectPath: project }));
+        const noteBefore = readFileSync(breakpointNotePath(project), 'utf8');
+        for (const root of named) {
+          const through = await answer('res://shared/o.gd', 2, 'set', root);
+          assert.deepEqual(heldIn(through), before, root);
+          assert.equal(
+            get(parsed(through), 'lineNotChecked'),
+            linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+            root,
+          );
+          assert.equal(readFileSync(breakpointNotePath(project), 'utf8'), noteBefore, root);
+        }
+        // An absolute path spelt through the project's other name answers as the res:// spelling does.
+        for (const [projectPath, script] of [
+          [alias, join(project, 'shared', 'o.gd')],
+          [project, join(alias, 'shared', 'o.gd')],
+        ] as const) {
+          const mixed = await answer(script, 2, 'set', projectPath);
+          assert.equal(
+            get(parsed(mixed), 'lineNotChecked'),
+            linkOutAnswer('res://shared/o.gd', 'res://shared/', 2),
+            `${projectPath} ${script}`,
+          );
+        }
+        const backIn = await answer(join(alias, 'link', 'r.gd'), 1, 'set', project);
+        assert.ok(heldIn(backIn).includes('res://link/r.gd:1'), backIn);
+        assert.ok(!heldIn(backIn).includes('res://real/r.gd:1'), backIn);
+
+        // A link back to the project root is a step like any other, whichever name the project has.
+        for (const through of [project, alias]) {
+          const looped = await answer(join(through, 'loop', 'real', 'r.gd'), 1, 'set', project);
+          assert.ok(heldIn(looped).includes('res://loop/real/r.gd:1'), `${through}: ${looped}`);
+          assert.ok(!heldIn(looped).includes('res://real/r.gd:1'), `${through}: ${looped}`);
+        }
+        // Through the other name, the tail is in the case the folders list.
+        if (ignoresCase) {
+          const cased = resolveWithinProject(project, join(alias, 'REAL', 'R.GD'), { forTheEngine: true });
+          assert.ok(cased.ok && cased.relativePath === 'real/r.gd', JSON.stringify(cased));
+        }
+
+        // A folder named like a script is no script.
+        assert.equal(await answer('res://dir.gd', 1), 'res://dir.gd is a folder, not a script.');
+        assert.ok(existsSync(join(project, 'a.gd')), 'the project is intact');
+      },
+      { GODOT_PATH: standInEngine() },
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/** With no editor, the headless engine reads a scene and a resource behind a link out, by the path as written. */
+async function aFileBehindALinkIsReadByTheEngine(project: string, outside: string): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('  skipped the engine reads behind a link: Godot not found');
+    return;
+  }
+  writeTree(outside, {
+    's.tscn':
+      '[gd_scene load_steps=6 format=3]\n\n' +
+      '[sub_resource type="Animation" id="Animation_walk"]\n\n' +
+      '[sub_resource type="AnimationLibrary" id="AnimationLibrary_a"]\n' +
+      '_data = {\n&"walk": SubResource("Animation_walk")\n}\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_walk"]\nanimation = &"walk"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="AnimationNodeStateMachine_a"]\n' +
+      'states/walk/node = SubResource("AnimationNodeAnimation_walk")\n\n' +
+      '[node name="S" type="Node2D"]\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries/ = SubResource("AnimationLibrary_a")\n\n' +
+      '[node name="Tree" type="AnimationTree" parent="."]\n' +
+      'tree_root = SubResource("AnimationNodeStateMachine_a")\nanim_player = NodePath("../Player")\n',
+    'r.tres': '[gd_resource type="Gradient" format=3]\n\n[resource]\n',
+  });
+  writeTree(project, { 'real/Level.tscn': '[gd_scene format=3]\n\n[node name="L" type="Node2D"]\n' });
+  const imported = await runImport(godotPath, project);
+  assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-rt-')),
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  try {
+    await server.initialize('linked-read');
+    const refused = 'must name a file inside the project';
+    const tree = parseTextContent(await call('scene_tree', { scenePath: 'res://shared/s.tscn' }));
+    assert.equal(get(tree, 'tree', 'name'), 'S', JSON.stringify(tree));
+    if (process.platform === 'win32') {
+      // The disk keeps its own case, and the engine warns of a path opened in another one.
+      const cased = parseTextContent(await call('scene_tree', { scenePath: 'res://REAL/level.tscn' }));
+      assert.equal(get(cased, 'tree', 'name'), 'L', JSON.stringify(cased));
+      assert.equal(get(cased, 'engine_messages'), undefined, JSON.stringify(cased));
+    }
+    const resource = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://shared/r.tres' }),
+    );
+    assert.equal(get(resource, 'resourceType'), 'Gradient', JSON.stringify(resource));
+    const animations = parseTextContent(
+      await call('scene_animation', {
+        op: 'read',
+        scenePath: 'res://shared/s.tscn',
+        playerNodePath: 'Player',
+      }),
+    );
+    assert.deepEqual(
+      asArray(get(animations, 'animations')).map((entry) => get(entry, 'animationName')),
+      ['walk'],
+      JSON.stringify(animations),
+    );
+    const states = parseTextContent(
+      await call('scene_animation', {
+        op: 'read_states',
+        scenePath: 'res://shared/s.tscn',
+        animTreePath: 'Tree',
+      }),
+    );
+    assert.ok(
+      asArray(get(states, 'states')).some((state) => get(state, 'stateName') === 'walk'),
+      JSON.stringify(states),
+    );
+    for (const answer of [tree, resource, animations, states]) {
+      assert.ok(!JSON.stringify(answer).includes(refused), JSON.stringify(answer));
+    }
+  } finally {
+    await server.stop();
   }
 }
 
@@ -95123,6 +98485,190 @@ const KIT_HEAD = 'class_name Kit\nconst SELF := preload("res://kit/sub/s.gd")\n'
 function filesReported(report: Record<string, unknown>): string[] {
   const lines = renameReadings(report).changed;
   return [...new Set(lines.map((line) => line.slice(0, line.lastIndexOf(':'))))].toSorted();
+}
+
+/**
+ * A script moved by a rename or a move takes along every path that names it, whichever path the
+ * caller named it by: its real place, and each link to it. Named through one link, the move left
+ * the scene and the preload naming another path pointing at nothing.
+ */
+async function testAMoveFollowsEveryPathItsFileIsReachedBy(): Promise<void> {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  const scene = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Script" path="${path}" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n`;
+  writeTree(project, {
+    'project.godot': '',
+    'real/r.gd': 'class_name Runner\nextends Node\n',
+    'main.tscn': scene('res://real/r.gd'),
+    'user.gd': 'extends Node\nconst R = preload("res://real/r.gd")\nvar r: Runner\n',
+    'link_user.gd': 'extends Node\nconst R = preload("res://link/r.gd")\n',
+    'kit/.gdignore': '',
+    'kit/sub/s.gd': 'class_name Kit\nextends Node\n',
+    'kit.tscn': scene('res://via1/s.gd'),
+    'kit_user.gd': 'extends Node\nconst K = preload("res://via1/s.gd")\nvar k: Kit\n',
+  });
+  try {
+    const made = [
+      linkTo(join(project, 'real'), join(project, 'link')),
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via1')),
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via2')),
+    ];
+    assert.ok(!made.includes(false), 'the platform makes a link to a folder');
+    const renamedTo = async (script: string, symbol: string, to: string, path: string): Promise<string[]> => {
+      const outcome = await renameSymbol(
+        { projectPath: project, scriptPath: script, symbol, newName: to, newScriptPath: join(project, path) },
+        { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+      );
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      return filesReported(outcome.report);
+    };
+    assert.deepEqual(
+      await renamedTo(join(project, 'link', 'r.gd'), 'Runner', 'Racer', 'racer.gd'),
+      ['res://link/r.gd', 'res://link_user.gd', 'res://main.tscn', 'res://user.gd'],
+      'named through the link, the paths naming its real place follow it',
+    );
+    const real = planFileMove(project, join(project, 'link', 'r.gd'), join(project, 'moved.gd'));
+    assert.ok(real.ok, JSON.stringify(real));
+    assert.deepEqual(
+      filesReported(real.report),
+      ['res://link_user.gd', 'res://main.tscn', 'res://user.gd'],
+      'a move named through the link takes the path through it as well as the real one',
+    );
+    assert.deepEqual(
+      await renamedTo(join(project, 'via2', 's.gd'), 'Kit', 'Gear', 'gear.gd'),
+      ['res://kit.tscn', 'res://kit_user.gd', 'res://via2/s.gd'],
+      'named through one link, the paths through the other follow it',
+    );
+    const moved = planFileMove(project, join(project, 'via2', 's.gd'), join(project, 'gear.gd'));
+    assert.ok(moved.ok, JSON.stringify(moved));
+    assert.deepEqual(
+      filesReported(moved.report),
+      ['res://kit.tscn', 'res://kit_user.gd'],
+      'a move named through one link takes the paths through the other',
+    );
+    assert.deepEqual(
+      moved.moved.map((file) => file.from),
+      ['res://kit/sub/s.gd'],
+      'and moves the file once',
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A binary file moved by a file or a folder move takes every path that names it along, the link
+ * spelling too, though the scan reads no text of it. Its `.import` sidecar moves once.
+ */
+function testAMovedBinaryIsNamedByEveryPathItIsReachedBy(): void {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  const scene = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Texture2D" path="${path}" id="1"]\n\n[node name="Main" type="Sprite2D"]\ntexture = ExtResource("1")\n`;
+  writeTree(project, {
+    'project.godot': '',
+    'real/icon.png': 'not really a png',
+    'real/icon.png.import': '[deps]\nsource_file="res://real/icon.png"\n',
+    'main.tscn': scene('res://link/icon.png'),
+    'other.tscn': scene('res://real/icon.png'),
+  });
+  try {
+    assert.ok(linkTo(join(project, 'real'), join(project, 'link')), 'the platform makes a link to a folder');
+    const mentioning = (outcome: ReturnType<typeof planFileMove>, path: string): string => {
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const rewrite = outcome.inPlace.find((one) => one.path === path);
+      assert.ok(rewrite !== undefined, `${path} is rewritten`);
+      return rewrite.after;
+    };
+    for (const through of ['link', 'real']) {
+      const outcome = planFileMove(project, join(project, through, 'icon.png'), join(project, 'moved.png'));
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      assert.match(mentioning(outcome, 'res://main.tscn'), /path="res:\/\/moved\.png"/, `through ${through}`);
+      assert.match(
+        mentioning(outcome, 'res://other.tscn'),
+        /path="res:\/\/moved\.png"/,
+        `through ${through}`,
+      );
+      assert.deepEqual(
+        outcome.moved.map((file) => file.from).toSorted(),
+        ['res://real/icon.png', 'res://real/icon.png.import'],
+        'the file and its sidecar move once each',
+      );
+    }
+    const folder = planFileMove(project, join(project, 'link'), join(project, 'gone'));
+    assert.match(mentioning(folder, 'res://main.tscn'), /path="res:\/\/gone\/icon\.png"/);
+    assert.match(mentioning(folder, 'res://other.tscn'), /path="res:\/\/gone\/icon\.png"/);
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A link inside a moved folder goes with it in the one rename, and the paths through it follow. What
+ * it leads to does not move.
+ */
+function testALinkInsideAMovedFolderMovesWithIt(): void {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  const scene = (paths: string[]): string =>
+    `[gd_scene format=3]\n\n${paths.map((path, index) => `[ext_resource type="Script" path="${path}" id="${String(index + 1)}"]\n`).join('')}\n[node name="Main" type="Node"]\n`;
+  writeTree(project, {
+    'project.godot': '',
+    'pack/p.gd': 'extends Node\n',
+    'shared/a.gd': 'extends Node\n',
+    'main.tscn': scene(['res://pack/lnk/a.gd', 'res://shared/a.gd', 'res://pack/p.gd']),
+  });
+  try {
+    assert.ok(linkTo(join(project, 'shared'), join(project, 'pack', 'lnk')), 'the platform makes a link');
+    const outcome = planFileMove(project, join(project, 'pack'), join(project, 'newpack'));
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(
+      outcome.moved.map((file) => `${file.from} -> ${file.to}`),
+      ['res://pack/p.gd -> res://newpack/p.gd'],
+      'the files behind the link do not move, and nothing garbled is listed',
+    );
+    const scened = outcome.inPlace.find((one) => one.path === 'res://main.tscn')?.after ?? '';
+    assert.match(
+      scened,
+      /path="res:\/\/newpack\/lnk\/a\.gd"/,
+      'the path through the link follows the folder',
+    );
+    assert.match(scened, /path="res:\/\/shared\/a\.gd"/, 'the path to the real place stays');
+    assert.match(scened, /path="res:\/\/newpack\/p\.gd"/);
+    assert.deepEqual(outcome.report['leftAlone'] ?? [], [], 'nothing is left naming the old folder');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A script only links reach resolves its relative paths against the path the engine loads it by.
+ * Moved, `preload("h.gd")` names a path the walk reaches, not one under the `.gdignore`.
+ */
+function testAMovedScriptKeepsItsRelativePathsOnAWalkedRoute(): void {
+  const root = tmpDir();
+  const project = join(root, 'project');
+  writeTree(project, {
+    'project.godot': '',
+    'kit/.gdignore': '',
+    'kit/sub/s.gd': 'extends Node\nconst H = preload("h.gd")\n',
+    'kit/sub/h.gd': 'extends Node\n',
+  });
+  try {
+    const made = [
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via1')),
+      linkTo(join(project, 'kit', 'sub'), join(project, 'via2')),
+    ];
+    assert.ok(!made.includes(false), 'the platform makes a link to a folder');
+    const outcome = planFileMove(project, join(project, 'via2', 's.gd'), join(project, 'gear.gd'));
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const after = outcome.moved.find((file) => file.from === 'res://kit/sub/s.gd')?.text?.after ?? '';
+    assert.match(after, /preload\("via[12]\/h\.gd"\)/, after);
+    assert.ok(!after.includes('kit/'), `no path under the .gdignore: ${after}`);
+  } finally {
+    sweep(root);
+  }
 }
 
 /** A project where `real` is reached by the link `link`, and `kit/sub` by `via1` and `via2` below a `.gdignore`. */
@@ -95305,11 +98851,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenameOfAScriptInANestedProjectIsRefused,
   testAMoveIntoAFolderHoldingAProjectIsRefused,
   testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
+  testANamedPathBehindALinkOutIsRefused,
+  testAWriteBehindALinkOutIsRefused,
+  testAFileBesideTheSceneBehindALinkOutIsNotWritten,
+  testABreakpointBehindALinkOutIsSetUnchecked,
   testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,
   testTheTextsStepOverAFolderHoldingAProject,
   testAFileTwoPathsReachIsRenamedOnce,
+  testAMoveFollowsEveryPathItsFileIsReachedBy,
+  testAMovedBinaryIsNamedByEveryPathItIsReachedBy,
+  testALinkInsideAMovedFolderMovesWithIt,
+  testAMovedScriptKeepsItsRelativePathsOnAWalkedRoute,
   testOneWalkStepsOverWhatTheEngineDoes,
   testASearchCutAtItsLimitFollowsTheScanOrder,
   testAWalkFollowsLinksAndMarksTheOnesThatLeave,
@@ -95399,6 +98953,32 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
+  testASceneNamingItByARelativePathIsFollowed,
+  testASceneBehindALinkOutIsNotFollowed,
+  testEachCommandThatFollowsANodeNamesALinkOut,
+  testASecondLinkToTheSameFolderOutIsNamedToo,
+  testAFileLinkOutIsNotFollowed,
+  testASceneReachedByALinkInsideTheProjectIsFollowed,
+  testALinkOutInsideAWalkedFolderIsNamed,
+  testRelativePathsBehindALinkOutAreLeft,
+  testADanglingLinkOutLeavesTheFollowerWorking,
+  testALinkOutThatHoldsNoSceneIsNotNamed,
+  testALinkOutInAnotherCaseLeavesTheFolderInside,
+  testARingOfJunctionsDoesNotHangTheFollower,
+  testAProjectReachedThroughAJunctionNamesItsLinkOut,
+  testAnAnimationBehindALinkOutIsNotSaved,
+  testABranchSavedOutLeavesAnAnimationBehindALinkOut,
+  testAnAnimationReachedByALinkInsideIsSaved,
+  testAnAnimationReachedByALinkBackInIsSaved,
+  testTheAddonJudgesALinkChainByWhereItEnds,
+  testTheAddonJudgesALinkChainWhereTheProjectIsSpeltAnotherWay,
+  testTheAddonJudgesALinkChainWhereTheProjectIsOpenedThroughALink,
+  testALinkToAMissingTargetIsAChainThatCannotBeFollowed,
+  testAnAbsolutePathInsideTheProjectIsSpeltAsTheDiskSpellsIt,
+  testAnAbsolutePathIsRespeltOnlyWhereCaseIsIgnored,
+  testALinkChainTooLongToFollowIsNotSaidToLeadOut,
+  testASceneReachedByTwoPathsThroughALinkBackInIsFollowedOnce,
+  testOneAnimationUnderTwoSpellingsIsSavedAndTheLinkOutKeepsItsSentence,
   testAMoveIsFollowedThroughAnInheritedInstance,
   testAMovedNodeKeepsThePathsNamingIt,
   testADeleteDropsWhatOtherScenesKeptBelowIt,
@@ -96094,6 +99674,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsReadForWhatItHolds,
   testAnEngineIsSizedByWhatItWasSeenToHold,
   testARunOutOfMemoryNamesEveryEngine,
+  testARunAddsALaneAsItsLanesRise,
+  testAPacedRunsCompileCheckIsOneOfItsLanes,
+  testAGatesRunFollowsItsLanesFile,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
 ];
 
