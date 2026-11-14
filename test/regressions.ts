@@ -63580,6 +63580,12 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       [began],
       'read in whole milliseconds, as a take reads its own clock',
     );
+    utimesSync(ahead, (began + 0.4) / 1000, (began + 0.4) / 1000);
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => one.seen),
+      [began],
+      'and so is when its taker last looked, which the file time gives with a fraction',
+    );
     const tied = new SlotLine('other', false, () => began);
     const waiter = {
       mark: '1-1.json',

@@ -378,7 +378,9 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
   }
   return {
     wants: typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? wants : 1,
-    seen,
+    // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a waiter
+    // let a slot stand its whole yield still read as inside it, and kept the slot standing.
+    seen: Math.floor(seen),
     mark,
     taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
