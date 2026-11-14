@@ -813,6 +813,8 @@ export class FollowedLanes {
       if (said > above) {
         if (said >= this.ceiling) {
           this.end();
+          // A run at its ceiling goes on reading the number for a fall, without the mark.
+          this.rises = false;
         }
         return said;
       }
@@ -899,15 +901,11 @@ export class FollowedLanes {
     this.holding = took;
   }
 
-  /**
-   * Gives the mark back while it names this process, and stops watching. It holds none again, so a
-   * run that has reached its ceiling goes on reading the number for a fall without it.
-   */
+  /** Gives the mark back while it names this process, and stops watching. */
   end(): void {
     this.changes?.close();
     this.changes = null;
     this.holding = false;
-    this.rises = false;
     giveBackSlot(this.mark, this.slots.holder.pid);
   }
 }
