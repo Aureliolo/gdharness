@@ -185,38 +185,30 @@ export class ClassGraph {
   }
 
   /**
-   * Whether a use of [param name] on self, written in [param at], can run [param target]'s own
-   * function of that name. It can where [param at] is [param target] or a class it inherits from,
-   * whose object may be a [param target]. It can below [param target] only where no class on the
-   * way down declares the function again. Null where a chain passes through a path no script here
-   * is at, so the answer cannot be known.
+   * The class whose own [param name] a use resolved from [param id] reaches: [param id] or the
+   * nearest class above it declaring the name as [param kind]. Undefined where none does, and null
+   * where the chain breaks before one does.
    */
-  selfUseReaches(at: ClassId, target: ClassId, name: string): boolean | null {
-    if (at === target || this.ancestors(target).includes(at)) {
-      return true;
-    }
-    const above = this.ancestors(at);
-    const until = above.indexOf(target);
-    if (until !== -1) {
-      return ![at, ...above.slice(0, until)].some((one) => this.declaresFunction(one, name));
-    }
-    return this.nativeBase(at) === null || this.nativeBase(target) === null ? null : false;
-  }
-
-  /**
-   * Whether `super.name` written in [param at] runs [param target]'s own function: the nearest
-   * class above [param at] declaring it is [param target]. Null where the chain breaks first.
-   */
-  superUseReaches(at: ClassId, target: ClassId, name: string): boolean | null {
-    const found = this.ancestors(at).find((one) => this.declaresFunction(one, name));
+  resolvedFrom(id: ClassId, name: string, kind: DeclarationKind): ClassId | null | undefined {
+    const found = [id, ...this.ancestors(id)].find((one) => this.declaration(one, name)?.kind === kind);
     if (found !== undefined) {
-      return found === target;
+      return found;
     }
-    return this.nativeBase(at) === null ? null : false;
+    return this.nativeBase(id) === null ? null : undefined;
   }
 
-  private declaresFunction(id: ClassId, name: string): boolean {
-    return this.declaration(id, name)?.kind === 'func';
+  /** The project class [param id] extends, or null where it extends a native class or a missing script. */
+  parentOf(id: ClassId): ClassId | null {
+    return this.nodes.get(id)?.parent ?? null;
+  }
+
+  /** Whether [param id] declares a static function named [param name]. */
+  declaresStatic(id: ClassId, name: string): boolean {
+    return (
+      this.nodes
+        .get(id)
+        ?.body.declarations.some((one) => one.name === name && one.kind === 'func' && one.isStatic) === true
+    );
   }
 
   /** The native class at the bottom of [param id]'s chain, or null where the chain is broken. */

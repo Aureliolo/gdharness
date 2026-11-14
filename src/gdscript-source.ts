@@ -1130,9 +1130,7 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * A bare name that is something else at that place is not the function: a parameter or local of
  * that name, or a variable, constant, signal or enum the class itself declares by it. Read as the
  * function, `made.bare_lift = lift` in a helper taking `lift: int` was listed as `lift` handed on
- * as a Callable. A member call whose receiver is one of [param otherClasses], or a local or a
- * variable of the class declared as one, is another class's method and is left out for a caller
- * asking about one class: `made.lift(by)` with `var made: Outcome` above it is Outcome's.
+ * as a Callable.
  *
  * With [param property] the name is a variable's, whose get and set blocks run wherever it is read or
  * assigned, so the class's own variable of that name is what is being looked for rather than
@@ -1140,16 +1138,15 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * name is the value stored, which the engine reads and writes without running them again, so
  * `sinks = value` in the set block of `sinks` is not a place that sets it.
  *
- * A bare use, or one through `self` or `super`, runs whichever function of that name the class
- * holding it dispatches to. It is kept only where [param reaches] says that can be the function
- * asked about: a bare `_settle()` in a script of an unrelated class calls that script's own.
+ * A use runs whichever function of that name the engine dispatches it to, and [param dispatch]
+ * says whether that can be the one asked about: a bare `_settle()` in a script of an unrelated
+ * class calls that script's own, and `made.lift(by)` with `var made: Outcome` above it is Outcome's.
  */
 export function callSitesOf(
   source: string,
   name: string,
-  otherClasses: ReadonlySet<string> = new Set(),
   property = false,
-  reaches: (offset: number, throughSuper: boolean) => boolean = () => true,
+  dispatch: CallDispatch = EVERY_USE,
 ): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
@@ -1160,13 +1157,12 @@ export function callSitesOf(
     source,
     name,
     property,
-    otherClasses,
     code,
     codeLines,
     lines,
     shape,
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
-    reaches,
+    dispatch,
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1174,20 +1170,32 @@ export function callSitesOf(
     .map((one) => callSiteAt(scan, one));
 }
 
+/** Whether the uses of a name can reach the function asked about, by how each is written. */
+export interface CallDispatch {
+  /** A use at [param offset] written bare, through `self` or through `super`. */
+  onSelf(offset: number, how: 'bare' | 'self' | 'super'): boolean;
+  /**
+   * A use through class [param name], or on a variable declared as it when [param onVariable].
+   * Null where [param name] is no class the project declares.
+   */
+  throughClass(name: string, onVariable: boolean): boolean | null;
+}
+
+/** Every use reaches the function, as when no class was asked about. */
+export const EVERY_USE: CallDispatch = { onSelf: () => true, throughClass: () => null };
+
 /** What one `callSitesOf` call reads from, worked out once. */
 interface CallScan {
   readonly source: string;
   readonly name: string;
   readonly property: boolean;
-  readonly otherClasses: ReadonlySet<string>;
   readonly code: string;
   readonly codeLines: readonly string[];
   readonly lines: Lines;
   readonly shape: ScriptShape;
   /** The zero-based line ranges of the property's own get and set blocks. */
   readonly accessors: readonly (readonly [number, number])[];
-  /** Whether a use at an offset, on self or through `super`, can run the function asked about. */
-  readonly reaches: (offset: number, throughSuper: boolean) => boolean;
+  readonly dispatch: CallDispatch;
 }
 
 /** The class a variable of the class body holding [param at] is declared as, read off its own line. */
@@ -1231,21 +1239,22 @@ function accessorsIn(
   ];
 }
 
-/** Whether a member call is this class's: not another class's method of the same name. */
+/** Whether a member call can reach the function asked about, by the class its receiver names. */
 function isOwnMemberCall(scan: CallScan, offset: number, index: number): boolean {
   const receiver = receiverBefore(scan.code, offset);
-  if (receiver === null || scan.otherClasses.size === 0) {
+  if (receiver === null) {
     return true;
   }
-  if (scan.otherClasses.has(receiver.name)) {
-    return false;
+  const throughClass = scan.dispatch.throughClass(receiver.name, false);
+  if (throughClass !== null) {
+    return throughClass;
   }
   if (receiver.dotted) {
     return true;
   }
   const typed =
     localAt(scan.codeLines, index, receiver.name)?.type ?? memberClass(scan, receiver.name, offset);
-  return typed === null || !scan.otherClasses.has(typed);
+  return typed === null || scan.dispatch.throughClass(typed, true) !== false;
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
@@ -1267,11 +1276,11 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
     return false;
   }
   if (!one.afterDot) {
-    return isBareFunctionUse(scan, one.offset, index) && scan.reaches(one.offset, false);
+    return isBareFunctionUse(scan, one.offset, index) && scan.dispatch.onSelf(one.offset, 'bare');
   }
   const receiver = receiverBefore(scan.code, one.offset);
   if (receiver !== null && !receiver.dotted && (receiver.name === 'self' || receiver.name === 'super')) {
-    return scan.reaches(one.offset, receiver.name === 'super');
+    return scan.dispatch.onSelf(one.offset, receiver.name);
   }
   return isOwnMemberCall(scan, one.offset, index);
 }

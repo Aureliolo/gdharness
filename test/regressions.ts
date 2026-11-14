@@ -2914,7 +2914,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   assert.deepEqual(
-    callSitesOf(assigned, 'level', new Set(), true).map((one) => [one.line, one.access]),
+    callSitesOf(assigned, 'level', true).map((one) => [one.line, one.access]),
     [
       [4, 'write'],
       ...Array.from({ length: 12 }, (_, index) => [index + 9, 'write']),
@@ -3297,6 +3297,24 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   const drift = ['extends "res://gone/wreck.gd"', '', '', 'func go() -> void:', '\t_moor(13)', ''].join('\n');
+  const skiff = [
+    'class_name Skiff',
+    'extends "res://gone/hull.gd"',
+    '',
+    '',
+    'func row() -> void:',
+    '\tsuper._moor(14)',
+    '',
+  ].join('\n');
+  const raft = [
+    'class_name Raft',
+    'extends "res://gone/hull.gd"',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+  ].join('\n');
   const port = [
     ['res://port/harbour.gd', harbour],
     ['res://port/quay.gd', quay],
@@ -3304,6 +3322,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ['res://port/inn.gd', inn],
     ['res://port/berth.gd', berth],
     ['res://port/drift.gd', drift],
+    ['res://port/skiff.gd', skiff],
+    ['res://port/raft.gd', raft],
   ] as const;
   const mooredAt = (name: string): unknown[] =>
     callersOf(totals({}), name, port).sites.map((one) => [one.script, one.line, one.called]);
@@ -3319,8 +3339,21 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://port/quay.gd', 6, true],
       ['res://port/quay.gd', 7, true],
       ['res://port/quay.gd', 8, true],
+      ['res://port/skiff.gd', 6, true],
     ],
-    'Harbour, its subclasses by name, by path and inside Inn either way, Berth super call and the missing chain, but not Inn, Loft or a bare call in Berth, which runs its own',
+    'Harbour, its subclasses by name, by path and inside Inn either way, Berth super call and the missing chains, but not Inn, Loft or a bare call in Berth, which runs its own',
+  );
+  assert.deepEqual(
+    mooredAt('Quay._moor'),
+    mooredAt('Harbour._moor'),
+    'a class that only inherits the function is asked about as the class it inherits it from, its own super call included',
+  );
+  assert.deepEqual(
+    callersOf(totals({}), 'Raft._moor', port)
+      .sites.filter((one) => one.script === 'res://port/inn.gd')
+      .map((one) => one.line),
+    [10, 11, 12, 20, 25, 33],
+    'asked about a class whose chain passes through a missing script, a class may sit above it, so no use on self is left out',
   );
   assert.deepEqual(
     mooredAt('Berth._moor'),
@@ -3330,6 +3363,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://port/harbour.gd', 10, true],
       ['res://port/quay.gd', 6, true],
       ['res://port/quay.gd', 7, true],
+      ['res://port/skiff.gd', 6, true],
     ],
     'asked about the override, the calls above it that may run on a Berth, but no super call, which runs Harbour',
   );
@@ -3338,6 +3372,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [
       ['res://port/drift.gd', 5, true],
       ['res://port/inn.gd', 33, true],
+      ['res://port/skiff.gd', 6, true],
     ],
     'an inner class asked about by name is that class, not the script around it',
   );
@@ -3348,10 +3383,80 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://port/inn.gd', 10, true],
       ['res://port/inn.gd', 11, true],
       ['res://port/inn.gd', 12, false],
+      ['res://port/skiff.gd', 6, true],
     ],
     'asked about Inn, its own bare call, self call and Callable are listed, and no Harbour line',
   );
-  assert.equal(mooredAt('_moor').length, 14, 'and with no class asked about, every use is listed');
+  assert.equal(mooredAt('_moor').length, 15, 'and with no class asked about, every use is listed');
+  // A bare call to a static function is bound to the class it is written in, a call through a class
+  // name to what that class resolves, and a call on a variable declared as a class to that class or
+  // any class below it.
+  const maker = [
+    'class_name Maker',
+    'extends RefCounted',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func build() -> int:',
+    '\treturn make()',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const fancy = [
+    'class_name Fancy',
+    'extends Maker',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 2',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const user = [
+    'extends Node',
+    '',
+    '',
+    'func use(given: Maker) -> void:',
+    '\tPlain.make()',
+    '\tFancy.make()',
+    '\tgiven.tick()',
+    '',
+  ].join('\n');
+  const works = [
+    ['res://works/maker.gd', maker],
+    ['res://works/fancy.gd', fancy],
+    ['res://works/plain.gd', 'class_name Plain\nextends Maker\n'],
+    ['res://works/user.gd', user],
+  ] as const;
+  const madeAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, works).sites.map((one) => [one.script, one.line]);
+  assert.deepEqual(
+    madeAt('Fancy.make'),
+    [['res://works/user.gd', 6]],
+    "Fancy's static function is reached through its name, never by Maker's bare call or through Plain",
+  );
+  assert.deepEqual(
+    madeAt('Maker.make'),
+    [
+      ['res://works/maker.gd', 10],
+      ['res://works/user.gd', 5],
+    ],
+    "Maker's is reached by its own bare call and through Plain, which inherits it",
+  );
+  assert.deepEqual(
+    madeAt('Fancy.tick'),
+    [['res://works/user.gd', 7]],
+    'a call on a variable declared as Maker may run on a Fancy',
+  );
 
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the
   // profiler goes on: it and its caller are the addon's, not the game's, so they are left out of the

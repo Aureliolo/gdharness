@@ -17,17 +17,20 @@ import { emptyRecord } from './dictionary.js';
 import { type DebugObserver, RUNTIME_ADDON } from './game-debugger.js';
 import {
   bodyCallsSuper,
+  type CallDispatch,
   type CallSite,
   type ClassBody,
   callSitesOf,
   codeOf,
+  type DeclarationKind,
+  EVERY_USE,
   enclosingFunction,
   Lines,
   shapeOf,
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
 import { isRecord } from './records.js';
-import { ClassGraph, declaredIn, Script } from './rename.js';
+import { ClassGraph, type ClassId, declaredIn, Script } from './rename.js';
 import { parseProjectGodot } from './resources.js';
 import { RUNTIME_AUTOLOAD } from './setup.js';
 import { writeWhole } from './whole-file.js';
@@ -915,32 +918,123 @@ function withinNumbersOf(
 const CALL_SITES = 40;
 
 /**
- * Whether a use of [param name] on self, or through `super`, at an offset of a script can run
- * [param asked]'s function of that name, as the engine dispatches it. Every place counts when no
- * class was asked about, when no script declares it, or where a chain passes through a script the
- * project does not hold.
+ * Which uses of a name the engine can send to the asked class's own declaration of it, `reached`,
+ * which is the class's own or the nearest one above it. A use counts:
+ * - bare or through `self`, where its class or one below it that does not declare the name again
+ *   resolves to it, or only its own class does for a static function written bare;
+ * - through `super`, where the class above the one it is written in resolves to it;
+ * - through a class name where that class resolves to it, and on a variable declared as a class
+ *   where that class or one below it does.
+ * A use whose chain passes through a script the project does not hold counts, since it may.
  */
-function dispatchesTo(
+class Dispatch {
+  private readonly below = new Map<ClassId, readonly ClassId[]>();
+  private readonly byName = new Map<string, ClassId | null>();
+  private readonly graph: ClassGraph;
+  private readonly target: ClassId;
+  private readonly reached: ClassId;
+  private readonly name: string;
+  private readonly kind: DeclarationKind;
+
+  constructor(graph: ClassGraph, target: ClassId, reached: ClassId, name: string, kind: DeclarationKind) {
+    this.graph = graph;
+    this.target = target;
+    this.reached = reached;
+    this.name = name;
+    this.kind = kind;
+  }
+
+  forScript(script: string): CallDispatch {
+    return {
+      onSelf: (offset, how) => this.onSelf(this.graph.bodyAt(script, offset), how),
+      throughClass: (named, onVariable) => {
+        const id = this.classNamed(script, named);
+        return id === null ? null : this.from(id, !onVariable);
+      },
+    };
+  }
+
+  private onSelf(at: ClassId, how: 'bare' | 'self' | 'super'): boolean {
+    if (how === 'super') {
+      const parent = this.graph.parentOf(at);
+      return parent === null ? this.graph.nativeBase(at) === null : this.from(parent, true);
+    }
+    // A bare call to a static function is bound to the class it is written in.
+    const resolved = this.graph.resolvedFrom(at, this.name, this.kind);
+    const bound =
+      how === 'bare' && typeof resolved === 'string' && this.graph.declaresStatic(resolved, this.name);
+    return this.from(at, bound);
+  }
+
+  /** Whether a use resolved from [param at], or from any class below it unless [param bound], reaches it. */
+  private from(at: ClassId, bound: boolean): boolean {
+    const own = this.graph.resolvedFrom(at, this.name, this.kind);
+    if (own === null) {
+      return true;
+    }
+    if (bound) {
+      return own === this.reached;
+    }
+    let below = this.below.get(at);
+    if (below === undefined) {
+      below = [...this.graph.descendants(at)];
+      this.below.set(at, below);
+    }
+    if (below.some((one) => this.graph.resolvedFrom(one, this.name, this.kind) === this.reached)) {
+      return true;
+    }
+    // Above a script the project does not hold, the asked class may still sit below this one.
+    return this.graph.nativeBase(this.target) === null;
+  }
+
+  /** The class [param named] names in [param script]: its own inner class, a global one, or the one inner class elsewhere. */
+  private classNamed(script: string, named: string): ClassId | null {
+    const key = `${script}\n${named}`;
+    const known = this.byName.get(key);
+    if (known !== undefined) {
+      return known;
+    }
+    const inner = [...this.graph.nodes.values()].filter((one) => one.inner.at(-1) === named);
+    const found =
+      inner.find((one) => one.file === script)?.id ??
+      this.graph.named(named) ??
+      (inner.length === 1 ? (inner[0]?.id ?? null) : null);
+    this.byName.set(key, found);
+    return found;
+  }
+}
+
+/**
+ * How the uses in each script are dispatched for [param asked]'s [param name]. With no class asked
+ * about every use counts. Where the asked class or its declaration of the name cannot be found,
+ * only a use through another class the project declares is left out.
+ */
+function dispatchOf(
   listed: readonly (readonly [string, string])[],
   asked: string | null,
   name: string,
-): (script: string, offset: number, throughSuper: boolean) => boolean {
+  property: boolean,
+): (script: string) => CallDispatch {
   if (asked === null) {
-    return () => true;
+    return () => EVERY_USE;
   }
   const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
   const graph = new ClassGraph(scripts, declaredIn(scripts));
+  const kind: DeclarationKind = property ? 'var' : 'func';
   const target = graph.named(asked);
-  if (target === null) {
-    return () => true;
+  const reached = target === null ? null : graph.resolvedFrom(target, name, kind);
+  if (target === null || reached === null || reached === undefined) {
+    const others = new Set(
+      listed.flatMap(([, source]) => classNamesOf(source)).filter((one) => one !== asked),
+    );
+    const unknown: CallDispatch = {
+      onSelf: () => true,
+      throughClass: (named) => (others.has(named) ? false : null),
+    };
+    return () => unknown;
   }
-  return (script, offset, throughSuper) => {
-    const at = graph.bodyAt(script, offset);
-    const reaches = throughSuper
-      ? graph.superUseReaches(at, target, name)
-      : graph.selfUseReaches(at, target, name);
-    return reaches !== false;
-  };
+  const dispatch = new Dispatch(graph, target, reached, name, kind);
+  return (script) => dispatch.forScript(script);
 }
 
 /**
@@ -951,8 +1045,8 @@ function dispatchesTo(
  * Found by name in the source, because the engine's profiler counts calls and time per function and
  * records nothing about who made them. A place is a caller only if the name there is this function:
  * a method of the same name on another class is found as well, which the answer says. When one class
- * was asked about, a call through another class the project declares is left out, and so is a bare,
- * `self` or `super` one the engine would send to another class's function of that name.
+ * was asked about, a use is left out where the engine would send it to another class's function of
+ * that name, as `Dispatch` decides.
  */
 export function callersOf(
   totals: ProfileTotals,
@@ -985,19 +1079,9 @@ export function callersOf(
       (asked === null || ownerOf(row.function) === asked),
   );
   const property = propertyOf(name) !== null || target.some((row) => row.property === bare);
-  const otherClasses = new Set<string>();
-  if (asked !== null) {
-    for (const [, source] of listed) {
-      for (const declared of classNamesOf(source).filter((one) => one !== asked)) {
-        otherClasses.add(declared);
-      }
-    }
-  }
-  const reaches = dispatchesTo(listed, asked, bare);
+  const dispatch = dispatchOf(listed, asked, bare, property);
   const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, otherClasses, property, (offset, throughSuper) =>
-      reaches(script, offset, throughSuper),
-    ).map((site) => {
+    callSitesOf(source, bare, property, dispatch(script)).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };
