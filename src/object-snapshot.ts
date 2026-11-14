@@ -26,7 +26,7 @@ type ObjectKind = 'RefCounted' | 'Node' | 'Object';
 /** How many objects of one engine class with one script the game held. */
 interface CountedClass {
   readonly engineClass: string;
-  /** The script's path, path::Name for an inner class, or null for an object with none. */
+  /** The script's path, or null for an object with none or with one that has no file. */
   readonly script: string | null;
   readonly kind: ObjectKind;
   readonly count: number;
@@ -35,6 +35,12 @@ interface CountedClass {
 /** A snapshot as the game's keeper reads it, with no project to name its scripts from. */
 export interface SnapshotCounts {
   readonly classes: readonly CountedClass[];
+  /**
+   * How many objects have a script with no file, such as an inner class's. The game names that
+   * script by an id alone, so they are counted under their engine class, as the editor's ObjectDB
+   * Profiler counts them.
+   */
+  readonly unnamed: number;
   /** How many deflated bytes the game sent it in. */
   readonly bytes: number;
   /** The engine's own reading of the memory it had in use, in bytes, when the header has one. */
@@ -68,75 +74,22 @@ function idOf(value: GodotValue | undefined): string | null {
   return typeof first === 'string' ? first : null;
 }
 
-/** Each property of an object's list, as its name and its value. */
-function propertiesOf(properties: GodotValue | undefined): [string, GodotValue | undefined][] {
-  if (!isList(properties)) {
-    return [];
-  }
-  return properties.flatMap((property) =>
-    isList(property) && typeof property[0] === 'string' ? [[property[0], property[5]]] : [],
-  );
-}
-
-/** One object of a snapshot, as far as counting it needs. */
-interface SnapshotObject {
-  readonly engineClass: string;
-  readonly properties: [string, GodotValue | undefined][];
-  readonly kind: ObjectKind;
-}
-
-/** The script an object names: its path, or the id of a script with none, such as an inner class. */
-function scriptValueOf(object: SnapshotObject): string | { readonly id: string } | null {
-  const value = object.properties.find(([name]) => name === 'script')?.[1];
-  if (typeof value === 'string') {
-    return value === '' ? null : value;
-  }
-  const id = idOf(value);
-  return id === null || id === '0' ? null : { id };
-}
-
-const CONSTANT = 'Constants/';
-
-/** Each name an instance's constants give a script with no path: its own script's, then the name. */
-function claimsOf(object: SnapshotObject, named: ReadonlyMap<string, string>): [string, string][] {
-  const script = scriptValueOf(object);
-  const holder = script === null || typeof script === 'string' ? script : named.get(script.id);
-  if (holder === null || holder === undefined) {
-    return [];
-  }
-  return object.properties.flatMap(([name, value]): [string, string][] => {
-    const id = name.startsWith(CONSTANT) ? idOf(value) : null;
-    return id === null ? [] : [[id, `${holder}::${name.slice(CONSTANT.length)}`]];
-  });
-}
-
 /**
- * The name of every script in [param objects] that has no path, by its id. An inner class's script
- * has none, so the collector sends it as an id, and each instance of the script holding it lists
- * it among its constants by name. That gives the class the name GDScript gives it, path::Name.
- * The collector lists a base script's constants unqualified too, so an inner class two scripts
- * claim keeps only its own name, the one GDScript's debugger gives it.
+ * The path of the script a property list names, or null. A script with a file is sent as its path.
+ * One without, such as an inner class's, is sent as an object id, which names nothing on its own.
  */
-function innerScriptNames(objects: readonly SnapshotObject[]): Map<string, string> {
-  let named = new Map<string, string>();
-  // A nested class is named from the class holding it, so each round names one level deeper.
-  for (let level = 0; level <= objects.length; level += 1) {
-    const claims = new Map<string, Set<string>>();
-    for (const [id, name] of objects.flatMap((object) => claimsOf(object, named))) {
-      claims.set(id, (claims.get(id) ?? new Set()).add(name));
+function scriptOf(properties: GodotValue | undefined): { path: string | null; unnamed: boolean } {
+  for (const property of isList(properties) ? properties : []) {
+    if (isList(property) && property[0] === 'script') {
+      const value = property[5];
+      if (typeof value === 'string') {
+        return { path: value === '' ? null : value, unnamed: false };
+      }
+      const id = idOf(value);
+      return { path: null, unnamed: id !== null && id !== '0' };
     }
-    const next = new Map(
-      [...claims].map(([id, names]): [string, string] => {
-        const [first = ''] = names;
-        return [id, names.size === 1 ? first : first.slice(first.lastIndexOf('::') + 2)];
-      }),
-    );
-    if ([...next].every(([id, name]) => named.get(id) === name) && next.size === named.size) {
-      return next;
-    }
-    named = next;
   }
-  return named;
+  return { path: null, unnamed: false };
 }
 
 function kindOf(extra: Entries): ObjectKind {
@@ -152,7 +105,11 @@ export function countSnapshot(compressed: Uint8Array): SnapshotCounts {
   if (!isList(all) || entriesOf(all[0]) === null || (all.length - 1) % 4 !== 0) {
     throw new RangeError('the snapshot is not a header followed by four entries for each object');
   }
-  const objects: SnapshotObject[] = [];
+  const counted = new Map<
+    string,
+    { engineClass: string; script: string | null; kind: ObjectKind; count: number }
+  >();
+  let unnamed = 0;
   for (let at = 1; at < all.length; at += 4) {
     const engineClass = all[at + 1];
     const extra = entriesOf(all[at + 3]);
@@ -161,18 +118,10 @@ export function countSnapshot(compressed: Uint8Array): SnapshotCounts {
         `object ${(at - 1) / 4} of the snapshot is not an id, class, properties and extra`,
       );
     }
-    objects.push({ engineClass, properties: propertiesOf(all[at + 2]), kind: kindOf(extra) });
-  }
-  const inner = innerScriptNames(objects);
-  const counted = new Map<
-    string,
-    { engineClass: string; script: string | null; kind: ObjectKind; count: number }
-  >();
-  for (const object of objects) {
-    const value = scriptValueOf(object);
-    const script = value === null || typeof value === 'string' ? value : (inner.get(value.id) ?? null);
-    const key = `${object.engineClass}\n${script ?? ''}`;
-    const one = counted.get(key) ?? { engineClass: object.engineClass, script, kind: object.kind, count: 0 };
+    const script = scriptOf(all[at + 2]);
+    unnamed += script.unnamed ? 1 : 0;
+    const key = `${engineClass}\n${script.path ?? ''}`;
+    const one = counted.get(key) ?? { engineClass, script: script.path, kind: kindOf(extra), count: 0 };
     one.count += 1;
     counted.set(key, one);
   }
@@ -180,13 +129,19 @@ export function countSnapshot(compressed: Uint8Array): SnapshotCounts {
   return {
     classes: [...counted.values()],
     bytes: compressed.length,
+    unnamed,
     ...(typeof memory === 'number' ? { memoryBytes: memory } : {}),
   };
 }
 
 /** Whether [param value], as it crossed the keeper's channel, is the counts of a snapshot. */
 export function isSnapshotCounts(value: unknown): value is SnapshotCounts {
-  return isRecord(value) && Array.isArray(value['classes']) && typeof value['bytes'] === 'number';
+  return (
+    isRecord(value) &&
+    Array.isArray(value['classes']) &&
+    typeof value['bytes'] === 'number' &&
+    typeof value['unnamed'] === 'number'
+  );
 }
 
 /** One class as an answer names it: by its class_name, its script's path, or its engine class. */
@@ -213,8 +168,15 @@ export interface KeptSnapshot {
   readonly takenAt: string;
   readonly classes: readonly NamedClass[];
   readonly totals: Totals;
+  /** How many objects are counted under their engine class for a script with no file. */
+  readonly unnamed: number;
   readonly bytes: number;
   readonly memoryBytes?: number;
+}
+
+/** The note of an answer holding objects whose script has no file, as [param counted] counts them. */
+function unnamedNote(counted: string): string {
+  return `${counted} a script with no file, such as an inner class's, which the game names only by an id, so they are counted under their native class.`;
 }
 
 /**
@@ -272,6 +234,7 @@ export class SnapshotStore {
       takenAt: new Date().toISOString(),
       classes,
       totals: totalsOf(classes),
+      unnamed: counts.unnamed,
       bytes: counts.bytes,
       ...(counts.memoryBytes === undefined ? {} : { memoryBytes: counts.memoryBytes }),
     };
@@ -320,6 +283,11 @@ export function snapshotAnswer(snapshot: KeptSnapshot): Record<string, unknown> 
     bytes: snapshot.bytes,
     ...(snapshot.memoryBytes === undefined ? {} : { memoryBytes: snapshot.memoryBytes }),
     classes: snapshot.classes,
+    ...(snapshot.unnamed === 0
+      ? {}
+      : {
+          note: unnamedNote(snapshot.unnamed === 1 ? '1 object has' : `${snapshot.unnamed} objects have`),
+        }),
   };
 }
 
@@ -349,5 +317,12 @@ export function diffAnswer(before: KeptSnapshot, after: KeptSnapshot): Record<st
     nodes: move('nodes'),
     changed,
     unchangedClasses: new Set([...was.keys(), ...now.keys()]).size - changed.length,
+    ...(before.unnamed === 0 && after.unnamed === 0
+      ? {}
+      : {
+          note: unnamedNote(
+            `Objects of ${before.id} (${before.unnamed}) and of ${after.id} (${after.unnamed}) have`,
+          ),
+        }),
   };
 }

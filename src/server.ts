@@ -7395,13 +7395,15 @@ class GodotServer {
   /** Why no snapshot can be taken now: no game, one that has ended, or one the editor plays. */
   private noSnapshotToTake(): ToolResponse {
     const game = this.activeProcess;
+    // Only these reach a spawn in every project. The editor plays a headless or silent start
+    // itself when the project's own run arguments already make its games headless.
     const start =
-      'editor_run start with args, savesIn, env or silent, or headless, starts a game this server holds the debugger of';
+      'editor_run start with headless: true and any of args, engineArgs, env or savesIn. The editor cannot hand a game any of them, so this server starts it and holds its debugger, which takes the snapshot';
     if (game?.throughEditor === true && !exited(game)) {
       return this.createErrorResponse(
         "The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way.",
         [
-          'editor_run stop, then editor_run start with headless: true and args, env or savesIn. This server starts such a game itself and holds its debugger, which takes the snapshot',
+          `editor_run stop, then ${start}`,
           "The editor's ObjectDB Profiler tab takes and compares snapshots of the played game by hand",
         ],
       );

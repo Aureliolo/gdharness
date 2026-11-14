@@ -201,15 +201,26 @@ export const READ_MS = 5000;
  * a game of 681 classes, where every later one took a tenth of a second.
  */
 export const EVALUATE_MS = 60_000;
-/**
- * How long a game is given to serialise every object it holds. A game with no answer by then has
- * no snapshot capture: the engine drops a message for a capture it lacks without a word.
- */
+/** How long a game is given to serialise every object it holds. */
 const SNAPSHOT_PREPARE_MS = 20_000;
 /** How long each slice of a snapshot is waited for. The game sends one each frame it is asked. */
 const SNAPSHOT_SLICE_MS = 10_000;
-/** The refusal of a game that never answered a snapshot. */
-const NO_SNAPSHOT = `The game answered no object snapshot within ${SNAPSHOT_PREPARE_MS / 1000} s. An engine has the snapshot only when built with debug features, as the editor and the debug export templates are, so a game run on a release template has none.`;
+/**
+ * How many of its performance frames a game sends past a prepare it never answers before it counts
+ * as having no snapshot. Every game with a debugger sends one about each second from its main loop,
+ * which reads the debugger's messages each frame and serialises a snapshot there and then. The
+ * engine drops a message for a capture it lacks without a word, so frames going on with no answer
+ * are that. One frame can already be on its way as the prepare is sent, so it takes more than one.
+ */
+const FRAMES_PAST_A_PREPARE = 3;
+/** What a prepare is answered by when the game's frames went on without answering it. */
+const WENT_ON = Symbol('went on');
+/** The refusal of a game whose frames went on past a prepare. */
+const NO_SNAPSHOT = `The game went on with ${FRAMES_PAST_A_PREPARE} frames and never answered the snapshot request, which is what an engine without the snapshot does. Only an engine built with debug features has it, as the editor and the debug export templates are, so a game run on a release template has none.`;
+/** The refusal of a game that sent nothing at all while it was asked. */
+const SNAPSHOT_STALLED = `The game answered no object snapshot within ${SNAPSHOT_PREPARE_MS / 1000} s, and the frames a running game sends each second stopped meanwhile, so it was busy.`;
+/** The fix for a game that was busy as it was asked. */
+const ASK_AGAIN = 'debug_objects snapshot asks again, which the game answers once its frames go on';
 /** The fix for a game run on an engine without the snapshot. */
 const DEBUG_ENGINE =
   'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot';
@@ -726,44 +737,66 @@ export class GameDebugger {
       SNAPSHOT_PREPARE_MS,
     );
     if (typeof total !== 'number') {
-      const gone = this.unreachableRefusal();
-      return gone === null ? { refused: NO_SNAPSHOT, next: DEBUG_ENGINE } : { ...gone, next: START_AGAIN };
+      return this.unprepared(total);
     }
     const bytes = new Uint8Array(total);
     for (let have = 0; have < total; ) {
       const ask = [id, have, have + SNAPSHOT_SLICE_BYTES];
       const part = await this.snapshotReply(id, 'request_snapshot_chunk', ask, SNAPSHOT_SLICE_MS);
-      if (part === undefined || !isList(part) || part.length === 0 || have + part.length > total) {
+      const slice = typeof part === 'symbol' ? undefined : part;
+      if (slice === undefined || !isList(slice) || slice.length === 0 || have + slice.length > total) {
         return {
           refused: `The game stopped sending its snapshot after ${have} of ${total} bytes${this.ended ? ', as it exited' : ''}.`,
           next: this.ended ? START_AGAIN : 'debug_objects snapshot asks for a fresh one',
         };
       }
-      bytes.set(part.map(Number), have);
-      have += part.length;
+      bytes.set(slice.map(Number), have);
+      have += slice.length;
     }
     return { ...countSnapshot(bytes) };
   }
 
+  /** Why a prepare answered by [param answered], which is no size, gave no snapshot. */
+  private unprepared(answered: GodotValue | typeof WENT_ON | undefined): DebugAnswer {
+    const gone = this.unreachableRefusal();
+    if (gone !== null) {
+      return { ...gone, next: START_AGAIN };
+    }
+    return answered === WENT_ON
+      ? { refused: NO_SNAPSHOT, next: DEBUG_ENGINE }
+      : { refused: SNAPSHOT_STALLED, next: ASK_AGAIN };
+  }
+
   /**
    * What the game answers [param request] of snapshot [param id] with, after the id: a size for a
-   * prepare and the bytes for a slice. Undefined when nothing came within [param ms].
+   * prepare and the bytes for a slice. Undefined when nothing came within [param ms], and WENT_ON
+   * when the game's frames went on past a prepare without it.
    */
   private async snapshotReply(
     id: number,
     request: 'request_prepare_snapshot' | 'request_snapshot_chunk',
     data: readonly SentValue[],
     ms: number,
-  ): Promise<GodotValue | undefined> {
-    const reply =
-      request === 'request_prepare_snapshot' ? 'snapshot:snapshot_prepared' : 'snapshot:snapshot_chunk';
-    const answered = this.next(
-      (received) => 'message' in received && received.message === reply && received.data[0] === id,
-      ms,
-    );
+  ): Promise<GodotValue | typeof WENT_ON | undefined> {
+    const prepare = request === 'request_prepare_snapshot';
+    const reply = prepare ? 'snapshot:snapshot_prepared' : 'snapshot:snapshot_chunk';
+    let frames = 0;
+    const answered = this.next((received) => {
+      if (!('message' in received)) {
+        return false;
+      }
+      if (prepare && received.message === 'performance:profile_frame') {
+        frames += 1;
+        return frames >= FRAMES_PAST_A_PREPARE;
+      }
+      return received.message === reply && received.data[0] === id;
+    }, ms);
     this.send(`snapshot:${request}`, data, this.held?.thread ?? MAIN_THREAD);
     const got = await answered;
-    return got !== null && 'message' in got ? got.data[1] : undefined;
+    if (got === null || !('message' in got)) {
+      return undefined;
+    }
+    return got.message === reply ? got.data[1] : WENT_ON;
   }
 
   /** The refusal for a game whose debugger connection is not there, or null when it is. */

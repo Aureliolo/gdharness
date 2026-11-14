@@ -230,6 +230,7 @@ import { fileNoCaseCompare } from '../src/file-order.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import {
   DEBUG_REQUESTS,
+  type DebugAnswer,
   type DebugRequest,
   debugRequestOf,
   framesOf,
@@ -361,7 +362,13 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
-import { countSnapshot, SNAPSHOT_SLICE_BYTES } from '../src/object-snapshot.js';
+import {
+  countSnapshot,
+  diffAnswer,
+  SNAPSHOT_SLICE_BYTES,
+  SnapshotStore,
+  snapshotAnswer,
+} from '../src/object-snapshot.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   commandProjectRefusal,
@@ -46711,37 +46718,41 @@ function standInSnapshot(count: number, script: string, kind: 'ref_count' | 'nod
 }
 
 /**
- * An inner class only its own script lists among its constants is named path::Name. One that two
- * scripts list, a base script and the one extending it, keeps only its own name, since the game
- * lists a base script's constants under the same names and so does not say which holds it.
+ * An object whose script has no file, as an inner class's has none, is counted under its native
+ * class, and the answers of every snapshot holding such objects say how many.
  */
-function testAnInnerClassIsNamedFromTheScriptHoldingIt(): void {
-  const shared = { objectId: 0x8000_0000_0000_0042n };
-  const own = { objectId: 0x8000_0000_0000_0043n };
-  const property = (name: string, value: unknown): unknown[] => [name, 24, 0, '', 6, value];
-  const all: unknown[] = [{ mem_usage: 1 }];
-  const add = (engineClass: string, properties: unknown[][], extra: Record<string, unknown>): void => {
-    all.push(all.length, engineClass, properties, extra);
+function testAnInnerClassIsCountedUnderItsNativeClass(): void {
+  const snapshotOf = (inner: number): Buffer => {
+    const all: unknown[] = [{ mem_usage: 1 }];
+    all.push(1, 'Node', [['script', 24, 17, 'Script', 6, 'res://main.gd']], { node_name: 'Main' });
+    for (let at = 0; at < inner; at += 1) {
+      all.push(
+        at + 2,
+        'RefCounted',
+        [['script', 24, 17, 'Script', 6, { objectId: 0x8000_0000_0000_0042n }]],
+        {
+          ref_count: 1,
+        },
+      );
+    }
+    return deflateSync(encodedSnapshotValue(all));
   };
-  add(
-    'Node',
-    [
-      property('script', 'res://base.gd'),
-      property('Constants/Shared', shared),
-      property('Constants/Own', own),
-    ],
-    {
-      node_name: 'Base',
-    },
+  const store = new SnapshotStore();
+  const none = store.keep('run', 1, countSnapshot(snapshotOf(0)), '');
+  const two = store.keep('run', 1, countSnapshot(snapshotOf(2)), '');
+  assert.equal(snapshotAnswer(none)['note'], undefined, 'a snapshot with none says nothing of them');
+  const answered = snapshotAnswer(two);
+  assert.deepEqual(answered['classes'], [
+    { class: 'RefCounted', kind: 'RefCounted', count: 2 },
+    { class: 'res://main.gd', kind: 'Node', count: 1, engineClass: 'Node' },
+  ]);
+  assert.equal(
+    answered['note'],
+    "2 objects have a script with no file, such as an inner class's, which the game names only by an id, so they are counted under their native class.",
   );
-  add('Node', [property('script', 'res://sub.gd'), property('Constants/Shared', shared)], {
-    node_name: 'Sub',
-  });
-  add('RefCounted', [property('script', shared)], { ref_count: 1 });
-  add('RefCounted', [property('script', own)], { ref_count: 1 });
-  assert.deepEqual(
-    countSnapshot(deflateSync(encodedSnapshotValue(all))).classes.map((one) => one.script),
-    ['res://base.gd', 'res://sub.gd', 'Shared', 'res://base.gd::Own'],
+  assert.equal(
+    diffAnswer(none, two)['note'],
+    "Objects of s1 (0) and of s2 (2) have a script with no file, such as an inner class's, which the game names only by an id, so they are counted under their native class.",
   );
 }
 
@@ -46792,11 +46803,13 @@ async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<voi
         {
           classes: [{ engineClass: 'Resource', script: 'res://item.gd', kind: 'RefCounted', count: 5000 }],
           bytes: big.length,
+          unnamed: 0,
           memoryBytes: 1234,
         },
         {
           classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
           bytes: small.length,
+          unnamed: 0,
           memoryBytes: 1234,
         },
       ],
@@ -46843,6 +46856,45 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
 }
 
 /**
+ * A game whose frames go on past a snapshot request it never answers has an engine without the
+ * snapshot, since the engine drops a message for a capture it lacks. A game that sends nothing at
+ * all while asked was busy, and is told to ask again rather than to change its engine.
+ */
+async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void> {
+  const answerOf = async (framesGoOn: boolean): Promise<{ answer: DebugAnswer; ms: number }> => {
+    const peer = await GameDebugger.open([]);
+    const game = createConnection({ host: '127.0.0.1', port: peer.port });
+    const ticking = setInterval(() => {
+      if (framesGoOn) {
+        game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
+      }
+    }, 200);
+    try {
+      await new Promise<void>((settle) => game.once('connect', settle));
+      const began = Date.now();
+      const answer = await peer.ask({ op: 'snapshot' });
+      return { answer, ms: Date.now() - began };
+    } finally {
+      clearInterval(ticking);
+      game.destroy();
+      peer.close();
+    }
+  };
+  const [without, busy] = await Promise.all([answerOf(true), answerOf(false)]);
+  assert.match(
+    String(without.answer['refused']),
+    /^The game went on with 3 frames and never answered the snapshot request/,
+  );
+  assert.match(String(without.answer['next']), /godot naming an editor build or a debug export template/);
+  assert.ok(without.ms < 5000, `known from the frames, not the wait: ${without.ms} ms`);
+  assert.deepEqual(busy.answer, {
+    refused:
+      'The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy.',
+    next: 'debug_objects snapshot asks again, which the game answers once its frames go on',
+  });
+}
+
+/**
  * A snapshot with no game running says how to start one, and a diff names the ids it does have.
  */
 async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> {
@@ -46876,16 +46928,71 @@ async function testAnObjectSnapshotOfAPlayedGameIsRefused(): Promise<void> {
       );
       assert.match(
         said ?? '',
-        /^The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way\.[\s\S]*editor_run stop, then editor_run start with headless: true and args, env or savesIn\. This server starts such a game itself/,
+        /^The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way\.[\s\S]*editor_run stop, then editor_run start with headless: true and any of args, engineArgs, env or savesIn\. The editor cannot hand a game any of them, so this server starts it/,
       );
     },
   );
 }
 
 /**
+ * Every start a snapshot refusal names is spawned by this server, even in a project whose run
+ * arguments already make the editor's games headless. There the editor plays a start asking only
+ * for headless or silent itself, and its debugger is the editor's.
+ */
+async function testTheStartASnapshotRefusalNamesIsSpawnedHere(): Promise<void> {
+  const tools: string[] = [];
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        tools.push(tool);
+        return tool === 'play_scene' || tool === 'playing_status'
+          ? { ok: true, playing: tool === 'play_scene', scenePath: 'res://main.tscn', debugPort: adapter }
+          : { ok: true };
+      },
+    async ({ server, project }) => {
+      const asked = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, 60_000)) ?? '';
+      const named = await asked('debug_objects', { op: 'snapshot' });
+      assert.match(
+        named,
+        /^No game is running[\s\S]*editor_run start with headless: true and any of args, engineArgs, env or savesIn\./,
+      );
+      const starts: Record<string, unknown>[] = [
+        { args: ['--level=1'] },
+        { engineArgs: ['--verbose'] },
+        { env: { SNAPSHOT_RUN: '1' } },
+        { savesIn: join(project, 'saves') },
+      ];
+      for (const start of starts) {
+        tools.length = 0;
+        const said = await asked('editor_run', {
+          projectPath: project,
+          op: 'start',
+          headless: true,
+          runtimeWaitMs: 300,
+          ...start,
+        });
+        assert.ok(
+          !tools.includes('play_scene'),
+          `${JSON.stringify(start)} is not played by the editor: ${said}`,
+        );
+        await asked('editor_run', { op: 'stop' });
+      }
+      // The two the editor does play here, which a refusal must not name on their own.
+      for (const start of [{ headless: true }, { headless: false, silent: true }]) {
+        tools.length = 0;
+        await asked('editor_run', { projectPath: project, op: 'start', runtimeWaitMs: 300, ...start });
+        assert.ok(tools.includes('play_scene'), `${JSON.stringify(start)} is played by the editor here`);
+        await asked('editor_run', { op: 'stop' });
+      }
+    },
+  );
+}
+
+/**
  * On a real engine, a hundred Resources kept by one call show as +100 of their class_name between
- * a snapshot before and one after, and the classes the call did not touch do not move. Inner
- * classes, nested ones too, are named after the script holding them. A fresh game's counts keep
+ * a snapshot before and one after, and the classes the call did not touch do not move. Objects of
+ * inner classes, nested ones too, are counted under their native class with a note. A fresh game's counts keep
  * RefCounted and Node apart, thousands of objects come back whole over several slices, and a
  * snapshot of an earlier run is refused for a diff.
  */
@@ -47029,18 +47136,20 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
     }
     assert.ok(Number(get(kept.answer, 'unchangedClasses')) > 10, kept.said);
 
-    // An inner class's script has no path, so the game sends it as an id. The script holding it
-    // names it, so its objects are not counted as plain RefCounted.
+    // An inner class's script has no file, so the game names it only by an id. Its objects go
+    // under their native class, and the note counts them.
     await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_inners', args: [40] });
     const inner = await call('debug_objects', { op: 'diff', before: 's2' });
+    const [, then = '', later = ''] =
+      /^Objects of s2 \((\d+)\) and of s3 \((\d+)\) have a script with no file/.exec(
+        String(get(inner.answer, 'note')),
+      ) ?? [];
     assert.deepEqual(
-      ['res://main.gd::Inner', 'res://main.gd::Inner::Deep'].map((name) =>
-        asArray(get(inner.answer, 'changed')).find((one) => get(one, 'class') === name),
-      ),
       [
-        { class: 'res://main.gd::Inner', kind: 'RefCounted', before: 0, after: 40, change: 40 },
-        { class: 'res://main.gd::Inner::Deep', kind: 'RefCounted', before: 0, after: 20, change: 20 },
+        Number(later) - Number(then),
+        asArray(get(inner.answer, 'changed')).some((one) => String(get(one, 'class')).includes('::')),
       ],
+      [60, false],
       inner.said,
     );
 
@@ -101827,10 +101936,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointLineIsOneTheEngineMarks,
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testObjectSnapshotsAskedTogetherGetTheirOwnAnswers,
-  testAnInnerClassIsNamedFromTheScriptHoldingIt,
+  testAnInnerClassIsCountedUnderItsNativeClass,
   testEachSnapshotRefusalNamesItsOwnFix,
+  testASnapshotTellsAnEngineWithoutItFromABusyGame,
   testAnObjectSnapshotNeedsAGameThisServerStarted,
   testAnObjectSnapshotOfAPlayedGameIsRefused,
+  testTheStartASnapshotRefusalNamesIsSpawnedHere,
   testObjectSnapshotsShowWhatAnActionKept,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
