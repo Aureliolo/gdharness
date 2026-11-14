@@ -206,6 +206,12 @@ export const READ_MS = 5000;
 export const EVALUATE_MS = 60_000;
 /** How long a game is given to serialise every object it holds. */
 const SNAPSHOT_PREPARE_MS = 20_000;
+/**
+ * The thread every snapshot message goes to. The collector keeps a prepared snapshot for any thread
+ * to send. The main thread reads its messages in its loop and in its own break, and never drops
+ * them, while a worker drops what it has not read as it leaves its break.
+ */
+const SNAPSHOT_THREAD = MAIN_THREAD;
 /** How long each slice of a snapshot is waited for. The game sends one each frame it is asked. */
 const SNAPSHOT_SLICE_MS = 10_000;
 /**
@@ -413,18 +419,15 @@ export class GameDebugger {
   private readonly waiters: Waiter[] = [];
   private readonly inbox: DebuggerMessage[] = [];
   private readonly onClosed: (() => void)[] = [];
-  /** Told the thread of each debug_exit, after the held state has taken it. */
-  private readonly onExit: ((thread: number) => void)[] = [];
   private readonly output: string[] = [];
   private outputDropped = 0;
   /** How many snapshots have been asked for, which numbers each one's requests. */
   private snapshotsAsked = 0;
   /**
-   * How many inspections have been sent and answered. The game answers them in order with nothing
-   * that names which, so the count says which answer is whose.
+   * How many inspections have been sent to each thread and answered by it. A thread answers them in
+   * order with nothing that names which, so the count says which answer is whose.
    */
-  private inspectionsSent = 0;
-  private inspectionsAnswered = 0;
+  private readonly inspections = new Map<number, { sent: number; answered: number }>();
   /** Why the expressions evaluated since the last evaluate began failed, as the engine said it. */
   private readonly expressionErrors: string[] = [];
   /**
@@ -589,15 +592,15 @@ export class GameDebugger {
         this.held = null;
         this.unreadable = null;
       }
-      for (const left of this.onExit) {
-        left(received.thread);
-      }
+      this.leftItsBreak(received.thread);
     } else if (received.message === 'output') {
       this.takeOutput(received.data);
     } else if (received.message === 'error') {
       this.takeError(received.data);
     } else if (received.message === 'scene:inspect_object') {
-      this.inspectionsAnswered += 1;
+      const counted = this.inspections.get(received.thread) ?? { sent: 0, answered: 0 };
+      counted.answered += 1;
+      this.inspections.set(received.thread, counted);
     }
     const at = this.waiters.findIndex((waiter) => waiter.wanted(received));
     if (at !== -1) {
@@ -781,10 +784,9 @@ export class GameDebugger {
    */
   private async prepare(id: number): Promise<number | DebugAnswer> {
     const sent = Date.now();
-    // The number the first ask gives its inspection, set before any answer is looked at.
-    let inspection = this.inspectionsSent + 1;
+    const inspection = this.inspectionSent(MAIN_THREAD);
     let frames = 0;
-    const wanted = (received: DebuggerMessage): boolean => {
+    const answered = this.next((received) => {
       if (!('message' in received)) {
         return false;
       }
@@ -793,21 +795,13 @@ export class GameDebugger {
         return false;
       }
       if (received.message === 'scene:inspect_object') {
-        return this.inspectionsAnswered >= inspection;
+        return this.isInspectionAnswered(received.thread, MAIN_THREAD, inspection);
       }
       return received.message === 'snapshot:snapshot_prepared' && received.data[0] === id;
-    };
-    const got = await this.askWhereRead(
-      (thread, again) => {
-        // Asked again only once a thread left its break with both unread, which drops them.
-        this.inspectionsSent += again ? 0 : 1;
-        inspection = this.inspectionsSent;
-        this.send('snapshot:request_prepare_snapshot', [id, 'gdharness'], thread);
-        this.send('scene:inspect_object', [0], thread);
-      },
-      wanted,
-      SNAPSHOT_PREPARE_MS,
-    );
+    }, SNAPSHOT_PREPARE_MS);
+    this.send('snapshot:request_prepare_snapshot', [id, 'gdharness'], SNAPSHOT_THREAD);
+    this.send('scene:inspect_object', [0], SNAPSHOT_THREAD);
+    const got = await answered;
     if (got !== null && 'message' in got) {
       const size = got.data[1];
       return got.message === 'snapshot:snapshot_prepared' && typeof size === 'number'
@@ -818,53 +812,56 @@ export class GameDebugger {
     if (gone !== null) {
       return { ...gone, next: START_AGAIN };
     }
-    return frames >= FRAMES_PAST_A_PREPARE
-      ? { refused: NO_DEBUG_FEATURES, next: DEBUG_ENGINE }
-      : { refused: SNAPSHOT_STALLED, next: ASK_AGAIN };
+    if (frames >= FRAMES_PAST_A_PREPARE) {
+      return { refused: NO_DEBUG_FEATURES, next: DEBUG_ENGINE };
+    }
+    const worker = this.held !== null && this.held.thread !== MAIN_THREAD ? this.held.thread : null;
+    return worker === null
+      ? { refused: SNAPSHOT_STALLED, next: ASK_AGAIN }
+      : {
+          refused: `${SNAPSHOT_STALLED} Thread ${worker} is held at a breakpoint, and a main loop that waits on it stops too, while the main loop is what answers a snapshot.`,
+          next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
+        };
   }
 
   /** The bytes of snapshot [param id] from [param from] on, or undefined when none came in time. */
   private async slice(id: number, from: number): Promise<GodotValue | undefined> {
-    const got = await this.askWhereRead(
-      (thread) => {
-        this.send('snapshot:request_snapshot_chunk', [id, from, from + SNAPSHOT_SLICE_BYTES], thread);
-      },
+    const answered = this.next(
       (received) =>
         'message' in received && received.message === 'snapshot:snapshot_chunk' && received.data[0] === id,
       SNAPSHOT_SLICE_MS,
     );
+    this.send('snapshot:request_snapshot_chunk', [id, from, from + SNAPSHOT_SLICE_BYTES], SNAPSHOT_THREAD);
+    const got = await answered;
     return got !== null && 'message' in got ? got.data[1] : undefined;
   }
 
   /**
-   * What [param wanted] takes in answer to what [param ask] sends, or null after [param ms].
-   *
-   * A held thread reads the debugger's messages, and the main loop reads them otherwise. A prepared
-   * snapshot is kept by the collector, not by the thread that made it, so any of them answers.
-   * A thread leaving its break drops whatever it has not read, and says so only after everything
-   * it answered. So a request whose thread leaves unanswered is asked again of wherever the game
-   * reads now, and [param ask] is told it is again.
+   * A thread other than the main one drops what it has not read as it leaves its break, after it
+   * sent everything it answered. Its inspections not answered by then never will be.
    */
-  private async askWhereRead(
-    ask: (thread: number, again: boolean) => void,
-    wanted: (received: DebuggerMessage) => boolean,
-    ms: number,
-  ): Promise<DebuggerMessage | null> {
-    const answered = this.next(wanted, ms);
-    let thread = this.held?.thread ?? MAIN_THREAD;
-    const left = (exited: number): void => {
-      if (exited === thread && thread !== MAIN_THREAD) {
-        thread = this.held?.thread ?? MAIN_THREAD;
-        ask(thread, true);
-      }
-    };
-    this.onExit.push(left);
-    ask(thread, false);
-    try {
-      return await answered;
-    } finally {
-      this.onExit.splice(this.onExit.indexOf(left), 1);
+  private leftItsBreak(thread: number): void {
+    const counted = this.inspections.get(thread);
+    if (thread !== MAIN_THREAD && counted !== undefined) {
+      counted.sent = counted.answered;
     }
+  }
+
+  /** Counts an inspection sent to [param thread], and answers its number there. */
+  private inspectionSent(thread: number): number {
+    const counted = this.inspections.get(thread) ?? { sent: 0, answered: 0 };
+    counted.sent += 1;
+    this.inspections.set(thread, counted);
+    return counted.sent;
+  }
+
+  /**
+   * Whether an inspection answer from [param from] answers inspection [param number] sent to
+   * [param thread]. A thread answers its own in the order sent, and threads do not wait on each
+   * other, so only the answers of the thread asked are counted.
+   */
+  private isInspectionAnswered(from: number, thread: number, number: number): boolean {
+    return from === thread && (this.inspections.get(thread)?.answered ?? 0) >= number;
   }
 
   /** The refusal for a game whose debugger connection is not there, or null when it is. */
@@ -1395,14 +1392,14 @@ export class GameDebugger {
    */
   private async taken(): Promise<boolean> {
     this.forget('scene:inspect_object');
-    this.inspectionsSent += 1;
-    const inspection = this.inspectionsSent;
-    this.send('scene:inspect_object', [0], this.held?.thread ?? MAIN_THREAD);
+    const thread = this.held?.thread ?? MAIN_THREAD;
+    const inspection = this.inspectionSent(thread);
+    this.send('scene:inspect_object', [0], thread);
     const answered = await this.next(
       (received) =>
         'message' in received &&
         received.message === 'scene:inspect_object' &&
-        this.inspectionsAnswered >= inspection,
+        this.isInspectionAnswered(received.thread, thread, inspection),
       READ_MS,
     );
     return answered !== null;
