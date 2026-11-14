@@ -444,6 +444,10 @@ const HOOKS_GD = [
   '\t\t"profile_held":',
   '\t\t\tvar profiler: Node = EditorInterface.get_base_control().get_tree().root.find_child("ProfileTools", true, false)',
   '\t\t\treturn profiler.call("profile_read", {}) if profiler != null else {}',
+  // The debugger session the addon takes as the played game's, read past the server.
+  '\t\t"active_session":',
+  '\t\t\tvar sessions: Node = EditorInterface.get_base_control().get_tree().root.find_child("ProfileTools", true, false)',
+  '\t\t\treturn {"session": sessions.call("_active_session") if sessions != null else null}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   // Every tab closed, which leaves the editor a tab of a new scene never saved, and what the
@@ -8299,6 +8303,16 @@ async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Edit
 }
 
 /**
+ * With no game playing, the addon finds no active debugger session. Session 0 there would switch
+ * the profiler on, and send error breaks, to a session with no game behind it.
+ */
+async function testNoDebuggerSessionIsActiveWithNoGame({ attempt, project }: Editor): Promise<void> {
+  await attempt('editor_run', { op: 'stop' });
+  const read = await hook(project, { op: 'active_session' });
+  assert.equal(get(read, 'session'), -1, JSON.stringify(read));
+}
+
+/**
  * A game the editor plays is profiled through the editor's own debugger session.
  *
  * The editor's handlers take the profiler's messages before any addon is asked, so the addon reads
@@ -9313,6 +9327,7 @@ async function main(): Promise<void> {
     ['testRuntime', testRuntime],
     ['testAPlayIsItsOwn', testAPlayIsItsOwn],
     ['testAnEditDoesNotReachTheRunningGame', testAnEditDoesNotReachTheRunningGame],
+    ['testNoDebuggerSessionIsActiveWithNoGame', testNoDebuggerSessionIsActiveWithNoGame],
     ['testAPlayedGameIsProfiled', testAPlayedGameIsProfiled],
     ['testTheDebuggerGetsAPortOfItsOwn', testTheDebuggerGetsAPortOfItsOwn],
     ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],

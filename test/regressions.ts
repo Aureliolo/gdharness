@@ -361,7 +361,7 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
-import { SNAPSHOT_SLICE_BYTES } from '../src/object-snapshot.js';
+import { countSnapshot, SNAPSHOT_SLICE_BYTES } from '../src/object-snapshot.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   commandProjectRefusal,
@@ -46675,6 +46675,12 @@ function encodedSnapshotValue(value: unknown): Buffer {
     return Buffer.concat([word(28), word(value.length), ...value.map((one) => encodedSnapshotValue(one))]);
   }
   assert.ok(isRecord(value), 'a stand-in snapshot holds numbers, strings, lists and records');
+  if (typeof value['objectId'] === 'bigint') {
+    // An object as the debugger sends one, as its id.
+    const id = Buffer.alloc(8);
+    id.writeBigUInt64LE(value['objectId']);
+    return Buffer.concat([word(24 | (1 << 16)), id]);
+  }
   const entries = Object.entries(value);
   return Buffer.concat([
     word(27),
@@ -46702,6 +46708,41 @@ function standInSnapshot(count: number, script: string, kind: 'ref_count' | 'nod
     );
   }
   return deflateSync(encodedSnapshotValue(all));
+}
+
+/**
+ * An inner class only its own script lists among its constants is named path::Name. One that two
+ * scripts list, a base script and the one extending it, keeps only its own name, since the game
+ * lists a base script's constants under the same names and so does not say which holds it.
+ */
+function testAnInnerClassIsNamedFromTheScriptHoldingIt(): void {
+  const shared = { objectId: 0x8000_0000_0000_0042n };
+  const own = { objectId: 0x8000_0000_0000_0043n };
+  const property = (name: string, value: unknown): unknown[] => [name, 24, 0, '', 6, value];
+  const all: unknown[] = [{ mem_usage: 1 }];
+  const add = (engineClass: string, properties: unknown[][], extra: Record<string, unknown>): void => {
+    all.push(all.length, engineClass, properties, extra);
+  };
+  add(
+    'Node',
+    [
+      property('script', 'res://base.gd'),
+      property('Constants/Shared', shared),
+      property('Constants/Own', own),
+    ],
+    {
+      node_name: 'Base',
+    },
+  );
+  add('Node', [property('script', 'res://sub.gd'), property('Constants/Shared', shared)], {
+    node_name: 'Sub',
+  });
+  add('RefCounted', [property('script', shared)], { ref_count: 1 });
+  add('RefCounted', [property('script', own)], { ref_count: 1 });
+  assert.deepEqual(
+    countSnapshot(deflateSync(encodedSnapshotValue(all))).classes.map((one) => one.script),
+    ['res://base.gd', 'res://sub.gd', 'Shared', 'res://base.gd::Own'],
+  );
 }
 
 /**
@@ -46768,6 +46809,40 @@ async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<voi
 }
 
 /**
+ * Each reason the keeper gives for no snapshot comes with its own fix. A game that never connected,
+ * or that exited part way through sending, is started again. Neither is told to change its engine,
+ * which a game that had begun to send plainly has the snapshot in.
+ */
+async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
+  const peer = await GameDebugger.open([]);
+  try {
+    const unconnected = await peer.ask({ op: 'snapshot' });
+    assert.match(String(unconnected['refused']), /^The game never connected to its debugger/);
+    assert.equal(
+      unconnected['next'],
+      'editor_run start starts the game again, with a debugger this server holds',
+    );
+    const game = createConnection({ host: '127.0.0.1', port: peer.port });
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received && received.message === 'snapshot:request_prepare_snapshot') {
+          game.end(framedCommand('snapshot:snapshot_prepared', [Number(received.data[0]), 1000]));
+        }
+      }
+    });
+    await new Promise<void>((settle) => game.once('connect', settle));
+    const exited = await peer.ask({ op: 'snapshot' });
+    assert.deepEqual(exited, {
+      refused: 'The game stopped sending its snapshot after 0 of 1000 bytes, as it exited.',
+      next: 'editor_run start starts the game again, with a debugger this server holds',
+    });
+  } finally {
+    peer.close();
+  }
+}
+
+/**
  * A snapshot with no game running says how to start one, and a diff names the ids it does have.
  */
 async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> {
@@ -46783,185 +46858,36 @@ async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> 
   });
 }
 
-/** The editor's end of a played game's debugger, as far as its ObjectDB Profiler uses it. */
-interface EditorsDebugger {
-  readonly port: number;
-  /** A snapshot fetched and saved in [param folder] as the profiler saves one, named and sized. */
-  snapshot(folder: string): Promise<{ path: string; size: number }>;
-  close(): void;
-}
-
 /**
- * A debugger a played game dials, which fetches a snapshot the way the editor's ObjectDB Profiler
- * does: one prepare, then 6 MiB slices, saved under the date and time it arrived.
+ * A game the editor plays is refused with why and with the start that makes one this server can
+ * snapshot: the editor is its debugger, and its own profiler takes the snapshot messages.
  */
-async function anEditorsDebugger(): Promise<EditorsDebugger> {
-  const waiting: { want: (message: string) => boolean; take: (data: readonly GodotValue[]) => void }[] = [];
-  let game: Socket | null = null;
-  const server = createServer((socket) => {
-    game = socket;
-    const stream = new DebuggerStream();
-    socket.on('data', (chunk: Buffer) => {
-      for (const received of stream.push(chunk)) {
-        const at = 'message' in received ? waiting.findIndex((one) => one.want(received.message)) : -1;
-        if (at !== -1 && 'message' in received) {
-          waiting.splice(at, 1)[0]?.take(received.data);
-        }
-      }
-    });
-  });
-  await new Promise<void>((settle) => server.listen(0, '127.0.0.1', settle));
-  const address = server.address();
-  assert.ok(address !== null && typeof address !== 'string', 'the debugger listens');
-  const next = (message: string): Promise<readonly GodotValue[]> =>
-    new Promise((take) => waiting.push({ want: (said) => said === message, take }));
-  let asked = 0;
-  const snapshot = async (folder: string): Promise<{ path: string; size: number }> => {
-    asked += 1;
-    const id = (1 << 30) + asked;
-    const prepared = next('snapshot:snapshot_prepared');
-    game?.write(framedCommand('snapshot:request_prepare_snapshot', [id, 'test']));
-    const size = Number((await prepared)[1]);
-    const bytes: number[] = [];
-    while (bytes.length < size) {
-      const sliced = next('snapshot:snapshot_chunk');
-      game?.write(
-        framedCommand('snapshot:request_snapshot_chunk', [id, bytes.length, bytes.length + (6 << 20)]),
+async function testAnObjectSnapshotOfAPlayedGameIsRefused(): Promise<void> {
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'play_scene' || tool === 'playing_status'
+          ? { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter }
+          : { ok: true },
+    async ({ server, start }) => {
+      await start(300);
+      const said = textOf(
+        await server.request('tools/call', { name: 'debug_objects', arguments: { op: 'snapshot' } }, 30_000),
       );
-      bytes.push(...asArray((await sliced)[1]).map(Number));
-    }
-    mkdirSync(folder, { recursive: true });
-    const path = join(
-      folder,
-      `${new Date().toISOString().slice(0, 19).replace('T', '_').replaceAll(':', '-')}.odb_snapshot`,
-    );
-    writeFileSync(path, Buffer.from(bytes));
-    return { path, size };
-  };
-  return { port: address.port, snapshot, close: () => server.close() };
-}
-
-/**
- * A game the editor plays is snapshotted through the editor: its ObjectDB Profiler saves the
- * snapshot as a file, which the server reads with the keeper's decoder and removes. The lane's
- * +100 proof holds through it, and the file another snapshot left in that folder is untouched.
- */
-async function testAnObjectSnapshotOfAPlayedGameIsTakenThroughTheEditor(): Promise<void> {
-  const engine = resolveGodotPath();
-  if (!engine) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
-    }
-    console.log('played object snapshot regression skipped (Godot not found)');
-    return;
-  }
-  const editorsDebugger = await anEditorsDebugger();
-  const saved = join(
-    mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-snapshots-')),
-    'objectdb_snapshots',
+      assert.match(
+        said ?? '',
+        /^The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way\.[\s\S]*editor_run stop, then editor_run start with headless: true and args, env or savesIn\. This server starts such a game itself/,
+      );
+    },
   );
-  const other = join(saved, '2026-01-01_00-00-00.odb_snapshot');
-  mkdirSync(saved, { recursive: true });
-  writeFileSync(other, 'a snapshot the user took');
-  const held: { game: ChildProcess | null } = { game: null };
-  try {
-    await withAPlayingEditor(
-      ({ adapter, project, runtimeDir }) =>
-        async (tool) => {
-          if (tool === 'play_scene') {
-            held.game = spawnHidden(
-              engine,
-              ['--headless', '--path', project, '--remote-debug', `tcp://127.0.0.1:${editorsDebugger.port}`],
-              {
-                stdio: 'ignore',
-                env: {
-                  ...process.env,
-                  GDHARNESS_RUNTIME_DIR: runtimeDir,
-                  GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
-                },
-              },
-            );
-          }
-          if (tool === 'object_snapshot') {
-            return { ok: true, ...(await editorsDebugger.snapshot(saved)) };
-          }
-          if (tool === 'stop_playing') {
-            held.game?.kill();
-          }
-          return {
-            ok: true,
-            playing: held.game?.exitCode === null,
-            scenePath: 'res://main.tscn',
-            debugPort: adapter,
-          };
-        },
-      async ({ server, project, start }) => {
-        writeFileSync(
-          join(project, 'item.gd'),
-          'class_name Item\nextends Resource\n\n@export var label: String = ""\n',
-        );
-        writeFileSync(
-          join(project, 'main.gd'),
-          'extends Node\n\nconst ITEM: GDScript = preload("res://item.gd")\n\nvar items: Array[Resource] = []\n\n\n' +
-            'func keep_items(count: int) -> void:\n\tfor at: int in count:\n\t\titems.append(ITEM.new())\n',
-        );
-        writeFileSync(
-          join(project, 'main.tscn'),
-          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
-            '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
-        );
-        const call = async (
-          name: string,
-          args: Record<string, unknown>,
-        ): Promise<{ said: string; answer: unknown }> => {
-          const answered = await server.request(
-            'tools/call',
-            { name, arguments: args },
-            ENGINE_CALL_TIMEOUT_MS,
-          );
-          const said = textOf(answered) ?? JSON.stringify(answered);
-          return {
-            said,
-            answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered),
-          };
-        };
-        await start(30_000);
-        const before = await call('debug_objects', { op: 'snapshot' });
-        assert.equal(get(before.answer, 'snapshot'), 's1', before.said);
-        assert.ok(Number(get(before.answer, 'nodes')) >= 2, before.said);
-        await call('runtime_invoke', {
-          op: 'call',
-          nodePath: '/root/Main',
-          method: 'keep_items',
-          args: [100],
-        });
-        const kept = await call('debug_objects', { op: 'diff', before: 's1' });
-        assert.deepEqual(
-          asArray(get(kept.answer, 'changed')).find((one) => get(one, 'class') === 'Item'),
-          { class: 'Item', kind: 'RefCounted', before: 0, after: 100, change: 100 },
-          kept.said,
-        );
-        assert.deepEqual(
-          readdirSync(saved),
-          ['2026-01-01_00-00-00.odb_snapshot'],
-          'only the snapshots taken were removed',
-        );
-        assert.equal(readFileSync(other, 'utf8'), 'a snapshot the user took');
-      },
-      { realAddon: true, engine },
-    );
-  } finally {
-    held.game?.kill();
-    editorsDebugger.close();
-    sweep(dirname(saved));
-  }
 }
 
 /**
- * The lane's proof on a real engine: a hundred Resources kept by one call show as +100 of their
- * class_name between a snapshot before and one after, and the classes the call did not touch do not
- * move. A fresh game's counts keep RefCounted and Node apart, thousands of objects come back whole
- * over several slices, and a snapshot of an earlier run is refused for a diff.
+ * On a real engine, a hundred Resources kept by one call show as +100 of their class_name between
+ * a snapshot before and one after, and the classes the call did not touch do not move. Inner
+ * classes, nested ones too, are named after the script holding them. A fresh game's counts keep
+ * RefCounted and Node apart, thousands of objects come back whole over several slices, and a
+ * snapshot of an earlier run is refused for a diff.
  */
 async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
   const engine = resolveGodotPath();
@@ -46997,6 +46923,21 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
       '',
       'var items: Array[Resource] = []',
       'var notes: Array[Resource] = []',
+      'var inners: Array[RefCounted] = []',
+      '',
+      '',
+      'class Inner extends RefCounted:',
+      '\tclass Deep extends RefCounted:',
+      '\t\tvar depth: int = 1',
+      '',
+      '\tvar at: int = 0',
+      '',
+      '',
+      'func keep_inners(count: int) -> void:',
+      '\tfor at: int in count:',
+      '\t\tinners.append(Inner.new())',
+      '\t\tif at % 2 == 0:',
+      '\t\t\tinners.append(Inner.Deep.new())',
       '',
       '',
       'func keep_items(count: int) -> void:',
@@ -47088,6 +47029,21 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
     }
     assert.ok(Number(get(kept.answer, 'unchangedClasses')) > 10, kept.said);
 
+    // An inner class's script has no path, so the game sends it as an id. The script holding it
+    // names it, so its objects are not counted as plain RefCounted.
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_inners', args: [40] });
+    const inner = await call('debug_objects', { op: 'diff', before: 's2' });
+    assert.deepEqual(
+      ['res://main.gd::Inner', 'res://main.gd::Inner::Deep'].map((name) =>
+        asArray(get(inner.answer, 'changed')).find((one) => get(one, 'class') === name),
+      ),
+      [
+        { class: 'res://main.gd::Inner', kind: 'RefCounted', before: 0, after: 40, change: 40 },
+        { class: 'res://main.gd::Inner::Deep', kind: 'RefCounted', before: 0, after: 20, change: 20 },
+      ],
+      inner.said,
+    );
+
     // Thousands of objects, each with text that does not deflate, come back whole over slices.
     await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_notes', args: [6000] });
     const [many, alongside] = await Promise.all([
@@ -47106,7 +47062,7 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
       [get(many.answer, 'snapshot'), get(alongside.answer, 'snapshot')].toSorted((a, b) =>
         String(a).localeCompare(String(b)),
       ),
-      ['s3', 's4'],
+      ['s4', 's5'],
       'two snapshots asked together are kept apart',
     );
 
@@ -47116,7 +47072,7 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
     assert.equal(refused.answer, null, refused.said);
     assert.match(
       refused.said,
-      /^s1 was taken in an earlier run of the game than s5 \(process \d+, then \d+\)\.[\s\S]*in the same run/,
+      /^s1 was taken in an earlier run of the game than s6 \(process \d+, then \d+\)\.[\s\S]*in the same run/,
     );
     // Two snapshots of one earlier run still compare, since both counts are of the same objects.
     const earlier = await call('debug_objects', { op: 'diff', before: 's1', after: 's2' });
@@ -101871,8 +101827,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointLineIsOneTheEngineMarks,
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testObjectSnapshotsAskedTogetherGetTheirOwnAnswers,
+  testAnInnerClassIsNamedFromTheScriptHoldingIt,
+  testEachSnapshotRefusalNamesItsOwnFix,
   testAnObjectSnapshotNeedsAGameThisServerStarted,
-  testAnObjectSnapshotOfAPlayedGameIsTakenThroughTheEditor,
+  testAnObjectSnapshotOfAPlayedGameIsRefused,
   testObjectSnapshotsShowWhatAnActionKept,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,

@@ -10,8 +10,7 @@ extends Node
 ## expose to scripts: found by its class in the editor's tree and connected to by name.
 ##
 ## The same session also holds a game's error breaks off for the length of one evaluate. See
-## [method error_breaks]. And it asks for the engine's object snapshot, which the editor's ObjectDB
-## Profiler fetches. See [method object_snapshot].
+## [method error_breaks].
 
 const GdhRead = preload("../reading.gd")
 ## The most functions a frame may carry when the server does not say. The engine names a function
@@ -29,13 +28,6 @@ const PROFILE_RECEIVED: String = "gdharness:profile_received"
 ## Set in the environment a played game inherits, when the play is to be profiled from its start.
 ## Kept in step with the runtime addon's runtime_autoload.gd.
 const PROFILE_FROM_START: String = "GDHARNESS_PROFILE_FROM_START"
-## Where the editor's ObjectDB Profiler saves each snapshot it fetches, and how it ends their names.
-const SNAPSHOT_FOLDER: String = "user://objectdb_snapshots"
-const SNAPSHOT_EXTENSION: String = ".odb_snapshot"
-## The first id a snapshot asked from here takes. The profiler's own button counts up from 0.
-const SNAPSHOT_IDS_FROM: int = 1 << 30
-## How long a snapshot is waited for, inside the server's wait for an editor's answer.
-const SNAPSHOT_WAIT_SECONDS: int = 20
 
 var _editor_plugin: EditorPlugin = null
 var _sessions: GdhSessions = null
@@ -58,11 +50,6 @@ var _total_capped: bool = false
 var _names: Dictionary[int, String] = {}
 ## Per signature: calls, self seconds, total seconds.
 var _totals: Dictionary[String, PackedFloat64Array] = {}
-var _snapshots_asked: int = 0
-## Per snapshot asked from here, by id: the size the game prepared, -1 until it says, and the bytes
-## seen go to the profiler since.
-var _snapshot_sizes: Dictionary[int, int] = {}
-var _snapshot_received: Dictionary[int, int] = {}
 
 
 func _exit_tree() -> void:
@@ -175,89 +162,6 @@ func error_breaks(args: Dictionary) -> Dictionary:
 	}
 
 
-## Has the editor's ObjectDB Profiler take the engine's object snapshot of the played game, and
-## answers the file it saved, for the server to read and remove.
-##
-## The profiler answers every snapshot a game prepares, whoever asked: it fetches the bytes and
-## saves them as user://objectdb_snapshots/<date>_<time>.odb_snapshot, with _2 and on for a second
-## in the same second (objectdb_profiler_panel.cpp at 4.7.2). So the request goes out on the
-## session, as its own button sends it, under an id far above the ones the button counts up from 0.
-## The file is told from any other by being new since the request and of the size the game said.
-func object_snapshot(_args: Dictionary) -> Dictionary:
-	var active: int = _active_session()
-	if active < 0:
-		return { "ok": false, "error": "The editor is playing no game to snapshot." }
-	var _watching: int = _hook()
-	var before: PackedStringArray = _snapshot_files()
-	_snapshots_asked += 1
-	var id: int = SNAPSHOT_IDS_FROM + _snapshots_asked
-	_snapshot_sizes[id] = -1
-	_snapshot_received[id] = 0
-	var started: int = Time.get_ticks_msec()
-	var version: String = str(Engine.get_version_info().get("string", ""))
-	_sessions.get_session(active).send_message("snapshot:request_prepare_snapshot", [id, version])
-	var found: String = ""
-	while found.is_empty() and Time.get_ticks_msec() - started < SNAPSHOT_WAIT_SECONDS * 1000:
-		await get_tree().process_frame
-		found = _new_snapshot_file(before, id)
-	var size: int = _snapshot_sizes[id]
-	var received: int = _snapshot_received[id]
-	var _sized: bool = _snapshot_sizes.erase(id)
-	var _counted: bool = _snapshot_received.erase(id)
-	if found.is_empty():
-		return { "ok": false, "error": _snapshot_failure(size, received) }
-	return { "ok": true, "path": ProjectSettings.globalize_path(found), "size": size }
-
-
-func _snapshot_failure(size: int, received: int) -> String:
-	if size < 0:
-		return (
-			"The game answered no object snapshot within %d s. An engine has the snapshot only "
-			+ "when built with debug features, as the editor and the debug export templates are."
-		) % SNAPSHOT_WAIT_SECONDS
-	if received == 0:
-		return (
-			"The game prepared a snapshot of %d bytes and the editor's ObjectDB Profiler never "
-			+ "fetched it, so this editor has no ObjectDB Profiler."
-		) % size
-	return (
-		"The editor's ObjectDB Profiler fetched %d of the snapshot's %d bytes and saved no file "
-		+ "of that size under %s within %d s."
-	) % [received, size, SNAPSHOT_FOLDER, SNAPSHOT_WAIT_SECONDS]
-
-
-func _snapshot_files() -> PackedStringArray:
-	if not DirAccess.dir_exists_absolute(SNAPSHOT_FOLDER):
-		return PackedStringArray()
-	return DirAccess.get_files_at(SNAPSHOT_FOLDER)
-
-
-## The file the profiler saved for snapshot [param id], once every byte has arrived, or "".
-func _new_snapshot_file(before: PackedStringArray, id: int) -> String:
-	var size: int = _snapshot_sizes[id]
-	if size < 0 or _snapshot_received[id] < size:
-		return ""
-	for listed: String in _snapshot_files():
-		if listed in before or not listed.ends_with(SNAPSHOT_EXTENSION):
-			continue
-		var path: String = SNAPSHOT_FOLDER.path_join(listed)
-		var file: FileAccess = FileAccess.open(path, FileAccess.READ)
-		if file != null and file.get_length() == size:
-			return path
-	return ""
-
-
-func _on_snapshot_data(message: String, data: Array) -> void:
-	if data.size() < 2 or not _snapshot_sizes.has(GdhRead.as_int(data[0])):
-		return
-	var id: int = GdhRead.as_int(data[0])
-	if message == "snapshot:snapshot_prepared":
-		_snapshot_sizes[id] = GdhRead.as_int(data[1])
-	elif message == "snapshot:snapshot_chunk" and data[1] is PackedByteArray:
-		var part: PackedByteArray = data[1]
-		_snapshot_received[id] += part.size()
-
-
 func _reset() -> void:
 	_armed = false
 	OS.unset_environment(PROFILE_FROM_START)
@@ -274,9 +178,15 @@ func _reset() -> void:
 func _active_session() -> int:
 	if _sessions == null:
 		return -1
-	var all: Array[EditorDebuggerSession] = _sessions.get_sessions()
+	# Untyped, since the engine builds the list without a type. A typed Array here fails at runtime,
+	# and the call would answer 0, a session, with none active.
+	var all: Array = _sessions.get_sessions()
 	for index: int in all.size():
-		if all[index].is_active():
+		var listed: Variant = all[index]
+		if not listed is EditorDebuggerSession:
+			continue
+		var session: EditorDebuggerSession = listed
+		if session.is_active():
 			return index
 	return -1
 
@@ -320,9 +230,6 @@ func _hook() -> int:
 
 
 func _on_debug_data(message: String, data: Array, session_id: int) -> void:
-	if message.begins_with("snapshot:"):
-		_on_snapshot_data(message, data)
-		return
 	if session_id != _session:
 		return
 	if message == "servers:function_signature" and data.size() >= 2:

@@ -210,6 +210,11 @@ const SNAPSHOT_PREPARE_MS = 20_000;
 const SNAPSHOT_SLICE_MS = 10_000;
 /** The refusal of a game that never answered a snapshot. */
 const NO_SNAPSHOT = `The game answered no object snapshot within ${SNAPSHOT_PREPARE_MS / 1000} s. An engine has the snapshot only when built with debug features, as the editor and the debug export templates are, so a game run on a release template has none.`;
+/** The fix for a game run on an engine without the snapshot. */
+const DEBUG_ENGINE =
+  'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot';
+/** The fix for a game whose debugger connection is gone or never came. */
+const START_AGAIN = 'editor_run start starts the game again, with a debugger this server holds';
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
 const REPLIES: ReadonlySet<string> = new Set([
   'debug_enter',
@@ -710,7 +715,7 @@ export class GameDebugger {
   private async snapshot(): Promise<DebugAnswer> {
     const unreachable = this.unreachableRefusal();
     if (unreachable !== null) {
-      return unreachable;
+      return { ...unreachable, next: START_AGAIN };
     }
     this.snapshotsAsked += 1;
     const id = this.snapshotsAsked;
@@ -721,7 +726,8 @@ export class GameDebugger {
       SNAPSHOT_PREPARE_MS,
     );
     if (typeof total !== 'number') {
-      return this.unreachableRefusal() ?? { refused: NO_SNAPSHOT };
+      const gone = this.unreachableRefusal();
+      return gone === null ? { refused: NO_SNAPSHOT, next: DEBUG_ENGINE } : { ...gone, next: START_AGAIN };
     }
     const bytes = new Uint8Array(total);
     for (let have = 0; have < total; ) {
@@ -730,6 +736,7 @@ export class GameDebugger {
       if (part === undefined || !isList(part) || part.length === 0 || have + part.length > total) {
         return {
           refused: `The game stopped sending its snapshot after ${have} of ${total} bytes${this.ended ? ', as it exited' : ''}.`,
+          next: this.ended ? START_AGAIN : 'debug_objects snapshot asks for a fresh one',
         };
       }
       bytes.set(part.map(Number), have);

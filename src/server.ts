@@ -238,7 +238,6 @@ import {
   mismatchedRuns,
   SnapshotStore,
   snapshotAnswer,
-  takeSavedSnapshot,
 } from './object-snapshot.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
@@ -7365,10 +7364,6 @@ class GodotServer {
   /** A snapshot of the game this server started, kept, or the refusal saying what it needs. */
   private async takeObjectSnapshot(): Promise<KeptSnapshot | { refusal: ToolResponse }> {
     const kept = this.keptRun();
-    const played = this.activeProcess;
-    if (kept === null && played?.throughEditor === true && !exited(played)) {
-      return await this.snapshotThroughTheEditor(played);
-    }
     if (kept === null) {
       return { refusal: this.noSnapshotToTake() };
     }
@@ -7382,10 +7377,9 @@ class GodotServer {
       };
     }
     if (typeof answered['refused'] === 'string') {
+      const next = answered['next'];
       return {
-        refusal: this.createErrorResponse(answered['refused'], [
-          'editor_run start runs the project on the engine GODOT_PATH names, an editor build, which has the snapshot',
-        ]),
+        refusal: this.createErrorResponse(answered['refused'], typeof next === 'string' ? [next] : []),
       };
     }
     if (!isSnapshotCounts(answered)) {
@@ -7398,42 +7392,20 @@ class GodotServer {
     return this.objectSnapshots.keep(kept.keeper, kept.pid, answered, kept.projectPath ?? '');
   }
 
-  /**
-   * A snapshot of the game the editor plays. The editor is that game's debugger, and its ObjectDB
-   * Profiler fetches every snapshot the game prepares and saves it, so the editor asks for one and
-   * names the file, which is read here and removed.
-   */
-  private async snapshotThroughTheEditor(
-    game: GodotProcess,
-  ): Promise<KeptSnapshot | { refusal: ToolResponse }> {
-    const asked = await this.handleViaBridge('object_snapshot', {});
-    if (asked.isError === true) {
-      return { refusal: asked };
-    }
-    const said = asParams(JSON.parse(asked.content[0]?.text ?? '{}'));
-    const path = readNonEmptyString(said, 'path');
-    const size = said['size'];
-    if (path === undefined || typeof size !== 'number') {
-      return {
-        refusal: this.createErrorResponse(
-          `The editor answered a snapshot with ${JSON.stringify(said).slice(0, 200)}, which names no file.`,
-          ['editor_launch restart brings the editor onto this release of the addon'],
-        ),
-      };
-    }
-    const counts = takeSavedSnapshot(path, size);
-    if (typeof counts === 'string') {
-      return { refusal: this.createErrorResponse(counts) };
-    }
-    const run = `editor:${String(game.pid)}:${String(game.startedAt)}`;
-    return this.objectSnapshots.keep(run, game.pid, counts, game.projectPath ?? '');
-  }
-
-  /** Why no snapshot can be taken now: no game, or one that has ended. */
+  /** Why no snapshot can be taken now: no game, one that has ended, or one the editor plays. */
   private noSnapshotToTake(): ToolResponse {
     const game = this.activeProcess;
     const start =
       'editor_run start with args, savesIn, env or silent, or headless, starts a game this server holds the debugger of';
+    if (game?.throughEditor === true && !exited(game)) {
+      return this.createErrorResponse(
+        "The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way.",
+        [
+          'editor_run stop, then editor_run start with headless: true and args, env or savesIn. This server starts such a game itself and holds its debugger, which takes the snapshot',
+          "The editor's ObjectDB Profiler tab takes and compares snapshots of the played game by hand",
+        ],
+      );
+    }
     return this.createErrorResponse(
       game === null || exited(game)
         ? 'No game is running, so there are no objects to count.'
