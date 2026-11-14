@@ -46921,6 +46921,134 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
   });
 }
 
+/** The thread a stand-in game holds at a breakpoint. */
+const HELD_WORKER = 5;
+
+/**
+ * A stand-in game with thread [constant HELD_WORKER] held at a breakpoint. Each message the keeper
+ * sends goes to [param reply] with the thread it was addressed to, and is tallied by name.
+ */
+async function aGameWithAHeldWorker(
+  reply: (message: string, data: number[], thread: number) => void,
+): Promise<{ peer: GameDebugger; game: Socket; got: Map<string, number> }> {
+  const peer = await GameDebugger.open([]);
+  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  const got = new Map<string, number>();
+  const stream = new DebuggerStream();
+  game.on('data', (chunk: Buffer) => {
+    for (const received of stream.push(chunk)) {
+      if ('message' in received) {
+        got.set(received.message, (got.get(received.message) ?? 0) + 1);
+        reply(received.message, received.data.map(Number), received.thread);
+      }
+    }
+  });
+  await new Promise<void>((settle) => game.once('connect', settle));
+  game.write(framedCommand('debug_enter', [true, 'Breakpoint', true, HELD_WORKER], HELD_WORKER));
+  await delay(200);
+  return { peer, game, got };
+}
+
+/**
+ * A snapshot asked while a worker is held is asked once, even when the answer to it, the answer to
+ * the inspection after it and the worker leaving its break all arrive in one read. A request sent
+ * twice is answered twice, and the spare answers make the next snapshot read as refused.
+ */
+async function testASnapshotAskedOnceAsAHeldWorkerLeaves(): Promise<void> {
+  const taken = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  const prepared: number[] = [];
+  const { peer, game, got } = await aGameWithAHeldWorker((message, [id = 0, begin = 0, end = 0], thread) => {
+    if (message === 'snapshot:request_prepare_snapshot') {
+      prepared.push(id);
+      if (prepared.length > 1) {
+        game.write(framedCommand('snapshot:snapshot_prepared', [id, taken.length], thread));
+      }
+    } else if (message === 'scene:inspect_object' && got.get(message) === 1) {
+      game.write(
+        Buffer.concat([
+          framedCommand('snapshot:snapshot_prepared', [prepared[0] ?? 0, taken.length], thread),
+          framedCommand('scene:inspect_object', [], thread),
+          framedCommand('debug_exit', [], HELD_WORKER),
+        ]),
+      );
+    } else if (message === 'scene:inspect_object') {
+      game.write(framedCommand('scene:inspect_object', [], thread));
+    } else if (message === 'snapshot:request_snapshot_chunk') {
+      game.write(framedCommand('snapshot:snapshot_chunk', [id, [...taken.subarray(begin, end)]], thread));
+    }
+  });
+  try {
+    const counts = {
+      classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+      bytes: taken.length,
+      unnamed: 0,
+      memoryBytes: 1234,
+    };
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the snapshot is taken');
+    await delay(300);
+    assert.deepEqual(
+      [got.get('snapshot:request_prepare_snapshot'), got.get('scene:inspect_object')],
+      [1, 1],
+      'the snapshot and its inspection are each asked once',
+    );
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the next snapshot is taken too');
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * Two snapshots asked together of an engine without the snapshot, while a worker is held, are both
+ * refused as soon as the inspections are answered. The worker leaves its break with what was asked
+ * of it unread, which must not leave either waiting the full 20 s.
+ */
+async function testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld(): Promise<void> {
+  let toWorker = 0;
+  const { peer, game } = await aGameWithAHeldWorker((message, _data, thread) => {
+    if (thread === HELD_WORKER) {
+      toWorker += 1;
+      if (toWorker === 4) {
+        game.write(framedCommand('debug_exit', [], HELD_WORKER));
+      }
+    } else if (message === 'scene:inspect_object') {
+      game.write(framedCommand('scene:inspect_object', [], thread));
+    }
+  });
+  try {
+    const began = Date.now();
+    const answers = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'snapshot' })]);
+    const ms = Date.now() - began;
+    const refused = {
+      refused:
+        'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+      next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+    };
+    assert.deepEqual(answers, [refused, refused], 'both are refused for the engine');
+    assert.ok(ms < 2000, `both are refused at once: ${ms} ms`);
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * A main loop waiting on a held worker answers nothing. The refusal names the worker and the resume
+ * that lets the main loop go on, since asking again changes nothing while the worker stays held.
+ */
+async function testASnapshotStalledByAHeldWorkerNamesTheResume(): Promise<void> {
+  const { peer, game } = await aGameWithAHeldWorker(() => undefined);
+  try {
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), {
+      refused: `The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy. Thread ${HELD_WORKER} is held at a breakpoint, and a main loop that waits on it stops too, while the main loop is what answers a snapshot.`,
+      next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
+    });
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
 /**
  * A snapshot asked as soon as a large one is answered is taken too. The game sends a frame each
  * second while the keeper reads and counts the first, and those frames are still unread as the
@@ -46998,9 +47126,9 @@ async function testASnapshotRightAfterALargeOneIsTaken(): Promise<void> {
 }
 
 /**
- * A snapshot a worker thread held at a breakpoint prepared comes back whole when the thread is let
- * go before the first slice is asked. The thread drops what it has not read as it leaves its break,
- * and the prepared snapshot is the collector's, so the slices are asked of the main loop.
+ * A snapshot asked while a worker thread is held at a breakpoint comes back whole when the worker
+ * leaves its break before the first slice is asked. A worker drops what it has not read as it
+ * leaves, so every snapshot message goes to the main loop, which never does.
  */
 async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void> {
   const engine = resolveGodotPath();
@@ -47046,7 +47174,7 @@ async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void
     '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
       '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
   );
-  const seen = { worker: -1, letGo: false };
+  const seen = { worker: -1, letGo: false, left: false };
   let heldNow = (): void => undefined;
   const held = new Promise<boolean>((settle) => {
     heldNow = () => {
@@ -47074,6 +47202,7 @@ async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void
             seen.letGo = true;
             send('continue', [], seen.worker);
           }
+          seen.left ||= received.message === 'debug_exit' && received.thread === seen.worker;
         },
       },
     ],
@@ -47084,7 +47213,10 @@ async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void
   try {
     assert.ok(await held, 'the worker stops on its breakpoint');
     const answer = await peer.ask({ op: 'snapshot' });
-    assert.ok(seen.letGo, 'the worker was let go mid-fetch');
+    for (let waited = 0; !seen.left && waited < 5000; waited += 100) {
+      await delay(100);
+    }
+    assert.ok(seen.letGo && seen.left, `the worker left its break mid-fetch: ${JSON.stringify(seen)}`);
     assert.ok(
       isSnapshotCounts(answer) &&
         answer.classes.some((one) => one.engineClass === 'Resource' && one.count >= 20000),
@@ -102148,6 +102280,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassIsCountedUnderItsNativeClass,
   testEachSnapshotRefusalNamesItsOwnFix,
   testASnapshotTellsAnEngineWithoutItFromABusyGame,
+  testASnapshotAskedOnceAsAHeldWorkerLeaves,
+  testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld,
+  testASnapshotStalledByAHeldWorkerNamesTheResume,
   testASnapshotRightAfterALargeOneIsTaken,
   testASnapshotOfAThreadLetGoMidFetchComesBackWhole,
   testAnObjectSnapshotNeedsAGameThisServerStarted,
