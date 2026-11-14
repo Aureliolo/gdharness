@@ -60489,16 +60489,16 @@ async function testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting(
 }
 
 /**
- * A share run in an engine already started is admitted by memory on its own, once the share before it
- * has ended, at what its own suites were seen to hold.
+ * A share run in an engine already started is admitted by memory on its own, at what its own suites
+ * were seen to hold, taking over the admission of the share before it.
  */
 async function testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn(): Promise<void> {
   const gib = 1024 ** 3;
   const events: string[] = [];
   class RecordingGate extends MemoryGate {
-    override admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+    override admit(signal: AbortSignal, need: () => number, replacing?: Admitted): Promise<Admitted> {
       events.push(`admit ${String(need() / gib)}`);
-      return super.admit(signal, need).then((admitted) => {
+      return super.admit(signal, need, replacing).then((admitted) => {
         const ended = admitted.ended;
         return Object.assign(admitted, {
           ended: () => {
@@ -60524,8 +60524,8 @@ async function testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn(): Promise<vo
   await runShares(slots, units, declared, 1, ['N'], times, rig.run, undefined, gate);
   assert.deepEqual(
     events,
-    ['admit 5', 'ended', 'admit 3', 'ended', 'admit 1', 'ended'],
-    'each share is admitted at its own need after the one before it ended',
+    ['admit 5', 'admit 3', 'ended', 'admit 1', 'ended', 'ended'],
+    'each share is admitted at its own need, handing over the admission of the one before it',
   );
   assert.equal(new Set(rig.holds).size, 3, 'and told what the engine holds through its own admission');
 }
@@ -60581,6 +60581,139 @@ async function testALaneToldToStopGivesItsSlotBackBetweenShares(): Promise<void>
   assert.equal(rig.engines(), 2, 'and a new engine starts when it is told to go on');
   assert.equal(ran.length, 4, 'every share ran');
   assert.deepEqual(events, ['release A', 'take', 'release B'], 'in a slot it took again');
+}
+
+/** An engine started with display flags ends after its windowed share, then a headless one starts in its lane. */
+async function testAWindowedEngineIsNotReusedForHeadlessShares(): Promise<void> {
+  const units = [
+    { ...SHARE_UNIT('win', 30), windowed: true, accessible: true },
+    ...Array.from({ length: 6 }, (_, at) => SHARE_UNIT(`h${String(at)}`, 30)),
+  ];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const rig = reusingEngines();
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 1, [], {}, rig.run);
+  assert.ok(rig.shares[0]?.windowed === true, 'the windowed share is dealt first');
+  assert.equal(rig.engines(), 2, 'the windowed engine ends after it, and one headless engine takes the rest');
+  assert.deepEqual(
+    rig.shares.map((plan) => plan.windowed),
+    [true, ...rig.shares.slice(1).map(() => false)],
+    'no headless share ran in the windowed engine',
+  );
+  assert.ok(ran.length > 2, 'and the headless shares after the first reuse their engine');
+}
+
+/**
+ * A reused engine keeps its memory admission until it exits, so the gate never counts fewer engines
+ * than are alive, even while the lanes file is read between two shares.
+ */
+async function testAReusedEngineKeepsItsMemoryAdmissionWhileItLives(): Promise<void> {
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const gib = 1024 ** 3;
+  const times = Object.fromEntries(
+    units.map((unit) => [unit.suite, { seconds: 120, cases: { test_one: 120 }, peak: 2 * gib }]),
+  );
+  let admittedNow = 0;
+  let live = 0;
+  let worst = 0;
+  class CountingGate extends MemoryGate {
+    override admit(signal: AbortSignal, need: () => number, replacing?: Admitted): Promise<Admitted> {
+      return super.admit(signal, need, replacing).then((admitted) => {
+        admittedNow += 1;
+        const ended = admitted.ended;
+        let done = false;
+        return Object.assign(admitted, {
+          ended: () => {
+            if (!done) {
+              done = true;
+              admittedNow -= 1;
+            }
+            ended();
+          },
+        });
+      });
+    }
+  }
+  const gate = new CountingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(0), 20);
+  const reading = 200;
+  let releaseSecond: (lock: string) => void = () => undefined;
+  const secondSlot = new Promise<string>((given) => {
+    releaseSecond = given;
+  });
+  const never = (signal: AbortSignal): Promise<never> =>
+    new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(new Error('the run is over'));
+      });
+    });
+  const raised = {
+    ceiling: 2,
+    told: async (): Promise<number | null> => {
+      await delay(reading);
+      return null;
+    },
+    untilTold: (_lane: number, signal: AbortSignal): Promise<void> => never(signal),
+    past: (_above: number, signal: AbortSignal): Promise<number> => never(signal),
+  };
+  const slots = {
+    take: (signal?: AbortSignal): Promise<string> =>
+      new Promise((given, reject) => {
+        signal?.addEventListener('abort', () => {
+          reject(new Error('stopped'));
+        });
+        void secondSlot.then(given);
+      }),
+    release: () => undefined,
+  };
+  const note = (): void => {
+    worst = Math.max(worst, live - admittedNow);
+  };
+  let asked = false;
+  const run = async (
+    _plan: EnginePlan,
+    index: number,
+    lock: string,
+    _holds?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ): Promise<StandInRan> => {
+    live += 1;
+    note();
+    try {
+      await delay(100);
+      let at = index;
+      for (;;) {
+        if (!asked && lock === 'A') {
+          asked = true;
+          setTimeout(() => {
+            releaseSecond('B');
+          }, reading / 2);
+        }
+        const next = await reuse?.next();
+        note();
+        if (next === undefined || next === null) {
+          break;
+        }
+        reuse?.done({ index: at, printed: { started: null } });
+        at = next.index;
+        await delay(300);
+        note();
+      }
+      return { index: at, printed: { started: null } };
+    } finally {
+      live -= 1;
+    }
+  };
+  await runShares(slots, units, declared, 2, ['A'], times, run, undefined, gate, raised);
+  assert.equal(worst, 0, 'no moment had more engines alive than the gate counted admitted');
+}
+
+/** A reused engine's runner prints its share's compile time on a line of its own. */
+function testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine(): void {
+  const printed = readRun('gdharness timing: reused engine, compiled together 450 ms\n');
+  assert.equal(printed.reusedCompiledSeconds, 0.45, 'read in seconds');
+  assert.equal(printed.started, null, 'and not taken for the start of an engine');
+  assert.equal(readRun('').reusedCompiledSeconds, null, 'a share without the line has none');
 }
 
 /** One suite of the shared-engine runs, whose one case runs [param body] and then passes. */
@@ -60700,6 +60833,11 @@ function testAShareInAReusedEngineHasNoStartTime(): void {
     assert.ok(
       (starts[0] ?? 0) > 0 && starts[1] === null,
       `the first share has the start its engine took, and the share after it none rather than 0: ${JSON.stringify(starts)}`,
+    );
+    const compiled = run.result.engines.map((engine) => engine.compiledSeconds);
+    assert.ok(
+      compiled.every((seconds) => seconds !== null),
+      `and each share has the time its suites compiled together, the reused one from the runner's own line: ${JSON.stringify(compiled)}`,
     );
   } finally {
     run.cleanup();
@@ -101679,6 +101817,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaneToldToStopGivesItsSlotBackBetweenShares,
   testARunDealtSharesOverOneSlotStartsOneEngineForThem,
   testAShareInAReusedEngineHasNoStartTime,
+  testAWindowedEngineIsNotReusedForHeadlessShares,
+  testAReusedEngineKeepsItsMemoryAdmissionWhileItLives,
+  testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine,
   testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn,
   testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone,
   testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,

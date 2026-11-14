@@ -130,7 +130,8 @@ output can still read it there. It holds:
 - `startedAfter`: the seconds after the command started that it got a slot and began.
 - `seconds`, and `dealt`, the seconds the times kept had it at.
 - `startSeconds`: its start until gdUnit4 began, null when it never did or when it ran in an engine
-  started for an earlier share. `compiledSeconds` is the part spent compiling its suites together.
+  started for an earlier share. `compiledSeconds` is the part spent compiling its suites together,
+  and for a share in a reused engine the time that share's suites took to compile.
 - `passed` and `windowed`.
 - `suites`: the suites it was handed.
 - `peakBytes`: the most memory it was read holding, or null when it was never read.
@@ -262,9 +263,9 @@ gate's export, say). Then the run says how many were free and hands the work out
 
 Each slot it holds starts an engine on a share. An engine starts in each other slot as that slot
 comes free. An engine that finishes its share while shares remain runs the next in the same
-process, so a share after the first pays no engine start. A lane that is told to stop (see
-[a gate's lanes file](#a-gates-lanes-file)), or whose engine crashed or was ended, takes its next
-share in an engine started for it.
+process, so a share after the first pays no engine start. A lane that is told to stop (see the
+lanes file below), or whose engine crashed or was ended, takes its next share in an engine started
+for it.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
 timeouts, deadline and peak memory. The memory gate admits a share in a running engine at the most
@@ -502,9 +503,10 @@ layout, and runs slower for drawing frames.
 
 Once the windowed engine ends, a headless engine follows it in the same slot without giving the
 slot back. It is dealt as though it began then, so a few quick windowed suites never leave a slot
-idle. With `--engines 1` the run is that one slot, the windowed engine and then a headless one. On a
-machine with room for fewer engines than asked for, the slots run one after the other. The line
-announcing the run says so.
+idle. The windowed engine takes no second share, since its display flags belong to the windowed
+suites. With `--engines 1` the run is that one slot, the windowed engine and then a headless one.
+On a machine with room for fewer engines than asked for, the slots run one after the other. The
+line announcing the run says so.
 
 An ordered run (`--order`) is one engine, or two when it mixes the kinds: a windowed engine for the
 suites needing a window and a headless one after it. Each keeps the order of the run within it.

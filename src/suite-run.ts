@@ -1330,9 +1330,16 @@ export class MemoryGate {
   /**
    * Waits until an engine needing [param need] has room, one caller at a time, and answers its
    * admission. [param need] is asked at each look, since the share a caller would draw changes as
-   * others draw theirs.
+   * others draw theirs. An engine that goes on to another share passes the admission it holds as
+   * [param replacing]: the engine is not counted against itself, and the new admission takes the old
+   * one's place at once, so the gate never counts fewer engines than are alive.
    */
-  admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+  admit(signal: AbortSignal, need: () => number, replacing?: Admitted): Promise<Admitted> {
+    // A caller replacing an admission does not wait its turn, and is not counted as waiting: the
+    // caller ahead of it may be waiting for the very engine it replaces to end.
+    if (replacing !== undefined) {
+      return this.room(signal, need, replacing);
+    }
     this.askers += 1;
     const admitted = this.turn.then(() => this.room(signal, need));
     this.turn = admitted.catch(() => undefined);
@@ -1348,17 +1355,18 @@ export class MemoryGate {
     return this.askers;
   }
 
-  private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
+  private async room(signal: AbortSignal, need: () => number, replacing?: Admitted): Promise<Admitted> {
     let unmark: (() => void) | undefined;
     let needed = 0;
     try {
       for (;;) {
         signal.throwIfAborted();
         needed = need();
+        const others = [...this.going].filter((one) => one !== replacing);
         // Summed before the read, as the memory read is taken before a reading told while it is
         // out. Summed after, that growth would count as owed no longer and as free memory too.
-        const owed = [...this.going].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
-        if (this.going.size === 0 || roomForAnother(await this.read(), owed, needed)) {
+        const owed = others.reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
+        if (others.length === 0 || roomForAnother(await this.read(), owed, needed)) {
           break;
         }
         unmark ??= this.slots.markWaiting();
@@ -1377,6 +1385,7 @@ export class MemoryGate {
         engine.held = bytes;
       },
     };
+    replacing?.ended();
     this.going.add(engine);
     return engine;
   }
@@ -2146,24 +2155,17 @@ export async function runShares<
       return null;
     }
     const { lock, admitted } = waited;
-    const drawn = draw(at, admitted);
-    return drawn === null ? null : { lock, ...drawn };
+    const drawn = draw(at);
+    if (drawn === null) {
+      admitted?.ended();
+      return null;
+    }
+    return { lock, admitted, ...drawn };
   };
-  /**
-   * Draws the share for lane [param at], numbering its engine, or answers null once every share is
-   * handed out. [param admitted] is ended then.
-   */
-  const draw = (
-    at: number,
-    admitted: Admitted | undefined,
-  ): {
-    readonly admitted: Admitted | undefined;
-    readonly plan: EnginePlan;
-    readonly index: number;
-  } | null => {
+  /** Draws the share for lane [param at], numbering its engine, or answers null once every share is handed out. */
+  const draw = (at: number): { readonly plan: EnginePlan; readonly index: number } | null => {
     const plan = shares.next(at);
     if (plan === null) {
-      admitted?.ended();
       return null;
     }
     if (empty()) {
@@ -2171,12 +2173,15 @@ export async function runShares<
     }
     const index = engines;
     engines += 1;
-    return { admitted, plan, index };
+    return { plan, index };
   };
-  /** Waits for memory to have room for the next share, or answers null once every share is handed out. */
-  const admittedByMemory = async (): Promise<Admitted | undefined | null> => {
+  /**
+   * Waits for memory to have room for the next share, or answers null once every share is handed out.
+   * [param replacing] is the admission of the engine that goes on to it, which the new one takes over.
+   */
+  const admittedByMemory = async (replacing?: Admitted): Promise<Admitted | undefined | null> => {
     try {
-      return await memory?.admit(handedOut.signal, needed);
+      return await memory?.admit(handedOut.signal, needed, replacing);
     } catch (error) {
       if (handedOut.signal.aborted) {
         return null;
@@ -2188,27 +2193,24 @@ export async function runShares<
    * Draws the share an engine of lane [param at] runs after the one it has finished, in the slot the
    * lane holds. Answers null when every share is handed out or the lanes file tells the lane to stop,
    * which ends the engine so the lane gives its slot back before it draws again. A wait for memory
-   * keeps the engine idle, which holds what it has.
+   * keeps the engine idle, which holds what it has. The engine's admission, in [param going], is
+   * handed to the next share's and is never released while the engine lives.
    */
   const drawnInPlace = async (
     at: number,
-  ): Promise<{
-    readonly admitted: Admitted | undefined;
-    readonly plan: EnginePlan;
-    readonly index: number;
-  } | null> => {
+    going: { admitted: Admitted | undefined },
+  ): Promise<{ readonly plan: EnginePlan; readonly index: number } | null> => {
     while (!empty() && !(await fallenPast(at))) {
-      const admitted = await admittedByMemory();
+      const admitted = await admittedByMemory(going.admitted);
       if (admitted === null) {
         return null;
       }
-      const fallen = raised !== undefined && (await fallenPast(at));
-      if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
-        return draw(at, admitted);
-      }
-      admitted?.ended();
-      if (fallen) {
+      going.admitted = admitted ?? going.admitted;
+      if (await fallenPast(at)) {
         return null;
+      }
+      if (admitted === undefined || needed() <= admitted.need) {
+        return draw(at);
       }
     }
     return null;
@@ -2227,7 +2229,7 @@ export async function runShares<
     at: number,
   ): Promise<T[]> => {
     const ran: T[] = [];
-    let going = first.admitted;
+    const going = { admitted: first.admitted };
     // What each engine took to start is what the shares after it are sized by. A share run in an
     // engine already started has no start of its own.
     const noted = (one: T): void => {
@@ -2245,23 +2247,23 @@ export async function runShares<
         if (empty() || (memory?.waiting ?? 0) > 0 || (await fallenPast(at))) {
           return null;
         }
-        going?.ended();
-        going = undefined;
-        const following = await drawnInPlace(at);
-        going = following?.admitted;
+        const following = await drawnInPlace(at, going);
         if (following === null) {
           return null;
         }
-        const holds = following.admitted?.holds;
+        const holds = going.admitted?.holds;
         return { plan: following.plan, index: following.index, ...(holds === undefined ? {} : { holds }) };
       },
       done: noted,
     };
     try {
-      noted(await run(first.plan, first.index, first.lock, first.admitted?.holds, reuse));
+      // A windowed engine starts with the display flags of a windowed share, which no headless share
+      // may run under, so it ends after its share and a headless engine follows it in the same slot.
+      const reusable = first.plan.windowed ? undefined : reuse;
+      noted(await run(first.plan, first.index, first.lock, first.admitted?.holds, reusable));
       return ran;
     } finally {
-      going?.ended();
+      going.admitted?.ended();
     }
   };
   const lane = async (at: number): Promise<T[]> => {
@@ -2798,7 +2800,7 @@ function engineRecordsOf(ran: readonly EngineRan[], startedAt: number, logs: Run
     startedAfter: (engine.began - startedAt) / 1000,
     seconds: engine.seconds,
     startSeconds: engine.printed.started?.seconds ?? null,
-    compiledSeconds: engine.printed.started?.compiledSeconds ?? null,
+    compiledSeconds: engine.printed.started?.compiledSeconds ?? engine.printed.reusedCompiledSeconds,
     dealt: engine.plan.cost,
     passed: engine.verdict.passed,
     windowed: engine.plan.windowed,

@@ -113,6 +113,8 @@ export interface RunPrinted {
   readonly engineVersion: string | null;
   /** What the engine spent before its first suite, or null when the run never opened a session. */
   readonly started: EngineStart | null;
+  /** The time a reused engine spent compiling its share's suites together, or null for any other share. */
+  readonly reusedCompiledSeconds: number | null;
   /** The orphans each case or suite's hooks left, as the runner named them. */
   readonly orphansLeft: readonly OrphansLeft[];
   /** The rows gdUnit4 skipped for data that does not fit their case's parameters. */
@@ -135,6 +137,7 @@ interface MismatchedRow {
 
 // Printed by the runner in src/godot/tests/listed.gd, TIMING there.
 const STARTED_TIMING = /^gdharness timing: started (\d+) ms, compiled together (\d+) ms\s*$/;
+const REUSED_TIMING = /^gdharness timing: reused engine, compiled together (\d+) ms\s*$/;
 const SET_UP_TIMING = /^gdharness timing: (res:\/\/.+?\.gd) loaded (\d+) ms, before (\d+) ms\s*$/;
 const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\))?\s+(${GDUNIT_TIME})\s*$`);
 // The text keeps its trailing blanks here and loses them where it is read: a pattern leaving them
@@ -237,6 +240,7 @@ export function readRun(printed: string): RunPrinted {
     lastCase: null,
     engineVersion: null,
     started: null,
+    reusedCompiledSeconds: null,
     reasonEnds: -1,
   };
   for (const [at, line] of lines.entries()) {
@@ -264,6 +268,7 @@ export function readRun(printed: string): RunPrinted {
     leftOut: state.leftOut,
     engineVersion: state.engineVersion,
     started: state.started,
+    reusedCompiledSeconds: state.reusedCompiledSeconds,
     orphansLeft: state.orphansLeft,
     mismatched: state.mismatched,
     unrunnable: state.unrunnable,
@@ -296,6 +301,7 @@ interface RunState {
   lastCase: string | null;
   engineVersion: string | null;
   started: EngineStart | null;
+  reusedCompiledSeconds: number | null;
   /** The last line of a skip's reason, which no other reading of a skip looks into. */
   reasonEnds: number;
 }
@@ -343,6 +349,15 @@ const readStartTiming: LineReader = (state, line) => {
     return false;
   }
   state.started = { seconds: Number(startTimed[1]) / 1000, compiledSeconds: Number(startTimed[2]) / 1000 };
+  return true;
+};
+
+const readReusedTiming: LineReader = (state, line) => {
+  const reused = REUSED_TIMING.exec(line);
+  if (reused === null) {
+    return false;
+  }
+  state.reusedCompiledSeconds = Number(reused[1]) / 1000;
   return true;
 };
 
@@ -517,6 +532,7 @@ const LINE_READERS: readonly LineReader[] = [
   readBanner,
   readOrphansLeft,
   readStartTiming,
+  readReusedTiming,
   readSetUpTiming,
   readLeftOut,
   readSuiteOpened,
