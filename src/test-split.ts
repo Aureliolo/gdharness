@@ -65,13 +65,15 @@ export function notStartedAnswer(
   kind: string,
   paths: readonly string[],
   limit: number,
+  left: number,
 ): Record<string, unknown> {
+  const why = `only ${String(left)} ms of the timeoutMs of ${String(limit)} ms was left, and an engine needs ${String(ENGINE_START_FLOOR_MS)} ms to start`;
   return {
     passed: false,
-    verdict: `the timeoutMs of ${String(limit)} ms was spent before the ${kind} engine started`,
+    verdict: `the ${kind} engine was not started: ${why}`,
     tests: 0,
     suitesNotRun: paths,
-    note: `${paths.join(', ')} did not run: the ${kind} engine was not started, since the ${String(limit)} ms of timeoutMs was spent before it could.`,
+    note: `${paths.join(', ')} did not run: ${why}.`,
   };
 }
 
@@ -198,8 +200,17 @@ export function mergedTestAnswers(
         .map(String),
     ),
   ];
+  const started = answers.filter((answer) => answer['suitesNotRun'] === undefined);
+  const named = (wanted: boolean): string =>
+    answers
+      .flatMap((answer, at) =>
+        (answer['suitesNotRun'] === undefined) === wanted ? [labels[at] ?? String(at)] : [],
+      )
+      .join(' and ');
   const note = [
-    TWO_ENGINES_NOTE,
+    started.length === answers.length
+      ? TWO_ENGINES_NOTE
+      : `Ran as one engine, the ${named(true)} one. The ${named(false)} suites were not started.`,
     typeof merged['note'] === 'string' ? merged['note'] : undefined,
     unmatched.length > 0 ? unmatchedSaid(unmatched) : undefined,
   ]
@@ -213,7 +224,7 @@ export function mergedTestAnswers(
     ...merged,
     ignoreUnmatched: unmatched.length > 0 ? unmatched : undefined,
     ...(commandLines.length > 0 ? { arguments: Object.fromEntries(commandLines) } : {}),
-    engines: answers.filter((answer) => answer['suitesNotRun'] === undefined).length,
+    engines: started.length,
     note,
   };
 }

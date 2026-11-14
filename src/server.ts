@@ -4274,6 +4274,10 @@ function keepCutAcross(
   const kept = takeCutTestRun(root);
   const inner = kept !== null && Date.parse(kept.cutAt) >= since ? kept : null;
   if (inner === null && left.length === 0) {
+    // Nothing of this call to keep, so a record an earlier cut call left stays as it was.
+    if (kept !== null) {
+      keepCutTestRun(root, kept);
+    }
     return;
   }
   const done = inner === null ? ran : ran.slice(0, -1);
@@ -4291,6 +4295,15 @@ export interface EngineRunner {
   run(args: OperationParams): Promise<ToolResponse>;
   aborted(): boolean;
   now(): number;
+}
+
+/** The runner of a call being answered: [param run] for each engine, the call's own signal and the clock. */
+export function engineRunnerOf(run: (args: OperationParams) => Promise<ToolResponse>): EngineRunner {
+  return {
+    run,
+    aborted: () => callSignal()?.aborted === true,
+    now: () => Date.now(),
+  };
 }
 
 /**
@@ -4312,7 +4325,9 @@ export async function runEngines(
   for (const [at, half] of plan.halves.entries()) {
     const left = timeLeft(limit, began, runner.now());
     if (at > 0 && left < ENGINE_START_FLOOR_MS) {
-      parsed.push(notStartedAnswer(ENGINE_KINDS[at] ?? 'next', readStringArray(half, 'path') ?? [], limit));
+      parsed.push(
+        notStartedAnswer(ENGINE_KINDS[at] ?? 'next', readStringArray(half, 'path') ?? [], limit, left),
+      );
       continue;
     }
     const answer = await runner.run({ ...args, ...half, timeoutMs: at === 0 ? limit : left });
@@ -9450,11 +9465,11 @@ class GodotServer {
     if (later.length === 0) {
       return await this.runTests({ ...args, ...only });
     }
-    return await runEngines(plan, args, {
-      run: async (given) => await this.runTests(given),
-      aborted: () => callSignal()?.aborted === true,
-      now: () => Date.now(),
-    });
+    return await runEngines(
+      plan,
+      args,
+      engineRunnerOf(async (given) => await this.runTests(given)),
+    );
   }
 
   /**

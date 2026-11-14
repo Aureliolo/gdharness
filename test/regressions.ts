@@ -513,6 +513,7 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
+  engineRunnerOf,
   enginesOfTestRun,
   enterASilentCrash,
   exportAnswer,
@@ -61515,7 +61516,7 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
       verdict: 'timed out',
       hung: false,
       timedOut: false,
-      silentForMs: 30,
+      silentForMs: 20,
       arguments: ['--w'],
     }),
     reply('The engine hung in Y.', {
@@ -61523,7 +61524,7 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
       verdict: 'timed out; hung',
       hung: true,
       timedOut: true,
-      silentForMs: 20,
+      silentForMs: 30,
       arguments: ['--h'],
     }),
   ]);
@@ -61585,12 +61586,19 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
   const spentAnswer = jsonOfLast(await spent.run());
   assert.equal(spent.seen.length, 1, 'no second engine is started');
   assert.deepEqual(spentAnswer['suitesNotRun'], headlessPaths, 'its suites are named as not run');
-  assert.match(
-    String(spentAnswer['verdict']),
-    /the timeoutMs of 20000 ms was spent before the headless engine started/,
+  assert.equal(
+    spentAnswer['verdict'],
+    'timed out; the headless engine was not started: only 1000 ms of the timeoutMs of 20000 ms was left, and an engine needs 5000 ms to start',
+    'the verdict says what was left and what an engine needs, in the caller own numbers',
   );
   assert.doesNotMatch(JSON.stringify(spentAnswer), /\b1 ms\b/, 'no sentence blames a limit of 1 ms');
   assert.equal(spentAnswer['engines'], 1, 'one engine ran');
+  assert.match(
+    String(spentAnswer['note']),
+    /^Ran as one engine, the windowed one\. The headless suites were not started\./,
+    'and the note does not say two engines ran',
+  );
+  assert.doesNotMatch(String(spentAnswer['note']), /two engines/);
 
   // A cut inside the headless engine keeps the windowed engine's results beside what is not yet run.
   const cutInside = driven(
@@ -61642,6 +61650,59 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
   assert.ok(betweenRecord !== null, 'a record is kept');
   assert.deepEqual(betweenRecord.paths, [windowedPath, ...headlessPaths]);
   assert.deepEqual(betweenRecord.suitesFinished, [windowedPath]);
+
+  // A record an earlier cut call left stays when this call is cut as its last engine answers.
+  const earlier: CutTestRun = { cutAt: '2000-01-01T00:00:00.000Z', paths: ['res://tests/old_test.gd'] };
+  keepCutTestRun(root, earlier);
+  const lastCut = driven([reply({ passed: true, tests: 1 }), reply({ passed: true, tests: 1 })], {
+    aborted: (call) => call === 2,
+    clock: [Date.now()],
+  });
+  await lastCut.run();
+  assert.deepEqual(takeCutTestRun(root), earlier, 'the earlier record is kept as a single run keeps it');
+
+  // A path that was not there is not a suite that finished.
+  const gone = 'res://tests/gone_test.gd';
+  await runEngines(
+    plan({ halves: [{ path: [windowedPath, gone] }, { path: headlessPaths }] }),
+    {},
+    {
+      run: () => Promise.resolve(reply({ passed: false, missing: [gone] })),
+      aborted: () => true,
+      now: () => 0,
+    },
+  );
+  assert.deepEqual(takeCutTestRun(root)?.suitesFinished, [windowedPath], 'a missing path is not finished');
+
+  // Through the runner a call is answered with: its own signal ends the run, and its clock is read.
+  const spanned: unknown[] = [];
+  const slowEngine = async (given: OperationParams, abort?: AbortController): Promise<ToolResponse> => {
+    spanned.push(given['timeoutMs']);
+    await new Promise((settle) => setTimeout(settle, 60));
+    abort?.abort();
+    return reply({ passed: true, tests: 1 });
+  };
+  await runEngines(
+    plan(),
+    { timeoutMs: 20_000 },
+    engineRunnerOf(async (given) => await slowEngine(given)),
+  );
+  assert.equal(spanned[0], 20_000);
+  assert.ok(Number(spanned[1]) <= 19_950, `the clock is read between engines: ${String(spanned[1])}`);
+  const controller = new AbortController();
+  await withCallSignal(controller.signal, async () => {
+    await runEngines(
+      plan(),
+      { timeoutMs: 20_000 },
+      engineRunnerOf(async (given) => await slowEngine(given, controller)),
+    );
+  });
+  assert.equal(spanned.length, 3, 'the call signal ends the run before the second engine');
+  assert.deepEqual(
+    takeCutTestRun(root)?.paths,
+    [windowedPath, ...headlessPaths],
+    'and the run is kept as cut',
+  );
 
   // A suite whose cases are all left out of the window gets no window in its engine.
   const needs = {
