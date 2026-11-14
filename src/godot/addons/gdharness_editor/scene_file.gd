@@ -949,31 +949,45 @@ static func links_out_in(args: Dictionary) -> PackedStringArray:
 ## one and does not come back into the project, or "". Case is ignored, since a scene may spell a
 ## file in another case where the file system ignores it.
 static func out_through_link(file: String, links_out: PackedStringArray) -> String:
+	var link: String = link_out_over(file, links_out)
+	if link.is_empty():
+		return ""
+	var ends: String = _ends_at(file, OS.get_name() in ["Windows", "macOS"])
+	if ends == "inside":
+		return ""
+	if ends == "unknown":
+		return (
+			(
+				"%s runs through links that cannot be followed to the end (more than %d, a "
+				+ "ring, or one that cannot be read), so whether it leads out of the "
+				+ "project is not known, and it is not written here."
+			)
+			% [file, MOST_LINKS]
+		)
+	return (
+		(
+			"%s leads out of the project through the link %s, and only what is inside "
+			+ "the project is written here."
+		)
+		% [file, link]
+	)
+
+
+## Whether [param file] is one of [param links_out] or lies below one, wherever the link ends, so a
+## scene found there is left unread. Case is ignored as [method out_through_link] says.
+static func behind_a_link_out(file: String, links_out: PackedStringArray) -> bool:
+	return not link_out_over(file, links_out).is_empty()
+
+
+## The first of [param links_out] that [param file] is or lies below, or "".
+static func link_out_over(file: String, links_out: PackedStringArray) -> String:
 	# Windows and macOS name a file in any case, Linux only in the case it was made in.
 	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
 	var lowered: String = file.to_lower() if any_case else file
 	for link: String in links_out:
 		var held: String = link.to_lower() if any_case else link
 		if lowered == held or (held.ends_with("/") and lowered.begins_with(held)):
-			var ends: String = _ends_at(file, any_case)
-			if ends == "inside":
-				return ""
-			if ends == "unknown":
-				return (
-					(
-						"%s runs through links that cannot be followed to the end (more than %d, a "
-						+ "ring, or one that cannot be read), so whether it leads out of the "
-						+ "project is not known, and it is not written here."
-					)
-					% [file, MOST_LINKS]
-				)
-			return (
-				(
-					"%s leads out of the project through the link %s, and only what is inside "
-					+ "the project is written here."
-				)
-				% [file, link]
-			)
+			return link
 	return ""
 
 
