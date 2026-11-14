@@ -27,6 +27,7 @@ import {
   type SentValue,
   TYPE_NAMES,
 } from './godot-variant.js';
+import { countSnapshot, SNAPSHOT_SLICE_BYTES } from './object-snapshot.js';
 import { isRecord } from './records.js';
 import { shippedAddonsDirectory } from './setup.js';
 
@@ -63,6 +64,7 @@ export const DEBUG_REQUESTS = {
   variables: { frame: 'number' },
   evaluate: { frame: 'number', expression: 'string' },
   output: {},
+  snapshot: {},
 } as const;
 
 type FieldValue<Field> = Field extends 'string'
@@ -199,6 +201,15 @@ export const READ_MS = 5000;
  * a game of 681 classes, where every later one took a tenth of a second.
  */
 export const EVALUATE_MS = 60_000;
+/**
+ * How long a game is given to serialise every object it holds. A game with no answer by then has
+ * no snapshot capture: the engine drops a message for a capture it lacks without a word.
+ */
+const SNAPSHOT_PREPARE_MS = 20_000;
+/** How long each slice of a snapshot is waited for. The game sends one each frame it is asked. */
+const SNAPSHOT_SLICE_MS = 10_000;
+/** The refusal of a game that never answered a snapshot. */
+const NO_SNAPSHOT = `The game answered no object snapshot within ${SNAPSHOT_PREPARE_MS / 1000} s. An engine has the snapshot only when built with debug features, as the editor and the debug export templates are, so a game run on a release template has none.`;
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
 const REPLIES: ReadonlySet<string> = new Set([
   'debug_enter',
@@ -382,6 +393,8 @@ export class GameDebugger {
   private readonly onClosed: (() => void)[] = [];
   private readonly output: string[] = [];
   private outputDropped = 0;
+  /** How many snapshots have been asked for, which numbers each one's requests. */
+  private snapshotsAsked = 0;
   /** Why the expressions evaluated since the last evaluate began failed, as the engine said it. */
   private readonly expressionErrors: string[] = [];
   /**
@@ -649,6 +662,11 @@ export class GameDebugger {
 
   /** Answers [param request], after every request asked before it. */
   ask(request: DebugRequest): Promise<DebugAnswer> {
+    // A snapshot reads only replies carrying its own id, so one asked beside another, or beside a
+    // stack read, waits for nothing but the game.
+    if (request.op === 'snapshot') {
+      return this.snapshot();
+    }
     const answered = this.queue.then(() => this.answer(request));
     this.queue = answered.catch(() => undefined);
     return answered;
@@ -678,9 +696,67 @@ export class GameDebugger {
         return await this.variables(request.frame);
       case 'evaluate':
         return await this.evaluate(request.frame, request.expression);
+      case 'snapshot':
+        return await this.snapshot();
       default:
         return { refused: `Nothing here answers ${JSON.stringify(request)}.` };
     }
+  }
+
+  /**
+   * The engine's object snapshot of the game, counted by class. Each request has an id of its own,
+   * and the game answers every message with the id it was asked for, so two never share replies.
+   */
+  private async snapshot(): Promise<DebugAnswer> {
+    const unreachable = this.unreachableRefusal();
+    if (unreachable !== null) {
+      return unreachable;
+    }
+    this.snapshotsAsked += 1;
+    const id = this.snapshotsAsked;
+    const total = await this.snapshotReply(
+      id,
+      'request_prepare_snapshot',
+      [id, 'gdharness'],
+      SNAPSHOT_PREPARE_MS,
+    );
+    if (typeof total !== 'number') {
+      return this.unreachableRefusal() ?? { refused: NO_SNAPSHOT };
+    }
+    const bytes = new Uint8Array(total);
+    for (let have = 0; have < total; ) {
+      const ask = [id, have, have + SNAPSHOT_SLICE_BYTES];
+      const part = await this.snapshotReply(id, 'request_snapshot_chunk', ask, SNAPSHOT_SLICE_MS);
+      if (part === undefined || !isList(part) || part.length === 0 || have + part.length > total) {
+        return {
+          refused: `The game stopped sending its snapshot after ${have} of ${total} bytes${this.ended ? ', as it exited' : ''}.`,
+        };
+      }
+      bytes.set(part.map(Number), have);
+      have += part.length;
+    }
+    return { ...countSnapshot(bytes) };
+  }
+
+  /**
+   * What the game answers [param request] of snapshot [param id] with, after the id: a size for a
+   * prepare and the bytes for a slice. Undefined when nothing came within [param ms].
+   */
+  private async snapshotReply(
+    id: number,
+    request: 'request_prepare_snapshot' | 'request_snapshot_chunk',
+    data: readonly SentValue[],
+    ms: number,
+  ): Promise<GodotValue | undefined> {
+    const reply =
+      request === 'request_prepare_snapshot' ? 'snapshot:snapshot_prepared' : 'snapshot:snapshot_chunk';
+    const answered = this.next(
+      (received) => 'message' in received && received.message === reply && received.data[0] === id,
+      ms,
+    );
+    this.send(`snapshot:${request}`, data, this.held?.thread ?? MAIN_THREAD);
+    const got = await answered;
+    return got !== null && 'message' in got ? got.data[1] : undefined;
   }
 
   /** The refusal for a game whose debugger connection is not there, or null when it is. */

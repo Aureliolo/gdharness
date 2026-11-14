@@ -2987,6 +2987,38 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     defaultOperation: 'stack',
   },
+  {
+    name: 'debug_objects',
+    title: 'Object snapshots',
+    description:
+      "Counts the objects the running game holds by class, from the engine's own object snapshot, and compares two snapshots to show what an action kept alive. Each snapshot is kept under the id its answer names, until this server ends. A scripted object is counted under its script's class_name, or under the script's path when it declares none, with its engine class beside it. kind says whether a class is RefCounted, a Node or neither, and refCounted and nodes total them. Only for a game this server started, since the editor's ObjectDB Profiler takes every snapshot a game the editor plays sends. editor_run start with args, savesIn, env or silent starts one, as does a headless start or one with no editor. The engine has the snapshot only when built with debug features, as the editor and debug export templates are.",
+    parameters: {
+      before: {
+        type: 'string',
+        ops: ['diff'],
+        description: 'diff: the id of the earlier snapshot, such as s1.',
+      },
+      after: {
+        type: 'string',
+        ops: ['diff'],
+        description: 'diff: the id of the later snapshot. Default a snapshot taken now, kept and named.',
+      },
+    },
+    requires: [],
+    operations: {
+      snapshot: {
+        effect: 'read',
+        summary: 'take a snapshot, keep it and answer its counts by class, most objects first',
+        requires: [],
+      },
+      diff: {
+        effect: 'read',
+        summary:
+          'each class whose count changed between two snapshots of the same run, with before, after and change, biggest change first. unchangedClasses counts the rest',
+        requires: ['before'],
+      },
+    },
+  },
 ];
 
 const SPECS_BY_NAME: Readonly<Record<string, ToolSpec>> = dictionary(

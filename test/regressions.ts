@@ -31,7 +31,7 @@ import { text as pipedText } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
-import { inflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
@@ -361,6 +361,7 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
+import { SNAPSHOT_SLICE_BYTES } from '../src/object-snapshot.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   commandProjectRefusal,
@@ -12158,7 +12159,7 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 163;
+const READ_IN_WORDS = 165;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -12492,7 +12493,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.deepEqual(
       counts,
-      { read: 13, additive: 4, destructive: 14 },
+      { read: 14, additive: 4, destructive: 14 },
       'each class holds what the table holds',
     );
 
@@ -23308,6 +23309,7 @@ async function testADebugRequestIsCheckedAgainstItsTable(): Promise<void> {
     variables: { op: 'variables', frame: 0 },
     evaluate: { op: 'evaluate', frame: 1, expression: 'a + 1' },
     output: { op: 'output' },
+    snapshot: { op: 'snapshot' },
   };
   assert.deepEqual(
     Object.keys(valid).toSorted(),
@@ -46648,6 +46650,333 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
         ENGINE_CALL_TIMEOUT_MS,
       );
     }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/** [param value] in Godot's binary Variant format, for the values a stand-in snapshot holds. */
+function encodedSnapshotValue(value: unknown): Buffer {
+  const word = (number: number): Buffer => {
+    const out = Buffer.alloc(4);
+    out.writeUInt32LE(number);
+    return out;
+  };
+  if (typeof value === 'number') {
+    const out = Buffer.alloc(4);
+    out.writeInt32LE(value);
+    return Buffer.concat([word(2), out]);
+  }
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    return Buffer.concat([word(4), word(bytes.length), bytes, Buffer.alloc((4 - (bytes.length % 4)) % 4)]);
+  }
+  if (Array.isArray(value)) {
+    return Buffer.concat([word(28), word(value.length), ...value.map((one) => encodedSnapshotValue(one))]);
+  }
+  assert.ok(isRecord(value), 'a stand-in snapshot holds numbers, strings, lists and records');
+  const entries = Object.entries(value);
+  return Buffer.concat([
+    word(27),
+    word(entries.length),
+    ...entries.flatMap(([key, one]) => [encodedSnapshotValue(key), encodedSnapshotValue(one)]),
+  ]);
+}
+
+/**
+ * A snapshot as the engine's collector deflates it: a header, then each object's id, engine class,
+ * properties and the extra the collector adds. Each object holds a random text, so the snapshot
+ * does not deflate below the size [param count] objects make.
+ */
+function standInSnapshot(count: number, script: string, kind: 'ref_count' | 'node_name'): Buffer {
+  const all: unknown[] = [{ mem_usage: 1234 }];
+  for (let at = 0; at < count; at += 1) {
+    all.push(
+      at + 1,
+      kind === 'ref_count' ? 'Resource' : 'Node',
+      [
+        ['script', 24, 17, 'Script', 6, script],
+        ['label', 4, 0, '', 6, randomUUID()],
+      ],
+      { [kind]: 1 },
+    );
+  }
+  return deflateSync(encodedSnapshotValue(all));
+}
+
+/**
+ * Two snapshots asked for together each get their own, and a snapshot that takes several slices
+ * comes back whole.
+ *
+ * The game answers every snapshot message with the id it was asked for, and nothing else tells two
+ * apart. So the stand-in game answers the second request first, and slices them in turns.
+ */
+async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<void> {
+  const big = standInSnapshot(5000, 'res://item.gd', 'ref_count');
+  const small = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  assert.ok(big.length > 2 * SNAPSHOT_SLICE_BYTES, `the big one takes several slices: ${big.length}`);
+  const peer = await GameDebugger.open([]);
+  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  try {
+    const stream = new DebuggerStream();
+    const asked: number[] = [];
+    const held = new Map<number, Buffer>();
+    const prepare = (id: number): void => {
+      asked.push(id);
+      held.set(id, asked.length === 1 ? big : small);
+      for (const one of asked.length === 2 ? asked.toReversed() : []) {
+        game.write(framedCommand('snapshot:snapshot_prepared', [one, held.get(one)?.length ?? 0]));
+      }
+    };
+    const answer = (message: string, [id = 0, begin = 0, end = 0]: number[]): void => {
+      if (message === 'snapshot:request_prepare_snapshot') {
+        prepare(id);
+      } else if (message === 'snapshot:request_snapshot_chunk') {
+        const part = [...(held.get(id) ?? Buffer.alloc(0)).subarray(begin, end)];
+        game.write(framedCommand('snapshot:snapshot_chunk', [id, part]));
+      }
+    };
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          answer(received.message, received.data.map(Number));
+        }
+      }
+    });
+    await new Promise<void>((settle) => game.once('connect', settle));
+    const [first, second] = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'snapshot' })]);
+    assert.deepEqual(
+      [first, second],
+      [
+        {
+          classes: [{ engineClass: 'Resource', script: 'res://item.gd', kind: 'RefCounted', count: 5000 }],
+          bytes: big.length,
+          memoryBytes: 1234,
+        },
+        {
+          classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+          bytes: small.length,
+          memoryBytes: 1234,
+        },
+      ],
+      'each request reads the snapshot asked for under its own id, whole',
+    );
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * A snapshot with no game running says how to start one, and a diff names the ids it does have.
+ */
+async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> {
+  await withStdioServer(async (call) => {
+    assert.match(
+      await call('debug_objects', { op: 'snapshot' }),
+      /^No game is running, so there are no objects to count\.[\s\S]*editor_run start/,
+    );
+    assert.match(
+      await call('debug_objects', { op: 'diff', before: 's1', after: 's2' }),
+      /^No snapshot is kept as "s1"\. None has been taken since this server started\.[\s\S]*debug_objects snapshot/,
+    );
+  });
+}
+
+/**
+ * A game the editor plays is refused with why and with the start that makes one this server can
+ * snapshot: the editor is its debugger, and its own profiler takes the snapshot messages.
+ */
+async function testAnObjectSnapshotOfAPlayedGameIsRefused(): Promise<void> {
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'play_scene' || tool === 'playing_status'
+          ? { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter }
+          : { ok: true },
+    async ({ server, start }) => {
+      await start(300);
+      const said = textOf(
+        await server.request('tools/call', { name: 'debug_objects', arguments: { op: 'snapshot' } }, 30_000),
+      );
+      assert.match(
+        said ?? '',
+        /^The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler takes every snapshot such a game sends\.[\s\S]*editor_run stop, then editor_run start with args/,
+      );
+    },
+  );
+}
+
+/**
+ * The lane's proof on a real engine: a hundred Resources kept by one call show as +100 of their
+ * class_name between a snapshot before and one after, and the classes the call did not touch do not
+ * move. A fresh game's counts keep RefCounted and Node apart, thousands of objects come back whole
+ * over several slices, and a snapshot of an earlier run is refused for a diff.
+ */
+async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('object snapshot regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshots-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshots-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Snapshots"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'item.gd'),
+    'class_name Item\nextends Resource\n\n@export var label: String = ""\n',
+  );
+  writeFileSync(
+    join(project, 'note.gd'),
+    'class_name Note\nextends Resource\n\n@export var text: String = ""\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'const ITEM: GDScript = preload("res://item.gd")',
+      'const NOTE: GDScript = preload("res://note.gd")',
+      '',
+      'var items: Array[Resource] = []',
+      'var notes: Array[Resource] = []',
+      '',
+      '',
+      'func keep_items(count: int) -> void:',
+      '\tfor at: int in count:',
+      '\t\tvar item: Resource = ITEM.new()',
+      '\t\titem.set("label", str(at))',
+      '\t\titems.append(item)',
+      '',
+      '',
+      'func keep_notes(count: int) -> void:',
+      '\tfor at: int in count:',
+      '\t\tvar note: Resource = NOTE.new()',
+      '\t\tnote.set("text", "%x%x%x%x%x%x" % [randi(), randi(), randi(), randi(), randi(), randi()])',
+      '\t\tnotes.append(note)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Marker" type="Marker2D" parent="."]\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const classOf = (answer: unknown, name: string): unknown =>
+    asArray(get(answer, 'classes')).find((one) => get(one, 'class') === name);
+  const play = async (): Promise<void> => {
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(start.answer, 'started'), true, start.said);
+  };
+  try {
+    await server.initialize('regression-test');
+    await play();
+
+    // A fresh game: the scripted root under its script's path, the plain node under its class,
+    // and RefCounted and Node totalled apart.
+    const fresh = await call('debug_objects', { op: 'snapshot' });
+    assert.equal(get(fresh.answer, 'snapshot'), 's1', fresh.said);
+    assert.deepEqual(
+      [
+        classOf(fresh.answer, 'res://main.gd'),
+        classOf(fresh.answer, 'Marker2D'),
+        classOf(fresh.answer, 'Item'),
+      ],
+      [
+        { class: 'res://main.gd', kind: 'Node', count: 1, engineClass: 'Node' },
+        { class: 'Marker2D', kind: 'Node', count: 1 },
+        undefined,
+      ],
+      fresh.said,
+    );
+    const counted = (field: string): number => Number(get(fresh.answer, field));
+    assert.ok(counted('nodes') >= 3 && counted('refCounted') > 0, fresh.said);
+    assert.ok(counted('objects') > counted('nodes') + counted('refCounted'), fresh.said);
+
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_items', args: [100] });
+    const kept = await call('debug_objects', { op: 'diff', before: 's1' });
+    assert.equal(get(kept.answer, 'after'), 's2', kept.said);
+    const changed = asArray(get(kept.answer, 'changed'));
+    assert.deepEqual(
+      changed.find((one) => get(one, 'class') === 'Item'),
+      { class: 'Item', kind: 'RefCounted', before: 0, after: 100, change: 100 },
+      kept.said,
+    );
+    for (const untouched of ['res://main.gd', 'Marker2D', 'Note']) {
+      assert.equal(
+        changed.find((one) => get(one, 'class') === untouched),
+        undefined,
+        `${untouched} did not move: ${kept.said}`,
+      );
+    }
+    assert.ok(Number(get(kept.answer, 'unchangedClasses')) > 10, kept.said);
+
+    // Thousands of objects, each with text that does not deflate, come back whole over slices.
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_notes', args: [6000] });
+    const [many, alongside] = await Promise.all([
+      call('debug_objects', { op: 'snapshot' }),
+      call('debug_objects', { op: 'snapshot' }),
+    ]);
+    for (const one of [many, alongside]) {
+      assert.deepEqual(
+        classOf(one.answer, 'Note'),
+        { class: 'Note', kind: 'RefCounted', count: 6000, engineClass: 'Resource' },
+        one.said,
+      );
+      assert.ok(Number(get(one.answer, 'bytes')) > 2 * SNAPSHOT_SLICE_BYTES, one.said);
+    }
+    assert.deepEqual(
+      [get(many.answer, 'snapshot'), get(alongside.answer, 'snapshot')].toSorted((a, b) =>
+        String(a).localeCompare(String(b)),
+      ),
+      ['s3', 's4'],
+      'two snapshots asked together are kept apart',
+    );
+
+    await call('editor_run', { op: 'stop' });
+    await play();
+    const refused = await call('debug_objects', { op: 'diff', before: 's1' });
+    assert.equal(refused.answer, null, refused.said);
+    assert.match(
+      refused.said,
+      /^s1 was taken in an earlier run of the game than s5 \(process \d+, then \d+\)\.[\s\S]*in the same run/,
+    );
+    // Two snapshots of one earlier run still compare, since both counts are of the same objects.
+    const earlier = await call('debug_objects', { op: 'diff', before: 's1', after: 's2' });
+    assert.equal(get(earlier.answer, 'changed', 0, 'class'), 'Item', earlier.said);
+  } finally {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
     await server.stop();
     sweep(project, runtimeDir);
   }
@@ -101391,6 +101720,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartRefusesAnotherReleasesRuntimeAddon,
   testABreakpointLineIsOneTheEngineMarks,
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
+  testObjectSnapshotsAskedTogetherGetTheirOwnAnswers,
+  testAnObjectSnapshotNeedsAGameThisServerStarted,
+  testAnObjectSnapshotOfAPlayedGameIsRefused,
+  testObjectSnapshotsShowWhatAnActionKept,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAPipelineCacheIsCarriedToTheNextRun,
