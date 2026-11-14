@@ -4185,10 +4185,8 @@ export function enginesOfTestRun(
     return null;
   }
   if (running.windowed.length === 0) {
-    // Suites needing a window are all left out, so what is left runs headless.
-    return chosen.some((one) => one.windowed)
-      ? { halves: [{ noWindow: true }], notSuites: [], notRun: [], root }
-      : null;
+    // Suites needing a window are all left out, so the single run gives what is left no window.
+    return null;
   }
   if (running.headless.length === 0) {
     return null;
@@ -4356,20 +4354,17 @@ export async function runEngines(
 }
 
 /**
- * The suites of a run that need a window and the accessibility tree among them, less those left out
- * whole by [param leftOut]. A run cut into engines marks its headless engine [param noWindow], when
- * every case of the suites needing one is left out, and that engine gets no window.
+ * The suites of a run that need a window and the accessibility tree among them, less those whose
+ * every case [param casesOf] gives is left out by [param ignore]: by the suite's name, a piece of
+ * its path or the case by name.
  */
 export function windowedNeeds(
   needs: ReturnType<typeof windowNeedsOf>,
-  leftOut: ReadonlySet<string>,
-  noWindow: boolean,
+  casesOf: (path: string) => readonly string[],
+  ignore: readonly string[],
 ): { needing: string[]; accessible: string[] } {
-  if (noWindow) {
-    return { needing: [], accessible: [] };
-  }
   const kept = (paths: readonly string[]): string[] =>
-    paths.filter((path) => !leftOut.has(basename(path, '.gd')));
+    paths.filter((path) => casesOf(path).some((test) => !caseIgnored(path, test, ignore)));
   return { needing: kept(needs.needing), accessible: kept(needs.accessible) };
 }
 
@@ -9461,10 +9456,6 @@ class GodotServer {
     if (plan === null) {
       return await this.runTests(args);
     }
-    const [only, ...later] = plan.halves;
-    if (later.length === 0) {
-      return await this.runTests({ ...args, ...only });
-    }
     return await runEngines(
       plan,
       args,
@@ -9643,9 +9634,11 @@ class GodotServer {
     // server answered six errors pointing at the game. A suite left out whole by ignore is not run.
     const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
     const needs = windowNeedsOf(scripts, selection.value?.suites ?? asked);
-    // Set by a run cut into engines for the one that is headless although suites needing a window
-    // are among its paths, every case of them being left out.
-    const { needing, accessible } = windowedNeeds(needs, leftOut, readBoolean(args, 'noWindow') === true);
+    const casesOf = (path: string): readonly string[] =>
+      selection.value === null
+        ? (scripts.suite(path)?.cases ?? [])
+        : selection.value.selected.filter((one) => one.suite === path).map((one) => one.test);
+    const { needing, accessible } = windowedNeeds(needs, casesOf, readStringArray(args, 'ignore') ?? []);
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
     const engine = await this.engine(project.value.path);

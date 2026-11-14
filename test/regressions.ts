@@ -62562,10 +62562,10 @@ function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
       'every case of the headless kind left out by name leaves one windowed engine',
     );
     assert.equal(named('tests/stood'), null, 'as does a piece of its path');
-    assert.deepEqual(
-      named('menu_test:test_menu')?.halves,
-      [{ noWindow: true }],
-      'and the windowed kind left out leaves one engine that is not given a window',
+    assert.equal(
+      named('menu_test:test_menu'),
+      null,
+      'and the windowed kind left out leaves one engine, which the single run gives no window',
     );
     assert.equal(named('stood_test:test_stood')?.halves.length, 2, 'a case left in each kind is two engines');
     assert.equal(
@@ -62889,18 +62889,32 @@ async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
     'and the run is kept as cut',
   );
 
-  // A suite whose cases are all left out of the window gets no window in its engine.
+  // A suite needing a window needs none once ignore leaves out every case it would run, by its name,
+  // a piece of its path or each case by name, on a machine with a display or without one.
   const needs = {
     needing: ['res://tests/menu_test.gd'],
     headless: [],
     accessible: ['res://tests/menu_test.gd'],
   };
-  assert.deepEqual(windowedNeeds(needs, new Set(), true), { needing: [], accessible: [] });
-  assert.deepEqual(windowedNeeds(needs, new Set(), false), {
+  const menuCases = (): readonly string[] => ['test_menu', 'test_menu_two'];
+  const neededWith = (...ignore: string[]): ReturnType<typeof windowedNeeds> =>
+    windowedNeeds(needs, menuCases, ignore);
+  assert.deepEqual(neededWith(), {
     needing: ['res://tests/menu_test.gd'],
     accessible: ['res://tests/menu_test.gd'],
   });
-  assert.deepEqual(windowedNeeds(needs, new Set(['menu_test']), false), { needing: [], accessible: [] });
+  assert.deepEqual(neededWith('menu_test'), { needing: [], accessible: [] }, 'left out by name');
+  assert.deepEqual(neededWith('tests/menu'), { needing: [], accessible: [] }, 'by a piece of its path');
+  assert.deepEqual(
+    neededWith('menu_test:test_menu', 'menu_test:test_menu_two'),
+    { needing: [], accessible: [] },
+    'and by every case',
+  );
+  assert.deepEqual(
+    neededWith('menu_test:test_menu').needing,
+    ['res://tests/menu_test.gd'],
+    'a case left in keeps the window',
+  );
 
   // A headless suite whose every case was left out is said to have run no case, not to have shared a window.
   const note = windowNoteFor(['res://tests/menu_test.gd'], ['res://tests/stood_test.gd'], []);
