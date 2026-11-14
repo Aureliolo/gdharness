@@ -297,7 +297,7 @@ const PROFILER_SWITCH = 'profiler:servers';
  * caller's self time. Off, that time stays in the caller's self, along with any script function the
  * engine called back. It is off unless asked for, because the engine reads an object's class after
  * a dynamic call to `free()` has destroyed it, which crashes a game on Linux and macOS, and records
- * the timings without a lock, which crashes a game calling engine methods on worker threads.
+ * the timings without a lock, which crashes a game running script on any thread but the main one.
  */
 export function profilerOn(frameFunctions: number, engineCalls = false): Uint8Array {
   return framedCommand(PROFILER_SWITCH, profilerOnData(frameFunctions, engineCalls));

@@ -12158,7 +12158,7 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 164;
+const READ_IN_WORDS = 163;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -56947,112 +56947,6 @@ async function testAProfiledRunTimesNoNativeCallsUnlessAsked(): Promise<void> {
 }
 
 /**
- * engineCalls is refused for a project whose scripts start threads, unless the caller accepts the
- * risk with engineCallsOnThreads.
- *
- * The engine records native-call timings without a lock, so a game calling engine methods from a
- * worker thread can crash or corrupt strings while they are on. The threaded scripts here are never
- * run, so the opted-in start ends cleanly and shows the opt-in let it through.
- *
- * - a project naming Thread and WorkerThreadPool only in a comment and a string is not refused.
- * - one naming WorkerThreadPool in one script and Thread in another is refused, naming both scripts
- *   and the opt-in.
- * - with engineCallsOnThreads: true the same start runs and times engine calls.
- */
-async function testEngineCallsAreRefusedWhereScriptsStartThreads(): Promise<void> {
-  const engine = resolveGodotPath();
-  if (!engine) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
-    }
-    console.log('engine calls on threads regression skipped (Godot not found)');
-    return;
-  }
-  const project = mkdtempSync(join(tmpdir(), 'gdharness-engine-threads-'));
-  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-engine-threads-rt-'));
-  try {
-    cpSync(
-      join('src', 'godot', 'addons', 'gdharness_runtime'),
-      join(project, 'addons', 'gdharness_runtime'),
-      { recursive: true },
-    );
-    writeFileSync(
-      join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Threads"\n' +
-        '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
-    );
-    const script = (name: string, body: string[]): void => {
-      writeFileSync(join(project, `${name}.gd`), ['extends Node', '', '', ...body, ''].join('\n'));
-    };
-    script('main', [
-      '# No Thread is started here.',
-      'func busy() -> int:',
-      '\tvar sum := 0',
-      '\tfor i in 200000:',
-      '\t\tsum += i % 7',
-      '\treturn sum',
-      '',
-      '',
-      // Typed, so the call goes through callv's method bind, which only engineCalls times apart.
-      'func _ready() -> void:',
-      '\tvar target: Object = self',
-      '\tprint(target.callv(&"busy", []), " WorkerThreadPool")',
-      '\tget_tree().quit()',
-    ]);
-    writeFileSync(
-      join(project, 'main.tscn'),
-      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Run" type="Node"]\nscript = ExtResource("1")\n',
-    );
-    const server = new ServerProcess({
-      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
-    });
-    try {
-      await server.initialize('regression-test');
-      const ask = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
-        await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS);
-      const start = {
-        op: 'start',
-        projectPath: project,
-        scene: 'main.tscn',
-        headless: true,
-        profile: true,
-        engineCalls: true,
-        runtimeWaitMs: 0,
-      };
-      const ranToItsEnd = async (asked: Record<string, unknown>, what: string): Promise<void> => {
-        const started = textOf(await ask(asked)) ?? '';
-        assert.match(started, /"started": true/, `${what}: ${started}`);
-        const waited = textOf(await ask({ op: 'wait', timeoutMs: 60_000 })) ?? '';
-        assert.equal(get(JSON.parse(waited), 'exitCode'), 0, `${what} ends cleanly: ${waited}`);
-        const profile = textOf(await ask({ op: 'profile', limit: 100 })) ?? '';
-        assert.ok(
-          asArray(get(JSON.parse(profile), 'functions')).some((row) => get(row, 'engineMs') !== undefined),
-          `${what} times engine calls: ${profile}`,
-        );
-      };
-
-      await ranToItsEnd(start, 'a project naming threads only in prose and strings runs');
-
-      script('worker', ['func spread() -> void:', '\tWorkerThreadPool.add_task(func() -> void: pass)']);
-      script('loose', ['var loose: Thread = Thread.new()']);
-      const refused = await ask(start);
-      const refusal = JSON.stringify(refused.result);
-      assert.equal(get(refused.result, 'isError'), true, `a threaded project is refused: ${refusal}`);
-      assert.match(refusal, /res:\/\/loose\.gd, res:\/\/worker\.gd name Thread or WorkerThreadPool/, refusal);
-      assert.match(refusal, /crash this game or corrupt its strings/, refusal);
-      assert.match(refusal, /engineCallsOnThreads: true/, `the refusal names the opt-in: ${refusal}`);
-
-      await ranToItsEnd({ ...start, engineCallsOnThreads: true }, 'the opt-in lets the threaded project run');
-    } finally {
-      await server.stop();
-    }
-  } finally {
-    sweep(project);
-    sweep(runtimeDir);
-  }
-}
-
-/**
  * A profile since a mark answers for one action apart from the boot.
  *
  * #1147: profiling a press in a running game summed everything from the game's start, so the
@@ -101394,7 +101288,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProfiledRunNamesWhereItsTimeWent,
   testACallThroughAnEngineMethodLeavesTheCallersSelfTime,
   testAProfiledRunTimesNoNativeCallsUnlessAsked,
-  testEngineCallsAreRefusedWhereScriptsStartThreads,
   testSuitesPlayInASceneTheProfilerSees,
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,

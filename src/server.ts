@@ -703,34 +703,6 @@ function writtenFileRefusal(
   return null;
 }
 
-/** The engine classes a script starts threads with, any of which runs GDScript off the main thread. */
-const THREAD_CLASSES = ['Thread', 'WorkerThreadPool'];
-
-/** How many of the scripts naming a thread class a refusal lists before it counts the rest. */
-const THREADED_SCRIPTS_LISTED = 5;
-
-/**
- * Why engineCalls is refused for the project at [param projectPath], or null when it may run.
- *
- * The engine times native calls into a table each script function keeps, written without a lock by
- * whichever thread runs the function, while the main thread copies and clears every table each
- * frame. Godot 4.7.2 games calling engine methods from worker threads died on an access violation or
- * stopped on a string destroyed twice. Mutex is not read as a sign of threads, because the runtime
- * addon locks one for log lines alone.
- */
-function engineCallsOnThreadsRefusal(args: OperationParams, projectPath: string): string | null {
-  if (readBoolean(args, 'engineCallsOnThreads') === true) {
-    return null;
-  }
-  const threaded = scriptsNaming(projectPath, THREAD_CLASSES).map((one) => one.script);
-  if (threaded.length === 0) {
-    return null;
-  }
-  const listed = threaded.slice(0, THREADED_SCRIPTS_LISTED).join(', ');
-  const more = threaded.length - THREADED_SCRIPTS_LISTED;
-  return `engineCalls can crash this game or corrupt its strings, because the engine times native calls without a lock and ${listed}${more > 0 ? ` and ${more} more` : ''} name${threaded.length === 1 ? 's' : ''} Thread or WorkerThreadPool, which run GDScript on other threads.`;
-}
-
 /**
  * Why a run cannot write the movie [param engineArgs] asks for, or null when it asks for none or may.
  *
@@ -13357,13 +13329,6 @@ class GodotServer {
         "engineCalls times the profiler's calls through engine methods, so it works only with profile: true.",
         ['editor_run start with profile: true and engineCalls: true, or without engineCalls'],
       );
-    }
-    const threaded = engineCalls ? engineCallsOnThreadsRefusal(args, project.value.path) : null;
-    if (threaded !== null) {
-      return this.createErrorResponse(threaded, [
-        'editor_run start with engineCallsOnThreads: true to time engine calls anyway, at that risk',
-        'editor_run start with profile: true alone, which is safe with threads',
-      ]);
     }
     const own = readStringArray(args, 'args') ?? [];
     const given = suites === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites)];
