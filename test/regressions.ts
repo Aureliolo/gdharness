@@ -93566,6 +93566,64 @@ async function testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce(): Promise<
   }
 }
 
+/** The short 8.3 spelling Windows gives [path], or [path] where the volume makes none. */
+function shortPathOf(path: string): string {
+  if (process.platform !== 'win32') {
+    return path;
+  }
+  const ran = spawnSyncHidden('cmd.exe', ['/d', '/s', '/c', `"for %I in ("${path}") do @echo %~sI"`], {
+    encoding: 'utf8',
+    windowsVerbatimArguments: true,
+  });
+  const said = ran.stdout.trim();
+  return said === '' ? path : said;
+}
+
+/**
+ * A project given by its short 8.3 path, whose links read back by the long names, still takes a
+ * scene reached through a junction inside as one file and saves through a file link to its
+ * target. It skips where the volume gives no short names.
+ */
+async function testAProjectGivenByItsShortNameFollowsLinkedScenesOnce(): Promise<void> {
+  let long = '';
+  let short = '';
+  await withLinksOut(
+    'project by its short name',
+    {
+      files: { 'real/mid.tscn': deskKin('Mid'), 'room.tscn': deskKin('Room', 'res://copy.tscn') },
+      spelt: (real) => {
+        long = realpathSync.native(real);
+        short = shortPathOf(long);
+        return short;
+      },
+    },
+    () => {
+      if (short.toLowerCase() === long.toLowerCase()) {
+        console.log(`project by its short name: the volume gives ${long} no short name`);
+        return false;
+      }
+      return (
+        linkTo(join(long, 'real'), join(long, 'inner')) &&
+        linkTo(join(long, 'desk.tscn'), join(long, 'copy.tscn'), 'file')
+      );
+    },
+    async (at) => {
+      const renamed = await at.call('scene_node', {
+        op: 'set',
+        scenePath: 'copy.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      const said = `${short}: ${JSON.stringify(renamed)}`;
+      assert.deepEqual(followedOf(renamed), ['res://real/mid.tscn', 'res://room.tscn'], said);
+      assert.ok(readlinkSync(join(long, 'copy.tscn')).length > 0, said);
+      for (const file of ['real/mid.tscn', 'room.tscn']) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${said}\n${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
 /**
  * An edit asked by a path in another case than the disk holds is refused with the stored spelling,
  * since a save under the asked spelling renames the file. Linux keeps case, so there it skips.
@@ -101141,6 +101199,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed,
   testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce,
   testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName,
+  testAProjectGivenByItsShortNameFollowsLinkedScenesOnce,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,
   testALinkOutInsideAWalkedFolderIsNamed,

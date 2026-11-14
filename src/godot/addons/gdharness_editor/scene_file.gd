@@ -1063,9 +1063,15 @@ static func _followed(given: String) -> String:
 
 ## Where the project's folder lies on disk, each link on the way followed and each name spelt as
 ## its folder lists it, or "" when a link cannot be followed. A link's target is read in the
-## disk's own spelling, and the project may be given in another, such as a lower-case drive.
+## disk's own spelling, and the project may be given in another, such as a lower-case drive or a
+## short 8.3 name.
 static func disk_project() -> String:
-	var led: String = _followed(ProjectSettings.globalize_path("res://")).trim_suffix("/")
+	return _disk_spelt(_followed(ProjectSettings.globalize_path("res://")).trim_suffix("/"))
+
+
+## The absolute path [param led], with no link left on it, with each name as its folder lists it
+## where the file system ignores case and short names. Answers "" for "".
+static func _disk_spelt(led: String) -> String:
 	if led.is_empty() or not OS.get_name() in ["Windows", "macOS"]:
 		return led
 	var parts: PackedStringArray = led.split("/")
@@ -1093,14 +1099,24 @@ static func _as_listed(folder: String, names: PackedStringArray) -> PackedString
 
 
 ## The one of [param entries], listed in [param at], that the disk says is [param name] there, or
-## [param name]. The case fold only narrows the entries to ask about, and the disk decides.
+## [param name]. The disk decides. The entries asked about first are those of the same letters in
+## any case, then, for a short 8.3 name such as RUNNER~1, those starting with its letters before
+## the tilde, and only then every entry.
 static func _same_entry(
 	listing: DirAccess, at: String, name: String, entries: PackedStringArray
 ) -> String:
-	for entry: String in entries:
-		if (entry.to_upper() == name.to_upper()
-				and listing.is_equivalent(at + "/" + entry, at + "/" + name)):
-			return entry
+	var upper: String = name.to_upper()
+	var short: bool = name.contains("~")
+	var stem: String = upper.get_slice("~", 0)
+	var rounds: Array[Callable] = [
+		func(entry: String) -> bool: return entry.to_upper() == upper,
+		func(entry: String) -> bool: return short and entry.to_upper().begins_with(stem),
+		func(_entry: String) -> bool: return true,
+	]
+	for fits: Callable in rounds:
+		for entry: String in entries:
+			if fits.call(entry) and listing.is_equivalent(at + "/" + entry, at + "/" + name):
+				return entry
 	return name
 
 
@@ -1127,7 +1143,9 @@ static func disk_entry(disk: DirAccess, folder: String, name: String) -> String:
 	if not disk.is_link(there):
 		return there
 	var target: String = _target_of(disk, there, folder)
-	return "" if target.is_empty() else _followed(target)
+	# A link may name its target by another spelling than the listing's, such as a short name,
+	# which would key one file twice.
+	return "" if target.is_empty() else _disk_spelt(_followed(target))
 
 
 ## The file a save asked at [param file_path] writes: where a file link there leads, each link in
