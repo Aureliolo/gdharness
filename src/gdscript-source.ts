@@ -645,6 +645,8 @@ function parseBody(
   };
 }
 
+const OPENS_OR_CLOSES = /[()[\]{}]/u;
+
 /** What [param source] declares: its class_name, its own members, and its inner classes, nested. */
 export function shapeOf(source: string): ScriptShape {
   const code = codeOf(source, regionsOf(source));
@@ -655,8 +657,8 @@ export function shapeOf(source: string): ScriptShape {
   for (const text of code.split('\n')) {
     lines.push({ start, text, indent: indentOf(text), continued: depth > 0 || joined });
     start += text.length + 1;
-    depth = Math.max(0, depth + bracketsOpenedBy(text));
-    joined = /\\\s*$/u.test(text);
+    depth = OPENS_OR_CLOSES.test(text) ? Math.max(0, depth + bracketsOpenedBy(text)) : depth;
+    joined = text.includes('\\') && /\\\s*$/u.test(text);
   }
   const reader: ShapeReader = { source, code, lines, className: null };
   const { body } = parseBody(reader, null, null, 0, 0, 0);
@@ -666,11 +668,7 @@ export function shapeOf(source: string): ScriptShape {
 const FUNC_LINE = new RegExp(`^[ \\t]*${ANNOTATIONS}(?:static\\s+)?func\\s+(${NAME})\\s*\\(`, 'u');
 
 function indentOf(text: string): number {
-  let at = 0;
-  while (at < text.length && (text[at] === ' ' || text[at] === '\t')) {
-    at += 1;
-  }
-  return at;
+  return /^[ \t]*/.exec(text)?.[0].length ?? 0;
 }
 
 /**
@@ -1069,8 +1067,8 @@ function localAt(lines: readonly string[], index: number, name: string): { type:
 /** The sum of what the brackets of [param text] open and close. */
 function bracketsOpenedBy(text: string): number {
   let open = 0;
-  for (const character of text) {
-    open += bracketDelta(character);
+  for (let at = 0; at < text.length; at += 1) {
+    open += bracketDelta(text[at]);
   }
   return open;
 }

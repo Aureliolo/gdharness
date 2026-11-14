@@ -27,6 +27,7 @@ import {
   Lines,
   type Receiver,
   type ReceiverDispatch,
+  type ScriptShape,
   type SelfDispatch,
   shapeOf,
 } from './gdscript-source.js';
@@ -850,9 +851,8 @@ interface ProfiledCallSite extends CallSite {
   readonly withinSelfIncludesSuper?: true;
 }
 
-/** The classes [param source] declares by name: its class_name and its inner classes, nested. */
-function classNamesOf(source: string): string[] {
-  const shape = shapeOf(source);
+/** The classes a script of [param shape] declares by name: its class_name and its inner classes, nested. */
+function classNamesOf(shape: ScriptShape): string[] {
   const inner = (body: ClassBody): string[] =>
     body.inner.flatMap((one) => [...(one.name === null ? [] : [one.name]), ...inner(one)]);
   return [...(shape.className === null ? [] : [shape.className.name]), ...inner(shape.body)];
@@ -867,19 +867,20 @@ function sameScript(a: string, b: string): boolean {
 }
 
 /**
- * The profile's row for the function [param within] that holds line [param line] of [param source],
- * or undefined when it made no counted call. Several functions of one script can share a bare name,
- * one per class, so the row is the one whose class is the innermost class holding the line.
+ * The profile's row for the function [param within] that holds line [param line] of the script
+ * [param read] holds, or undefined when it made no counted call. Several functions of one script can
+ * share a bare name, one per class, so the row is the one whose class is the innermost class
+ * holding the line.
  */
 function rowOfSite(
   rows: readonly ProfiledFunction[],
   script: string,
-  source: string,
+  read: { readonly shape: ScriptShape; readonly lines: Lines },
   line: number,
   within: string,
 ): ProfiledFunction | undefined {
-  const shape = shapeOf(source);
-  const offset = new Lines(source).offsetOf({ line: line - 1, character: 0 }) ?? 0;
+  const { shape } = read;
+  const offset = read.lines.offsetOf({ line: line - 1, character: 0 }) ?? 0;
   let body = shape.body;
   for (
     let inner = body.inner.find((one) => one.start <= offset && offset < one.end);
@@ -888,7 +889,7 @@ function rowOfSite(
   ) {
     body = inner;
   }
-  const innerNames = classNamesOf(source).filter((name) => name !== shape.className?.name);
+  const innerNames = classNamesOf(shape).filter((name) => name !== shape.className?.name);
   const endsWith = (owner: string, name: string): boolean => owner === name || owner.endsWith(`.${name}`);
   return rows.find((row) => {
     if (!sameScript(row.script, script) || bareName(row.function) !== within) {
@@ -1286,13 +1287,14 @@ export function callersOf(
     bare,
     propertyOf(name) !== null || target.some((row) => row.property === bare),
   );
-  const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, property, forScript(script)).map((site) => {
-      const within =
-        site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
+  const sites = listed.flatMap(([script, source]) => {
+    let read: { shape: ScriptShape; lines: Lines } | null = null;
+    return callSitesOf(source, bare, property, forScript(script)).map((site) => {
+      read ??= { shape: shapeOf(source), lines: new Lines(source) };
+      const within = site.within === null ? undefined : rowOfSite(rows, script, read, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };
-    }),
-  );
+    });
+  });
   sites.sort(
     (a, b) =>
       (b.withinTotalMs ?? -1) - (a.withinTotalMs ?? -1) ||
