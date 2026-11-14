@@ -52,6 +52,7 @@ import {
   machineSlots,
   ownStart,
   poolCount,
+  reservedMemory,
 } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
@@ -770,7 +771,10 @@ async function runStages(context: RunContext): Promise<number> {
   const started = await takenLanes(context, deal, say);
   const memory =
     started.shared && (deal.memoryHeld || started.follows !== null)
-      ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes)
+      ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes, undefined, {
+          owed: reservedMemory,
+          say,
+        })
       : undefined;
   // In a paced run a lane lends the check its slot, so the run holds no engine beyond its lanes.
   // Otherwise the lanes hold what slots were free, so it takes one only beside them.
@@ -1288,6 +1292,23 @@ export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'pea
 
 /** How often a share held back for memory reads it again. */
 const MEMORY_LOOK_MS = 2000;
+/**
+ * How long the first engine of a run waits for memory other work reserved before it starts anyway,
+ * so a holder that is itself waiting on this run cannot stall it for ever.
+ */
+export const RESERVED_WAIT_MS = 600_000;
+
+/** What lets the first engine of a run wait for memory other work has reserved. */
+export interface ReservationWait {
+  /** The bytes the live reservations still owe. */
+  readonly owed: () => Promise<number>;
+  /** Where the line saying the run waits goes. */
+  readonly say: (line: string) => void;
+  /** The clock, in milliseconds. */
+  readonly now?: () => number;
+  /** How long the wait lasts before the engine starts anyway. */
+  readonly limitMs?: number;
+}
 
 /** An engine a [class MemoryGate] let start, with what it needs and what it holds now. */
 export interface Admitted {
@@ -1306,20 +1327,48 @@ export interface Admitted {
  * another, read again before each, so engines join as other work frees memory rather than the run
  * keeping all its life the count it had room for as it began. A going engine is counted at what it
  * has yet to take, its need less what it holds now, since what it holds already shows in the memory
- * read. The first engine of the run always starts, as a run held to one engine did. A wait keeps a
- * mark in the slots, as a wait for a slot does.
+ * read. The first engine of the run starts at once, as a run held to one engine did, unless other
+ * work has reserved memory and the room is short of that engine: then it waits like the rest, and
+ * starts anyway after {@link RESERVED_WAIT_MS}. A wait keeps a mark in the slots, as a wait for a
+ * slot does.
  */
 export class MemoryGate {
   private readonly slots: Pick<EngineSlots, 'markWaiting'>;
   private readonly read: () => Promise<number>;
   private readonly lookMs: number;
+  private readonly reservation: ReservationWait | undefined;
   private readonly going = new Set<Admitted>();
   private turn: Promise<unknown> = Promise.resolve();
 
-  constructor(slots: Pick<EngineSlots, 'markWaiting'>, read: () => Promise<number>, lookMs = MEMORY_LOOK_MS) {
+  constructor(
+    slots: Pick<EngineSlots, 'markWaiting'>,
+    read: () => Promise<number>,
+    lookMs = MEMORY_LOOK_MS,
+    reservation?: ReservationWait,
+  ) {
     this.slots = slots;
     this.read = read;
     this.lookMs = lookMs;
+    this.reservation = reservation;
+  }
+
+  /** Whether the first engine of the run is held by a reservation, said once in [param wait] when it first is. */
+  private async heldByReservation(needed: number, wait: { since?: number; said?: true }): Promise<boolean> {
+    const { reservation } = this;
+    const reserved = reservation === undefined ? 0 : await reservation.owed();
+    if (reservation === undefined || reserved <= 0 || roomForAnother(await this.read(), 0, needed)) {
+      return false;
+    }
+    const now = (reservation.now ?? Date.now)();
+    wait.since ??= now;
+    if (now - wait.since >= (reservation.limitMs ?? RESERVED_WAIT_MS)) {
+      return false;
+    }
+    if (wait.said === undefined) {
+      wait.said = true;
+      reservation.say(`Waiting for memory other work reserved: ${gigabytes(reserved)}.`);
+    }
+    return true;
   }
 
   /**
@@ -1336,6 +1385,7 @@ export class MemoryGate {
   private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
     let unmark: (() => void) | undefined;
     let needed = 0;
+    const wait: { since?: number; said?: true } = {};
     try {
       for (;;) {
         signal.throwIfAborted();
@@ -1343,7 +1393,11 @@ export class MemoryGate {
         // Summed before the read, as the memory read is taken before a reading told while it is
         // out. Summed after, that growth would count as owed no longer and as free memory too.
         const owed = [...this.going].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
-        if (this.going.size === 0 || roomForAnother(await this.read(), owed, needed)) {
+        const room =
+          this.going.size === 0
+            ? !(await this.heldByReservation(needed, wait))
+            : roomForAnother(await this.read(), owed, needed);
+        if (room) {
           break;
         }
         unmark ??= this.slots.markWaiting();

@@ -119,6 +119,25 @@ interface SlotsMachine {
   readonly cwd: string;
 }
 
+function thisMachine(): SlotsMachine {
+  return {
+    env: process.env,
+    platform: process.platform,
+    processors: availableParallelism(),
+    memory: totalmem(),
+    home: homedir(),
+    cwd: process.cwd(),
+  };
+}
+
+/** The machine's own slots directory: the variable, else the cache home's. The count is not read. */
+function machineSlotsDirectory(machine: SlotsMachine = thisMachine()): string {
+  const named = nonEmpty(machine.env[SLOTS_VARIABLE]);
+  return named === undefined
+    ? join(cacheHome(machine.env, machine.platform, machine.home), 'slots')
+    : resolve(machine.cwd, named);
+}
+
 /**
  * The slots a run takes: [param asked] where a command named them, else the variables, else the
  * machine's own directory and count. Every tool on the machine works the default out the same way,
@@ -129,20 +148,10 @@ export function machineSlots(
     directory: null,
     count: null,
   },
-  machine: SlotsMachine = {
-    env: process.env,
-    platform: process.platform,
-    processors: availableParallelism(),
-    memory: totalmem(),
-    home: homedir(),
-    cwd: process.cwd(),
-  },
+  machine: SlotsMachine = thisMachine(),
 ): SlotsChosen {
   const { env } = machine;
-  const named = nonEmpty(env[SLOTS_VARIABLE]);
-  const cache = cacheHome(env, machine.platform, machine.home);
-  const directory =
-    asked.directory ?? (named === undefined ? join(cache, 'slots') : resolve(machine.cwd, named));
+  const directory = asked.directory ?? machineSlotsDirectory(machine);
   const counted = nonEmpty(env[SLOT_COUNT_VARIABLE]);
   let count = asked.count;
   if (count === null && counted !== undefined) {
@@ -1042,16 +1051,35 @@ function reservationMarks(directory: string): ReservationMark[] {
   return marks;
 }
 
-/** This process and every process above it, which a reservation of theirs is not owed to. */
-async function ownLineage(): Promise<Set<number>> {
-  const tree = await processTree();
-  const lineage = new Set<number>([process.pid, process.ppid]);
-  if (tree !== undefined) {
-    for (const above of ancestorsIn(tree, process.pid, -1)) {
-      lineage.add(above);
+/**
+ * [param pid] and every process above it in [param tree], which a reservation of theirs is not owed
+ * to. A parent counts only where the tree links it to its child: Windows keeps a dead creator's pid
+ * as an orphan's parent, and a later process may hold that number.
+ */
+export function lineageIn(tree: ProcessTree | undefined, pid: number): Set<number> {
+  return new Set<number>([pid, ...(tree === undefined ? [] : ancestorsIn(tree, pid, -1))]);
+}
+
+/** When each of [param pids] started: from [param tree] where it dates them, else asked of the platform. */
+async function startsFrom(
+  pids: readonly number[],
+  tree: ProcessTree | undefined,
+): Promise<Map<number, number>> {
+  const starts = new Map<number, number>();
+  for (const pid of pids) {
+    const began = tree?.get(pid)?.startedAt;
+    if (began !== undefined) {
+      starts.set(pid, began);
     }
   }
-  return lineage;
+  if (tree !== undefined && starts.size === pids.length) {
+    return starts;
+  }
+  const missing = pids.filter((pid) => !starts.has(pid));
+  for (const [pid, began] of await startTimesOf(missing)) {
+    starts.set(pid, began);
+  }
+  return starts;
 }
 
 /**
@@ -1060,13 +1088,14 @@ async function ownLineage(): Promise<Set<number>> {
  * this process or an ancestor counts nothing, since a gate that reserved its peak runs this inside
  * it. The default directory is the machine's, never a pool's.
  */
-export async function reservedMemory(directory: string = machineSlots().directory): Promise<number> {
+export async function reservedMemory(directory: string = machineSlotsDirectory()): Promise<number> {
   const live = reservationMarks(directory).filter((mark) => alive(mark.holder.pid));
   if (live.length === 0) {
     return 0;
   }
-  const starts = await startTimesOf([...new Set(live.map((mark) => mark.holder.pid))]);
-  const lineage = await ownLineage();
+  const tree = await processTree();
+  const starts = await startsFrom([...new Set(live.map((mark) => mark.holder.pid))], tree);
+  const lineage = lineageIn(tree, process.pid);
   const now = Date.now();
   return live
     .filter((mark) => !lineage.has(mark.holder.pid))

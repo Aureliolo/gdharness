@@ -257,7 +257,9 @@ engine's own figure is what Windows has committed to it, and its resident memory
 Memory that other work has reserved machine-wide and still owes comes off that figure, and the
 line on room says how much. The reservations are the `reserved/*.json` marks in the machine's slots
 folder, each `{"pid", "started", "owed"}` with `owed` in bytes. A mark counts while its holder lives,
-by the rule a slot lock follows. A mark held by this process or one above it counts nothing.
+by the rule a slot lock follows. A mark held by this process or one above it counts nothing. While
+a reservation counts and the room is short of one engine, the first engine waits too, and starts
+anyway after 10 minutes. The run prints one line saying it waits and how much is reserved.
 
 ### When some slots are held
 
