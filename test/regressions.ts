@@ -3149,13 +3149,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.deepEqual(
     placedAt('Placed.lift'),
     [
-      ['res://core/lifts.gd', 13, false],
-      ['res://core/lifts.gd', 20, true],
       ['res://core/stowed.gd', 7, true],
       ['res://core/stowed.gd', 8, true],
       ['res://core/stowed.gd', 9, true],
     ],
-    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Shelved',
+    'the calls in a class extending Placed, and none of the locals, the call through Shelved or the bare uses in Lifts, which extends RefCounted',
   );
   assert.deepEqual(
     placedAt('lift'),
@@ -3217,6 +3215,275 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     paidAt('lift'),
     [10, 12, 14, 15, 16, 17, 18, 20, 22],
     'and asked by bare name, every one is listed',
+  );
+  // A bare, self or super use of the name runs the function its class dispatches to. With one class
+  // asked about, a bare or self use counts in that class, in a class above it, whose object may be
+  // one, and in a class below it, by name, by path or as an inner class, unless a class on the way
+  // down declares the function again. A super use counts where the nearest class above declaring
+  // the function is the one asked about. A chain through a script the project does not hold counts.
+  const harbour = [
+    'class_name Harbour',
+    'extends Node',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+    '',
+    'func dock() -> void:',
+    '\t_moor(1)',
+    '',
+  ].join('\n');
+  const quay = [
+    'class_name Quay',
+    'extends Harbour',
+    '',
+    '',
+    'func tie() -> void:',
+    '\t_moor(2)',
+    '\tself._moor(3)',
+    '\tsuper._moor(4)',
+    '',
+  ].join('\n');
+  const pier = ['extends "res://port/harbour.gd"', '', '', 'func tie() -> void:', '\t_moor(5)', ''].join(
+    '\n',
+  );
+  const inn = [
+    'class_name Inn',
+    'extends Node',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+    '',
+    'func rest() -> void:',
+    '\t_moor(6)',
+    '\tself._moor(7)',
+    '\tvar later := _moor',
+    '\tlater.call(8)',
+    '',
+    '',
+    'class Cellar:',
+    '\textends Harbour',
+    '',
+    '\tfunc fill() -> void:',
+    '\t\t_moor(9)',
+    '',
+    '',
+    'class Vault extends Harbour:',
+    '\tfunc fill() -> void:',
+    '\t\t_moor(10)',
+    '',
+    '',
+    'class Loft:',
+    '\tfunc _moor(x: int) -> void:',
+    '\t\tprint(x)',
+    '',
+    '\tfunc sweep() -> void:',
+    '\t\t_moor(11)',
+    '',
+  ].join('\n');
+  const berth = [
+    'class_name Berth',
+    'extends Quay',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tsuper._moor(x)',
+    '',
+    '',
+    'func land() -> void:',
+    '\t_moor(12)',
+    '',
+  ].join('\n');
+  const drift = ['extends "res://gone/wreck.gd"', '', '', 'func go() -> void:', '\t_moor(13)', ''].join('\n');
+  const skiff = [
+    'class_name Skiff',
+    'extends "res://gone/hull.gd"',
+    '',
+    '',
+    'func row() -> void:',
+    '\tsuper._moor(14)',
+    '',
+  ].join('\n');
+  const raft = [
+    'class_name Raft',
+    'extends "res://gone/hull.gd"',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+  ].join('\n');
+  const port = [
+    ['res://port/harbour.gd', harbour],
+    ['res://port/quay.gd', quay],
+    ['res://port/pier.gd', pier],
+    ['res://port/inn.gd', inn],
+    ['res://port/berth.gd', berth],
+    ['res://port/drift.gd', drift],
+    ['res://port/skiff.gd', skiff],
+    ['res://port/raft.gd', raft],
+  ] as const;
+  const mooredAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, port).sites.map((one) => [one.script, one.line, one.called]);
+  assert.deepEqual(
+    mooredAt('Harbour._moor'),
+    [
+      ['res://port/berth.gd', 6, true],
+      ['res://port/drift.gd', 5, true],
+      ['res://port/harbour.gd', 10, true],
+      ['res://port/inn.gd', 20, true],
+      ['res://port/inn.gd', 25, true],
+      ['res://port/pier.gd', 5, true],
+      ['res://port/quay.gd', 6, true],
+      ['res://port/quay.gd', 7, true],
+      ['res://port/quay.gd', 8, true],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'Harbour, its subclasses by name, by path and inside Inn either way, Berth super call and the missing chains, but not Inn, Loft or a bare call in Berth, which runs its own',
+  );
+  assert.deepEqual(
+    mooredAt('Quay._moor'),
+    mooredAt('Harbour._moor'),
+    'a class that only inherits the function is asked about as the class it inherits it from, its own super call included',
+  );
+  assert.deepEqual(
+    callersOf(totals({}), 'Raft._moor', port)
+      .sites.filter((one) => one.script === 'res://port/inn.gd')
+      .map((one) => one.line),
+    [10, 11, 12, 20, 25, 33],
+    'asked about a class whose chain passes through a missing script, a class may sit above it, so no use on self is left out',
+  );
+  assert.deepEqual(
+    mooredAt('Berth._moor'),
+    [
+      ['res://port/berth.gd', 10, true],
+      ['res://port/drift.gd', 5, true],
+      ['res://port/harbour.gd', 10, true],
+      ['res://port/quay.gd', 6, true],
+      ['res://port/quay.gd', 7, true],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'asked about the override, the calls above it that may run on a Berth, but no super call, which runs Harbour',
+  );
+  assert.deepEqual(
+    mooredAt('Inn.Loft._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/inn.gd', 33, true],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'an inner class asked about by name is that class, not the script around it',
+  );
+  assert.deepEqual(
+    mooredAt('Inn._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/inn.gd', 10, true],
+      ['res://port/inn.gd', 11, true],
+      ['res://port/inn.gd', 12, false],
+      ['res://port/skiff.gd', 6, true],
+    ],
+    'asked about Inn, its own bare call, self call and Callable are listed, and no Harbour line',
+  );
+  assert.equal(mooredAt('_moor').length, 15, 'and with no class asked about, every use is listed');
+  // A bare call to a static function is bound to the class it is written in, and one through self
+  // runs on whatever the object is.
+  const maker = [
+    'class_name Maker',
+    'extends RefCounted',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func build() -> int:',
+    '\treturn make()',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+    '',
+    'func again() -> int:',
+    '\treturn self.make()',
+    '',
+  ].join('\n');
+  const fancy = [
+    'class_name Fancy',
+    'extends Maker',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 2',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const works = [
+    ['res://works/maker.gd', maker],
+    ['res://works/fancy.gd', fancy],
+  ] as const;
+  const madeAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, works).sites.map((one) => [one.script, one.line]);
+  assert.deepEqual(
+    madeAt('Fancy.make'),
+    [['res://works/maker.gd', 18]],
+    "Fancy's static function is reached through self on a Fancy, never by Maker's bare call",
+  );
+  assert.deepEqual(
+    madeAt('Maker.make'),
+    [
+      ['res://works/maker.gd', 10],
+      ['res://works/maker.gd', 18],
+    ],
+    "Maker's is reached by its own bare call and through self",
+  );
+  // A property the profile has no row for is asked about as the class declares it.
+  const hull = [
+    'class_name Hull',
+    'extends Node',
+    '',
+    'var speed: int = 0',
+    '',
+    '',
+    'func go() -> void:',
+    '\tspeed = 2',
+    '\tprint(speed)',
+    '',
+  ].join('\n');
+  const mast = [
+    'class_name Mast',
+    'extends Node',
+    '',
+    'var speed: int = 0',
+    '',
+    '',
+    'func go() -> void:',
+    '\tself.speed = 1',
+    '',
+  ].join('\n');
+  const sailed = callersOf(totals({}), 'Hull.speed', [
+    ['res://sea/hull.gd', hull],
+    ['res://sea/keel.gd', 'class_name Keel\nextends Hull\n\n\nfunc go() -> void:\n\tspeed = 3\n'],
+    ['res://sea/mast.gd', mast],
+  ]);
+  assert.deepEqual(
+    [sailed.property, sailed.sites.map((one) => [one.script, one.line, one.access])],
+    [
+      true,
+      [
+        ['res://sea/hull.gd', 8, 'write'],
+        ['res://sea/hull.gd', 9, 'read'],
+        ['res://sea/keel.gd', 6, 'write'],
+      ],
+    ],
+    "Hull's own reads and writes and its subclass's, as a property, and not Mast's speed",
   );
 
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the

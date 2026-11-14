@@ -504,10 +504,15 @@ function readHeaderLine(reader: ShapeReader, member: MemberLine, extendsAs: stri
   if (extendsAs !== null || !(EXTENDS_LINE.test(text) || named !== null)) {
     return extendsAs;
   }
-  const clause = EXTENDS_CLAUSE.exec(text);
+  return extendsOn(reader, member);
+}
+
+/** The class [param member]'s `extends` clause names, or null where the line holds none. */
+function extendsOn(reader: ShapeReader, member: MemberLine): string | null {
+  const clause = EXTENDS_CLAUSE.exec(member.text);
   return clause === null
     ? null
-    : extendsTarget(reader.source, reader.code, at + clause.index + clause[0].length);
+    : extendsTarget(reader.source, reader.code, member.at + clause.index + clause[0].length);
 }
 
 /** Reads the inner class declared on [param member], and returns the index of the line after it. */
@@ -579,6 +584,9 @@ function readMemberLine(
   const member: MemberLine = { line, text: line.text.slice(line.indent), at: line.start + line.indent };
   if (isScriptBody) {
     state.extendsAs = readHeaderLine(reader, member, state.extendsAs);
+  } else if (state.extendsAs === null && EXTENDS_LINE.test(member.text)) {
+    // An inner class may name its base on the line after its own, as `extends Base`.
+    state.extendsAs = extendsOn(reader, member);
   }
   const declared = DECLARATION_LINE.exec(member.text);
   if (declared !== null) {
@@ -1131,12 +1139,17 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * something to pass over, and each place says which of the two it does. Inside those blocks the
  * name is the value stored, which the engine reads and writes without running them again, so
  * `sinks = value` in the set block of `sinks` is not a place that sets it.
+ *
+ * A use written bare, through `self` or through `super` runs whichever function of that name the
+ * engine dispatches it to from the class holding it, and [param onSelf] says whether that can be
+ * the one asked about: a bare `_settle()` in a script of an unrelated class calls that script's own.
  */
 export function callSitesOf(
   source: string,
   name: string,
   otherClasses: ReadonlySet<string> = new Set(),
   property = false,
+  onSelf: SelfDispatch = () => true,
 ): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
@@ -1153,12 +1166,16 @@ export function callSitesOf(
     lines,
     shape,
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
+    onSelf,
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
     .filter((one) => isCallSiteKept(scan, one))
     .map((one) => callSiteAt(scan, one));
 }
+
+/** Whether a use at [param offset] written bare, through `self` or through `super` can reach the function asked about. */
+export type SelfDispatch = (offset: number, how: 'bare' | 'self' | 'super') => boolean;
 
 /** What one `callSitesOf` call reads from, worked out once. */
 interface CallScan {
@@ -1172,6 +1189,7 @@ interface CallScan {
   readonly shape: ScriptShape;
   /** The zero-based line ranges of the property's own get and set blocks. */
   readonly accessors: readonly (readonly [number, number])[];
+  readonly onSelf: SelfDispatch;
 }
 
 /** The class a variable of the class body holding [param at] is declared as, read off its own line. */
@@ -1250,7 +1268,14 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
   if (!one.afterDot && scan.accessors.some(([declared, last]) => index > declared && index <= last)) {
     return false;
   }
-  return one.afterDot ? isOwnMemberCall(scan, one.offset, index) : isBareFunctionUse(scan, one.offset, index);
+  if (!one.afterDot) {
+    return isBareFunctionUse(scan, one.offset, index) && scan.onSelf(one.offset, 'bare');
+  }
+  const receiver = receiverBefore(scan.code, one.offset);
+  if (receiver !== null && !receiver.dotted && (receiver.name === 'self' || receiver.name === 'super')) {
+    return scan.onSelf(one.offset, receiver.name);
+  }
+  return isOwnMemberCall(scan, one.offset, index);
 }
 
 function callSiteAt(scan: CallScan, one: Occurrence): CallSite {
