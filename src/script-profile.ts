@@ -1112,8 +1112,8 @@ interface ScriptDispatch {
  * for a static function written bare. A `super` use counts where the class above the one it is
  * written in resolves to it. A use on an object of a class the receiver names counts as a `self`
  * use in that class does. A use on the class itself, or on an object `new()` made of it, counts as
- * a static call bound to that class does. A use whose
- * chain passes through a script the project does not hold counts, since it may.
+ * a static call bound to that class does. A use whose chain passes through a script the project
+ * does not hold counts, since it may.
  */
 class Dispatch {
   /** The classes whose objects, or those of a class below them, resolve the name to `reached`. */
