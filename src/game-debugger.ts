@@ -27,7 +27,7 @@ import {
   type SentValue,
   TYPE_NAMES,
 } from './godot-variant.js';
-import { countSnapshot, SNAPSHOT_SLICE_BYTES } from './object-snapshot.js';
+import { countSnapshot, SNAPSHOT_SLICE_BYTES, SPAWNING_START } from './object-snapshot.js';
 import { isRecord } from './records.js';
 import { shippedAddonsDirectory } from './setup.js';
 
@@ -206,17 +206,20 @@ const SNAPSHOT_PREPARE_MS = 20_000;
 /** How long each slice of a snapshot is waited for. The game sends one each frame it is asked. */
 const SNAPSHOT_SLICE_MS = 10_000;
 /**
- * How many of its performance frames a game sends past a prepare it never answers before it counts
- * as having no snapshot. Every game with a debugger sends one about each second from its main loop,
- * which reads the debugger's messages each frame and serialises a snapshot there and then. The
- * engine drops a message for a capture it lacks without a word, so frames going on with no answer
- * are that. One frame can already be on its way as the prepare is sent, so it takes more than one.
+ * How long after a prepare the game's performance frames start to count. Every game with a
+ * debugger sends one about each second from its main loop. The frames it sent before it read the
+ * prepare can still be unread here as the prepare goes out, and arrive together at once.
+ */
+const FRAMES_COUNT_AFTER_MS = 1500;
+/**
+ * How many counted frames show a game that went on without answering a prepare or the inspection
+ * sent after it. A game prepares a snapshot on its main loop, so it sends no frame while it does.
  */
 const FRAMES_PAST_A_PREPARE = 3;
-/** What a prepare is answered by when the game's frames went on without answering it. */
-const WENT_ON = Symbol('went on');
-/** The refusal of a game whose frames went on past a prepare. */
-const NO_SNAPSHOT = `The game went on with ${FRAMES_PAST_A_PREPARE} frames and never answered the snapshot request, which is what an engine without the snapshot does. Only an engine built with debug features has it, as the editor and the debug export templates are, so a game run on a release template has none.`;
+/** The refusal of a game that answered what was asked after a prepare and not the prepare. */
+const NO_SNAPSHOT = `The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.`;
+/** The refusal of a game whose frames went on while it answered nothing asked of it. */
+const NO_DEBUG_FEATURES = `The game answered neither the snapshot request nor the inspection asked after it within ${SNAPSHOT_PREPARE_MS / 1000} s, while its frames went on, which is what an engine without debug features does, as a release template is.`;
 /** The refusal of a game that sent nothing at all while it was asked. */
 const SNAPSHOT_STALLED = `The game answered no object snapshot within ${SNAPSHOT_PREPARE_MS / 1000} s, and the frames a running game sends each second stopped meanwhile, so it was busy.`;
 /** The fix for a game that was busy as it was asked. */
@@ -225,7 +228,7 @@ const ASK_AGAIN = 'debug_objects snapshot asks again, which the game answers onc
 const DEBUG_ENGINE =
   'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot';
 /** The fix for a game whose debugger connection is gone or never came. */
-const START_AGAIN = 'editor_run start starts the game again, with a debugger this server holds';
+const START_AGAIN = SPAWNING_START;
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
 const REPLIES: ReadonlySet<string> = new Set([
   'debug_enter',
@@ -411,6 +414,12 @@ export class GameDebugger {
   private outputDropped = 0;
   /** How many snapshots have been asked for, which numbers each one's requests. */
   private snapshotsAsked = 0;
+  /**
+   * How many inspections have been sent and answered. The game answers them in order with nothing
+   * that names which, so the count says which answer is whose.
+   */
+  private inspectionsSent = 0;
+  private inspectionsAnswered = 0;
   /** Why the expressions evaluated since the last evaluate began failed, as the engine said it. */
   private readonly expressionErrors: string[] = [];
   /**
@@ -577,6 +586,8 @@ export class GameDebugger {
       this.takeOutput(received.data);
     } else if (received.message === 'error') {
       this.takeError(received.data);
+    } else if (received.message === 'scene:inspect_object') {
+      this.inspectionsAnswered += 1;
     }
     const at = this.waiters.findIndex((waiter) => waiter.wanted(received));
     if (at !== -1) {
@@ -730,20 +741,13 @@ export class GameDebugger {
     }
     this.snapshotsAsked += 1;
     const id = this.snapshotsAsked;
-    const total = await this.snapshotReply(
-      id,
-      'request_prepare_snapshot',
-      [id, 'gdharness'],
-      SNAPSHOT_PREPARE_MS,
-    );
+    const total = await this.prepare(id);
     if (typeof total !== 'number') {
-      return this.unprepared(total);
+      return total;
     }
     const bytes = new Uint8Array(total);
     for (let have = 0; have < total; ) {
-      const ask = [id, have, have + SNAPSHOT_SLICE_BYTES];
-      const part = await this.snapshotReply(id, 'request_snapshot_chunk', ask, SNAPSHOT_SLICE_MS);
-      const slice = typeof part === 'symbol' ? undefined : part;
+      const slice = await this.slice(id, have);
       if (slice === undefined || !isList(slice) || slice.length === 0 || have + slice.length > total) {
         return {
           refused: `The game stopped sending its snapshot after ${have} of ${total} bytes${this.ended ? ', as it exited' : ''}.`,
@@ -756,47 +760,66 @@ export class GameDebugger {
     return { ...countSnapshot(bytes) };
   }
 
-  /** Why a prepare answered by [param answered], which is no size, gave no snapshot. */
-  private unprepared(answered: GodotValue | typeof WENT_ON | undefined): DebugAnswer {
-    const gone = this.unreachableRefusal();
-    if (gone !== null) {
-      return { ...gone, next: START_AGAIN };
-    }
-    return answered === WENT_ON
-      ? { refused: NO_SNAPSHOT, next: DEBUG_ENGINE }
-      : { refused: SNAPSHOT_STALLED, next: ASK_AGAIN };
-  }
-
   /**
-   * What the game answers [param request] of snapshot [param id] with, after the id: a size for a
-   * prepare and the bytes for a slice. Undefined when nothing came within [param ms], and WENT_ON
-   * when the game's frames went on past a prepare without it.
+   * The size of snapshot [param id] once the game has prepared it, or why it has none.
+   *
+   * The game prepares a snapshot inside the handler of the request, before it reads the next
+   * message, and answers its messages in the order they came. So an inspection asked right after
+   * the request, which every game with debug features answers, comes back after the size. Its
+   * answer with no size before it shows an engine without the snapshot. A game answering neither
+   * while its frames go on has no debug features at all.
    */
-  private async snapshotReply(
-    id: number,
-    request: 'request_prepare_snapshot' | 'request_snapshot_chunk',
-    data: readonly SentValue[],
-    ms: number,
-  ): Promise<GodotValue | typeof WENT_ON | undefined> {
-    const prepare = request === 'request_prepare_snapshot';
-    const reply = prepare ? 'snapshot:snapshot_prepared' : 'snapshot:snapshot_chunk';
+  private async prepare(id: number): Promise<number | DebugAnswer> {
+    const thread = this.held?.thread ?? MAIN_THREAD;
+    const sent = Date.now();
+    this.inspectionsSent += 1;
+    const inspection = this.inspectionsSent;
     let frames = 0;
     const answered = this.next((received) => {
       if (!('message' in received)) {
         return false;
       }
-      if (prepare && received.message === 'performance:profile_frame') {
-        frames += 1;
-        return frames >= FRAMES_PAST_A_PREPARE;
+      if (received.message === 'performance:profile_frame') {
+        frames += Date.now() - sent >= FRAMES_COUNT_AFTER_MS ? 1 : 0;
+        return false;
       }
-      return received.message === reply && received.data[0] === id;
-    }, ms);
-    this.send(`snapshot:${request}`, data, this.held?.thread ?? MAIN_THREAD);
+      if (received.message === 'scene:inspect_object') {
+        return this.inspectionsAnswered >= inspection;
+      }
+      return received.message === 'snapshot:snapshot_prepared' && received.data[0] === id;
+    }, SNAPSHOT_PREPARE_MS);
+    this.send('snapshot:request_prepare_snapshot', [id, 'gdharness'], thread);
+    this.send('scene:inspect_object', [0], thread);
     const got = await answered;
-    if (got === null || !('message' in got)) {
-      return undefined;
+    if (got !== null && 'message' in got) {
+      const size = got.data[1];
+      return got.message === 'snapshot:snapshot_prepared' && typeof size === 'number'
+        ? size
+        : { refused: NO_SNAPSHOT, next: DEBUG_ENGINE };
     }
-    return got.message === reply ? got.data[1] : WENT_ON;
+    const gone = this.unreachableRefusal();
+    if (gone !== null) {
+      return { ...gone, next: START_AGAIN };
+    }
+    return frames >= FRAMES_PAST_A_PREPARE
+      ? { refused: NO_DEBUG_FEATURES, next: DEBUG_ENGINE }
+      : { refused: SNAPSHOT_STALLED, next: ASK_AGAIN };
+  }
+
+  /** The bytes of snapshot [param id] from [param from] on, or undefined when none came in time. */
+  private async slice(id: number, from: number): Promise<GodotValue | undefined> {
+    const answered = this.next(
+      (received) =>
+        'message' in received && received.message === 'snapshot:snapshot_chunk' && received.data[0] === id,
+      SNAPSHOT_SLICE_MS,
+    );
+    this.send(
+      'snapshot:request_snapshot_chunk',
+      [id, from, from + SNAPSHOT_SLICE_BYTES],
+      this.held?.thread ?? MAIN_THREAD,
+    );
+    const got = await answered;
+    return got !== null && 'message' in got ? got.data[1] : undefined;
   }
 
   /** The refusal for a game whose debugger connection is not there, or null when it is. */
@@ -1327,8 +1350,17 @@ export class GameDebugger {
    */
   private async taken(): Promise<boolean> {
     this.forget('scene:inspect_object');
+    this.inspectionsSent += 1;
+    const inspection = this.inspectionsSent;
     this.send('scene:inspect_object', [0], this.held?.thread ?? MAIN_THREAD);
-    return (await this.next(GameDebugger.named('scene:inspect_object'), READ_MS)) !== null;
+    const answered = await this.next(
+      (received) =>
+        'message' in received &&
+        received.message === 'scene:inspect_object' &&
+        this.inspectionsAnswered >= inspection,
+      READ_MS,
+    );
+    return answered !== null;
   }
 
   /** The refusal for [param frame] when [param frames] has no such frame, or null when it does. */

@@ -365,8 +365,10 @@ import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
 import {
   countSnapshot,
   diffAnswer,
+  isSnapshotCounts,
   SNAPSHOT_SLICE_BYTES,
   SnapshotStore,
+  SPAWNING_START,
   snapshotAnswer,
 } from '../src/object-snapshot.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
@@ -46831,10 +46833,7 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
   try {
     const unconnected = await peer.ask({ op: 'snapshot' });
     assert.match(String(unconnected['refused']), /^The game never connected to its debugger/);
-    assert.equal(
-      unconnected['next'],
-      'editor_run start starts the game again, with a debugger this server holds',
-    );
+    assert.equal(unconnected['next'], SPAWNING_START);
     const game = createConnection({ host: '127.0.0.1', port: peer.port });
     const stream = new DebuggerStream();
     game.on('data', (chunk: Buffer) => {
@@ -46848,7 +46847,7 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
     const exited = await peer.ask({ op: 'snapshot' });
     assert.deepEqual(exited, {
       refused: 'The game stopped sending its snapshot after 0 of 1000 bytes, as it exited.',
-      next: 'editor_run start starts the game again, with a debugger this server holds',
+      next: SPAWNING_START,
     });
   } finally {
     peer.close();
@@ -46856,19 +46855,38 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
 }
 
 /**
- * A game whose frames go on past a snapshot request it never answers has an engine without the
- * snapshot, since the engine drops a message for a capture it lacks. A game that sends nothing at
- * all while asked was busy, and is told to ask again rather than to change its engine.
+ * Why a game gave no snapshot is told from what it answered, in the order it answers.
+ * - A game that answers the inspection asked right after the request, and not the request, has an
+ *   engine without the snapshot, since the engine drops a message for a capture it lacks. That is
+ *   known at once.
+ * - A game that answers neither while its frames go on has no debug features at all.
+ * - A game that sends nothing more was busy. The frames it had sent before it read the request,
+ *   which arrive together as the request goes out, do not count as frames past it.
  */
 async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void> {
-  const answerOf = async (framesGoOn: boolean): Promise<{ answer: DebugAnswer; ms: number }> => {
+  type Game = 'inspects' | 'frames' | 'busy';
+  const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
     const peer = await GameDebugger.open([]);
     const game = createConnection({ host: '127.0.0.1', port: peer.port });
-    const ticking = setInterval(() => {
-      if (framesGoOn) {
-        game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
+    const frame = (): boolean => game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
+    const reply = (message: string): void => {
+      if (kind === 'inspects' && message === 'scene:inspect_object') {
+        game.write(framedCommand('scene:inspect_object', []));
       }
-    }, 200);
+      // What was sent before the request was read, still on its way as the request goes out.
+      if (kind === 'busy' && message === 'snapshot:request_prepare_snapshot') {
+        Array.from({ length: 5 }).forEach(frame);
+      }
+    };
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          reply(received.message);
+        }
+      }
+    });
+    const ticking = setInterval(() => kind === 'frames' && frame(), 200);
     try {
       await new Promise<void>((settle) => game.once('connect', settle));
       const began = Date.now();
@@ -46880,18 +46898,103 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
       peer.close();
     }
   };
-  const [without, busy] = await Promise.all([answerOf(true), answerOf(false)]);
+  const [inspected, frames, busy] = await Promise.all([
+    answerOf('inspects'),
+    answerOf('frames'),
+    answerOf('busy'),
+  ]);
+  assert.deepEqual(inspected.answer, {
+    refused:
+      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+  });
+  assert.ok(inspected.ms < 2000, `known from the order, not the wait: ${inspected.ms} ms`);
   assert.match(
-    String(without.answer['refused']),
-    /^The game went on with 3 frames and never answered the snapshot request/,
+    String(frames.answer['refused']),
+    /^The game answered neither the snapshot request nor the inspection asked after it within 20 s, while its frames went on/,
   );
-  assert.match(String(without.answer['next']), /godot naming an editor build or a debug export template/);
-  assert.ok(without.ms < 5000, `known from the frames, not the wait: ${without.ms} ms`);
+  assert.match(String(frames.answer['next']), /godot naming an editor build or a debug export template/);
   assert.deepEqual(busy.answer, {
     refused:
       'The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy.',
     next: 'debug_objects snapshot asks again, which the game answers once its frames go on',
   });
+}
+
+/**
+ * A snapshot asked as soon as a large one is answered is taken too. The game sends a frame each
+ * second while the keeper reads and counts the first, and those frames are still unread as the
+ * second request goes out. Counted as frames past it, they read as an engine without the snapshot.
+ */
+async function testASnapshotRightAfterALargeOneIsTaken(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('snapshot after a large one regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshot-backlog-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Backlog"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\nvar kept: Array[Resource] = []\n\n\nfunc _ready() -> void:\n' +
+      '\tfor at: int in 200000:\n\t\tvar one: Resource = Resource.new()\n\t\tone.resource_name = str(at)\n\t\tkept.append(one)\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  let running = (): void => undefined;
+  const ran = new Promise<boolean>((settle) => {
+    running = () => {
+      settle(true);
+    };
+    setTimeout(() => {
+      settle(false);
+    }, 60_000).unref();
+  });
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => undefined,
+        message: (received) => {
+          if ('message' in received && received.message === 'performance:profile_frame') {
+            running();
+          }
+        },
+      },
+    ],
+  );
+  const game = spawnHidden(engine, ['--headless', '--path', project, ...peer.engineArguments], {
+    stdio: 'ignore',
+  });
+  try {
+    assert.ok(await ran, 'the game runs and sends its frames');
+    const first = await peer.ask({ op: 'snapshot' });
+    const second = await peer.ask({ op: 'snapshot' });
+    for (const [which, answer] of [
+      ['first', first],
+      ['second', second],
+    ] as const) {
+      assert.ok(
+        isSnapshotCounts(answer) &&
+          answer.classes.some((one) => one.engineClass === 'Resource' && one.count >= 200000),
+        `the ${which} snapshot is taken: ${JSON.stringify(answer).slice(0, 600)}`,
+      );
+    }
+  } finally {
+    game.kill();
+    peer.close();
+    await delay(300);
+    sweep(project);
+  }
 }
 
 /**
@@ -46953,10 +47056,15 @@ async function testTheStartASnapshotRefusalNamesIsSpawnedHere(): Promise<void> {
       const asked = async (name: string, args: Record<string, unknown>): Promise<string> =>
         textOf(await server.request('tools/call', { name, arguments: args }, 60_000)) ?? '';
       const named = await asked('debug_objects', { op: 'snapshot' });
-      assert.match(
-        named,
-        /^No game is running[\s\S]*editor_run start with headless: true and any of args, engineArgs, env or savesIn\./,
-      );
+      const spawning = /editor_run start with headless: true and any of args, engineArgs, env or savesIn\./;
+      assert.match(named, new RegExp(`^No game is running[\\s\\S]*${spawning.source}`));
+      // The keeper's fix for a game whose debugger is gone names the same start.
+      const keeper = await GameDebugger.open([]);
+      try {
+        assert.match(String((await keeper.ask({ op: 'snapshot' }))['next']), spawning);
+      } finally {
+        keeper.close();
+      }
       const starts: Record<string, unknown>[] = [
         { args: ['--level=1'] },
         { engineArgs: ['--verbose'] },
@@ -101939,6 +102047,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassIsCountedUnderItsNativeClass,
   testEachSnapshotRefusalNamesItsOwnFix,
   testASnapshotTellsAnEngineWithoutItFromABusyGame,
+  testASnapshotRightAfterALargeOneIsTaken,
   testAnObjectSnapshotNeedsAGameThisServerStarted,
   testAnObjectSnapshotOfAPlayedGameIsRefused,
   testTheStartASnapshotRefusalNamesIsSpawnedHere,

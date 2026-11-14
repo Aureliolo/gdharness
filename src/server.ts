@@ -237,6 +237,7 @@ import {
   type KeptSnapshot,
   mismatchedRuns,
   SnapshotStore,
+  SPAWNING_START,
   snapshotAnswer,
 } from './object-snapshot.js';
 import { launchOutsideTheTree } from './outside.js';
@@ -7395,10 +7396,7 @@ class GodotServer {
   /** Why no snapshot can be taken now: no game, one that has ended, or one the editor plays. */
   private noSnapshotToTake(): ToolResponse {
     const game = this.activeProcess;
-    // Only these reach a spawn in every project. The editor plays a headless or silent start
-    // itself when the project's own run arguments already make its games headless.
-    const start =
-      'editor_run start with headless: true and any of args, engineArgs, env or savesIn. The editor cannot hand a game any of them, so this server starts it and holds its debugger, which takes the snapshot';
+    const start = SPAWNING_START;
     if (game?.throughEditor === true && !exited(game)) {
       return this.createErrorResponse(
         "The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way.",

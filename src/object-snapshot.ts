@@ -20,6 +20,14 @@ import { isRecord } from './records.js';
  */
 export const SNAPSHOT_SLICE_BYTES = 64 << 10;
 
+/**
+ * The start that gives a game this server holds the debugger of, in every project. The editor
+ * plays a headless or silent start itself where the project's run arguments make its games
+ * headless, and its debugger is then the editor's.
+ */
+export const SPAWNING_START =
+  'editor_run start with headless: true and any of args, engineArgs, env or savesIn. The editor cannot hand a game any of them, so this server starts it and holds its debugger, which takes the snapshot';
+
 /** What kind of object a class's instances are, from what the collector adds to each. */
 type ObjectKind = 'RefCounted' | 'Node' | 'Object';
 
