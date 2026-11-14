@@ -189,6 +189,8 @@ import {
   ownStart,
   poolCount,
   QUEUED_FOLDER,
+  RESERVED_FOLDER,
+  reservedMemory,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
@@ -59925,6 +59927,220 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
   }
 }
 
+const RESERVED_GIB = 1024 ** 3;
+
+/** A slots folder with a reserved folder, and live processes to hold marks, all removed by `close`. */
+function reservationFixture(): {
+  readonly directory: string;
+  readonly holder: () => Promise<{ pid: number; started: number }>;
+  readonly mark: (name: string, content: unknown) => void;
+  readonly close: () => void;
+} {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reserved-'));
+  mkdirSync(join(directory, RESERVED_FOLDER));
+  const children: ReturnType<typeof spawnHidden>[] = [];
+  return {
+    directory,
+    holder: async () => {
+      const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+        stdio: 'ignore',
+      });
+      children.push(child);
+      const pid = child.pid ?? 0;
+      const started = (await startTimesOf([pid])).get(pid);
+      assert.notEqual(started, undefined, 'the platform says when a live process started');
+      return { pid, started: started ?? 0 };
+    },
+    mark: (name, content) => {
+      writeFileSync(
+        join(directory, RESERVED_FOLDER, name),
+        typeof content === 'string' ? content : JSON.stringify(content),
+      );
+    },
+    close: () => {
+      for (const child of children) {
+        child.kill();
+      }
+      sweep(directory);
+    },
+  };
+}
+
+/** A live mark owing 30 GiB takes exactly 30 GiB from the room, and from the figure the room is read from. */
+async function testALiveReservationShrinksTheRoomByWhatItOwes(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    assert.equal(await reservedMemory(fixture.directory), 0, 'no mark owes nothing');
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 30 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 30 * RESERVED_GIB);
+    assert.equal(memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB).bytes, -18 * RESERVED_GIB);
+    assert.equal(memoryRoomOf(12 * RESERVED_GIB, 5 * RESERVED_GIB, 3 * RESERVED_GIB).bytes, 2 * RESERVED_GIB);
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A mark whose holder is gone, or whose pid a later process holds, counts nothing. */
+async function testAGoneHoldersReservationCountsNothing(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const live = await fixture.holder();
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    fixture.mark('gone.json', { pid: gone.pid ?? 0, started: live.started, owed: 7 * RESERVED_GIB });
+    fixture.mark('reused.json', { pid: live.pid, started: live.started - 3_600_000, owed: 9 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 0, 'neither mark counts');
+    fixture.mark('live.json', { ...live, owed: 2 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 2 * RESERVED_GIB, 'and a live one still does');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** Live marks add up. */
+async function testSeveralLiveReservationsSum(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 10 * RESERVED_GIB });
+    fixture.mark('b.json', { ...(await fixture.holder()), owed: 20 * RESERVED_GIB });
+    fixture.mark('c.json', { ...(await fixture.holder()), owed: 1 });
+    assert.equal(await reservedMemory(fixture.directory), 30 * RESERVED_GIB + 1);
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A mark that cannot be read as a whole-number debt counts nothing and throws nothing. */
+async function testAMalformedReservationCountsNothingAndThrowsNothing(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const live = await fixture.holder();
+    for (const [name, owed] of [
+      ['fraction', 1.5],
+      ['negative', -5],
+      ['zero', 0],
+      ['boolean', true],
+      ['text', '5'],
+      ['null', null],
+    ] as const) {
+      fixture.mark(`${name}.json`, { ...live, owed });
+    }
+    fixture.mark('missing.json', live);
+    fixture.mark('nobody.json', { owed: 5 });
+    fixture.mark('torn.json', '{"pid":');
+    fixture.mark('array.json', '[1,2]');
+    fixture.mark('empty.json', '');
+    mkdirSync(join(fixture.directory, RESERVED_FOLDER, 'unreadable.json'));
+    assert.equal(await reservedMemory(fixture.directory), 0, 'none of them counts');
+    fixture.mark('good.json', { ...live, owed: 4 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 4 * RESERVED_GIB, 'a good one beside them does');
+    assert.equal(await reservedMemory(join(fixture.directory, 'nowhere')), 0, 'no folder owes nothing');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A mark held by this process or one above it is the run's own reservation and is not waited on. */
+async function testAReservationOfThisProcessOrAnAncestorCountsNothing(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const own = await ownStart();
+    const parent = (await startTimesOf([process.ppid])).get(process.ppid);
+    assert.notEqual(parent, undefined, 'the platform says when the parent started');
+    fixture.mark('own.json', { pid: process.pid, started: own, owed: 5 * RESERVED_GIB });
+    fixture.mark('parent.json', { pid: process.ppid, started: parent, owed: 6 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 0, 'a gate does not wait on its own peak');
+    fixture.mark('other.json', { ...(await fixture.holder()), owed: 3 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 3 * RESERVED_GIB, 'a stranger still counts');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** Reservations are read from the machine's slots folder, never from the pool a gate shares. */
+async function testReservationsAreReadFromTheMachineFolderNotThePool(): Promise<void> {
+  const machine = reservationFixture();
+  const pool = reservationFixture();
+  const before = { slots: process.env[SLOTS_VARIABLE], share: process.env[SHARE_VARIABLE] };
+  try {
+    machine.mark('m.json', { ...(await machine.holder()), owed: 11 * RESERVED_GIB });
+    pool.mark('p.json', { ...(await pool.holder()), owed: 13 * RESERVED_GIB });
+    process.env[SLOTS_VARIABLE] = machine.directory;
+    process.env[SHARE_VARIABLE] = pool.directory;
+    assert.equal(await reservedMemory(), 11 * RESERVED_GIB);
+  } finally {
+    for (const [name, value] of [
+      [SLOTS_VARIABLE, before.slots],
+      [SHARE_VARIABLE, before.share],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+    machine.close();
+    pool.close();
+  }
+}
+
+/** The room every reader gets is less the reservations, and the line on room says how much. */
+async function testTheRoomEveryReaderGetsIsLessTheReservations(): Promise<void> {
+  const fixture = reservationFixture();
+  const before = process.env[SLOTS_VARIABLE];
+  try {
+    const untouched = await memoryAvailable();
+    assert.doesNotMatch(untouched.said, /reserved/, 'nothing reserved says nothing');
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 2 ** 50 });
+    process.env[SLOTS_VARIABLE] = fixture.directory;
+    const room = await memoryAvailable();
+    assert.ok(room.bytes < -(2 ** 49), `the room is below nothing: ${room.bytes}`);
+    assert.match(room.said, /^of memory (free|left to commit) after 1048576\.0 GB reserved$/);
+    const reserved = memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB);
+    assert.equal(reserved.said, 'of memory free after 30.0 GB reserved');
+    assert.deepEqual(roomFor(2, 16, reserved.bytes, reserved.said), {
+      engines: 1,
+      held: 'the machine has 0.0 GB of memory free after 30.0 GB reserved, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
+    });
+  } finally {
+    if (before === undefined) {
+      delete process.env[SLOTS_VARIABLE];
+    } else {
+      process.env[SLOTS_VARIABLE] = before;
+    }
+    fixture.close();
+  }
+}
+
+/** The slot sweep reads only numbered locks and the waiting marks, and leaves reservations alone. */
+async function testTheSlotSweepLeavesReservationsAlone(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const started = await ownStart();
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    const dead = { pid: gone.pid ?? 0, started, owed: 5 * RESERVED_GIB };
+    fixture.mark('dead.json', dead);
+    fixture.mark('dead.lock', dead);
+    fixture.mark('7.lock', dead);
+    writeFileSync(join(fixture.directory, '9.lock'), JSON.stringify(dead));
+    const slots = new EngineSlots(fixture.directory, 2, { pid: process.pid, started });
+    const taken = await slots.takeFree();
+    assert.ok(
+      [0, 1].some((one) => taken === join(fixture.directory, `${one}.lock`)),
+      `a slot is taken: ${taken}`,
+    );
+    assert.deepEqual(
+      readdirSync(join(fixture.directory, RESERVED_FOLDER)).toSorted(),
+      ['7.lock', 'dead.json', 'dead.lock'],
+      'the folder is untouched',
+    );
+    assert.equal(existsSync(join(fixture.directory, '9.lock')), false, 'while the sweep did run');
+  } finally {
+    fixture.close();
+  }
+}
+
 /**
  * Gates come before work beside them, as the games' own tools take the slots. While a gate waits
  * for its seat, an engine outside a gate takes no slot at all, the kept ones included. Once every
@@ -101189,6 +101405,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
+  testALiveReservationShrinksTheRoomByWhatItOwes,
+  testAGoneHoldersReservationCountsNothing,
+  testSeveralLiveReservationsSum,
+  testAMalformedReservationCountsNothingAndThrowsNothing,
+  testAReservationOfThisProcessOrAnAncestorCountsNothing,
+  testReservationsAreReadFromTheMachineFolderNotThePool,
+  testTheRoomEveryReaderGetsIsLessTheReservations,
+  testTheSlotSweepLeavesReservationsAlone,
   testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,

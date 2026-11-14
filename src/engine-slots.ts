@@ -1005,6 +1005,75 @@ export async function ownStart(): Promise<number> {
   return said ?? Math.round(Date.now() - process.uptime() * 1000);
 }
 
+/** The folder under the machine's slots where other work marks the memory it has reserved. */
+export const RESERVED_FOLDER = 'reserved';
+
+/** One reservation mark: who holds it, how much it still owes, and what the file said. */
+interface ReservationMark {
+  readonly holder: SlotHolder;
+  readonly owed: number;
+  readonly content: string;
+  readonly writtenAt: number;
+}
+
+/** The marks in [param directory]'s reserved folder that name a holder and a positive whole `owed`. */
+function reservationMarks(directory: string): ReservationMark[] {
+  const folder = join(directory, RESERVED_FOLDER);
+  let names: string[];
+  try {
+    names = readdirSync(folder);
+  } catch {
+    return [];
+  }
+  const marks: ReservationMark[] = [];
+  for (const name of names.filter((one) => one.endsWith('.json'))) {
+    try {
+      const content = readFileSync(join(folder, name), 'utf8');
+      const holder = holderOf(content);
+      const parsed: unknown = JSON.parse(content);
+      const owed = isRecord(parsed) ? parsed['owed'] : undefined;
+      if (holder !== null && typeof owed === 'number' && Number.isInteger(owed) && owed > 0) {
+        marks.push({ holder, owed, content, writtenAt: statSync(join(folder, name)).mtimeMs });
+      }
+    } catch {
+      // Unreadable or not JSON: it reserves nothing.
+    }
+  }
+  return marks;
+}
+
+/** This process and every process above it, which a reservation of theirs is not owed to. */
+async function ownLineage(): Promise<Set<number>> {
+  const tree = await processTree();
+  const lineage = new Set<number>([process.pid, process.ppid]);
+  if (tree !== undefined) {
+    for (const above of ancestorsIn(tree, process.pid, -1)) {
+      lineage.add(above);
+    }
+  }
+  return lineage;
+}
+
+/**
+ * The bytes other work has reserved and still owes, summed over the live marks in
+ * `<directory>/reserved`. A mark counts by the rule a lock does ({@link lockIsFree}), and one held by
+ * this process or an ancestor counts nothing, since a gate that reserved its peak runs this inside
+ * it. The default directory is the machine's, never a pool's.
+ */
+export async function reservedMemory(directory: string = machineSlots().directory): Promise<number> {
+  const live = reservationMarks(directory).filter((mark) => alive(mark.holder.pid));
+  if (live.length === 0) {
+    return 0;
+  }
+  const starts = await startTimesOf([...new Set(live.map((mark) => mark.holder.pid))]);
+  const lineage = await ownLineage();
+  const now = Date.now();
+  return live
+    .filter((mark) => !lineage.has(mark.holder.pid))
+    .filter((mark) => !lockIsFree(mark.content, mark.writtenAt, now, alive, (asked) => starts.get(asked)))
+    .reduce((sum, mark) => sum + mark.owed, 0);
+}
+
 /**
  * The engine slots in one directory, taken for this process. [param say] is where a take given no
  * listener of its own says it is waiting, a line at a time: a command's output, which several lanes
