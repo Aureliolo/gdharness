@@ -46998,6 +46998,107 @@ async function testASnapshotRightAfterALargeOneIsTaken(): Promise<void> {
 }
 
 /**
+ * A snapshot a worker thread held at a breakpoint prepared comes back whole when the thread is let
+ * go before the first slice is asked. The thread drops what it has not read as it leaves its break,
+ * and the prepared snapshot is the collector's, so the slices are asked of the main loop.
+ */
+async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('snapshot of a thread let go regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshot-thread-'));
+  const script = [
+    'extends Node',
+    '',
+    'var kept: Array[Resource] = []',
+    'var worker: Thread = null',
+    '',
+    '',
+    'func _ready() -> void:',
+    '\tfor at: int in 20000:',
+    '\t\tvar one: Resource = Resource.new()',
+    '\t\tone.resource_name = str(at)',
+    '\t\tkept.append(one)',
+    '',
+    '',
+    'func _process(_delta: float) -> void:',
+    '\tif worker == null and Time.get_ticks_msec() > 2000:',
+    '\t\tworker = Thread.new()',
+    '\t\tworker.start(work)',
+    '',
+    '',
+    'func work() -> void:',
+    '\tvar held: int = 2',
+    '\tprint(held)',
+  ];
+  writeFileSync(join(project, 'main.gd'), `${script.join('\n')}\n`);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Thread"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const seen = { worker: -1, letGo: false };
+  let heldNow = (): void => undefined;
+  const held = new Promise<boolean>((settle) => {
+    heldNow = () => {
+      settle(true);
+    };
+    setTimeout(() => {
+      settle(false);
+    }, 60_000).unref();
+  });
+  const peer = await GameDebugger.open(
+    [`res://main.gd:${script.indexOf('\tvar held: int = 2') + 1}`],
+    [
+      {
+        connected: () => undefined,
+        message: (received, send) => {
+          if (!('message' in received)) {
+            return;
+          }
+          if (received.message === 'debug_enter' && seen.worker === -1) {
+            seen.worker = received.thread;
+            heldNow();
+          }
+          // Let go as the size arrives, before the snapshot's first slice is asked.
+          if (received.message === 'snapshot:snapshot_prepared' && !seen.letGo) {
+            seen.letGo = true;
+            send('continue', [], seen.worker);
+          }
+        },
+      },
+    ],
+  );
+  const game = spawnHidden(engine, ['--headless', '--path', project, ...peer.engineArguments], {
+    stdio: 'ignore',
+  });
+  try {
+    assert.ok(await held, 'the worker stops on its breakpoint');
+    const answer = await peer.ask({ op: 'snapshot' });
+    assert.ok(seen.letGo, 'the worker was let go mid-fetch');
+    assert.ok(
+      isSnapshotCounts(answer) &&
+        answer.classes.some((one) => one.engineClass === 'Resource' && one.count >= 20000),
+      `the snapshot comes back whole: ${JSON.stringify(answer).slice(0, 600)}`,
+    );
+  } finally {
+    game.kill();
+    peer.close();
+    await delay(300);
+    sweep(project);
+  }
+}
+
+/**
  * A snapshot with no game running says how to start one, and a diff names the ids it does have.
  */
 async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> {
@@ -102048,6 +102149,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEachSnapshotRefusalNamesItsOwnFix,
   testASnapshotTellsAnEngineWithoutItFromABusyGame,
   testASnapshotRightAfterALargeOneIsTaken,
+  testASnapshotOfAThreadLetGoMidFetchComesBackWhole,
   testAnObjectSnapshotNeedsAGameThisServerStarted,
   testAnObjectSnapshotOfAPlayedGameIsRefused,
   testTheStartASnapshotRefusalNamesIsSpawnedHere,

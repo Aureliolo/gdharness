@@ -121,10 +121,13 @@ export function debugRequestOf(asked: unknown): DebugRequest | null {
 /** An answer as it crosses the keeper's channel: a refusal says why under `refused`. */
 export type DebugAnswer = Readonly<Record<string, unknown>>;
 
+/** How an observer sends a message, to the main thread unless it names another. */
+type ObserverSend = (message: string, data: readonly SentValue[], thread?: number) => void;
+
 /** Something else reading the same connection, such as the script profiler. */
 export interface DebugObserver {
-  connected(send: (message: string, data: readonly SentValue[]) => void): void;
-  message(received: DebuggerMessage, send: (message: string, data: readonly SentValue[]) => void): void;
+  connected(send: ObserverSend): void;
+  message(received: DebuggerMessage, send: ObserverSend): void;
 }
 
 /**
@@ -410,6 +413,8 @@ export class GameDebugger {
   private readonly waiters: Waiter[] = [];
   private readonly inbox: DebuggerMessage[] = [];
   private readonly onClosed: (() => void)[] = [];
+  /** Told the thread of each debug_exit, after the held state has taken it. */
+  private readonly onExit: ((thread: number) => void)[] = [];
   private readonly output: string[] = [];
   private outputDropped = 0;
   /** How many snapshots have been asked for, which numbers each one's requests. */
@@ -512,8 +517,8 @@ export class GameDebugger {
     this.connection = socket;
     // Only the one game ever dials it, and it dials once.
     this.server.close();
-    const send = (message: string, data: readonly SentValue[]): void => {
-      this.send(message, data);
+    const send: ObserverSend = (message, data, thread) => {
+      this.send(message, data, thread);
     };
     for (const observer of this.observers) {
       observer.connected(send);
@@ -579,9 +584,14 @@ export class GameDebugger {
         hasStack: hasStack === true,
       };
       this.unreadable = null;
-    } else if (received.message === 'debug_exit' && this.held?.thread === received.thread) {
-      this.held = null;
-      this.unreadable = null;
+    } else if (received.message === 'debug_exit') {
+      if (this.held?.thread === received.thread) {
+        this.held = null;
+        this.unreadable = null;
+      }
+      for (const left of this.onExit) {
+        left(received.thread);
+      }
     } else if (received.message === 'output') {
       this.takeOutput(received.data);
     } else if (received.message === 'error') {
@@ -770,12 +780,11 @@ export class GameDebugger {
    * while its frames go on has no debug features at all.
    */
   private async prepare(id: number): Promise<number | DebugAnswer> {
-    const thread = this.held?.thread ?? MAIN_THREAD;
     const sent = Date.now();
-    this.inspectionsSent += 1;
-    const inspection = this.inspectionsSent;
+    // The number the first ask gives its inspection, set before any answer is looked at.
+    let inspection = this.inspectionsSent + 1;
     let frames = 0;
-    const answered = this.next((received) => {
+    const wanted = (received: DebuggerMessage): boolean => {
       if (!('message' in received)) {
         return false;
       }
@@ -787,10 +796,18 @@ export class GameDebugger {
         return this.inspectionsAnswered >= inspection;
       }
       return received.message === 'snapshot:snapshot_prepared' && received.data[0] === id;
-    }, SNAPSHOT_PREPARE_MS);
-    this.send('snapshot:request_prepare_snapshot', [id, 'gdharness'], thread);
-    this.send('scene:inspect_object', [0], thread);
-    const got = await answered;
+    };
+    const got = await this.askWhereRead(
+      (thread, again) => {
+        // Asked again only once a thread left its break with both unread, which drops them.
+        this.inspectionsSent += again ? 0 : 1;
+        inspection = this.inspectionsSent;
+        this.send('snapshot:request_prepare_snapshot', [id, 'gdharness'], thread);
+        this.send('scene:inspect_object', [0], thread);
+      },
+      wanted,
+      SNAPSHOT_PREPARE_MS,
+    );
     if (got !== null && 'message' in got) {
       const size = got.data[1];
       return got.message === 'snapshot:snapshot_prepared' && typeof size === 'number'
@@ -808,18 +825,46 @@ export class GameDebugger {
 
   /** The bytes of snapshot [param id] from [param from] on, or undefined when none came in time. */
   private async slice(id: number, from: number): Promise<GodotValue | undefined> {
-    const answered = this.next(
+    const got = await this.askWhereRead(
+      (thread) => {
+        this.send('snapshot:request_snapshot_chunk', [id, from, from + SNAPSHOT_SLICE_BYTES], thread);
+      },
       (received) =>
         'message' in received && received.message === 'snapshot:snapshot_chunk' && received.data[0] === id,
       SNAPSHOT_SLICE_MS,
     );
-    this.send(
-      'snapshot:request_snapshot_chunk',
-      [id, from, from + SNAPSHOT_SLICE_BYTES],
-      this.held?.thread ?? MAIN_THREAD,
-    );
-    const got = await answered;
     return got !== null && 'message' in got ? got.data[1] : undefined;
+  }
+
+  /**
+   * What [param wanted] takes in answer to what [param ask] sends, or null after [param ms].
+   *
+   * A held thread reads the debugger's messages, and the main loop reads them otherwise. A prepared
+   * snapshot is kept by the collector, not by the thread that made it, so any of them answers.
+   * A thread leaving its break drops whatever it has not read, and says so only after everything
+   * it answered. So a request whose thread leaves unanswered is asked again of wherever the game
+   * reads now, and [param ask] is told it is again.
+   */
+  private async askWhereRead(
+    ask: (thread: number, again: boolean) => void,
+    wanted: (received: DebuggerMessage) => boolean,
+    ms: number,
+  ): Promise<DebuggerMessage | null> {
+    const answered = this.next(wanted, ms);
+    let thread = this.held?.thread ?? MAIN_THREAD;
+    const left = (exited: number): void => {
+      if (exited === thread && thread !== MAIN_THREAD) {
+        thread = this.held?.thread ?? MAIN_THREAD;
+        ask(thread, true);
+      }
+    };
+    this.onExit.push(left);
+    ask(thread, false);
+    try {
+      return await answered;
+    } finally {
+      this.onExit.splice(this.onExit.indexOf(left), 1);
+    }
   }
 
   /** The refusal for a game whose debugger connection is not there, or null when it is. */
