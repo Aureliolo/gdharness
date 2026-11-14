@@ -2,6 +2,8 @@
 extends RefCounted
 ## How a scene or resource a tool saves keeps naming files by uid, as the editor's saves do.
 
+const GdhSceneFile = preload("scene_file.gd")
+
 ## The files a headless save named by path alone because the uid cache holds no uid for them,
 ## gathered for the answer to the call that saved, the one call its engine runs.
 static var by_path: PackedStringArray = []
@@ -14,7 +16,7 @@ static var by_path: PackedStringArray = []
 ## made through it stopped resolving. Read from the file itself, since the loader does not answer it
 ## for a text scene there, and a new file is given one as the editor gives it.
 static func save_keeping_uid(resource: Resource, asked_path: String) -> Error:
-	var file_path: String = written_at(asked_path)
+	var file_path: String = GdhSceneFile.written_at(asked_path)
 	if Engine.is_editor_hint():
 		var saved: Error = ResourceSaver.save(resource, file_path)
 		return saved if saved != OK else _as_the_editor_writes(file_path)
@@ -28,31 +30,6 @@ static func save_keeping_uid(resource: Resource, asked_path: String) -> Error:
 	if marked != OK:
 		return marked
 	return _as_the_editor_writes(file_path)
-
-
-## The file a save asked at [param file_path] writes: where a file link there leads, each link in
-## turn, when that is inside the project, or [param file_path] itself. Setting a uid, and every
-## write in the editor, whose safe save is on by default, write a new file and rename it over the
-## old one. Over a link that left a copy in its place, cut off from the file it led to.
-static func written_at(file_path: String) -> String:
-	var at: String = ProjectSettings.globalize_path(file_path)
-	var disk: DirAccess = DirAccess.open(at.get_base_dir())
-	if disk == null or not disk.is_link(at):
-		return file_path
-	# As many links as the follower takes before calling a chain a ring.
-	for _step: int in 40:
-		if not disk.is_link(at):
-			var inside: String = ProjectSettings.localize_path(at)
-			return inside if inside.begins_with("res://") else file_path
-		var target: String = disk.read_link(at).replace("\\", "/")
-		for prefix: String in ["//?/", "/??/"]:
-			target = target.trim_prefix(prefix)
-		if target.is_empty():
-			return file_path
-		if not target.is_absolute_path():
-			target = at.get_base_dir().path_join(target)
-		at = target.simplify_path()
-	return file_path
 
 
 ## Writes the text file at [param file_path] as the editor's save would have.

@@ -335,7 +335,7 @@ static func _keep_ids(file_path: String, keep: Dictionary) -> Error:
 					changed = true
 	if not changed:
 		return OK
-	var file: FileAccess = FileAccess.open(GdhSceneUids.written_at(file_path), FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(written_at(file_path), FileAccess.WRITE)
 	if file == null:
 		return FileAccess.get_open_error()
 	if not file.store_string("\n".join(lines)):
@@ -788,7 +788,7 @@ func _unmade_waits() -> String:
 ## Adds [param lines] to the file just saved, answering "" or why they could not be added.
 func _keep_unmade(lines: PackedStringArray) -> String:
 	var saved: String = FileAccess.get_file_as_string(path)
-	var file: FileAccess = FileAccess.open(GdhSceneUids.written_at(path), FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(written_at(path), FileAccess.WRITE)
 	if file == null:
 		return (
 			"%s was saved without %s, and could not be opened again to put it back: %s"
@@ -1074,6 +1074,28 @@ static func disk_entry(disk: DirAccess, folder: String, name: String) -> String:
 		return there
 	var target: String = _target_of(disk, there, folder)
 	return "" if target.is_empty() else _followed(target)
+
+
+## The file a save asked at [param file_path] writes: where a file link there leads, each link in
+## turn, when that is inside the project, or [param file_path] itself. Setting a uid, and every
+## write in the editor, whose safe save is on by default, write a new file and rename it over the
+## old one. Over a link that left a copy in its place, cut off from the file it led to.
+static func written_at(file_path: String) -> String:
+	var at: String = ProjectSettings.globalize_path(file_path)
+	var disk: DirAccess = DirAccess.open(at.get_base_dir())
+	if disk == null or not disk.is_link(at):
+		return file_path
+	var led: String = _followed(at)
+	var inside: String = disk_project()
+	if led.is_empty() or inside.is_empty():
+		return file_path
+	# Both ends are taken where they lie on disk, so a project opened through a junction, or under
+	# another spelling of its folder, still finds a target the link names by the real folder.
+	var top: String = inside + "/"
+	var any_case: bool = OS.get_name() in ["Windows", "macOS"]
+	if led.begins_with(top) or (any_case and led.to_upper().begins_with(top.to_upper())):
+		return "res://" + led.substr(top.length())
+	return file_path
 
 
 ## The absolute path the link [param at], found in the folder [param folder], points to.

@@ -93545,9 +93545,28 @@ async function testAScenePathInAnotherCaseIsFollowed(): Promise<void> {
  * leaves the link a link, so the scenes naming either path are followed.
  */
 async function testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths(): Promise<void> {
+  await editThroughAFileLink('edit through a file link', false);
+}
+
+/**
+ * With the project opened through a junction to its folder, a file link naming its target by the
+ * real folder is still written through, so the link stays a link and both scenes are followed.
+ */
+async function testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction(): Promise<void> {
+  await editThroughAFileLink('file link through a junction', true);
+}
+
+/**
+ * Renames desk.tscn's Top through copy.tscn, a file link to desk.tscn by the project's real
+ * folder, with the project opened through a junction when [through], and checks what is left.
+ */
+async function editThroughAFileLink(label: string, through: boolean): Promise<void> {
   await withLinksOut(
-    'edit through a file link',
-    { files: { 'room.tscn': deskKin('Room', 'res://copy.tscn'), 'room2.tscn': deskKin('Room2') } },
+    label,
+    {
+      files: { 'room.tscn': deskKin('Room', 'res://copy.tscn'), 'room2.tscn': deskKin('Room2') },
+      through,
+    },
     (real) => linkTo(join(real, 'desk.tscn'), join(real, 'copy.tscn'), 'file'),
     async (at) => {
       const copy = join(at.real, 'copy.tscn');
@@ -101071,6 +101090,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed,
   testAScenePathInAnotherCaseIsFollowed,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
+  testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,
   testALinkOutInsideAWalkedFolderIsNamed,
   testRelativePathsBehindALinkOutAreLeft,
   testADanglingLinkOutLeavesTheFollowerWorking,

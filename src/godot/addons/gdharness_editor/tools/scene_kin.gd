@@ -243,7 +243,7 @@ static func _store_scene(
 	if not unsaved.is_empty():
 		run.not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 		return false
-	var file: FileAccess = FileAccess.open(GdhSceneUids.written_at(scene_path), FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(GdhSceneFile.written_at(scene_path), FileAccess.WRITE)
 	if file == null or not file.store_string(rewritten):
 		run.not_followed.append(
 			{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
@@ -376,7 +376,7 @@ static func enclose(asked: String, at: String, links_out: PackedStringArray) -> 
 			not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 			continue
 		var file: FileAccess = FileAccess.open(
-			GdhSceneUids.written_at(scene_path), FileAccess.WRITE
+			GdhSceneFile.written_at(scene_path), FileAccess.WRITE
 		)
 		if (file == null
 				or not file.store_string(text.rstrip("\n") + "\n\n" + "\n".join(marks) + "\n")):
