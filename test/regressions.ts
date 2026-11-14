@@ -49283,7 +49283,7 @@ interface ReadingGame {
 }
 
 /**
- * A played headless game with three labels under `Rows`: `When` and `Pad` have no children, `Who`
+ * A headless game the server starts, with three labels under `Rows`: `When` and `Pad` have no children, `Who`
  * has one, `Kid`. Its method `fail` raises an error of the game's own.
  */
 async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Promise<void>): Promise<void> {
@@ -49295,36 +49295,9 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
     console.log(`${skipped} skipped (Godot not found)`);
     return;
   }
-  const held: { game: ChildProcess | null } = { game: null };
   await withAPlayingEditor(
-    ({ adapter, project, runtimeDir }) =>
-      (tool) => {
-        if (tool === 'play_scene') {
-          held.game = spawnHidden(engine, ['--headless', '--path', project], {
-            stdio: 'ignore',
-            env: {
-              ...process.env,
-              GDHARNESS_RUNTIME_DIR: runtimeDir,
-              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
-            },
-          });
-          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-        }
-        if (tool === 'playing_status') {
-          return {
-            ok: true,
-            playing: held.game?.exitCode === null,
-            scenePath: 'res://main.tscn',
-            debugPort: adapter,
-          };
-        }
-        if (tool === 'stop_playing') {
-          held.game?.kill();
-          return { ok: true };
-        }
-        return { ok: true };
-      },
-    async ({ server, project, start }) => {
+    () => () => ({ ok: true, playing: false, scenePath: '' }),
+    async ({ server, project }) => {
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\n\nfunc fail() -> void:\n\tpush_error("the game failed on its own")\n',
@@ -49339,8 +49312,17 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           '[node name="Kid" type="Label" parent="Rows/Who"]\n\n' +
           '[node name="Pad" type="Label" parent="Rows"]\n',
       );
-      const started = await start(20_000);
-      assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
       const ask = async (name: string, args: Record<string, unknown>): Promise<string> =>
         textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
       const counted = async (expected = 0): Promise<{ errors: number; clean: unknown }> => {
@@ -49368,7 +49350,7 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
         );
       }
     },
-    { realAddon: true, engine, held },
+    { realAddon: true, engine, playsWindowed: true },
   );
 }
 
