@@ -49310,6 +49310,13 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           '\t\tpass',
           'var nodes: Array[Node] = []',
           'var list: Array = [1, 2]',
+          'var late_reads: int = 0',
+          'var late: int:',
+          '\tget:',
+          '\t\tlate_reads += 1',
+          '\t\tif late_reads >= 3:',
+          '\t\t\tpush_error("late getter")',
+          '\t\treturn late_reads',
           'var _reads: int = 0',
           'var flaky: int:',
           '\tget:',
@@ -49343,6 +49350,16 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           'func noisy25() -> Node:',
           '\tfor _round: int in 25:',
           '\t\tpush_error("noisy step %d" % _round)',
+          '\treturn self',
+          '',
+          '',
+          'func odd() -> Node:',
+          '\tpush_error("odd step")',
+          '\treturn self',
+          '',
+          '',
+          'func slow() -> Node:',
+          '\tawait get_tree().create_timer(0.6).timeout',
           '\treturn self',
           '',
           '',
@@ -49754,6 +49771,75 @@ async function testAWaitKeepsTheErrorsOfEveryLook(): Promise<void> {
       });
       assert.match(said, /flaky read/, `${JSON.stringify(args)}: ${said}`);
     }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A watch pushed out by newer ones stops reading, so its errors are not marked and shown nowhere. */
+async function testAnEvictedWatchStopsReading(): Promise<void> {
+  await withAReadingGame('evicted watch regression', async ({ ask }) => {
+    const readCount = async (): Promise<unknown> =>
+      get(
+        JSON.parse(
+          await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'late_reads' }),
+        ),
+        'value',
+      );
+    await ask('runtime_wait', { op: 'watch', nodePath: '/root/Main', property: 'late' });
+    for (let armed = 0; armed < 16; armed += 1) {
+      await ask('runtime_wait', { op: 'watch', nodePath: '/root/Main', property: 'count' });
+    }
+    await ask('runtime_wait', { op: 'frames', frames: 3 });
+    const before = await readCount();
+    await ask('runtime_wait', { op: 'frames', frames: 30 });
+    assert.equal(await readCount(), before, 'the evicted watch reads no more');
+  });
+}
+
+/**
+ * Requests that overlap in the game each answer with their own errors. A wait on a getter that
+ * errors is in flight while an awaiting call that reads its result, a find and a property read
+ * each make errors of their own.
+ */
+async function testOverlappingRequestsKeepTheirOwnErrors(): Promise<void> {
+  await withAReadingGame('overlap regression', async ({ ask, counted }) => {
+    const waiting = ask('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'loud:name',
+      value: 'never',
+      timeoutMs: 2500,
+    });
+    await delay(300);
+    const [called, found, read] = await Promise.all([
+      ask('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'slow',
+        properties: ['noisy():name'],
+      }),
+      ask('runtime_inspect', {
+        op: 'find',
+        className: 'Label',
+        nodePath: '/root/Main/Rows',
+        property: 'odd():name',
+      }),
+      ask('runtime_inspect', {
+        op: 'property',
+        nodePath: '/root/Main/Rows/When',
+        property: 'get_node("missing"):name',
+      }),
+    ]);
+    const waited = await waiting;
+    assert.match(called, /noisy step/, called);
+    assert.doesNotMatch(called, /loud getter|odd step|Node not found/, called);
+    assert.match(found, /odd step/, found);
+    assert.doesNotMatch(found, /loud getter|noisy step|Node not found/, found);
+    assert.match(read, /Node not found/, read);
+    assert.doesNotMatch(read, /loud getter|noisy step|odd step/, read);
+    assert.match(waited, /loud getter/, waited);
+    assert.doesNotMatch(waited, /noisy step|odd step|Node not found/, waited);
     const verdict = await counted();
     assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
   });
@@ -101498,6 +101584,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAListCallRefusalCarriesTheStepErrors,
   testAWaitKeepsTheErrorsOfEveryLook,
   testAPropertyWatchReportsItsReadingsErrors,
+  testAnEvictedWatchStopsReading,
+  testOverlappingRequestsKeepTheirOwnErrors,
   testAPropertyStepWhoseGetterErrorsIsReported,
   testACallArgumentPathSaysWhatItsStepsReported,
   testAnObjectTargetPathSaysWhatItsStepsReported,

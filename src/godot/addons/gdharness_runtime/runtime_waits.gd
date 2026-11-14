@@ -319,7 +319,12 @@ func _watch_property(node_path: String, property: String) -> Dictionary:
 	var trace: GdhTrace = GdhTrace.new(node, node_path, property)
 	trace.see(0, 0, 0.0, watched["value"], _values)
 	while _traces.size() >= MOST_WATCHES:
-		var _gone: bool = _traces.erase(_traces.keys().min())
+		var oldest: Variant = _traces.keys().min()
+		# Its recording ends with it: nobody can collect it now, and a reading made after would
+		# be an error shown in no answer.
+		var evicted: GdhTrace = _traces[oldest]
+		evicted.collected = true
+		var _gone: bool = _traces.erase(oldest)
 	var id: int = _next_watch
 	_next_watch += 1
 	_traces[id] = trace
