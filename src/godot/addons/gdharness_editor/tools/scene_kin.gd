@@ -193,6 +193,7 @@ static func follow(
 	var kin: Array[String] = _kin_of(run.changed, scenes)
 	for scene_path: String in kin:
 		_follow_scene(scene_path, run)
+	run.not_followed.append_array(_unclear_left(kin, scenes))
 	run.not_followed.append_array(_links_left(links_out))
 	var answer: Dictionary = carried.answer(links_out)
 	if not run.followed.is_empty():
@@ -352,7 +353,8 @@ static func enclose(asked: String, at: String, links_out: PackedStringArray) -> 
 	var changed: String = scenes.one(asked)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
-	for scene_path: String in _kin_of(changed, scenes):
+	var kin: Array[String] = _kin_of(changed, scenes)
+	for scene_path: String in kin:
 		if scene_path == changed:
 			continue
 		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
@@ -387,6 +389,7 @@ static func enclose(asked: String, at: String, links_out: PackedStringArray) -> 
 		file.close()
 		GdhSceneFile.refresh(scene_path)
 		followed.append(scene_path)
+	not_followed.append_array(_unclear_left(kin, scenes))
 	not_followed.append_array(_links_left(links_out))
 	var answer: Dictionary = {}
 	if not followed.is_empty():
@@ -418,7 +421,7 @@ static func _kin_of(changed: String, scenes: GdhScenes) -> Array[String]:
 	for scene_path: String in scenes.texts:
 		var spelt: PackedStringArray = []
 		for path: String in _named_in(str(scenes.texts[scene_path]), scene_path):
-			var _added: bool = spelt.append(scenes.one(path))
+			var _added: bool = spelt.append(scenes.one(path, scene_path))
 		named[scene_path] = spelt
 	var grew: bool = true
 	while grew:
@@ -461,6 +464,32 @@ static func _resolved(path: String, scene_path: String) -> String:
 	if path.contains("://"):
 		return path
 	return scene_path.get_base_dir().path_join(path).simplify_path()
+
+
+## A notFollowed row for each scene outside [param kin] that names a path matching more than one
+## file by letter case alone, one of them in [param kin], since which file it loads is not known.
+static func _unclear_left(kin: Array[String], scenes: GdhScenes) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	for scene_path: String in scenes.unclear:
+		if kin.has(scene_path):
+			continue
+		var named: Dictionary = scenes.unclear[scene_path]
+		for path: String in named:
+			var spellings: Array[String] = named[path]
+			if spellings.any(func(spelling: String) -> bool: return kin.has(spelling)):
+				rows.append({ "scenePath": scene_path, "reason": _unclear_reason(path, spellings) })
+				break
+	return rows
+
+
+static func _unclear_reason(path: String, spellings: Array[String]) -> String:
+	return (
+		(
+			"names %s, which matches more than one file by letter case (%s), so it was not "
+			+ "followed. Name it in the case the file has on disk."
+		)
+		% [path, ", ".join(spellings)]
+	)
 
 
 ## A notFollowed row for each of [param links_out] that can hold a scene, since no scene reached
@@ -656,7 +685,10 @@ class GdhScenes:
 	var texts: Dictionary = {}
 	## The spelling read for each file on disk, keyed by its path with every name as listed.
 	var _spelt: Dictionary = {}
-	## Each key of [member _spelt] by its upper case, for a spelling in another case to find it.
+	## Each scene naming a path that matches more than one file by letter case alone, with the
+	## spellings of those files under each such path.
+	var unclear: Dictionary = {}
+	## The keys of [member _spelt] under their upper case, for a spelling in another case to find.
 	var _folded: Dictionary = {}
 	## Where each res:// folder asked about lies on disk, "" where a link on it cannot be followed.
 	var _folders: Dictionary = {}
@@ -674,43 +706,47 @@ class GdhScenes:
 		for path: String in GdhFileWalk.new().find_files("res://", ".tscn", true):
 			if GdhSceneFile.behind_a_link_out(path, links_out):
 				continue
+			# A walked path spells every name as the listing does, so its key is matched exactly. No
+			# case fold the engine has is the file system's own, which keeps s and ſ apart.
 			var file: String = _file(path)
-			var known: String = _known(file)
-			if known.is_empty():
+			var held: String = str(_spelt.get(file, ""))
+			if file.is_empty() or held.is_empty():
 				if not file.is_empty():
 					_spelt[file] = path
-					_folded[file.to_upper()] = file
+					var folded: Array = _folded.get_or_add(file.to_upper(), [])
+					folded.append(file)
 				texts[path] = FileAccess.get_file_as_string(path)
-				continue
-			var held: String = _spelt[known]
-			if _plain(path, file) and not _plain(held, known):
+			elif _plain(path, file) and not _plain(held, file):
 				# The path with no link on it is the one the engine and the caller most likely use.
-				_spelt[known] = path
+				_spelt[file] = path
 				texts[path] = texts[held]
 				var _erased: bool = texts.erase(held)
 
 
 	## The spelling [param path], a scene's res:// path spelt any way, was read under, or
-	## [param path] when no scene read lies at that file.
-	func one(path: String) -> String:
+	## [param path] when no scene read lies at that file. Where the file system ignores case, a
+	## path matching no file exactly finds the one file it matches by letter case. When it matches
+	## more, it finds none, and [member unclear] keeps it under [param by], the scene naming it.
+	func one(path: String, by: String = "") -> String:
 		if texts.has(path) or not path.begins_with("res://"):
 			return path
 		if path.get_extension().to_lower() != "tscn":
 			return path
-		var known: String = _known(_file(path))
-		return path if known.is_empty() else str(_spelt[known])
-
-
-	## The key of [member _spelt] that [param file], a path on disk, names, or "". The name as
-	## listed wins. Where the file system ignores case, another case finds it next. The fold is
-	## to upper case one character at a time, as NTFS compares names, so files the file system holds
-	## apart, such as k and the Kelvin sign, stay apart where a lowering would join them.
-	func _known(file: String) -> String:
+		var file: String = _file(path)
 		if _spelt.has(file):
-			return file
+			return str(_spelt[file])
 		if file.is_empty() or not _any_case:
-			return ""
-		return str(_folded.get(file.to_upper(), ""))
+			return path
+		var matched: Array = _folded.get(file.to_upper(), [])
+		if matched.size() == 1:
+			return str(_spelt[matched[0]])
+		if matched.size() > 1 and not by.is_empty():
+			var spellings: Array[String] = []
+			for each: Variant in matched:
+				spellings.append(str(_spelt[each]))
+			var named: Dictionary = unclear.get_or_add(by, {})
+			named[path] = spellings
+		return path
 
 
 	## Where the res:// [param path] lies on disk, each name as [param path] spells it, or "".
@@ -737,4 +773,4 @@ class GdhScenes:
 
 	func _plain(path: String, file: String) -> bool:
 		var spelt: String = _project.path_join(path.trim_prefix("res://"))
-		return file == spelt or (_any_case and file.to_upper() == spelt.to_upper())
+		return file == spelt

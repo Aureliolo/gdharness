@@ -93471,14 +93471,38 @@ async function testAMoveAndADeleteAskedThroughALinkInsideAreFollowed(): Promise<
  * and the Kelvin sign, i and the dotted capital I. Where the platform joins them itself, it skips.
  */
 async function testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed(): Promise<void> {
-  const scenes = ['k.tscn', 'K.tscn', 'i.tscn', 'İ.tscn'];
+  await eachFollowedApart('names lowering joins', ['k.tscn', 'K.tscn', 'i.tscn', 'İ.tscn']);
+}
+
+/**
+ * Files the file system holds apart are followed apart, though upper-casing their names joins
+ * them: s and the long s, i and the dotless i, the micro sign and mu, and the two sigmas.
+ */
+async function testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed(): Promise<void> {
+  await eachFollowedApart('names upper-casing joins', [
+    's.tscn',
+    'ſ.tscn',
+    'i.tscn',
+    'ı.tscn',
+    'μ.tscn',
+    'µ.tscn',
+    'σ.tscn',
+    'ς.tscn',
+  ]);
+}
+
+/**
+ * Renames desk.tscn's Top in a project holding [scenes], each keeping a value below it, and checks
+ * each is followed on its own. Where the platform keeps fewer files than were written, it skips.
+ */
+async function eachFollowedApart(label: string, scenes: readonly string[]): Promise<void> {
   await withLinksOut(
-    'names lowering joins',
+    label,
     { files: Object.fromEntries(scenes.map((file, at) => [file, deskKin(`Kin${at}`)])) },
     (real) => {
       const held = readdirSync(real).filter((file) => scenes.includes(file));
       if (held.length !== scenes.length) {
-        console.log(`names lowering joins: the platform keeps only ${JSON.stringify(held)}`);
+        console.log(`${label}: the platform keeps only ${JSON.stringify(held)}`);
       }
       return held.length === scenes.length;
     },
@@ -93535,6 +93559,37 @@ async function testAScenePathInAnotherCaseIsFollowed(): Promise<void> {
         for (const file of rooms) {
           assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
         }
+      }
+    },
+  );
+}
+
+/**
+ * A scene naming a path that matches two files only by letter case is not followed into either,
+ * and its one row says so. Linux keeps case, so there it skips.
+ */
+async function testAPathMatchingTwoFilesByCaseIsNotFollowedAndSaysSo(): Promise<void> {
+  const room = deskKin('Room', 'res://S.tscn');
+  const heirs = { 's.tscn': deskHeir('Es'), 'ſ.tscn': deskHeir('LongEs') };
+  await withLinksOut(
+    'path matching two files by case',
+    { files: { 'room.tscn': room, ...heirs } },
+    (real) => process.platform !== 'linux' && readdirSync(real).filter((file) => file in heirs).length === 2,
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      const rows = asArray(get(renamed, 'notFollowed') ?? []);
+      assert.equal(rows.length, 1, JSON.stringify(renamed));
+      assert.equal(get(rows[0], 'scenePath'), 'res://room.tscn', JSON.stringify(renamed));
+      assert.equal(
+        get(rows[0], 'reason'),
+        'names res://S.tscn, which matches more than one file by letter case ' +
+          '(res://s.tscn, res://ſ.tscn), so it was not followed. Name it in the case the file has on disk.',
+        JSON.stringify(renamed),
+      );
+      assert.equal(get(renamed, 'followed'), undefined, JSON.stringify(renamed));
+      assert.equal(at.fileOf('room.tscn'), room);
+      for (const [file, written] of Object.entries(heirs)) {
+        assert.equal(at.fileOf(file), written, file);
       }
     },
   );
@@ -101088,7 +101143,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEachSceneIsFollowedOnceUnderOnePath,
   testAMoveAndADeleteAskedThroughALinkInsideAreFollowed,
   testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed,
+  testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed,
   testAScenePathInAnotherCaseIsFollowed,
+  testAPathMatchingTwoFilesByCaseIsNotFollowedAndSaysSo,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,
   testALinkOutInsideAWalkedFolderIsNamed,
