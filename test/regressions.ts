@@ -513,12 +513,14 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
+  enginesOfTestRun,
   enterASilentCrash,
   exportAnswer,
   exportPresetRefusal,
   failedVerdict,
   finishedBeforeTheEnd,
   foldedScriptErrors,
+  keepCutAcross,
   leftRunningNote,
   longerWaitNote,
   misshapen,
@@ -696,7 +698,14 @@ import {
 } from '../src/suite-run.js';
 import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
 import { casesOutOfPath, scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
-import { mergedTestAnswers } from '../src/test-split.js';
+import {
+  mergedTestAnswers,
+  NOT_SUITES_NOTE,
+  notSuitesVerdict,
+  timeLeft,
+  unmatchedSaid,
+  withNotSuites,
+} from '../src/test-split.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -61315,6 +61324,147 @@ function testAnInnerClassBaseIsFollowedToTheInnerClass(): void {
  * is dealt to the windowed engine, which alone starts with the tree on. One that also says it runs
  * headless is refused, since the tree needs a window.
  */
+/**
+ * A project_test run of a mixed set is cut into a windowed engine and a headless one after `ignore`
+ * and `tests` are applied, keeps every refusal of a single run, says what an engine without a report
+ * said, and is one call for time and for a cut-off.
+ */
+function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-engines-'));
+  const suite = (window: string, funcs: string[]): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      ...(window === '' ? [] : [`const GDHARNESS_NEEDS_WINDOW: bool = ${window}`, '']),
+      ...funcs.flatMap((func) => ['', `func ${func}() -> void:`, '\tassert_bool(true).is_true()', '']),
+    ].join('\n');
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'addons/gdUnit4/plugin.cfg': '[plugin]\n',
+    'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends Node\n',
+    'tests/menu_test.gd': suite('true', ['test_menu']),
+    'tests/stood_test.gd': suite('false', ['test_stood', 'test_stood_two']),
+    'tests/plain_test.gd': suite('', ['test_plain']),
+  });
+  const folder = (args: Record<string, unknown>): ReturnType<typeof enginesOfTestRun> =>
+    enginesOfTestRun(project, ['res://tests'], args);
+  const kept = process.env['GDHARNESS_SUITE_FILES_ONLY'];
+  try {
+    const plain = folder({});
+    assert.deepEqual(
+      plain?.halves.map((half) => half['path']),
+      [['res://tests/menu_test.gd'], ['res://tests/plain_test.gd', 'res://tests/stood_test.gd']],
+      'a folder holding both kinds is two engines, the windowed one first',
+    );
+    // A single run refuses a folder when only suite files may be named, and a cut run has to as well.
+    process.env['GDHARNESS_SUITE_FILES_ONLY'] = '1';
+    assert.equal(folder({}), null, 'the refusal is left to the single run, before any cut');
+    delete process.env['GDHARNESS_SUITE_FILES_ONLY'];
+
+    // Cases left out by ignore leave a kind with nothing to run, and that kind gets no engine.
+    const named = (...entries: string[]): ReturnType<typeof enginesOfTestRun> =>
+      enginesOfTestRun(project, ['res://tests/menu_test.gd', 'res://tests/stood_test.gd'], {
+        ignore: entries,
+      });
+    assert.equal(
+      named('stood_test:test_stood', 'stood_test:test_stood_two'),
+      null,
+      'every case of the headless kind left out by name leaves one windowed engine',
+    );
+    assert.equal(named('tests/stood'), null, 'as does a piece of its path');
+    assert.deepEqual(
+      named('menu_test:test_menu')?.halves,
+      [{ noWindow: true }],
+      'and the windowed kind left out leaves one engine that is not given a window',
+    );
+    assert.equal(named('stood_test:test_stood')?.halves.length, 2, 'a case left in each kind is two engines');
+    assert.equal(
+      named('stood_test:test_stood:1')?.halves.length,
+      2,
+      'one row of a case leaves the case in the kind',
+    );
+
+    // A case asked for by name in a script that is no suite reaches an engine, which reports it.
+    writeTree(project, {
+      'tests/helper_cases.gd': 'extends Node\n\n\nfunc test_helper() -> void:\n\tpass\n',
+    });
+    const asked = folder({
+      tests: ['helper_cases:test_helper', 'menu_test:test_menu', 'stood_test:test_stood'],
+    });
+    assert.deepEqual(
+      asked?.halves.map((half) => [half['path'], half['tests']]),
+      [
+        [['res://tests/menu_test.gd'], ['res://tests/menu_test.gd:test_menu']],
+        [
+          ['res://tests/helper_cases.gd', 'res://tests/stood_test.gd'],
+          ['res://tests/helper_cases.gd:test_helper', 'res://tests/stood_test.gd:test_stood'],
+        ],
+      ],
+      'the script that is no suite is handed to an engine with its case',
+    );
+    // A folder run names the scripts left out, to fail the run as a single run does.
+    assert.equal(folder({})?.notSuites.length, 1, 'a folder run names the one script that is no suite');
+  } finally {
+    if (kept === undefined) {
+      delete process.env['GDHARNESS_SUITE_FILES_ONLY'];
+    } else {
+      process.env['GDHARNESS_SUITE_FILES_ONLY'] = kept;
+    }
+  }
+
+  const failedAnswer = {
+    passed: false,
+    verdict: 'passed',
+    note: `${unmatchedSaid(['stood_test:test_stood'])} Other.`,
+    ignoreUnmatched: ['stood_test:test_stood'],
+  };
+  const matched = { passed: true, verdict: 'passed', ignored: ['stood_test:test_stood'] };
+  const mixed = mergedTestAnswers([failedAnswer, matched], ['windowed', 'headless']);
+  assert.ok(
+    !String(mixed['note']).includes('left nothing out'),
+    'an entry one engine matched is not said unmatched',
+  );
+  assert.equal(mixed['ignoreUnmatched'], undefined);
+  const dead = mergedTestAnswers(
+    [
+      { passed: false, hung: false, timedOut: true, arguments: ['--resolution', '1x1'], note: 'a' },
+      { passed: false, hung: true, timedOut: true, arguments: ['--headless'], note: 'b' },
+    ],
+    ['windowed', 'headless'],
+  );
+  assert.equal(dead['hung'], true, 'hung when either engine hung');
+  assert.deepEqual(
+    dead['arguments'],
+    { windowed: ['--resolution', '1x1'], headless: ['--headless'] },
+    'each command line apart, under its engine',
+  );
+  const failing: Record<string, unknown> = { passed: true, verdict: 'passed', note: 'Ran.' };
+  withNotSuites(failing, ['helper_cases.gd declares cases']);
+  assert.deepEqual(
+    [failing['passed'], failing['verdict'], failing['notSuites']],
+    [false, notSuitesVerdict(1), ['helper_cases.gd declares cases']],
+    'passed and the verdict agree',
+  );
+  assert.ok(String(failing['note']).includes(NOT_SUITES_NOTE), 'and the note says what was left out');
+
+  // One limit for the call: the second engine gets what the first left.
+  assert.equal(timeLeft(600_000, 1000, 61_000), 540_000);
+  assert.equal(timeLeft(1000, 0, 5000), 1, 'and never none');
+
+  // A call cut off between the engines keeps every suite not yet run, headless ones included.
+  keepCutAcross(project, [{ path: ['res://tests/plain_test.gd'] }], Date.now() - 1000);
+  const cut = takeCutTestRun(project);
+  assert.deepEqual(cut?.paths, ['res://tests/plain_test.gd']);
+  keepCutTestRun(project, { cutAt: new Date().toISOString(), paths: ['res://tests/menu_test.gd'] });
+  keepCutAcross(project, [{ path: ['res://tests/plain_test.gd'] }], Date.now() - 1000);
+  assert.deepEqual(
+    takeCutTestRun(project)?.paths,
+    ['res://tests/menu_test.gd', 'res://tests/plain_test.gd'],
+    'a cut inside the first engine adds the engines after it to its own record',
+  );
+  rmSync(project, { recursive: true, force: true });
+}
+
 function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-tree-'));
   const cases = (...names: string[]): string =>
@@ -99560,6 +99710,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
+  testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,

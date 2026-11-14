@@ -10,8 +10,47 @@ import { isRecord } from './records.js';
 const TWO_ENGINES_NOTE =
   'Ran as two engines: the suites needing a window in one with a window, the others in one headless.';
 
+/** The note sentence for ignore entries that named nothing under the paths run. */
+export function unmatchedSaid(unmatched: readonly string[]): string {
+  return `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`;
+}
+
+/** The verdict clause for [param count] scripts that declare cases and are no suite. */
+export function notSuitesVerdict(count: number): string {
+  return `${count === 1 ? 'one script declares' : `${String(count)} scripts declare`} cases gdUnit4 never runs`;
+}
+
+/** The note sentence for scripts that declare cases and are no suite. */
+export const NOT_SUITES_NOTE =
+  'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.';
+
+/**
+ * Whether an ignore list leaves out the whole case [param test] of the suite at [param path]: by
+ * the suite's file name, a piece of its path, or `suite:test`. An entry naming one row leaves out
+ * the case's other rows.
+ */
+export function caseIgnored(path: string, test: string, ignore: readonly string[]): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1).replace(/\.gd$/, '');
+  return ignore.some((entry) => {
+    const bare = entry.replace(/^res:\/\//, '');
+    const at = bare.indexOf(':');
+    if (at === -1) {
+      return path.includes(entry);
+    }
+    const [suite = '', func = '', row] = bare.split(':');
+    return (
+      row === undefined && func === test && (suite === name || path.slice('res://'.length).includes(suite))
+    );
+  });
+}
+
+/** What is left of [param limit] milliseconds a call began at [param began] with, never below 1. */
+export function timeLeft(limit: number, began: number, now: number): number {
+  return Math.max(1, limit - (now - began));
+}
+
 /** [param value] as a list of unknowns, empty when it is no list. */
-export function listOf(value: unknown): unknown[] {
+function listOf(value: unknown): unknown[] {
   return Array.isArray(value) ? value.map((item: unknown) => item) : [];
 }
 
@@ -40,7 +79,11 @@ function namedValue(key: string, left: unknown, right: unknown): { merged: unkno
     case 'exitCode':
       return { merged: left === 0 ? right : left };
     case 'windowed':
+    case 'hung':
+    case 'timedOut':
       return { merged: left === true || right === true };
+    case 'silentForMs':
+      return { merged: Math.max(Number(left), Number(right)) };
     case 'classes':
     case 'windowNote':
     case 'engineNote':
@@ -88,29 +131,66 @@ function mergedValue(key: string, left: unknown, right: unknown): unknown {
  */
 export function mergedTestAnswers(
   answers: readonly Record<string, unknown>[],
-  extra: Readonly<Record<string, unknown>> = {},
+  labels: readonly string[] = [],
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = {};
   for (const answer of answers) {
     for (const [key, value] of Object.entries(answer)) {
-      merged[key] = mergedValue(key, merged[key], value);
+      if (key === 'arguments') {
+        continue;
+      }
+      // The sentence about ignore entries is said once, for the entries no engine matched.
+      const entries = listOf(answer['ignoreUnmatched']).map(String);
+      merged[key] =
+        key === 'note' && typeof value === 'string' && entries.length > 0
+          ? mergedValue(key, merged[key], value.replace(unmatchedSaid(entries), '').trim())
+          : mergedValue(key, merged[key], value);
     }
   }
-  const note = [TWO_ENGINES_NOTE, typeof merged['note'] === 'string' ? merged['note'] : undefined]
-    .filter((part) => part !== undefined)
-    .join(' ');
   // An entry the suites of one engine matched left something out, so only one every engine lacked stays.
-  const unmatched = answers
-    .map((answer) => listOf(answer['ignoreUnmatched']))
-    .reduce(
-      (kept, entries) => kept.filter((entry) => entries.includes(entry)),
-      listOf(merged['ignoreUnmatched']),
-    );
+  const unmatched = [
+    ...new Set(
+      answers
+        .map((answer) => listOf(answer['ignoreUnmatched']))
+        .reduce(
+          (kept, entries) => kept.filter((entry) => entries.includes(entry)),
+          listOf(merged['ignoreUnmatched']),
+        )
+        .map(String),
+    ),
+  ];
+  const note = [
+    TWO_ENGINES_NOTE,
+    typeof merged['note'] === 'string' ? merged['note'] : undefined,
+    unmatched.length > 0 ? unmatchedSaid(unmatched) : undefined,
+  ]
+    .filter((part) => part !== undefined && part !== '')
+    .join(' ');
+  // Each engine's command line apart, under the kind of engine it was.
+  const commandLines = answers.flatMap((answer, at) =>
+    answer['arguments'] === undefined ? [] : [[labels[at] ?? String(at), answer['arguments']] as const],
+  );
   return {
     ...merged,
-    ignoreUnmatched: unmatched.length > 0 ? [...new Set(unmatched)] : undefined,
-    ...extra,
+    ignoreUnmatched: unmatched.length > 0 ? unmatched : undefined,
+    ...(commandLines.length > 0 ? { arguments: Object.fromEntries(commandLines) } : {}),
     engines: answers.length,
     note,
   };
+}
+
+/**
+ * [param answer] failed for scripts that declare cases and are no suite, [param notSuites], the
+ * way a single run is: the verdict and the note say so beside the list.
+ */
+export function withNotSuites(answer: Record<string, unknown>, notSuites: readonly string[]): void {
+  if (notSuites.length === 0) {
+    return;
+  }
+  const said = notSuitesVerdict(notSuites.length);
+  const verdict = typeof answer['verdict'] === 'string' ? answer['verdict'] : '';
+  answer['passed'] = false;
+  answer['verdict'] = verdict === '' || verdict === 'passed' ? said : `${verdict}; ${said}`;
+  answer['notSuites'] = [...notSuites, ...listOf(answer['notSuites'])];
+  answer['note'] = [answer['note'], NOT_SUITES_NOTE].filter((part) => typeof part === 'string').join(' ');
 }

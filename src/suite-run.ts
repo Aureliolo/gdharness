@@ -110,7 +110,10 @@ import {
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
 
-/** An order `--order` runs every suite in, in one engine. A number is the seed it is shuffled by. */
+/**
+ * An order `--order` runs the suites of an engine in. A windowed engine runs first when suites need
+ * a window, and the order holds within each engine. A number is the seed it is shuffled by.
+ */
 type RunOrder = 'reversed' | 'named' | number;
 
 interface TestOptions {
@@ -136,7 +139,10 @@ interface TestOptions {
   readonly wholeTree: boolean;
   readonly reachAlso: readonly string[];
   readonly importFirst: boolean;
-  /** Every suite in one engine in this order: `reversed`, as `named`, or shuffled by the seed. */
+  /**
+   * The order within an engine, which is every suite in one unless suites need a window: `reversed`,
+   * as `named`, or shuffled by the seed. The windowed engine runs first.
+   */
   readonly order: RunOrder | null;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
