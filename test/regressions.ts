@@ -60033,6 +60033,61 @@ function testAShareHoldsNoMoreThanTwoMinutesOfWork(): void {
   assert.deepEqual(shareCosts([120], 1), [120], 'a suite of exactly 120 s is one share');
 }
 
+/** The shares of [param count] units of 1 s, the engines' starts [param starts] noted after the first. */
+function sharesAfterStarts(starts: readonly number[], count = 600): { first: number; later: number } {
+  const units = Array.from({ length: count }, (_, at) => SHARE_UNIT(`s${String(at)}`, 1));
+  const shares = new Shares(units, new Map(units.map((unit) => [unit.suite, ['test_one']])), 300);
+  const first = shares.next(0)?.cost ?? 0;
+  for (const seconds of starts) {
+    shares.noteStart(seconds);
+  }
+  return { first, later: shares.next(0)?.cost ?? 0 };
+}
+
+/**
+ * A share's floor is six engine starts, read off the engines of the run once two have shown it. No
+ * start is read from one alone, and one slow start among others sets nothing.
+ */
+function testAShareFloorIsWhatTheRunsEnginesTookToStart(): void {
+  assert.deepEqual(sharesAfterStarts([]), { first: 30, later: 30 }, 'with no start seen it is 30 s');
+  assert.equal(sharesAfterStarts([8, 8]).later, 48, 'two starts of 8 s make it 48 s');
+  assert.equal(
+    sharesAfterStarts([14.2, 8.3, 11, 9]).later,
+    54,
+    'starts of 8 to 14 s make it 54 s, six times the middle of them and the 5 s',
+  );
+  assert.equal(sharesAfterStarts([300]).later, 30, 'one start alone changes nothing, however slow');
+  assert.equal(sharesAfterStarts([8, 8, 8, 300]).later, 48, 'and a slow one among the rest sets nothing');
+  assert.equal(
+    sharesAfterStarts([2, 2, 2]).later,
+    30,
+    'a start under the 5 s taken with none seen is not trusted',
+  );
+  assert.equal(sharesAfterStarts([0, -3, Number.NaN]).later, 30, 'nor one that is no time');
+}
+
+/**
+ * A run of many suites over fewer free slots than engines asked for starts no engine for less than the
+ * start-sized floor while that much work is left: engines taking 10 s to start make the floor 60 s.
+ */
+async function testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor(): Promise<void> {
+  const units = Array.from({ length: 550 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 2.7));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const costs: number[] = [];
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 6, [], {}, async (plan, index) => {
+    costs.push(plan.cost);
+    await delay(2);
+    return { index, printed: { started: { seconds: 10 } } };
+  });
+  const total = costs.reduce((sum, cost) => sum + cost, 0);
+  assert.ok(Math.abs(total - 550 * 2.7) < 0.001, 'every suite is handed out once');
+  assert.equal(ran.length, costs.length, 'one result for each engine started');
+  const small = costs.slice(0, -1).filter((cost) => cost < 60 - 2.7);
+  assert.deepEqual(small, [], `no share but the last holds less than 60 s: ${JSON.stringify(costs)}`);
+  assert.ok(costs.length <= 17, `engines started, 21 before: ${String(costs.length)}`);
+}
+
 /** A run's lanes read the lanes file before each share and give a slot back when told fewer. */
 async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promise<void> {
   const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fall-'));
@@ -100124,6 +100179,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
   testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
   testAFallWhileEveryShareIsOutEndsTheParkedLanes,
+  testAShareFloorIsWhatTheRunsEnginesTookToStart,
+  testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
   testAParkedLanesSlotGoesToTheMachineNotTheCheck,
   testARunBegunAtItsCeilingStillFollowsTheLanesFile,

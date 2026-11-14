@@ -1986,7 +1986,12 @@ async function runLane(
  * lanes file tells to stop reads the file again after each of its waits and before it draws, and gives
  * its slot back to the machine.
  */
-export async function runShares<T extends { readonly index: number }>(
+export async function runShares<
+  T extends {
+    readonly index: number;
+    readonly printed?: { readonly started: { readonly seconds: number } | null };
+  },
+>(
   slots: Pick<EngineSlots, 'take' | 'release'>,
   units: readonly Unit[],
   declared: CasesBySuite,
@@ -2122,7 +2127,13 @@ export async function runShares<T extends { readonly index: number }>(
     readonly index: number;
   }): Promise<T> => {
     try {
-      return await run(drawn.plan, drawn.index, drawn.lock, drawn.admitted?.holds);
+      const ran = await run(drawn.plan, drawn.index, drawn.lock, drawn.admitted?.holds);
+      // What the engine took to start is what the shares after it are sized by.
+      const started = ran.printed?.started?.seconds;
+      if (started !== undefined) {
+        shares.noteStart(started);
+      }
+      return ran;
     } finally {
       drawn.admitted?.ended();
     }

@@ -903,10 +903,11 @@ function slowestFirst(a: Unit, b: Unit): number {
 }
 
 /**
- * The least work a share holds, while there is that much left: a share is an engine started, which
- * costs about [constant ENGINE_START_SECONDS] before its first case.
+ * The least work a share holds, while there is that much left, in engine starts: a share is an
+ * engine started, which costs [method Shares.startSeconds] before its first case, so a share of six
+ * starts' work pays a seventh of it again.
  */
-const SHARE_FLOOR_SECONDS = 6 * ENGINE_START_SECONDS;
+const SHARE_FLOOR_STARTS = 6;
 
 /**
  * The most work a share holds, apart from one suite longer than that, which is a share of its own.
@@ -924,7 +925,7 @@ const SHARE_MOST_SECONDS = 120;
  * suites from there, and the run ends as late as running the suites after the export. Here each
  * lane, as it starts or finishes an engine, is handed a share of what is left: the windowed units
  * first and whole, then the slowest headless units up to [param lanes] parts of what is left, never
- * less than [constant SHARE_FLOOR_SECONDS] while that much remains, and never more than
+ * less than [constant SHARE_FLOOR_STARTS] engine starts while that much remains, and never more than
  * [constant SHARE_MOST_SECONDS]. The shares shrink as the work
  * runs out, so the lanes end close together however late each began. A run whose lanes rise widens
  * the parts, so a lane joining late is handed a part cut for the lanes there are now.
@@ -935,6 +936,8 @@ export class Shares {
   private readonly declared: CasesBySuite;
   private readonly all: readonly Unit[];
   private lanes: number;
+  /** What the engines of this run took before their first suite, in seconds, as they ended. */
+  private readonly starts: number[] = [];
 
   constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
     this.windowed = units.filter((unit) => unit.windowed);
@@ -947,6 +950,26 @@ export class Shares {
   /** Raises the lanes the next shares are cut for. A number at or below the present one changes nothing. */
   widen(lanes: number): void {
     this.lanes = Math.max(this.lanes, lanes);
+  }
+
+  /**
+   * Notes what an engine of this run took before its first suite, which its output says as
+   * `gdharness timing: started`, compiling the suites together included.
+   */
+  noteStart(seconds: number): void {
+    if (Number.isFinite(seconds) && seconds > 0) {
+      this.starts.push(seconds);
+    }
+  }
+
+  /**
+   * What starting an engine costs, as this run's engines have shown. The constant stands with them
+   * as one more reading, and the lower of the two middle ones is taken when there is an even number.
+   * So one slow start alone changes nothing, and it takes two engines starting alike to move it.
+   */
+  startSeconds(): number {
+    const readings = [ENGINE_START_SECONDS, ...this.starts].toSorted((a, b) => a - b);
+    return readings[Math.floor((readings.length - 1) / 2)] ?? ENGINE_START_SECONDS;
   }
 
   /** Whether every unit has been handed out. */
@@ -978,7 +1001,8 @@ export class Shares {
   /** The headless units a share takes, and those left for the shares after it. */
   private headlessSplit(): { share: Unit[]; rest: Unit[] } {
     const left = this.headless.reduce((sum, unit) => sum + unit.cost, 0);
-    const target = Math.min(SHARE_MOST_SECONDS, Math.max(SHARE_FLOOR_SECONDS, left / this.lanes));
+    const floor = SHARE_FLOOR_STARTS * this.startSeconds();
+    const target = Math.min(SHARE_MOST_SECONDS, Math.max(floor, left / this.lanes));
     const share: Unit[] = [];
     const rest: Unit[] = [];
     let cost = 0;
