@@ -61062,6 +61062,48 @@ async function testATakerHeldBackByAClaimDoesNotSayItLooks(): Promise<void> {
   }
 }
 
+/**
+ * A game held back by the games limit says nothing of looking either, and says it once the limit
+ * lets it take a slot.
+ */
+async function testAGameHeldBackByTheGamesLimitDoesNotSayItLooks(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-games-look-'));
+  try {
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    mkdirSync(join(directory, QUEUED_FOLDER));
+    mkdirSync(join(directory, WAITING_FOLDER));
+    writeFileSync(
+      join(directory, QUEUED_FOLDER, 'ticket.json'),
+      JSON.stringify({ pid: process.pid, started: holder.started }),
+    );
+    const sessions = new EngineSlots(directory, 16, holder, undefined, () => 'other');
+    const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
+    assert.ok(
+      games.every((lock) => lock !== null),
+      'two games take the kept slots games may hold',
+    );
+    const line = new SlotLine('other', true);
+    line.mark = 'game-1.json';
+    const note = join(directory, WAITING_FOLDER, 'game-1.seen');
+    assert.equal(await sessions.takeFree(true, 0, line), null, 'a third game waits');
+    assert.equal(sessions.drawn.limit, 'games', 'held by the games limit');
+    assert.equal(existsSync(note), false, 'and a game it holds back does not say it looks');
+    const first = games[0];
+    assert.ok(first !== undefined, 'the first game holds a slot');
+    sessions.release(first);
+    const third = await sessions.takeFree(true, 0, line);
+    assert.ok(third !== null, 'with the limit allowing it, the third game takes a slot');
+    assert.equal(existsSync(note), true, 'and says it looks');
+    sessions.release(third);
+    const second = games[1];
+    if (second !== undefined) {
+      sessions.release(second);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** The slot order every kind of taker draws from when nothing is kept back. */
 const EVERY_OF_16_SLOTS = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 
@@ -100359,6 +100401,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
   testATakerHeldBackByAClaimDoesNotSayItLooks,
+  testAGameHeldBackByTheGamesLimitDoesNotSayItLooks,
   testGatesInTheQueueKeepTheirSlots,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
