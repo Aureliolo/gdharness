@@ -563,6 +563,8 @@ func _condition_answer(
 		var outside: String = _outside_declared(owner, declaration, wanted)
 		if not outside.is_empty():
 			answer["outside_declared"] = outside
+	if watched.has("errors"):
+		answer["errors"] = watched["errors"]
 	return answer
 
 
@@ -690,6 +692,7 @@ func _wait_in_order(
 
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
+	var read_errors: Array = []
 	while not _in_order(compare, limit, current) and Time.get_ticks_msec() - started < timeout_ms:
 		await _host.get_tree().process_frame
 		frames += 1
@@ -699,6 +702,7 @@ func _wait_in_order(
 		if watched.has("message"):
 			return watched
 		current = watched["value"]
+		read_errors = watched.get("errors", [])
 		unordered = _no_order(current, node_path, property, compare)
 		if not unordered.is_empty():
 			return { "type": "error", "message": unordered }
@@ -716,6 +720,8 @@ func _wait_in_order(
 	}
 	if not met:
 		answer["waited_for"] = _values.serialize(number)
+	if not read_errors.is_empty():
+		answer["errors"] = read_errors
 	return answer
 
 
@@ -847,19 +853,21 @@ static func _enum_by_name(watched: Dictionary, sent: Variant, node_path: String)
 static func _watched(node: Node, node_path: String, property: String) -> Dictionary:
 	var reached: Dictionary = GdhPaths.walk_to(node, node_path, property)
 	if reached.has("message"):
-		return reached
+		return GdhPaths.with_read_errors(reached)
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	var missing: String = GdhPaths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
-		return { "type": "error", "message": missing }
+		return GdhPaths.with_read_errors({ "type": "error", "message": missing })
 	var slot: Dictionary = _declared_slot(holder, named)
-	return {
-		"value": GdhPaths.read_under(holder, named),
-		"declared": slot["type"],
-		"declaration": slot["declared"],
-		"holder": holder,
-	}
+	return GdhPaths.with_read_errors(
+		{
+			"value": GdhPaths.read_under(holder, named),
+			"declared": slot["type"],
+			"declaration": slot["declared"],
+			"holder": holder,
+		}
+	)
 
 
 ## What [param named] is declared with on [param holder], as [method GdhValues.slot_declared]

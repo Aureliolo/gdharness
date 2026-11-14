@@ -49271,6 +49271,260 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
   );
 }
 
+/** What a read-path regression asks of the played game, and how it reads the run's verdict. */
+interface ReadingGame {
+  /** A tool call, answered as text: a refusal is its message. */
+  readonly ask: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /**
+   * The errors the run counts against the game, once the report has settled: clean, or holding
+   * [param expected] errors at least.
+   */
+  readonly counted: (expected?: number) => Promise<{ errors: number; clean: unknown }>;
+}
+
+/**
+ * A played headless game with three labels under `Rows`: `When` and `Pad` have no children, `Who`
+ * has one, `Kid`. Its method `fail` raises an error of the game's own.
+ */
+async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Promise<void>): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${skipped} skipped (Godot not found)`);
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          held.game = spawnHidden(engine, ['--headless', '--path', project], {
+            stdio: 'ignore',
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, start }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\n\nfunc fail() -> void:\n\tpush_error("the game failed on its own")\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+          '[node name="Rows" type="Node" parent="."]\n\n' +
+          '[node name="When" type="Label" parent="Rows"]\n\n' +
+          '[node name="Who" type="Label" parent="Rows"]\n\n' +
+          '[node name="Kid" type="Label" parent="Rows/Who"]\n\n' +
+          '[node name="Pad" type="Label" parent="Rows"]\n',
+      );
+      const started = await start(20_000);
+      assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+      const ask = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const counted = async (expected = 0): Promise<{ errors: number; clean: unknown }> => {
+        const deadline = Date.now() + 5000;
+        let answer = parseTextContent(
+          await server.request('tools/call', { name: 'editor_output', arguments: { severity: 'error' } }),
+        );
+        const settled = (): boolean =>
+          expected === 0 ? get(answer, 'clean') === true : asNumber(get(answer, 'errors')) >= expected;
+        while (!settled() && Date.now() < deadline) {
+          await delay(250);
+          answer = parseTextContent(
+            await server.request('tools/call', { name: 'editor_output', arguments: { severity: 'error' } }),
+          );
+        }
+        return { errors: asNumber(get(answer, 'errors')), clean: get(answer, 'clean') };
+      };
+      try {
+        await body({ ask, counted });
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine, held },
+  );
+}
+
+/** The nodes of a find answer by name, with what each says of the property asked. */
+function foundByName(answer: string): Map<string, unknown> {
+  const parsed: unknown = JSON.parse(answer);
+  return new Map(asArray(get(parsed, 'nodes')).map((node) => [text(get(node, 'name')), node]));
+}
+
+/**
+ * A find whose `property` path takes an index step past a node's children says the step is not
+ * there, and the engine is never asked.
+ *
+ * `get_child(0):get_class()` over labels answered `has_property` false for the ones with no child
+ * and left the engine's out-of-bounds error in the game's log for each, so the run read as unclean
+ * with errors the game never made.
+ */
+async function testAFindIndexStepPastTheChildrenIsNotThere(): Promise<void> {
+  await withAReadingGame('find index step regression', async ({ ask, counted }) => {
+    const found = foundByName(
+      await ask('runtime_inspect', {
+        op: 'find',
+        className: 'Label',
+        property: 'get_child(0):get_class()',
+      }),
+    );
+    assert.deepEqual(
+      ['When', 'Who', 'Kid', 'Pad'].map((name) => [
+        name,
+        get(found.get(name), 'has_property'),
+        get(found.get(name), 'value'),
+        get(found.get(name), 'errors'),
+      ]),
+      [
+        ['When', false, undefined, undefined],
+        ['Who', true, 'Label', undefined],
+        ['Kid', false, undefined, undefined],
+        ['Pad', false, undefined, undefined],
+      ],
+    );
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * A find whose path takes a step that makes the engine report an error carries that error in the
+ * match's answer, and the run stays clean.
+ */
+async function testAFindStepThatErrorsReturnsTheErrorAndStaysClean(): Promise<void> {
+  await withAReadingGame('find erroring step regression', async ({ ask, counted }) => {
+    const found = foundByName(
+      await ask('runtime_inspect', {
+        op: 'find',
+        className: 'Label',
+        property: 'get_node("missing"):get_class()',
+      }),
+    );
+    for (const name of ['When', 'Who', 'Kid', 'Pad']) {
+      const node = found.get(name);
+      assert.equal(get(node, 'has_property'), false, name);
+      assert.match(
+        asArray(get(node, 'errors')).map(text).join('\n'),
+        /Node not found/,
+        `${name} carries the engine's error`,
+      );
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * Every op that walks a `property` path says what a step made the engine report, or that the step
+ * is not there, and leaves nothing in the game's log.
+ */
+async function testEveryPathOpSaysWhatAReadStepReported(): Promise<void> {
+  await withAReadingGame('path op regression', async ({ ask, counted }) => {
+    const label = '/root/Main/Rows/When';
+    const erroring = 'get_node("missing"):name';
+    const reported = /The engine reported: .*Node not found/;
+    assert.match(
+      await ask('runtime_inspect', { op: 'property', nodePath: label, property: erroring }),
+      reported,
+      'property',
+    );
+    assert.match(
+      await ask('runtime_wait', {
+        op: 'until',
+        nodePath: label,
+        property: erroring,
+        value: 'x',
+        timeoutMs: 1000,
+      }),
+      reported,
+      'until',
+    );
+    assert.match(
+      await ask('runtime_invoke', { op: 'set', nodePath: label, property: erroring, value: 'x' }),
+      reported,
+      'set',
+    );
+    assert.match(
+      await ask('runtime_invoke', { op: 'call', nodePath: label, method: 'get_node("missing"):get_class' }),
+      reported,
+      'call',
+    );
+    const past = await ask('runtime_inspect', {
+      op: 'property',
+      nodePath: label,
+      property: 'get_child(0):name',
+    });
+    assert.match(past, /has 0 children/, 'an index past the children is not there');
+    assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/** An error the game makes on its own while reads run still counts against the run. */
+async function testAGamesOwnErrorStillCountsBesideReads(): Promise<void> {
+  await withAReadingGame('own error regression', async ({ ask, counted }) => {
+    await ask('runtime_inspect', {
+      op: 'find',
+      className: 'Label',
+      property: 'get_node("missing"):get_class()',
+    });
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'fail' });
+    const verdict = await counted(1);
+    assert.equal(verdict.errors, 1, "only the game's own error counts");
+    assert.equal(verdict.clean, false);
+  });
+}
+
+/** Indexes inside the children, negative ones included, are read as before. */
+async function testIndexStepsInsideTheChildrenStillRead(): Promise<void> {
+  await withAReadingGame('index step regression', async ({ ask, counted }) => {
+    const who = '/root/Main/Rows/Who';
+    for (const index of ['0', '-1']) {
+      const answer: unknown = JSON.parse(
+        await ask('runtime_inspect', { op: 'property', nodePath: who, property: `get_child(${index}):name` }),
+      );
+      assert.equal(get(answer, 'value'), 'Kid', `get_child(${index})`);
+    }
+    for (const index of ['1', '-2']) {
+      assert.match(
+        await ask('runtime_inspect', { op: 'property', nodePath: who, property: `get_child(${index}):name` }),
+        /has 1 child,/,
+        `get_child(${index}) is past the one child`,
+      );
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
 /**
  * A played game's console comes out in the order the game made it, and reaches the transcript
  * without anybody asking.
@@ -100933,6 +101187,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWrittenLineBreakMatchesATwoLineLabel,
   testALayeredWordIsOneSignAndAShapeHasExtent,
   testAPlayedGamesReportsReachTheOutput,
+  testAFindIndexStepPastTheChildrenIsNotThere,
+  testAFindStepThatErrorsReturnsTheErrorAndStaysClean,
+  testEveryPathOpSaysWhatAReadStepReported,
+  testAGamesOwnErrorStillCountsBesideReads,
+  testIndexStepsInsideTheChildrenStillRead,
   testAPlayedGamesConsoleKeepsItsOrder,
   testAPickedUpRunReadsItsReportOnFromTheTranscript,
   testACallTakesAnObjectByItsPath,

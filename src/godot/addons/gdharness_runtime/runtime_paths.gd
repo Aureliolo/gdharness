@@ -3,9 +3,14 @@ extends RefCounted
 ## run off the game the node keeps. Every op that reads, writes, calls or waits on a game's state
 ## walks the same way, so the walk and what it says when a step is not there live in one place.
 
+const GdhCallErrors = preload("call_errors.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhValues = preload("runtime_values.gd")
+## What the server is told raised the errors a read makes, as it is for a debugger call.
+const READ_MARK: String = "path read"
+## The most errors a walk keeps, which is enough to see what its steps ran into.
+const MOST_READ_ERRORS: int = 20
 ## The calls a path makes on a list or a map: those that take no arguments and change nothing.
 ##
 ## Named rather than asked of the engine, because asking about a method a list does not have logs an
@@ -276,6 +281,9 @@ const READS_ONLY: String = (
 	", and a path, which a wait reads every frame, only calls methods that read"
 )
 
+## The errors reported to the reads of the walk in progress. See [method take_read_errors].
+static var _read_errors: Array[String] = []
+
 
 ## What [param reaching] names something on, which is the node itself until the name has a colon
 ## in it, and the last name along that path.
@@ -309,6 +317,7 @@ const READS_ONLY: String = (
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle. Answers `chain` as
 ## well, each holder walked through and the step taken off it, for [method write_back].
 static func walk_to(node: Object, node_path: String, reaching: String) -> Dictionary:
+	_read_errors.clear()
 	var parts: PackedStringArray = steps_of(reaching)
 	var holder: Variant = node
 	var called: String = node_path
@@ -596,9 +605,28 @@ static func can_read(holder: Variant, named: String) -> bool:
 	if holder is Object:
 		var object: Object = holder
 		if not method.is_empty():
-			return call_refused(object, method, "", args.size()).is_empty()
+			return (
+				call_refused(object, method, "", args.size()).is_empty()
+				and _child_gone(object, method, args).is_empty()
+			)
 		return _has_property(object, named) or not constant_of(object, named).is_empty()
 	return false
+
+
+## Why the child a step asks a node for is not there, or "" when it is or the step asks for none.
+##
+## Checked before the call, because the engine reports an error for an index past the children
+## and that error would land in the game's output. A negative index counts from the end.
+static func _child_gone(object: Object, method: String, args: Array) -> String:
+	if method != "get_child" or not object is Node or args.is_empty() or not args[0] is int:
+		return ""
+	var node: Node = object
+	var internal: bool = args.size() > 1 and args[1] == true
+	var count: int = node.get_child_count(internal)
+	var index: int = args[0]
+	if index >= -count and index < count:
+		return ""
+	return "has %d %s" % [count, "child" if count == 1 else "children"]
 
 
 ## The key of [param map] a step names, in a list of one, or an empty list when it names none.
@@ -970,8 +998,46 @@ static func read_under(holder: Variant, named: String) -> Variant:
 	var method: String = method_of(named)
 	if not method.is_empty():
 		var args: Array = arguments_of(named)["args"]
-		return object.callv(method, args)
+		return _called_reading(object, method, args)
 	return constant_of(object, named)[0] if is_constant(object, named) else object.get(named)
+
+
+## The answer of [param method] on [param object], with what the engine reported while it ran kept
+## for [method take_read_errors] and announced to the server, so a read's error is the read's and
+## not the game's.
+static func _called_reading(object: Object, method: String, args: Array) -> Variant:
+	var caught: GdhCallErrors = GdhCallErrors.new()
+	OS.add_logger(caught)
+	var answer: Variant = object.callv(method, args)
+	OS.remove_logger(caught)
+	var reported: Array[String] = caught.errors()
+	if not reported.is_empty():
+		caught.announce(READ_MARK)
+		_read_errors.append_array(reported)
+	return answer
+
+
+## The errors the engine reported to the reads since the last walk began, which the answer to the
+## op that walked carries under `errors`. Empties what it takes.
+static func take_read_errors() -> Array[String]:
+	var taken: Array[String] = _read_errors.slice(0, MOST_READ_ERRORS)
+	_read_errors.clear()
+	return taken
+
+
+## [param answer] with the errors the reads made so far under `errors`, when there are any. A
+## refusal reaches the caller as its message alone, so the errors go into the message.
+static func with_read_errors(answer: Dictionary) -> Dictionary:
+	var taken: Array[String] = take_read_errors()
+	if taken.is_empty():
+		return answer
+	if answer.has("message"):
+		answer["message"] = "%s. The engine reported: %s" % [
+			str(answer["message"]).trim_suffix("."), " | ".join(taken),
+		]
+	else:
+		answer["errors"] = taken
+	return answer
 
 
 ## Where [param named] lands in a list of [param size], or -1 for a step that is not in it.
@@ -1041,8 +1107,21 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
-		return call_refused(object, method, called_as, given_count)
+		return _method_step_refused(object, named, called_as, given_args)
 	return _no_property(object, named, called_as)
+
+
+## Why the method step [param named] cannot be taken on [param object], said about [param
+## called_as].
+static func _method_step_refused(
+	object: Object, named: String, called_as: String, given_args: Array
+) -> String:
+	var method: String = method_of(named)
+	var refused: String = call_refused(object, method, called_as, given_args.size())
+	if not refused.is_empty():
+		return refused
+	var gone: String = _child_gone(object, method, given_args)
+	return "" if gone.is_empty() else "%s %s, so it has no %s" % [called_as, gone, named]
 
 
 ## Why [param object] has no property [param named], with the method most likely meant.

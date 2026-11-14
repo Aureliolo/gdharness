@@ -43,14 +43,15 @@ func set_property(params: Dictionary) -> Dictionary:
 	# which is how a typed container refusing a write is told from one accepting it.
 	var reached: Dictionary = GdhPaths.walk_to(target, node_path, property)
 	if reached.has("message"):
-		return reached
+		return GdhPaths.with_read_errors(reached)
 
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	var no_place: String = _no_place(reached)
 	if not no_place.is_empty():
-		return { "type": "error", "message": no_place }
+		return GdhPaths.with_read_errors({ "type": "error", "message": no_place })
 	var old_value: Variant = GdhPaths.read_under(holder, named)
+	var read_errors: Array[String] = GdhPaths.take_read_errors()
 	var slot: Dictionary = GdhValues.slot_declared(holder, named)
 	var fitting: Dictionary = _value_for(value, slot, old_value, reached, node, node_path)
 	if fitting.has("message"):
@@ -115,7 +116,8 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 	if already and unmoved:
 		answer["unchanged"] = true
-	_keep_reported(answer, "errors", caught.raised)
+	read_errors.append_array(caught.raised)
+	_keep_reported(answer, "errors", read_errors)
 	_keep_reported(answer, "warnings", caught.warned)
 	if holder is Object:
 		var owner: Object = holder
@@ -502,7 +504,7 @@ func call_method(params: Dictionary) -> Dictionary:
 	# `_game:run:advance` answers half of what a node holds and refuses the other half.
 	var reached: Dictionary = GdhPaths.walk_to(target, node_path, method)
 	if reached.has("message"):
-		return reached
+		return GdhPaths.with_read_errors(reached)
 
 	# A list or a map answers the calls a path makes on one, and nothing else: said in those terms
 	# rather than as "has no method", which reads as a misspelling of a method that was never going
@@ -514,7 +516,8 @@ func call_method(params: Dictionary) -> Dictionary:
 	var named: String = reached["name"]
 	var not_called: String = _not_callable(holder, named, str(reached["called"]))
 	if not not_called.is_empty():
-		return { "type": "error", "message": not_called }
+		return GdhPaths.with_read_errors({ "type": "error", "message": not_called })
+	var walk_errors: Array[String] = GdhPaths.take_read_errors()
 	if not GdhPaths.method_of(named).is_empty():
 		named = GdhPaths.method_of(named)
 
@@ -570,6 +573,7 @@ func call_method(params: Dictionary) -> Dictionary:
 		if not named_result.is_empty():
 			answer["result_named"] = named_result
 	_note_call(answer, awaited, outside, caught, named)
+	_keep_walk_errors(answer, walk_errors)
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
 		answer.merge(_read_off_result(result, asked))
@@ -674,7 +678,7 @@ func _called_on_value(reached: Dictionary, params: Dictionary) -> Dictionary:
 		var asked_of_it: Variant = params.get("properties")
 		if _reads_the_result(asked_of_it):
 			listed.merge(_read_off_result(answered, asked_of_it))
-		return listed
+		return GdhPaths.with_read_errors(listed)
 	var why: String = (
 		"%s:%s takes no arguments" % [reached["called"], spelled]
 		if answers
@@ -762,6 +766,15 @@ static func _call_refused(
 			% checked
 		)
 	return message + "."
+
+
+## Puts [param walked], what the engine reported to the steps of the path, ahead of the errors
+## [param answer] already holds.
+static func _keep_walk_errors(answer: Dictionary, walked: Array[String]) -> void:
+	if walked.is_empty():
+		return
+	var own: Array = answer.get("errors", [])
+	answer["errors"] = (walked + own).slice(0, ERRORS_KEPT)
 
 
 ## Puts the first [constant ERRORS_KEPT] of [param reported] in [param answer] under [param field],
