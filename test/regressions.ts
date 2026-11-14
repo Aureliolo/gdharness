@@ -46783,28 +46783,178 @@ async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> 
   });
 }
 
+/** The editor's end of a played game's debugger, as far as its ObjectDB Profiler uses it. */
+interface EditorsDebugger {
+  readonly port: number;
+  /** A snapshot fetched and saved in [param folder] as the profiler saves one, named and sized. */
+  snapshot(folder: string): Promise<{ path: string; size: number }>;
+  close(): void;
+}
+
 /**
- * A game the editor plays is refused with why and with the start that makes one this server can
- * snapshot: the editor is its debugger, and its own profiler takes the snapshot messages.
+ * A debugger a played game dials, which fetches a snapshot the way the editor's ObjectDB Profiler
+ * does: one prepare, then 6 MiB slices, saved under the date and time it arrived.
  */
-async function testAnObjectSnapshotOfAPlayedGameIsRefused(): Promise<void> {
-  await withAPlayingEditor(
-    ({ adapter }) =>
-      (tool) =>
-        tool === 'play_scene' || tool === 'playing_status'
-          ? { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter }
-          : { ok: true },
-    async ({ server, start }) => {
-      await start(300);
-      const said = textOf(
-        await server.request('tools/call', { name: 'debug_objects', arguments: { op: 'snapshot' } }, 30_000),
+async function anEditorsDebugger(): Promise<EditorsDebugger> {
+  const waiting: { want: (message: string) => boolean; take: (data: readonly GodotValue[]) => void }[] = [];
+  let game: Socket | null = null;
+  const server = createServer((socket) => {
+    game = socket;
+    const stream = new DebuggerStream();
+    socket.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        const at = 'message' in received ? waiting.findIndex((one) => one.want(received.message)) : -1;
+        if (at !== -1 && 'message' in received) {
+          waiting.splice(at, 1)[0]?.take(received.data);
+        }
+      }
+    });
+  });
+  await new Promise<void>((settle) => server.listen(0, '127.0.0.1', settle));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string', 'the debugger listens');
+  const next = (message: string): Promise<readonly GodotValue[]> =>
+    new Promise((take) => waiting.push({ want: (said) => said === message, take }));
+  let asked = 0;
+  const snapshot = async (folder: string): Promise<{ path: string; size: number }> => {
+    asked += 1;
+    const id = (1 << 30) + asked;
+    const prepared = next('snapshot:snapshot_prepared');
+    game?.write(framedCommand('snapshot:request_prepare_snapshot', [id, 'test']));
+    const size = Number((await prepared)[1]);
+    const bytes: number[] = [];
+    while (bytes.length < size) {
+      const sliced = next('snapshot:snapshot_chunk');
+      game?.write(
+        framedCommand('snapshot:request_snapshot_chunk', [id, bytes.length, bytes.length + (6 << 20)]),
       );
-      assert.match(
-        said ?? '',
-        /^The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler takes every snapshot such a game sends\.[\s\S]*editor_run stop, then editor_run start with args/,
-      );
-    },
+      bytes.push(...asArray((await sliced)[1]).map(Number));
+    }
+    mkdirSync(folder, { recursive: true });
+    const path = join(
+      folder,
+      `${new Date().toISOString().slice(0, 19).replace('T', '_').replaceAll(':', '-')}.odb_snapshot`,
+    );
+    writeFileSync(path, Buffer.from(bytes));
+    return { path, size };
+  };
+  return { port: address.port, snapshot, close: () => server.close() };
+}
+
+/**
+ * A game the editor plays is snapshotted through the editor: its ObjectDB Profiler saves the
+ * snapshot as a file, which the server reads with the keeper's decoder and removes. The lane's
+ * +100 proof holds through it, and the file another snapshot left in that folder is untouched.
+ */
+async function testAnObjectSnapshotOfAPlayedGameIsTakenThroughTheEditor(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('played object snapshot regression skipped (Godot not found)');
+    return;
+  }
+  const editorsDebugger = await anEditorsDebugger();
+  const saved = join(
+    mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-snapshots-')),
+    'objectdb_snapshots',
   );
+  const other = join(saved, '2026-01-01_00-00-00.odb_snapshot');
+  mkdirSync(saved, { recursive: true });
+  writeFileSync(other, 'a snapshot the user took');
+  const held: { game: ChildProcess | null } = { game: null };
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        async (tool) => {
+          if (tool === 'play_scene') {
+            held.game = spawnHidden(
+              engine,
+              ['--headless', '--path', project, '--remote-debug', `tcp://127.0.0.1:${editorsDebugger.port}`],
+              {
+                stdio: 'ignore',
+                env: {
+                  ...process.env,
+                  GDHARNESS_RUNTIME_DIR: runtimeDir,
+                  GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+                },
+              },
+            );
+          }
+          if (tool === 'object_snapshot') {
+            return { ok: true, ...(await editorsDebugger.snapshot(saved)) };
+          }
+          if (tool === 'stop_playing') {
+            held.game?.kill();
+          }
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        },
+      async ({ server, project, start }) => {
+        writeFileSync(
+          join(project, 'item.gd'),
+          'class_name Item\nextends Resource\n\n@export var label: String = ""\n',
+        );
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Node\n\nconst ITEM: GDScript = preload("res://item.gd")\n\nvar items: Array[Resource] = []\n\n\n' +
+            'func keep_items(count: int) -> void:\n\tfor at: int in count:\n\t\titems.append(ITEM.new())\n',
+        );
+        writeFileSync(
+          join(project, 'main.tscn'),
+          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+            '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+        );
+        const call = async (
+          name: string,
+          args: Record<string, unknown>,
+        ): Promise<{ said: string; answer: unknown }> => {
+          const answered = await server.request(
+            'tools/call',
+            { name, arguments: args },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          const said = textOf(answered) ?? JSON.stringify(answered);
+          return {
+            said,
+            answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered),
+          };
+        };
+        await start(30_000);
+        const before = await call('debug_objects', { op: 'snapshot' });
+        assert.equal(get(before.answer, 'snapshot'), 's1', before.said);
+        assert.ok(Number(get(before.answer, 'nodes')) >= 2, before.said);
+        await call('runtime_invoke', {
+          op: 'call',
+          nodePath: '/root/Main',
+          method: 'keep_items',
+          args: [100],
+        });
+        const kept = await call('debug_objects', { op: 'diff', before: 's1' });
+        assert.deepEqual(
+          asArray(get(kept.answer, 'changed')).find((one) => get(one, 'class') === 'Item'),
+          { class: 'Item', kind: 'RefCounted', before: 0, after: 100, change: 100 },
+          kept.said,
+        );
+        assert.deepEqual(
+          readdirSync(saved),
+          ['2026-01-01_00-00-00.odb_snapshot'],
+          'only the snapshots taken were removed',
+        );
+        assert.equal(readFileSync(other, 'utf8'), 'a snapshot the user took');
+      },
+      { realAddon: true, engine },
+    );
+  } finally {
+    held.game?.kill();
+    editorsDebugger.close();
+    sweep(dirname(saved));
+  }
 }
 
 /**
@@ -101722,7 +101872,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testObjectSnapshotsAskedTogetherGetTheirOwnAnswers,
   testAnObjectSnapshotNeedsAGameThisServerStarted,
-  testAnObjectSnapshotOfAPlayedGameIsRefused,
+  testAnObjectSnapshotOfAPlayedGameIsTakenThroughTheEditor,
   testObjectSnapshotsShowWhatAnActionKept,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,

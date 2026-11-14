@@ -9,6 +9,8 @@
  * collector adds, holding ref_count for a RefCounted and node_name for a Node.
  */
 
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { declaredClasses } from './class-cache.js';
 import { decodeVariant, type GodotValue } from './godot-variant.js';
@@ -109,6 +111,30 @@ export function countSnapshot(compressed: Uint8Array): SnapshotCounts {
     bytes: compressed.length,
     ...(typeof memory === 'number' ? { memoryBytes: memory } : {}),
   };
+}
+
+/**
+ * The snapshot the editor's ObjectDB Profiler saved at [param path] for one request, counted, with
+ * the file then removed. The profiler saves the deflated bytes as they came, so they decode as the
+ * keeper's do. Only a file of the profiler's own naming in its own folder, of the size the game
+ * prepared, is read or removed. Anything else is answered as the reason it was left alone.
+ */
+export function takeSavedSnapshot(path: string, size: number): SnapshotCounts | string {
+  if (basename(dirname(path)) !== 'objectdb_snapshots' || !path.endsWith('.odb_snapshot')) {
+    return `The editor named ${path} as its snapshot, which is not a file of its ObjectDB Profiler, so it was left alone.`;
+  }
+  if (!existsSync(path)) {
+    return `The editor named ${path} as its snapshot, and there is no such file.`;
+  }
+  const bytes = readFileSync(path);
+  if (bytes.length !== size) {
+    return `${path} holds ${bytes.length} bytes, not the ${size} the game prepared, so it is another snapshot and was left alone.`;
+  }
+  try {
+    return countSnapshot(bytes);
+  } finally {
+    rmSync(path, { force: true });
+  }
 }
 
 /** Whether [param value], as it crossed the keeper's channel, is the counts of a snapshot. */

@@ -167,7 +167,7 @@ so take it off when the question it was for is answered.
 ## Objects a game keeps
 
 \`debug_objects snapshot\` before an action, then \`debug_objects diff\` with its id as \`before\`,
-names each class whose count moved. It reads a game this server started, not one the editor plays.
+names each class whose count moved. Both snapshots must come from the same run.
 
 ## Editing
 
