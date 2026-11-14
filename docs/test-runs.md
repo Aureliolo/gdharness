@@ -265,13 +265,12 @@ Each slot it holds starts an engine on a share. An engine starts in each other s
 comes free. An engine that finishes its share while shares remain runs the next in the same
 process, so a share after the first pays no engine start. A lane that is told to stop (see
 [a gate's lanes file](#a-gates-lanes-file)), or whose engine crashed or was ended, takes its next
-share in an engine started for it. So does a lane whose next share does not fit in the memory left
-at once, since an engine never waits for memory while it holds its own.
+share in an engine started for it. An engine is reused only when memory does not hold the run. In a
+run held by memory each share gets an engine of its own, admitted for that share.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
-timeouts, deadline and peak memory. The memory gate admits a share in a running engine at the most
-its suites were seen to hold, once the share before it has ended. A share in an engine that ran
-out of memory runs again alone, and only that share does. What the engine reports as leaked at exit
+timeouts, deadline and peak memory. A share in an engine that ran out of memory runs again alone,
+and only that share does. What the engine reports as leaked at exit
 is attributed to the share it ran last.
 
 The run and the engine pass shares through the folder named by `--shares-in` (see

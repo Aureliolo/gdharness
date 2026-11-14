@@ -91,8 +91,6 @@ export interface ShareEnded {
 export interface ShareNext {
   /** What follows `--` on the engine's command line for the share. */
   readonly args: readonly string[];
-  /** Told each reading of what the engine holds while it runs the share. */
-  readonly holds?: (bytes: number) => void;
 }
 
 /** What the watcher of an engine needs to hand it shares. */

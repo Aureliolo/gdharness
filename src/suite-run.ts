@@ -1319,7 +1319,6 @@ export class MemoryGate {
   private readonly lookMs: number;
   private readonly going = new Set<Admitted>();
   private turn: Promise<unknown> = Promise.resolve();
-  private askers = 0;
 
   constructor(slots: Pick<EngineSlots, 'markWaiting'>, read: () => Promise<number>, lookMs = MEMORY_LOOK_MS) {
     this.slots = slots;
@@ -1333,44 +1332,9 @@ export class MemoryGate {
    * others draw theirs.
    */
   admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-    this.askers += 1;
     const admitted = this.turn.then(() => this.room(signal, need));
     this.turn = admitted.catch(() => undefined);
-    const settled = (): void => {
-      this.askers -= 1;
-    };
-    admitted.then(settled, settled);
     return admitted;
-  }
-
-  /** How many callers are waiting to be admitted. */
-  get waiting(): number {
-    return this.askers;
-  }
-
-  /**
-   * Hands the admission [param replacing] of an engine that goes on to another share over to that
-   * share's, which needs [param need], and answers null when the room left does not hold it at once.
-   * It never waits: two engines waiting for each other's memory would never end. The engine then
-   * exits and its lane asks in the ordinary queue. The old admission stays until the new one takes
-   * its place, so the gate never counts fewer engines than are alive.
-   */
-  async handOver(signal: AbortSignal, need: () => number, replacing: Admitted): Promise<Admitted | null> {
-    signal.throwIfAborted();
-    const needed = need();
-    if (!(await this.roomFor(needed, replacing))) {
-      return null;
-    }
-    return this.admission(needed, replacing);
-  }
-
-  /** Whether an engine needing [param needed] fits beside the engines going, [param replacing] aside. */
-  private async roomFor(needed: number, replacing?: Admitted): Promise<boolean> {
-    const others = [...this.going].filter((one) => one !== replacing);
-    // Summed before the read, as the memory read is taken before a reading told while it is
-    // out. Summed after, that growth would count as owed no longer and as free memory too.
-    const owed = others.reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
-    return others.length === 0 || roomForAnother(await this.read(), owed, needed);
   }
 
   private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
@@ -1380,7 +1344,10 @@ export class MemoryGate {
       for (;;) {
         signal.throwIfAborted();
         needed = need();
-        if (await this.roomFor(needed)) {
+        // Summed before the read, as the memory read is taken before a reading told while it is
+        // out. Summed after, that growth would count as owed no longer and as free memory too.
+        const owed = [...this.going].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
+        if (this.going.size === 0 || roomForAnother(await this.read(), owed, needed)) {
           break;
         }
         unmark ??= this.slots.markWaiting();
@@ -1389,10 +1356,6 @@ export class MemoryGate {
     } finally {
       unmark?.();
     }
-    return this.admission(needed);
-  }
-
-  private admission(needed: number, replacing?: Admitted): Admitted {
     const engine: Admitted = {
       need: needed,
       held: 0,
@@ -1403,7 +1366,6 @@ export class MemoryGate {
         engine.held = bytes;
       },
     };
-    replacing?.ended();
     this.going.add(engine);
     return engine;
   }
@@ -2194,48 +2156,9 @@ export async function runShares<
     return { plan, index };
   };
   /**
-   * Hands the admission [param replacing] of an engine that goes on to another share over to that
-   * share's, or answers null when the memory left does not hold it at once or every share is handed out.
-   */
-  const handedOver = async (replacing: Admitted): Promise<Admitted | null> => {
-    try {
-      return (await memory?.handOver(handedOut.signal, needed, replacing)) ?? null;
-    } catch (error) {
-      if (handedOut.signal.aborted) {
-        return null;
-      }
-      throw error;
-    }
-  };
-  /**
-   * Draws the share an engine of lane [param at] runs after the one it has finished, in the slot the
-   * lane holds. Answers null when every share is handed out, the lanes file tells the lane to stop,
-   * or the memory left does not hold the share at once, which ends the engine so the lane gives its
-   * slot back and asks in the ordinary queue. The engine's admission, in [param going], is handed to
-   * the next share's and is never released while the engine lives.
-   */
-  const drawnInPlace = async (
-    at: number,
-    going: { admitted: Admitted | undefined },
-  ): Promise<{ readonly plan: EnginePlan; readonly index: number } | null> => {
-    if (empty() || (await fallenPast(at))) {
-      return null;
-    }
-    if (memory !== undefined && going.admitted !== undefined) {
-      const admitted = await handedOver(going.admitted);
-      if (admitted === null) {
-        return null;
-      }
-      going.admitted = admitted;
-      if (needed() > admitted.need || (await fallenPast(at))) {
-        return null;
-      }
-    }
-    return draw(at);
-  };
-  /**
-   * Runs a drawn share in the lane's engine, which takes the shares after it that the lane draws. Each
-   * share's admission ends as its share does, and the results come in the order the shares ran.
+   * Runs a drawn share in the lane's engine, which takes the shares after it that the lane draws when
+   * no memory gate holds the run. Its admission ends as its engine does, and the results come in the
+   * order the shares ran.
    */
   const runDrawn = async (
     first: {
@@ -2247,7 +2170,6 @@ export async function runShares<
     at: number,
   ): Promise<T[]> => {
     const ran: T[] = [];
-    const going = { admitted: first.admitted };
     // What each engine took to start is what the shares after it are sized by. A share run in an
     // engine already started has no start of its own.
     const noted = (one: T): void => {
@@ -2259,29 +2181,23 @@ export async function runShares<
     };
     const reuse: ShareReuse<T> = {
       next: async () => {
-        // An engine about to exit keeps its admission until it has, so memory is not offered to
-        // another engine while this one still holds it. The same goes while another lane waits
-        // for memory, which takes the next share in an engine of its own once this one is gone.
-        if (empty() || (memory?.waiting ?? 0) > 0 || (await fallenPast(at))) {
+        if (empty() || (await fallenPast(at))) {
           return null;
         }
-        const following = await drawnInPlace(at, going);
-        if (following === null) {
-          return null;
-        }
-        const holds = going.admitted?.holds;
-        return { plan: following.plan, index: following.index, ...(holds === undefined ? {} : { holds }) };
+        return draw(at);
       },
       done: noted,
     };
     try {
       // A windowed engine starts with the display flags of a windowed share, which no headless share
       // may run under, so it ends after its share and a headless engine follows it in the same slot.
-      const reusable = first.plan.windowed ? undefined : reuse;
+      // A run held by memory admits each engine for the one share it is dealt, so each share has an
+      // engine of its own.
+      const reusable = first.plan.windowed || memory !== undefined ? undefined : reuse;
       noted(await run(first.plan, first.index, first.lock, first.admitted?.holds, reusable));
       return ran;
     } finally {
-      going.admitted?.ended();
+      first.admitted?.ended();
     }
   };
   const lane = async (at: number): Promise<T[]> => {
@@ -2479,7 +2395,7 @@ async function runEngine(
       directory,
       files,
       reports,
-      reportsBefore: new Set<string>(),
+      reportsBefore: new Map<string, string>(),
       began: Date.now(),
       from: 0,
     },
@@ -2518,8 +2434,8 @@ interface ShareRun {
   readonly files: EngineFiles;
   /** The folder the engine's gdUnit4 reports go to, which is the first share's. */
   readonly reports: string;
-  /** The files in it when the share began, which earlier shares of the engine wrote. */
-  readonly reportsBefore: ReadonlySet<string>;
+  /** The files in it when the share began, with their size and time of change: earlier shares' own. */
+  readonly reportsBefore: ReadonlyMap<string, string>;
   /** When it began, in milliseconds since the epoch. */
   readonly began: number;
   /** The byte of the engine's log its lines begin at. */
@@ -2530,8 +2446,6 @@ interface ShareRun {
 interface DrawnShare {
   readonly plan: EnginePlan;
   readonly index: number;
-  /** Told each reading of what the engine holds while it runs the share. */
-  readonly holds?: (bytes: number) => void;
 }
 
 /** What a lane gives an engine that runs more than one share. */
@@ -2568,14 +2482,11 @@ async function handedOn(
     directory,
     files,
     reports: running.share.reports,
-    reportsBefore: new Set(reportFiles(running.share.reports)),
+    reportsBefore: reportFiles(running.share.reports),
     began: Date.now(),
     from: ended.to,
   };
-  return {
-    args: shareArguments(drawn.plan, files),
-    ...(drawn.holds === undefined ? {} : { holds: drawn.holds }),
-  };
+  return { args: shareArguments(drawn.plan, files) };
 }
 
 /**
@@ -2619,13 +2530,19 @@ function judgedShare(
   };
 }
 
-/** The files under [param reports], sorted, as paths inside it. */
-function reportFiles(reports: string): string[] {
-  return existsSync(reports)
-    ? readdirSync(reports, { recursive: true, encoding: 'utf8' })
-        .filter((file) => statSync(join(reports, file)).isFile())
-        .toSorted()
-    : [];
+/** The files under [param reports] by path inside it, sorted, with their size and time of change. */
+function reportFiles(reports: string): ReadonlyMap<string, string> {
+  const found = new Map<string, string>();
+  if (!existsSync(reports)) {
+    return found;
+  }
+  for (const file of readdirSync(reports, { recursive: true, encoding: 'utf8' }).toSorted()) {
+    const stat = statSync(join(reports, file));
+    if (stat.isFile()) {
+      found.set(file, `${String(stat.size)}:${String(stat.mtimeMs)}`);
+    }
+  }
+  return found;
 }
 
 /** How many of the files written into a report folder that was turned off are named. */
@@ -2637,8 +2554,10 @@ const REPORT_FILES_NAMED = 3;
  * file there means the gdUnit4 installed no longer reads that mark: every run then writes reports it
  * was told not to, and the hook the runner reads the registration of is no proof of it.
  */
-export function reportsFault(reports: string, known: ReadonlySet<string> = new Set()): string | null {
-  const files = reportFiles(reports).filter((file) => !known.has(file));
+export function reportsFault(reports: string, known: ReadonlyMap<string, string> = new Map()): string | null {
+  const files = [...reportFiles(reports)]
+    .filter(([file, seen]) => known.get(file) !== seen)
+    .map(([file]) => file);
   if (files.length === 0) {
     return null;
   }

@@ -653,7 +653,7 @@ interface Watch {
   readonly outcome: { ended: string | null };
   readonly silenceSeconds: number;
   readonly silenceIn: ((printed: RunPrinted) => number) | undefined;
-  holds: ((bytes: number) => void) | undefined;
+  readonly holds: ((bytes: number) => void) | undefined;
   readonly sample: () => Promise<Sample>;
   readonly running: Spent;
   readonly quiet: Spent;
@@ -800,7 +800,6 @@ function handedTheNext(watch: Watch, to: number, code: number): void {
       if (next !== null) {
         watch.shareFrom = to;
         watch.peakBytes = 0;
-        watch.holds = next.holds;
       }
       handedOver(shares.directory, number + 1, next?.args ?? null);
     })

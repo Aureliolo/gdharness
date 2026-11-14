@@ -34,7 +34,7 @@ import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
-import { slug } from '../scripts/doc-slug.js';
+import { headingIdsOf } from '../scripts/doc-slug.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
@@ -60389,7 +60389,6 @@ interface StandInRan {
 function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<void> = () => delay(1)): {
   engines: () => number;
   shares: EnginePlan[];
-  holds: Array<((bytes: number) => void) | undefined>;
   run: (
     plan: EnginePlan,
     index: number,
@@ -60400,7 +60399,6 @@ function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<v
 } {
   let engines = 0;
   const shares: EnginePlan[] = [];
-  const holds: Array<((bytes: number) => void) | undefined> = [];
   const ranOf = (index: number, first: boolean): StandInRan => ({
     index,
     printed: { started: first ? { seconds: 10 } : null },
@@ -60409,12 +60407,11 @@ function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<v
     plan: EnginePlan,
     index: number,
     _lock: string,
-    held?: (bytes: number) => void,
+    _held?: (bytes: number) => void,
     reuse?: ShareReuse<StandInRan>,
   ): Promise<StandInRan> => {
     engines += 1;
     shares.push(plan);
-    holds.push(held);
     let at = index;
     let first = true;
     await between(plan, shares.length);
@@ -60423,12 +60420,11 @@ function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<v
       first = false;
       at = next.index;
       shares.push(next.plan);
-      holds.push(next.holds);
       await between(next.plan, shares.length);
     }
     return ranOf(at, first);
   };
-  return { engines: () => engines, shares, holds, run };
+  return { engines: () => engines, shares, run };
 }
 
 /** An engine that finishes its share while shares remain runs the next in the same process. */
@@ -60490,35 +60486,24 @@ async function testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting(
 }
 
 /**
- * A share run in an engine already started is admitted by memory on its own, at what its own suites
- * were seen to hold, taking over the admission of the share before it.
+ * A run held by memory admits each engine for the one share it is dealt, so each share has an engine
+ * of its own and the admissions are the ones the gate would have made before shares were reused.
  */
-async function testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn(): Promise<void> {
+async function testARunHeldByMemoryStartsAnEngineForEachShare(): Promise<void> {
   const gib = 1024 ** 3;
   const events: string[] = [];
   class RecordingGate extends MemoryGate {
-    private recorded(admitted: Admitted): Admitted {
-      const ended = admitted.ended;
-      return Object.assign(admitted, {
-        ended: () => {
-          events.push('ended');
-          ended();
-        },
-      });
-    }
-
     override admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
       events.push(`admit ${String(need() / gib)}`);
-      return super.admit(signal, need).then((admitted) => this.recorded(admitted));
-    }
-
-    override handOver(
-      signal: AbortSignal,
-      need: () => number,
-      replacing: Admitted,
-    ): Promise<Admitted | null> {
-      events.push(`admit ${String(need() / gib)}`);
-      return super.handOver(signal, need, replacing).then((admitted) => admitted && this.recorded(admitted));
+      return super.admit(signal, need).then((admitted) => {
+        const ended = admitted.ended;
+        return Object.assign(admitted, {
+          ended: () => {
+            events.push('ended');
+            ended();
+          },
+        });
+      });
     }
   }
   const gate = new RecordingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(64 * gib), 5);
@@ -60533,13 +60518,14 @@ async function testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn(): Promise<vo
   );
   const rig = reusingEngines();
   const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-  await runShares(slots, units, declared, 1, ['N'], times, rig.run, undefined, gate);
+  const ran = await runShares(slots, units, declared, 1, ['N'], times, rig.run, undefined, gate);
+  assert.equal(rig.engines(), ran.length, 'an engine for every share dealt');
+  assert.ok(ran.length >= 3, `and the run dealt several: ${String(ran.length)}`);
   assert.deepEqual(
     events,
-    ['admit 5', 'admit 3', 'ended', 'admit 1', 'ended', 'ended'],
-    'each share is admitted at its own need, handing over the admission of the one before it',
+    ['admit 5', 'ended', 'admit 3', 'ended', 'admit 1', 'ended'],
+    "each engine is admitted at its own share's need and gives it back when it exits",
   );
-  assert.equal(new Set(rig.holds).size, 3, 'and told what the engine holds through its own admission');
 }
 
 /** A lane told fewer lanes gives its slot back after its share instead of drawing another. */
@@ -60616,118 +60602,85 @@ async function testAWindowedEngineIsNotReusedForHeadlessShares(): Promise<void> 
 }
 
 /**
- * A reused engine keeps its memory admission until it exits, so the gate never counts fewer engines
- * than are alive, even while the lanes file is read between two shares.
+ * Two lanes whose engines finish light shares together and are dealt heavy ones next never hold more
+ * than the memory has: each engine is admitted through the gate's one look at a time.
  */
-async function testAReusedEngineKeepsItsMemoryAdmissionWhileItLives(): Promise<void> {
-  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+async function testTwoEnginesFinishingTogetherAreNotAdmittedBeyondTheMemory(): Promise<void> {
   const gib = 1024 ** 3;
+  const kept = 4 * gib;
+  const units = [
+    SHARE_UNIT('light0', 120),
+    SHARE_UNIT('light1', 120),
+    SHARE_UNIT('heavy0', 119),
+    SHARE_UNIT('heavy1', 119),
+  ];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const peaks: Record<string, number> = {
+    'res://light0.gd': gib,
+    'res://light1.gd': gib,
+    'res://heavy0.gd': 3 * gib,
+    'res://heavy1.gd': 3 * gib,
+  };
   const times = Object.fromEntries(
-    units.map((unit) => [unit.suite, { seconds: 120, cases: { test_one: 120 }, peak: 2 * gib }]),
+    units.map((unit) => [
+      unit.suite,
+      { seconds: unit.cost, cases: { test_one: unit.cost }, peak: peaks[unit.suite] ?? 0 },
+    ]),
   );
-  let admittedNow = 0;
-  let live = 0;
-  let worst = 0;
-  class CountingGate extends MemoryGate {
-    private counted(admitted: Admitted): Admitted {
-      admittedNow += 1;
-      const ended = admitted.ended;
-      let done = false;
-      return Object.assign(admitted, {
-        ended: () => {
-          if (!done) {
-            done = true;
-            admittedNow -= 1;
-          }
-          ended();
-        },
-      });
-    }
-
-    override admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-      return super.admit(signal, need).then((admitted) => this.counted(admitted));
-    }
-
-    override handOver(
-      signal: AbortSignal,
-      need: () => number,
-      replacing: Admitted,
-    ): Promise<Admitted | null> {
-      return super.handOver(signal, need, replacing).then((admitted) => admitted && this.counted(admitted));
-    }
-  }
-  const gate = new CountingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(0), 20);
-  const reading = 200;
-  let releaseSecond: (lock: string) => void = () => undefined;
-  const secondSlot = new Promise<string>((given) => {
-    releaseSecond = given;
-  });
-  const never = (signal: AbortSignal): Promise<never> =>
-    new Promise((_resolve, reject) => {
-      signal.addEventListener('abort', () => {
-        reject(new Error('the run is over'));
-      });
-    });
-  const raised = {
-    ceiling: 2,
-    told: async (): Promise<number | null> => {
-      await delay(reading);
-      return null;
+  const holding = new Map<number, number>();
+  let engineCount = 0;
+  let worst = Number.POSITIVE_INFINITY;
+  const free = (): number => kept + 5 * gib - [...holding.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    async () => {
+      const at = free();
+      await delay(5);
+      return at;
     },
-    untilTold: (_lane: number, signal: AbortSignal): Promise<void> => never(signal),
-    past: (_above: number, signal: AbortSignal): Promise<number> => never(signal),
-  };
+    20,
+  );
+  const names = ['A', 'B'];
   const slots = {
-    take: (signal?: AbortSignal): Promise<string> =>
-      new Promise((given, reject) => {
-        signal?.addEventListener('abort', () => {
-          reject(new Error('stopped'));
-        });
-        void secondSlot.then(given);
-      }),
-    release: () => undefined,
+    take: (): Promise<string> => Promise.resolve(names.shift() ?? 'X'),
+    release: (lock: string): void => {
+      names.push(lock);
+    },
   };
-  const note = (): void => {
-    worst = Math.max(worst, live - admittedNow);
-  };
-  let asked = false;
   const run = async (
-    _plan: EnginePlan,
+    plan: EnginePlan,
     index: number,
-    lock: string,
+    _lock: string,
     _holds?: (bytes: number) => void,
     reuse?: ShareReuse<StandInRan>,
   ): Promise<StandInRan> => {
-    live += 1;
-    note();
+    const id = engineCount;
+    engineCount += 1;
+    holding.set(id, 0);
     try {
-      await delay(100);
       let at = index;
+      let current = plan;
       for (;;) {
-        if (!asked && lock === 'A') {
-          asked = true;
-          setTimeout(() => {
-            releaseSecond('B');
-          }, reading / 2);
-        }
+        await delay(10);
+        holding.set(id, Math.max(holding.get(id) ?? 0, peaks[current.suites[0]?.path ?? ''] ?? 0));
+        worst = Math.min(worst, free() - kept);
+        await delay(30);
         const next = await reuse?.next();
-        note();
         if (next === undefined || next === null) {
           break;
         }
         reuse?.done({ index: at, printed: { started: null } });
         at = next.index;
-        await delay(300);
-        note();
+        current = next.plan;
       }
       return { index: at, printed: { started: null } };
     } finally {
-      live -= 1;
+      holding.delete(id);
     }
   };
-  await runShares(slots, units, declared, 2, ['A'], times, run, undefined, gate, raised);
-  assert.equal(worst, 0, 'no moment had more engines alive than the gate counted admitted');
+  const ran = await runShares(slots, units, declared, 2, [], times, run, undefined, gate);
+  assert.equal(ran.length, 4, 'every share ran');
+  assert.ok(worst >= 0, `the room past what is kept never went below nothing: ${String(worst / gib)} GiB`);
 }
 
 /** A reused engine's runner prints its share's compile time on a line of its own. */
@@ -60740,8 +60693,7 @@ function testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine(): void {
 
 /**
  * Two lanes whose idle engines hold the memory their next shares need beside each other do not wait
- * for each other: an engine whose next share does not fit at once exits, and its lane asks in the
- * ordinary queue.
+ * for each other: each engine exits after its share and its lane asks the gate for the next.
  */
 async function testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther(): Promise<void> {
   const gib = 1024 ** 3;
@@ -60766,13 +60718,12 @@ async function testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther(): Promise
     _plan: EnginePlan,
     index: number,
     _lock: string,
-    holds?: (bytes: number) => void,
+    _holds?: (bytes: number) => void,
     reuse?: ShareReuse<StandInRan>,
   ): Promise<StandInRan> => {
     const id = engineCount;
     engineCount += 1;
     holding.set(id, 2 * gib);
-    holds?.(2 * gib);
     try {
       let at = index;
       for (;;) {
@@ -60783,7 +60734,6 @@ async function testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther(): Promise
         }
         reuse?.done({ index: at, printed: { started: null } });
         at = next.index;
-        next.holds?.(2 * gib);
       }
       return { index: at, printed: { started: null } };
     } finally {
@@ -60798,6 +60748,16 @@ async function testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther(): Promise
   assert.equal(ran.length, 8, 'with a result for every share');
 }
 
+/** A case body that writes a report into the folder gdUnit4 was told to put its reports in. */
+const STRAY_REPORT =
+  '\tvar args: PackedStringArray = OS.get_cmdline_args()\n' +
+  '\tvar at: int = args.find("-rd")\n' +
+  '\tvar dir: String = ProjectSettings.globalize_path(args[at + 1])\n' +
+  '\tDirAccess.make_dir_recursive_absolute(dir)\n' +
+  '\tvar file: FileAccess = FileAccess.open(dir.path_join("stray.html"), FileAccess.WRITE)\n' +
+  '\tfile.store_string("x")\n' +
+  '\tfile.close()\n';
+
 /**
  * A report gdUnit4 wrote during one share of a reused engine fails that share, and the shares after
  * it are judged on what they wrote themselves.
@@ -60807,17 +60767,9 @@ function testAStrayReportFailsOnlyTheShareOfAReusedEngineThatWroteIt(): void {
   if (engines === null) {
     return;
   }
-  const stray =
-    '\tvar args: PackedStringArray = OS.get_cmdline_args()\n' +
-    '\tvar at: int = args.find("-rd")\n' +
-    '\tvar dir: String = ProjectSettings.globalize_path(args[at + 1])\n' +
-    '\tDirAccess.make_dir_recursive_absolute(dir)\n' +
-    '\tvar file: FileAccess = FileAccess.open(dir.path_join("stray.html"), FileAccess.WRITE)\n' +
-    '\tfile.store_string("x")\n' +
-    '\tfile.close()\n';
   const run = sharedEngineRun(
     engines,
-    { a: sharedEngineSuite(stray), b: sharedEngineSuite(''), c: sharedEngineSuite('') },
+    { a: sharedEngineSuite(STRAY_REPORT), b: sharedEngineSuite(''), c: sharedEngineSuite('') },
     1,
   );
   try {
@@ -60832,24 +60784,84 @@ function testAStrayReportFailsOnlyTheShareOfAReusedEngineThatWroteIt(): void {
   }
 }
 
-/**
- * A heading's id on the docs site is the one GitHub and markdownlint give it, so a link written for
- * either works on the site.
- */
-function testADocsHeadingHasTheIdGitHubGivesIt(): void {
-  const given: Array<[string, string]> = [
-    ["A gate's lanes file", 'a-gates-lanes-file'],
-    ['Leaks at exit', 'leaks-at-exit'],
-    ['The v1.2 format (and more)', 'the-v12-format-and-more'],
-    ['Run `gdharness test`: what it does', 'run-gdharness-test-what-it-does'],
-    ['snake_case names', 'snake_case-names'],
-    ['Plain - dashes', 'plain---dashes'],
-    ['Fenêtres windowed', 'fenêtres-windowed'],
-  ];
-  assert.deepEqual(
-    given.map(([heading]) => slug(heading)),
-    given.map(([, id]) => id),
+/** A later share that writes a report under a name an earlier share used fails too. */
+function testAReportRewrittenUnderTheSameNameFailsTheShareThatRewroteIt(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(STRAY_REPORT), b: sharedEngineSuite(STRAY_REPORT), c: sharedEngineSuite('') },
+    1,
   );
+  try {
+    assert.notEqual(run.status, 0, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.passed),
+      [false, false, true],
+      'each share that wrote the report fails, the one that wrote none passes',
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * The ids the docs site gives headings are the ones GitHub gives them, which markdownlint's link
+ * check (MD051) judges: a link to each id passes, and a link to an id no heading has fails.
+ */
+function testDocsHeadingsHaveTheIdsMarkdownlintComputes(): void {
+  const markdown = [
+    "# A gate's lanes file",
+    '## Intro',
+    '## Intro',
+    '## Intro',
+    '## Use foo_bar here',
+    '## See [the docs](https://example.com/x)',
+    '## A &amp; B',
+    '## A & B',
+    '## <code>x</code> y',
+    '## `Code` and **bold**',
+    '## The v1.2 format (and more)',
+    '## Plain - dashes',
+    '## Fenêtres ä',
+    '',
+  ].join('\n');
+  const ids = headingIdsOf(markdown);
+  assert.deepEqual(ids, [
+    'a-gates-lanes-file',
+    'intro',
+    'intro-1',
+    'intro-2',
+    'use-foo_bar-here',
+    'see-the-docs',
+    'a--b',
+    'a--b-1',
+    'x-y',
+    'code-and-bold',
+    'the-v12-format-and-more',
+    'plain---dashes',
+    'fenêtres-ä',
+  ]);
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slug-'));
+  try {
+    writeTree(directory, {
+      '.markdownlint-cli2.jsonc': '{"config": {"default": false, "MD051": true}}',
+      'ok.md': `${markdown}\n${ids.map((id) => `- [to](#${id})`).join('\n')}\n`,
+      'wrong.md': `${markdown}\n- [to](#no-such-heading)\n`,
+    });
+    const lint = (file: string): number | null =>
+      spawnSyncHidden(
+        process.execPath,
+        [join('node_modules', 'markdownlint-cli2', 'markdownlint-cli2-bin.mjs'), join(directory, file)],
+        { encoding: 'utf8', cwd: process.cwd() },
+      ).status;
+    assert.equal(lint('ok.md'), 0, 'markdownlint accepts a link to each id the site gives');
+    assert.notEqual(lint('wrong.md'), 0, 'and refuses one to an id no heading has, so it is judging');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /** One suite of the shared-engine runs, whose one case runs [param body] and then passes. */
@@ -101949,15 +101961,16 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testAnEngineFinishingItsShareTakesTheNextInTheSameProcess,
   testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting,
-  testAShareInAReusedEngineIsAdmittedByMemoryOnItsOwn,
+  testARunHeldByMemoryStartsAnEngineForEachShare,
   testALaneToldToStopGivesItsSlotBackBetweenShares,
   testARunDealtSharesOverOneSlotStartsOneEngineForThem,
   testAShareInAReusedEngineHasNoStartTime,
   testAWindowedEngineIsNotReusedForHeadlessShares,
-  testAReusedEngineKeepsItsMemoryAdmissionWhileItLives,
+  testTwoEnginesFinishingTogetherAreNotAdmittedBeyondTheMemory,
   testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther,
   testAStrayReportFailsOnlyTheShareOfAReusedEngineThatWroteIt,
-  testADocsHeadingHasTheIdGitHubGivesIt,
+  testAReportRewrittenUnderTheSameNameFailsTheShareThatRewroteIt,
+  testDocsHeadingsHaveTheIdsMarkdownlintComputes,
   testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine,
   testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn,
   testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone,

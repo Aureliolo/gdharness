@@ -19,7 +19,7 @@ import { runLine } from '../src/runner.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { argumentShape, renderToolsMarkdown } from '../src/tool-reference.js';
-import { slug } from './doc-slug.js';
+import { HeadingIds } from './doc-slug.js';
 
 const DOCS = 'docs';
 const THEME = join(DOCS, 'theme');
@@ -470,11 +470,14 @@ const AGENT_GUIDE = {
   summary: 'Do this to install gdharness into a project. Terse, imperative, for an agent.',
 } as const;
 
+/** The ids taken by the headings of the page being rendered, new for each page. */
+let pageIds = new HeadingIds();
+
 marked.use({
   renderer: {
     heading(this: { parser: { parseInline: (tokens: Tokens.Generic[]) => string } }, token: Tokens.Heading) {
       const text = this.parser.parseInline(token.tokens);
-      return `<h${token.depth} id="${slug(token.text)}">${text}</h${token.depth}>\n`;
+      return `<h${token.depth} id="${pageIds.next(text)}">${text}</h${token.depth}>\n`;
     },
     // A fence says its language and, after it, what the block is: ```bash verify the download.
     // The label becomes the bar along the top, which is what tells one block from the next when
@@ -701,6 +704,7 @@ function build(): void {
   for (const page of PAGES) {
     // Substituted before parsing, not after, so that a generated table arrives as markdown and
     // is rendered as a table rather than dropped into the page as its own source.
+    pageIds = new HeadingIds();
     const rendered =
       page.render !== undefined
         ? page.render()
