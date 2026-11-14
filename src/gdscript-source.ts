@@ -647,6 +647,15 @@ function parseBody(
 
 const OPENS_OR_CLOSES = /[()[\]{}]/u;
 
+/** Whether [param text] ends in a backslash, past any white space, which joins the next line to it. */
+function endsInBackslash(text: string): boolean {
+  let at = text.length - 1;
+  while (at >= 0 && (text[at] === ' ' || text[at] === '\t' || text[at] === '\r')) {
+    at -= 1;
+  }
+  return text[at] === '\\';
+}
+
 /** What [param source] declares: its class_name, its own members, and its inner classes, nested. */
 export function shapeOf(source: string): ScriptShape {
   const code = codeOf(source, regionsOf(source));
@@ -657,8 +666,9 @@ export function shapeOf(source: string): ScriptShape {
   for (const text of code.split('\n')) {
     lines.push({ start, text, indent: indentOf(text), continued: depth > 0 || joined });
     start += text.length + 1;
+    // Most lines hold no bracket and no backslash, and the native searches pass them at once.
     depth = OPENS_OR_CLOSES.test(text) ? Math.max(0, depth + bracketsOpenedBy(text)) : depth;
-    joined = text.includes('\\') && /\\\s*$/u.test(text);
+    joined = text.includes('\\') && endsInBackslash(text);
   }
   const reader: ShapeReader = { source, code, lines, className: null };
   const { body } = parseBody(reader, null, null, 0, 0, 0);
@@ -1068,7 +1078,13 @@ function localAt(lines: readonly string[], index: number, name: string): { type:
 function bracketsOpenedBy(text: string): number {
   let open = 0;
   for (let at = 0; at < text.length; at += 1) {
-    open += bracketDelta(text[at]);
+    // Read as character codes, since every script line passes through here: ( [ { and ) ] }.
+    const code = text.charCodeAt(at);
+    if (code === 40 || code === 91 || code === 123) {
+      open += 1;
+    } else if (code === 41 || code === 93 || code === 125) {
+      open -= 1;
+    }
   }
   return open;
 }
@@ -1214,18 +1230,24 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * the class, runs what that class dispatches it to, and `onReceiver` says the same of it:
  * `made.lift(by)` with `var made: Outcome` above it is Outcome's. A receiver the text gives no class,
  * such as an untyped local or a call's result, may be anything, so the use is kept.
+ *
+ * [param read] is what a caller that has already read the script hands over, so it is not read twice.
  */
 export function callSitesOf(
   source: string,
   name: string,
   property = false,
   dispatch: { readonly onSelf?: SelfDispatch; readonly onReceiver?: ReceiverDispatch } = {},
+  read?: { readonly regions: Region[]; readonly shape: ScriptShape; readonly lines: Lines },
 ): CallSite[] {
-  const regions = regionsOf(source);
+  if (!source.includes(name)) {
+    return [];
+  }
+  const regions = read?.regions ?? regionsOf(source);
   const code = codeOf(source, regions);
   const codeLines = code.split('\n');
-  const lines = new Lines(source);
-  const shape = shapeOf(source);
+  const lines = read?.lines ?? new Lines(source);
+  const shape = read?.shape ?? shapeOf(source);
   let locals: ReadonlySet<string> | null = null;
   const scan: CallScan = {
     source,

@@ -24,12 +24,11 @@ import {
   type DeclarationKind,
   declaredClass,
   enclosingFunction,
-  Lines,
+  type Lines,
   type Receiver,
   type ReceiverDispatch,
   type ScriptShape,
   type SelfDispatch,
-  shapeOf,
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
 import { isRecord } from './records.js';
@@ -1206,7 +1205,7 @@ function related(graph: ClassGraph, one: ClassId, other: ClassId): boolean {
  * one related to the asked class.
  */
 function dispatchOf(
-  listed: readonly (readonly [string, string])[],
+  scripts: ReadonlyMap<string, Script>,
   asked: string | null,
   name: string,
   rowsSayProperty: boolean,
@@ -1215,7 +1214,6 @@ function dispatchOf(
   if (asked === null) {
     return { property: rowsSayProperty, forScript: () => ({}) };
   }
-  const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
   const graph = new ClassGraph(scripts, declaredIn(scripts));
   const scope = new ClassScope(graph, scripts);
   const target = graph.named(asked);
@@ -1281,16 +1279,25 @@ export function callersOf(
       (bareName(row.function) === bare || row.property === bare) &&
       (asked === null || ownerOf(row.function) === asked),
   );
+  // A class asked about needs every script read for the class graph. Otherwise only the scripts
+  // that name the function are read, each once.
+  const reads =
+    asked === null
+      ? new Map<string, Script>()
+      : new Map(listed.map(([script, source]) => [script, new Script(script, source)]));
   const { property, forScript } = dispatchOf(
-    listed,
+    reads,
     asked,
     bare,
     propertyOf(name) !== null || target.some((row) => row.property === bare),
   );
   const sites = listed.flatMap(([script, source]) => {
-    let read: { shape: ScriptShape; lines: Lines } | null = null;
-    return callSitesOf(source, bare, property, forScript(script)).map((site) => {
-      read ??= { shape: shapeOf(source), lines: new Lines(source) };
+    if (!source.includes(bare)) {
+      return [];
+    }
+    const known = reads.get(script);
+    const read = known?.text === source ? known : new Script(script, source);
+    return callSitesOf(source, bare, property, forScript(script), read).map((site) => {
       const within = site.within === null ? undefined : rowOfSite(rows, script, read, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };
     });
