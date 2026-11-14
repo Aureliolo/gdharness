@@ -391,10 +391,10 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 		return entry
 	entry["property"] = wanted_property
 	# The errors this match's steps make are this match's answer, not the request's.
-	var made: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
-	var before: GdhCallErrors.Collected = GdhCallErrors.bind(made)
+	var made: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
+	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(made)
 	_read_found(entry, node, wanted_property)
-	var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
+	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 	GdhCallErrors.attach(entry, made)
 	return entry
 
@@ -968,10 +968,10 @@ func _serialize_node_tree(
 ) -> Dictionary:
 	var result: Dictionary = _serialize_node(node, include_properties)
 	if not named.is_empty():
-		var made: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
-		var before: GdhCallErrors.Collected = GdhCallErrors.bind(made)
+		var made: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
+		var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(made)
 		result["properties"] = _named_properties_of(node, str(result["path"]), named)
-		var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
+		var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 		GdhCallErrors.attach(result, made)
 
 	if depth < max_depth:

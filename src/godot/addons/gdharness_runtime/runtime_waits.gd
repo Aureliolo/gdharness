@@ -462,7 +462,7 @@ func recorded(params: Dictionary) -> Dictionary:
 func wait_until(params: Dictionary) -> Dictionary:
 	# Every look of the wait adds to the request's collector, which another request may replace
 	# as the bound one while the wait is suspended.
-	var request_errors: GdhCallErrors.Collected = GdhCallErrors.bound()
+	var request_errors: GdhCallErrors.GdhCollected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var says: String = str(params.get("says", ""))
@@ -674,7 +674,7 @@ static func _property_wait_unasked(property: String, params: Dictionary) -> Stri
 func _wait_in_order(
 	node: Node, params: Dictionary, current: Variant, timeout_ms: int
 ) -> Dictionary:
-	var request_errors: GdhCallErrors.Collected = GdhCallErrors.bound()
+	var request_errors: GdhCallErrors.GdhCollected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var compare: String = str(params.get("compare", ""))
@@ -856,11 +856,11 @@ static func _enum_by_name(watched: Dictionary, sent: Variant, node_path: String)
 ## its nodes hold: a run object built afresh each day would leave a wait watching the day before. A
 ## step that has gone in the meantime ends the wait with what went.
 static func _watched(
-	node: Node, node_path: String, property: String, errors: GdhCallErrors.Collected
+	node: Node, node_path: String, property: String, errors: GdhCallErrors.GdhCollected
 ) -> Dictionary:
-	var before: GdhCallErrors.Collected = GdhCallErrors.bind(errors)
+	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(errors)
 	var looked: Dictionary = _look(node, node_path, property)
-	var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
+	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 	return looked
 
 
@@ -1041,7 +1041,7 @@ class GdhTrace:
 	var ended: String = ""
 	var collected: bool = false
 	## The errors the watch's readings make, which the recording answers with.
-	var errors: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
+	var errors: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
 	var _last: Variant = null
 	var _seen: bool = false
 

@@ -12,7 +12,7 @@ const REFUSED: String = "Error calling method from 'callv': "
 const ERRORS_KEPT: int = 20
 
 ## Where the errors the reads of the request in progress make are gathered. See [method bind].
-static var _bound: Collected = null
+static var _bound: GdhCollected = null
 
 ## The engine's reason for refusing the call, without [constant REFUSED], or "" when it ran.
 var refused: String = ""
@@ -33,14 +33,14 @@ var refused_in: String = ""
 ## Makes [param collector] the one reads add their errors to, and answers the one it replaced. A
 ## request opens one when it starts. Code that resumes after an await binds the request's again,
 ## since another request may have run in between.
-static func bind(collector: Collected) -> Collected:
-	var before: Collected = _bound
+static func bind(collector: GdhCollected) -> GdhCollected:
+	var before: GdhCollected = _bound
 	_bound = collector
 	return before
 
 
 ## The collector reads are adding to now, or null outside a request.
-static func bound() -> Collected:
+static func bound() -> GdhCollected:
 	return _bound
 
 
@@ -53,7 +53,7 @@ static func note(text: String) -> void:
 ## Puts what [param found] gathered in [param answer]. An answer that lists errors gets them after
 ## the ones it holds, cut to [constant ERRORS_KEPT] with the rest counted under errors_not_shown.
 ## A refusal reaches the caller as its message alone, so the errors go into the message.
-static func attach(answer: Dictionary, found: Collected) -> void:
+static func attach(answer: Dictionary, found: GdhCollected) -> void:
 	if found.is_empty():
 		return
 	var lines: Array[String] = found.lines()
@@ -132,7 +132,7 @@ func _log_error(
 
 
 ## The errors the reads of one request made, each distinct text once with how often it came.
-class Collected:
+class GdhCollected:
 	extends RefCounted
 	var texts: Array[String] = []
 	var counts: Dictionary[String, int] = {}

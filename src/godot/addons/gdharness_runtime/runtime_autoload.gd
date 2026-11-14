@@ -895,10 +895,10 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 	# The errors the request's reads make are gathered while the handler runs up to its first
 	# await, and a handler that reads after an await binds the collector again. They go into the
 	# answer whatever it is, so no route that reads can leave them out.
-	var errors: GdhCallErrors.Collected = GdhCallErrors.Collected.new()
-	var before: GdhCallErrors.Collected = GdhCallErrors.bind(errors)
+	var errors: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
+	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(errors)
 	var answer: Variant = await handler.call(params)
-	var _rebound: GdhCallErrors.Collected = GdhCallErrors.bind(before)
+	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 	var result: Dictionary = answer
 	GdhCallErrors.attach(result, errors)
 	return result
