@@ -395,14 +395,14 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	var reached: Dictionary = GdhPaths.walk_to(node, str(entry["path"]), wanted_property)
 	if reached.has("message"):
 		entry["has_property"] = false
-		return entry
+		return GdhPaths.with_read_errors(entry)
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	var has: bool = GdhPaths.can_read(holder, named)
 	entry["has_property"] = has
 	if has:
 		entry["value"] = _values.serialize(GdhPaths.read_under(holder, named))
-	return entry
+	return GdhPaths.with_read_errors(entry)
 
 
 ## Whether the caller named anything to match on, since every filter left out matches everything
@@ -842,24 +842,29 @@ func get_property(params: Dictionary) -> Dictionary:
 
 	var reached: Dictionary = GdhPaths.walk_to(target, node_path, property)
 	if reached.has("message"):
-		return reached
+		return GdhPaths.with_read_errors(reached)
 
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	# Asked of the holder rather than read and compared to null, because a property the holder does
 	# not have and a property that is null both read as null.
 	if not GdhPaths.can_read(holder, named):
-		return {
-			"type": "error",
-			"message": GdhPaths.nothing_there(holder, named, str(reached["called"])),
-		}
+		return GdhPaths.with_read_errors(
+			{
+				"type": "error",
+				"message": GdhPaths.nothing_there(holder, named, str(reached["called"])),
+			}
+		)
 
-	return {
-		"type": "property",
-		"path": node_path,
-		"property": property,
-		"value": _values.serialize(GdhPaths.read_under(holder, named)),
-	}
+	var value: Variant = GdhPaths.read_under(holder, named)
+	return GdhPaths.with_read_errors(
+		{
+			"type": "property",
+			"path": node_path,
+			"property": property,
+			"value": _values.serialize(value),
+		}
+	)
 
 
 ## Whether the frame waits for the display, which sets its floor: a game with vsync on cannot
@@ -957,7 +962,10 @@ func _serialize_node_tree(
 ) -> Dictionary:
 	var result: Dictionary = _serialize_node(node, include_properties)
 	if not named.is_empty():
-		result["properties"] = _named_properties_of(node, str(result["path"]), named)
+		var read_errors: Array[String] = []
+		result["properties"] = _named_properties_of(node, str(result["path"]), named, read_errors)
+		if not read_errors.is_empty():
+			result["errors"] = read_errors.slice(0, GdhPaths.MOST_READ_ERRORS)
 
 	if depth < max_depth:
 		var children: Array = []
@@ -983,16 +991,20 @@ func _serialize_node_tree(
 ## The named properties a node has, read the way a find reads its one: through a colon path as
 ## well, and a name this node has not got is left out rather than answered null, since a tree
 ## holds nodes of every class and a label's `text` is not a container's.
-func _named_properties_of(node: Node, path: String, named: Array[String]) -> Dictionary:
+##
+## What the engine reports to the reads is added to [param read_errors].
+func _named_properties_of(
+	node: Node, path: String, named: Array[String], read_errors: Array[String]
+) -> Dictionary:
 	var properties: Dictionary = {}
 	for wanted: String in named:
 		var reached: Dictionary = GdhPaths.walk_to(node, path, wanted)
-		if reached.has("message"):
-			continue
-		var holder: Variant = reached["holder"]
-		var name: String = reached["name"]
-		if GdhPaths.can_read(holder, name):
-			properties[wanted] = _values.serialize(GdhPaths.read_under(holder, name))
+		if not reached.has("message"):
+			var holder: Variant = reached["holder"]
+			var name: String = reached["name"]
+			if GdhPaths.can_read(holder, name):
+				properties[wanted] = _values.serialize(GdhPaths.read_under(holder, name))
+		read_errors.append_array(GdhPaths.take_read_errors())
 	return properties
 
 

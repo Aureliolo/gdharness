@@ -53,9 +53,15 @@ export const RAISED_FROM = {
  * The calls that make the engine print an error the game did not raise. Besides the two above, an
  * evaluate loads the script of every global class first, and one that does not parse prints its
  * errors then, as does the evaluate a step out asks of a function the engine called. The engine
- * prints each as the game's, so the run read as unclean.
+ * prints each as the game's, so the run read as unclean. A step of a `property` path that makes the
+ * engine report an error is the same, and the game prints that mark itself, as `path read`.
  */
-const RAISERS = ['debug_state evaluate', 'debug_control pause', 'debug_control step_out'] as const;
+const RAISERS = [
+  'debug_state evaluate',
+  'debug_control pause',
+  'debug_control step_out',
+  'path read',
+] as const;
 export type RaisedBy = (typeof RAISERS)[number];
 
 /** What the engine prints when a pause reaches a game already held. */
