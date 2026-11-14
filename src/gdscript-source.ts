@@ -1226,10 +1226,10 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * A use written bare, through `self` or through `super` runs whichever function of that name the
  * engine dispatches it to from the class holding it, and `onSelf` says whether that can be the one
  * asked about: a bare `_settle()` in a script of an unrelated class calls that script's own. A use
- * through anything else whose class the text names, such as a class, a typed local or a variable of
- * the class, runs what that class dispatches it to, and `onReceiver` says the same of it:
- * `made.lift(by)` with `var made: Outcome` above it is Outcome's. A receiver the text gives no class,
- * such as an untyped local or a call's result, may be anything, so the use is kept.
+ * through a class, or through a class variable typed as one, runs what that class dispatches it to,
+ * and `onReceiver` says the same of it: `held.lift(by)` with `var held: Outcome` in the class body is
+ * Outcome's. A receiver the text gives no class, such as a local or a call's result, may be
+ * anything, so the use is kept.
  *
  * [param read] is what a caller that has already read the script hands over, so it is not read twice.
  */
@@ -1240,9 +1240,6 @@ export function callSitesOf(
   dispatch: { readonly onSelf?: SelfDispatch; readonly onReceiver?: ReceiverDispatch } = {},
   read?: { readonly regions: Region[]; readonly shape: ScriptShape; readonly lines: Lines },
 ): CallSite[] {
-  if (!source.includes(name)) {
-    return [];
-  }
   const regions = read?.regions ?? regionsOf(source);
   const code = codeOf(source, regions);
   const codeLines = code.split('\n');

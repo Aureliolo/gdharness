@@ -1113,13 +1113,12 @@ interface ScriptDispatch {
  * for a static function written bare. A `super` use counts where the class above the one it is
  * written in resolves to it. A use on an object of a class the receiver names counts as a `self`
  * use in that class does. A use on the class itself, or on an object `new()` made of it, counts as
- * a static call bound to that class does. A use whose
- * chain passes through a script the project does not hold counts, since it may.
+ * a static call bound to that class does. A use whose chain passes through a script the project
+ * does not hold counts, since it may.
  */
 class Dispatch {
   /** The classes whose objects, or those of a class below them, resolve the name to `reached`. */
   private readonly above = new Set<ClassId>();
-  private readonly reachedFrom = new Map<string, boolean>();
   private readonly graph: ClassGraph;
   private readonly target: ClassId;
   private readonly reached: ClassId;
@@ -1165,16 +1164,6 @@ class Dispatch {
 
   /** Whether a use resolved from [param at], or from any class below it unless [param bound], reaches it. */
   private from(at: ClassId, bound: boolean): boolean {
-    const key = `${at}\n${bound}`;
-    let reaches = this.reachedFrom.get(key);
-    if (reaches === undefined) {
-      reaches = this.reachesFrom(at, bound);
-      this.reachedFrom.set(key, reaches);
-    }
-    return reaches;
-  }
-
-  private reachesFrom(at: ClassId, bound: boolean): boolean {
     const own = this.graph.resolvedFrom(at, this.name, this.kind);
     if (own === null) {
       return true;
