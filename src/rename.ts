@@ -118,13 +118,19 @@ interface ClassNode {
 export class ClassGraph {
   readonly nodes = new Map<ClassId, ClassNode>();
   readonly declared: ReadonlyMap<string, string>;
+  /** Each script's classes, its own body first. */
+  private readonly inFile = new Map<string, ClassNode[]>();
 
   constructor(scripts: ReadonlyMap<string, Script>, declared: ReadonlyMap<string, string>) {
     this.declared = declared;
     for (const script of scripts.values()) {
+      const held: ClassNode[] = [];
+      this.inFile.set(script.path, held);
       const add = (body: ClassBody, inner: string[]): void => {
         const id = classId(script.path, inner);
-        this.nodes.set(id, { id, file: script.path, inner, body, parent: null, native: null });
+        const node: ClassNode = { id, file: script.path, inner, body, parent: null, native: null };
+        this.nodes.set(id, node);
+        held.push(node);
         for (const child of body.inner) {
           if (child.name !== null) {
             add(child, [...inner, child.name]);
@@ -184,13 +190,6 @@ export class ClassGraph {
     return id !== null && this.nodes.has(id) ? id : null;
   }
 
-  /** The class [param path] names inside [param id], as `Inner.Deeper`, or null where none is declared. */
-  within(id: ClassId, path: readonly string[]): ClassId | null {
-    const node = this.nodes.get(id);
-    const found = node === undefined ? null : classId(node.file, [...node.inner, ...path]);
-    return found !== null && this.nodes.has(found) ? found : null;
-  }
-
   /**
    * The class whose own [param name] a use resolved from [param id] reaches: [param id] or the
    * nearest class above it declaring the name as [param kind]. Undefined where none does, and null
@@ -239,13 +238,8 @@ export class ClassGraph {
   bodyAt(file: string, offset: number): ClassId {
     let best = classId(file, []);
     let depth = 0;
-    for (const node of this.nodes.values()) {
-      if (
-        node.file === file &&
-        node.inner.length > depth &&
-        node.body.start <= offset &&
-        offset <= node.body.end
-      ) {
+    for (const node of this.inFile.get(file) ?? []) {
+      if (node.inner.length > depth && node.body.start <= offset && offset <= node.body.end) {
         best = node.id;
         depth = node.inner.length;
       }

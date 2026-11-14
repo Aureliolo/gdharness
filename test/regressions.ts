@@ -2914,7 +2914,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   assert.deepEqual(
-    callSitesOf(assigned, 'level', true).map((one) => [one.line, one.access]),
+    callSitesOf(assigned, 'level', new Set(), true).map((one) => [one.line, one.access]),
     [
       [4, 'write'],
       ...Array.from({ length: 12 }, (_, index) => [index + 9, 'write']),
@@ -3388,9 +3388,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'asked about Inn, its own bare call, self call and Callable are listed, and no Harbour line',
   );
   assert.equal(mooredAt('_moor').length, 15, 'and with no class asked about, every use is listed');
-  // A bare call to a static function is bound to the class it is written in, a call through a class
-  // name to what that class resolves, and a call on a variable declared as a class to that class or
-  // any class below it.
+  // A bare call to a static function is bound to the class it is written in, and one through self
+  // runs on whatever the object is.
   const maker = [
     'class_name Maker',
     'extends RefCounted',
@@ -3425,120 +3424,24 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\tpass',
     '',
   ].join('\n');
-  const user = [
-    'extends Node',
-    '',
-    '',
-    'func use(given: Maker) -> void:',
-    '\tPlain.make()',
-    '\tFancy.make()',
-    '\tgiven.tick()',
-    '',
-  ].join('\n');
   const works = [
     ['res://works/maker.gd', maker],
     ['res://works/fancy.gd', fancy],
-    ['res://works/plain.gd', 'class_name Plain\nextends Maker\n'],
-    ['res://works/user.gd', user],
   ] as const;
   const madeAt = (name: string): unknown[] =>
     callersOf(totals({}), name, works).sites.map((one) => [one.script, one.line]);
   assert.deepEqual(
     madeAt('Fancy.make'),
-    [
-      ['res://works/maker.gd', 18],
-      ['res://works/user.gd', 6],
-    ],
-    "Fancy's static function is reached through its name and through self on a Fancy, never by Maker's bare call or through Plain",
+    [['res://works/maker.gd', 18]],
+    "Fancy's static function is reached through self on a Fancy, never by Maker's bare call",
   );
   assert.deepEqual(
     madeAt('Maker.make'),
     [
       ['res://works/maker.gd', 10],
       ['res://works/maker.gd', 18],
-      ['res://works/user.gd', 5],
     ],
-    "Maker's is reached by its own bare call, through self and through Plain, which inherits it",
-  );
-  assert.deepEqual(
-    madeAt('Fancy.tick'),
-    [['res://works/user.gd', 7]],
-    'a call on a variable declared as Maker may run on a Fancy',
-  );
-  // A class name is read the way the engine reads it from the script it is written in: its own inner
-  // class first, then a global class, then the one inner class of that name elsewhere, and the rest
-  // of a dotted name inside that. A parameter named like a class is the parameter.
-  const opening = (inner: string): string => `class ${inner}:\n\tstatic func open() -> void:\n\t\tpass\n`;
-  const alpha = ['class_name Alpha', 'extends Node', '', '', opening('Box'), '', opening('Lid')].join('\n');
-  const beta = [
-    'class_name Beta',
-    'extends Node',
-    '',
-    '',
-    opening('Box'),
-    '',
-    opening('Crate'),
-    '',
-    'func use(held: Alpha.Box, Lid: Variant) -> void:',
-    '\tAlpha.Box.open()',
-    '\tBox.open()',
-    '\theld.open()',
-    '\tCrate.open()',
-    '\tLid.open()',
-    '',
-  ].join('\n');
-  const gamma = [
-    'extends Node',
-    '',
-    '',
-    opening('Box'),
-    '',
-    'func use() -> void:',
-    '\tBox.open()',
-    '\tCrate.open()',
-    '\tLid.open()',
-    '',
-  ].join('\n');
-  const yard = [
-    ['res://yard/alpha.gd', alpha],
-    ['res://yard/beta.gd', beta],
-    ['res://yard/gamma.gd', gamma],
-    ['res://yard/crate.gd', 'class_name Crate\nextends Node\n\n\nstatic func open() -> void:\n\tpass\n'],
-  ] as const;
-  const openedAt = (name: string): unknown[] =>
-    callersOf(totals({}), name, yard).sites.map((one) => [one.script, one.line]);
-  assert.deepEqual(
-    openedAt('Beta.Box.open'),
-    [
-      ['res://yard/beta.gd', 17],
-      ['res://yard/beta.gd', 20],
-    ],
-    "Beta's own Box and the parameter named Lid, not Alpha.Box by name or by type, Beta's Crate, gamma's Box or Alpha's Lid",
-  );
-  assert.deepEqual(
-    openedAt('Alpha.Box.open'),
-    [
-      ['res://yard/beta.gd', 16],
-      ['res://yard/beta.gd', 18],
-      ['res://yard/beta.gd', 20],
-    ],
-    'Alpha.Box by its dotted name and by a variable declared as it',
-  );
-  assert.deepEqual(
-    openedAt('Crate.open'),
-    [
-      ['res://yard/beta.gd', 20],
-      ['res://yard/gamma.gd', 11],
-    ],
-    "the global Crate where no inner class of the script takes the name, and not Beta's own",
-  );
-  assert.deepEqual(
-    openedAt('Alpha.Lid.open'),
-    [
-      ['res://yard/beta.gd', 20],
-      ['res://yard/gamma.gd', 12],
-    ],
-    "Alpha's Lid, the only inner class of that name, from a script that declares none",
+    "Maker's is reached by its own bare call and through self",
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [

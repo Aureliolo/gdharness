@@ -17,15 +17,14 @@ import { emptyRecord } from './dictionary.js';
 import { type DebugObserver, RUNTIME_ADDON } from './game-debugger.js';
 import {
   bodyCallsSuper,
-  type CallDispatch,
   type CallSite,
   type ClassBody,
   callSitesOf,
   codeOf,
   type DeclarationKind,
-  EVERY_USE,
   enclosingFunction,
   Lines,
+  type SelfDispatch,
   shapeOf,
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
@@ -918,21 +917,16 @@ function withinNumbersOf(
 const CALL_SITES = 40;
 
 /**
- * Which uses of a name the engine can send to the asked class's own declaration of it, `reached`,
- * which is the class's own or the nearest one above it. A use counts:
- * - bare or through `self`, where its class or one below it that does not declare the name again
- *   resolves to it, or only its own class does for a static function written bare;
- * - through `super`, where the class above the one it is written in resolves to it;
- * - through a class name where that class resolves to it, and on a variable declared as a class
- *   where that class or one below it does.
- * A use whose chain passes through a script the project does not hold counts, since it may.
+ * Which uses of a name written bare, through `self` or through `super` the engine can send to the
+ * asked class's own declaration of it, `reached`, which is the class's own or the nearest one above
+ * it. A bare or `self` use counts where its class or one below it that does not declare the name
+ * again resolves to it, or only its own class does for a static function written bare. A `super`
+ * use counts where the class above the one it is written in resolves to it. A use whose chain
+ * passes through a script the project does not hold counts, since it may.
  */
-class Dispatch {
+class SelfUses {
   /** The classes whose objects, or those of a class below them, resolve the name to `reached`. */
   private readonly above = new Set<ClassId>();
-  /** The project's inner classes by their own name. */
-  private readonly inner = new Map<string, ClassId[]>();
-  private readonly byName = new Map<string, ClassId | null>();
   private readonly graph: ClassGraph;
   private readonly target: ClassId;
   private readonly reached: ClassId;
@@ -945,30 +939,20 @@ class Dispatch {
     this.reached = reached;
     this.name = name;
     this.kind = kind;
-    for (const node of graph.nodes.values()) {
-      if (graph.resolvedFrom(node.id, name, kind) === reached) {
-        for (const one of [node.id, ...graph.ancestors(node.id)]) {
+    for (const id of graph.nodes.keys()) {
+      if (graph.resolvedFrom(id, name, kind) === reached) {
+        for (const one of [id, ...graph.ancestors(id)]) {
           this.above.add(one);
         }
-      }
-      const own = node.inner.at(-1);
-      if (own !== undefined) {
-        this.inner.set(own, [...(this.inner.get(own) ?? []), node.id]);
       }
     }
   }
 
-  forScript(script: string): CallDispatch {
-    return {
-      onSelf: (offset, how) => this.onSelf(this.graph.bodyAt(script, offset), how),
-      throughClass: (named, onVariable) => {
-        const id = this.classNamed(script, named);
-        return id === null ? null : this.from(id, !onVariable);
-      },
-    };
+  forScript(script: string): SelfDispatch {
+    return (offset, how) => this.reaches(this.graph.bodyAt(script, offset), how);
   }
 
-  private onSelf(at: ClassId, how: 'bare' | 'self' | 'super'): boolean {
+  private reaches(at: ClassId, how: 'bare' | 'self' | 'super'): boolean {
     if (how === 'super') {
       const parent = this.graph.parentOf(at);
       return parent === null ? this.graph.nativeBase(at) === null : this.from(parent, true);
@@ -992,43 +976,23 @@ class Dispatch {
     // Above a script the project does not hold, the asked class may still sit below this one.
     return this.above.has(at) || this.graph.nativeBase(this.target) === null;
   }
-
-  /**
-   * The class [param named], as `Box` or `Alpha.Box`, names in [param script]. Its first name is the
-   * script's own inner class, else a global class, else the one inner class of that name elsewhere.
-   */
-  private classNamed(script: string, named: string): ClassId | null {
-    const key = `${script}\n${named}`;
-    const known = this.byName.get(key);
-    if (known !== undefined) {
-      return known;
-    }
-    const [first = '', ...rest] = named.split('.');
-    const inner = this.inner.get(first) ?? [];
-    const base =
-      inner.find((one) => this.graph.nodes.get(one)?.file === script) ??
-      this.graph.named(first) ??
-      (inner.length === 1 ? (inner[0] ?? null) : null);
-    const found = base === null ? null : this.graph.within(base, rest);
-    this.byName.set(key, found);
-    return found;
-  }
 }
 
 /**
- * How the uses in each script are dispatched for [param asked]'s [param name], and whether the name
- * is a property's: as the profile's rows say, or as the asked class declares it when they say
- * nothing. With no class asked about every use counts. Where the asked class or its declaration of
- * the name cannot be found, only a use through another class the project declares is left out.
+ * How the uses on self in each script are dispatched for [param asked]'s [param name], and whether
+ * the name is a property's: as the profile's rows say, or as the asked class declares it when they
+ * say nothing. Every such use counts when no class was asked about, or where the asked class or its
+ * declaration of the name cannot be found.
  */
-function dispatchOf(
+function selfUsesOf(
   listed: readonly (readonly [string, string])[],
   asked: string | null,
   name: string,
   rowsSayProperty: boolean,
-): { property: boolean; forScript: (script: string) => CallDispatch } {
+): { property: boolean; forScript: (script: string) => SelfDispatch } {
+  const every = (): SelfDispatch => () => true;
   if (asked === null) {
-    return { property: rowsSayProperty, forScript: () => EVERY_USE };
+    return { property: rowsSayProperty, forScript: every };
   }
   const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
   const graph = new ClassGraph(scripts, declaredIn(scripts));
@@ -1041,17 +1005,10 @@ function dispatchOf(
   const kind: DeclarationKind = property ? 'var' : 'func';
   const reached = target === null ? null : graph.resolvedFrom(target, name, kind);
   if (target === null || reached === null || reached === undefined) {
-    const others = new Set(
-      listed.flatMap(([, source]) => classNamesOf(source)).filter((one) => one !== asked),
-    );
-    const unknown: CallDispatch = {
-      onSelf: () => true,
-      throughClass: (named) => (others.has(named.slice(named.lastIndexOf('.') + 1)) ? false : null),
-    };
-    return { property, forScript: () => unknown };
+    return { property, forScript: every };
   }
-  const dispatch = new Dispatch(graph, target, reached, name, kind);
-  return { property, forScript: (script) => dispatch.forScript(script) };
+  const uses = new SelfUses(graph, target, reached, name, kind);
+  return { property, forScript: (script) => uses.forScript(script) };
 }
 
 /**
@@ -1062,8 +1019,9 @@ function dispatchOf(
  * Found by name in the source, because the engine's profiler counts calls and time per function and
  * records nothing about who made them. A place is a caller only if the name there is this function:
  * a method of the same name on another class is found as well, which the answer says. When one class
- * was asked about, a use is left out where the engine would send it to another class's function of
- * that name, as `Dispatch` decides.
+ * was asked about, a call through another class the project declares is left out, and so is a bare,
+ * `self` or `super` one the engine would send to another class's function of that name, as
+ * `SelfUses` decides.
  */
 export function callersOf(
   totals: ProfileTotals,
@@ -1095,14 +1053,22 @@ export function callersOf(
       (bareName(row.function) === bare || row.property === bare) &&
       (asked === null || ownerOf(row.function) === asked),
   );
-  const { property, forScript } = dispatchOf(
+  const { property, forScript } = selfUsesOf(
     listed,
     asked,
     bare,
     propertyOf(name) !== null || target.some((row) => row.property === bare),
   );
+  const otherClasses = new Set<string>();
+  if (asked !== null) {
+    for (const [, source] of listed) {
+      for (const declared of classNamesOf(source).filter((one) => one !== asked)) {
+        otherClasses.add(declared);
+      }
+    }
+  }
   const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, property, forScript(script)).map((site) => {
+    callSitesOf(source, bare, otherClasses, property, forScript(script)).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };

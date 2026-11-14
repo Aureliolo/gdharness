@@ -1008,7 +1008,7 @@ function declaredClass(text: string, name: string): string | null {
     new RegExp(`${word}\\s*:\\s*(${DOTTED})`, 'u').exec(text)?.[1] ??
     new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\(`, 'u').exec(text)?.[1] ??
     new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1];
-  return found ?? null;
+  return found === undefined ? null : found.slice(found.lastIndexOf('.') + 1);
 }
 
 /**
@@ -1083,50 +1083,22 @@ function scopeVerdict(
   return patterns.declares.test(text) ? 'binds' : 'passes';
 }
 
-/** The index of the last character before [param at] in [param code] that is not white space. */
-function backOverSpace(code: string, at: number): number {
-  let index = at;
-  while (index >= 0 && /\s/.test(code[index] ?? '')) {
-    index -= 1;
-  }
-  return index;
-}
-
 /**
- * The names joined by dots that end with the receiver starting at [param start], as `Alpha.Box`, or
- * null where something other than a name comes before a dot.
+ * The identifier written before the dot that ends just before [param offset] in [param code], and
+ * whether it is itself a member of something written before it.
  */
-function receiverPath(code: string, start: number, name: string): string | null {
-  let path = name;
-  let dot = backOverSpace(code, start - 1);
-  while (code[dot] === '.') {
-    const end = backOverSpace(code, dot - 1);
-    let from = end + 1;
-    while (from > 0 && isIdentifierPart(code[from - 1])) {
-      from -= 1;
-    }
-    if (from > end) {
-      return null;
-    }
-    path = `${code.slice(from, end + 1)}.${path}`;
-    dot = backOverSpace(code, from - 1);
+function receiverBefore(code: string, offset: number): { name: string; dotted: boolean } | null {
+  let at = offset - 1;
+  while (at >= 0 && /\s/.test(code[at] ?? '')) {
+    at -= 1;
   }
-  return path;
-}
-
-/**
- * The identifier written before the dot that ends just before [param offset] in [param code],
- * whether it is itself a member of something written before it, and the whole dotted path it ends.
- */
-function receiverBefore(
-  code: string,
-  offset: number,
-): { name: string; dotted: boolean; path: string | null } | null {
-  const dot = backOverSpace(code, offset - 1);
-  if (code[dot] !== '.') {
+  if (code[at] !== '.') {
     return null;
   }
-  const at = backOverSpace(code, dot - 1);
+  at -= 1;
+  while (at >= 0 && /\s/.test(code[at] ?? '')) {
+    at -= 1;
+  }
   let start = at + 1;
   while (start > 0 && isIdentifierPart(code[start - 1])) {
     start -= 1;
@@ -1134,9 +1106,11 @@ function receiverBefore(
   if (start > at) {
     return null;
   }
-  const name = code.slice(start, at + 1);
-  const dotted = code[backOverSpace(code, start - 1)] === '.';
-  return { name, dotted, path: receiverPath(code, start, name) };
+  let before = start - 1;
+  while (before >= 0 && /\s/.test(code[before] ?? '')) {
+    before -= 1;
+  }
+  return { name: code.slice(start, at + 1), dotted: code[before] === '.' };
 }
 
 /** What a class declares by a name that, written bare in it, means that member and no function. */
@@ -1156,7 +1130,9 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * A bare name that is something else at that place is not the function: a parameter or local of
  * that name, or a variable, constant, signal or enum the class itself declares by it. Read as the
  * function, `made.bare_lift = lift` in a helper taking `lift: int` was listed as `lift` handed on
- * as a Callable.
+ * as a Callable. A member call whose receiver is one of [param otherClasses], or a local or a
+ * variable of the class declared as one, is another class's method and is left out for a caller
+ * asking about one class: `made.lift(by)` with `var made: Outcome` above it is Outcome's.
  *
  * With [param property] the name is a variable's, whose get and set blocks run wherever it is read or
  * assigned, so the class's own variable of that name is what is being looked for rather than
@@ -1164,15 +1140,16 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * name is the value stored, which the engine reads and writes without running them again, so
  * `sinks = value` in the set block of `sinks` is not a place that sets it.
  *
- * A use runs whichever function of that name the engine dispatches it to, and [param dispatch]
- * says whether that can be the one asked about: a bare `_settle()` in a script of an unrelated
- * class calls that script's own, and `made.lift(by)` with `var made: Outcome` above it is Outcome's.
+ * A use written bare, through `self` or through `super` runs whichever function of that name the
+ * engine dispatches it to from the class holding it, and [param onSelf] says whether that can be
+ * the one asked about: a bare `_settle()` in a script of an unrelated class calls that script's own.
  */
 export function callSitesOf(
   source: string,
   name: string,
+  otherClasses: ReadonlySet<string> = new Set(),
   property = false,
-  dispatch: CallDispatch = EVERY_USE,
+  onSelf: SelfDispatch = () => true,
 ): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
@@ -1183,12 +1160,13 @@ export function callSitesOf(
     source,
     name,
     property,
+    otherClasses,
     code,
     codeLines,
     lines,
     shape,
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
-    dispatch,
+    onSelf,
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1196,45 +1174,32 @@ export function callSitesOf(
     .map((one) => callSiteAt(scan, one));
 }
 
-/** Whether the uses of a name can reach the function asked about, by how each is written. */
-export interface CallDispatch {
-  /** A use at [param offset] written bare, through `self` or through `super`. */
-  onSelf(offset: number, how: 'bare' | 'self' | 'super'): boolean;
-  /**
-   * A use through class [param name], or on a variable declared as it when [param onVariable].
-   * Null where [param name] is no class the project declares.
-   */
-  throughClass(name: string, onVariable: boolean): boolean | null;
-}
-
-/** Every use reaches the function, as when no class was asked about. */
-export const EVERY_USE: CallDispatch = { onSelf: () => true, throughClass: () => null };
+/** Whether a use at [param offset] written bare, through `self` or through `super` can reach the function asked about. */
+export type SelfDispatch = (offset: number, how: 'bare' | 'self' | 'super') => boolean;
 
 /** What one `callSitesOf` call reads from, worked out once. */
 interface CallScan {
   readonly source: string;
   readonly name: string;
   readonly property: boolean;
+  readonly otherClasses: ReadonlySet<string>;
   readonly code: string;
   readonly codeLines: readonly string[];
   readonly lines: Lines;
   readonly shape: ScriptShape;
   /** The zero-based line ranges of the property's own get and set blocks. */
   readonly accessors: readonly (readonly [number, number])[];
-  readonly dispatch: CallDispatch;
+  readonly onSelf: SelfDispatch;
 }
 
-/**
- * A variable of the class body holding [param at], with the class it is declared as, read off its
- * own line, or null when the body declares none by that name.
- */
-function memberAt(scan: CallScan, member: string, at: number): { type: string | null } | null {
+/** The class a variable of the class body holding [param at] is declared as, read off its own line. */
+function memberClass(scan: CallScan, member: string, at: number): string | null {
   const declared = bodyHolding(scan.shape.body, at).declarations.find(
     (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
   );
   return declared === undefined
     ? null
-    : { type: declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member) };
+    : declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member);
 }
 
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
@@ -1268,20 +1233,21 @@ function accessorsIn(
   ];
 }
 
-/** Whether a member call can reach the function asked about, by the class its receiver names. */
+/** Whether a member call is this class's: not another class's method of the same name. */
 function isOwnMemberCall(scan: CallScan, offset: number, index: number): boolean {
   const receiver = receiverBefore(scan.code, offset);
-  if (receiver === null) {
+  if (receiver === null || scan.otherClasses.size === 0) {
     return true;
   }
-  // A local or a variable of the class shadows a class of the same name.
-  const variable = receiver.dotted
-    ? null
-    : (localAt(scan.codeLines, index, receiver.name) ?? memberAt(scan, receiver.name, offset));
-  if (variable !== null) {
-    return variable.type === null || scan.dispatch.throughClass(variable.type, true) !== false;
+  if (scan.otherClasses.has(receiver.name)) {
+    return false;
   }
-  return receiver.path === null || scan.dispatch.throughClass(receiver.path, false) !== false;
+  if (receiver.dotted) {
+    return true;
+  }
+  const typed =
+    localAt(scan.codeLines, index, receiver.name)?.type ?? memberClass(scan, receiver.name, offset);
+  return typed === null || !scan.otherClasses.has(typed);
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
@@ -1303,11 +1269,11 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
     return false;
   }
   if (!one.afterDot) {
-    return isBareFunctionUse(scan, one.offset, index) && scan.dispatch.onSelf(one.offset, 'bare');
+    return isBareFunctionUse(scan, one.offset, index) && scan.onSelf(one.offset, 'bare');
   }
   const receiver = receiverBefore(scan.code, one.offset);
   if (receiver !== null && !receiver.dotted && (receiver.name === 'self' || receiver.name === 'super')) {
-    return scan.dispatch.onSelf(one.offset, receiver.name);
+    return scan.onSelf(one.offset, receiver.name);
   }
   return isOwnMemberCall(scan, one.offset, index);
 }
