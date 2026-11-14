@@ -9,7 +9,7 @@ const GdhSceneFile = preload("scene_file.gd")
 static var by_path: PackedStringArray = []
 
 
-## Saves [param resource] at [param file_path], keeping the uid the file already has.
+## Saves [param resource] at [param asked_path], keeping the uid the file already has.
 ##
 ## The editor saves through its uid cache, which knows every file's. A headless engine that has not
 ## imported the project has none, and a resave dropped the uid from the header, so every reference
@@ -17,6 +17,8 @@ static var by_path: PackedStringArray = []
 ## for a text scene there, and a new file is given one as the editor gives it.
 static func save_keeping_uid(resource: Resource, asked_path: String) -> Error:
 	var file_path: String = GdhSceneFile.written_at(asked_path)
+	if file_path.get_extension().to_lower() != asked_path.get_extension().to_lower():
+		return _saved_beside(resource, asked_path, file_path)
 	if Engine.is_editor_hint():
 		var saved: Error = ResourceSaver.save(resource, file_path)
 		return saved if saved != OK else _as_the_editor_writes(file_path)
@@ -30,6 +32,46 @@ static func save_keeping_uid(resource: Resource, asked_path: String) -> Error:
 	if marked != OK:
 		return marked
 	return _as_the_editor_writes(file_path)
+
+
+## Saves [param resource] for [param asked_path] into [param file_path], the file a link there leads
+## to, which is named with another extension.
+##
+## The saver is chosen by the extension, so the save is made under the asked one beside the file and
+## its bytes are written into the file in place, which keeps the link leading to it. The copy is
+## named by its absolute path, so the editor neither lists it nor takes it into its uid cache, and
+## it starts with a dot, which an editor's scan steps over. Its uid is the file's, or the one the
+## editor holds for the asked path.
+static func _saved_beside(resource: Resource, asked_path: String, file_path: String) -> Error:
+	var beside: String = ProjectSettings.globalize_path(file_path.get_base_dir()).path_join(
+		".%s.gdharness-save.%s" % [file_path.get_file(), asked_path.get_extension()]
+	)
+	var uid: int = uid_in(file_path)
+	if uid == ResourceUID.INVALID_ID:
+		uid = ResourceLoader.get_resource_uid(asked_path)
+	if uid == ResourceUID.INVALID_ID:
+		uid = ResourceUID.create_id()
+	var saving: Error = ResourceSaver.save(resource, beside)
+	if saving == OK:
+		saving = ResourceSaver.set_uid(beside, uid)
+	if saving == OK:
+		saving = _as_the_editor_writes(beside)
+	if saving == OK:
+		saving = _written_into(file_path, FileAccess.get_file_as_bytes(beside))
+	if FileAccess.file_exists(beside):
+		var _removed: Error = DirAccess.remove_absolute(beside)
+	return saving
+
+
+## Writes [param bytes] over the file at [param file_path].
+static func _written_into(file_path: String, bytes: PackedByteArray) -> Error:
+	var file: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
+	if file == null:
+		return FileAccess.get_open_error()
+	if not file.store_buffer(bytes):
+		return ERR_FILE_CANT_WRITE
+	file.close()
+	return OK
 
 
 ## Writes the text file at [param file_path] as the editor's save would have.

@@ -4551,6 +4551,34 @@ async function testAConnectionPutBackThroughAFileLinkKeepsTheLink({ call, projec
 }
 
 /**
+ * A scene saved through a file link to a file not named as a scene is saved in the asked format
+ * into that file. The file keeps its uid and nothing else is left beside it.
+ */
+async function testASaveThroughAFileLinkToAnotherNameIsMade({ call, project }: Editor): Promise<void> {
+  const at = fileLinksIn(
+    project,
+    'savelink',
+    {
+      'room.txt':
+        '[gd_scene format=3 uid="uid://droomhw2x"]\n\n[node name="Room" type="Node2D"]\n\n' +
+        '[node name="Top" type="Node2D" parent="."]\n',
+    },
+    { 'room.tscn': 'room.txt' },
+  );
+  const before = readdirSync(at).toSorted();
+  const renamed = await call('scene_node', {
+    projectPath: project,
+    op: 'set',
+    scenePath: 'res://savelink/room.tscn',
+    nodePath: 'Top',
+    properties: { name: 'Surface' },
+  });
+  linkKeptHolding(join(at, 'room.tscn'), join(at, 'room.txt'), /\[node name="Surface"/, renamed);
+  assert.match(readFileSync(join(at, 'room.txt'), 'utf8'), /^\[gd_scene format=3 uid="uid:\/\/droomhw2x"\]/);
+  assert.deepEqual(readdirSync(at).toSorted(), before);
+}
+
+/**
  * A create does not replace what is there, and makes what it was asked for or nothing.
  *
  * The faults this holds:
@@ -9390,6 +9418,7 @@ async function main(): Promise<void> {
       'testAConnectionPutBackThroughAFileLinkKeepsTheLink',
       testAConnectionPutBackThroughAFileLinkKeepsTheLink,
     ],
+    ['testASaveThroughAFileLinkToAnotherNameIsMade', testASaveThroughAFileLinkToAnotherNameIsMade],
     ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],
