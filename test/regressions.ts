@@ -3407,6 +3407,10 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'func tick() -> void:',
     '\tpass',
     '',
+    '',
+    'func again() -> int:',
+    '\treturn self.make()',
+    '',
   ].join('\n');
   const fancy = [
     'class_name Fancy',
@@ -3441,21 +3445,141 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     callersOf(totals({}), name, works).sites.map((one) => [one.script, one.line]);
   assert.deepEqual(
     madeAt('Fancy.make'),
-    [['res://works/user.gd', 6]],
-    "Fancy's static function is reached through its name, never by Maker's bare call or through Plain",
+    [
+      ['res://works/maker.gd', 18],
+      ['res://works/user.gd', 6],
+    ],
+    "Fancy's static function is reached through its name and through self on a Fancy, never by Maker's bare call or through Plain",
   );
   assert.deepEqual(
     madeAt('Maker.make'),
     [
       ['res://works/maker.gd', 10],
+      ['res://works/maker.gd', 18],
       ['res://works/user.gd', 5],
     ],
-    "Maker's is reached by its own bare call and through Plain, which inherits it",
+    "Maker's is reached by its own bare call, through self and through Plain, which inherits it",
   );
   assert.deepEqual(
     madeAt('Fancy.tick'),
     [['res://works/user.gd', 7]],
     'a call on a variable declared as Maker may run on a Fancy',
+  );
+  // A class name is read the way the engine reads it from the script it is written in: its own inner
+  // class first, then a global class, then the one inner class of that name elsewhere, and the rest
+  // of a dotted name inside that. A parameter named like a class is the parameter.
+  const opening = (inner: string): string => `class ${inner}:\n\tstatic func open() -> void:\n\t\tpass\n`;
+  const alpha = ['class_name Alpha', 'extends Node', '', '', opening('Box'), '', opening('Lid')].join('\n');
+  const beta = [
+    'class_name Beta',
+    'extends Node',
+    '',
+    '',
+    opening('Box'),
+    '',
+    opening('Crate'),
+    '',
+    'func use(held: Alpha.Box, Lid: Variant) -> void:',
+    '\tAlpha.Box.open()',
+    '\tBox.open()',
+    '\theld.open()',
+    '\tCrate.open()',
+    '\tLid.open()',
+    '',
+  ].join('\n');
+  const gamma = [
+    'extends Node',
+    '',
+    '',
+    opening('Box'),
+    '',
+    'func use() -> void:',
+    '\tBox.open()',
+    '\tCrate.open()',
+    '\tLid.open()',
+    '',
+  ].join('\n');
+  const yard = [
+    ['res://yard/alpha.gd', alpha],
+    ['res://yard/beta.gd', beta],
+    ['res://yard/gamma.gd', gamma],
+    ['res://yard/crate.gd', 'class_name Crate\nextends Node\n\n\nstatic func open() -> void:\n\tpass\n'],
+  ] as const;
+  const openedAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, yard).sites.map((one) => [one.script, one.line]);
+  assert.deepEqual(
+    openedAt('Beta.Box.open'),
+    [
+      ['res://yard/beta.gd', 17],
+      ['res://yard/beta.gd', 20],
+    ],
+    "Beta's own Box and the parameter named Lid, not Alpha.Box by name or by type, Beta's Crate, gamma's Box or Alpha's Lid",
+  );
+  assert.deepEqual(
+    openedAt('Alpha.Box.open'),
+    [
+      ['res://yard/beta.gd', 16],
+      ['res://yard/beta.gd', 18],
+      ['res://yard/beta.gd', 20],
+    ],
+    'Alpha.Box by its dotted name and by a variable declared as it',
+  );
+  assert.deepEqual(
+    openedAt('Crate.open'),
+    [
+      ['res://yard/beta.gd', 20],
+      ['res://yard/gamma.gd', 11],
+    ],
+    "the global Crate where no inner class of the script takes the name, and not Beta's own",
+  );
+  assert.deepEqual(
+    openedAt('Alpha.Lid.open'),
+    [
+      ['res://yard/beta.gd', 20],
+      ['res://yard/gamma.gd', 12],
+    ],
+    "Alpha's Lid, the only inner class of that name, from a script that declares none",
+  );
+  // A property the profile has no row for is asked about as the class declares it.
+  const hull = [
+    'class_name Hull',
+    'extends Node',
+    '',
+    'var speed: int = 0',
+    '',
+    '',
+    'func go() -> void:',
+    '\tspeed = 2',
+    '\tprint(speed)',
+    '',
+  ].join('\n');
+  const mast = [
+    'class_name Mast',
+    'extends Node',
+    '',
+    'var speed: int = 0',
+    '',
+    '',
+    'func go() -> void:',
+    '\tself.speed = 1',
+    '',
+  ].join('\n');
+  const sailed = callersOf(totals({}), 'Hull.speed', [
+    ['res://sea/hull.gd', hull],
+    ['res://sea/keel.gd', 'class_name Keel\nextends Hull\n\n\nfunc go() -> void:\n\tspeed = 3\n'],
+    ['res://sea/mast.gd', mast],
+  ]);
+  assert.deepEqual(
+    [sailed.property, sailed.sites.map((one) => [one.script, one.line, one.access])],
+    [
+      true,
+      [
+        ['res://sea/hull.gd', 8, 'write'],
+        ['res://sea/hull.gd', 9, 'read'],
+        ['res://sea/keel.gd', 6, 'write'],
+      ],
+    ],
+    "Hull's own reads and writes and its subclass's, as a property, and not Mast's speed",
   );
 
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the

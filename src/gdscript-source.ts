@@ -1008,7 +1008,7 @@ function declaredClass(text: string, name: string): string | null {
     new RegExp(`${word}\\s*:\\s*(${DOTTED})`, 'u').exec(text)?.[1] ??
     new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\(`, 'u').exec(text)?.[1] ??
     new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1];
-  return found === undefined ? null : found.slice(found.lastIndexOf('.') + 1);
+  return found ?? null;
 }
 
 /**
@@ -1083,22 +1083,50 @@ function scopeVerdict(
   return patterns.declares.test(text) ? 'binds' : 'passes';
 }
 
-/**
- * The identifier written before the dot that ends just before [param offset] in [param code], and
- * whether it is itself a member of something written before it.
- */
-function receiverBefore(code: string, offset: number): { name: string; dotted: boolean } | null {
-  let at = offset - 1;
-  while (at >= 0 && /\s/.test(code[at] ?? '')) {
-    at -= 1;
+/** The index of the last character before [param at] in [param code] that is not white space. */
+function backOverSpace(code: string, at: number): number {
+  let index = at;
+  while (index >= 0 && /\s/.test(code[index] ?? '')) {
+    index -= 1;
   }
-  if (code[at] !== '.') {
+  return index;
+}
+
+/**
+ * The names joined by dots that end with the receiver starting at [param start], as `Alpha.Box`, or
+ * null where something other than a name comes before a dot.
+ */
+function receiverPath(code: string, start: number, name: string): string | null {
+  let path = name;
+  let dot = backOverSpace(code, start - 1);
+  while (code[dot] === '.') {
+    const end = backOverSpace(code, dot - 1);
+    let from = end + 1;
+    while (from > 0 && isIdentifierPart(code[from - 1])) {
+      from -= 1;
+    }
+    if (from > end) {
+      return null;
+    }
+    path = `${code.slice(from, end + 1)}.${path}`;
+    dot = backOverSpace(code, from - 1);
+  }
+  return path;
+}
+
+/**
+ * The identifier written before the dot that ends just before [param offset] in [param code],
+ * whether it is itself a member of something written before it, and the whole dotted path it ends.
+ */
+function receiverBefore(
+  code: string,
+  offset: number,
+): { name: string; dotted: boolean; path: string | null } | null {
+  const dot = backOverSpace(code, offset - 1);
+  if (code[dot] !== '.') {
     return null;
   }
-  at -= 1;
-  while (at >= 0 && /\s/.test(code[at] ?? '')) {
-    at -= 1;
-  }
+  const at = backOverSpace(code, dot - 1);
   let start = at + 1;
   while (start > 0 && isIdentifierPart(code[start - 1])) {
     start -= 1;
@@ -1106,11 +1134,9 @@ function receiverBefore(code: string, offset: number): { name: string; dotted: b
   if (start > at) {
     return null;
   }
-  let before = start - 1;
-  while (before >= 0 && /\s/.test(code[before] ?? '')) {
-    before -= 1;
-  }
-  return { name: code.slice(start, at + 1), dotted: code[before] === '.' };
+  const name = code.slice(start, at + 1);
+  const dotted = code[backOverSpace(code, start - 1)] === '.';
+  return { name, dotted, path: receiverPath(code, start, name) };
 }
 
 /** What a class declares by a name that, written bare in it, means that member and no function. */
@@ -1198,14 +1224,17 @@ interface CallScan {
   readonly dispatch: CallDispatch;
 }
 
-/** The class a variable of the class body holding [param at] is declared as, read off its own line. */
-function memberClass(scan: CallScan, member: string, at: number): string | null {
+/**
+ * A variable of the class body holding [param at], with the class it is declared as, read off its
+ * own line, or null when the body declares none by that name.
+ */
+function memberAt(scan: CallScan, member: string, at: number): { type: string | null } | null {
   const declared = bodyHolding(scan.shape.body, at).declarations.find(
     (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
   );
   return declared === undefined
     ? null
-    : declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member);
+    : { type: declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member) };
 }
 
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
@@ -1245,16 +1274,14 @@ function isOwnMemberCall(scan: CallScan, offset: number, index: number): boolean
   if (receiver === null) {
     return true;
   }
-  const throughClass = scan.dispatch.throughClass(receiver.name, false);
-  if (throughClass !== null) {
-    return throughClass;
+  // A local or a variable of the class shadows a class of the same name.
+  const variable = receiver.dotted
+    ? null
+    : (localAt(scan.codeLines, index, receiver.name) ?? memberAt(scan, receiver.name, offset));
+  if (variable !== null) {
+    return variable.type === null || scan.dispatch.throughClass(variable.type, true) !== false;
   }
-  if (receiver.dotted) {
-    return true;
-  }
-  const typed =
-    localAt(scan.codeLines, index, receiver.name)?.type ?? memberClass(scan, receiver.name, offset);
-  return typed === null || scan.dispatch.throughClass(typed, true) !== false;
+  return receiver.path === null || scan.dispatch.throughClass(receiver.path, false) !== false;
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */

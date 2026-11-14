@@ -928,7 +928,10 @@ const CALL_SITES = 40;
  * A use whose chain passes through a script the project does not hold counts, since it may.
  */
 class Dispatch {
-  private readonly below = new Map<ClassId, readonly ClassId[]>();
+  /** The classes whose objects, or those of a class below them, resolve the name to `reached`. */
+  private readonly above = new Set<ClassId>();
+  /** The project's inner classes by their own name. */
+  private readonly inner = new Map<string, ClassId[]>();
   private readonly byName = new Map<string, ClassId | null>();
   private readonly graph: ClassGraph;
   private readonly target: ClassId;
@@ -942,6 +945,17 @@ class Dispatch {
     this.reached = reached;
     this.name = name;
     this.kind = kind;
+    for (const node of graph.nodes.values()) {
+      if (graph.resolvedFrom(node.id, name, kind) === reached) {
+        for (const one of [node.id, ...graph.ancestors(node.id)]) {
+          this.above.add(one);
+        }
+      }
+      const own = node.inner.at(-1);
+      if (own !== undefined) {
+        this.inner.set(own, [...(this.inner.get(own) ?? []), node.id]);
+      }
+    }
   }
 
   forScript(script: string): CallDispatch {
@@ -975,53 +989,56 @@ class Dispatch {
     if (bound) {
       return own === this.reached;
     }
-    let below = this.below.get(at);
-    if (below === undefined) {
-      below = [...this.graph.descendants(at)];
-      this.below.set(at, below);
-    }
-    if (below.some((one) => this.graph.resolvedFrom(one, this.name, this.kind) === this.reached)) {
-      return true;
-    }
     // Above a script the project does not hold, the asked class may still sit below this one.
-    return this.graph.nativeBase(this.target) === null;
+    return this.above.has(at) || this.graph.nativeBase(this.target) === null;
   }
 
-  /** The class [param named] names in [param script]: its own inner class, a global one, or the one inner class elsewhere. */
+  /**
+   * The class [param named], as `Box` or `Alpha.Box`, names in [param script]. Its first name is the
+   * script's own inner class, else a global class, else the one inner class of that name elsewhere.
+   */
   private classNamed(script: string, named: string): ClassId | null {
     const key = `${script}\n${named}`;
     const known = this.byName.get(key);
     if (known !== undefined) {
       return known;
     }
-    const inner = [...this.graph.nodes.values()].filter((one) => one.inner.at(-1) === named);
-    const found =
-      inner.find((one) => one.file === script)?.id ??
-      this.graph.named(named) ??
-      (inner.length === 1 ? (inner[0]?.id ?? null) : null);
+    const [first = '', ...rest] = named.split('.');
+    const inner = this.inner.get(first) ?? [];
+    const base =
+      inner.find((one) => this.graph.nodes.get(one)?.file === script) ??
+      this.graph.named(first) ??
+      (inner.length === 1 ? (inner[0] ?? null) : null);
+    const found = base === null ? null : this.graph.within(base, rest);
     this.byName.set(key, found);
     return found;
   }
 }
 
 /**
- * How the uses in each script are dispatched for [param asked]'s [param name]. With no class asked
- * about every use counts. Where the asked class or its declaration of the name cannot be found,
- * only a use through another class the project declares is left out.
+ * How the uses in each script are dispatched for [param asked]'s [param name], and whether the name
+ * is a property's: as the profile's rows say, or as the asked class declares it when they say
+ * nothing. With no class asked about every use counts. Where the asked class or its declaration of
+ * the name cannot be found, only a use through another class the project declares is left out.
  */
 function dispatchOf(
   listed: readonly (readonly [string, string])[],
   asked: string | null,
   name: string,
-  property: boolean,
-): (script: string) => CallDispatch {
+  rowsSayProperty: boolean,
+): { property: boolean; forScript: (script: string) => CallDispatch } {
   if (asked === null) {
-    return () => EVERY_USE;
+    return { property: rowsSayProperty, forScript: () => EVERY_USE };
   }
   const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
   const graph = new ClassGraph(scripts, declaredIn(scripts));
-  const kind: DeclarationKind = property ? 'var' : 'func';
   const target = graph.named(asked);
+  const declaredVar =
+    target !== null &&
+    typeof graph.resolvedFrom(target, name, 'var') === 'string' &&
+    typeof graph.resolvedFrom(target, name, 'func') !== 'string';
+  const property = rowsSayProperty || declaredVar;
+  const kind: DeclarationKind = property ? 'var' : 'func';
   const reached = target === null ? null : graph.resolvedFrom(target, name, kind);
   if (target === null || reached === null || reached === undefined) {
     const others = new Set(
@@ -1029,12 +1046,12 @@ function dispatchOf(
     );
     const unknown: CallDispatch = {
       onSelf: () => true,
-      throughClass: (named) => (others.has(named) ? false : null),
+      throughClass: (named) => (others.has(named.slice(named.lastIndexOf('.') + 1)) ? false : null),
     };
-    return () => unknown;
+    return { property, forScript: () => unknown };
   }
   const dispatch = new Dispatch(graph, target, reached, name, kind);
-  return (script) => dispatch.forScript(script);
+  return { property, forScript: (script) => dispatch.forScript(script) };
 }
 
 /**
@@ -1078,10 +1095,14 @@ export function callersOf(
       (bareName(row.function) === bare || row.property === bare) &&
       (asked === null || ownerOf(row.function) === asked),
   );
-  const property = propertyOf(name) !== null || target.some((row) => row.property === bare);
-  const dispatch = dispatchOf(listed, asked, bare, property);
+  const { property, forScript } = dispatchOf(
+    listed,
+    asked,
+    bare,
+    propertyOf(name) !== null || target.some((row) => row.property === bare),
+  );
   const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, property, dispatch(script)).map((site) => {
+    callSitesOf(source, bare, property, forScript(script)).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };

@@ -184,6 +184,13 @@ export class ClassGraph {
     return id !== null && this.nodes.has(id) ? id : null;
   }
 
+  /** The class [param path] names inside [param id], as `Inner.Deeper`, or null where none is declared. */
+  within(id: ClassId, path: readonly string[]): ClassId | null {
+    const node = this.nodes.get(id);
+    const found = node === undefined ? null : classId(node.file, [...node.inner, ...path]);
+    return found !== null && this.nodes.has(found) ? found : null;
+  }
+
   /**
    * The class whose own [param name] a use resolved from [param id] reaches: [param id] or the
    * nearest class above it declaring the name as [param kind]. Undefined where none does, and null
