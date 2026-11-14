@@ -1210,6 +1210,7 @@ export function callSitesOf(
   const codeLines = code.split('\n');
   const lines = new Lines(source);
   const shape = shapeOf(source);
+  let declared: ReadonlySet<string> | null = null;
   const scan: CallScan = {
     source,
     name,
@@ -1221,6 +1222,10 @@ export function callSitesOf(
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
     onSelf: dispatch.onSelf ?? (() => true),
     onReceiver: dispatch.onReceiver ?? (() => true),
+    mayBeLocal: (one) => {
+      declared ??= localNamesIn(code);
+      return declared.has(one);
+    },
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1247,6 +1252,27 @@ interface CallScan {
   readonly accessors: readonly (readonly [number, number])[];
   readonly onSelf: SelfDispatch;
   readonly onReceiver: ReceiverDispatch;
+  /** Whether [param name] is declared anywhere in the script as a local could be, read once. */
+  readonly mayBeLocal: (name: string) => boolean;
+}
+
+/**
+ * Every name [param code] declares with `var`, `const` or `for`, or takes as a parameter of a
+ * function or lambda: more than the locals of any one place, and never fewer.
+ */
+function localNamesIn(code: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of code.matchAll(
+    new RegExp(`(?<![\\p{L}\\p{N}_.])(?:var|const|for)\\s+(${NAME})`, 'gu'),
+  )) {
+    names.add(match[1] ?? '');
+  }
+  for (const match of code.matchAll(/(?<![\p{L}\p{N}_.])func(?![\p{L}\p{N}_])/gu)) {
+    for (const parameter of parametersOf(code, match.index)) {
+      names.add(parameter);
+    }
+  }
+  return names;
 }
 
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
@@ -1296,7 +1322,7 @@ function isMemberUseKept(scan: CallScan, offset: number, index: number): boolean
       ? scan.onSelf(offset, first)
       : scan.onReceiver(offset, { start: 'self', type: null, names: rest, made });
   }
-  const local = localAt(scan.codeLines, index, first);
+  const local = scan.mayBeLocal(first) ? localAt(scan.codeLines, index, first) : null;
   return scan.onReceiver(
     offset,
     local === null
