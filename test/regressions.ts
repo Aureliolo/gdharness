@@ -520,7 +520,6 @@ import {
   failedVerdict,
   finishedBeforeTheEnd,
   foldedScriptErrors,
-  keepCutAcross,
   leftRunningNote,
   longerWaitNote,
   misshapen,
@@ -537,6 +536,7 @@ import {
   profileOnStart,
   projectSourceOf,
   repeatingScriptError,
+  runEngines,
   runIsUp,
   runtimeVerdict,
   scanWaitAnswer,
@@ -545,11 +545,14 @@ import {
   settingsNamedBy,
   staleCopyNote,
   stopVerdict,
+  type TestEnginePlan,
   testPathsIn,
   timedOutVerdict,
   transcriptNote,
   uidsLeftNote,
   unmodelledAnswer,
+  windowedNeeds,
+  windowNoteFor,
   withoutUidUnder,
   withPreviousCut,
   withUidsMissing,
@@ -706,6 +709,7 @@ import {
   unmatchedSaid,
   withNotSuites,
 } from '../src/test-split.js';
+import type { OperationParams } from '../src/tool-args.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -61384,7 +61388,8 @@ function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
       'one row of a case leaves the case in the kind',
     );
 
-    // A case asked for by name in a script that is no suite reaches an engine, which reports it.
+    // A case asked for by name in a script that is no suite is handed to no engine, and answered as
+    // not run, since an engine refuses a script that is no suite.
     writeTree(project, {
       'tests/helper_cases.gd': 'extends Node\n\n\nfunc test_helper() -> void:\n\tpass\n',
     });
@@ -61395,13 +61400,11 @@ function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
       asked?.halves.map((half) => [half['path'], half['tests']]),
       [
         [['res://tests/menu_test.gd'], ['res://tests/menu_test.gd:test_menu']],
-        [
-          ['res://tests/helper_cases.gd', 'res://tests/stood_test.gd'],
-          ['res://tests/helper_cases.gd:test_helper', 'res://tests/stood_test.gd:test_stood'],
-        ],
+        [['res://tests/stood_test.gd'], ['res://tests/stood_test.gd:test_stood']],
       ],
-      'the script that is no suite is handed to an engine with its case',
+      'the script that is no suite is handed to no engine',
     );
+    assert.deepEqual(asked?.notRun, ['helper_cases:test_helper'], 'and its case is named as not run');
     // A folder run names the scripts left out, to fail the run as a single run does.
     assert.equal(folder({})?.notSuites.length, 1, 'a folder run names the one script that is no suite');
   } finally {
@@ -61449,20 +61452,214 @@ function testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut(): void {
 
   // One limit for the call: the second engine gets what the first left.
   assert.equal(timeLeft(600_000, 1000, 61_000), 540_000);
-  assert.equal(timeLeft(1000, 0, 5000), 1, 'and never none');
-
-  // A call cut off between the engines keeps every suite not yet run, headless ones included.
-  keepCutAcross(project, [{ path: ['res://tests/plain_test.gd'] }], Date.now() - 1000);
-  const cut = takeCutTestRun(project);
-  assert.deepEqual(cut?.paths, ['res://tests/plain_test.gd']);
-  keepCutTestRun(project, { cutAt: new Date().toISOString(), paths: ['res://tests/menu_test.gd'] });
-  keepCutAcross(project, [{ path: ['res://tests/plain_test.gd'] }], Date.now() - 1000);
-  assert.deepEqual(
-    takeCutTestRun(project)?.paths,
-    ['res://tests/menu_test.gd', 'res://tests/plain_test.gd'],
-    'a cut inside the first engine adds the engines after it to its own record',
-  );
+  assert.equal(timeLeft(1000, 0, 5000), 0, 'and never a made-up floor');
   rmSync(project, { recursive: true, force: true });
+}
+
+/**
+ * A run cut into engines, driven through runEngines with an engine that answers what it is told, so
+ * the wiring of every part of the merged answer is held without a window.
+ */
+async function testACutRunIsDrivenThroughItsEngines(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-driven-'));
+  const windowedPath = 'res://tests/menu_test.gd';
+  const headlessPaths = ['res://tests/plain_test.gd', 'res://tests/stood_test.gd'];
+  const plan = (extra: Partial<TestEnginePlan> = {}): TestEnginePlan => ({
+    halves: [{ path: [windowedPath] }, { path: headlessPaths }],
+    notSuites: [],
+    notRun: [],
+    root,
+    ...extra,
+  });
+  const reply = (...parts: Array<string | Record<string, unknown>>): ToolResponse => ({
+    content: parts.map((part) => ({
+      type: 'text',
+      text: typeof part === 'string' ? part : JSON.stringify(part),
+    })),
+  });
+  const driven = (
+    answers: ToolResponse[],
+    options: { aborted?: (call: number) => boolean; clock?: number[]; during?: (call: number) => void } = {},
+  ): { seen: OperationParams[]; run: () => Promise<ToolResponse> } => {
+    const seen: OperationParams[] = [];
+    let ticks = 0;
+    return {
+      seen,
+      run: async () =>
+        await runEngines(
+          plan(),
+          { timeoutMs: 20_000 },
+          {
+            run: async (given) => {
+              seen.push(given);
+              options.during?.(seen.length);
+              return answers[seen.length - 1] ?? reply({ passed: true });
+            },
+            aborted: () => options.aborted?.(seen.length) ?? false,
+            now: () => options.clock?.[Math.min(ticks++, (options.clock?.length ?? 1) - 1)] ?? 0,
+          },
+        ),
+    };
+  };
+  const jsonOfLast = (response: ToolResponse): Record<string, unknown> => {
+    const last = response.content.at(-1);
+    return JSON.parse(last?.type === 'text' ? last.text : '{}') as Record<string, unknown>;
+  };
+
+  // The explanations of an engine without a report, and the flags and command lines of both.
+  const ended = driven([
+    reply('The engine stopped in X.', {
+      passed: false,
+      verdict: 'timed out',
+      hung: false,
+      timedOut: true,
+      silentForMs: 30,
+      arguments: ['--w'],
+    }),
+    reply('The engine hung in Y.', {
+      passed: false,
+      verdict: 'timed out; hung',
+      hung: true,
+      timedOut: false,
+      silentForMs: 20,
+      arguments: ['--h'],
+    }),
+  ]);
+  const dead = await ended.run();
+  assert.deepEqual(
+    dead.content.slice(0, -1).map((part) => (part.type === 'text' ? part.text : '')),
+    ['The windowed engine: The engine stopped in X.', 'The headless engine: The engine hung in Y.'],
+    'each engine without a report keeps its explanation, named for the engine',
+  );
+  const deadJson = jsonOfLast(dead);
+  assert.deepEqual(
+    [deadJson['hung'], deadJson['timedOut'], deadJson['silentForMs'], deadJson['arguments']],
+    [true, true, 30, { windowed: ['--w'], headless: ['--h'] }],
+    'hung and timed out when either was, the longest silence, and the command lines apart',
+  );
+
+  // A folder's non-suite scripts and the cases asked for in one fail the run as a single run does.
+  const failed = await runEngines(
+    plan({ notSuites: ['helper_cases.gd declares cases'], notRun: ['helper_cases:test_helper'] }),
+    {},
+    {
+      run: async () => reply({ passed: true, verdict: 'passed', tests: 1 }),
+      aborted: () => false,
+      now: () => 0,
+    },
+  );
+  const failedJson = jsonOfLast(failed);
+  assert.deepEqual(
+    [
+      failedJson['passed'],
+      failedJson['verdict'],
+      failedJson['notSuites'],
+      failedJson['testsNotRun'],
+      failedJson['engines'],
+    ],
+    [
+      false,
+      `${notSuitesVerdict(1)}; not run: helper_cases:test_helper`,
+      ['helper_cases.gd declares cases'],
+      ['helper_cases:test_helper'],
+      2,
+    ],
+    'a script that is no suite and a case asked for in one are failures, with the verdict saying so',
+  );
+
+  // One limit for the call: the second engine gets what the first, its rebuild and its import left.
+  const timed = driven([reply({ passed: true, tests: 1 }), reply({ passed: true, tests: 1 })], {
+    clock: [1000, 1000, 13_000],
+  });
+  await timed.run();
+  assert.deepEqual(
+    timed.seen.map((call) => call['timeoutMs']),
+    [20_000, 8000],
+    'the second engine is handed what is left of the call, and the first the whole of it',
+  );
+
+  // With almost none left the headless engine is not started, and the answer says why in the caller's number.
+  const spent = driven([reply({ passed: false, verdict: 'timed out', tests: 0 })], { clock: [0, 0, 19_000] });
+  const spentAnswer = jsonOfLast(await spent.run());
+  assert.equal(spent.seen.length, 1, 'no second engine is started');
+  assert.deepEqual(spentAnswer['suitesNotRun'], headlessPaths, 'its suites are named as not run');
+  assert.match(
+    String(spentAnswer['verdict']),
+    /the timeoutMs of 20000 ms was spent before the headless engine started/,
+  );
+  assert.doesNotMatch(JSON.stringify(spentAnswer), /\b1 ms\b/, 'no sentence blames a limit of 1 ms');
+  assert.equal(spentAnswer['engines'], 1, 'one engine ran');
+
+  // A cut inside the headless engine keeps the windowed engine's results beside what is not yet run.
+  const cutInside = driven(
+    [
+      reply({
+        passed: false,
+        verdict: '1 failed',
+        failed: [{ path: windowedPath, name: 'test_menu', status: 'failed' }],
+        suites: [{ path: windowedPath, failures: 1, errors: 0 }],
+      }),
+      reply({ passed: false, verdict: 'cut' }),
+    ],
+    {
+      aborted: (call) => call === 2,
+      during: (call) => {
+        if (call === 2) {
+          keepCutTestRun(root, {
+            cutAt: new Date(Date.now() + 5).toISOString(),
+            paths: headlessPaths,
+            suitesFinished: [headlessPaths[0] ?? ''],
+            suiteRunning: headlessPaths[1] ?? '',
+          });
+        }
+      },
+      clock: [Date.now()],
+    },
+  );
+  await cutInside.run();
+  const record = takeCutTestRun(root);
+  assert.deepEqual(record?.paths, [windowedPath, ...headlessPaths], 'every suite of the call is named');
+  assert.deepEqual(
+    record?.suitesFinished,
+    [windowedPath, headlessPaths[0]],
+    'the windowed engine finished, and so did the headless suite before the cut',
+  );
+  assert.deepEqual(
+    record?.suitesFailing?.map((suite) => [suite.path, suite.failed]),
+    [[windowedPath, ['test_menu']]],
+    'and the windowed engine failures are kept',
+  );
+  assert.equal(record?.suiteRunning, headlessPaths[1], 'with the suite that was running');
+
+  // A cut after the windowed engine answered whole keeps the headless suites not yet run.
+  const between = driven([reply({ passed: true, tests: 1 })], { aborted: () => true, clock: [Date.now()] });
+  await between.run();
+  assert.equal(between.seen.length, 1, 'the headless engine never starts');
+  const betweenRecord = takeCutTestRun(root);
+  assert.deepEqual(betweenRecord?.paths, [windowedPath, ...headlessPaths]);
+  assert.deepEqual(betweenRecord?.suitesFinished, [windowedPath]);
+
+  // A suite whose cases are all left out of the window gets no window in its engine.
+  const needs = {
+    needing: ['res://tests/menu_test.gd'],
+    headless: [],
+    accessible: ['res://tests/menu_test.gd'],
+  };
+  assert.deepEqual(windowedNeeds(needs, new Set(), true), { needing: [], accessible: [] });
+  assert.deepEqual(windowedNeeds(needs, new Set(), false), {
+    needing: ['res://tests/menu_test.gd'],
+    accessible: ['res://tests/menu_test.gd'],
+  });
+  assert.deepEqual(windowedNeeds(needs, new Set(['menu_test']), false), { needing: [], accessible: [] });
+
+  // A headless suite whose every case was left out is said to have run no case, not to have shared a window.
+  const note = windowNoteFor(['res://tests/menu_test.gd'], ['res://tests/stood_test.gd'], []);
+  assert.match(
+    note,
+    /stood_test\.gd says it runs headless, and every case of it was left out, so it ran no case in the window\.$/,
+  );
+  assert.doesNotMatch(note, /also declares/, 'and the reason is not an accessibility declaration');
+  rmSync(root, { recursive: true, force: true });
 }
 
 function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
@@ -99711,6 +99908,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
   testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut,
+  testACutRunIsDrivenThroughItsEngines,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,

@@ -44,9 +44,48 @@ export function caseIgnored(path: string, test: string, ignore: readonly string[
   });
 }
 
-/** What is left of [param limit] milliseconds a call began at [param began] with, never below 1. */
+/** What is left of [param limit] milliseconds a call began at [param began] with, never below 0. */
 export function timeLeft(limit: number, began: number, now: number): number {
-  return Math.max(1, limit - (now - began));
+  return Math.max(0, limit - (now - began));
+}
+
+/** The least milliseconds an engine is worth starting for: it spends seconds before its first suite. */
+export const ENGINE_START_FLOOR_MS = 5000;
+
+/** The note sentence for cases asked for by name that no engine ran. */
+export function notRunSaid(notRun: readonly string[]): string {
+  return `${notRun.join(', ')} ${notRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`;
+}
+
+/**
+ * The answer standing for an engine of [param kind] that never started because the call's
+ * [param limit] was spent, naming its [param paths] as not run.
+ */
+export function notStartedAnswer(
+  kind: string,
+  paths: readonly string[],
+  limit: number,
+): Record<string, unknown> {
+  return {
+    passed: false,
+    verdict: `the timeoutMs of ${String(limit)} ms was spent before the ${kind} engine started`,
+    tests: 0,
+    suitesNotRun: paths,
+    note: `${paths.join(', ')} did not run: the ${kind} engine was not started, since the ${String(limit)} ms of timeoutMs was spent before it could.`,
+  };
+}
+
+/** [param answer] failed for cases asked for by name that no engine ran, as a single run words it. */
+export function withNotRun(answer: Record<string, unknown>, notRun: readonly string[]): void {
+  if (notRun.length === 0) {
+    return;
+  }
+  const said = `not run: ${notRun.join(', ')}`;
+  const verdict = typeof answer['verdict'] === 'string' ? answer['verdict'] : '';
+  answer['passed'] = false;
+  answer['verdict'] = verdict === '' || verdict === 'passed' ? said : `${verdict}; ${said}`;
+  answer['testsNotRun'] = [...notRun, ...listOf(answer['testsNotRun'])];
+  answer['note'] = [answer['note'], notRunSaid(notRun)].filter((part) => typeof part === 'string').join(' ');
 }
 
 /** [param value] as a list of unknowns, empty when it is no list. */
@@ -174,7 +213,7 @@ export function mergedTestAnswers(
     ...merged,
     ignoreUnmatched: unmatched.length > 0 ? unmatched : undefined,
     ...(commandLines.length > 0 ? { arguments: Object.fromEntries(commandLines) } : {}),
-    engines: answers.length,
+    engines: answers.filter((answer) => answer['suitesNotRun'] === undefined).length,
     note,
   };
 }

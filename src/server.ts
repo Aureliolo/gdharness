@@ -406,11 +406,15 @@ import {
 } from './test-selection.js';
 import {
   caseIgnored,
+  ENGINE_START_FLOOR_MS,
   mergedTestAnswers,
   NOT_SUITES_NOTE,
+  notRunSaid,
+  notStartedAnswer,
   notSuitesVerdict,
   timeLeft,
   unmatchedSaid,
+  withNotRun,
   withNotSuites,
 } from './test-split.js';
 import {
@@ -4121,6 +4125,8 @@ export interface TestEnginePlan {
   readonly halves: OperationParams[];
   /** The scripts declaring cases that are no suite, which a folder run names and fails for. */
   readonly notSuites: string[];
+  /** The cases asked for by name in a script that is no suite, as `script:test_case`. */
+  readonly notRun: string[];
   readonly root: string;
 }
 
@@ -4180,12 +4186,21 @@ export function enginesOfTestRun(
   }
   if (running.windowed.length === 0) {
     // Suites needing a window are all left out, so what is left runs headless.
-    return chosen.some((one) => one.windowed) ? { halves: [{ noWindow: true }], notSuites: [], root } : null;
+    return chosen.some((one) => one.windowed)
+      ? { halves: [{ noWindow: true }], notSuites: [], notRun: [], root }
+      : null;
   }
   if (running.headless.length === 0) {
     return null;
   }
-  const all = splitByWindow(chosen);
+  // A case asked for in a script that is no suite is handed to no engine, and answered as not run.
+  const all = splitByWindow(chosen.filter((one) => one.suite));
+  const notRun =
+    selection.value === null
+      ? []
+      : selection.value.selected
+          .filter((one) => chosen.some((script) => script.path === one.suite && !script.suite))
+          .map((one) => `${basename(one.suite, '.gd')}:${one.test}`);
   const half = (group: readonly { path: string }[], also: readonly string[]): OperationParams => ({
     path: [...group.map((suite) => suite.path), ...also],
     ...(selection.value === null
@@ -4199,25 +4214,148 @@ export function enginesOfTestRun(
   return {
     halves: [half(all.windowed, missing), half(all.headless, [])],
     notSuites: selection.value === null ? uncollectedSaid(uncollected) : [],
+    notRun,
     root,
   };
 }
 
+/** What an engine of a cut run finished, as the record of a cut call holds it. */
+export interface RanEngine {
+  readonly paths: readonly string[];
+  readonly finished: readonly string[];
+  readonly failing: NonNullable<CutTestRun['suitesFailing']>;
+}
+
+/** What the engine that answered [param json] for [param half] had finished. */
+function ranEngineOf(half: OperationParams, json: Record<string, unknown>): RanEngine {
+  const paths = readStringArray(half, 'path') ?? [];
+  const absent = new Set(readStringArray(json, 'missing') ?? []);
+  const failedCases = Array.isArray(json['failed']) ? json['failed'] : [];
+  const suites = Array.isArray(json['suites']) ? json['suites'] : [];
+  return {
+    paths,
+    finished: paths.filter((path) => path.endsWith('.gd') && !absent.has(path)),
+    failing: suites.flatMap((suite: unknown) => {
+      if (!isRecord(suite) || typeof suite['path'] !== 'string') {
+        return [];
+      }
+      const errors = typeof suite['errors'] === 'number' ? suite['errors'] : 0;
+      const failures = typeof suite['failures'] === 'number' ? suite['failures'] : 0;
+      return errors + failures === 0
+        ? []
+        : [
+            {
+              path: suite['path'],
+              errors,
+              failures,
+              failed: failedCases.flatMap((one: unknown) =>
+                isRecord(one) && one['path'] === suite['path'] && typeof one['name'] === 'string'
+                  ? [one['name']]
+                  : [],
+              ),
+            },
+          ];
+    }),
+  };
+}
+
 /**
- * Keeps, for the run cut off after one of its engines, every suite still to run: the engine that was
- * running keeps its own record, and the engines after it are added to it.
+ * Keeps the record of a call cut off after the engine in [param ran] last, the one that answered:
+ * every suite still to run, in [param rest], and what the engines before it finished. An engine cut
+ * inside keeps its own record, which this adds to. One that answered whole is among what finished.
  */
-export function keepCutAcross(root: string, rest: readonly OperationParams[], since: number): void {
+export function keepCutAcross(
+  root: string,
+  ran: readonly RanEngine[],
+  rest: readonly OperationParams[],
+  since: number,
+): void {
   const left = rest.flatMap((half) => readStringArray(half, 'path') ?? []);
-  if (left.length === 0) {
-    return;
-  }
   const kept = takeCutTestRun(root);
   const inner = kept !== null && Date.parse(kept.cutAt) >= since ? kept : null;
+  if (inner === null && left.length === 0) {
+    return;
+  }
+  const done = inner === null ? ran : ran.slice(0, -1);
   keepCutTestRun(root, {
-    ...(inner ?? { cutAt: new Date().toISOString() }),
-    paths: [...(inner?.paths ?? []), ...left],
+    cutAt: inner?.cutAt ?? new Date().toISOString(),
+    paths: [...done.flatMap((one) => one.paths), ...(inner?.paths ?? []), ...left],
+    suitesFinished: [...done.flatMap((one) => one.finished), ...(inner?.suitesFinished ?? [])],
+    suitesFailing: [...done.flatMap((one) => one.failing), ...(inner?.suitesFailing ?? [])],
+    ...(inner?.suiteRunning === undefined ? {} : { suiteRunning: inner.suiteRunning }),
   });
+}
+
+/** How a call cut into engines starts them, so that a run of it can be driven without any. */
+export interface EngineRunner {
+  run(args: OperationParams): Promise<ToolResponse>;
+  aborted(): boolean;
+  now(): number;
+}
+
+/**
+ * Runs the engines of [param plan] one after the other, under one limit for the whole call, and
+ * answers them as one run. An engine with too little of the limit left is not started, and the
+ * answer names its suites as not run.
+ */
+export async function runEngines(
+  plan: TestEnginePlan,
+  args: OperationParams,
+  runner: EngineRunner,
+): Promise<ToolResponse> {
+  const limit = readPositiveNumber(args, 'timeoutMs') ?? TEST_TIMEOUT_MS;
+  const began = runner.now();
+  const answers: ToolResponse[] = [];
+  const parsed: Record<string, unknown>[] = [];
+  const explained: { type: 'text'; text: string }[] = [];
+  const ran: RanEngine[] = [];
+  for (const [at, half] of plan.halves.entries()) {
+    const left = timeLeft(limit, began, runner.now());
+    if (at > 0 && left < ENGINE_START_FLOOR_MS) {
+      parsed.push(notStartedAnswer(ENGINE_KINDS[at] ?? 'next', readStringArray(half, 'path') ?? [], limit));
+      continue;
+    }
+    const answer = await runner.run({ ...args, ...half, timeoutMs: at === 0 ? limit : left });
+    const json = answeredAsARun(answer);
+    // A refusal or an answer of another shape is the whole answer, since there is nothing to add to.
+    if (json === null) {
+      return answer;
+    }
+    answers.push(answer);
+    parsed.push(json);
+    ran.push(ranEngineOf(half, json));
+    // What an engine without a report said of itself, which the merged answer would otherwise lose.
+    explained.push(...explanationsOf(answer, ENGINE_KINDS[at] ?? 'next'));
+    if (runner.aborted()) {
+      keepCutAcross(plan.root, ran, plan.halves.slice(at + 1), began);
+      return answer;
+    }
+  }
+  const merged = mergedTestAnswers(parsed, ENGINE_KINDS);
+  withNotSuites(merged, plan.notSuites);
+  withNotRun(merged, plan.notRun);
+  return {
+    content: [...explained, { type: 'text', text: answerJson(merged) }],
+    ...(answers.some((answer) => answer.isError === true) ? { isError: true } : {}),
+  };
+}
+
+/**
+ * The suites of a run that need a window and the accessibility tree among them, less those left out
+ * whole by [param leftOut]. A run cut into engines marks its headless engine [param noWindow], when
+ * every case of the suites needing one is left out, and that engine gets no window.
+ */
+export function windowedNeeds(
+  needs: ReturnType<typeof windowNeedsOf>,
+  leftOut: ReadonlySet<string>,
+  noWindow: boolean,
+): { needing: string[]; accessible: string[] } {
+  if (noWindow) {
+    return { needing: [], accessible: [] };
+  }
+  const kept = (paths: readonly string[]): string[] =>
+    paths.filter((path) => !leftOut.has(basename(path, '.gd')));
+  return { needing: kept(needs.needing), accessible: kept(needs.accessible) };
 }
 
 /**
@@ -4225,7 +4363,7 @@ export function keepCutAcross(root: string, rest: readonly OperationParams[], si
  * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
  * the run had none, that the machine has no display.
  */
-function windowNoteFor(
+export function windowNoteFor(
   needing: readonly string[],
   sharing: readonly string[] | null,
   accessible: readonly string[],
@@ -4242,7 +4380,7 @@ function windowNoteFor(
   const shared =
     sharing.length === 0
       ? ''
-      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since ${sharing.length === 1 ? 'it also declares' : 'each also declares'} GDHARNESS_ACCESSIBILITY, which needs one.`;
+      : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless, and ${sharing.length === 1 ? 'every case of it was' : 'every case of each was'} left out, so ${sharing.length === 1 ? 'it' : 'none'} ran no case in the window.`;
   return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''}${tree} ${why}${shared}`;
 }
 
@@ -9312,35 +9450,11 @@ class GodotServer {
     if (later.length === 0) {
       return await this.runTests({ ...args, ...only });
     }
-    // One limit for the whole call: the second engine gets what the first left of it.
-    const limit = readPositiveNumber(args, 'timeoutMs') ?? TEST_TIMEOUT_MS;
-    const began = Date.now();
-    const answers: ToolResponse[] = [];
-    const parsed: Record<string, unknown>[] = [];
-    const explained: { type: 'text'; text: string }[] = [];
-    for (const [at, half] of plan.halves.entries()) {
-      const left = timeLeft(limit, began, Date.now());
-      const answer = await this.runTests({ ...args, ...half, timeoutMs: left });
-      const json = answeredAsARun(answer);
-      // A refusal or an answer of another shape is the whole answer, since there is nothing to add to.
-      if (json === null) {
-        return answer;
-      }
-      answers.push(answer);
-      parsed.push(json);
-      // What an engine without a report said of itself, which the merged answer would otherwise lose.
-      explained.push(...explanationsOf(answer, ENGINE_KINDS[at] ?? 'next'));
-      if (callSignal()?.aborted === true) {
-        keepCutAcross(plan.root, plan.halves.slice(at + 1), began);
-        return answer;
-      }
-    }
-    const merged = mergedTestAnswers(parsed, ENGINE_KINDS);
-    withNotSuites(merged, plan.notSuites);
-    return {
-      content: [...explained, { type: 'text', text: answerJson(merged) }],
-      ...(answers.some((answer) => answer.isError === true) ? { isError: true } : {}),
-    };
+    return await runEngines(plan, args, {
+      run: async (given) => await this.runTests(given),
+      aborted: () => callSignal()?.aborted === true,
+      now: () => Date.now(),
+    });
   }
 
   /**
@@ -9516,9 +9630,7 @@ class GodotServer {
     const needs = windowNeedsOf(scripts, selection.value?.suites ?? asked);
     // Set by a run cut into engines for the one that is headless although suites needing a window
     // are among its paths, every case of them being left out.
-    const noWindow = readBoolean(args, 'noWindow') === true;
-    const needing = noWindow ? [] : needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
-    const accessible = noWindow ? [] : needs.accessible.filter((path) => !leftOut.has(basename(path, '.gd')));
+    const { needing, accessible } = windowedNeeds(needs, leftOut, readBoolean(args, 'noWindow') === true);
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
     const engine = await this.engine(project.value.path);
@@ -10624,9 +10736,7 @@ class GodotServer {
     const { casesNotRun, missingNote, rowsMismatched, testsNotRun } = s;
     return [
       missingNote,
-      testsNotRun.length > 0
-        ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
-        : undefined,
+      testsNotRun.length > 0 ? notRunSaid(testsNotRun) : undefined,
       casesNotRun.length > 0
         ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
         : undefined,
