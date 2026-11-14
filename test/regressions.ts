@@ -46759,6 +46759,46 @@ function testAnInnerClassIsCountedUnderItsNativeClass(): void {
 }
 
 /**
+ * A stand-in game dialled into a new keeper, returned once the keeper has taken the connection. The
+ * game's own `connect` comes as the handshake ends, which can be before the keeper's accept has run.
+ * [param beforeDialling] asks the keeper whatever it is asked with no game yet. `taken` settles once
+ * the keeper has taken the next message of that name, as an observer is told only after it has.
+ */
+async function aStandInGame(
+  beforeDialling: (peer: GameDebugger) => Promise<void> = () => Promise.resolve(),
+): Promise<{ peer: GameDebugger; game: Socket; taken: (message: string) => Promise<void> }> {
+  let accept = (): void => undefined;
+  const accepted = new Promise<void>((settle) => {
+    accept = settle;
+  });
+  const waiting = new Map<string, () => void>();
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => {
+          accept();
+        },
+        message: (received) => {
+          if ('message' in received) {
+            waiting.get(received.message)?.();
+            waiting.delete(received.message);
+          }
+        },
+      },
+    ],
+  );
+  await beforeDialling(peer);
+  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  await accepted;
+  const taken = (message: string): Promise<void> =>
+    new Promise((settle) => {
+      waiting.set(message, settle);
+    });
+  return { peer, game, taken };
+}
+
+/**
  * Two snapshots asked for together each get their own, and a snapshot that takes several slices
  * comes back whole.
  *
@@ -46769,8 +46809,7 @@ async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<voi
   const big = standInSnapshot(5000, 'res://item.gd', 'ref_count');
   const small = standInSnapshot(3, 'res://mob.gd', 'node_name');
   assert.ok(big.length > 2 * SNAPSHOT_SLICE_BYTES, `the big one takes several slices: ${big.length}`);
-  const peer = await GameDebugger.open([]);
-  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  const { peer, game } = await aStandInGame();
   try {
     const stream = new DebuggerStream();
     const asked: number[] = [];
@@ -46797,7 +46836,6 @@ async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<voi
         }
       }
     });
-    await new Promise<void>((settle) => game.once('connect', settle));
     const [first, second] = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'snapshot' })]);
     assert.deepEqual(
       [first, second],
@@ -46829,12 +46867,12 @@ async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<voi
  * which a game that had begun to send plainly has the snapshot in.
  */
 async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
-  const peer = await GameDebugger.open([]);
-  try {
-    const unconnected = await peer.ask({ op: 'snapshot' });
+  const { peer, game } = await aStandInGame(async (keeper) => {
+    const unconnected = await keeper.ask({ op: 'snapshot' });
     assert.match(String(unconnected['refused']), /^The game never connected to its debugger/);
     assert.equal(unconnected['next'], SPAWNING_START);
-    const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  });
+  try {
     const stream = new DebuggerStream();
     game.on('data', (chunk: Buffer) => {
       for (const received of stream.push(chunk)) {
@@ -46843,7 +46881,6 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
         }
       }
     });
-    await new Promise<void>((settle) => game.once('connect', settle));
     const exited = await peer.ask({ op: 'snapshot' });
     assert.deepEqual(exited, {
       refused: 'The game stopped sending its snapshot after 0 of 1000 bytes, as it exited.',
@@ -46866,8 +46903,7 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
 async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void> {
   type Game = 'inspects' | 'frames' | 'busy';
   const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
-    const peer = await GameDebugger.open([]);
-    const game = createConnection({ host: '127.0.0.1', port: peer.port });
+    const { peer, game } = await aStandInGame();
     const frame = (): boolean => game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
     const reply = (message: string): void => {
       if (kind === 'inspects' && message === 'scene:inspect_object') {
@@ -46888,7 +46924,6 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
     });
     const ticking = setInterval(() => kind === 'frames' && frame(), 200);
     try {
-      await new Promise<void>((settle) => game.once('connect', settle));
       const began = Date.now();
       const answer = await peer.ask({ op: 'snapshot' });
       return { answer, ms: Date.now() - began };
@@ -46931,8 +46966,7 @@ const HELD_WORKER = 5;
 async function aGameWithAHeldWorker(
   reply: (message: string, data: number[], thread: number) => void,
 ): Promise<{ peer: GameDebugger; game: Socket; got: Map<string, number> }> {
-  const peer = await GameDebugger.open([]);
-  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  const { peer, game, taken } = await aStandInGame();
   const got = new Map<string, number>();
   const stream = new DebuggerStream();
   game.on('data', (chunk: Buffer) => {
@@ -46943,9 +46977,9 @@ async function aGameWithAHeldWorker(
       }
     }
   });
-  await new Promise<void>((settle) => game.once('connect', settle));
+  const entered = taken('debug_enter');
   game.write(framedCommand('debug_enter', [true, 'Breakpoint', true, HELD_WORKER], HELD_WORKER));
-  await delay(200);
+  await entered;
   return { peer, game, got };
 }
 
@@ -46985,13 +47019,13 @@ async function testASnapshotAskedOnceAsAHeldWorkerLeaves(): Promise<void> {
       memoryBytes: 1234,
     };
     assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the snapshot is taken');
-    await delay(300);
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the next snapshot is taken too');
+    // Whatever the first sent reached the game before the second's answers came back.
     assert.deepEqual(
       [got.get('snapshot:request_prepare_snapshot'), got.get('scene:inspect_object')],
-      [1, 1],
-      'the snapshot and its inspection are each asked once',
+      [2, 2],
+      'each snapshot and its inspection are asked once',
     );
-    assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the next snapshot is taken too');
   } finally {
     game.destroy();
     peer.close();
@@ -47174,7 +47208,16 @@ async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void
     '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
       '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
   );
-  const seen = { worker: -1, letGo: false, left: false };
+  const seen = { worker: -1, letGo: false };
+  let leftNow = (): void => undefined;
+  const left = new Promise<boolean>((settle) => {
+    leftNow = () => {
+      settle(true);
+    };
+    setTimeout(() => {
+      settle(false);
+    }, 60_000).unref();
+  });
   let heldNow = (): void => undefined;
   const held = new Promise<boolean>((settle) => {
     heldNow = () => {
@@ -47202,7 +47245,9 @@ async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void
             seen.letGo = true;
             send('continue', [], seen.worker);
           }
-          seen.left ||= received.message === 'debug_exit' && received.thread === seen.worker;
+          if (received.message === 'debug_exit' && received.thread === seen.worker) {
+            leftNow();
+          }
         },
       },
     ],
@@ -47213,10 +47258,8 @@ async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void
   try {
     assert.ok(await held, 'the worker stops on its breakpoint');
     const answer = await peer.ask({ op: 'snapshot' });
-    for (let waited = 0; !seen.left && waited < 5000; waited += 100) {
-      await delay(100);
-    }
-    assert.ok(seen.letGo && seen.left, `the worker left its break mid-fetch: ${JSON.stringify(seen)}`);
+    assert.ok(seen.letGo, 'the worker was let go mid-fetch');
+    assert.ok(await left, 'the worker left its break');
     assert.ok(
       isSnapshotCounts(answer) &&
         answer.classes.some((one) => one.engineClass === 'Resource' && one.count >= 20000),
