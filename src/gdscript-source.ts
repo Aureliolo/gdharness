@@ -1131,12 +1131,17 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * something to pass over, and each place says which of the two it does. Inside those blocks the
  * name is the value stored, which the engine reads and writes without running them again, so
  * `sinks = value` in the set block of `sinks` is not a place that sets it.
+ *
+ * A bare use, or one through `self` or `super`, is the function of the class holding it. It is kept
+ * only where [param inAskedChain] says that class is the one asked about or inherits from it: a
+ * bare `_settle()` in a script of an unrelated class calls that script's own `_settle`.
  */
 export function callSitesOf(
   source: string,
   name: string,
   otherClasses: ReadonlySet<string> = new Set(),
   property = false,
+  inAskedChain: (offset: number) => boolean = () => true,
 ): CallSite[] {
   const regions = regionsOf(source);
   const code = codeOf(source, regions);
@@ -1153,6 +1158,7 @@ export function callSitesOf(
     lines,
     shape,
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
+    inAskedChain,
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1172,6 +1178,8 @@ interface CallScan {
   readonly shape: ScriptShape;
   /** The zero-based line ranges of the property's own get and set blocks. */
   readonly accessors: readonly (readonly [number, number])[];
+  /** Whether the class holding an offset is the one asked about or inherits from it. */
+  readonly inAskedChain: (offset: number) => boolean;
 }
 
 /** The class a variable of the class body holding [param at] is declared as, read off its own line. */
@@ -1250,7 +1258,14 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
   if (!one.afterDot && scan.accessors.some(([declared, last]) => index > declared && index <= last)) {
     return false;
   }
-  return one.afterDot ? isOwnMemberCall(scan, one.offset, index) : isBareFunctionUse(scan, one.offset, index);
+  if (!one.afterDot) {
+    return isBareFunctionUse(scan, one.offset, index) && scan.inAskedChain(one.offset);
+  }
+  const receiver = receiverBefore(scan.code, one.offset);
+  if (receiver !== null && !receiver.dotted && (receiver.name === 'self' || receiver.name === 'super')) {
+    return scan.inAskedChain(one.offset);
+  }
+  return isOwnMemberCall(scan, one.offset, index);
 }
 
 function callSiteAt(scan: CallScan, one: Occurrence): CallSite {

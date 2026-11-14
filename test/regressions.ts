@@ -3148,13 +3148,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.deepEqual(
     placedAt('Placed.lift'),
     [
-      ['res://core/lifts.gd', 13, false],
-      ['res://core/lifts.gd', 20, true],
       ['res://core/stowed.gd', 7, true],
       ['res://core/stowed.gd', 8, true],
       ['res://core/stowed.gd', 9, true],
     ],
-    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Shelved',
+    'the calls in a class extending Placed, and none of the locals, the call through Shelved or the bare uses in Lifts, which extends RefCounted',
   );
   assert.deepEqual(
     placedAt('lift'),
@@ -3217,6 +3215,99 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [10, 12, 14, 15, 16, 17, 18, 20, 22],
     'and asked by bare name, every one is listed',
   );
+  // A bare use of the name belongs to the class it is written in. With one class asked about, it
+  // counts where that class is the one asked about or inherits from it, by name, by path or as an
+  // inner class, and also where the chain passes through a script the project does not hold.
+  const harbour = [
+    'class_name Harbour',
+    'extends Node',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+    '',
+    'func dock() -> void:',
+    '\t_moor(1)',
+    '',
+  ].join('\n');
+  const quay = [
+    'class_name Quay',
+    'extends Harbour',
+    '',
+    '',
+    'func tie() -> void:',
+    '\t_moor(2)',
+    '\tself._moor(3)',
+    '\tsuper._moor(4)',
+    '',
+  ].join('\n');
+  const pier = ['extends "res://port/harbour.gd"', '', '', 'func tie() -> void:', '\t_moor(5)', ''].join(
+    '\n',
+  );
+  const inn = [
+    'class_name Inn',
+    'extends Node',
+    '',
+    '',
+    'func _moor(x: int) -> void:',
+    '\tprint(x)',
+    '',
+    '',
+    'func rest() -> void:',
+    '\t_moor(6)',
+    '\tself._moor(7)',
+    '\tvar later := _moor',
+    '\tlater.call(8)',
+    '',
+    '',
+    'class Cellar extends Harbour:',
+    '\tfunc fill() -> void:',
+    '\t\t_moor(9)',
+    '',
+    '',
+    'class Loft:',
+    '\tfunc _moor(x: int) -> void:',
+    '\t\tprint(x)',
+    '',
+    '\tfunc sweep() -> void:',
+    '\t\t_moor(10)',
+    '',
+  ].join('\n');
+  const drift = ['extends "res://gone/wreck.gd"', '', '', 'func go() -> void:', '\t_moor(11)', ''].join('\n');
+  const port = [
+    ['res://port/harbour.gd', harbour],
+    ['res://port/quay.gd', quay],
+    ['res://port/pier.gd', pier],
+    ['res://port/inn.gd', inn],
+    ['res://port/drift.gd', drift],
+  ] as const;
+  const mooredAt = (name: string): unknown[] =>
+    callersOf(totals({}), name, port).sites.map((one) => [one.script, one.line, one.called]);
+  assert.deepEqual(
+    mooredAt('Harbour._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/harbour.gd', 10, true],
+      ['res://port/inn.gd', 18, true],
+      ['res://port/pier.gd', 5, true],
+      ['res://port/quay.gd', 6, true],
+      ['res://port/quay.gd', 7, true],
+      ['res://port/quay.gd', 8, true],
+    ],
+    'Harbour, its subclasses by name, by path and inside Inn, and the chain through a missing script, but not Inn or Loft',
+  );
+  assert.deepEqual(
+    mooredAt('Inn._moor'),
+    [
+      ['res://port/drift.gd', 5, true],
+      ['res://port/inn.gd', 10, true],
+      ['res://port/inn.gd', 11, true],
+      ['res://port/inn.gd', 12, false],
+    ],
+    'asked about Inn, its own bare call, self call and Callable are listed, and no Harbour line',
+  );
+  assert.equal(mooredAt('_moor').length, 11, 'and with no class asked about, every use is listed');
 
   // The profiler's own cost per call, read off the empty function the runtime addon calls as the
   // profiler goes on: it and its caller are the addon's, not the game's, so they are left out of the

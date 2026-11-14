@@ -176,6 +176,26 @@ export class ClassGraph {
     return found;
   }
 
+  /** The class a global name such as `Outer.Inner` names, or null where no script declares it. */
+  named(name: string): ClassId | null {
+    const [first = '', ...rest] = name.split('.');
+    const file = this.declared.get(first);
+    const id = file === undefined ? null : classId(file, rest);
+    return id !== null && this.nodes.has(id) ? id : null;
+  }
+
+  /**
+   * Whether [param id] is [param target] or inherits from it. Null where its chain passes through a
+   * path no script here is at, so the answer cannot be known.
+   */
+  isOrInherits(id: ClassId, target: ClassId): boolean | null {
+    const chain = [id, ...this.ancestors(id)];
+    if (chain.includes(target)) {
+      return true;
+    }
+    return this.nativeBase(id) === null ? null : false;
+  }
+
   /** The native class at the bottom of [param id]'s chain, or null where the chain is broken. */
   nativeBase(id: ClassId): string | null {
     const chain = [id, ...this.ancestors(id)];

@@ -27,6 +27,7 @@ import {
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
 import { isRecord } from './records.js';
+import { ClassGraph, declaredIn, Script } from './rename.js';
 import { parseProjectGodot } from './resources.js';
 import { RUNTIME_AUTOLOAD } from './setup.js';
 import { writeWhole } from './whole-file.js';
@@ -914,14 +915,36 @@ function withinNumbersOf(
 const CALL_SITES = 40;
 
 /**
+ * Whether the class holding an offset of a script is [param asked] or inherits from it, for a bare
+ * use of a name there. Every place counts when no class was asked about, when no script declares
+ * it, or where a chain passes through a script the project does not hold.
+ */
+function askedChain(
+  listed: readonly (readonly [string, string])[],
+  asked: string | null,
+): (script: string, offset: number) => boolean {
+  if (asked === null) {
+    return () => true;
+  }
+  const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
+  const graph = new ClassGraph(scripts, declaredIn(scripts));
+  const target = graph.named(asked);
+  if (target === null) {
+    return () => true;
+  }
+  return (script, offset) => graph.isOrInherits(graph.bodyAt(script, offset), target) !== false;
+}
+
+/**
  * Where the project's scripts name [param name], each with the profile's numbers for the function
  * it is written in, those that took the most time first. [param name] is a function's own name, or
  * `Class.name` to pick out the rows of one class.
  *
  * Found by name in the source, because the engine's profiler counts calls and time per function and
  * records nothing about who made them. A place is a caller only if the name there is this function:
- * a method of the same name on another class is found as well, which the answer says, except one
- * called through another class the project declares by name when one class was asked about.
+ * a method of the same name on another class is found as well, which the answer says. When one class
+ * was asked about, a call through another class the project declares is left out, and so is a bare
+ * one in a class that neither is that class nor inherits from it.
  */
 export function callersOf(
   totals: ProfileTotals,
@@ -962,8 +985,9 @@ export function callersOf(
       }
     }
   }
+  const inChain = askedChain(listed, asked);
   const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, otherClasses, property).map((site) => {
+    callSitesOf(source, bare, otherClasses, property, (offset) => inChain(script, offset)).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };
