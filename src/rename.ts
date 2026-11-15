@@ -1154,23 +1154,6 @@ function literalsOf(file: ProjectText, script: Script | undefined): { offset: nu
   return found;
 }
 
-/** Every file the string literals of [param texts] name, as a res:// path, each once. */
-export function literalTargets(
-  texts: readonly ProjectText[],
-  scripts: ReadonlyMap<string, Script>,
-): Set<string> {
-  const targets = new Set<string>();
-  for (const file of texts) {
-    for (const literal of literalsOf(file, scripts.get(file.path))) {
-      const written = literal.value.startsWith('*') ? literal.value.slice(1) : literal.value;
-      if (written !== '' && !written.startsWith('uid://') && !written.includes('\n')) {
-        targets.add(resolvedPath(written, file.path));
-      }
-    }
-  }
-  return targets;
-}
-
 /**
  * The edits moving files: every string naming one by path, as a res:// path or relative to the
  * file it is in, written to name the new place in the same style, and in each moved file, every
