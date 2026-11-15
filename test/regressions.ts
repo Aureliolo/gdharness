@@ -88962,8 +88962,10 @@ function testAMoveRewritesOnlyReferences(): void {
     assert.equal(read('scenes/theme.tres'), kept['theme.tres'], 'a resource name stays');
     assert.equal(
       read('scenes/say.gd'),
-      kept['say.gd'],
-      'a print argument, a key, a comment and a call that is no load stay',
+      (kept['say.gd'] ?? '')
+        .replaceAll('("desk.tscn")', '("../stage/desk.tscn")')
+        .replace('{"desk.tscn"', '{"../stage/desk.tscn"'),
+      'a code string that names the file beside the script is followed, a comment is not',
     );
     assert.equal(read('scenes/notes.md'), kept['notes.md'], 'a note keeps the relative name');
     assert.equal(read('scenes/notes.txt'), kept['notes.txt'], 'a text file keeps the relative name');
@@ -88976,8 +88978,8 @@ function testAMoveRewritesOnlyReferences(): void {
     assert.match(loads, /const A := preload\("\.\.\/stage\/desk\.tscn"\)/, 'preload is followed');
     assert.match(
       loads,
-      /const B := load\("desk\.tscn"\)\nconst C := ResourceLoader\.load\("desk\.tscn"\)/,
-      'load and ResourceLoader.load read a relative path from the root, so one beside the script is another file',
+      /const B := load\("\.\.\/stage\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/stage\/desk\.tscn"\)/,
+      'a code string naming nothing from the root but the file beside the script is followed as a constant for a preload would be',
     );
     assert.match(loads, /const E := load\("stage\/desk\.tscn"\)/, 'load from the root is followed');
     assert.match(
@@ -89028,6 +89030,7 @@ function testAMoveRewritesOnlyReferences(): void {
         'res://scenes/refs.json',
         'res://scenes/relative.tres',
         'res://scenes/relative.tscn',
+        'res://scenes/say.gd',
       ],
       'only a file holding a reference is listed as changed',
     );
@@ -89158,25 +89161,71 @@ function testAPluginAndAnExtensionFollowTheirFolder(): void {
   }
 }
 
-/** A string a `preload` may be fed through a constant is listed, since nothing says it is. */
-function testAConstantThatMayFeedAPreloadIsListed(): void {
+/**
+ * A constant that feeds a `preload` is read against the script, and one that feeds a `load` from
+ * the root, so a code string is followed by the root reading first and the script's folder second.
+ * Where both name a moved file the root reading wins and the other is listed.
+ */
+function testAConstantForAPreloadIsFollowedAgainstTheScript(): void {
   const project = kindsProject({
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Constant"\n',
     'scenes/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
-    'scenes/s.gd': 'extends Node\n\nconst DESK_PATH := "desk.tscn"\nconst DESK := preload(DESK_PATH)\n',
+    'scenes/s.gd': 'extends RefCounted\n\nconst DESK_PATH := "desk.tscn"\nconst DESK := preload(DESK_PATH)\n',
+    'desk.tscn': '[gd_scene format=3]\n\n[node name="Root" type="Node2D"]\n',
+    'scenes/both.gd': 'extends Node\n\nconst P := "desk.tscn"\n',
+    'probe.gd':
+      'extends SceneTree\n\nfunc _initialize() -> void:\n\tvar script := load("res://scenes/s.gd") as GDScript\n\tvar desk: Variant = script.get_script_constant_map().get("DESK") if script != null else null\n\tprint("PROBE preload through a constant: ", desk.resource_path if desk != null else "nothing")\n\tquit()\n',
   });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
   try {
     const outcome = movedIn(project, 'scenes/desk.tscn', 'stage/desk.tscn');
-    assert.match(
-      readFileSync(join(project, 'scenes/s.gd'), 'utf8'),
-      /DESK_PATH := "desk\.tscn"/,
-      'it is not changed, as it may be nothing but text',
+    assert.match(read('scenes/s.gd'), /DESK_PATH := "\.\.\/stage\/desk\.tscn"/, 'the constant follows');
+    assert.deepEqual(
+      asArray(get(outcome.report, 'leftAlone')).filter((one) => get(one, 'file') === 'res://scenes/s.gd'),
+      [],
+      'and nothing is listed for it',
     );
-    const entry = asArray(get(outcome.report, 'leftAlone')).find(
-      (one) => get(one, 'file') === 'res://scenes/s.gd',
+    assert.match(
+      read('scenes/both.gd'),
+      /const P := "\.\.\/stage\/desk\.tscn"/,
+      'the one beside the script moved',
+    );
+    const godot = process.env['GODOT_PATH'];
+    if (godot !== undefined) {
+      const loaded = spawnSyncHidden(godot, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.match(
+        `${loaded.stdout}${loaded.stderr}`,
+        /PROBE preload through a constant: res:\/\/stage\/desk\.tscn/,
+        'the engine still loads the preload after the move',
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A code string that reads as one moved file from the root and another beside the script is listed. */
+function testACodeStringThatNamesTwoMovedFilesIsListed(): void {
+  const project = kindsProject({
+    'a/x.png': 'one',
+    'a/sub/a/x.png': 'two',
+    'a/sub/s.gd': 'extends Node\n\nconst P := "a/x.png"\n',
+  });
+  try {
+    const outcome = movedIn(project, 'a', 'b');
+    assert.match(
+      readFileSync(join(project, 'b/sub/s.gd'), 'utf8'),
+      /const P := "b\/x\.png"/,
+      'the root reading wins',
+    );
+    const entry = asArray(get(outcome.report, 'leftAlone')).find((one) =>
+      text(get(one, 'file')).endsWith('/sub/s.gd'),
     );
     assert.ok(entry !== undefined, JSON.stringify(get(outcome.report, 'leftAlone')));
-    assert.equal(get(entry, 'line'), 3);
-    assert.match(text(get(entry, 'why')), /res:\/\/scenes\/desk\.tscn relative to this file.*preload/);
+    assert.match(text(get(entry, 'why')), /names res:\/\/a\/sub\/a\/x\.png, which moved too/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -89257,14 +89306,22 @@ function testAFolderMoveRewritesOnlyReferences(): void {
     const read = (path: string): string => readFileSync(join(project, path), 'utf8');
     movedIn(project, 'scenes', 'ui/stage');
     for (const [name, content] of Object.entries(outside)) {
-      assert.equal(read(`game/${name}`), content, `${name} outside keeps the relative name as text`);
+      if (name !== 'say.gd') {
+        assert.equal(read(`game/${name}`), content, `${name} outside keeps the relative name as text`);
+      }
     }
+    assert.match(
+      read('game/say.gd'),
+      /print\("\.\.\/ui\/stage\/desk\.tscn"\)/,
+      'a code string beside is followed',
+    );
+    assert.match(read('game/say.gd'), /# "\.\.\/scenes\/desk\.tscn" in a comment/, 'a comment is not');
     const loads = read('game/loads.gd');
     assert.match(loads, /const A := preload\("\.\.\/ui\/stage\/desk\.tscn"\)/, 'preload outside is followed');
     assert.match(
       loads,
-      /const B := load\("\.\.\/scenes\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/scenes\/desk\.tscn"\)/,
-      'load and ResourceLoader.load read a path from the root, so one climbing out of it names nothing moved',
+      /const B := load\("\.\.\/ui\/stage\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/ui\/stage\/desk\.tscn"\)/,
+      'a load that names nothing from the root but the folder beside the script is followed against the script',
     );
     assert.match(loads, /const E := load\("ui\/stage\/desk\.tscn"\)/, 'load from the root is followed');
     assert.match(
@@ -89280,7 +89337,11 @@ function testAFolderMoveRewritesOnlyReferences(): void {
     );
     const reaches = read('ui/stage/reaches.gd');
     assert.match(reaches, /preload\("\.\.\/\.\.\/art\.png"\)/, 'a load inside reaching out is followed');
-    assert.match(reaches, /NAME := "\.\.\/art\.png"/, 'a string inside that is no load stays');
+    assert.match(
+      reaches,
+      /NAME := "\.\.\/\.\.\/art\.png"/,
+      'a code string inside naming a file beside the script follows the script',
+    );
     assert.match(read('ui/stage/label.tscn'), /text = "desk\.tscn"/, 'a label inside keeps its text');
     assert.match(
       read('ui/stage/loads.gd'),
@@ -105303,7 +105364,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEachKindOfFileFollowsItsOwnBase,
   testAShaderIncludeIsFollowedAgainstTheShader,
   testAPluginAndAnExtensionFollowTheirFolder,
-  testAConstantThatMayFeedAPreloadIsListed,
+  testAConstantForAPreloadIsFollowedAgainstTheScript,
+  testACodeStringThatNamesTwoMovedFilesIsListed,
   testARenameThatMovesAScriptFollowsOnlyReferences,
   testAMoveNamesAPathFromTheRootItLeftAlone,
   testAMovedFileTakesItsSidecars,

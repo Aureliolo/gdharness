@@ -1134,7 +1134,7 @@ interface Literal {
    * What a relative path here is relative to: the file holding it, or the project's root. Null
    * where the engine reads no path.
    */
-  readonly base: 'file' | 'root' | null;
+  readonly base: 'file' | 'root' | 'code' | null;
 }
 
 /** What a string after this, in a script, resolves against the script's folder (parser and analyser). */
@@ -1151,7 +1151,8 @@ const AGAINST_THE_SCENE = /^\[ext_resource\b.*\spath=$/;
  *   `plugin.cfg` and `.gdextension` paths are joined to the file's folder. `.import` and export
  *   presets hold absolute paths only.
  * - Code: the direct argument of `preload`, `extends`, `@icon` or `#include` is against the file.
- *   Every other string goes to `ResourceLoader`, which reads a relative path from the root.
+ *   Every other string goes to `ResourceLoader`, which reads a relative path from the root, and may
+ *   be a constant feeding a `preload`, which reads it against the file: root first, then the file.
  * - Data files a game loads from: from the root.
  * - Anything else, prose included: no relative path is a reference.
  */
@@ -1169,12 +1170,20 @@ function relativeBase(file: ProjectText, offset: number): Literal['base'] {
     return AGAINST_THE_SCENE.test(line) ? 'file' : null;
   }
   if (extension === 'gd') {
-    return AGAINST_THE_SCRIPT.test(file.text.slice(Math.max(0, quoteAt - 80), quoteAt)) ? 'file' : 'root';
+    return AGAINST_THE_SCRIPT.test(file.text.slice(Math.max(0, quoteAt - 80), quoteAt)) ? 'file' : 'code';
   }
-  if (extension === 'gdshader' || extension === 'gdshaderinc') {
-    return AGAINST_THE_SHADER.test(line) ? 'file' : 'root';
+  if (['cs', 'gdshader', 'gdshaderinc'].includes(extension)) {
+    return baseInUntokenisedCode(line);
   }
   return null;
+}
+
+/** A line comment is prose, which these files have no tokenizer to tell apart from code. */
+function baseInUntokenisedCode(lineBefore: string): Literal['base'] {
+  if (lineBefore.includes('//')) {
+    return null;
+  }
+  return AGAINST_THE_SHADER.test(lineBefore) ? 'file' : 'code';
 }
 
 /** The base of every string in a file named, or of a kind, whatever the string follows. */
@@ -1185,7 +1194,6 @@ const FIXED_BASES: Readonly<Record<string, Literal['base']>> = {
   '.gdextension': 'file',
   'export_presets.cfg': null,
   '.import': null,
-  '.cs': 'root',
   '.json': 'root',
   '.csv': 'root',
   '.cfg': 'root',
@@ -1250,15 +1258,16 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
       const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
       if (moved !== null) {
         add(file.path, moved.offset, moved.length, moved.replacement);
-      } else if (readAgainstTheFile(literal, file.path, goesTo, moves, exists)) {
+      }
+      const other = otherReading(literal, file.path, moves);
+      if (other !== null) {
         const lines = script?.lines ?? new Lines(file.text);
-        const beside = resolvedPath(literal.value, file.path);
         mentions.push({
           file: file.path,
           line: lines.positionOf(literal.offset).line + 1,
           kind: mentionKindAt(script, file.path, literal.offset),
           text: lines.lineAt(literal.offset).trim(),
-          why: `names ${beside} relative to this file, as a preload would read it, and from the project's root it names no moved file, so it was not changed`,
+          why: `was changed as a path from the project's root, and read relative to this file it names ${other}, which moved too, so a preload fed by it would name the old place`,
         });
       }
     }
@@ -1298,34 +1307,6 @@ function mentionNamedPaths(
   }
 }
 
-/**
- * Whether a code string read from the root names no moved file, though read relative to
- * [param from] it names one (or an existing file, once [param from] has moved). A constant fed to
- * `preload` reads that way, and nothing here says whether it does.
- */
-function readAgainstTheFile(
-  literal: Literal,
-  from: string,
-  goesTo: string | undefined,
-  moves: ReadonlyMap<string, string>,
-  exists: (path: string) => boolean,
-): boolean {
-  const written = literal.value;
-  if (literal.base !== 'root' || written.startsWith('res://') || !/\.[a-z0-9]+$/i.test(written)) {
-    return false;
-  }
-  const rooted = resolvedPath(written, 'res://_');
-  if (moves.has(rooted) || exists(rooted) || written.includes('\n')) {
-    return false;
-  }
-  const beside = resolvedPath(written, from);
-  const besideGoesTo = moves.get(beside);
-  if (besideGoesTo !== undefined) {
-    return relativeTo(besideGoesTo, goesTo ?? from) !== written;
-  }
-  return goesTo !== undefined && exists(beside) && relativeTo(beside, goesTo) !== written;
-}
-
 /** The path edit for a string literal of [param from], or null where it needs none. */
 function movedLiteral(
   literal: Literal,
@@ -1361,7 +1342,7 @@ function movedPath(
   if (!isAbsolute && base === null) {
     return null;
   }
-  const fromRoot = !isAbsolute && base === 'root';
+  const fromRoot = !isAbsolute && (base === 'root' || base === 'code');
   const target = resolvedPath(written, fromRoot ? 'res://_' : from);
   const targetGoesTo = moves.get(target);
   if (targetGoesTo !== undefined) {
@@ -1370,13 +1351,44 @@ function movedPath(
     }
     return isAbsolute ? targetGoesTo : relativeTo(targetGoesTo, goesTo ?? from);
   }
-  if (fromRoot) {
+  if (isAbsolute || base === 'root') {
     return null;
   }
-  if (goesTo !== undefined && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
-    return relativeTo(target, goesTo);
+  // A string in code that names nothing from the root may feed a `preload`, which reads it
+  // against the file.
+  return movedAgainstTheFile(written, fromRoot, from, goesTo, moves, exists);
+}
+
+/** [param written] read against [param from]'s folder, as it must read now, or null. */
+function movedAgainstTheFile(
+  written: string,
+  fromRoot: boolean,
+  from: string,
+  goesTo: string | undefined,
+  moves: ReadonlyMap<string, string>,
+  exists: (path: string) => boolean,
+): string | null {
+  const beside = resolvedPath(written, from);
+  const besideGoesTo = moves.get(beside);
+  if (besideGoesTo !== undefined) {
+    return relativeTo(besideGoesTo, goesTo ?? from);
   }
-  return null;
+  const standsAtTheRoot = fromRoot && exists(resolvedPath(written, 'res://_'));
+  const isFile = /\.[a-z0-9]+$/i.test(written) && exists(beside);
+  return goesTo !== undefined && isFile && !standsAtTheRoot ? relativeTo(beside, goesTo) : null;
+}
+
+/**
+ * The other file a code string names when it reads from the root as one moved file and against
+ * [param from] as another, or null.
+ */
+function otherReading(literal: Literal, from: string, moves: ReadonlyMap<string, string>): string | null {
+  if (literal.base !== 'code' || literal.value.startsWith('res://')) {
+    return null;
+  }
+  const rooted = resolvedPath(literal.value, 'res://_');
+  const beside = resolvedPath(literal.value, from);
+  return moves.has(rooted) && moves.has(beside) && beside !== rooted ? beside : null;
 }
 
 function escapedForPattern(text: string): string {
