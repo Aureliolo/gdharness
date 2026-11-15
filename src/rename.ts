@@ -1137,34 +1137,59 @@ interface Literal {
   readonly base: 'file' | 'root' | null;
 }
 
-/**
- * Where a relative path is a reference, and what it is relative to. A script's `preload`,
- * `extends` and `@icon`, an `ext_resource` path and a shader `#include` resolve against the file.
- * `load` and the `ResourceLoader` methods that take a path go through `_validate_local_path`, which
- * puts `res://` before a relative path whichever script calls it.
- */
-const RELATIVE_AFTER: readonly { files: RegExp; before: RegExp; base: 'file' | 'root' }[] = [
-  { files: /\.gd$/, before: /(?:\bpreload|\bextends|@icon)\s*\(?\s*$/, base: 'file' },
-  {
-    files: /\.gd$/,
-    before:
-      /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*(?:load|load_threaded_request|load_threaded_get_status|exists|get_dependencies|get_resource_uid|has_cached|get_cached_ref))\s*\(\s*$/,
-    base: 'root',
-  },
-  { files: /\.(?:tscn|tres)$/, before: /^\[ext_resource\b.*\spath=$/, base: 'file' },
-  { files: /\.gdshaderinc?$/, before: /^\s*#include\s+$/, base: 'file' },
-];
+/** What a string after this, in a script, resolves against the script's folder (parser and analyser). */
+const AGAINST_THE_SCRIPT = /(?:\bpreload|\bextends|@icon)\s*\(?\s*$/;
+const AGAINST_THE_SHADER = /^\s*#include\s+$/;
+const AGAINST_THE_SCENE = /^\[ext_resource\b.*\spath=$/;
 
-/** What the literal whose contents start at [param offset] of [param file] is relative to, if a path. */
-function relativeBase(file: ProjectText, offset: number): 'file' | 'root' | null {
+/**
+ * What a relative string at [param offset] of [param file] is relative to, by the kind of file.
+ *
+ * - Scenes and resources: only an `ext_resource` path, against the file. Any other property string
+ *   is a reference only when absolute.
+ * - `project.godot` and `override.cfg` values are loaded by `ResourceLoader`, so from the root.
+ *   `plugin.cfg` and `.gdextension` paths are joined to the file's folder. `.import` and export
+ *   presets hold absolute paths only.
+ * - Code: the direct argument of `preload`, `extends`, `@icon` or `#include` is against the file.
+ *   Every other string goes to `ResourceLoader`, which reads a relative path from the root.
+ * - Data files a game loads from: from the root.
+ * - Anything else, prose included: no relative path is a reference.
+ */
+function relativeBase(file: ProjectText, offset: number): Literal['base'] {
   // The opening quote sits just before the contents.
   const quoteAt = offset - 1;
-  const text = file.path.endsWith('.gd')
-    ? file.text.slice(Math.max(0, quoteAt - 80), quoteAt)
-    : file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
-  const rule = RELATIVE_AFTER.find((one) => one.files.test(file.path) && one.before.test(text));
-  return rule?.base ?? null;
+  const line = file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
+  const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+  const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';
+  const fixed = FIXED_BASES[name] ?? FIXED_BASES[`.${extension}`];
+  if (fixed !== undefined) {
+    return fixed;
+  }
+  if (extension === 'tscn' || extension === 'tres') {
+    return AGAINST_THE_SCENE.test(line) ? 'file' : null;
+  }
+  if (extension === 'gd') {
+    return AGAINST_THE_SCRIPT.test(file.text.slice(Math.max(0, quoteAt - 80), quoteAt)) ? 'file' : 'root';
+  }
+  if (extension === 'gdshader' || extension === 'gdshaderinc') {
+    return AGAINST_THE_SHADER.test(line) ? 'file' : 'root';
+  }
+  return null;
 }
+
+/** The base of every string in a file named, or of a kind, whatever the string follows. */
+const FIXED_BASES: Readonly<Record<string, Literal['base']>> = {
+  'project.godot': 'root',
+  'override.cfg': 'root',
+  'plugin.cfg': 'file',
+  '.gdextension': 'file',
+  'export_presets.cfg': null,
+  '.import': null,
+  '.cs': 'root',
+  '.json': 'root',
+  '.csv': 'root',
+  '.cfg': 'root',
+};
 
 /** Every string literal of [param file], with where its contents start. */
 function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
@@ -1225,6 +1250,16 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
       const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
       if (moved !== null) {
         add(file.path, moved.offset, moved.length, moved.replacement);
+      } else if (readAgainstTheFile(literal, file.path, goesTo, moves, exists)) {
+        const lines = script?.lines ?? new Lines(file.text);
+        const beside = resolvedPath(literal.value, file.path);
+        mentions.push({
+          file: file.path,
+          line: lines.positionOf(literal.offset).line + 1,
+          kind: mentionKindAt(script, file.path, literal.offset),
+          text: lines.lineAt(literal.offset).trim(),
+          why: `names ${beside} relative to this file, as a preload would read it, and from the project's root it names no moved file, so it was not changed`,
+        });
       }
     }
     mentionNamedPaths(file, script, named, edits, mentions);
@@ -1261,6 +1296,34 @@ function mentionNamedPaths(
       }
     }
   }
+}
+
+/**
+ * Whether a code string read from the root names no moved file, though read relative to
+ * [param from] it names one (or an existing file, once [param from] has moved). A constant fed to
+ * `preload` reads that way, and nothing here says whether it does.
+ */
+function readAgainstTheFile(
+  literal: Literal,
+  from: string,
+  goesTo: string | undefined,
+  moves: ReadonlyMap<string, string>,
+  exists: (path: string) => boolean,
+): boolean {
+  const written = literal.value;
+  if (literal.base !== 'root' || written.startsWith('res://') || !/\.[a-z0-9]+$/i.test(written)) {
+    return false;
+  }
+  const rooted = resolvedPath(written, 'res://_');
+  if (moves.has(rooted) || exists(rooted) || written.includes('\n')) {
+    return false;
+  }
+  const beside = resolvedPath(written, from);
+  const besideGoesTo = moves.get(beside);
+  if (besideGoesTo !== undefined) {
+    return relativeTo(besideGoesTo, goesTo ?? from) !== written;
+  }
+  return goesTo !== undefined && exists(beside) && relativeTo(beside, goesTo) !== written;
 }
 
 /** The path edit for a string literal of [param from], or null where it needs none. */

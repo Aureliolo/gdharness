@@ -89036,6 +89036,152 @@ function testAMoveRewritesOnlyReferences(): void {
   }
 }
 
+function kindsProject(files: Record<string, string>): string {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kinds-'));
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  return project;
+}
+
+/**
+ * Each kind of file has its own rule for what a path in it is read against, which the engine's own
+ * source sets. `project.godot` and every code string go through `ResourceLoader`, so they read a
+ * relative path from the root. A shader `#include` reads against the shader. A data file is read
+ * from the root, quoted prose never. An `.md` word is not a path, an absolute one is.
+ */
+function testEachKindOfFileFollowsItsOwnBase(): void {
+  const project = kindsProject({
+    'project.godot':
+      'config_version=5\n\n[application]\n\nrun/main_scene="content/desk.tscn"\nconfig/icon="content/icon.svg"\n\n[autoload]\n\nGame="*content/game.gd"\n\n[internationalization]\n\nlocale/translations=PackedStringArray("content/fr.po")\n',
+    'content/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'content/game.gd': 'extends Node\n',
+    'content/icon.svg': '<svg/>\n',
+    'content/fr.po': 'msgid ""\n',
+    'top.gd':
+      'extends Node\n\nfunc _ready() -> void:\n\tget_tree().change_scene_to_file("content/desk.tscn")\n\tResourceLoader.load_threaded_request("content/desk.tscn")\n\tResourceLoader.load_threaded_get_status("content/desk.tscn")\n\tResourceLoader.load_threaded_get("content/desk.tscn")\n\tprint("content/desk.tscn")\n',
+    'Top.cs': 'class Top { void Run() { GD.Load<Godot.PackedScene>("content/desk.tscn"); } }\n',
+    'data.json': '{"scene": "content/desk.tscn"}\n',
+    'list.csv': 'key,path\nA,"content/desk.tscn"\n',
+    'tool.cfg': '[a]\nscene="content/desk.tscn"\n',
+    'notes.md': 'Quoted "res://content/desk.tscn" and the word "content/desk.tscn" in prose.\n',
+  });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  try {
+    const outcome = movedIn(project, 'content', 'stuff');
+    const settings = read('project.godot');
+    assert.match(settings, /run\/main_scene="stuff\/desk\.tscn"/, 'the main scene is read from the root');
+    assert.match(settings, /config\/icon="stuff\/icon\.svg"/, 'the icon is read from the root');
+    assert.match(settings, /Game="\*stuff\/game\.gd"/, 'an autoload is read from the root');
+    assert.match(settings, /PackedStringArray\("stuff\/fr\.po"\)/, 'a translation is read from the root');
+    const top = read('top.gd');
+    assert.match(
+      top,
+      /change_scene_to_file\("stuff\/desk\.tscn"\)/,
+      'change_scene_to_file is read from the root',
+    );
+    assert.match(top, /load_threaded_request\("stuff\/desk\.tscn"\)/, 'a threaded request follows');
+    assert.match(top, /load_threaded_get_status\("stuff\/desk\.tscn"\)/, 'a threaded status follows');
+    assert.match(
+      top,
+      /load_threaded_get\("stuff\/desk\.tscn"\)/,
+      'a threaded get follows, or the load is lost',
+    );
+    assert.match(
+      top,
+      /print\("stuff\/desk\.tscn"\)/,
+      'a string that reads as the moved path from the root follows',
+    );
+    assert.match(read('Top.cs'), /GD\.Load<Godot\.PackedScene>\("stuff\/desk\.tscn"\)/, 'GD.Load follows');
+    assert.match(read('data.json'), /"scene": "stuff\/desk\.tscn"/, 'a data file read from the root follows');
+    assert.match(read('list.csv'), /A,"stuff\/desk\.tscn"/, 'a table read from the root follows');
+    assert.match(read('tool.cfg'), /scene="stuff\/desk\.tscn"/, 'a settings file read from the root follows');
+    assert.equal(
+      read('notes.md'),
+      'Quoted "res://stuff/desk.tscn" and the word "content/desk.tscn" in prose.\n',
+      'prose takes an absolute path and keeps a relative word',
+    );
+    const left = asArray(get(outcome.report, 'leftAlone')).map((one) => text(get(one, 'file')));
+    assert.equal(left.includes('res://project.godot'), false, `no setting is left alone: ${left.join(', ')}`);
+    assert.equal(left.includes('res://top.gd'), false, 'nor a string the root reads');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A shader `#include` is read against the shader, in a `.gdshader` and in a `.gdshaderinc`. */
+function testAShaderIncludeIsFollowedAgainstTheShader(): void {
+  const project = kindsProject({
+    'fx/a.gdshader': 'shader_type canvas_item;\n#include "../lib/common.gdshaderinc"\n',
+    'lib/common.gdshaderinc': 'float one() { return 1.0; }\n',
+    'lib/more.gdshaderinc': '#include "common.gdshaderinc"\nfloat two() { return 2.0; }\n',
+    'fx/b.gdshader': 'shader_type canvas_item;\n// see "../lib/common.gdshaderinc"\n',
+  });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  try {
+    movedIn(project, 'lib/common.gdshaderinc', 'core/common.gdshaderinc');
+    assert.match(read('fx/a.gdshader'), /#include "\.\.\/core\/common\.gdshaderinc"/, 'a shader follows');
+    assert.match(
+      read('lib/more.gdshaderinc'),
+      /#include "\.\.\/core\/common\.gdshaderinc"/,
+      'an include file is read as text and follows',
+    );
+    assert.match(read('fx/b.gdshader'), /\/\/ see "\.\.\/lib\/common\.gdshaderinc"/, 'a comment stays');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A plugin's script and an extension's libraries and icons are joined to the file's own folder. */
+function testAPluginAndAnExtensionFollowTheirFolder(): void {
+  const project = kindsProject({
+    'addons/kit/plugin.cfg': '[plugin]\n\nname="Kit"\nscript="plugin.gd"\n',
+    'addons/kit/plugin.gd': '@tool\nextends EditorPlugin\n',
+    'addons/kit/kit.gdextension':
+      '[configuration]\nentry_symbol = "kit_init"\n\n[libraries]\nlinux.x86_64 = "bin/libkit.so"\n\n[icons]\nKit = "kit.svg"\n',
+    'addons/kit/kit.svg': '<svg/>\n',
+    'addons/kit/bin/libkit.so': 'elf',
+  });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  try {
+    movedIn(project, 'addons/kit/plugin.gd', 'addons/kit/src/plugin.gd');
+    movedIn(project, 'addons/kit/kit.svg', 'addons/kit/icons/kit.svg');
+    movedIn(project, 'addons/kit/bin', 'addons/kit/lib');
+    assert.match(read('addons/kit/plugin.cfg'), /script="src\/plugin\.gd"/, 'the plugin script follows');
+    const extension = read('addons/kit/kit.gdextension');
+    assert.match(extension, /Kit = "icons\/kit\.svg"/, 'an icon follows');
+    assert.match(extension, /linux\.x86_64 = "lib\/libkit\.so"/, 'a library follows');
+    assert.match(extension, /entry_symbol = "kit_init"/, 'and a symbol is not a path');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A string a `preload` may be fed through a constant is listed, since nothing says it is. */
+function testAConstantThatMayFeedAPreloadIsListed(): void {
+  const project = kindsProject({
+    'scenes/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'scenes/s.gd': 'extends Node\n\nconst DESK_PATH := "desk.tscn"\nconst DESK := preload(DESK_PATH)\n',
+  });
+  try {
+    const outcome = movedIn(project, 'scenes/desk.tscn', 'stage/desk.tscn');
+    assert.match(
+      readFileSync(join(project, 'scenes/s.gd'), 'utf8'),
+      /DESK_PATH := "desk\.tscn"/,
+      'it is not changed, as it may be nothing but text',
+    );
+    const entry = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://scenes/s.gd',
+    );
+    assert.ok(entry !== undefined, JSON.stringify(get(outcome.report, 'leftAlone')));
+    assert.equal(get(entry, 'line'), 3);
+    assert.match(text(get(entry, 'why')), /res:\/\/scenes\/desk\.tscn relative to this file.*preload/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /**
  * `load` and the `ResourceLoader` methods that take a path read a relative one from the project's
  * root, whichever script calls them. A move follows it there, and a script that moves keeps it as
@@ -89200,7 +89346,11 @@ async function testARenameThatMovesAScriptFollowsOnlyReferences(): Promise<void>
     assert.equal(read('label.tscn'), files['label.tscn'], 'a label keeps its text');
     assert.match(read('say.gd'), /preload\("heroes\/hero\.gd"\)/, 'preload is followed');
     assert.match(read('say.gd'), /const B := load\("heroes\/hero\.gd"\)/, 'load is followed');
-    assert.match(read('say.gd'), /print\("Player\.gd"\)/, 'a print argument stays');
+    assert.match(
+      read('say.gd'),
+      /print\("heroes\/hero\.gd"\)/,
+      'a string that names the file from the root is followed, print argument or not',
+    );
     assert.equal(read('notes.md'), files['notes.md'], 'a note stays');
     const left = asArray(get(outcome.report, 'leftAlone')).map(
       (one) => `${text(get(one, 'file'))}:${text(get(one, 'line'))}`,
@@ -105150,6 +105300,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveRewritesOnlyReferences,
   testAFolderMoveRewritesOnlyReferences,
   testALoadIsFollowedFromTheProjectRoot,
+  testEachKindOfFileFollowsItsOwnBase,
+  testAShaderIncludeIsFollowedAgainstTheShader,
+  testAPluginAndAnExtensionFollowTheirFolder,
+  testAConstantThatMayFeedAPreloadIsListed,
   testARenameThatMovesAScriptFollowsOnlyReferences,
   testAMoveNamesAPathFromTheRootItLeftAlone,
   testAMovedFileTakesItsSidecars,
