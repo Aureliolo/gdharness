@@ -236,8 +236,9 @@ it kept whole past that cost.
 
 ### How many engines start
 
-Units are dealt slowest first, each to the engine with the least so far. A run starts no more
-engines than the smallest of these:
+Units are dealt slowest first, each to the engine with the least so far. Each engine then runs its
+suites cheapest first, so its slowest suite does not run while the other engines are starting. A
+run starts no more engines than the smallest of these:
 
 - `--engines`, or the lanes a gate's file names where that is more.
 - The machine's processors, or `--cores`.
