@@ -88883,6 +88883,281 @@ function testAMovedFileIsNamedByItsNewPathEverywhere(): void {
 }
 
 /**
+ * Text that says the name of a file without the engine reading it as a path: a label, a resource
+ * name, a print argument, a dictionary key, a call that is not a load, and a note, a data file and
+ * a text file. [param spelling] is how each writes the name.
+ */
+function nonReferencesTo(spelling: string): Record<string, string> {
+  return {
+    'label.tscn': `[gd_scene format=3]\n\n[node name="L" type="Label"]\ntext = "${spelling}"\n`,
+    'theme.tres': `[gd_resource type="Theme" format=3]\n\n[resource]\nresource_name = "${spelling}"\n`,
+    'say.gd': [
+      'extends Node',
+      '',
+      `# "${spelling}" in a comment`,
+      'func _ready() -> void:',
+      `\tprint("${spelling}")`,
+      `\tvar names := {"${spelling}": 1}`,
+      `\tvar config := ConfigFile.new().load("${spelling}")`,
+      '',
+    ].join('\n'),
+    'notes.md': `The file "${spelling}" holds the desk.\n`,
+    'data.json': `{"name": "${spelling}"}\n`,
+    'notes.txt': `"${spelling}"\n`,
+  };
+}
+
+/** A project with `scenes/desk.tscn`, text that only names it and text that references it. */
+function referencesProject(): string {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-references-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nrun/main_scene="res://scenes/desk.tscn"\n',
+    'scenes/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'scenes/relative.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="desk.tscn" id="1"]\n\n[node name="R" type="Node"]\n',
+    'scenes/absolute.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://scenes/desk.tscn" id="1"]\n\n[node name="A" type="Node"]\ntext = "res://scenes/desk.tscn"\n',
+    'scenes/relative.tres':
+      '[gd_resource type="Resource" format=3]\n\n[ext_resource type="PackedScene" path="desk.tscn" id="1"]\n\n[resource]\n',
+    'scenes/absolute.tres':
+      '[gd_resource type="Resource" format=3]\n\n[ext_resource type="PackedScene" path="res://scenes/desk.tscn" id="1"]\n\n[resource]\n',
+    'scenes/loads.gd': [
+      'extends Node',
+      '',
+      'const A := preload("desk.tscn")',
+      'const B := load("desk.tscn")',
+      'const C := ResourceLoader.load("desk.tscn")',
+      'const D := "res://scenes/desk.tscn"',
+      '',
+    ].join('\n'),
+    'scenes/refs.json': '{"scene": "res://scenes/desk.tscn"}\n',
+    ...Object.fromEntries(
+      Object.entries(nonReferencesTo('desk.tscn')).map(([name, content]) => [`scenes/${name}`, content]),
+    ),
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  return project;
+}
+
+/**
+ * A move rewrites a path the engine reads and nothing else. A relative path is one only where the
+ * engine resolves it against the file holding it: the argument of `preload`, `load` and
+ * `ResourceLoader.load`, and an `ext_resource` path. A label, a resource name, a print argument, a
+ * dictionary key, a note and a data file spelling the same relative path stay as written.
+ */
+function testAMoveRewritesOnlyReferences(): void {
+  const project = referencesProject();
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  const kept = Object.fromEntries(
+    Object.keys(nonReferencesTo('')).map((name) => [name, read(`scenes/${name}`)]),
+  );
+  try {
+    const outcome = movedIn(project, 'scenes/desk.tscn', 'stage/desk.tscn');
+    assert.equal(read('scenes/label.tscn'), kept['label.tscn'], 'a label keeps its text');
+    assert.equal(read('scenes/theme.tres'), kept['theme.tres'], 'a resource name stays');
+    assert.equal(
+      read('scenes/say.gd'),
+      kept['say.gd'],
+      'a print argument, a key, a comment and a call that is no load stay',
+    );
+    assert.equal(read('scenes/notes.md'), kept['notes.md'], 'a note keeps the relative name');
+    assert.equal(read('scenes/notes.txt'), kept['notes.txt'], 'a text file keeps the relative name');
+    assert.equal(
+      read('scenes/refs.json'),
+      '{"scene": "res://stage/desk.tscn"}\n',
+      'a data file names the new place',
+    );
+    const loads = read('scenes/loads.gd');
+    assert.match(loads, /const A := preload\("\.\.\/stage\/desk\.tscn"\)/, 'preload is followed');
+    assert.match(loads, /const B := load\("\.\.\/stage\/desk\.tscn"\)/, 'load is followed');
+    assert.match(
+      loads,
+      /const C := ResourceLoader\.load\("\.\.\/stage\/desk\.tscn"\)/,
+      'ResourceLoader.load is followed',
+    );
+    assert.match(loads, /const D := "res:\/\/stage\/desk\.tscn"/, 'an absolute path in a script is followed');
+    assert.match(
+      read('scenes/relative.tscn'),
+      /path="\.\.\/stage\/desk\.tscn"/,
+      'a relative ext_resource in a scene is followed',
+    );
+    assert.match(
+      read('scenes/relative.tres'),
+      /path="\.\.\/stage\/desk\.tscn"/,
+      'a relative ext_resource in a resource is followed',
+    );
+    assert.match(
+      read('scenes/absolute.tscn'),
+      /path="res:\/\/stage\/desk\.tscn"/,
+      'an absolute ext_resource is followed',
+    );
+    assert.match(
+      read('scenes/absolute.tscn'),
+      /text = "res:\/\/stage\/desk\.tscn"/,
+      'an absolute path in a scene property is followed',
+    );
+    assert.match(
+      read('scenes/absolute.tres'),
+      /path="res:\/\/stage\/desk\.tscn"/,
+      'an absolute ext_resource in a resource is followed',
+    );
+    assert.match(
+      read('project.godot'),
+      /run\/main_scene="res:\/\/stage\/desk\.tscn"/,
+      'project.godot is followed',
+    );
+    assert.deepEqual(
+      asArray(get(outcome.report, 'changed'))
+        .map((one) => text(get(one, 'file')))
+        .toSorted(),
+      [
+        'res://project.godot',
+        'res://scenes/absolute.tres',
+        'res://scenes/absolute.tscn',
+        'res://scenes/loads.gd',
+        'res://scenes/refs.json',
+        'res://scenes/relative.tres',
+        'res://scenes/relative.tscn',
+      ],
+      'only a file holding a reference is listed as changed',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** The same split for a folder: the files outside naming it, and the files inside reaching out. */
+function testAFolderMoveRewritesOnlyReferences(): void {
+  const project = referencesProject();
+  try {
+    mkdirSync(join(project, 'game'));
+    const outside = nonReferencesTo('../scenes/desk.tscn');
+    for (const [name, content] of Object.entries(outside)) {
+      writeFileSync(join(project, 'game', name), content);
+    }
+    writeFileSync(
+      join(project, 'game', 'loads.gd'),
+      'extends Node\n\nconst A := preload("../scenes/desk.tscn")\nconst B := load("../scenes/desk.tscn")\nconst C := ResourceLoader.load("../scenes/desk.tscn")\nconst D := "res://scenes/desk.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'game', 'rel.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="../scenes/desk.tscn" id="1"]\n\n[node name="R" type="Node"]\n',
+    );
+    writeFileSync(join(project, 'art.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0]));
+    writeFileSync(
+      join(project, 'scenes', 'reaches.gd'),
+      'extends Node\n\nconst A := preload("../art.png")\nconst NAME := "../art.png"\n',
+    );
+    const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+    movedIn(project, 'scenes', 'ui/stage');
+    for (const [name, content] of Object.entries(outside)) {
+      assert.equal(read(`game/${name}`), content, `${name} outside keeps the relative name as text`);
+    }
+    const loads = read('game/loads.gd');
+    assert.match(loads, /const A := preload\("\.\.\/ui\/stage\/desk\.tscn"\)/, 'preload outside is followed');
+    assert.match(loads, /const B := load\("\.\.\/ui\/stage\/desk\.tscn"\)/, 'load outside is followed');
+    assert.match(
+      loads,
+      /const C := ResourceLoader\.load\("\.\.\/ui\/stage\/desk\.tscn"\)/,
+      'ResourceLoader.load outside is followed',
+    );
+    assert.match(loads, /const D := "res:\/\/ui\/stage\/desk\.tscn"/, 'an absolute path outside is followed');
+    assert.match(
+      read('game/rel.tscn'),
+      /path="\.\.\/ui\/stage\/desk\.tscn"/,
+      'a relative ext_resource outside is followed',
+    );
+    const reaches = read('ui/stage/reaches.gd');
+    assert.match(reaches, /preload\("\.\.\/\.\.\/art\.png"\)/, 'a load inside reaching out is followed');
+    assert.match(reaches, /NAME := "\.\.\/art\.png"/, 'a string inside that is no load stays');
+    assert.match(read('ui/stage/label.tscn'), /text = "desk\.tscn"/, 'a label inside keeps its text');
+    assert.match(
+      read('ui/stage/loads.gd'),
+      /preload\("desk\.tscn"\)/,
+      'a path between files that moved together reads the same',
+    );
+    assert.match(
+      read('ui/stage/absolute.tscn'),
+      /path="res:\/\/ui\/stage\/desk\.tscn"/,
+      'an absolute path inside is followed',
+    );
+    assert.match(
+      read('project.godot'),
+      /run\/main_scene="res:\/\/ui\/stage\/desk\.tscn"/,
+      'project.godot is followed',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A class rename that moves its script follows references only, and leaves nothing under leftAlone
+ * for a scene line whose class-name word the new path took away.
+ */
+async function testARenameThatMovesAScriptFollowsOnlyReferences(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-references-'));
+  const files: Record<string, string> = {
+    'Player.gd': 'class_name Player\nextends Node\n',
+    'Player.gd.uid': 'uid://bplayer\n',
+    'relative.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="Player.gd" id="1"]\n\n[node name="N" type="Node"]\nscript = ExtResource("1")\n',
+    'absolute.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://Player.gd" id="1"]\n\n[node name="N" type="Node"]\nscript = ExtResource("1")\n',
+    'label.tscn': '[gd_scene format=3]\n\n[node name="L" type="Label"]\ntext = "Player.gd"\n',
+    'say.gd':
+      'extends Node\n\nconst A := preload("Player.gd")\nconst B := load("Player.gd")\n\nfunc _ready() -> void:\n\tprint("Player.gd")\n',
+    'notes.md': 'The file "Player.gd" holds the player.\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'Player.gd'),
+        symbol: 'Player',
+        newName: 'Hero',
+        newScriptPath: join(project, 'heroes', 'hero.gd'),
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    applyRewrites(outcome.rewrites);
+    const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+    assert.match(read('relative.tscn'), /path="heroes\/hero\.gd"/, 'a relative ext_resource is followed');
+    assert.match(
+      read('absolute.tscn'),
+      /path="res:\/\/heroes\/hero\.gd"/,
+      'an absolute ext_resource is followed',
+    );
+    assert.equal(read('label.tscn'), files['label.tscn'], 'a label keeps its text');
+    assert.match(read('say.gd'), /preload\("heroes\/hero\.gd"\)/, 'preload is followed');
+    assert.match(read('say.gd'), /const B := load\("heroes\/hero\.gd"\)/, 'load is followed');
+    assert.match(read('say.gd'), /print\("Player\.gd"\)/, 'a print argument stays');
+    assert.equal(read('notes.md'), files['notes.md'], 'a note stays');
+    const left = asArray(get(outcome.report, 'leftAlone')).map(
+      (one) => `${text(get(one, 'file'))}:${text(get(one, 'line'))}`,
+    );
+    assert.deepEqual(
+      left.filter((one) => one.startsWith('res://relative.tscn') || one.startsWith('res://absolute.tscn')),
+      [],
+      `no scene line the path edit took the word from is left alone: ${JSON.stringify(left)}`,
+    );
+    assert.ok(
+      left.some((one) => one.startsWith('res://label.tscn')),
+      `a label that still says the word is: ${JSON.stringify(left)}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A file goes with its .import and its .uid, and a path inside a sidecar naming the file is
  * rewritten with it: an image whose .import still named the old source would be imported from a
  * file that is not there.
@@ -104810,6 +105085,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedScriptIsNamedByItsNewPathEverywhere,
   testARenameWritesEveryFileOrNone,
   testAMovedFileIsNamedByItsNewPathEverywhere,
+  testAMoveRewritesOnlyReferences,
+  testAFolderMoveRewritesOnlyReferences,
+  testARenameThatMovesAScriptFollowsOnlyReferences,
   testAMoveNamesAPathFromTheRootItLeftAlone,
   testAMovedFileTakesItsSidecars,
   testAMovedDirectoryTakesEverythingInIt,

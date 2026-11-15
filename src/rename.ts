@@ -1127,9 +1127,40 @@ interface MoveArguments {
   readonly exists: (path: string) => boolean;
 }
 
+interface Literal {
+  readonly offset: number;
+  readonly value: string;
+  /** Whether the engine reads a path here relative to the file holding it. */
+  readonly relative: boolean;
+}
+
+/** Where the engine resolves a relative path against the file: what a string literal follows. */
+const RELATIVE_AFTER: readonly { files: RegExp; before: RegExp }[] = [
+  {
+    files: /\.gd$/,
+    before: /(?:\bpreload|(?<![.\w])load|\bResourceLoader\.load|\bextends|@icon)\s*\(?\s*$/,
+  },
+  { files: /\.(?:tscn|tres)$/, before: /^\[ext_resource\b.*\spath=$/ },
+  { files: /\.gdshaderinc?$/, before: /^\s*#include\s+$/ },
+];
+
+/** Whether the literal whose contents start at [param offset] of [param file] is read relative to it. */
+function readsRelative(file: ProjectText, offset: number): boolean {
+  const rule = RELATIVE_AFTER.find((one) => one.files.test(file.path));
+  if (rule === undefined) {
+    return false;
+  }
+  // The opening quote sits just before the contents.
+  const quoteAt = offset - 1;
+  const text = file.path.endsWith('.gd')
+    ? file.text.slice(Math.max(0, quoteAt - 80), quoteAt)
+    : file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
+  return rule.before.test(text);
+}
+
 /** Every string literal of [param file], with where its contents start. */
-function literalsOf(file: ProjectText, script: Script | undefined): { offset: number; value: string }[] {
-  const found: { offset: number; value: string }[] = [];
+function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
+  const found: Literal[] = [];
   if (script !== undefined) {
     for (const region of script.regions) {
       if (region.kind !== 'string') {
@@ -1144,12 +1175,21 @@ function literalsOf(file: ProjectText, script: Script | undefined): { offset: nu
       ) {
         continue;
       }
-      found.push({ offset: region.start + quote.index + 1, value: literal.slice(quote.index + 1, -1) });
+      const offset = region.start + quote.index + 1;
+      found.push({
+        offset,
+        value: literal.slice(quote.index + 1, -1),
+        relative: readsRelative(file, offset),
+      });
     }
     return found;
   }
   for (const match of file.text.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)) {
-    found.push({ offset: match.index + 1, value: match[1] ?? '' });
+    found.push({
+      offset: match.index + 1,
+      value: match[1] ?? '',
+      relative: readsRelative(file, match.index + 1),
+    });
   }
   return found;
 }
@@ -1217,7 +1257,7 @@ function mentionNamedPaths(
 
 /** The path edit for a string literal of [param from], or null where it needs none. */
 function movedLiteral(
-  literal: { offset: number; value: string },
+  literal: Literal,
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
@@ -1228,7 +1268,7 @@ function movedLiteral(
   if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
     return null;
   }
-  const replacement = movedPath(written, from, goesTo, moves, exists);
+  const replacement = movedPath(written, literal.relative, from, goesTo, moves, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
   if (replacement === null || replacement === written) {
@@ -1240,12 +1280,16 @@ function movedLiteral(
 /** [param written] as it must read once [param from] or the file it names has moved, or null. */
 function movedPath(
   written: string,
+  relative: boolean,
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
 ): string | null {
   const isAbsolute = written.startsWith('res://');
+  if (!isAbsolute && !relative) {
+    return null;
+  }
   const target = resolvedPath(written, from);
   const targetGoesTo = moves.get(target);
   if (targetGoesTo !== undefined) {
