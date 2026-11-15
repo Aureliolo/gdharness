@@ -24,11 +24,12 @@ import {
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
+import { ignoredTexts, installedByUs, linksOut, type Reach, sameEntry, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
   declaredIn,
+  literalTargets,
   type Mention,
   mentionIgnored,
   planMove,
@@ -348,6 +349,47 @@ function referencesOf(
   return references;
 }
 
+/**
+ * Whether [param one] and [param other] could be spelt apart and still be one file on some file
+ * system. Two names of ASCII letters only are joined by ASCII case alone on every one, so that is
+ * all they are asked. A name with any other character is left to the disk to judge. It can say
+ * yes where the disk says no, never no where the disk would say yes.
+ */
+function mightJoin(one: string, other: string): boolean {
+  const plain = /^[ -~]*$/;
+  return !(plain.test(one) && plain.test(other)) || one.toLowerCase() === other.toLowerCase();
+}
+
+/**
+ * Adds to [param references] each spelling in [param targets] that the file system takes for a file
+ * that moves, as `res://DESK.tscn` is `res://desk.tscn` on Windows and macOS. The disk says so by the
+ * identity of the two entries, since no fold of the letters is its own. Where it keeps the two
+ * apart, as Linux does, nothing is added. The spelling goes to the same place the exact path does.
+ */
+function joinedByTheDisk(
+  projectPath: string,
+  targets: Iterable<string>,
+  references: Map<string, string>,
+  moves: ReadonlyMap<string, string>,
+  folder: { from: string; to: string },
+): void {
+  const absoluteOf = (path: string): string => join(projectPath, path.slice('res://'.length));
+  const sources: [string, string][] = [[folder.from, folder.to], ...moves];
+  for (const target of targets) {
+    if (references.has(target) || !target.startsWith('res://')) {
+      continue;
+    }
+    const near = sources.filter(([source]) => mightJoin(target, source));
+    if (near.length === 0 || !existsSync(absoluteOf(target))) {
+      continue;
+    }
+    const goesTo = near.find(([source]) => sameEntry(absoluteOf(target), absoluteOf(source)));
+    if (goesTo !== undefined) {
+      references.set(target, goesTo[1]);
+    }
+  }
+}
+
 export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {
   const checked = checkedMove(projectPath, absoluteFrom, absoluteTo);
   if ('reason' in checked) {
@@ -365,6 +407,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   // The files that move on disk stay those of `moves`. A text keeps the path the walk reached it by,
   // which the engine resolves its relative paths against, and `references` says where it goes.
   const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
+  joinedByTheDisk(projectPath, literalTargets(texts, scripts), references, moves, { from, to });
   const placeOf = new Map(texts.map((file) => [file.path, file.realPath ?? file.path]));
   const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);
   let plan = planMove(

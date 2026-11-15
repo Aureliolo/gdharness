@@ -663,6 +663,8 @@ class GdhScenes:
 	var _folders: Dictionary = {}
 	## What the disk holds under another spelling, keyed by the path asked.
 	var _kept: Dictionary = {}
+	## How many paths the disk was asked the stored spelling of, each a sweep of folder listings.
+	var asked: int = 0
 	var _project: String = ""
 	var _disk: DirAccess = null
 
@@ -693,6 +695,10 @@ class GdhScenes:
 	func one(path: String) -> String:
 		if texts.has(path) or not path.begins_with("res://") or not _may_be_scene(path):
 			return path
+		# The file system says first whether anything is there under its own case rules, so a
+		# reference to a file that is not there costs one call, however many folders it would sweep.
+		if not FileAccess.file_exists(path):
+			return path
 		var file: String = _file(path)
 		if _spelt.has(file):
 			return _spelt[file]
@@ -714,6 +720,7 @@ class GdhScenes:
 	## path.
 	func _stored(path: String) -> String:
 		if not _kept.has(path):
+			asked += 1
 			_kept[path] = GdhSceneFile.stored_as(path)
 		return _kept[path]
 

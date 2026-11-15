@@ -88004,6 +88004,134 @@ function movedIn(
 }
 
 /**
+ * A project holding [files] and an empty newdir, with whether its file system takes [probe], a
+ * spelling of a file or folder it holds in another case, for that file or folder.
+ */
+function caseMoveProject(files: Record<string, string>, probe: string): { project: string; folds: boolean } {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-move-case-'));
+  writeTree(project, { 'project.godot': 'config_version=5\n', ...files });
+  mkdirSync(join(project, 'newdir'));
+  return { project, folds: existsSync(join(project, probe)) };
+}
+
+/**
+ * A move of desk.tscn rewrites each string naming it in another case where the file system takes
+ * that for the file: a scene's ext_resource (also with the extension in capitals), a script's
+ * preload and load, and a resource, each to the new path as the move spells it. Where the file
+ * system keeps the spellings apart, as Linux does, they stay as they were.
+ */
+function testAMoveRewritesWhatTheFileSystemTakesForTheMovedFile(): void {
+  const named = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
+  const { project, folds } = caseMoveProject(
+    {
+      'desk.tscn': LINKED_DESK,
+      'exact.tscn': named('res://desk.tscn'),
+      'upper.tscn': named('res://DESK.tscn'),
+      'ext.tscn': named('res://desk.TSCN'),
+      'script.gd':
+        'extends Node\n\nconst A := preload("res://Desk.tscn")\nconst B := load("res://DESK.tscn")\n',
+      'made.tres':
+        '[gd_resource type="Resource" format=3]\n\n[ext_resource type="PackedScene" path="res://DESK.tscn" id="1"]\n\n[resource]\n',
+      'other.tscn': named('res://desks.tscn'),
+    },
+    'DESK.tscn',
+  );
+  try {
+    const outcome = movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
+    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
+    const moved = 'res://newdir/desk.tscn';
+    assert.ok(after('exact.tscn').includes(`path="${moved}"`), after('exact.tscn'));
+    assert.ok(
+      after('upper.tscn').includes(folds ? `path="${moved}"` : 'path="res://DESK.tscn"'),
+      after('upper.tscn'),
+    );
+    assert.ok(
+      after('ext.tscn').includes(folds ? `path="${moved}"` : 'path="res://desk.TSCN"'),
+      after('ext.tscn'),
+    );
+    assert.ok(
+      after('made.tres').includes(folds ? `path="${moved}"` : 'path="res://DESK.tscn"'),
+      after('made.tres'),
+    );
+    assert.equal(
+      after('script.gd'),
+      folds
+        ? `extends Node\n\nconst A := preload("${moved}")\nconst B := load("${moved}")\n`
+        : 'extends Node\n\nconst A := preload("res://Desk.tscn")\nconst B := load("res://DESK.tscn")\n',
+    );
+    assert.ok(after('other.tscn').includes('path="res://desks.tscn"'), after('other.tscn'));
+    assert.deepEqual(
+      outcome.inPlace.map((rewrite) => rewrite.path).toSorted(),
+      folds
+        ? ['res://exact.tscn', 'res://ext.tscn', 'res://made.tres', 'res://script.gd', 'res://upper.tscn']
+        : ['res://exact.tscn'],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A folder named in another case than the disk holds it is followed by a move of that folder. */
+function testAFolderMoveRewritesAFolderSpeltInAnotherCase(): void {
+  const named = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_hero"]\n\n[node name="N" type="Node3D"]\n`;
+  const { project, folds } = caseMoveProject(
+    {
+      'scenes/hero.tscn': LINKED_DESK,
+      'exact.tscn': named('res://scenes/hero.tscn'),
+      'folder.tscn': named('res://Scenes/hero.tscn'),
+      'both.tscn': named('res://SCENES/HERO.tscn'),
+    },
+    'SCENES/hero.tscn',
+  );
+  try {
+    movedIn(project, 'scenes', 'stage');
+    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
+    assert.ok(after('exact.tscn').includes('path="res://stage/hero.tscn"'), after('exact.tscn'));
+    for (const file of ['folder.tscn', 'both.tscn']) {
+      const wanted = folds ? 'path="res://stage/hero.tscn"' : 'path="res://';
+      assert.ok(after(file).includes(wanted), after(file));
+      assert.equal(after(file).includes('res://stage/hero.tscn'), folds, after(file));
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A reference to a file that only Godot's case folding joins to the moved one stays: s and the long
+ * s are two files, and the move of s.tscn rewrites res://S.tscn and leaves res://ſ.tscn. Where the
+ * platform keeps fewer files than were written, it skips.
+ */
+function testAMoveLeavesAFileOnlyGodotsFoldJoins(): void {
+  const named = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_s"]\n\n[node name="N" type="Node3D"]\n`;
+  const { project, folds } = caseMoveProject(
+    {
+      's.tscn': LINKED_DESK,
+      'ſ.tscn': LINKED_DESK,
+      'long.tscn': named('res://ſ.tscn'),
+      'upper.tscn': named('res://S.tscn'),
+    },
+    'S.tscn',
+  );
+  try {
+    if (!readdirSync(project).includes('ſ.tscn') || !readdirSync(project).includes('s.tscn')) {
+      console.log('s and the long s: the platform keeps only one of them');
+      return;
+    }
+    movedIn(project, 's.tscn', 'newdir/s.tscn');
+    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
+    assert.ok(after('long.tscn').includes('path="res://ſ.tscn"'), after('long.tscn'));
+    assert.equal(after('upper.tscn').includes('path="res://newdir/s.tscn"'), folds, after('upper.tscn'));
+    assert.ok(existsSync(join(project, 'ſ.tscn')));
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A path from the project's root without res://, the way a build script or a note names a file, is
  * answered under leftAlone. Reported from a folder move in a game whose own check listed the moved
  * scripts as `"src/ui/badge.gd"`. Nothing was changed or named, and the check broke.
@@ -96295,15 +96423,29 @@ async function renameTopIn(at: LinkedProject, scene: string): Promise<unknown> {
 /**
  * A scene naming desk.tscn as res://DESK.tscn, by an instance and by an inheritance, is followed
  * where the file system takes that for desk.tscn, and its entries are moved with a rename and a
- * reparent. Where the file system keeps the two apart, as Linux does, it is not followed.
+ * reparent. Where the file system keeps the two apart, as Linux does, it is not followed. A scene
+ * naming a file that is not there in another case (res://DESKS.tscn) is left as it was. A scene
+ * naming desk.tscn by its uid beside a path in another case is followed on every file system, since
+ * the engine loads a uid the project knows before the path written beside it.
  */
 async function testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt(): Promise<void> {
   const heir =
     deskHeir('Heir').replace('res://desk.tscn', 'res://DESK.tscn') +
     '\n[node name="Lamp" parent="Top"]\nvisible = false\n';
+  const ghost = deskKin('Ghost', 'res://DESKS.tscn');
+  const byUid = deskKin('Uid').replace(
+    'type="PackedScene" path="res://desk.tscn"',
+    'type="PackedScene" uid="uid://cdeskcase01" path="res://DESK.tscn"',
+  );
   await withCaseFolding(
     'a path in another case',
-    { 'room.tscn': deskKin('Room', 'res://DESK.tscn'), 'heir.tscn': heir },
+    {
+      'desk.tscn': LINKED_DESK.replace('format=3', 'format=3 uid="uid://cdeskcase01"'),
+      'room.tscn': deskKin('Room', 'res://DESK.tscn'),
+      'heir.tscn': heir,
+      'ghost.tscn': ghost,
+      'uid.tscn': byUid,
+    },
     async (at, folds) => {
       if (process.platform === 'win32') {
         assert.ok(folds, 'NTFS takes DESK.tscn for desk.tscn');
@@ -96314,9 +96456,12 @@ async function testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt():
       const renamed = await renameTheTop(at);
       assert.deepEqual(
         followedOf(renamed),
-        folds ? ['res://heir.tscn', 'res://room.tscn'] : [],
+        folds ? ['res://heir.tscn', 'res://room.tscn', 'res://uid.tscn'] : ['res://uid.tscn'],
         JSON.stringify(renamed),
       );
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      assert.equal(at.fileOf('ghost.tscn'), ghost);
+      assert.equal(lampParent(at.fileOf('uid.tscn')), 'Desk/Surface');
       assert.equal(lampParent(at.fileOf('room.tscn')), folds ? 'Desk/Surface' : 'Desk/Top');
       assert.equal(lampParent(at.fileOf('heir.tscn')), folds ? 'Surface' : 'Top');
       assert.ok(at.fileOf('room.tscn').includes('path="res://DESK.tscn"'), at.fileOf('room.tscn'));
@@ -96329,7 +96474,11 @@ async function testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt():
         nodePath: 'Surface/Lamp',
         newParentPath: 'Leg',
       });
-      assert.deepEqual(followedOf(moved), ['res://heir.tscn', 'res://room.tscn'], JSON.stringify(moved));
+      assert.deepEqual(
+        followedOf(moved),
+        ['res://heir.tscn', 'res://room.tscn', 'res://uid.tscn'],
+        JSON.stringify(moved),
+      );
       assert.equal(lampParent(at.fileOf('room.tscn')), 'Desk/Leg');
       assert.equal(lampParent(at.fileOf('heir.tscn')), 'Leg');
     },
@@ -96350,17 +96499,6 @@ async function testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt(): Pr
       assert.equal(lampParent(at.fileOf('room.tscn')), folds ? 'Desk/Surface' : 'Desk/Top');
     },
   );
-}
-
-/** A path in another case that names no file at all matches nothing, whichever file system. */
-async function testAMissingFileInAnotherCaseMatchesNothing(): Promise<void> {
-  const room = deskKin('Room', 'res://DESKS.tscn');
-  await withCaseFolding('a missing file in another case', { 'room.tscn': room }, async (at) => {
-    const renamed = await renameTheTop(at);
-    assert.deepEqual(followedOf(renamed), [], JSON.stringify(renamed));
-    assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
-    assert.equal(at.fileOf('room.tscn'), room);
-  });
 }
 
 /**
@@ -96388,26 +96526,80 @@ async function testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks():
 }
 
 /**
- * A scene naming desk.tscn by its uid beside a path in another case is followed on every file
- * system, since the engine loads a uid the project knows before the path written beside it.
+ * A reference to a scene that is not there, in a folder that is or is not, costs the disk nothing
+ * beyond the one answer that nothing exists, however many there are. A reference the disk joins to
+ * a file that is there costs one question about its stored spelling, and answers the file's own.
+ * The count is the number of paths the follower asked the disk the stored spelling of.
  */
-async function testAUidBesideAPathInAnotherCaseIsFollowedEverywhere(): Promise<void> {
-  const room = deskKin('Room').replace(
-    'type="PackedScene" path="res://desk.tscn"',
-    'type="PackedScene" uid="uid://cdeskcase01" path="res://DESK.tscn"',
-  );
-  await withCaseFolding(
-    'a uid beside a path in another case',
-    {
-      'desk.tscn': LINKED_DESK.replace('format=3', 'format=3 uid="uid://cdeskcase01"'),
-      'room.tscn': room,
-    },
-    async (at) => {
-      const renamed = await renameTheTop(at);
-      assert.deepEqual(followedOf(renamed), ['res://room.tscn'], JSON.stringify(renamed));
-      assert.equal(lampParent(at.fileOf('room.tscn')), 'Desk/Surface');
-    },
-  );
+function testReferencesToMissingScenesAskTheDiskNothing(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('missing scene reference regression skipped (Godot not found)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-missing-refs-'));
+  try {
+    const project = join(sandbox, 'project');
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    const filler = Object.fromEntries(
+      Array.from({ length: 200 }, (_unused, at) => [`filler/f${at}.tscn`, LINKED_DESK]),
+    );
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'desk.tscn': LINKED_DESK, ...filler });
+    const missing = Array.from({ length: 100 }, (_unused, at) => [
+      `res://ghost${at}.tscn`,
+      `res://gone/g${at}.tscn`,
+      `res://FILLER/ghost${at}.tscn`,
+    ]).flat();
+    const folds = existsSync(join(project, 'DESK.tscn'));
+    writeFileSync(
+      join(project, 'runner.gd'),
+      [
+        'extends SceneTree',
+        '',
+        'const GdhSceneKin = preload("res://addons/gdharness_editor/tools/scene_kin.gd")',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar scenes: GdhSceneKin.GdhScenes = GdhSceneKin.GdhScenes.new(PackedStringArray())',
+        `\tvar missing: Array[String] = ${JSON.stringify(missing)}`,
+        '\tvar kept: int = 0',
+        '\tfor given: String in missing:',
+        '\t\tif scenes.one(given) == given:',
+        '\t\t\tkept += 1',
+        '\tvar asked_for_missing: int = scenes.asked',
+        '\tvar joined: String = scenes.one("res://DESK.tscn")',
+        '\tvar upper_folder: String = scenes.one("res://FILLER/f1.tscn")',
+        '\tprint("MISSING " + JSON.stringify([kept, asked_for_missing, scenes.asked, joined, upper_folder]))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+      encoding: 'utf8',
+      timeout: 120000,
+    });
+    const output = `${run.stdout}\n${run.stderr}`;
+    const answered = /MISSING (\[.*\])/.exec(output)?.[1];
+    assert.ok(answered !== undefined, output);
+    assert.deepEqual(
+      JSON.parse(answered),
+      [
+        missing.length,
+        0,
+        folds ? 2 : 0,
+        folds ? 'res://desk.tscn' : 'res://DESK.tscn',
+        folds ? 'res://filler/f1.tscn' : 'res://FILLER/f1.tscn',
+      ],
+      output,
+    );
+  } finally {
+    sweep(sandbox);
+  }
 }
 
 /**
@@ -103989,11 +104181,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed,
   testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce,
   testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName,
+  testAMoveRewritesWhatTheFileSystemTakesForTheMovedFile,
+  testAFolderMoveRewritesAFolderSpeltInAnotherCase,
+  testAMoveLeavesAFileOnlyGodotsFoldJoins,
   testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
-  testAMissingFileInAnotherCaseMatchesNothing,
   testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks,
-  testAUidBesideAPathInAnotherCaseIsFollowedEverywhere,
+  testReferencesToMissingScenesAskTheDiskNothing,
   testAProjectGivenByItsShortNameFollowsLinkedScenesOnce,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,

@@ -668,7 +668,7 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
 }
 
 /** Whether two paths name one file or folder, by its identity on disk rather than its spelling. */
-function sameEntry(one: string, other: string): boolean {
+export function sameEntry(one: string, other: string): boolean {
   try {
     const first = statSync(one, { bigint: true });
     const second = statSync(other, { bigint: true });
