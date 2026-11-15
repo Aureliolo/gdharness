@@ -17,6 +17,7 @@ import {
   declaredIn,
   type Edit,
   type EditKind,
+  entryAt,
   fileOf,
   joinedByTheDisk,
   literalTargets,
@@ -528,6 +529,7 @@ function renamed(
       targets: literalTargets(texts, scripts),
       references: moves,
       resolve: reachedAt,
+      entry: entryAt,
     });
     plan = planMove(
       {

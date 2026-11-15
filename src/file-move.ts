@@ -29,6 +29,7 @@ import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
   declaredIn,
+  entryAt,
   joinedByTheDisk,
   literalTargets,
   type Mention,
@@ -363,6 +364,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     targets: literalTargets(texts, scripts),
     references,
     resolve: reachedAt,
+    entry: entryAt,
   });
   const placeOf = new Map(texts.map((file) => [file.path, file.realPath ?? file.path]));
   const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);

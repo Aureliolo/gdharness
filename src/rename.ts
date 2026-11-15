@@ -15,6 +15,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -1259,6 +1260,18 @@ export interface JoinArguments {
   readonly references: Map<string, string>;
   /** Where the entry at an absolute path really is, or null where nothing is: [function reachedAt]. */
   readonly resolve: (absolute: string) => string | null;
+  /** Which directory entry an absolute path names, a link itself rather than what it leads to: [function entryAt]. */
+  readonly entry: (absolute: string) => string | null;
+}
+
+/** The directory entry at [param absolute], a link not followed, as an id, or null where nothing is. */
+export function entryAt(absolute: string): string | null {
+  try {
+    const found = lstatSync(absolute, { bigint: true });
+    return `${found.dev}:${found.ino}`;
+  } catch {
+    return null;
+  }
 }
 
 /** Where the entry at [param absolute] really is, each link followed and each name as stored, or null. */
@@ -1268,6 +1281,26 @@ export function reachedAt(absolute: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether [param target] is [param moved] spelt another way, not a second route to the same file:
+ * each folder above the last name, and the name itself, is the same directory entry in both. A
+ * path through another link to the file reaches it too, and is a different path.
+ */
+function sameRoute(target: string, moved: string, entry: (path: string) => string | null): boolean {
+  const names = (path: string): string[] => path.slice('res://'.length).split('/').filter(Boolean);
+  const [wanted, own] = [names(target), names(moved)];
+  if (wanted.length !== own.length) {
+    return false;
+  }
+  return wanted.every((_name, at) => {
+    const last = at === wanted.length - 1;
+    const prefix = (path: string, parts: string[]): string =>
+      last ? path : `res://${parts.slice(0, at + 1).join('/')}`;
+    const there = entry(prefix(target, wanted));
+    return there !== null && there === entry(prefix(moved, own));
+  });
 }
 
 /**
@@ -1282,24 +1315,30 @@ export function reachedAt(absolute: string): string | null {
  */
 export function joinedByTheDisk(args: JoinArguments): Set<string> {
   const { targets, references, resolve } = args;
-  const reached = new Map<string, string | null>();
-  const reach = (path: string): string | null => {
-    if (!reached.has(path)) {
-      reached.set(path, resolve(`${args.projectPath}/${path.slice('res://'.length)}`));
-    }
-    return reached.get(path) ?? null;
+  const asked = (ask: (absolute: string) => string | null): ((path: string) => string | null) => {
+    const answers = new Map<string, string | null>();
+    return (path) => {
+      if (!answers.has(path)) {
+        answers.set(path, ask(`${args.projectPath}/${path.slice('res://'.length)}`));
+      }
+      return answers.get(path) ?? null;
+    };
   };
-  const moved = new Map<string, string>();
+  const reach = asked(resolve);
+  const entry = asked(args.entry);
+  const moved = new Map<string, { path: string; goesTo: string }[]>();
   for (const [path, goesTo] of references) {
     const at = reach(path);
-    if (at !== null && !moved.has(at)) {
-      moved.set(at, goesTo);
+    if (at !== null) {
+      moved.set(at, [...(moved.get(at) ?? []), { path, goesTo }]);
     }
   }
   const joined = new Set<string>();
   for (const target of targets) {
     const at = references.has(target) ? null : reach(target);
-    const goesTo = at === null ? undefined : moved.get(at);
+    const goesTo = (at === null ? [] : (moved.get(at) ?? [])).find((one) =>
+      sameRoute(target, one.path, entry),
+    )?.goesTo;
     if (goesTo !== undefined) {
       references.set(target, goesTo);
       joined.add(target);

@@ -89130,6 +89130,7 @@ function testAMoveLooksAtEachEntryOnce(): void {
   }));
   const references = new Map(names.map((path) => [path, path.replace('bühne', 'stage')]));
   let asked = 0;
+  let entries = 0;
   joinedByTheDisk({
     projectPath: '/project',
     targets: literalTargets(texts, scriptsOf(texts)),
@@ -89138,7 +89139,12 @@ function testAMoveLooksAtEachEntryOnce(): void {
       asked += 1;
       return absolute.toLowerCase();
     },
+    entry: (absolute) => {
+      entries += 1;
+      return absolute.toLowerCase();
+    },
   });
+  assert.ok(entries <= 300 + 300 + 2, `the entries were asked ${entries} times`);
   assert.equal(references.size, 600, 'each upper-case spelling joins the file it names');
   assert.ok(asked <= 300 + 300, `the disk was asked ${asked} times`);
 }
@@ -89242,16 +89248,7 @@ function testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches(): void {
   }
   const { project } = caseMoveProject(files, 'DESK.tscn');
   try {
-    const reaches = spellings.map((spelling) => {
-      try {
-        return (
-          realpathSync.native(join(project, spelling.slice('res://'.length))) ===
-          realpathSync.native(join(project, 'desk.tscn'))
-        );
-      } catch {
-        return false;
-      }
-    });
+    const reaches = spellings.map((spelling) => existsSync(join(project, spelling.slice('res://'.length))));
     movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
     for (const [at, spelling] of spellings.entries()) {
       const after = readFileSync(join(project, `user${at}.gd`), 'utf8');
