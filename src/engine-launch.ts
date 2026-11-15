@@ -30,6 +30,7 @@ import {
   spawnOnDesktop,
 } from './desktop.js';
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
+import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
 import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
@@ -406,12 +407,13 @@ export async function watchedEngine(
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
   holds?: (bytes: number) => void,
+  shares?: ShareHandoff,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   seedPipelineCache(user, launch.projectPath, launch.godotPath);
   try {
     return await startedUntilItRuns(
-      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds),
+      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds, shares),
       undefined,
       (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
     );
@@ -429,6 +431,7 @@ async function engineWatchedOnce(
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
   holds?: (bytes: number) => void,
+  shares?: ShareHandoff,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
@@ -484,11 +487,18 @@ async function engineWatchedOnce(
       carried: '',
       // The silence allowed for what the log shows running, read once for each size it reaches.
       allowed: { size: -1, seconds: silenceSeconds },
+      shares,
+      shareNumber: 0,
+      shareFrom: 0,
+      shareTail: Buffer.alloc(0),
+      deciding: null,
+      failure: undefined,
     };
     while (!finished.now) {
       await delay(LOOK_MS);
       await lookAtTheEngine(watch);
     }
+    await watch.deciding;
   } catch (error) {
     // Ended before the failure goes on, since nothing else holds a way to end it once this returns.
     stop();
@@ -500,6 +510,9 @@ async function engineWatchedOnce(
     if (pid !== undefined) {
       watching(pid, false);
     }
+  }
+  if (watch.failure !== undefined) {
+    throw watch.failure;
   }
   return await endOfTheEngine({
     started,
@@ -662,6 +675,18 @@ interface Watch {
   size: number;
   carried: string;
   allowed: { size: number; seconds: number };
+  /** The shares an engine that takes more than one is handed, when it does. */
+  readonly shares: ShareHandoff | undefined;
+  /** How many shares have ended, which is the number of the one running. */
+  shareNumber: number;
+  /** The byte of the log the running share's lines begin at. */
+  shareFrom: number;
+  /** The end of what was scanned, in case a share's marker is split between two reads. */
+  shareTail: Buffer;
+  /** Settles once the run has answered with the next share, while the engine waits for it. */
+  deciding: Promise<void> | null;
+  /** Why handing over a share failed, thrown once the engine has ended. */
+  failure: Error | undefined;
 }
 
 /** One look at the engine: its pid, what it holds, whether it is past a limit and what the log has gained. */
@@ -686,11 +711,16 @@ async function lookAtTheEngine(watch: Watch): Promise<void> {
   // within it.
   // The hidden desktop's helper exits a moment after the engine it started.
   const gone = watch.finished.now || (watch.pid !== undefined && !alive(watch.pid));
-  endIfPastTheDeadline(watch, gone, at);
+  endIfPastTheDeadline(watch, gone || watch.deciding !== null, at);
   const now = fstatSync(watch.reading).size;
   if (now > watch.size) {
     scanWhatTheLogGained(watch, now, at);
-  } else if (watch.outcome.ended === null && !gone && watch.quiet.past(watch.silenceSeconds, at) !== null) {
+  } else if (
+    watch.outcome.ended === null &&
+    !gone &&
+    watch.deciding === null &&
+    watch.quiet.past(watch.silenceSeconds, at) !== null
+  ) {
     endIfSilent(watch, at);
   }
 }
@@ -701,7 +731,7 @@ function endIfPastTheDeadline(watch: Watch, gone: boolean, at: number): void {
   const deadline = watch.launch.deadlineSeconds;
   const over = deadline === null || gone ? null : watch.running.past(deadline, at);
   if (watch.outcome.ended === null && deadline !== null && over !== null) {
-    const stoppedIn = readRun(readLog(watch.log)).stoppedIn;
+    const stoppedIn = printedNow(watch).stoppedIn;
     watch.outcome.ended = `the engine ran past the ${String(deadline)} s deadline${countedBy(watch.running, over, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
     watch.started.stop();
   }
@@ -721,14 +751,82 @@ function scanWhatTheLogGained(watch: Watch, now: number, at: number): void {
       watch.started.stop();
     }
     watch.carried = scanned.slice(-AUTOLOAD_FAILED.length);
+    if (watch.shares !== undefined && watch.deciding === null) {
+      noticeShareEnd(watch, chunk.subarray(0, got), offset);
+    }
     offset += got;
   }
   watch.size = now;
   watch.quiet.restart(at);
-  if (watch.outcome.ended === null && watch.size > LOG_LIMIT_BYTES) {
+  if (watch.outcome.ended === null && watch.size - watch.shareFrom > LOG_LIMIT_BYTES) {
     watch.outcome.ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
     watch.started.stop();
   }
+}
+
+/** What the engine has printed for the share it is running. */
+function printedNow(watch: Watch): RunPrinted {
+  return readRun(watch.shares === undefined ? readLog(watch.log) : shareText(watch.log, watch.shareFrom));
+}
+
+/**
+ * Looks in [param chunk], read from byte [param offset] of the log, for the line saying the running
+ * share ended, and hands the engine its next share once the line is whole.
+ */
+function noticeShareEnd(watch: Watch, chunk: Buffer, offset: number): void {
+  const marker = Buffer.from(shareMarker(watch.shareNumber));
+  const joined = Buffer.concat([watch.shareTail, chunk]);
+  const base = offset - watch.shareTail.length;
+  const found = joined.indexOf(marker);
+  const newline = found < 0 ? -1 : joined.indexOf(0x0a, found + marker.length);
+  if (newline < 0) {
+    watch.shareTail = joined.subarray(found < 0 ? Math.max(0, joined.length - marker.length + 1) : found);
+    return;
+  }
+  watch.shareTail = Buffer.alloc(0);
+  const code = Number.parseInt(joined.toString('utf8', found + marker.length, newline), 10);
+  handedTheNext(watch, base + newline + 1, code);
+}
+
+/**
+ * Asks the run for the share after the one that ended with [param code] and whose lines end at byte
+ * [param to], and writes it for the engine, which waits for it. The engine is not silent or late
+ * meanwhile, and the next share counts from the moment it is handed over.
+ */
+function handedTheNext(watch: Watch, to: number, code: number): void {
+  const { shares } = watch;
+  if (shares === undefined) {
+    return;
+  }
+  const number = watch.shareNumber;
+  watch.shareNumber += 1;
+  const end: EngineEnd = {
+    code,
+    signal: null,
+    ended: null,
+    ...(watch.peakBytes > 0 ? { peakBytes: watch.peakBytes } : {}),
+  };
+  const from = watch.shareFrom;
+  watch.deciding = shares
+    .ended({ number, from, to, end })
+    .then((next) => {
+      if (next !== null) {
+        watch.shareFrom = to;
+        watch.peakBytes = 0;
+      }
+      handedOver(shares.directory, number + 1, next?.args ?? null);
+    })
+    .catch((error: unknown) => {
+      watch.failure ??= error instanceof Error ? error : new Error(errorMessage(error));
+      handedOver(shares.directory, number + 1, null);
+    })
+    .finally(() => {
+      const at = nowSeconds();
+      watch.running.restart(at);
+      watch.quiet.restart(at);
+      watch.allowed = { size: -1, seconds: watch.silenceSeconds };
+      watch.deciding = null;
+    });
 }
 
 /** Ends the engine once it has printed nothing for as long as what it was running is allowed. */
@@ -739,14 +837,14 @@ function endIfSilent(watch: Watch, at: number): void {
       seconds:
         watch.silenceIn === undefined
           ? watch.silenceSeconds
-          : Math.max(watch.silenceSeconds, watch.silenceIn(readRun(readLog(watch.log)))),
+          : Math.max(watch.silenceSeconds, watch.silenceIn(printedNow(watch))),
     };
   }
   const silent = watch.quiet.past(watch.allowed.seconds, at);
   if (silent === null) {
     return;
   }
-  const { stoppedIn } = readRun(readLog(watch.log));
+  const { stoppedIn } = printedNow(watch);
   const { helper } = watch.started;
   // A helper that never wrote the pid never started the engine, which is a start that hung.
   const unstarted =

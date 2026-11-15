@@ -45,6 +45,7 @@ import {
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import type { EngineRun } from './engine-run.js';
+import { SHARES_IN, type ShareEnded, type ShareNext, shareText } from './engine-shares.js';
 import {
   EngineSlots,
   FollowedLanes,
@@ -189,7 +190,10 @@ export interface RunResult {
     /** When it started, in seconds after the command did, once it had a slot. */
     readonly startedAfter: number;
     readonly seconds: number;
-    /** From its start until gdUnit4 opened its session, or null when it never did. */
+    /**
+     * From its start until gdUnit4 opened its session, or null when it never did or ran in an engine
+     * started for an earlier share.
+     */
     readonly startSeconds: number | null;
     /** The part of [member startSeconds] spent compiling its suites together. */
     readonly compiledSeconds: number | null;
@@ -1182,7 +1186,7 @@ async function ranEngines(
           lanes.length,
           taken,
           times,
-          (plan, index, lock, holds) => runEngine(launch, plan, index, times, '', lock, holds),
+          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, '', lock, holds, reuse),
           handed,
           memory,
           follower === null
@@ -2050,6 +2054,12 @@ async function runLane(
  * the run is raised to, up to its ceiling, asking again until every share is handed out. A lane the
  * lanes file tells to stop reads the file again after each of its waits and before it draws, and gives
  * its slot back to the machine.
+ *
+ * An engine that finishes its share while shares remain is handed the next through [param run]'s
+ * reuse, in the slot its lane holds, so a share after the first pays no engine start. Before that
+ * draw a lane asks the lanes file and the memory gate exactly as it does before a draw for a new
+ * engine, and an engine told to stop exits, after which its lane parks as usual. Each share has its
+ * own admission, result and peak.
  */
 export async function runShares<
   T extends {
@@ -2063,7 +2073,13 @@ export async function runShares<
   lanes: number,
   taken: readonly string[],
   times: SuiteTimes,
-  run: (plan: EnginePlan, index: number, lock: string, holds?: (bytes: number) => void) => Promise<T>,
+  run: (
+    plan: EnginePlan,
+    index: number,
+    lock: string,
+    holds?: (bytes: number) => void,
+    reuse?: ShareReuse<T>,
+  ) => Promise<T>,
   handed?: HandedSlot,
   memory?: MemoryGate,
   raised?: Pick<FollowedLanes, 'ceiling' | 'past'> & Partial<Pick<FollowedLanes, 'told' | 'untilTold'>>,
@@ -2178,9 +2194,17 @@ export async function runShares<
       return null;
     }
     const { lock, admitted } = waited;
+    const drawn = draw(at);
+    if (drawn === null) {
+      admitted?.ended();
+      return null;
+    }
+    return { lock, admitted, ...drawn };
+  };
+  /** Draws the share for lane [param at], numbering its engine, or answers null once every share is handed out. */
+  const draw = (at: number): { readonly plan: EnginePlan; readonly index: number } | null => {
     const plan = shares.next(at);
     if (plan === null) {
-      admitted?.ended();
       return null;
     }
     if (empty()) {
@@ -2188,25 +2212,51 @@ export async function runShares<
     }
     const index = engines;
     engines += 1;
-    return { lock, admitted, plan, index };
+    return { plan, index };
   };
-  /** Runs a drawn share, ending its admission once it is over. */
-  const runDrawn = async (drawn: {
-    readonly lock: string;
-    readonly admitted: Admitted | undefined;
-    readonly plan: EnginePlan;
-    readonly index: number;
-  }): Promise<T> => {
-    try {
-      const ran = await run(drawn.plan, drawn.index, drawn.lock, drawn.admitted?.holds);
-      // What the engine took to start is what the shares after it are sized by.
-      const started = ran.printed?.started?.seconds;
+  /**
+   * Runs a drawn share in the lane's engine, which takes the shares after it that the lane draws when
+   * no memory gate holds the run. Its admission ends as its engine does, and the results come in the
+   * order the shares ran.
+   */
+  const runDrawn = async (
+    first: {
+      readonly lock: string;
+      readonly admitted: Admitted | undefined;
+      readonly plan: EnginePlan;
+      readonly index: number;
+    },
+    at: number,
+  ): Promise<T[]> => {
+    const ran: T[] = [];
+    // What each engine took to start is what the shares after it are sized by. A share run in an
+    // engine already started has no start of its own.
+    const noted = (one: T): void => {
+      const started = one.printed?.started?.seconds;
       if (started !== undefined) {
         shares.noteStart(started);
       }
+      ran.push(one);
+    };
+    const reuse: ShareReuse<T> = {
+      next: async () => {
+        if (empty() || (await fallenPast(at))) {
+          return null;
+        }
+        return draw(at);
+      },
+      done: noted,
+    };
+    try {
+      // A windowed engine starts with the display flags of a windowed share, which no headless share
+      // may run under, so it ends after its share and a headless engine follows it in the same slot.
+      // A run held by memory admits each engine for the one share it is dealt, so each share has an
+      // engine of its own.
+      const reusable = first.plan.windowed || memory !== undefined ? undefined : reuse;
+      noted(await run(first.plan, first.index, first.lock, first.admitted?.holds, reusable));
       return ran;
     } finally {
-      drawn.admitted?.ended();
+      first.admitted?.ended();
     }
   };
   const lane = async (at: number): Promise<T[]> => {
@@ -2218,7 +2268,7 @@ export async function runShares<
         if (drawn === null) {
           break;
         }
-        ran.push(await runDrawn(drawn));
+        ran.push(...(await runDrawn(drawn, at)));
       }
       return ran;
     } finally {
@@ -2315,27 +2365,9 @@ function displayFlags(launch: Launch, plan: EnginePlan): string[] {
   ];
 }
 
-/** The arguments an engine running [param plan] in [param directory] starts with. */
-function engineArguments(launch: Launch, plan: EnginePlan, directory: string, files: EngineFiles): string[] {
+/** What follows `--` on the command line of an engine running [param plan] with [param files]. */
+function shareArguments(plan: EnginePlan, files: EngineFiles): string[] {
   return [
-    ...displayFlags(launch, plan),
-    '--audio-driver',
-    'Dummy',
-    ...(plan.accessible ? ['--accessibility', 'always'] : []),
-    '--path',
-    launch.projectPath,
-    ...(launch.verbose ? ['--verbose'] : []),
-    '-s',
-    shippedListedRunner(),
-    ...(plan.windowed ? [] : ['--ignoreHeadlessMode']),
-    '-c',
-    // Named from res://, since gdUnit4 reads a path starting with a slash as one under res://: an
-    // absolute path on Linux or macOS would put the reports in a tree of their own in the project.
-    '-rd',
-    `res://${relative(launch.projectPath, join(directory, 'reports')).split(sep).join('/')}`,
-    '-rc',
-    '1',
-    '--',
     // The engine keeps --accessibility to itself, so the runner is told to ask for the tree.
     ...(plan.accessible ? ['--ask-for-the-tree'] : []),
     '--suites-in',
@@ -2355,6 +2387,41 @@ function engineArguments(launch: Launch, plan: EnginePlan, directory: string, fi
 }
 
 /**
+ * The arguments an engine running [param plan] in [param directory] starts with, naming
+ * [param sharesIn] when it is to take more shares after this one.
+ */
+function engineArguments(
+  launch: Launch,
+  plan: EnginePlan,
+  directory: string,
+  files: EngineFiles,
+  sharesIn?: string,
+): string[] {
+  return [
+    ...displayFlags(launch, plan),
+    '--audio-driver',
+    'Dummy',
+    ...(plan.accessible ? ['--accessibility', 'always'] : []),
+    '--path',
+    launch.projectPath,
+    ...(launch.verbose ? ['--verbose'] : []),
+    '-s',
+    shippedListedRunner(),
+    ...(plan.windowed ? [] : ['--ignoreHeadlessMode']),
+    '-c',
+    // Named from res://, since gdUnit4 reads a path starting with a slash as one under res://: an
+    // absolute path on Linux or macOS would put the reports in a tree of their own in the project.
+    '-rd',
+    `res://${relative(launch.projectPath, join(directory, 'reports')).split(sep).join('/')}`,
+    '-rc',
+    '1',
+    '--',
+    ...shareArguments(plan, files),
+    ...(sharesIn === undefined ? [] : [SHARES_IN, sharesIn]),
+  ];
+}
+
+/**
  * Runs [param plan] in an engine of its own, in the slot [param slot] when its lane holds one and
  * otherwise once a slot is free, and judges what it printed. [param holds] is told each reading of
  * what the engine holds.
@@ -2367,16 +2434,31 @@ async function runEngine(
   again = '',
   slot: string | null = null,
   holds?: (bytes: number) => void,
+  reuse?: ShareReuse<EngineRan>,
 ): Promise<EngineRan> {
   const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
   mkdirSync(join(directory, 'user'), { recursive: true });
+  const sharesIn = reuse === undefined ? undefined : join(directory, 'shares');
+  if (sharesIn !== undefined) {
+    mkdirSync(sharesIn, { recursive: true });
+  }
   const files = writtenEngineFiles(plan, directory);
-  const args = engineArguments(launch, plan, directory, files);
-  const reached = files.reached;
-  const expectedFile = files.expected;
-  const log = join(directory, 'engine.log');
+  const args = engineArguments(launch, plan, directory, files, sharesIn);
+  const log = join(directory, reuse === undefined ? 'engine.log' : 'process.log');
   const lock = slot ?? (await launch.slots.take());
-  const began = Date.now();
+  const reports = join(directory, 'reports');
+  const running = {
+    share: {
+      plan,
+      index,
+      directory,
+      files,
+      reports,
+      reportsBefore: new Map<string, string>(),
+      began: Date.now(),
+      from: 0,
+    },
+  };
   let end: EngineEnd;
   try {
     end = await watchedEngine(
@@ -2388,34 +2470,138 @@ async function runEngine(
       launch.silenceFloorSeconds,
       (printed) => silenceWhile(printed.running, times, launch.silenceFloorSeconds),
       holds,
+      reuse === undefined || sharesIn === undefined
+        ? undefined
+        : {
+            directory: sharesIn,
+            ended: (ended) => handedOn(launch, reuse, running, log, ended),
+          },
     );
   } finally {
     if (slot === null) {
       launch.slots.release(lock);
     }
   }
-  const printed = readRun(readLog(log));
+  return judgedShare(launch, running.share, log, end, again);
+}
+
+/** One share of suites as an engine runs it: where its files are and when it began. */
+interface ShareRun {
+  readonly plan: EnginePlan;
+  readonly index: number;
+  readonly directory: string;
+  readonly files: EngineFiles;
+  /** The folder the engine's gdUnit4 reports go to, which is the first share's. */
+  readonly reports: string;
+  /** The files in it when the share began, with their size and time of change: earlier shares' own. */
+  readonly reportsBefore: ReadonlyMap<string, string>;
+  /** When it began, in milliseconds since the epoch. */
+  readonly began: number;
+  /** The byte of the engine's log its lines begin at. */
+  readonly from: number;
+}
+
+/** The share a lane draws for an engine that has finished one. */
+interface DrawnShare {
+  readonly plan: EnginePlan;
+  readonly index: number;
+}
+
+/** What a lane gives an engine that runs more than one share. */
+export interface ShareReuse<T> {
+  /** Draws the share after the one that ended, or answers null when the engine is to exit. */
+  readonly next: () => Promise<DrawnShare | null>;
+  /** Told the result of each share that another follows, in the order they ran. */
+  readonly done: (ran: T) => void;
+}
+
+/**
+ * Judges the share that [param ended] closed, hands the engine the one [param reuse] draws after it,
+ * and answers what the engine is told to run. Answers null when no share follows, which leaves the
+ * share to be judged with the engine's own end.
+ */
+async function handedOn(
+  launch: Launch,
+  reuse: ShareReuse<EngineRan>,
+  running: { share: ShareRun },
+  log: string,
+  ended: ShareEnded,
+): Promise<ShareNext | null> {
+  const drawn = await reuse.next();
+  if (drawn === null) {
+    return null;
+  }
+  reuse.done(judgedShare(launch, running.share, log, ended.end, '', ended.to));
+  const directory = join(launch.runDirectory, `engine-${String(drawn.index)}`);
+  mkdirSync(directory, { recursive: true });
+  const files = writtenEngineFiles(drawn.plan, directory);
+  running.share = {
+    plan: drawn.plan,
+    index: drawn.index,
+    directory,
+    files,
+    reports: running.share.reports,
+    reportsBefore: reportFiles(running.share.reports),
+    began: Date.now(),
+    from: ended.to,
+  };
+  return { args: shareArguments(drawn.plan, files) };
+}
+
+/**
+ * The result of [param share], read from the lines [param log] holds for it up to byte [param to] of
+ * the engine's log, or to its end. A share cut out of a longer log has its lines written beside its
+ * files.
+ */
+function judgedShare(
+  launch: Launch,
+  share: ShareRun,
+  log: string,
+  end: EngineEnd,
+  again: string,
+  to?: number,
+): EngineRan {
+  const shareLog = join(share.directory, 'engine.log');
+  if (log !== shareLog) {
+    writeFileSync(shareLog, shareText(log, share.from, to));
+  }
+  const printed = readRun(readLog(shareLog));
   const assignment: EngineAssignment = {
-    suites: plan.suites,
-    expected: readExpected(expectedFile),
+    suites: share.plan.suites,
+    expected: readExpected(share.files.expected),
     selfTyped: launch.selfTyped,
     godotVersion: launch.godotVersion,
     failsOnPushErrors: launch.failsOnPushErrors,
   };
   const judged = judgeEngine(printed, assignment, end);
-  const written = reportsFault(join(directory, 'reports'));
+  const written = reportsFault(share.reports, share.reportsBefore);
   return {
-    index,
-    plan,
+    index: share.index,
+    plan: share.plan,
     printed,
     verdict: written === null ? judged : { ...judged, passed: false, faults: [...judged.faults, written] },
-    log,
-    began,
-    seconds: (Date.now() - began) / 1000,
+    log: shareLog,
+    began: share.began,
+    seconds: (Date.now() - share.began) / 1000,
     again: again !== '',
-    reached,
+    reached: share.files.reached,
     ...(end.peakBytes === undefined ? {} : { peakBytes: end.peakBytes }),
   };
+}
+
+/** The files under [param reports] by path inside it, sorted, with their size and time of change. */
+function reportFiles(reports: string): ReadonlyMap<string, string> {
+  const found = new Map<string, string>();
+  if (!existsSync(reports)) {
+    return found;
+  }
+  for (const file of readdirSync(reports, { recursive: true, encoding: 'utf8' }).toSorted()) {
+    const stat = statSync(join(reports, file));
+    if (stat.isFile()) {
+      found.set(file, `${String(stat.size)}:${String(stat.mtimeMs)}`);
+    }
+  }
+  return found;
 }
 
 /** How many of the files written into a report folder that was turned off are named. */
@@ -2427,12 +2613,10 @@ const REPORT_FILES_NAMED = 3;
  * file there means the gdUnit4 installed no longer reads that mark: every run then writes reports it
  * was told not to, and the hook the runner reads the registration of is no proof of it.
  */
-export function reportsFault(reports: string): string | null {
-  const files = existsSync(reports)
-    ? readdirSync(reports, { recursive: true, encoding: 'utf8' })
-        .filter((file) => statSync(join(reports, file)).isFile())
-        .toSorted()
-    : [];
+export function reportsFault(reports: string, known: ReadonlyMap<string, string> = new Map()): string | null {
+  const files = [...reportFiles(reports)]
+    .filter(([file, seen]) => known.get(file) !== seen)
+    .map(([file]) => file);
   if (files.length === 0) {
     return null;
   }
@@ -2631,7 +2815,7 @@ function engineRecordsOf(ran: readonly EngineRan[], startedAt: number, logs: Run
     startedAfter: (engine.began - startedAt) / 1000,
     seconds: engine.seconds,
     startSeconds: engine.printed.started?.seconds ?? null,
-    compiledSeconds: engine.printed.started?.compiledSeconds ?? null,
+    compiledSeconds: engine.printed.started?.compiledSeconds ?? engine.printed.reusedCompiledSeconds,
     dealt: engine.plan.cost,
     passed: engine.verdict.passed,
     windowed: engine.plan.windowed,
