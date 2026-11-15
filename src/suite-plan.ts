@@ -862,10 +862,11 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
   const windowed = units.filter((unit) => unit.windowed);
   const headless = units.filter((unit) => !unit.windowed).toSorted(slowestFirst);
   // The windowed units stay together, so for the count they are one unit as slow as all of them.
-  const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
+  // Summed in sorted order, since a float sum differs by order and a plan depends on its units alone.
+  const together = windowed.toSorted(slowestFirst).reduce((sum, unit) => sum + unit.cost, 0);
   // A headless engine following them in their lane starts afresh.
   const restart = windowed.length > 0 ? ENGINE_START_SECONDS : 0;
-  const total = units.reduce((sum, unit) => sum + unit.cost, 0);
+  const total = together + headless.reduce((sum, unit) => sum + unit.cost, 0);
   const slowest = Math.max(together, headless[0]?.cost ?? 0);
   const count = Math.max(
     1,
@@ -1164,7 +1165,7 @@ function planOf(
         (unit) => unit.suite === path && unit.cases[0] === func && unit.row?.rest === true,
       );
       shares[func] = rest
-        ? { besides: dealtOut.filter((row) => !mine.includes(row)) }
+        ? { besides: dealtOut.filter((row) => !mine.includes(row)).toSorted((a, b) => a - b) }
         : { only: mine.toSorted((a, b) => a - b) };
     }
     return shares;

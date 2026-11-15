@@ -1683,6 +1683,25 @@ function aPlanDependsOnItsUnitsAlone(): void {
           ),
           'in one engine the suites come cheapest total first, ties by code unit',
         );
+        const lanes = dealt(units, declared, most);
+        const loads = lanes.map(() => 0);
+        const expectedLanes = lanes.map((): string[] => []);
+        const dealing = units.toSorted(
+          (a, b) =>
+            b.cost - a.cost || byCodeUnit(a.suite, b.suite) || byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
+        );
+        for (const unit of dealing) {
+          const lightest = loads.indexOf(Math.min(...loads));
+          loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
+          expectedLanes[lightest]?.push(`${unit.suite}:${unit.cases[0] ?? ''}`);
+        }
+        assert.deepEqual(
+          lanes.map((plan) =>
+            plan.suites.flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)).toSorted(),
+          ),
+          expectedLanes.map((held) => held.toSorted()),
+          'units go slowest first to the lane with least, equal costs by path then case in code-unit order',
+        );
         assert.equal(
           one.reduce(
             (sum, plan) => sum + plan.suites.reduce((count, suite) => count + suite.cases.length, 0),

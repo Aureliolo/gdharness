@@ -104659,6 +104659,31 @@ function testAnEngineRunsTheCheapEndOfItsUnitsFirst(): void {
     ],
     'the first share holds the slowest, and each runs its cheaper suites first',
   );
+
+  // The windowed units' float sum picks the headless lanes, so it cannot depend on their input order.
+  const windowedUnits = [unit('w1', 45, true), unit('w2', 5, true), unit('w3', 0.02, true)];
+  const headlessUnits = [0.3, 0.4, 0.1, 55.019999999999996].map((cost, at) => unit(`h${String(at)}`, cost));
+  const lanesFor = (all: readonly Unit[]): string[][] =>
+    dealt(all, declaredOf(all), 3).map((plan) => [String(plan.lane), ...named(plan)]);
+  assert.deepEqual(
+    lanesFor([...windowedUnits.toReversed(), ...headlessUnits]),
+    lanesFor([...windowedUnits, ...headlessUnits]),
+    'a plan is the same whichever order the windowed units come in',
+  );
+
+  // The rows an engine leaves to the others are a set, listed by index whatever the input order.
+  const rowUnits = [1, 0, 3, 2].map((index) => ({
+    ...unit('rows', 10 - index * 3, false, ['test_m'], index),
+    row: { index, rest: index === 3 },
+  }));
+  const holdingTheRest = dealt(rowUnits, declaredOf(rowUnits), 3).flatMap((plan) =>
+    plan.suites.flatMap((suite) => (suite.rows?.['test_m'] ? [suite.rows['test_m']] : [])),
+  );
+  assert.deepEqual(
+    holdingTheRest.filter((share) => 'besides' in share),
+    [{ besides: [0, 1] }],
+    'the engine taking the last row lists the others sorted',
+  );
 }
 
 /**
