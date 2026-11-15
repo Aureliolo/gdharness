@@ -1181,178 +1181,64 @@ function relativeBase(file: ProjectText, offset: number): Literal['base'] {
   return CODE_OR_DATA.test(file.path) ? 'code' : 'file';
 }
 
-const STRING_START = /([$@]*)("+)/y;
-const CHARACTER = /'(?:[^'\\\n]|\\.)*'/y;
 const PLAIN_STRING = /"((?:[^"\\\n]|\\.)*)"/g;
+const HOLE = String.raw`\{(?:[^{}"]|"(?:[^"\\\n]|\\.)*")*\}`;
+/**
+ * What C# and shader code holds that decides where a string starts: a comment, then a raw string, a
+ * `$@`, `@$`, `$` or `@` string with its interpolation holes, a plain string and a character. A
+ * quote none of them ends is the rest of its line, which is code.
+ */
+const CODE_TOKEN = new RegExp(
+  [
+    String.raw`(?<comment>//[^\n]*|/\*[\s\S]*?\*/)`,
+    String.raw`\$*(?<fence>"{3,})[\s\S]*?\k<fence>`,
+    String.raw`(?:\$@|@\$)"(?:[^"{]|""|\{\{|${HOLE})*"`,
+    String.raw`\$"(?:[^"\\\n{]|\\.|\{\{|${HOLE})*"`,
+    '@"(?:[^"]|"")*"',
+    String.raw`"(?:[^"\\\n]|\\.)*"`,
+    String.raw`'(?:[^'\\\n]|\\.)*'`,
+    String.raw`[$@]*(?<rest>"[^\n]*)`,
+  ].join('|'),
+  'g',
+);
 
-/** A comment, string or character of C# or a shader: the strings in it and where it ends. */
-interface Token {
-  readonly end: number;
-  readonly literals: Literal[];
-}
-
-/** The strings of a comment, which are prose: only an absolute path in one is a reference. */
-function literalsInComment(text: string, start: number, end: number): Literal[] {
-  return [...text.slice(start, end).matchAll(PLAIN_STRING)].map((match) => ({
-    offset: start + match.index + 1,
-    value: match[1] ?? '',
-    base: null,
-  }));
-}
-
-/** Every `"..."` between [param from] and [param to], read as code with no comment in it. */
-function plainLiterals(file: ProjectText, from: number, to: number): Literal[] {
+/** Every `"..."` between [param from] and [param to]. In [param prose] it is no relative path. */
+function plainLiterals(file: ProjectText, from: number, to: number, prose = false): Literal[] {
   return [...file.text.slice(from, to).matchAll(PLAIN_STRING)].map((match) => {
     const offset = from + match.index + 1;
-    return { offset, value: match[1] ?? '', base: relativeBase(file, offset) };
+    return { offset, value: match[1] ?? '', base: prose ? null : relativeBase(file, offset) };
   });
 }
 
 /**
- * The strings of a C# or shader file, found by walking it so that a `//` or a `/*` inside a string
- * does not start a comment, and a quote inside a comment or a character does not start a string.
- * A construct the walk cannot follow makes the rest of its line code.
+ * The strings of a C# or shader file, found by tokenising it so that a `//` or a `/*` inside a
+ * string does not start a comment, and a quote inside a comment or a character does not start a
+ * string. A string in a comment is prose, and one in an interpolation hole is code.
  */
 function literalsOfCode(file: ProjectText): Literal[] {
-  const found: Literal[] = [];
-  let at = 0;
-  while (at < file.text.length) {
-    const token = tokenAt(file, at);
-    found.push(...(token?.literals ?? []));
-    at = token === null ? at + 1 : token.end;
-  }
-  return found;
-}
-
-function stickyMatch(pattern: RegExp, text: string, from: number): RegExpExecArray | null {
-  pattern.lastIndex = from;
-  return pattern.exec(text);
-}
-
-/** The rest of the line at [param at], read as code. */
-function restOfLine(file: ProjectText, at: number): Token {
-  const lineEnd = file.text.indexOf('\n', at);
-  const end = lineEnd < 0 ? file.text.length : lineEnd;
-  return { end, literals: plainLiterals(file, at, end) };
-}
-
-/** The token starting at [param at], or null where none does. */
-function tokenAt(file: ProjectText, at: number): Token | null {
-  const { text } = file;
-  if (text.startsWith('//', at)) {
-    const lineEnd = text.indexOf('\n', at);
-    const end = lineEnd < 0 ? text.length : lineEnd;
-    return { end, literals: literalsInComment(text, at, end) };
-  }
-  if (text.startsWith('/*', at)) {
-    const closeAt = text.indexOf('*/', at + 2);
-    return closeAt < 0
-      ? restOfLine(file, at)
-      : { end: closeAt, literals: literalsInComment(text, at, closeAt) };
-  }
-  const start = stickyMatch(STRING_START, text, at);
-  if (start !== null) {
-    return (
-      stringAt(file, at + start[0].length, start[1] ?? '', (start[2] ?? '').length) ?? restOfLine(file, at)
-    );
-  }
-  const character = text[at] === "'" ? stickyMatch(CHARACTER, text, at) : null;
-  return character === null ? null : { end: at + character[0].length, literals: [] };
-}
-
-/**
- * The string whose opening quotes end at [param bodyAt], or null where it has no end the walk can
- * find. [param prefix] is its `$` and `@` and [param quotes] how many quotes open it.
- */
-function stringAt(file: ProjectText, bodyAt: number, prefix: string, quotes: number): Token | null {
-  if (quotes === 2) {
-    return { end: bodyAt, literals: [] };
-  }
-  if (quotes > 2) {
-    const closeAt = file.text.indexOf('"'.repeat(quotes), bodyAt);
-    return closeAt < 0 ? null : stringEnding(file, bodyAt, closeAt, closeAt + quotes, []);
-  }
-  const verbatim = prefix.includes('@');
-  const interpolated = prefix.includes('$');
-  const { text } = file;
-  const inHoles: Literal[] = [];
-  let at = bodyAt;
-  while (at < text.length) {
-    const ch = text[at];
-    if (ch === '"' && !(verbatim && text[at + 1] === '"')) {
-      return stringEnding(file, bodyAt, at, at + 1, inHoles);
+  return [...file.text.matchAll(CODE_TOKEN)].flatMap((match) => {
+    const token = match[0];
+    const end = match.index + token.length;
+    if (match.groups?.['comment'] !== undefined) {
+      return plainLiterals(file, match.index, end, true);
     }
-    if (ch === '\n' && !verbatim) {
-      return null;
+    if (match.groups?.['rest'] !== undefined) {
+      return plainLiterals(file, match.index, end);
     }
-    const next = stepInString(file, at, verbatim, interpolated, inHoles);
-    if (next === null) {
-      return null;
+    if (token.startsWith("'")) {
+      return [];
     }
-    at = next;
-  }
-  return null;
-}
-
-/** Where a string goes on from [param at], past an interpolation hole whole, or null where the hole has no end. */
-function stepInString(
-  file: ProjectText,
-  at: number,
-  verbatim: boolean,
-  interpolated: boolean,
-  inHoles: Literal[],
-): number | null {
-  const { text } = file;
-  if (interpolated && text[at] === '{' && text[at + 1] !== '{') {
-    const hole = holeAt(file, at + 1);
-    inHoles.push(...(hole?.literals ?? []));
-    return hole?.end ?? null;
-  }
-  return at + stepOf(text[at], verbatim, interpolated);
-}
-
-/** How far a string goes on past [param ch]: two for an escape, a doubled quote or a doubled brace. */
-function stepOf(ch: string | undefined, verbatim: boolean, interpolated: boolean): number {
-  if (ch === '\\') {
-    return verbatim ? 1 : 2;
-  }
-  return (ch === '"' && verbatim) || (ch === '{' && interpolated) ? 2 : 1;
-}
-
-function stringEnding(
-  file: ProjectText,
-  bodyAt: number,
-  closeAt: number,
-  end: number,
-  inHoles: readonly Literal[],
-): Token {
-  const value = file.text.slice(bodyAt, closeAt);
-  return { end, literals: [{ offset: bodyAt, value, base: relativeBase(file, bodyAt) }, ...inHoles] };
-}
-
-/** An interpolation hole of a string, whose code may hold strings of its own, up to its closing brace. */
-function holeAt(file: ProjectText, from: number): Token | null {
-  const literals: Literal[] = [];
-  let depth = 1;
-  let at = from;
-  while (at < file.text.length) {
-    const token = tokenAt(file, at);
-    if (token !== null) {
-      literals.push(...token.literals);
-      at = token.end;
-      continue;
-    }
-    if (file.text[at] === '{') {
-      depth += 1;
-    } else if (file.text[at] === '}') {
-      depth -= 1;
-    }
-    at += 1;
-    if (depth === 0) {
-      return { end: at, literals };
-    }
-  }
-  return null;
+    const fence = match.groups?.['fence']?.length ?? 1;
+    const bodyAt = match.index + token.indexOf('"') + fence;
+    const body = file.text.slice(bodyAt, end - fence);
+    const interpolated = /^(?:\$|@\$)/.test(token);
+    const holes = interpolated
+      ? [...body.matchAll(new RegExp(HOLE, 'g'))].flatMap((hole) =>
+          plainLiterals(file, bodyAt + hole.index, bodyAt + hole.index + hole[0].length),
+        )
+      : [];
+    return [{ offset: bodyAt, value: body, base: relativeBase(file, bodyAt) }, ...holes];
+  });
 }
 
 /** Every string literal of [param file], with where its contents start. */
