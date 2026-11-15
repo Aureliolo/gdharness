@@ -62379,6 +62379,34 @@ async function testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation()
   assert.deepEqual(told, [], 'and nothing is said');
 }
 
+/** A reservation that appears after the run's first engine started holds none of the engines after it. */
+async function testALaterReservationHoldsNoEngineAfterTheFirst(): Promise<void> {
+  const owed = { bytes: 0 };
+  const told: string[] = [];
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(-18 * RESERVED_GIB),
+    5,
+    { owed: () => Promise.resolve(owed.bytes), say: (line) => told.push(line), limitMs: 60_000 },
+  );
+  const first = await gate.admit(new AbortController().signal, () => RESERVED_GIB);
+  first.ended();
+  owed.bytes = 30 * RESERVED_GIB;
+  const control = new AbortController();
+  const next = await Promise.race([
+    gate
+      .admit(control.signal, () => RESERVED_GIB)
+      .then(
+        () => 'started',
+        () => 'aborted',
+      ),
+    delay(1000).then(() => 'waited'),
+  ]);
+  control.abort();
+  assert.equal(next, 'started', 'the next engine starts at once');
+  assert.deepEqual(told, [], 'and nothing is said');
+}
+
 /** With nothing reserved the first engine starts at once and the memory is not read. */
 async function testTheFirstEngineStartsAtOnceWithNothingReserved(): Promise<void> {
   let reads = 0;
@@ -104344,6 +104372,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMarkPathSpeltDifferentlyStillMatches,
   testTheFirstEngineWaitsOnceForTheWholeRun,
   testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation,
+  testALaterReservationHoldsNoEngineAfterTheFirst,
   testABadSlotCountNeverStopsTheRoomBeingRead,
   testTheFirstEngineWaitsWhileReservedMemoryLeavesNoRoom,
   testTheFirstEngineStartsOnceTheReservationIsGone,
