@@ -1148,15 +1148,14 @@ const FROM_THE_ROOT =
 const TEXT_IN_A_SCENE =
   /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
 /** The files of Godot's text formats, where a line starting with `;` is a comment. */
-const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|tres|cfg|gdextension)$/;
-const SCENE_OR_RESOURCE = /\.(?:tscn|tres)$/;
+const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|escn|tres|cfg|gdextension)$/;
+const SCENE_OR_RESOURCE = /\.(?:tscn|escn|tres)$/;
 
 /**
  * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
  * listed reads it against the file, the way a move always has.
  *
- * - `.import` files and export presets hold no relative path, nor do comment lines of Godot's
- *   text formats.
+ * - `.import` files hold no relative path, nor do comment lines of Godot's text formats.
  * - In a scene, the text and names it holds are no path.
  * - The argument of `load` and a `ResourceLoader` method is read from the root.
  */

@@ -89609,7 +89609,7 @@ function testExportPresetsFollowAndImportFilesTakeAbsolutePathsOnly(): void {
 /**
  * A quoted relative path in prose, a CMake list and a Markdown image follows, as it always has. A
  * `;` comment line of Godot's text formats holds no relative path, and the line that is no comment,
- * in the same file, still follows.
+ * in the same file, still follows. An `.escn` scene keeps its names and text as a `.tscn` does.
  */
 function testAProseFollowsAndACommentLineHoldsNoRelativePath(): void {
   const comment = '; "desk.tscn" and "../scenes/desk.tscn"';
@@ -89621,6 +89621,7 @@ function testAProseFollowsAndACommentLineHoldsNoRelativePath(): void {
     'scenes/CMakeLists.txt': 'target_sources(app PRIVATE "desk.tscn")\n',
     'scenes/README.md': '<img src="desk.tscn">\n',
     'scenes/s.tscn': `[gd_scene format=3]\n\n${comment}\n[ext_resource type="PackedScene" path="desk.tscn" id="1"]\n`,
+    'scenes/e.escn': `[gd_scene format=3]\n\n${comment}\n[ext_resource type="PackedScene" path="desk.tscn" id="1"]\n\n[node name="desk.tscn" type="Label" groups=["desk.tscn"]]\ntext = "desk.tscn"\n`,
     'scenes/plugin.cfg': `[plugin]\n\n  ${comment}\nscript="desk.tscn"\n`,
     'scenes/k.gdextension': `[icons]\n\n${comment}\nKit = "desk.tscn"\n`,
     'scenes/data.cfg': `[a]\n\n${comment}\nscene="desk.tscn"\n`,
@@ -89647,6 +89648,11 @@ function testAProseFollowsAndACommentLineHoldsNoRelativePath(): void {
     assert.equal(
       read('scenes/s.tscn'),
       files['scenes/s.tscn']?.replace('path="desk.tscn"', 'path="../stage/desk.tscn"'),
+    );
+    assert.equal(
+      read('scenes/e.escn'),
+      files['scenes/e.escn']?.replace('path="desk.tscn"', 'path="../stage/desk.tscn"'),
+      'an .escn keeps its comment, node name, group and text, and its ext_resource follows',
     );
     assert.equal(
       read('scenes/plugin.cfg'),
