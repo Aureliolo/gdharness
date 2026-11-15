@@ -97200,11 +97200,20 @@ function testReferencesToMissingScenesAskTheDiskNothing(): void {
     const filler = Object.fromEntries(
       Array.from({ length: 200 }, (_unused, at) => [`filler/f${at}.tscn`, LINKED_DESK]),
     );
-    writeTree(project, { 'project.godot': 'config_version=5\n', 'desk.tscn': LINKED_DESK, ...filler });
+    const art = Object.fromEntries(Array.from({ length: 100 }, (_unused, at) => [`art/a${at}.png`, 'png']));
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'desk.tscn': LINKED_DESK,
+      ...filler,
+      ...art,
+    });
+    // A file that is there but is no scene asks nothing either, in its own case or another.
     const missing = Array.from({ length: 100 }, (_unused, at) => [
       `res://ghost${at}.tscn`,
       `res://gone/g${at}.tscn`,
       `res://FILLER/ghost${at}.tscn`,
+      `res://art/a${at}.png`,
+      `res://ART/a${at}.PNG`,
     ]).flat();
     const folds = existsSync(join(project, 'DESK.tscn'));
     writeFileSync(
