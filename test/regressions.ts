@@ -103771,6 +103771,19 @@ async function testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten():
   ]);
   assert.deepEqual(order, [1, 2], 'an unkeyed queue serves one at a time too');
   assert.equal(unkeyed.waiting, 0);
+  let unhandled = 0;
+  const count = (): void => {
+    unhandled += 1;
+  };
+  process.on('unhandledRejection', count);
+  try {
+    const late = unkeyed.run(() => Promise.reject(new Error('late')));
+    await delay(20);
+    await assert.rejects(late, /late/);
+    assert.equal(unhandled, 0, 'a caller that attaches its handler late raises no unhandled rejection');
+  } finally {
+    process.off('unhandledRejection', count);
+  }
 }
 
 const TESTS: (() => void | Promise<void>)[] = [

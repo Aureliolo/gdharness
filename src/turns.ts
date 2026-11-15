@@ -10,16 +10,16 @@ export class Turns<Key = undefined> {
   /** Runs [param task] once every call made before it on [param key] has settled. */
   run<T>(task: () => Promise<T>, key?: Key): Promise<T> {
     const done = (this.tails.get(key) ?? Promise.resolve()).then(task);
-    const tail = done.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.tails.set(key, tail);
-    return done.finally(() => {
+    // The caller gets `done` itself, which the tail already handles: a caller that attaches its
+    // handler late raises no unhandled rejection, and it resumes before the next call starts.
+    const forget = (): void => {
       if (this.tails.get(key) === tail) {
         this.tails.delete(key);
       }
-    });
+    };
+    const tail = done.then(forget, forget);
+    this.tails.set(key, tail);
+    return done;
   }
 
   /** How many keys have a call waiting or running. */
