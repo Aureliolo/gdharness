@@ -286,7 +286,7 @@ import {
 import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
-import { applyRewrites } from './rename.js';
+import { applyRewrites, SCENE_OR_RESOURCE_EXTENSIONS } from './rename.js';
 import {
   type NameTaken,
   type RenameOutcome,
@@ -2810,7 +2810,7 @@ function rewriteBusNamed(
   const quoted = (name: string): string => name.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
   const giving = [`bus = &"${quoted(from)}"`, `bus = "${quoted(from)}"`];
   const rewritten: { file: string; lines: number[] }[] = [];
-  for (const file of projectFiles(projectPath, ['.tscn', '.tres'])) {
+  for (const file of projectFiles(projectPath, SCENE_OR_RESOURCE_EXTENSIONS)) {
     const absolute = join(projectPath, file);
     const lines = readFileSync(absolute, 'utf8').split('\n');
     const at: number[] = [];

@@ -83402,6 +83402,8 @@ async function declaredBusesRenamedAndResent(fixture: DeclaredValuesFixture): Pr
     join(project, 'crlf.tscn'),
     '[gd_scene format=3]\r\n\r\n[node name="Hand" type="AudioStreamPlayer"]\r\nbus = "Music"\r\n',
   );
+  const imported = '[gd_scene format=3]\n\n[node name="Hand" type="AudioStreamPlayer3D"]\nbus = "Music"\n';
+  writeFileSync(join(project, 'imported.escn'), imported);
   await settings({ op: 'add_audio_bus', busName: 'Drums', parentBusIndex: 1 });
   const renamed = parseTextContent(
     await settings({ op: 'rename_audio_bus', busName: 'Music', newBusName: 'Score' }),
@@ -83413,9 +83415,15 @@ async function declaredBusesRenamedAndResent(fixture: DeclaredValuesFixture): Pr
     get(renamed, 'rewritten'),
     [
       { file: 'res://crlf.tscn', lines: [4] },
+      { file: 'res://imported.escn', lines: [4] },
       { file: 'res://speaker.tscn', lines: [6] },
     ],
     JSON.stringify(renamed),
+  );
+  assert.equal(
+    readFileSync(join(project, 'imported.escn'), 'utf8'),
+    imported.replace('bus = "Music"', 'bus = &"Score"'),
+    'an .escn names its bus too',
   );
   assert.equal(
     readFileSync(join(project, 'crlf.tscn'), 'utf8'),
@@ -87876,11 +87884,19 @@ async function testAnEscnFollowsAClassAndAVarRename(): Promise<void> {
     applyRewrites(outcome.rewrites);
     return outcome.report;
   };
-  const project = renameProjectWith({ 'models/scene.escn': ESCN_SCENE, 'models/res.escn': ESCN_RESOURCE });
+  const project = renameProjectWith({ 'models/scene.escn': ESCN_SCENE, 'models/res.tres': ESCN_RESOURCE });
   try {
     const classReport = await rename(project, 'Told', 'Phrasing');
-    const resource = readFileSync(join(project, 'models/res.escn'), 'utf8');
-    assert.match(resource, /script_class="Phrasing"/, 'the class an .escn resource records follows');
+    assert.equal(
+      readFileSync(join(project, 'models/res.tres'), 'utf8'),
+      ESCN_RESOURCE.replace('script_class="Told"', 'script_class="Phrasing"'),
+      'the class a resource records follows',
+    );
+    assert.equal(
+      readFileSync(join(project, 'models/scene.escn'), 'utf8'),
+      ESCN_SCENE,
+      'a class rename leaves the .escn as it was',
+    );
     assert.ok(
       renameReadings(classReport).left.includes(
         `res://models/scene.escn:${ESCN_SCENE.split('\n').findIndex((line) => line.includes('name="Told"')) + 1}:scene`,
@@ -87888,10 +87904,16 @@ async function testAnEscnFollowsAClassAndAVarRename(): Promise<void> {
       `a mention in an .escn reads scene: ${JSON.stringify(get(classReport, 'leftAlone'))}`,
     );
     await rename(project, 'level', 'power');
-    const scene = readFileSync(join(project, 'models/scene.escn'), 'utf8');
-    assert.match(scene, /^power = 8$/m, 'a stored property of a sub-resource follows');
-    assert.match(scene, /^power = 9$/m, 'a stored property of a node follows');
-    assert.doesNotMatch(scene, /level/, scene);
+    assert.equal(
+      readFileSync(join(project, 'models/scene.escn'), 'utf8'),
+      ESCN_SCENE.replaceAll('level = ', 'power = '),
+      'a stored property of a sub-resource and of a node follows',
+    );
+    assert.equal(
+      readFileSync(join(project, 'models/res.tres'), 'utf8'),
+      ESCN_RESOURCE.replace('script_class="Told"', 'script_class="Phrasing"'),
+      'a resource with no such property is left as it was',
+    );
     const probe = [
       'extends SceneTree',
       '',

@@ -1150,7 +1150,11 @@ const TEXT_IN_A_SCENE =
 /** The files of Godot's text formats, where a line starting with `;` is a comment. */
 const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|escn|tres|cfg|gdextension)$/;
 /** Godot's text scene and resource files. */
-export const SCENE_OR_RESOURCE = /\.(?:tscn|escn|tres)$/i;
+export const SCENE_OR_RESOURCE_EXTENSIONS = ['.tscn', '.escn', '.tres'] as const;
+const SCENE_OR_RESOURCE = new RegExp(
+  `(?:${SCENE_OR_RESOURCE_EXTENSIONS.join('|').replaceAll('.', '\\.')})$`,
+  'i',
+);
 
 /**
  * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
