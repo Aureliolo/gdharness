@@ -62522,6 +62522,15 @@ async function testTheRoomEveryReaderGetsIsLessTheReservations(): Promise<void> 
     assert.match(room.said, /^of memory (free|left to commit) after 1048576\.0 GB reserved$/);
     const reserved = memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB);
     assert.equal(reserved.said, 'of memory free after 30.0 GB reserved');
+    assert.deepEqual(
+      memoryRoomOf(12 * RESERVED_GIB, 'the commit query failed', 30 * RESERVED_GIB),
+      {
+        bytes: -18 * RESERVED_GIB,
+        said: 'of memory free after 30.0 GB reserved',
+        unread: 'the commit query failed',
+      },
+      'a commit left unread still loses the reservation from the free memory',
+    );
     assert.deepEqual(roomFor(2, 16, reserved.bytes, reserved.said), {
       engines: 1,
       held: 'the machine has 0.0 GB of memory free after 30.0 GB reserved, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
@@ -62533,6 +62542,47 @@ async function testTheRoomEveryReaderGetsIsLessTheReservations(): Promise<void> 
       process.env[SLOTS_VARIABLE] = before;
     }
     fixture.close();
+  }
+}
+
+/** A test run held by memory waits for what another program reserved before its first engine, then goes on. */
+async function testATestRunWaitsForReservedMemoryBeforeItsFirstEngine(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
+  const fixture = reservationFixture();
+  let running: ReturnType<typeof spawnHidden> | undefined;
+  try {
+    fixture.mark('other.json', { ...(await fixture.holder()), owed: 2 ** 50 });
+    const suites = ['tests/ok_test.gd', 'tests/declared_test.gd'];
+    running = spawnHidden(process.execPath, ['build/cli.js', 'test', project, '--slots', slots, ...suites], {
+      env: { ...env, [SLOTS_VARIABLE]: fixture.directory },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let said = '';
+    for (const stream of [running.stdout, running.stderr]) {
+      stream?.setEncoding('utf8');
+      stream?.on('data', (chunk: string) => {
+        said += chunk;
+      });
+    }
+    const ended = exitOf(running);
+    const until = Date.now() + 120_000;
+    while (!said.includes('Waiting for memory other work reserved') && Date.now() < until) {
+      await delay(250);
+    }
+    assert.match(said, /^Waiting for memory other work reserved: .* GB\.$/m, said);
+    assert.doesNotMatch(said, /^Passed: /m, 'the first engine has not started while the reservation stands');
+    fixture.close();
+    const code = await Promise.race([ended, delay(4 * ENGINE_CALL_TIMEOUT_MS).then(() => null)]);
+    assert.deepEqual(code, { code: 0, signal: null }, said);
+    assert.match(said, /^Passed: 4 cases in 2 suites across \d engines?, /m, said);
+  } finally {
+    running?.kill();
+    fixture.close();
+    sweep(project, slots, checkouts);
   }
 }
 
@@ -107583,6 +107633,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheFirstEngineStartsAtOnceWithNothingReserved,
   testReservationsAreReadFromTheMachineFolderNotThePool,
   testTheRoomEveryReaderGetsIsLessTheReservations,
+  testATestRunWaitsForReservedMemoryBeforeItsFirstEngine,
   testTheSlotSweepLeavesReservationsAlone,
   testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
