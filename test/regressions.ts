@@ -63491,7 +63491,9 @@ function sharedEngineRun(
       Object.fromEntries(
         Object.keys(suites).map((name) => [
           `res://tests/${name}_test.gd`,
-          { seconds: 40, cases: { test_it: 40 } },
+          // Seen to hold a quarter of a gigabyte, so a runner with little memory free still has room
+          // for both engines: a run memory holds starts an engine for every share.
+          { seconds: 40, cases: { test_it: 40 }, peak: 0.25 * 1024 ** 3 },
         ]),
       ),
     ),
@@ -63521,15 +63523,15 @@ function sharedEngineRun(
     },
   );
   const said = `${ran.stdout}${ran.stderr}`;
-  return {
-    said,
-    status: ran.status,
-    result: readRunResult(resultFile),
-    cleanup: () => {
-      rmSync(project, { recursive: true, force: true });
-      rmSync(slots, { recursive: true, force: true });
-    },
+  const cleanup = (): void => {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
   };
+  if (/^Memory had room for /m.test(said)) {
+    cleanup();
+    assert.fail(`the machine had too little memory free for the run these cases need: ${said}`);
+  }
+  return { said, status: ran.status, result: readRunResult(resultFile), cleanup };
 }
 
 /** With Godot, a run dealt shares over one slot starts one engine for three shares. */
