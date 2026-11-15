@@ -11,6 +11,7 @@ import { waitFromEnv } from './launch.js';
 import { isSameDirectory, notAGodotProject, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
+import { Turns } from './turns.js';
 
 /** What an editor serves the language server on when nothing has moved it. */
 export const DEFAULT_LSP_PORT = 6005;
@@ -168,7 +169,7 @@ export class GodotLSPClient {
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
   /** The last ask queued on each file, which the next one waits behind. See [withDocument]. */
-  private documentTurns = new Map<string, Promise<void>>();
+  private documentTurns = new Turns<string>();
 
   private readonly timeouts: LSPTimeouts;
   /** Whether the editor on the bridge says its language server is on this client's port. */
@@ -668,22 +669,7 @@ export class GodotLSPClient {
    */
   private async withDocument<T>(filePath: string, work: () => Promise<T>): Promise<T> {
     const key = diagnosticsKey(this.toFileUri(filePath));
-    const before = this.documentTurns.get(key) ?? Promise.resolve();
-    let done = (): void => {};
-    const mine = new Promise<void>((finished) => {
-      done = finished;
-    });
-    const turn = before.then(() => mine);
-    this.documentTurns.set(key, turn);
-    await before;
-    try {
-      return await work();
-    } finally {
-      done();
-      if (this.documentTurns.get(key) === turn) {
-        this.documentTurns.delete(key);
-      }
-    }
+    return await this.documentTurns.run(work, key);
   }
 
   async getDiagnostics(filePath: string, content: string): Promise<unknown[]> {
