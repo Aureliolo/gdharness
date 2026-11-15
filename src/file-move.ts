@@ -34,6 +34,7 @@ import {
   planMove,
   type Rewrite,
   rewritesOf,
+  SCENE_OR_RESOURCE,
   scriptsOf,
 } from './rename.js';
 import {
@@ -413,7 +414,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     .map(afterwards);
   const scenesChanged = rewrites
     .map((rewrite) => rewrite.path)
-    .filter((path) => /\.(tscn|tres)$/i.test(path))
+    .filter((path) => SCENE_OR_RESOURCE.test(path))
     .map(afterwards);
   const changed = changedReport(plan.edits, rewrites).map((entry) => ({
     ...entry,

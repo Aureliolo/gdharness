@@ -644,7 +644,7 @@ function classUseKind(
 /** The `script_class` a scene or resource file records for the class. */
 function planResourceClasses(plan: PlanBuilder, texts: readonly ProjectText[], oldName: string): void {
   for (const file of texts) {
-    if (!/\.(tscn|tres)$/.test(file.path)) {
+    if (!SCENE_OR_RESOURCE.test(file.path)) {
       continue;
     }
     for (const section of sectionsOf(file.text)) {
@@ -1061,7 +1061,7 @@ function planScenes(
     plan,
   };
   for (const file of texts) {
-    if (!/\.(tscn|tres)$/.test(file.path) || !file.text.includes(oldName)) {
+    if (!SCENE_OR_RESOURCE.test(file.path) || !file.text.includes(oldName)) {
       continue;
     }
     if (kind === 'var') {
@@ -1149,7 +1149,8 @@ const TEXT_IN_A_SCENE =
   /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
 /** The files of Godot's text formats, where a line starting with `;` is a comment. */
 const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|escn|tres|cfg|gdextension)$/;
-const SCENE_OR_RESOURCE = /\.(?:tscn|escn|tres)$/;
+/** Godot's text scene and resource files. */
+export const SCENE_OR_RESOURCE = /\.(?:tscn|escn|tres)$/i;
 
 /**
  * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
@@ -1361,7 +1362,7 @@ function mentionKindAt(script: Script | undefined, file: string, offset: number)
 }
 
 function sceneOrText(file: string): 'scene' | 'text' {
-  return /\.(tscn|tres)$/.test(file) ? 'scene' : 'text';
+  return SCENE_OR_RESOURCE.test(file) ? 'scene' : 'text';
 }
 
 /**

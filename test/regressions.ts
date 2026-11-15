@@ -87823,6 +87823,107 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
   }
 }
 
+const ESCN_SCENE = [
+  '[gd_scene load_steps=3 format=3]',
+  '',
+  '[ext_resource type="Script" path="res://told.gd" id="1"]',
+  '[sub_resource type="Resource" id="Resource_1"]',
+  'script = ExtResource("1")',
+  'level = 8',
+  '',
+  '[node name="Told" type="Node3D"]',
+  'script = ExtResource("1")',
+  'level = 9',
+  '',
+].join('\n');
+
+const ESCN_RESOURCE = [
+  '[gd_resource type="Resource" script_class="Told" load_steps=2 format=3]',
+  '',
+  '[ext_resource type="Script" path="res://told.gd" id="1"]',
+  '',
+  '[resource]',
+  'script = ExtResource("1")',
+  '',
+].join('\n');
+
+/**
+ * An `.escn` is Godot's text scene format, so a class rename rewrites its `script_class` and a
+ * variable rename its stored property, and a mention of the name in it reads `scene`.
+ */
+async function testAnEscnFollowsAClassAndAVarRename(): Promise<void> {
+  const rename = async (
+    project: string,
+    symbol: string,
+    newName: string,
+  ): Promise<Record<string, unknown>> => {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol,
+        newName,
+        newScriptPath: null,
+      },
+      {
+        namesTaken: engineSaying(),
+        references: async (absolute, _text, position) =>
+          await Promise.resolve(symbol === 'level' ? [{ file: absolute, ...position }] : []),
+        definitions: async () => await Promise.resolve([]),
+      },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    applyRewrites(outcome.rewrites);
+    return outcome.report;
+  };
+  const project = renameProjectWith({ 'models/scene.escn': ESCN_SCENE, 'models/res.escn': ESCN_RESOURCE });
+  try {
+    const classReport = await rename(project, 'Told', 'Phrasing');
+    const resource = readFileSync(join(project, 'models/res.escn'), 'utf8');
+    assert.match(resource, /script_class="Phrasing"/, 'the class an .escn resource records follows');
+    assert.ok(
+      renameReadings(classReport).left.includes(
+        `res://models/scene.escn:${ESCN_SCENE.split('\n').findIndex((line) => line.includes('name="Told"')) + 1}:scene`,
+      ),
+      `a mention in an .escn reads scene: ${JSON.stringify(get(classReport, 'leftAlone'))}`,
+    );
+    await rename(project, 'level', 'power');
+    const scene = readFileSync(join(project, 'models/scene.escn'), 'utf8');
+    assert.match(scene, /^power = 8$/m, 'a stored property of a sub-resource follows');
+    assert.match(scene, /^power = 9$/m, 'a stored property of a node follows');
+    assert.doesNotMatch(scene, /level/, scene);
+    const probe = [
+      'extends SceneTree',
+      '',
+      'func _init() -> void:',
+      '\tvar node: Node = (load("res://models/scene.escn") as PackedScene).instantiate()',
+      '\tprint("ESCN_POWER=", node.get("power"))',
+      '\tquit()',
+      '',
+    ].join('\n');
+    writeFileSync(join(project, 'probe.gd'), probe);
+    const godot = process.env['GODOT_PATH'];
+    if (godot === undefined) {
+      assert.ok(
+        !process.env['GDHARNESS_REQUIRE_GODOT'],
+        'GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH is not',
+      );
+    } else {
+      spawnSyncHidden(godot, ['--headless', '--path', project, '--import'], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.match(
+        engineProbe(project) ?? '',
+        /ESCN_POWER=9/,
+        'the renamed property still loads from the .escn',
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /**
  * A class rename leaves a name that does not mean the class: a dictionary key written bare, a
  * member a script inherits, and a parameter. A call's argument and a list's entry are the class.
@@ -105970,6 +106071,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testAnEscnFollowsAClassAndAVarRename,
   testAClassRenameLeavesKeysInheritedMembersAndParameters,
   testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
