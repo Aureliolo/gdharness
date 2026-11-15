@@ -1718,7 +1718,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['move'],
         description:
-          'move: where it goes, inside the project, and for a file with the extension it has. A file goes with its .import and .uid, and a directory with everything in it. Every path naming what moved in a scene, resource, script, project.godot or other text file is rewritten in the style it was written in, res:// or relative, and so is every relative path inside a moved file. A relative word in prose or a comment, and the text of a label or the name of a resource, stay as written. A script string that names one file from the project root and another beside the script is answered under leftAlone. A string naming it any other way, such as the start of a path built at run time, is answered under leftAlone rather than changed, and so is a scene or resource saved as .scn or .res, which this cannot rewrite.',
+          'move: where it goes, inside the project, and for a file with the extension it has. A file goes with its .import and .uid, and a directory with everything in it. Every path naming what moved in a scene, resource, script, project.godot or other text file is rewritten in the style it was written in, res:// or relative, and so is every relative path inside a moved file. A relative word in prose (.md, .txt, .rst), in a GDScript comment or on a `;` comment line of a Godot text file, and the text of a label or the name of a resource, stay as written. A string naming it any other way, such as the start of a path built at run time, is answered under leftAlone rather than changed, and so is a scene or resource saved as .scn or .res, which this cannot rewrite.',
       },
       preview: {
         type: 'boolean',

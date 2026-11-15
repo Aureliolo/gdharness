@@ -1127,114 +1127,52 @@ interface MoveArguments {
   readonly exists: (path: string) => boolean;
 }
 
-/** A stretch of a file, by its `res://` path. */
-type Span = Pick<Edit, 'file' | 'offset' | 'length'>;
-
 interface Literal {
   readonly offset: number;
   readonly value: string;
   /**
-   * What a relative path here is read against: the file's folder, the project's root, or either,
-   * for a string that may feed a `preload` or a `load`. Null where it is no path.
+   * What a relative path here is read against: the file's folder or the project's root. Null where
+   * it is no path.
    */
-  readonly base: 'file' | 'root' | 'code' | null;
+  readonly base: 'file' | 'root' | null;
 }
 
-/** What precedes a string whose path the engine reads against the file's folder. */
-const AGAINST_THE_FILE = /(?:\b(?:preload|extends)\s*\(?\s*|@icon\s*\(\s*|^\s*#include\s+)$/;
-/** What precedes a string handed to `ResourceLoader`, which reads a relative path from the root. */
+/**
+ * What precedes a string handed to `ResourceLoader`, which reads a relative path from the root,
+ * with the type argument C# puts after the name.
+ */
 const FROM_THE_ROOT =
-  /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*\w+|\bGD\s*\.\s*Load(?:<[^>()]*>)?|\b(?:change_scene_to_file|ChangeSceneToFile))\s*\(\s*$/;
+  /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*\w+|\bGD\s*\.\s*Load|\b(?:change_scene_to_file|ChangeSceneToFile))\s*(?:<[^()]*>)?\s*\(\s*$/;
 /** What precedes a string in a scene that holds text or a name, which is never a path. */
 const TEXT_IN_A_SCENE =
   /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
-const NO_RELATIVE_PATH = /\.(?:md|txt|import)$|\/export_presets\.cfg$/;
-const CODE_OR_DATA = /\.(?:gd|cs|gdshader|gdshaderinc|json|csv)$|\/(?!plugin\.cfg$)[^/]*\.cfg$/;
+const NO_RELATIVE_PATH = /\.(?:md|txt|rst|import)$|\/export_presets\.cfg$/i;
+/** The files of Godot's text formats, where a line starting with `;` is a comment. */
+const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|tres|cfg|gdextension)$/;
 const SCENE_OR_RESOURCE = /\.(?:tscn|tres)$/;
 
 /**
- * What a relative string at [param offset] of [param file] is read against. Any kind of file nobody
+ * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
  * listed reads it against the file, the way a move always has.
  *
- * - Prose, `.import` files and export presets hold no relative path.
+ * - Prose, `.import` files, export presets and comment lines of Godot's text formats hold no
+ *   relative path.
  * - In a scene, the text and names it holds are no path.
- * - The direct argument of `preload`, `extends`, `@icon`, `#include` and `ext_resource` is read
- *   against the file, and the argument of `load` and a `ResourceLoader` method from the root.
- * - Any other string in code or data may be either.
+ * - The argument of `load` and a `ResourceLoader` method is read from the root.
  */
 function relativeBase(file: ProjectText, offset: number): Literal['base'] {
   // The opening quote sits just before the contents.
   const before = file.text.slice(file.text.lastIndexOf('\n', offset - 2) + 1, offset - 1);
-  if (NO_RELATIVE_PATH.test(file.path)) {
+  if (NO_RELATIVE_PATH.test(file.path) || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
     return null;
   }
-  if (SCENE_OR_RESOURCE.test(file.path)) {
-    return TEXT_IN_A_SCENE.test(before) ? null : 'file';
+  if (SCENE_OR_RESOURCE.test(file.path) && TEXT_IN_A_SCENE.test(before)) {
+    return null;
   }
-  if (AGAINST_THE_FILE.test(before)) {
-    return 'file';
-  }
-  if (FROM_THE_ROOT.test(before)) {
-    return 'root';
-  }
-  return CODE_OR_DATA.test(file.path) ? 'code' : 'file';
+  return FROM_THE_ROOT.test(before) ? 'root' : 'file';
 }
 
 const PLAIN_STRING = /"((?:[^"\\\n]|\\.)*)"/g;
-const HOLE = String.raw`\{(?:[^{}"]|"(?:[^"\\\n]|\\.)*")*\}`;
-/**
- * What C# and shader code holds that decides where a string starts: a comment, then a raw string, a
- * `$@`, `@$`, `$` or `@` string with its interpolation holes, a plain string and a character. Text
- * none of them matches is code, and a `/*` with no end is code too, never a comment.
- */
-const CODE_TOKEN = new RegExp(
-  [
-    String.raw`(?<comment>//[^\n]*|/\*[\s\S]*?\*/)`,
-    String.raw`\$*(?<fence>"{3,})[\s\S]*?\k<fence>`,
-    String.raw`(?:\$@|@\$)"(?:[^"{]|""|\{\{|${HOLE})*"`,
-    String.raw`\$"(?:[^"\\\n{]|\\.|\{\{|${HOLE})*"`,
-    '@"(?:[^"]|"")*"',
-    String.raw`"(?:[^"\\\n]|\\.)*"`,
-    String.raw`'(?:[^'\\\n]|\\.)*'`,
-  ].join('|'),
-  'g',
-);
-
-/** Every `"..."` between [param from] and [param to]. In [param prose] it is no relative path. */
-function plainLiterals(file: ProjectText, from: number, to: number, prose = false): Literal[] {
-  return [...file.text.slice(from, to).matchAll(PLAIN_STRING)].map((match) => {
-    const offset = from + match.index + 1;
-    return { offset, value: match[1] ?? '', base: prose ? null : relativeBase(file, offset) };
-  });
-}
-
-/**
- * The strings of a C# or shader file, found by tokenising it so that a `//` or a `/*` inside a
- * string does not start a comment, and a quote inside a comment or a character does not start a
- * string. A string in a comment is prose, and one in an interpolation hole is code.
- */
-function literalsOfCode(file: ProjectText): Literal[] {
-  return [...file.text.matchAll(CODE_TOKEN)].flatMap((match) => {
-    const token = match[0];
-    const end = match.index + token.length;
-    if (match.groups?.['comment'] !== undefined) {
-      return plainLiterals(file, match.index, end, true);
-    }
-    if (token.startsWith("'")) {
-      return [];
-    }
-    const fence = match.groups?.['fence']?.length ?? 1;
-    const bodyAt = match.index + token.indexOf('"') + fence;
-    const body = file.text.slice(bodyAt, end - fence);
-    const interpolated = /^(?:\$|@\$)/.test(token);
-    const holes = interpolated
-      ? [...body.matchAll(new RegExp(HOLE, 'g'))].flatMap((hole) =>
-          plainLiterals(file, bodyAt + hole.index, bodyAt + hole.index + hole[0].length),
-        )
-      : [];
-    return [{ offset: bodyAt, value: body, base: relativeBase(file, bodyAt) }, ...holes];
-  });
-}
 
 /** Every string literal of [param file], with where its contents start. */
 function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
@@ -1262,9 +1200,14 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
     }
     return found;
   }
-  return /\.(?:cs|gdshader|gdshaderinc)$/.test(file.path)
-    ? literalsOfCode(file)
-    : plainLiterals(file, 0, file.text.length);
+  for (const match of file.text.matchAll(PLAIN_STRING)) {
+    found.push({
+      offset: match.index + 1,
+      value: match[1] ?? '',
+      base: relativeBase(file, match.index + 1),
+    });
+  }
+  return found;
 }
 
 /**
@@ -1283,28 +1226,16 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
       edits.push({ file, offset, length, replacement, kind: 'path' });
     }
   };
-  const held: Span[] = [];
   for (const file of texts) {
     const script = scripts.get(file.path);
     const goesTo = moves.get(file.path);
     for (const literal of literalsOf(file, script)) {
-      const { edit, clash } = movedLiteral(literal, file.path, goesTo, moves, exists);
-      if (edit !== null) {
-        add(file.path, edit.offset, edit.length, edit.replacement);
-      }
-      if (clash !== null) {
-        const lines = script?.lines ?? new Lines(file.text);
-        held.push({ file: file.path, offset: literal.offset, length: literal.value.length });
-        mentions.push({
-          file: file.path,
-          line: lines.positionOf(literal.offset).line + 1,
-          kind: mentionKindAt(script, file.path, literal.offset),
-          text: lines.lineAt(literal.offset).trim(),
-          why: clash,
-        });
+      const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
+      if (moved !== null) {
+        add(file.path, moved.offset, moved.length, moved.replacement);
       }
     }
-    mentionNamedPaths(file, script, named, [...edits, ...held], mentions);
+    mentionNamedPaths(file, script, named, edits, mentions);
   }
   return {
     edits: edits.toSorted((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
@@ -1317,7 +1248,7 @@ function mentionNamedPaths(
   file: ProjectText,
   script: Script | undefined,
   named: readonly string[],
-  edits: readonly Span[],
+  edits: readonly Edit[],
   mentions: Mention[],
 ): void {
   const lines = script?.lines ?? new Lines(file.text);
@@ -1340,12 +1271,6 @@ function mentionNamedPaths(
   }
 }
 
-/** What a string literal needs: a path edit, or the reason it is left as written. */
-interface Moved {
-  readonly edit: { offset: number; length: number; replacement: string } | null;
-  readonly clash: string | null;
-}
-
 /** The path edit for a string literal of [param from], or null where it needs none. */
 function movedLiteral(
   literal: Literal,
@@ -1353,29 +1278,22 @@ function movedLiteral(
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
-): Moved {
+): { offset: number; length: number; replacement: string } | null {
   const autoload = literal.value.startsWith('*') ? '*' : '';
   const written = literal.value.slice(autoload.length);
   if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
-    return { edit: null, clash: null };
+    return null;
   }
-  const { replacement, clash } = movedPath(written, literal.base, from, goesTo, moves, exists);
+  const replacement = movedPath(written, literal.base, from, goesTo, moves, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
   if (replacement === null || replacement === written) {
-    return { edit: null, clash };
+    return null;
   }
-  return {
-    edit: { offset: literal.offset + autoload.length, length: written.length, replacement },
-    clash: null,
-  };
+  return { offset: literal.offset + autoload.length, length: written.length, replacement };
 }
 
-/**
- * [param written] as it must read once [param from] or the file it names has moved. A string with
- * two readings that name two existing files, one of which changes, has no answer, only the
- * reason.
- */
+/** [param written] as it must read once [param from] or the file it names has moved, or null. */
 function movedPath(
   written: string,
   base: Literal['base'],
@@ -1383,45 +1301,24 @@ function movedPath(
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
-): { replacement: string | null; clash: string | null } {
-  if (written.startsWith('res://')) {
-    return { replacement: moves.get(resolvedPath(written, from)) ?? null, clash: null };
-  }
-  if (base === null) {
-    return { replacement: null, clash: null };
-  }
-  const rooted = resolvedPath(written, 'res://_');
-  const beside = resolvedPath(written, from);
-  const names = (path: string): boolean => moves.has(path) || (EXTENSION.test(written) && exists(path));
-  const rootReads = base !== 'file' && names(rooted);
-  const besideReads = base !== 'root' && names(beside) && (base === 'file' || beside !== rooted);
-  const rootNow = rootReads ? (moves.get(rooted)?.slice('res://'.length) ?? null) : null;
-  const besideChange = besideReads ? readAgainstTheFile(written, beside, from, goesTo, moves) : null;
-  if (rootReads && besideReads) {
-    const why = `reads as ${rooted} from the project's root and as ${beside} against this file, two files, so it is left as written`;
-    return { replacement: null, clash: rootNow !== null || besideChange !== null ? why : null };
-  }
-  return { replacement: rootReads ? rootNow : besideChange, clash: null };
-}
-
-const EXTENSION = /\.[a-z0-9]+$/i;
-
-/**
- * [param written] as it must read against [param from]'s folder once the file it names, [param
- * beside], or [param from] has moved, or null where it reads the same.
- */
-function readAgainstTheFile(
-  written: string,
-  beside: string,
-  from: string,
-  goesTo: string | undefined,
-  moves: ReadonlyMap<string, string>,
 ): string | null {
-  if (!moves.has(beside) && goesTo === undefined) {
+  const isAbsolute = written.startsWith('res://');
+  if (!isAbsolute && base === null) {
     return null;
   }
-  const now = relativeTo(moves.get(beside) ?? beside, goesTo ?? from);
-  return now === written ? null : now;
+  const fromRoot = base === 'root' && !isAbsolute;
+  const target = resolvedPath(written, fromRoot ? 'res://_' : from);
+  const targetGoesTo = moves.get(target);
+  if (targetGoesTo !== undefined) {
+    if (fromRoot) {
+      return targetGoesTo.slice('res://'.length);
+    }
+    return isAbsolute ? targetGoesTo : relativeTo(targetGoesTo, goesTo ?? from);
+  }
+  if (goesTo !== undefined && !isAbsolute && !fromRoot && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
+    return relativeTo(target, goesTo);
+  }
+  return null;
 }
 
 function escapedForPattern(text: string): string {
@@ -1453,7 +1350,7 @@ function namedSpellings(path: string): { pattern: RegExp; why: string }[] {
 }
 
 /** Whether an edit of [param file] covers [param offset]. */
-function isEdited(edits: readonly Span[], file: string, offset: number): boolean {
+function isEdited(edits: readonly Edit[], file: string, offset: number): boolean {
   return edits.some((one) => one.file === file && one.offset <= offset && offset < one.offset + one.length);
 }
 
