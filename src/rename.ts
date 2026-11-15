@@ -1126,6 +1126,8 @@ interface MoveArguments {
   readonly scripts: ReadonlyMap<string, Script>;
   /** Each file that moves, by its `res://` path, to where it goes. */
   readonly moves: ReadonlyMap<string, string>;
+  /** The spellings of [field moves] the file system joined to a moved file, which a relative string never matches. */
+  readonly joined: ReadonlySet<string>;
   /**
    * The paths whose every other occurrence is answered as a mention: the file moved, or the
    * directory, whose path also opens strings that build a path inside it at run time.
@@ -1269,25 +1271,16 @@ export function reachedAt(absolute: string): string | null {
 }
 
 /**
- * Whether [param name] could be joined to a spelling in [param lowered], the ASCII-lowered
- * spellings it is compared against. Names of printable ASCII only are joined by ASCII case on every
- * file system, so those are checked against the set. A name with any other character, or any
- * spelling that has one, is left to the disk. This says yes where the disk says no, never no where
- * it would say yes.
- */
-function mightJoin(name: string, lowered: ReadonlySet<string>, otherNonAscii: boolean): boolean {
-  return otherNonAscii || !/^[ -~]*$/.test(name) || lowered.has(name.toLowerCase());
-}
-
-/**
  * Adds to [param args].references each res:// spelling in [param args].targets that reaches the
  * same directory entry as a moved file, as `res://DESK.tscn` reaches `res://desk.tscn` on Windows
- * and macOS, or a path through a link spelt in another case. The file system answers, since no fold
- * of the letters is its own: where it keeps two spellings apart, as Linux does, or where a name is
- * a hard link, which reaches its own entry, nothing is added. The spelling goes where the exact
- * path goes. Each distinct spelling is resolved once.
+ * and macOS, or a path through a link spelt in another case. The file system answers every
+ * spelling, since no fold of the letters is its own and the disk also joins a trailing slash, a
+ * stream suffix or a short name: where it keeps two spellings apart, as Linux does, or where a name
+ * is a hard link, which reaches its own entry, nothing is added. The spelling goes where the exact
+ * path goes. Each distinct spelling is resolved once. Returns the spellings added, which only an
+ * absolute string reads as a path.
  */
-export function joinedByTheDisk(args: JoinArguments): void {
+export function joinedByTheDisk(args: JoinArguments): Set<string> {
   const { targets, references, resolve } = args;
   const reached = new Map<string, string | null>();
   const reach = (path: string): string | null => {
@@ -1303,16 +1296,16 @@ export function joinedByTheDisk(args: JoinArguments): void {
       moved.set(at, goesTo);
     }
   }
-  const spellings = [...references.keys()];
-  const lowered = new Set(spellings.map((path) => path.toLowerCase()));
-  const nonAscii = spellings.some((path) => /[^ -~]/.test(path));
+  const joined = new Set<string>();
   for (const target of targets) {
-    const at = references.has(target) || !mightJoin(target, lowered, nonAscii) ? null : reach(target);
+    const at = references.has(target) ? null : reach(target);
     const goesTo = at === null ? undefined : moved.get(at);
     if (goesTo !== undefined) {
       references.set(target, goesTo);
+      joined.add(target);
     }
   }
+  return joined;
 }
 
 /**
@@ -1321,7 +1314,7 @@ export function joinedByTheDisk(args: JoinArguments): void {
  * relative path, which names a different file once it is somewhere else.
  */
 export function planMove(args: MoveArguments, plan: Plan): Plan {
-  const { texts, scripts, moves, named, exists } = args;
+  const { texts, scripts, moves, joined, named, exists } = args;
   const edits = [...plan.edits];
   const mentions = [...plan.mentions];
   const editedAt = new Set(edits.map((one) => `${one.file}:${one.offset}`));
@@ -1335,7 +1328,7 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     const script = scripts.get(file.path);
     const goesTo = moves.get(file.path);
     for (const literal of literalsOf(file, script)) {
-      const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
+      const moved = movedLiteral(literal, file.path, goesTo, moves, joined, exists);
       if (moved !== null) {
         add(file.path, moved.offset, moved.length, moved.replacement);
       }
@@ -1382,6 +1375,7 @@ function movedLiteral(
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
+  joined: ReadonlySet<string>,
   exists: (path: string) => boolean,
 ): { offset: number; length: number; replacement: string } | null {
   const autoload = literal.value.startsWith('*') ? '*' : '';
@@ -1389,7 +1383,7 @@ function movedLiteral(
   if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
     return null;
   }
-  const replacement = movedPath(written, literal.base, from, goesTo, moves, exists);
+  const replacement = movedPath(written, literal.base, from, goesTo, moves, joined, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
   if (replacement === null || replacement === written) {
@@ -1405,6 +1399,7 @@ function movedPath(
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
+  joined: ReadonlySet<string>,
   exists: (path: string) => boolean,
 ): string | null {
   const isAbsolute = written.startsWith('res://');
@@ -1413,7 +1408,7 @@ function movedPath(
   }
   const fromRoot = base === 'root' && !isAbsolute;
   const target = resolvedPath(written, fromRoot ? 'res://_' : from);
-  const targetGoesTo = moves.get(target);
+  const targetGoesTo = isAbsolute || !joined.has(target) ? moves.get(target) : undefined;
   if (targetGoesTo !== undefined) {
     if (fromRoot) {
       return targetGoesTo.slice('res://'.length);

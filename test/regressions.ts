@@ -89196,6 +89196,76 @@ function testAMoveLeavesARelativeStringInAnotherCase(): void {
 }
 
 /**
+ * A relative string matches the moved file by its exact spelling, however another file spells the
+ * path in full: one mis-cased res:// reference elsewhere does not turn a label, a resource name
+ * or a print argument in another case into a reference.
+ */
+function testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne(): void {
+  const label =
+    '[gd_scene format=3]\n\n[node name="N" type="Label"]\ntext = "DESK.tscn"\ntooltip_text = "Open DESK.tscn"\n';
+  const say = 'extends Node\n\nfunc _ready() -> void:\n\tprint("DESK.tscn")\n\tvar d := {"DESK.tscn": 1}\n';
+  const { project, folds } = caseMoveProject(
+    {
+      'desk.tscn': LINKED_DESK,
+      'abs.gd': 'extends Node\n\nconst A := preload("res://DESK.tscn")\n',
+      'label.tscn': label,
+      'say.gd': say,
+      'sub/inner.tscn': label,
+    },
+    'DESK.tscn',
+  );
+  try {
+    movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
+    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
+    assert.ok(
+      after('abs.gd').includes(folds ? 'preload("res://newdir/desk.tscn")' : 'preload("res://DESK.tscn")'),
+      after('abs.gd'),
+    );
+    assert.equal(after('label.tscn'), label);
+    assert.equal(after('say.gd'), say);
+    assert.equal(after('sub/inner.tscn'), label);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A spelling the file system reaches the moved file by is rewritten whatever it is spelt like, not
+ * only one in another case: a trailing slash and an NTFS stream suffix reach the file on Windows,
+ * and Godot loads the first. Where the file system refuses a spelling, as Linux does, it stays.
+ */
+function testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches(): void {
+  const spellings = ['res://desk.tscn/', 'res://DESK.tscn/', 'res://desk.tscn::$DATA'];
+  const files: Record<string, string> = { 'desk.tscn': LINKED_DESK };
+  for (const [at, spelling] of spellings.entries()) {
+    files[`user${at}.gd`] = `extends Node\n\nconst A := preload("${spelling}")\n`;
+  }
+  const { project } = caseMoveProject(files, 'DESK.tscn');
+  try {
+    const reaches = spellings.map((spelling) => {
+      try {
+        return (
+          realpathSync.native(join(project, spelling.slice('res://'.length))) ===
+          realpathSync.native(join(project, 'desk.tscn'))
+        );
+      } catch {
+        return false;
+      }
+    });
+    movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
+    for (const [at, spelling] of spellings.entries()) {
+      const after = readFileSync(join(project, `user${at}.gd`), 'utf8');
+      assert.ok(
+        after.includes(reaches[at] ? 'preload("res://newdir/desk.tscn")' : `preload("${spelling}")`),
+        `${spelling}: ${after}`,
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * The native realpath, which the move asks, gives one answer for a path in another case and the
  * stored one where the file system takes them for one entry, and none where it does not: on
  * Windows always, on macOS on a default volume, never on Linux.
@@ -106645,6 +106715,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveLooksAtEachEntryOnce,
   testAMoveLeavesAHardLinkedSecondNameAlone,
   testAMoveLeavesARelativeStringInAnotherCase,
+  testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne,
+  testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
   testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins,
