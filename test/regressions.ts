@@ -89146,7 +89146,7 @@ function testAMoveLooksAtEachEntryOnce(): void {
   });
   assert.ok(entries <= 300 + 300 + 2, `the entries were asked ${entries} times`);
   assert.equal(references.size, 600, 'each upper-case spelling joins the file it names');
-  assert.ok(asked <= 300 + 300, `the disk was asked ${asked} times`);
+  assert.ok(asked <= 300 + 300 + 2, `the disk was asked ${asked} times`);
 }
 
 /**

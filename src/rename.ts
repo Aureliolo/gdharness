@@ -1379,13 +1379,34 @@ export function joinedByTheDisk(args: JoinArguments): Joins {
   const reach = asked(resolve);
   const entry = asked(args.entry);
   const own = new Map(references);
-  const byEntry = new Map<string, string[]>();
+  const folderOf = (path: string): string => {
+    const parts = partsOf(path);
+    return parts.length < 2 ? 'res://' : `res://${parts.slice(0, -1).join('/')}`;
+  };
+  // The moved paths by where their folder really is. A spelling reaches a moved file only from the
+  // same real folder, so one question per folder rules out every target elsewhere.
+  const byFolder = new Map<string, string[]>();
   for (const path of own.keys()) {
-    const id = entry(path);
-    if (id !== null) {
-      byEntry.set(id, [...(byEntry.get(id) ?? []), path]);
+    const folder = reach(folderOf(path));
+    if (folder !== null) {
+      byFolder.set(folder, [...(byFolder.get(folder) ?? []), path]);
     }
   }
+  const indexed = new Map<string, Map<string, string[]>>();
+  const entriesIn = (folder: string, paths: string[]): Map<string, string[]> => {
+    let index = indexed.get(folder);
+    if (index === undefined) {
+      index = new Map();
+      for (const path of paths) {
+        const id = entry(path);
+        if (id !== null) {
+          index.set(id, [...(index.get(id) ?? []), path]);
+        }
+      }
+      indexed.set(folder, index);
+    }
+    return index;
+  };
   const found = new Map<string, Reach | undefined>();
   const reaching = (path: string): Reach | undefined => {
     if (!found.has(path)) {
@@ -1393,11 +1414,17 @@ export function joinedByTheDisk(args: JoinArguments): Joins {
     }
     return found.get(path);
   };
-  const lookUp = (path: string): Reach | undefined => {
-    const id = entry(path);
-    const same = id === null ? [] : (byEntry.get(id) ?? []);
+  // The moved paths that are the entry at [param path], as the disk stores its name.
+  const entryOfMoved = (path: string): string[] => {
+    const folder = reach(folderOf(path));
+    const beside = folder === null ? [] : (byFolder.get(folder) ?? []);
+    const id = beside.length === 0 ? null : entry(path);
+    const same = id === null || folder === null ? [] : (entriesIn(folder, beside).get(id) ?? []);
     const at = same.length === 0 ? null : reach(path);
-    const there = same.filter((moved) => at !== null && reach(moved) === at);
+    return same.filter((moved) => at !== null && reach(moved) === at);
+  };
+  const lookUp = (path: string): Reach | undefined => {
+    const there = entryOfMoved(path);
     const spelt = there.find((moved) => sameRoute(path, moved, entry));
     if (spelt !== undefined) {
       return { goesTo: own.get(spelt) ?? '', joins: true };
