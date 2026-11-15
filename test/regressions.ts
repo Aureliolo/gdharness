@@ -31,7 +31,7 @@ import { text as pipedText } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
-import { inflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
@@ -189,6 +189,9 @@ import {
   ownStart,
   poolCount,
   QUEUED_FOLDER,
+  RESERVED_FOLDER,
+  RESERVED_VARIABLE,
+  reservedMemory,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
@@ -230,6 +233,7 @@ import { fileNoCaseCompare } from '../src/file-order.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import {
   DEBUG_REQUESTS,
+  type DebugAnswer,
   type DebugRequest,
   debugRequestOf,
   framesOf,
@@ -361,6 +365,15 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
+import {
+  countSnapshot,
+  diffAnswer,
+  isSnapshotCounts,
+  SNAPSHOT_SLICE_BYTES,
+  SnapshotStore,
+  SPAWNING_START,
+  snapshotAnswer,
+} from '../src/object-snapshot.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   commandProjectRefusal,
@@ -689,6 +702,7 @@ import {
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
+  RESERVED_WAIT_MS,
   type RunResult,
   reachedAlsoSaid,
   reportsFault,
@@ -2931,7 +2945,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   assert.deepEqual(
-    callSitesOf(assigned, 'level', new Set(), true).map((one) => [one.line, one.access]),
+    callSitesOf(assigned, 'level', true).map((one) => [one.line, one.access]),
     [
       [4, 'write'],
       ...Array.from({ length: 12 }, (_, index) => [index + 9, 'write']),
@@ -3183,10 +3197,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ],
     'and with no class asked about, the call through another class is listed as the note says',
   );
-  // A receiver declared as another class is that class's object, whichever way it was declared: a
-  // typed local, a new(), a cast, a typed parameter, a typed for variable, a variable of the class.
-  // Reported from game-b on 1.1.61, `result.apply(...)` with `var result: Effect` above it. What says
-  // nothing about the class stays: an untyped local, a receiver that is a member of something else,
+  // A class variable declared as another class is that class's object. A local of any kind is kept,
+  // typed or not, since its scope is not read. So is a receiver that is a member of something else,
   // and a variable declared as the class asked about.
   const paying = [
     'class_name Prize',
@@ -3224,8 +3236,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       .map((one) => one.line);
   assert.deepEqual(
     paidAt('Placed.lift'),
-    [17, 18, 20],
-    'the receivers declared as Outcome are left out, and the Placed, dotted and untyped ones kept',
+    [10, 12, 14, 15, 17, 18, 20, 22],
+    'the class variable declared as Outcome is left out, and the locals, Placed and dotted ones kept',
   );
   assert.deepEqual(
     paidAt('lift'),
@@ -3459,6 +3471,545 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://works/maker.gd', 18],
     ],
     "Maker's is reached by its own bare call and through self",
+  );
+  // A use through a class by name, or through a variable declared as one, runs what that class
+  // dispatches the name to: a class named is bound to what it resolves, and an object may be of any
+  // class below its declared one. Names are looked up as the engine does, a local first, then the
+  // class it is written in, the classes it extends and the class around it, the globals last. A
+  // receiver the text gives no class, untyped or a call's result, is kept.
+  const yardTool = [
+    'class_name Tool',
+    'extends RefCounted',
+    '',
+    '',
+    'static func make() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+  ].join('\n');
+  const yardUser = [
+    'extends Node',
+    '',
+    'const B := preload("res://yard/sub.gd")',
+    'var held: Tool',
+    '',
+    'func go(given: SubTool, odd: Other, base: Tool, loose, Tool: Other) -> void:',
+    '\tSubTool.make()',
+    '\tFancyTool.make()',
+    '\tOther.make()',
+    '\tgiven.tick()',
+    '\todd.tick()',
+    '\tbase.tick()',
+    '\tloose.tick()',
+    '\tB.make()',
+    '\tTool.tick()',
+    '\tOther.new().tick()',
+    '\tSubTool.new().tick()',
+    '\tSubTool \\',
+    '\t\t.make()',
+    '\tself.held.tick()',
+    '\tvar d := {}',
+    '\td["k"].tick()',
+    '\tvar made := loose.get_it()',
+    '\tmade.tick()',
+    '',
+    '',
+    'const Same = Same',
+    '',
+    '',
+    'func again() -> void:',
+    '\tSame.make()',
+    '\tTool.make()',
+    '',
+  ].join('\n');
+  const yardOuter = [
+    'class_name Outer',
+    'extends RefCounted',
+    '',
+    'class Inner:',
+    '\tstatic func make() -> int:',
+    '\t\treturn 1',
+    '',
+    'class Deeper extends Inner:',
+    '\tfunc go() -> void:',
+    '\t\tInner.make()',
+    '',
+    'class Box:',
+    '\tstatic func make() -> int:',
+    '\t\treturn 2',
+    '\tclass Box:',
+    '\t\tstatic func make() -> int:',
+    '\t\t\treturn 3',
+    '\t\tfunc go() -> void:',
+    '\t\t\tBox.make()',
+    '',
+  ].join('\n');
+  const yardCaller = [
+    'extends Node',
+    '',
+    'var crate: Outer.Inner',
+    '',
+    'func go() -> void:',
+    '\tOuter.Inner.make()',
+    '\tOuter.Box.make()',
+    '\tcrate.make()',
+    '\tOuter.Deeper.make()',
+    '',
+  ].join('\n');
+  const yardHolder = ['class_name Holder', 'extends Node', '', 'var made: Tool', 'var Other: Tool', ''].join(
+    '\n',
+  );
+  const yardHeld = [
+    'extends Holder',
+    '',
+    'func go() -> void:',
+    '\tmade.tick()',
+    '\tOther.tick()',
+    '\tself.made.tick()',
+    '',
+  ].join('\n');
+  const yard = [
+    ['res://yard/tool.gd', yardTool],
+    ['res://yard/sub.gd', 'class_name SubTool\nextends Tool\n'],
+    [
+      'res://yard/fancy.gd',
+      yardTool.replace('class_name Tool\nextends RefCounted', 'class_name FancyTool\nextends Tool'),
+    ],
+    ['res://yard/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://yard/user.gd', yardUser],
+    ['res://yard/outer.gd', yardOuter],
+    ['res://yard/caller.gd', yardCaller],
+    ['res://yard/holder.gd', yardHolder],
+    ['res://yard/held.gd', yardHeld],
+  ] as const;
+  const yardAt = (name: string, script: string): number[] =>
+    callersOf(totals({}), name, yard)
+      .sites.filter((one) => one.script === `res://yard/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    yardAt('Tool.make', 'user'),
+    [7, 14, 19, 31, 32],
+    'Tool.make through a subclass that inherits it, by name, by a preloaded constant and split by a backslash, and through a constant the text cannot read, but not through FancyTool or Other, which declare their own',
+  );
+  assert.deepEqual(
+    yardAt('FancyTool.make', 'user'),
+    [8, 31, 32],
+    'a static call is bound to the class named, so SubTool by name does not reach the override, and Tool, named like a parameter in the script, is kept',
+  );
+  assert.deepEqual(
+    yardAt('Tool.tick', 'user'),
+    [10, 11, 12, 13, 15, 17, 20, 22, 24],
+    'objects of Tool and of a subclass made with new(), a member through self, the parameters, which are locals, and the untyped, indexed and undeclared receivers, but not Other',
+  );
+  assert.deepEqual(
+    yardAt('FancyTool.tick', 'user'),
+    [10, 11, 12, 13, 15, 20, 22, 24],
+    'an object made as SubTool may not be a FancyTool',
+  );
+  assert.deepEqual(
+    yardAt('Other.tick', 'user'),
+    [10, 11, 12, 13, 15, 16, 22, 24],
+    "Other's own objects, the parameters and the receivers the text gives no class",
+  );
+  assert.deepEqual(
+    [yardAt('Tool.tick', 'held'), yardAt('Other.tick', 'held')],
+    [[4, 5, 6], []],
+    'an inherited variable is read as its declared class, also where it is named like a class',
+  );
+  assert.deepEqual(
+    [
+      yardAt('Outer.Inner.make', 'caller'),
+      yardAt('Outer.Inner.make', 'outer'),
+      yardAt('Outer.Box.make', 'caller'),
+      yardAt('Outer.Box.make', 'outer'),
+      yardAt('Outer.Box.Box.make', 'outer'),
+    ],
+    [[6, 8, 9], [10], [7], [], [19]],
+    'a dotted name, a variable declared as one and an inner class that inherits the function, each read in its own scope',
+  );
+  const docked = [
+    ['res://dock/harbour.gd', 'class_name Harbour\nextends Node\n'],
+    ['res://dock/quay.gd', 'class_name Quay\nextends Harbour\n'],
+    ['res://dock/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://dock/lost.gd', 'class_name Lost\nextends "res://dock/missing.gd"\n'],
+    [
+      'res://dock/user.gd',
+      [
+        'extends Node',
+        '',
+        'var q: Quay = null',
+        'var o: Other = null',
+        'var h: Harbour = null',
+        'var l: Lost = null',
+        '',
+        'func go() -> void:',
+        '\tq.add_child(null)',
+        '\to.add_child(null)',
+        '\th.add_child(null)',
+        '\tl.add_child(null)',
+        '',
+      ].join('\n'),
+    ],
+  ] as const;
+  assert.deepEqual(
+    [
+      callersOf(totals({}), 'Harbour.add_child', docked).sites.map((one) => one.line),
+      callersOf(totals({}), 'Quay.add_child', docked).sites.map((one) => one.line),
+    ],
+    [
+      [9, 11, 12],
+      [9, 11, 12],
+    ],
+    'asked about a function the class does not declare, a use through a class above it, below it or past a missing script counts, and one through an unrelated class does not',
+  );
+  // A name the script declares as a local may be that local, so its uses are kept: a match binding,
+  // in any branch, a parameter, also on a header's later lines, and a function's constant. new()
+  // makes exactly the class named. A class constant holds the class it preloads or names. An inner
+  // class sees its outer class's constants, never its variables.
+  const laneUser = [
+    'class_name User',
+    'extends Node',
+    '',
+    'const Near := preload("other.gd")',
+    'const Alias = Near',
+    'var Helper: Other',
+    '',
+    '',
+    'func tick() -> void:',
+    '\tpass',
+    '',
+    '',
+    'func matched(v: Variant) -> void:',
+    '\tmatch v:',
+    '\t\t[var Other]:',
+    '\t\t\tOther.make()',
+    '\t\t_:',
+    '\t\t\tOther.make()',
+    '\t\t\ttick()',
+    '',
+    '',
+    'func split(',
+    '\tOther: Kid,',
+    ') -> void:',
+    '\tOther.make()',
+    '',
+    '',
+    'func wrapped(',
+    '\t\tOther: Kid) -> void:',
+    '\tOther.make()',
+    '',
+    '',
+    'func made() -> void:',
+    '\tBase.new().tick()',
+    '\tKid.new().tick()',
+    '\tOther.create().tick()',
+    '\tconst M := preload("res://lane/other.gd")',
+    '\tM.make()',
+    '\tconst N = Near',
+    '\tN.make()',
+    '\tAlias.make()',
+    '\tNear.make()',
+    '',
+    '',
+    'class Inside:',
+    '\tfunc go() -> void:',
+    '\t\tHelper.make()',
+    '\t\tAlias.make()',
+    '',
+  ].join('\n');
+  const lane = [
+    ['res://lane/base.gd', yardTool.replace('class_name Tool', 'class_name Base')],
+    [
+      'res://lane/kid.gd',
+      yardTool.replace('class_name Tool\nextends RefCounted', 'class_name Kid\nextends Base'),
+    ],
+    ['res://lane/other.gd', yardTool.replace('class_name Tool', 'class_name Other')],
+    ['res://lane/helper.gd', yardTool.replace('class_name Tool', 'class_name Helper')],
+    ['res://lane/user.gd', laneUser],
+    [
+      'res://lane/outer.gd',
+      'class_name Outer\nextends RefCounted\n\nclass Box:\n\tstatic func make() -> int:\n\t\treturn 1\n\nclass Mid:\n\tpass\n',
+    ],
+    [
+      'res://lane/far.gd',
+      'class_name Far\nextends RefCounted\n\nclass Box:\n\tstatic func make() -> int:\n\t\treturn 2\n',
+    ],
+    ['res://lane/mid.gd', 'extends Outer.Mid\n\n\nfunc go() -> void:\n\tBox.make()\n'],
+  ] as const;
+  const laneAt = (name: string, script = 'user'): number[] =>
+    callersOf(totals({}), name, lane)
+      .sites.filter((one) => one.script === `res://lane/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    laneAt('Kid.make'),
+    [16, 18, 25, 30, 38, 40],
+    'the match binding in either branch, the parameters of split headers and the local constants, but not the class constants holding Other or the outer variable',
+  );
+  assert.deepEqual(
+    laneAt('Other.make'),
+    [16, 18, 25, 30, 38, 40, 41, 42, 48],
+    'every local named Other or holding a class, the class constants preloading or naming it, relatively too, and the outer constant seen from the inner class',
+  );
+  assert.deepEqual(
+    laneAt('Helper.make'),
+    [16, 18, 25, 30, 38, 40, 47],
+    "the locals, and Helper in the inner class, which does not see the outer class's variable, so it is the global class",
+  );
+  assert.deepEqual(
+    [laneAt('User.tick'), laneAt('Base.tick'), laneAt('Kid.tick')],
+    [
+      [19, 36],
+      [34, 36],
+      [35, 36],
+    ],
+    'a bare call in the other branch, an object new() made is of exactly that class, and a call result may be anything',
+  );
+  assert.deepEqual(
+    [laneAt('Outer.Box.make', 'mid'), laneAt('Far.Box.make', 'mid')],
+    [[5], []],
+    "a name is looked up in the class around the class extended, as the engine's analyser does",
+  );
+  // A local declared in a lambda, a lambda's parameter or a match binding used in its own guard may
+  // be the receiver, so the use is kept for either class. So is a use above the typed var of the
+  // same name. A script's own class_name is read before a member it inherits by that name.
+  const coveClass = (name: string, base = 'RefCounted'): string =>
+    [
+      `class_name ${name}`,
+      `extends ${base}`,
+      '',
+      '',
+      'static func open() -> String:',
+      `\treturn "${name}.open"`,
+      '',
+      '',
+      'static func take(_f: Callable) -> String:',
+      `\treturn "${name}.take"`,
+      '',
+      '',
+      'func tick() -> Variant:',
+      '\treturn null',
+      '',
+    ].join('\n');
+  const coveLam = [
+    'extends Node',
+    '',
+    'var target: Kid',
+    'signal done',
+    '',
+    '',
+    'func a() -> void:',
+    '\tdone.connect(func():',
+    '\t\tvar Other := Kid.new()',
+    '\t\tvar target := Other.new()',
+    '\t)',
+    '\tOther.open()',
+    '\ttarget.tick()',
+    '',
+    '',
+    'func b() -> String:',
+    '\treturn Other.take(',
+    '\t\tfunc(Other: Kid) -> void: pass',
+    '\t)',
+    '',
+    '',
+    'func c(v: Variant) -> void:',
+    '\tmatch v:',
+    '\t\tvar Other when Other is Kid and Other.tick() == null:',
+    '\t\t\tpass',
+    '',
+    '',
+    'func d() -> void:',
+    '\ttarget.tick()',
+    '\tvar target: Other = Other.new()',
+    '\ttarget.tick()',
+    '',
+    '',
+    'func e() -> void:',
+    '\tvar f := func(target: Kid) -> void:',
+    '\t\ttarget.tick()',
+    '\tvar target: Other = Other.new()',
+    '\ttarget.tick()',
+    '\tf.call(Kid.new())',
+    '',
+  ].join('\n');
+  const cove = [
+    ['res://cove/other.gd', coveClass('Other')],
+    ['res://cove/kid.gd', coveClass('Kid')],
+    [
+      'res://cove/base.gd',
+      'class_name CoveBase\nextends RefCounted\n\nconst Box = preload("res://cove/other.gd")\n',
+    ],
+    ['res://cove/box.gd', `${coveClass('Box', 'CoveBase')}\n\nfunc go() -> String:\n\treturn Box.open()\n`],
+    ['res://cove/lam.gd', coveLam],
+  ] as const;
+  const coveAt = (name: string, script: string, below = Number.POSITIVE_INFINITY): number[] =>
+    callersOf(totals({}), name, cove)
+      .sites.filter((one) => one.script === `res://cove/${script}.gd` && one.line < below)
+      .map((one) => one.line);
+  assert.deepEqual(
+    [
+      coveAt('Other.open', 'lam'),
+      coveAt('Kid.open', 'lam'),
+      coveAt('Other.tick', 'lam', 28),
+      coveAt('Kid.tick', 'lam', 28),
+    ],
+    [[12], [12], [13, 24], [13, 24]],
+    "a lambda's own locals and a match binding in its guard leave the receiver unread, so it is kept for either class",
+  );
+  assert.deepEqual(
+    [coveAt('Other.take', 'lam'), coveAt('Kid.take', 'lam')],
+    [[17], [17]],
+    "a lambda's parameter later in the statement leaves the receiver on its first line unread",
+  );
+  assert.deepEqual(
+    [
+      coveAt('Other.tick', 'lam').filter((line) => line >= 28),
+      coveAt('Kid.tick', 'lam').filter((line) => line >= 28),
+    ],
+    [
+      [29, 31, 36, 38],
+      [29, 31, 36, 38],
+    ],
+    'a typed local is kept for either class, above its declaration and after it',
+  );
+  assert.deepEqual(
+    [coveAt('Box.open', 'box'), coveAt('Other.open', 'box')],
+    [[18], []],
+    "a script's own class_name is read before the constant of that name it inherits",
+  );
+  // A function's constant is a local like any other, whatever block or lambda holds it. A local
+  // outside any function, in a class variable's lambda or a get block, keeps its name's uses too.
+  // A line at column 0 inside brackets or after a backslash does not end its inner class. A class
+  // variable has a class only where it is typed, by annotation or by a new() ending its line.
+  const reef = [
+    ['res://reef/other.gd', coveClass('Other')],
+    ['res://reef/kid.gd', coveClass('Kid')],
+    [
+      'res://reef/consts.gd',
+      [
+        'extends Node',
+        '',
+        '',
+        'func c1(x: bool) -> void:',
+        '\tif x:',
+        '\t\tconst Other = preload("res://reef/kid.gd")',
+        '\t\tOther.open()',
+        '\tOther.open()',
+        '',
+        '',
+        'func c2() -> void:',
+        '\tOther.open()',
+        '\tconst Other = preload("res://reef/kid.gd")',
+        '\tOther.open()',
+        '',
+        '',
+        'func c3() -> void:',
+        '\tvar f := func() -> void:',
+        '\t\tconst Other = preload("res://reef/kid.gd")',
+        '\t\tOther.open()',
+        '\tf.call()',
+        '\tOther.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/outside.gd',
+      [
+        'extends Node',
+        '',
+        'var cb := func(Other: Kid) -> String: return Other.open()',
+        'var held: String:',
+        '\tget:',
+        '\t\tvar Other := Kid.new()',
+        '\t\treturn Other.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/split.gd',
+      [
+        'extends Node',
+        '',
+        'var Kid: Other',
+        '',
+        '',
+        'class In0:',
+        '\tconst Kid = preload("res://reef/kid.gd")',
+        '',
+        '\tfunc g() -> void:',
+        '\t\tprint(',
+        '0)',
+        '\t\tKid.open()',
+        '\t\tvar sum := 1 + \\',
+        '2',
+        '\t\tKid.open()',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'res://reef/members.gd',
+      [
+        'extends Node',
+        '',
+        'var made := Kid.new()',
+        'var cast = Other.new() as Other',
+        'var chained := Other.new().call("tick")',
+        '',
+        '',
+        'func go() -> void:',
+        '\tmade.tick()',
+        '\tcast.tick()',
+        '\tchained.tick()',
+        '',
+        '',
+        'func typed() -> void:',
+        '\tconst Kid = preload("res://reef/other.gd")',
+        '\tvar Base: Kid = Kid.new()',
+        '\tBase.open()',
+        '',
+      ].join('\n'),
+    ],
+  ] as const;
+  const reefAt = (name: string, script: string): number[] =>
+    callersOf(totals({}), name, reef)
+      .sites.filter((one) => one.script === `res://reef/${script}.gd`)
+      .map((one) => one.line);
+  assert.deepEqual(
+    [reefAt('Kid.open', 'consts'), reefAt('Other.open', 'consts')],
+    [
+      [7, 8, 12, 14, 20, 22],
+      [7, 8, 12, 14, 20, 22],
+    ],
+    "a function's constant is kept for either class, inside its block, after it, above it and outside its lambda",
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'outside'), reefAt('Other.open', 'outside')],
+    [
+      [3, 7],
+      [3, 7],
+    ],
+    "a class variable's lambda parameter and a get block's local are kept for either class",
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'split'), reefAt('Other.open', 'split')],
+    [[12, 15], []],
+    'a column-0 line inside brackets or after a backslash carries on the inner class, whose constant holds',
+  );
+  assert.deepEqual(
+    [reefAt('Kid.tick', 'members'), reefAt('Other.tick', 'members')],
+    [
+      [9, 10, 11],
+      [10, 11],
+    ],
+    'a class variable inferred from a new() ending its line is of that class, and one cast with as or given a call result may hold anything',
+  );
+  assert.deepEqual(
+    [reefAt('Kid.open', 'members'), reefAt('Other.open', 'members')],
+    [[17], [17]],
+    'a typed local is kept for either class, also when a constant of the function names its type',
   );
   // A property the profile has no row for is asked about as the class declares it.
   const hull = [
@@ -12158,7 +12709,7 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 163;
+const READ_IN_WORDS = 165;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -12492,7 +13043,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.deepEqual(
       counts,
-      { read: 13, additive: 4, destructive: 14 },
+      { read: 14, additive: 4, destructive: 14 },
       'each class holds what the table holds',
     );
 
@@ -23308,6 +23859,7 @@ async function testADebugRequestIsCheckedAgainstItsTable(): Promise<void> {
     variables: { op: 'variables', frame: 0 },
     evaluate: { op: 'evaluate', frame: 1, expression: 'a + 1' },
     output: { op: 'output' },
+    snapshot: { op: 'snapshot' },
   };
   assert.deepEqual(
     Object.keys(valid).toSorted(),
@@ -46653,6 +47205,923 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
   }
 }
 
+/** [param value] in Godot's binary Variant format, for the values a stand-in snapshot holds. */
+function encodedSnapshotValue(value: unknown): Buffer {
+  const word = (number: number): Buffer => {
+    const out = Buffer.alloc(4);
+    out.writeUInt32LE(number);
+    return out;
+  };
+  if (typeof value === 'number') {
+    const out = Buffer.alloc(4);
+    out.writeInt32LE(value);
+    return Buffer.concat([word(2), out]);
+  }
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    return Buffer.concat([word(4), word(bytes.length), bytes, Buffer.alloc((4 - (bytes.length % 4)) % 4)]);
+  }
+  if (Array.isArray(value)) {
+    return Buffer.concat([word(28), word(value.length), ...value.map((one) => encodedSnapshotValue(one))]);
+  }
+  assert.ok(isRecord(value), 'a stand-in snapshot holds numbers, strings, lists and records');
+  if (typeof value['objectId'] === 'bigint') {
+    // An object as the debugger sends one, as its id.
+    const id = Buffer.alloc(8);
+    id.writeBigUInt64LE(value['objectId']);
+    return Buffer.concat([word(24 | (1 << 16)), id]);
+  }
+  const entries = Object.entries(value);
+  return Buffer.concat([
+    word(27),
+    word(entries.length),
+    ...entries.flatMap(([key, one]) => [encodedSnapshotValue(key), encodedSnapshotValue(one)]),
+  ]);
+}
+
+/**
+ * A snapshot as the engine's collector deflates it: a header, then each object's id, engine class,
+ * properties and the extra the collector adds. Each object holds a random text, so the snapshot
+ * does not deflate below the size [param count] objects make.
+ */
+function standInSnapshot(count: number, script: string, kind: 'ref_count' | 'node_name'): Buffer {
+  const all: unknown[] = [{ mem_usage: 1234 }];
+  for (let at = 0; at < count; at += 1) {
+    all.push(
+      at + 1,
+      kind === 'ref_count' ? 'Resource' : 'Node',
+      [
+        ['script', 24, 17, 'Script', 6, script],
+        ['label', 4, 0, '', 6, randomUUID()],
+      ],
+      { [kind]: 1 },
+    );
+  }
+  return deflateSync(encodedSnapshotValue(all));
+}
+
+/**
+ * An object whose script has no file, as an inner class's has none, is counted under its native
+ * class, and the answers of every snapshot holding such objects say how many.
+ */
+function testAnInnerClassIsCountedUnderItsNativeClass(): void {
+  const snapshotOf = (inner: number): Buffer => {
+    const all: unknown[] = [{ mem_usage: 1 }];
+    all.push(1, 'Node', [['script', 24, 17, 'Script', 6, 'res://main.gd']], { node_name: 'Main' });
+    for (let at = 0; at < inner; at += 1) {
+      all.push(
+        at + 2,
+        'RefCounted',
+        [['script', 24, 17, 'Script', 6, { objectId: 0x8000_0000_0000_0042n }]],
+        {
+          ref_count: 1,
+        },
+      );
+    }
+    return deflateSync(encodedSnapshotValue(all));
+  };
+  const store = new SnapshotStore();
+  const none = store.keep('run', 1, countSnapshot(snapshotOf(0)), '');
+  const two = store.keep('run', 1, countSnapshot(snapshotOf(2)), '');
+  assert.equal(snapshotAnswer(none)['note'], undefined, 'a snapshot with none says nothing of them');
+  const answered = snapshotAnswer(two);
+  assert.deepEqual(answered['classes'], [
+    { class: 'RefCounted', kind: 'RefCounted', count: 2 },
+    { class: 'res://main.gd', kind: 'Node', count: 1, engineClass: 'Node' },
+  ]);
+  assert.equal(
+    answered['note'],
+    "2 objects have a script with no file, such as an inner class's, which the game names only by an id, so they are counted under their native class.",
+  );
+  assert.equal(
+    diffAnswer(none, two)['note'],
+    "Objects of s1 (0) and of s2 (2) have a script with no file, such as an inner class's, which the game names only by an id, so they are counted under their native class.",
+  );
+}
+
+/**
+ * A stand-in game dialled into a new keeper, returned once the keeper has taken the connection. The
+ * game's own `connect` comes as the handshake ends, which can be before the keeper's accept has run.
+ * [param beforeDialling] asks the keeper whatever it is asked with no game yet. `taken` settles once
+ * the keeper has taken the next message of that name, as an observer is told only after it has.
+ */
+async function aStandInGame(
+  beforeDialling: (peer: GameDebugger) => Promise<void> = () => Promise.resolve(),
+): Promise<{ peer: GameDebugger; game: Socket; taken: (message: string) => Promise<void> }> {
+  let accept = (): void => undefined;
+  const accepted = new Promise<void>((settle) => {
+    accept = settle;
+  });
+  const waiting = new Map<string, () => void>();
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => {
+          accept();
+        },
+        message: (received) => {
+          if ('message' in received) {
+            waiting.get(received.message)?.();
+            waiting.delete(received.message);
+          }
+        },
+      },
+    ],
+  );
+  await beforeDialling(peer);
+  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  await accepted;
+  const taken = (message: string): Promise<void> =>
+    new Promise((settle) => {
+      waiting.set(message, settle);
+    });
+  return { peer, game, taken };
+}
+
+/**
+ * Two snapshots asked for together each get their own, and a snapshot that takes several slices
+ * comes back whole.
+ *
+ * The game answers every snapshot message with the id it was asked for, and nothing else tells two
+ * apart. So the stand-in game answers the second request first, and slices them in turns.
+ */
+async function testObjectSnapshotsAskedTogetherGetTheirOwnAnswers(): Promise<void> {
+  const big = standInSnapshot(5000, 'res://item.gd', 'ref_count');
+  const small = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  assert.ok(big.length > 2 * SNAPSHOT_SLICE_BYTES, `the big one takes several slices: ${big.length}`);
+  const { peer, game } = await aStandInGame();
+  try {
+    const stream = new DebuggerStream();
+    const asked: number[] = [];
+    const held = new Map<number, Buffer>();
+    const prepare = (id: number): void => {
+      asked.push(id);
+      held.set(id, asked.length === 1 ? big : small);
+      for (const one of asked.length === 2 ? asked.toReversed() : []) {
+        game.write(framedCommand('snapshot:snapshot_prepared', [one, held.get(one)?.length ?? 0]));
+      }
+    };
+    const answer = (message: string, [id = 0, begin = 0, end = 0]: number[]): void => {
+      if (message === 'snapshot:request_prepare_snapshot') {
+        prepare(id);
+      } else if (message === 'snapshot:request_snapshot_chunk') {
+        const part = [...(held.get(id) ?? Buffer.alloc(0)).subarray(begin, end)];
+        game.write(framedCommand('snapshot:snapshot_chunk', [id, part]));
+      }
+    };
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          answer(received.message, received.data.map(Number));
+        }
+      }
+    });
+    const [first, second] = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'snapshot' })]);
+    assert.deepEqual(
+      [first, second],
+      [
+        {
+          classes: [{ engineClass: 'Resource', script: 'res://item.gd', kind: 'RefCounted', count: 5000 }],
+          bytes: big.length,
+          unnamed: 0,
+          memoryBytes: 1234,
+        },
+        {
+          classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+          bytes: small.length,
+          unnamed: 0,
+          memoryBytes: 1234,
+        },
+      ],
+      'each request reads the snapshot asked for under its own id, whole',
+    );
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * Each reason the keeper gives for no snapshot comes with its own fix. A game that never connected,
+ * or that exited part way through sending, is started again. Neither is told to change its engine,
+ * which a game that had begun to send plainly has the snapshot in.
+ */
+async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
+  const { peer, game } = await aStandInGame(async (keeper) => {
+    const unconnected = await keeper.ask({ op: 'snapshot' });
+    assert.match(String(unconnected['refused']), /^The game never connected to its debugger/);
+    assert.equal(unconnected['next'], SPAWNING_START);
+  });
+  try {
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received && received.message === 'snapshot:request_prepare_snapshot') {
+          game.end(framedCommand('snapshot:snapshot_prepared', [Number(received.data[0]), 1000]));
+        }
+      }
+    });
+    const exited = await peer.ask({ op: 'snapshot' });
+    assert.deepEqual(exited, {
+      refused: 'The game stopped sending its snapshot after 0 of 1000 bytes, as it exited.',
+      next: SPAWNING_START,
+    });
+  } finally {
+    peer.close();
+  }
+}
+
+/**
+ * Why a game gave no snapshot is told from what it answered, in the order it answers.
+ * - A game that answers the inspection asked right after the request, and not the request, has an
+ *   engine without the snapshot, since the engine drops a message for a capture it lacks. That is
+ *   known at once.
+ * - A game that answers neither while its frames go on has no debug features at all.
+ * - A game that sends nothing more was busy. The frames it had sent before it read the request,
+ *   which arrive together as the request goes out, do not count as frames past it.
+ */
+async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void> {
+  type Game = 'inspects' | 'frames' | 'busy';
+  const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
+    const { peer, game } = await aStandInGame();
+    const frame = (): boolean => game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
+    const reply = (message: string): void => {
+      if (kind === 'inspects' && message === 'scene:inspect_object') {
+        game.write(framedCommand('scene:inspect_object', []));
+      }
+      // What was sent before the request was read, still on its way as the request goes out.
+      if (kind === 'busy' && message === 'snapshot:request_prepare_snapshot') {
+        Array.from({ length: 5 }).forEach(frame);
+      }
+    };
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          reply(received.message);
+        }
+      }
+    });
+    const ticking = setInterval(() => kind === 'frames' && frame(), 200);
+    try {
+      const began = Date.now();
+      const answer = await peer.ask({ op: 'snapshot' });
+      return { answer, ms: Date.now() - began };
+    } finally {
+      clearInterval(ticking);
+      game.destroy();
+      peer.close();
+    }
+  };
+  const [inspected, frames, busy] = await Promise.all([
+    answerOf('inspects'),
+    answerOf('frames'),
+    answerOf('busy'),
+  ]);
+  assert.deepEqual(inspected.answer, {
+    refused:
+      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+  });
+  assert.ok(inspected.ms < 2000, `known from the order, not the wait: ${inspected.ms} ms`);
+  assert.match(
+    String(frames.answer['refused']),
+    /^The game answered neither the snapshot request nor the inspection asked after it within 20 s, while its frames went on/,
+  );
+  assert.match(String(frames.answer['next']), /godot naming an editor build or a debug export template/);
+  assert.deepEqual(busy.answer, {
+    refused:
+      'The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy.',
+    next: 'debug_objects snapshot asks again, which the game answers once its frames go on',
+  });
+}
+
+/** The thread a stand-in game holds at a breakpoint. */
+const HELD_WORKER = 5;
+
+/**
+ * A stand-in game with thread [constant HELD_WORKER] held at a breakpoint. Each message the keeper
+ * sends goes to [param reply] with the thread it was addressed to, and is tallied by name.
+ */
+async function aGameWithAHeldWorker(
+  reply: (message: string, data: number[], thread: number) => void,
+): Promise<{ peer: GameDebugger; game: Socket; got: Map<string, number> }> {
+  const { peer, game, taken } = await aStandInGame();
+  const got = new Map<string, number>();
+  const stream = new DebuggerStream();
+  game.on('data', (chunk: Buffer) => {
+    for (const received of stream.push(chunk)) {
+      if ('message' in received) {
+        got.set(received.message, (got.get(received.message) ?? 0) + 1);
+        reply(received.message, received.data.map(Number), received.thread);
+      }
+    }
+  });
+  const entered = taken('debug_enter');
+  game.write(framedCommand('debug_enter', [true, 'Breakpoint', true, HELD_WORKER], HELD_WORKER));
+  await entered;
+  return { peer, game, got };
+}
+
+/**
+ * A snapshot asked while a worker is held is asked once, even when the answer to it, the answer to
+ * the inspection after it and the worker leaving its break all arrive in one read. A request sent
+ * twice is answered twice, and the spare answers make the next snapshot read as refused.
+ */
+async function testASnapshotAskedOnceAsAHeldWorkerLeaves(): Promise<void> {
+  const taken = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  const prepared: number[] = [];
+  const { peer, game, got } = await aGameWithAHeldWorker((message, [id = 0, begin = 0, end = 0], thread) => {
+    if (message === 'snapshot:request_prepare_snapshot') {
+      prepared.push(id);
+      if (prepared.length > 1) {
+        game.write(framedCommand('snapshot:snapshot_prepared', [id, taken.length], thread));
+      }
+    } else if (message === 'scene:inspect_object' && got.get(message) === 1) {
+      game.write(
+        Buffer.concat([
+          framedCommand('snapshot:snapshot_prepared', [prepared[0] ?? 0, taken.length], thread),
+          framedCommand('scene:inspect_object', [], thread),
+          framedCommand('debug_exit', [], HELD_WORKER),
+        ]),
+      );
+    } else if (message === 'scene:inspect_object') {
+      game.write(framedCommand('scene:inspect_object', [], thread));
+    } else if (message === 'snapshot:request_snapshot_chunk') {
+      game.write(framedCommand('snapshot:snapshot_chunk', [id, [...taken.subarray(begin, end)]], thread));
+    }
+  });
+  try {
+    const counts = {
+      classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+      bytes: taken.length,
+      unnamed: 0,
+      memoryBytes: 1234,
+    };
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the snapshot is taken');
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), counts, 'the next snapshot is taken too');
+    // Whatever the first sent reached the game before the second's answers came back.
+    assert.deepEqual(
+      [got.get('snapshot:request_prepare_snapshot'), got.get('scene:inspect_object')],
+      [2, 2],
+      'each snapshot and its inspection are asked once',
+    );
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * Two snapshots asked together of an engine without the snapshot, while a worker is held, are both
+ * refused as soon as the inspections are answered. The worker leaves its break with what was asked
+ * of it unread, which must not leave either waiting the full 20 s.
+ */
+async function testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld(): Promise<void> {
+  let toWorker = 0;
+  const { peer, game } = await aGameWithAHeldWorker((message, _data, thread) => {
+    if (thread === HELD_WORKER) {
+      toWorker += 1;
+      if (toWorker === 4) {
+        game.write(framedCommand('debug_exit', [], HELD_WORKER));
+      }
+    } else if (message === 'scene:inspect_object') {
+      game.write(framedCommand('scene:inspect_object', [], thread));
+    }
+  });
+  try {
+    const began = Date.now();
+    const answers = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'snapshot' })]);
+    const ms = Date.now() - began;
+    const refused = {
+      refused:
+        'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+      next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+    };
+    assert.deepEqual(answers, [refused, refused], 'both are refused for the engine');
+    assert.ok(ms < 2000, `both are refused at once: ${ms} ms`);
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * A main loop waiting on a held worker answers nothing. The refusal names the worker and the resume
+ * that lets the main loop go on, since asking again changes nothing while the worker stays held.
+ */
+async function testASnapshotStalledByAHeldWorkerNamesTheResume(): Promise<void> {
+  const { peer, game } = await aGameWithAHeldWorker(() => undefined);
+  try {
+    assert.deepEqual(await peer.ask({ op: 'snapshot' }), {
+      refused: `The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy. Thread ${HELD_WORKER} is held at a breakpoint, and a main loop that waits on it stops too, while the main loop is what answers a snapshot.`,
+      next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
+    });
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * A snapshot asked as soon as a large one is answered is taken too. The game sends a frame each
+ * second while the keeper reads and counts the first, and those frames are still unread as the
+ * second request goes out. Counted as frames past it, they read as an engine without the snapshot.
+ */
+async function testASnapshotRightAfterALargeOneIsTaken(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('snapshot after a large one regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshot-backlog-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Backlog"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\nvar kept: Array[Resource] = []\n\n\nfunc _ready() -> void:\n' +
+      '\tfor at: int in 200000:\n\t\tvar one: Resource = Resource.new()\n\t\tone.resource_name = str(at)\n\t\tkept.append(one)\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  let running = (): void => undefined;
+  const ran = new Promise<boolean>((settle) => {
+    running = () => {
+      settle(true);
+    };
+    setTimeout(() => {
+      settle(false);
+    }, 60_000).unref();
+  });
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => undefined,
+        message: (received) => {
+          if ('message' in received && received.message === 'performance:profile_frame') {
+            running();
+          }
+        },
+      },
+    ],
+  );
+  const game = spawnHidden(engine, ['--headless', '--path', project, ...peer.engineArguments], {
+    stdio: 'ignore',
+  });
+  try {
+    assert.ok(await ran, 'the game runs and sends its frames');
+    const first = await peer.ask({ op: 'snapshot' });
+    const second = await peer.ask({ op: 'snapshot' });
+    for (const [which, answer] of [
+      ['first', first],
+      ['second', second],
+    ] as const) {
+      assert.ok(
+        isSnapshotCounts(answer) &&
+          answer.classes.some((one) => one.engineClass === 'Resource' && one.count >= 200000),
+        `the ${which} snapshot is taken: ${JSON.stringify(answer).slice(0, 600)}`,
+      );
+    }
+  } finally {
+    game.kill();
+    peer.close();
+    await delay(300);
+    sweep(project);
+  }
+}
+
+/**
+ * A snapshot asked while a worker thread is held at a breakpoint comes back whole when the worker
+ * leaves its break before the first slice is asked. A worker drops what it has not read as it
+ * leaves, so every snapshot message goes to the main loop, which never does.
+ */
+async function testASnapshotOfAThreadLetGoMidFetchComesBackWhole(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('snapshot of a thread let go regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshot-thread-'));
+  const script = [
+    'extends Node',
+    '',
+    'var kept: Array[Resource] = []',
+    'var worker: Thread = null',
+    '',
+    '',
+    'func _ready() -> void:',
+    '\tfor at: int in 20000:',
+    '\t\tvar one: Resource = Resource.new()',
+    '\t\tone.resource_name = str(at)',
+    '\t\tkept.append(one)',
+    '',
+    '',
+    'func _process(_delta: float) -> void:',
+    '\tif worker == null and Time.get_ticks_msec() > 2000:',
+    '\t\tworker = Thread.new()',
+    '\t\tworker.start(work)',
+    '',
+    '',
+    'func work() -> void:',
+    '\tvar held: int = 2',
+    '\tprint(held)',
+  ];
+  writeFileSync(join(project, 'main.gd'), `${script.join('\n')}\n`);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Thread"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const seen = { worker: -1, letGo: false };
+  let leftNow = (): void => undefined;
+  const left = new Promise<boolean>((settle) => {
+    leftNow = () => {
+      settle(true);
+    };
+    setTimeout(() => {
+      settle(false);
+    }, 60_000).unref();
+  });
+  let heldNow = (): void => undefined;
+  const held = new Promise<boolean>((settle) => {
+    heldNow = () => {
+      settle(true);
+    };
+    setTimeout(() => {
+      settle(false);
+    }, 60_000).unref();
+  });
+  const peer = await GameDebugger.open(
+    [`res://main.gd:${script.indexOf('\tvar held: int = 2') + 1}`],
+    [
+      {
+        connected: () => undefined,
+        message: (received, send) => {
+          if (!('message' in received)) {
+            return;
+          }
+          if (received.message === 'debug_enter' && seen.worker === -1) {
+            seen.worker = received.thread;
+            heldNow();
+          }
+          // Let go as the size arrives, before the snapshot's first slice is asked.
+          if (received.message === 'snapshot:snapshot_prepared' && !seen.letGo) {
+            seen.letGo = true;
+            send('continue', [], seen.worker);
+          }
+          if (received.message === 'debug_exit' && received.thread === seen.worker) {
+            leftNow();
+          }
+        },
+      },
+    ],
+  );
+  const game = spawnHidden(engine, ['--headless', '--path', project, ...peer.engineArguments], {
+    stdio: 'ignore',
+  });
+  try {
+    assert.ok(await held, 'the worker stops on its breakpoint');
+    const answer = await peer.ask({ op: 'snapshot' });
+    assert.ok(seen.letGo, 'the worker was let go mid-fetch');
+    assert.ok(await left, 'the worker left its break');
+    assert.ok(
+      isSnapshotCounts(answer) &&
+        answer.classes.some((one) => one.engineClass === 'Resource' && one.count >= 20000),
+      `the snapshot comes back whole: ${JSON.stringify(answer).slice(0, 600)}`,
+    );
+  } finally {
+    game.kill();
+    peer.close();
+    await delay(300);
+    sweep(project);
+  }
+}
+
+/**
+ * A snapshot with no game running says how to start one, and a diff names the ids it does have.
+ */
+async function testAnObjectSnapshotNeedsAGameThisServerStarted(): Promise<void> {
+  await withStdioServer(async (call) => {
+    assert.match(
+      await call('debug_objects', { op: 'snapshot' }),
+      /^No game is running, so there are no objects to count\.[\s\S]*editor_run start/,
+    );
+    assert.match(
+      await call('debug_objects', { op: 'diff', before: 's1', after: 's2' }),
+      /^No snapshot is kept as "s1"\. None has been taken since this server started\.[\s\S]*debug_objects snapshot/,
+    );
+  });
+}
+
+/**
+ * A game the editor plays is refused with why and with the start that makes one this server can
+ * snapshot: the editor is its debugger, and its own profiler takes the snapshot messages.
+ */
+async function testAnObjectSnapshotOfAPlayedGameIsRefused(): Promise<void> {
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'play_scene' || tool === 'playing_status'
+          ? { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter }
+          : { ok: true },
+    async ({ server, start }) => {
+      await start(300);
+      const said = textOf(
+        await server.request('tools/call', { name: 'debug_objects', arguments: { op: 'snapshot' } }, 30_000),
+      );
+      assert.match(
+        said ?? '',
+        /^The game is one the editor plays, so the editor is its debugger, and the editor's ObjectDB Profiler answers every snapshot such a game sends in its own way\.[\s\S]*editor_run stop, then editor_run start with headless: true and any of args, engineArgs, env or savesIn\. The editor cannot hand a game any of them, so this server starts it/,
+      );
+    },
+  );
+}
+
+/**
+ * Every start a snapshot refusal names is spawned by this server, even in a project whose run
+ * arguments already make the editor's games headless. There the editor plays a start asking only
+ * for headless or silent itself, and its debugger is the editor's.
+ */
+async function testTheStartASnapshotRefusalNamesIsSpawnedHere(): Promise<void> {
+  const tools: string[] = [];
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        tools.push(tool);
+        return tool === 'play_scene' || tool === 'playing_status'
+          ? { ok: true, playing: tool === 'play_scene', scenePath: 'res://main.tscn', debugPort: adapter }
+          : { ok: true };
+      },
+    async ({ server, project }) => {
+      const asked = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, 60_000)) ?? '';
+      const named = await asked('debug_objects', { op: 'snapshot' });
+      const spawning = /editor_run start with headless: true and any of args, engineArgs, env or savesIn\./;
+      assert.match(named, new RegExp(`^No game is running[\\s\\S]*${spawning.source}`));
+      // The keeper's fix for a game whose debugger is gone names the same start.
+      const keeper = await GameDebugger.open([]);
+      try {
+        assert.match(String((await keeper.ask({ op: 'snapshot' }))['next']), spawning);
+      } finally {
+        keeper.close();
+      }
+      const starts: Record<string, unknown>[] = [
+        { args: ['--level=1'] },
+        { engineArgs: ['--verbose'] },
+        { env: { SNAPSHOT_RUN: '1' } },
+        { savesIn: join(project, 'saves') },
+      ];
+      for (const start of starts) {
+        tools.length = 0;
+        const said = await asked('editor_run', {
+          projectPath: project,
+          op: 'start',
+          headless: true,
+          runtimeWaitMs: 300,
+          ...start,
+        });
+        assert.ok(
+          !tools.includes('play_scene'),
+          `${JSON.stringify(start)} is not played by the editor: ${said}`,
+        );
+        await asked('editor_run', { op: 'stop' });
+      }
+      // The two the editor does play here, which a refusal must not name on their own.
+      for (const start of [{ headless: true }, { headless: false, silent: true }]) {
+        tools.length = 0;
+        await asked('editor_run', { projectPath: project, op: 'start', runtimeWaitMs: 300, ...start });
+        assert.ok(tools.includes('play_scene'), `${JSON.stringify(start)} is played by the editor here`);
+        await asked('editor_run', { op: 'stop' });
+      }
+    },
+  );
+}
+
+/**
+ * On a real engine, a hundred Resources kept by one call show as +100 of their class_name between
+ * a snapshot before and one after, and the classes the call did not touch do not move. Objects of
+ * inner classes, nested ones too, are counted under their native class with a note. A fresh game's counts keep
+ * RefCounted and Node apart, thousands of objects come back whole over several slices, and a
+ * snapshot of an earlier run is refused for a diff.
+ */
+async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('object snapshot regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshots-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-snapshots-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Snapshots"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'item.gd'),
+    'class_name Item\nextends Resource\n\n@export var label: String = ""\n',
+  );
+  writeFileSync(
+    join(project, 'note.gd'),
+    'class_name Note\nextends Resource\n\n@export var text: String = ""\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'const ITEM: GDScript = preload("res://item.gd")',
+      'const NOTE: GDScript = preload("res://note.gd")',
+      '',
+      'var items: Array[Resource] = []',
+      'var notes: Array[Resource] = []',
+      'var inners: Array[RefCounted] = []',
+      '',
+      '',
+      'class Inner extends RefCounted:',
+      '\tclass Deep extends RefCounted:',
+      '\t\tvar depth: int = 1',
+      '',
+      '\tvar at: int = 0',
+      '',
+      '',
+      'func keep_inners(count: int) -> void:',
+      '\tfor at: int in count:',
+      '\t\tinners.append(Inner.new())',
+      '\t\tif at % 2 == 0:',
+      '\t\t\tinners.append(Inner.Deep.new())',
+      '',
+      '',
+      'func keep_items(count: int) -> void:',
+      '\tfor at: int in count:',
+      '\t\tvar item: Resource = ITEM.new()',
+      '\t\titem.set("label", str(at))',
+      '\t\titems.append(item)',
+      '',
+      '',
+      'func keep_notes(count: int) -> void:',
+      '\tfor at: int in count:',
+      '\t\tvar note: Resource = NOTE.new()',
+      '\t\tnote.set("text", "%x%x%x%x%x%x" % [randi(), randi(), randi(), randi(), randi(), randi()])',
+      '\t\tnotes.append(note)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Marker" type="Marker2D" parent="."]\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const classOf = (answer: unknown, name: string): unknown =>
+    asArray(get(answer, 'classes')).find((one) => get(one, 'class') === name);
+  const play = async (): Promise<void> => {
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(start.answer, 'started'), true, start.said);
+  };
+  try {
+    await server.initialize('regression-test');
+    await play();
+
+    // A fresh game: the scripted root under its script's path, the plain node under its class,
+    // and RefCounted and Node totalled apart.
+    const fresh = await call('debug_objects', { op: 'snapshot' });
+    assert.equal(get(fresh.answer, 'snapshot'), 's1', fresh.said);
+    assert.deepEqual(
+      [
+        classOf(fresh.answer, 'res://main.gd'),
+        classOf(fresh.answer, 'Marker2D'),
+        classOf(fresh.answer, 'Item'),
+      ],
+      [
+        { class: 'res://main.gd', kind: 'Node', count: 1, engineClass: 'Node' },
+        { class: 'Marker2D', kind: 'Node', count: 1 },
+        undefined,
+      ],
+      fresh.said,
+    );
+    const counted = (field: string): number => Number(get(fresh.answer, field));
+    assert.ok(counted('nodes') >= 3 && counted('refCounted') > 0, fresh.said);
+    assert.ok(counted('objects') > counted('nodes') + counted('refCounted'), fresh.said);
+
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_items', args: [100] });
+    const kept = await call('debug_objects', { op: 'diff', before: 's1' });
+    assert.equal(get(kept.answer, 'after'), 's2', kept.said);
+    const changed = asArray(get(kept.answer, 'changed'));
+    assert.deepEqual(
+      changed.find((one) => get(one, 'class') === 'Item'),
+      { class: 'Item', kind: 'RefCounted', before: 0, after: 100, change: 100 },
+      kept.said,
+    );
+    for (const untouched of ['res://main.gd', 'Marker2D', 'Note']) {
+      assert.equal(
+        changed.find((one) => get(one, 'class') === untouched),
+        undefined,
+        `${untouched} did not move: ${kept.said}`,
+      );
+    }
+    assert.ok(Number(get(kept.answer, 'unchangedClasses')) > 10, kept.said);
+
+    // An inner class's script has no file, so the game names it only by an id. Its objects go
+    // under their native class, and the note counts them.
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_inners', args: [40] });
+    const inner = await call('debug_objects', { op: 'diff', before: 's2' });
+    const [, then = '', later = ''] =
+      /^Objects of s2 \((\d+)\) and of s3 \((\d+)\) have a script with no file/.exec(
+        String(get(inner.answer, 'note')),
+      ) ?? [];
+    assert.deepEqual(
+      [
+        Number(later) - Number(then),
+        asArray(get(inner.answer, 'changed')).some((one) => String(get(one, 'class')).includes('::')),
+      ],
+      [60, false],
+      inner.said,
+    );
+
+    // Thousands of objects, each with text that does not deflate, come back whole over slices.
+    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_notes', args: [6000] });
+    const [many, alongside] = await Promise.all([
+      call('debug_objects', { op: 'snapshot' }),
+      call('debug_objects', { op: 'snapshot' }),
+    ]);
+    for (const one of [many, alongside]) {
+      assert.deepEqual(
+        classOf(one.answer, 'Note'),
+        { class: 'Note', kind: 'RefCounted', count: 6000, engineClass: 'Resource' },
+        one.said,
+      );
+      assert.ok(Number(get(one.answer, 'bytes')) > 2 * SNAPSHOT_SLICE_BYTES, one.said);
+    }
+    assert.deepEqual(
+      [get(many.answer, 'snapshot'), get(alongside.answer, 'snapshot')].toSorted((a, b) =>
+        String(a).localeCompare(String(b)),
+      ),
+      ['s4', 's5'],
+      'two snapshots asked together are kept apart',
+    );
+
+    await call('editor_run', { op: 'stop' });
+    await play();
+    const refused = await call('debug_objects', { op: 'diff', before: 's1' });
+    assert.equal(refused.answer, null, refused.said);
+    assert.match(
+      refused.said,
+      /^s1 was taken in an earlier run of the game than s6 \(process \d+, then \d+\)\.[\s\S]*in the same run/,
+    );
+    // Two snapshots of one earlier run still compare, since both counts are of the same objects.
+    const earlier = await call('debug_objects', { op: 'diff', before: 's1', after: 's2' });
+    assert.equal(get(earlier.answer, 'changed', 0, 'class'), 'Item', earlier.said);
+  } finally {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 /**
  * An evaluate in a project with a global class that does not parse names the class, and says the
  * held game's stack cannot be read until it next stops.
@@ -49269,6 +50738,663 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
     },
     { realAddon: true, engine, held },
   );
+}
+
+/** What a read-path regression asks of the played game, and how it reads the run's verdict. */
+interface ReadingGame {
+  /** A tool call, answered as text: a refusal is its message. */
+  readonly ask: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /**
+   * The errors the run counts against the game, once the report has settled: clean, or holding
+   * [param expected] errors at least.
+   */
+  readonly counted: (expected?: number) => Promise<{ errors: number; clean: unknown }>;
+}
+
+/**
+ * A headless game the server starts, with three labels under `Rows`: `When` and `Pad` have no children, `Who`
+ * has one, `Kid`. Its method `fail` raises an error of the game's own.
+ */
+async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Promise<void>): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${skipped} skipped (Godot not found)`);
+    return;
+  }
+  await withAPlayingEditor(
+    () => () => ({ ok: true, playing: false, scenePath: '' }),
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        [
+          'extends Node',
+          '',
+          'var held: Node',
+          'var count: int = 0',
+          'var locked: int = 0:',
+          '\tset(_value):',
+          '\t\tpass',
+          'var nodes: Array[Node] = []',
+          'var list: Array = [1, 2]',
+          'var late_reads: int = 0',
+          'var late: int:',
+          '\tget:',
+          '\t\tlate_reads += 1',
+          '\t\tif late_reads >= 3:',
+          '\t\t\tpush_error("late getter")',
+          '\t\treturn late_reads',
+          'var _reads: int = 0',
+          'var flaky: int:',
+          '\tget:',
+          '\t\t_reads += 1',
+          '\t\tif _reads == 2:',
+          '\t\t\tpush_error("flaky read")',
+          '\t\treturn _reads',
+          'var loud: Node:',
+          '\tget:',
+          '\t\tpush_error("loud getter")',
+          '\t\treturn self',
+          'var grumble: Node:',
+          '\tget:',
+          '\t\tpush_error("grumble getter")',
+          '\t\treturn self',
+          '',
+          '',
+          'func take(_node: Node) -> void:',
+          '\tpass',
+          '',
+          '',
+          'func take2(_first: Node, _second: Node) -> void:',
+          '\tpass',
+          '',
+          '',
+          'func one(_value: int) -> void:',
+          '\tpass',
+          '',
+          '',
+          'func noisy() -> Node:',
+          '\tpush_error("noisy step")',
+          '\treturn self',
+          '',
+          '',
+          'func noisy25() -> Node:',
+          '\tfor _round: int in 25:',
+          '\t\tpush_error("noisy step %d" % _round)',
+          '\treturn self',
+          '',
+          '',
+          'func odd() -> Node:',
+          '\tpush_error("odd step")',
+          '\treturn self',
+          '',
+          '',
+          'func slow() -> Node:',
+          '\tawait get_tree().create_timer(0.6).timeout',
+          '\treturn self',
+          '',
+          '',
+          'func reset_flaky() -> void:',
+          '\t_reads = 0',
+          '',
+          '',
+          'func drop_later() -> void:',
+          '\tget_tree().create_timer(0.5).timeout.connect($Rows/Who/Kid.queue_free)',
+          '',
+          '',
+          'func add_later() -> void:',
+          '\tget_tree().create_timer(0.5).timeout.connect(',
+          '\t\tfunc() -> void: $Rows/Pad.add_child(Label.new())',
+          '\t)',
+          '',
+          '',
+          'func fail() -> void:',
+          '\tpush_error("the game failed on its own")',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+          '[node name="Rows" type="Node" parent="."]\n\n' +
+          '[node name="When" type="Label" parent="Rows"]\n\n' +
+          '[node name="Who" type="Label" parent="Rows"]\n\n' +
+          '[node name="Kid" type="Label" parent="Rows/Who"]\n\n' +
+          '[node name="Pad" type="Label" parent="Rows"]\n',
+      );
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+      const ask = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const counted = async (expected = 0): Promise<{ errors: number; clean: unknown }> => {
+        const deadline = Date.now() + 5000;
+        let answer = parseTextContent(
+          await server.request('tools/call', { name: 'editor_output', arguments: { severity: 'error' } }),
+        );
+        const settled = (): boolean =>
+          expected === 0 ? get(answer, 'clean') === true : asNumber(get(answer, 'errors')) >= expected;
+        while (!settled() && Date.now() < deadline) {
+          await delay(250);
+          answer = parseTextContent(
+            await server.request('tools/call', { name: 'editor_output', arguments: { severity: 'error' } }),
+          );
+        }
+        return { errors: asNumber(get(answer, 'errors')), clean: get(answer, 'clean') };
+      };
+      try {
+        await body({ ask, counted });
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine, playsWindowed: true },
+  );
+}
+
+/** The nodes of a find answer by name, with what each says of the property asked. */
+function foundByName(answer: string): Map<string, unknown> {
+  const parsed: unknown = JSON.parse(answer);
+  return new Map(asArray(get(parsed, 'nodes')).map((node) => [text(get(node, 'name')), node]));
+}
+
+/**
+ * A find whose `property` path takes an index step past a node's children says the step is not
+ * there, and the engine is never asked.
+ *
+ * `get_child(0):get_class()` over labels answered `has_property` false for the ones with no child
+ * and left the engine's out-of-bounds error in the game's log for each, so the run read as unclean
+ * with errors the game never made.
+ */
+async function testAFindIndexStepPastTheChildrenIsNotThere(): Promise<void> {
+  await withAReadingGame('find index step regression', async ({ ask, counted }) => {
+    const found = foundByName(
+      await ask('runtime_inspect', {
+        op: 'find',
+        className: 'Label',
+        property: 'get_child(0):get_class()',
+      }),
+    );
+    assert.deepEqual(
+      ['When', 'Who', 'Kid', 'Pad'].map((name) => [
+        name,
+        get(found.get(name), 'has_property'),
+        get(found.get(name), 'value'),
+        get(found.get(name), 'errors'),
+      ]),
+      [
+        ['When', false, undefined, undefined],
+        ['Who', true, 'Label', undefined],
+        ['Kid', false, undefined, undefined],
+        ['Pad', false, undefined, undefined],
+      ],
+    );
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * A find whose path takes a step that makes the engine report an error carries that error in the
+ * match's answer, and the run stays clean.
+ */
+async function testAFindStepThatErrorsReturnsTheErrorAndStaysClean(): Promise<void> {
+  await withAReadingGame('find erroring step regression', async ({ ask, counted }) => {
+    const found = foundByName(
+      await ask('runtime_inspect', {
+        op: 'find',
+        className: 'Label',
+        property: 'get_node("missing"):get_class()',
+      }),
+    );
+    for (const name of ['When', 'Who', 'Kid', 'Pad']) {
+      const node = found.get(name);
+      assert.equal(get(node, 'has_property'), false, name);
+      assert.match(
+        asArray(get(node, 'errors')).map(text).join('\n'),
+        /Node not found/,
+        `${name} carries the engine's error`,
+      );
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * Every op that walks a `property` path says what a step made the engine report, or that the step
+ * is not there, and leaves nothing in the game's log.
+ */
+async function testEveryPathOpSaysWhatAReadStepReported(): Promise<void> {
+  await withAReadingGame('path op regression', async ({ ask, counted }) => {
+    const label = '/root/Main/Rows/When';
+    const erroring = 'get_node("missing"):name';
+    const reported = /The engine reported: .*Node not found/;
+    assert.match(
+      await ask('runtime_inspect', { op: 'property', nodePath: label, property: erroring }),
+      reported,
+      'property',
+    );
+    assert.match(
+      await ask('runtime_wait', {
+        op: 'until',
+        nodePath: label,
+        property: erroring,
+        value: 'x',
+        timeoutMs: 1000,
+      }),
+      reported,
+      'until',
+    );
+    assert.match(
+      await ask('runtime_invoke', { op: 'set', nodePath: label, property: erroring, value: 'x' }),
+      reported,
+      'set',
+    );
+    assert.match(
+      await ask('runtime_invoke', { op: 'call', nodePath: label, method: 'get_node("missing"):get_class' }),
+      reported,
+      'call',
+    );
+    const past = await ask('runtime_inspect', {
+      op: 'property',
+      nodePath: label,
+      property: 'get_child(0):name',
+    });
+    assert.match(past, /has 0 children/, 'an index past the children is not there');
+    assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * A path given as a call's argument takes the same steps a property path does. An index past the
+ * children is refused as not there, and an engine error a step makes comes back in the refusal and
+ * stays out of the run's errors.
+ */
+async function testACallArgumentPathSaysWhatItsStepsReported(): Promise<void> {
+  await withAReadingGame('call argument path regression', async ({ ask, counted }) => {
+    const take = (path: string): Promise<string> =>
+      ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'take', args: [path] });
+    const past = await take('/root/Main/Rows/When:get_child(0)');
+    assert.match(past, /has 0 children/, 'an index past the children is not there');
+    assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    assert.match(
+      await take('/root/Main/Rows/When:get_node("missing"):get_parent()'),
+      /The engine reported: .*Node not found/,
+      'a step that errors says so',
+    );
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/**
+ * A path given as the value of a write to an object slot takes the same steps a property path
+ * does, with the same answers.
+ */
+async function testAnObjectTargetPathSaysWhatItsStepsReported(): Promise<void> {
+  await withAReadingGame('object target path regression', async ({ ask, counted }) => {
+    const hold = (path: string): Promise<string> =>
+      ask('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'held', value: path });
+    const past = await hold('/root/Main/Rows/When:get_child(0)');
+    assert.match(past, /has 0 children/, 'an index past the children is not there');
+    assert.doesNotMatch(past, /engine reported/, 'and the engine was not asked');
+    assert.match(
+      await hold('/root/Main/Rows/When:get_node("missing"):get_parent()'),
+      /The engine reported: .*Node not found/,
+      'a step that errors says so',
+    );
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/** A second argument of get_child that is not a bool is the engine's to read, not the addon's fault. */
+async function testAChildStepWithAnOddSecondArgumentRaisesNoScriptError(): Promise<void> {
+  await withAReadingGame('child step argument regression', async ({ ask, counted }) => {
+    const who = '/root/Main/Rows/Who';
+    const read = async (step: string): Promise<string> =>
+      await ask('runtime_inspect', { op: 'property', nodePath: who, property: `${step}:name` });
+    assert.equal(get(JSON.parse(await read('get_child(0, 1)')), 'value'), 'Kid');
+    await read('get_child(0, "x")');
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the addon raised nothing itself');
+  });
+}
+
+/** A wait on a child step waits for the child to come or go, as it does for any other step. */
+async function testAWaitOnAChildStepWaitsForTheChild(): Promise<void> {
+  await withAReadingGame('child wait regression', async ({ ask, counted }) => {
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'drop_later' });
+    const gone: unknown = JSON.parse(
+      await ask('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main/Rows/Who',
+        property: 'get_child(0)',
+        value: null,
+        timeoutMs: 5000,
+      }),
+    );
+    assert.equal(get(gone, 'met'), true, JSON.stringify(gone));
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'add_later' });
+    const came: unknown = JSON.parse(
+      await ask('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main/Rows/Pad',
+        property: 'get_child(0)',
+        compare: '!=',
+        value: null,
+        timeoutMs: 5000,
+      }),
+    );
+    assert.equal(get(came, 'met'), true, JSON.stringify(came));
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** Every refusal after a successful walk carries the errors the walk's steps made. */
+async function testARefusalAfterAWalkCarriesTheWalksErrors(): Promise<void> {
+  await withAReadingGame('refusal after walk regression', async ({ ask, counted }) => {
+    const game = '/root/Main';
+    const answers: Record<string, string> = {
+      'value it cannot fit': await ask('runtime_invoke', {
+        op: 'set',
+        nodePath: game,
+        property: 'noisy():count',
+        value: 1.5,
+      }),
+      'setter that kept the old value': await ask('runtime_invoke', {
+        op: 'set',
+        nodePath: game,
+        property: 'noisy():locked',
+        value: 5,
+      }),
+      'wrong argument count': await ask('runtime_invoke', {
+        op: 'call',
+        nodePath: game,
+        method: 'noisy():one',
+        args: [],
+      }),
+      'refused argument': await ask('runtime_invoke', {
+        op: 'call',
+        nodePath: game,
+        method: 'noisy():take',
+        args: ['/root/Main/Nope'],
+      }),
+      'wait met on the first look': await ask('runtime_wait', {
+        op: 'until',
+        nodePath: game,
+        property: 'noisy():count',
+        compare: '>=',
+        value: 0,
+        timeoutMs: 1000,
+      }),
+    };
+    for (const [what, answer] of Object.entries(answers)) {
+      assert.match(answer, /noisy step/, `${what}: ${answer}`);
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** Two paths in one request each keep the errors their steps made. */
+async function testTwoPathsInOneRequestKeepBothSetsOfErrors(): Promise<void> {
+  await withAReadingGame('two paths regression', async ({ ask, counted }) => {
+    const first = '/root/Main:noisy()';
+    const second = '/root/Main/Rows:get_parent()';
+    const called = await ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'take2',
+      args: [first, second],
+    });
+    assert.match(called, /noisy step/, `a call with two path arguments: ${called}`);
+    const written = await ask('runtime_invoke', {
+      op: 'set',
+      nodePath: '/root/Main',
+      property: 'nodes',
+      value: [first, second],
+    });
+    assert.match(written, /noisy step/, `a typed array of two paths: ${written}`);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** The errors of the call itself come first, and a cut counts what it leaves out. */
+async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
+  await withAReadingGame('walk error cut regression', async ({ ask }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noisy25():fail' }),
+    );
+    const errors = asArray(get(answer, 'errors')).map(text);
+    assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
+    assert.equal(errors.length, 20);
+    assert.equal(get(answer, 'errors_not_shown'), 6, 'the game raised 26 and 20 are shown');
+    const read: unknown = JSON.parse(
+      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'noisy25():name' }),
+    );
+    assert.equal(asArray(get(read, 'errors')).length, 20);
+    assert.equal(get(read, 'errors_not_shown'), 5, 'a read that raised 25 shows 20');
+  });
+}
+
+/** The errors of reading a call's result with `properties` come back in the call's answer. */
+async function testAResultReadWithPropertiesReportsItsStepErrors(): Promise<void> {
+  await withAReadingGame('result properties regression', async ({ ask, counted }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_invoke', {
+        op: 'call',
+        nodePath: '/root/Main/Rows',
+        method: 'get_parent',
+        properties: ['noisy():name'],
+      }),
+    );
+    assert.match(asArray(get(answer, 'errors')).map(text).join('\n'), /noisy step/);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A call on a list or a map that is refused still carries the errors of the path's steps. */
+async function testAListCallRefusalCarriesTheStepErrors(): Promise<void> {
+  await withAReadingGame('list call refusal regression', async ({ ask, counted }) => {
+    for (const [method, args] of [
+      ['noisy():list:size', [1]],
+      ['noisy():list:bogus', []],
+    ] as const) {
+      const said = await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method, args });
+      assert.match(said, /The engine reported: .*noisy step/, `${method}: ${said}`);
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A wait keeps the errors of every look it took, not only the last. */
+async function testAWaitKeepsTheErrorsOfEveryLook(): Promise<void> {
+  await withAReadingGame('wait looks regression', async ({ ask, counted }) => {
+    for (const args of [{ compare: '>=', value: 5 }, { value: 5 }]) {
+      await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'reset_flaky' });
+      const said = await ask('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'flaky',
+        timeoutMs: 5000,
+        ...args,
+      });
+      assert.match(said, /flaky read/, `${JSON.stringify(args)}: ${said}`);
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A watch pushed out by newer ones stops reading, so its errors are not marked and shown nowhere. */
+async function testAnEvictedWatchStopsReading(): Promise<void> {
+  await withAReadingGame('evicted watch regression', async ({ ask }) => {
+    const readCount = async (): Promise<unknown> =>
+      get(
+        JSON.parse(
+          await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'late_reads' }),
+        ),
+        'value',
+      );
+    await ask('runtime_wait', { op: 'watch', nodePath: '/root/Main', property: 'late' });
+    for (let armed = 0; armed < 16; armed += 1) {
+      await ask('runtime_wait', { op: 'watch', nodePath: '/root/Main', property: 'count' });
+    }
+    await ask('runtime_wait', { op: 'frames', frames: 3 });
+    const before = await readCount();
+    await ask('runtime_wait', { op: 'frames', frames: 30 });
+    assert.equal(await readCount(), before, 'the evicted watch reads no more');
+  });
+}
+
+/**
+ * Requests that overlap in the game each answer with their own errors. A wait on a getter that
+ * errors is in flight while an awaiting call that reads its result, a find and a property read
+ * each make errors of their own.
+ */
+async function testOverlappingRequestsKeepTheirOwnErrors(): Promise<void> {
+  await withAReadingGame('overlap regression', async ({ ask, counted }) => {
+    // The order matters: the call awaits, so a request that starts after it and is still waiting
+    // when the call resumes is the one the game last bound.
+    const waiting = ask('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'loud:name',
+      value: 'never',
+      timeoutMs: 2500,
+    });
+    await delay(100);
+    const calling = ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'slow',
+      properties: ['noisy():name'],
+    });
+    await delay(100);
+    const ordering = ask('runtime_wait', {
+      op: 'until',
+      nodePath: '/root/Main',
+      property: 'grumble:count',
+      compare: '>=',
+      value: 5,
+      timeoutMs: 2500,
+    });
+    await delay(200);
+    const [found, read] = await Promise.all([
+      ask('runtime_inspect', {
+        op: 'find',
+        className: 'Label',
+        nodePath: '/root/Main/Rows',
+        property: 'get_node("/root/Main"):odd():name',
+      }),
+      ask('runtime_inspect', {
+        op: 'property',
+        nodePath: '/root/Main/Rows/When',
+        property: 'get_node("missing"):name',
+      }),
+    ]);
+    const [called, waited, ordered] = await Promise.all([calling, waiting, ordering]);
+    assert.match(called, /noisy step/, called);
+    assert.doesNotMatch(called, /loud getter|grumble getter|odd step|Node not found/, called);
+    assert.match(found, /odd step/, found);
+    assert.doesNotMatch(found, /loud getter|grumble getter|noisy step|Node not found/, found);
+    assert.match(read, /Node not found/, read);
+    assert.doesNotMatch(read, /loud getter|grumble getter|noisy step|odd step/, read);
+    assert.match(waited, /loud getter/, waited);
+    assert.doesNotMatch(waited, /grumble getter|noisy step|odd step|Node not found/, waited);
+    assert.match(ordered, /grumble getter/, ordered);
+    assert.doesNotMatch(ordered, /loud getter|noisy step|odd step|Node not found/, ordered);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A property watch reports the errors its readings made when its recording is collected. */
+async function testAPropertyWatchReportsItsReadingsErrors(): Promise<void> {
+  await withAReadingGame('watch errors regression', async ({ ask, counted }) => {
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'reset_flaky' });
+    const armed: unknown = JSON.parse(
+      await ask('runtime_wait', { op: 'watch', nodePath: '/root/Main', property: 'flaky' }),
+    );
+    await ask('runtime_wait', { op: 'frames', frames: 6 });
+    const recorded = await ask('runtime_wait', { op: 'recorded', watch: get(armed, 'watch') });
+    assert.match(recorded, /flaky read/, recorded);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/** A property step whose getter errors is reported in the answer and kept out of the verdict. */
+async function testAPropertyStepWhoseGetterErrorsIsReported(): Promise<void> {
+  await withAReadingGame('getter step regression', async ({ ask, counted }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'loud:name' }),
+    );
+    assert.equal(get(answer, 'value'), 'Main');
+    assert.match(asArray(get(answer, 'errors')).map(text).join('\n'), /loud getter/);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true], 'the run is still clean');
+  });
+}
+
+/** An error the game makes on its own while reads run still counts against the run. */
+async function testAGamesOwnErrorStillCountsBesideReads(): Promise<void> {
+  await withAReadingGame('own error regression', async ({ ask, counted }) => {
+    await ask('runtime_inspect', {
+      op: 'find',
+      className: 'Label',
+      property: 'get_node("missing"):get_class()',
+    });
+    await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'fail' });
+    const verdict = await counted(1);
+    assert.equal(verdict.errors, 1, "only the game's own error counts");
+    assert.equal(verdict.clean, false);
+  });
+}
+
+/** Indexes inside the children, negative ones included, are read as before. */
+async function testIndexStepsInsideTheChildrenStillRead(): Promise<void> {
+  await withAReadingGame('index step regression', async ({ ask, counted }) => {
+    const who = '/root/Main/Rows/Who';
+    for (const index of ['0', '-1']) {
+      const answer: unknown = JSON.parse(
+        await ask('runtime_inspect', { op: 'property', nodePath: who, property: `get_child(${index}):name` }),
+      );
+      assert.equal(get(answer, 'value'), 'Kid', `get_child(${index})`);
+    }
+    for (const index of ['1', '-2']) {
+      assert.match(
+        await ask('runtime_inspect', { op: 'property', nodePath: who, property: `get_child(${index}):name` }),
+        /has 1 child,/,
+        `get_child(${index}) is past the one child`,
+      );
+    }
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
 }
 
 /**
@@ -59925,6 +62051,475 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
   }
 }
 
+const RESERVED_GIB = 1024 ** 3;
+
+/** A slots folder with a reserved folder, and live processes to hold marks, all removed by `close`. */
+function reservationFixture(): {
+  readonly directory: string;
+  readonly holder: () => Promise<{ pid: number; started: number }>;
+  readonly mark: (name: string, content: unknown) => void;
+  readonly close: () => void;
+} {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reserved-'));
+  mkdirSync(join(directory, RESERVED_FOLDER));
+  const children: ReturnType<typeof spawnHidden>[] = [];
+  return {
+    directory,
+    holder: async () => {
+      const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+        stdio: 'ignore',
+      });
+      children.push(child);
+      const pid = child.pid ?? 0;
+      const started = (await startTimesOf([pid])).get(pid);
+      assert.notEqual(started, undefined, 'the platform says when a live process started');
+      return { pid, started: started ?? 0 };
+    },
+    mark: (name, content) => {
+      writeFileSync(
+        join(directory, RESERVED_FOLDER, name),
+        typeof content === 'string' ? content : JSON.stringify(content),
+      );
+    },
+    close: () => {
+      for (const child of children) {
+        child.kill();
+      }
+      sweep(directory);
+    },
+  };
+}
+
+/** A live mark owing 30 GiB takes exactly 30 GiB from the room, and from the figure the room is read from. */
+async function testALiveReservationShrinksTheRoomByWhatItOwes(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    assert.equal(await reservedMemory(fixture.directory), 0, 'no mark owes nothing');
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 30 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 30 * RESERVED_GIB);
+    assert.equal(memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB).bytes, -18 * RESERVED_GIB);
+    assert.equal(memoryRoomOf(12 * RESERVED_GIB, 5 * RESERVED_GIB, 3 * RESERVED_GIB).bytes, 2 * RESERVED_GIB);
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A mark whose holder is gone, or whose pid a later process holds, counts nothing. */
+async function testAGoneHoldersReservationCountsNothing(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const live = await fixture.holder();
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    fixture.mark('gone.json', { pid: gone.pid ?? 0, started: live.started, owed: 7 * RESERVED_GIB });
+    fixture.mark('reused.json', { pid: live.pid, started: live.started - 3_600_000, owed: 9 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 0, 'neither mark counts');
+    fixture.mark('live.json', { ...live, owed: 2 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 2 * RESERVED_GIB, 'and a live one still does');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** Live marks add up. */
+async function testSeveralLiveReservationsSum(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 10 * RESERVED_GIB });
+    fixture.mark('b.json', { ...(await fixture.holder()), owed: 20 * RESERVED_GIB });
+    fixture.mark('c.json', { ...(await fixture.holder()), owed: 1 });
+    assert.equal(await reservedMemory(fixture.directory), 30 * RESERVED_GIB + 1);
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A mark that cannot be read as a whole-number debt counts nothing and throws nothing. */
+async function testAMalformedReservationCountsNothingAndThrowsNothing(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const live = await fixture.holder();
+    for (const [name, owed] of [
+      ['fraction', 1.5],
+      ['negative', -5],
+      ['zero', 0],
+      ['boolean', true],
+      ['text', '5'],
+      ['null', null],
+    ] as const) {
+      fixture.mark(`${name}.json`, { ...live, owed });
+    }
+    fixture.mark('missing.json', live);
+    fixture.mark('nobody.json', { owed: 5 });
+    fixture.mark('torn.json', '{"pid":');
+    fixture.mark('array.json', '[1,2]');
+    fixture.mark('empty.json', '');
+    mkdirSync(join(fixture.directory, RESERVED_FOLDER, 'unreadable.json'));
+    assert.equal(await reservedMemory(fixture.directory), 0, 'none of them counts');
+    fixture.mark('good.json', { ...live, owed: 4 * RESERVED_GIB });
+    assert.equal(await reservedMemory(fixture.directory), 4 * RESERVED_GIB, 'a good one beside them does');
+    assert.equal(await reservedMemory(join(fixture.directory, 'nowhere')), 0, 'no folder owes nothing');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** The path of the mark `name` in [param fixture]. */
+function markPath(fixture: { readonly directory: string }, name: string): string {
+  return join(fixture.directory, RESERVED_FOLDER, name);
+}
+
+/** A mark the variable names is the run's own reservation and is not waited on, and one it does not name is. */
+async function testAMarkNamedInTheReservedVariableCountsNothing(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    fixture.mark('own.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
+    fixture.mark('other.json', { ...(await fixture.holder()), owed: 3 * RESERVED_GIB });
+    const named = { [RESERVED_VARIABLE]: markPath(fixture, 'own.json') };
+    assert.equal(await reservedMemory(fixture.directory, named), 3 * RESERVED_GIB, 'only the other counts');
+    assert.equal(await reservedMemory(fixture.directory, {}), 8 * RESERVED_GIB, 'unnamed, both count');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** Nested holders name several marks, joined by the path-list separator, and every one is skipped. */
+async function testSeveralNamedMarksAreAllSkipped(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
+    fixture.mark('b.json', { ...(await fixture.holder()), owed: 6 * RESERVED_GIB });
+    fixture.mark('c.json', { ...(await fixture.holder()), owed: 1 * RESERVED_GIB });
+    const named = {
+      [RESERVED_VARIABLE]: [markPath(fixture, 'a.json'), markPath(fixture, 'b.json')].join(delimiter),
+    };
+    assert.equal(await reservedMemory(fixture.directory, named), RESERVED_GIB, 'only the third counts');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A path spelt with other slashes, and on Windows another case, still names the mark. */
+async function testAMarkPathSpeltDifferentlyStillMatches(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    fixture.mark('own.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
+    const plain = markPath(fixture, 'own.json');
+    const spellings = [
+      join(fixture.directory, RESERVED_FOLDER, '..', RESERVED_FOLDER, 'own.json'),
+      process.platform === 'win32' ? plain.replaceAll('\\', '/') : plain,
+      process.platform === 'win32' ? plain.toUpperCase() : plain,
+    ];
+    for (const spelt of spellings) {
+      assert.equal(await reservedMemory(fixture.directory, { [RESERVED_VARIABLE]: spelt }), 0, spelt);
+    }
+    assert.equal(await reservedMemory(fixture.directory, {}), 5 * RESERVED_GIB, 'and unnamed it counts');
+  } finally {
+    fixture.close();
+  }
+}
+
+/** A count variable that cannot be read never stops the room being read. */
+async function testABadSlotCountNeverStopsTheRoomBeingRead(): Promise<void> {
+  const fixture = reservationFixture();
+  const before = { slots: process.env[SLOTS_VARIABLE], count: process.env['GODOT_ENGINE_SLOT_COUNT'] };
+  try {
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 2 * RESERVED_GIB });
+    process.env[SLOTS_VARIABLE] = fixture.directory;
+    process.env['GODOT_ENGINE_SLOT_COUNT'] = 'abc';
+    assert.equal(await reservedMemory(), 2 * RESERVED_GIB);
+    const room = await memoryAvailable();
+    assert.match(room.said, /after 2\.0 GB reserved$/);
+  } finally {
+    for (const [name, value] of [
+      [SLOTS_VARIABLE, before.slots],
+      ['GODOT_ENGINE_SLOT_COUNT', before.count],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+    fixture.close();
+  }
+}
+
+/** A gate whose memory reads -18 GiB, with [param owed] reserved and a clock the test moves. */
+function reservedGate(owed: { bytes: number }, clock: { ms: number }, told: string[]): MemoryGate {
+  return new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(-18 * RESERVED_GIB),
+    5,
+    {
+      owed: () => Promise.resolve(owed.bytes),
+      say: (line) => told.push(line),
+      now: () => clock.ms,
+    },
+  );
+}
+
+/** The first engine of a run waits while reserved memory leaves no room for it, and says so once. */
+async function testTheFirstEngineWaitsWhileReservedMemoryLeavesNoRoom(): Promise<void> {
+  const told: string[] = [];
+  const gate = reservedGate({ bytes: 30 * RESERVED_GIB }, { ms: 0 }, told);
+  let admitted = false;
+  const control = new AbortController();
+  const asked = gate
+    .admit(control.signal, () => RESERVED_GIB)
+    .then(
+      () => {
+        admitted = true;
+      },
+      () => undefined,
+    );
+  await delay(300);
+  assert.equal(admitted, false, 'the first engine waits');
+  assert.deepEqual(told, ['Waiting for memory other work reserved: 30.0 GB.'], 'and says so once');
+  control.abort();
+  await asked;
+}
+
+/** The first engine starts once the reservation is gone. */
+async function testTheFirstEngineStartsOnceTheReservationIsGone(): Promise<void> {
+  const owed = { bytes: 30 * RESERVED_GIB };
+  const gate = reservedGate(owed, { ms: 0 }, []);
+  let admitted = false;
+  const asked = gate
+    .admit(new AbortController().signal, () => RESERVED_GIB)
+    .then(() => {
+      admitted = true;
+    });
+  await delay(150);
+  assert.equal(admitted, false, 'it waits while the reservation stands');
+  owed.bytes = 0;
+  await asked;
+  assert.equal(admitted, true, 'and starts once it is gone');
+}
+
+/** The first engine starts anyway once the wait has lasted the limit. */
+async function testTheFirstEngineStartsAnywayAfterTheReservedWaitLimit(): Promise<void> {
+  const clock = { ms: 1_000_000 };
+  const gate = reservedGate({ bytes: 30 * RESERVED_GIB }, clock, []);
+  let admitted = false;
+  const asked = gate
+    .admit(new AbortController().signal, () => RESERVED_GIB)
+    .then(() => {
+      admitted = true;
+    });
+  await delay(100);
+  clock.ms += RESERVED_WAIT_MS - 1;
+  await delay(100);
+  assert.equal(admitted, false, 'one millisecond short of the limit it still waits');
+  clock.ms += 1;
+  await asked;
+  assert.equal(admitted, true, 'at the limit it starts');
+}
+
+/** Three lanes of two engines under a standing reservation wait once, for the first engine only, and say so once. */
+async function testTheFirstEngineWaitsOnceForTheWholeRun(): Promise<void> {
+  const told: string[] = [];
+  const limitMs = 400;
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(-18 * RESERVED_GIB),
+    20,
+    { owed: () => Promise.resolve(30 * RESERVED_GIB), say: (line) => told.push(line), limitMs },
+  );
+  const control = new AbortController();
+  const began = Date.now();
+  const starts: number[] = [];
+  const lane = async (): Promise<void> => {
+    for (let engine = 0; engine < 2; engine += 1) {
+      const admitted = await gate.admit(control.signal, () => 1.5 * RESERVED_GIB);
+      starts.push(Date.now() - began);
+      await delay(30);
+      admitted.ended();
+    }
+  };
+  const finished = await Promise.race([
+    Promise.all([lane(), lane(), lane()]).then(
+      () => 'finished',
+      () => 'aborted',
+    ),
+    delay(limitMs * 6).then(() => 'stuck'),
+  ]);
+  control.abort();
+  assert.equal(finished, 'finished', `the lanes did not wait again and again: ${starts.join(', ')}`);
+  assert.equal(starts.length, 6, 'every engine started');
+  assert.ok((starts[0] ?? 0) >= limitMs - 50, `the first waited the limit: ${starts[0]}`);
+  assert.ok(
+    Math.max(...starts) - (starts[0] ?? 0) < limitMs,
+    `and the other five did not wait again: ${starts.join(', ')}`,
+  );
+  assert.equal(told.length, 1, 'and the line is said once');
+}
+
+/** A reservation that leaves room for the first engine holds nothing. */
+async function testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation(): Promise<void> {
+  const told: string[] = [];
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(40 * RESERVED_GIB),
+    5,
+    { owed: () => Promise.resolve(2 * RESERVED_GIB), say: (line) => told.push(line), limitMs: 60_000 },
+  );
+  const control = new AbortController();
+  const first = await Promise.race([
+    gate
+      .admit(control.signal, () => RESERVED_GIB)
+      .then(
+        () => 'started',
+        () => 'aborted',
+      ),
+    delay(1000).then(() => 'waited'),
+  ]);
+  control.abort();
+  assert.equal(first, 'started', 'the first engine starts at once');
+  assert.deepEqual(told, [], 'and nothing is said');
+}
+
+/** A reservation that appears after the run's first engine started holds none of the engines after it. */
+async function testALaterReservationHoldsNoEngineAfterTheFirst(): Promise<void> {
+  const owed = { bytes: 0 };
+  const told: string[] = [];
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(-18 * RESERVED_GIB),
+    5,
+    { owed: () => Promise.resolve(owed.bytes), say: (line) => told.push(line), limitMs: 60_000 },
+  );
+  const first = await gate.admit(new AbortController().signal, () => RESERVED_GIB);
+  first.ended();
+  owed.bytes = 30 * RESERVED_GIB;
+  const control = new AbortController();
+  const next = await Promise.race([
+    gate
+      .admit(control.signal, () => RESERVED_GIB)
+      .then(
+        () => 'started',
+        () => 'aborted',
+      ),
+    delay(1000).then(() => 'waited'),
+  ]);
+  control.abort();
+  assert.equal(next, 'started', 'the next engine starts at once');
+  assert.deepEqual(told, [], 'and nothing is said');
+}
+
+/** With nothing reserved the first engine starts at once and the memory is not read. */
+async function testTheFirstEngineStartsAtOnceWithNothingReserved(): Promise<void> {
+  let reads = 0;
+  const told: string[] = [];
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => {
+      reads += 1;
+      return Promise.resolve(-18 * RESERVED_GIB);
+    },
+    5,
+    { owed: () => Promise.resolve(0), say: (line) => told.push(line) },
+  );
+  const control = new AbortController();
+  const first = await Promise.race([
+    gate
+      .admit(control.signal, () => RESERVED_GIB)
+      .then(
+        () => 'started',
+        () => 'aborted',
+      ),
+    delay(1000).then(() => 'waited'),
+  ]);
+  control.abort();
+  assert.equal(first, 'started', 'the first engine starts at once');
+  assert.equal(reads, 0, 'the memory is not read');
+  assert.deepEqual(told, [], 'and nothing is said');
+}
+
+/** Reservations are read from the machine's slots folder, never from the pool a gate shares. */
+async function testReservationsAreReadFromTheMachineFolderNotThePool(): Promise<void> {
+  const machine = reservationFixture();
+  const pool = reservationFixture();
+  const before = { slots: process.env[SLOTS_VARIABLE], share: process.env[SHARE_VARIABLE] };
+  try {
+    machine.mark('m.json', { ...(await machine.holder()), owed: 11 * RESERVED_GIB });
+    pool.mark('p.json', { ...(await pool.holder()), owed: 13 * RESERVED_GIB });
+    process.env[SLOTS_VARIABLE] = machine.directory;
+    process.env[SHARE_VARIABLE] = pool.directory;
+    assert.equal(await reservedMemory(), 11 * RESERVED_GIB);
+  } finally {
+    for (const [name, value] of [
+      [SLOTS_VARIABLE, before.slots],
+      [SHARE_VARIABLE, before.share],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+    machine.close();
+    pool.close();
+  }
+}
+
+/** The room every reader gets is less the reservations, and the line on room says how much. */
+async function testTheRoomEveryReaderGetsIsLessTheReservations(): Promise<void> {
+  const fixture = reservationFixture();
+  const before = process.env[SLOTS_VARIABLE];
+  try {
+    const untouched = await memoryAvailable();
+    assert.doesNotMatch(untouched.said, /reserved/, 'nothing reserved says nothing');
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 2 ** 50 });
+    process.env[SLOTS_VARIABLE] = fixture.directory;
+    const room = await memoryAvailable();
+    assert.ok(room.bytes < -(2 ** 49), `the room is below nothing: ${room.bytes}`);
+    assert.match(room.said, /^of memory (free|left to commit) after 1048576\.0 GB reserved$/);
+    const reserved = memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB);
+    assert.equal(reserved.said, 'of memory free after 30.0 GB reserved');
+    assert.deepEqual(roomFor(2, 16, reserved.bytes, reserved.said), {
+      engines: 1,
+      held: 'the machine has 0.0 GB of memory free after 30.0 GB reserved, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
+    });
+  } finally {
+    if (before === undefined) {
+      delete process.env[SLOTS_VARIABLE];
+    } else {
+      process.env[SLOTS_VARIABLE] = before;
+    }
+    fixture.close();
+  }
+}
+
+/** The slot sweep reads only numbered locks and the waiting marks, and leaves reservations alone. */
+async function testTheSlotSweepLeavesReservationsAlone(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    const started = await ownStart();
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await exitOf(gone);
+    const dead = { pid: gone.pid ?? 0, started, owed: 5 * RESERVED_GIB };
+    fixture.mark('dead.json', dead);
+    fixture.mark('dead.lock', dead);
+    fixture.mark('7.lock', dead);
+    writeFileSync(join(fixture.directory, '9.lock'), JSON.stringify(dead));
+    const slots = new EngineSlots(fixture.directory, 2, { pid: process.pid, started });
+    const taken = await slots.takeFree();
+    assert.ok(
+      [0, 1].some((one) => taken === join(fixture.directory, `${one}.lock`)),
+      `a slot is taken: ${taken}`,
+    );
+    assert.deepEqual(
+      readdirSync(join(fixture.directory, RESERVED_FOLDER)).toSorted(),
+      ['7.lock', 'dead.json', 'dead.lock'],
+      'the folder is untouched',
+    );
+    assert.equal(existsSync(join(fixture.directory, '9.lock')), false, 'while the sweep did run');
+  } finally {
+    fixture.close();
+  }
+}
+
 /**
  * Gates come before work beside them, as the games' own tools take the slots. While a gate waits
  * for its seat, an engine outside a gate takes no slot at all, the kept ones included. Once every
@@ -62115,6 +64710,12 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       [began],
       'read in whole milliseconds, as a take reads its own clock',
     );
+    utimesSync(ahead, (began + 0.4) / 1000, (began + 0.4) / 1000);
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => one.seen),
+      [began],
+      'and so is when its taker last looked, which the file time gives with a fraction',
+    );
     const tied = new SlotLine('other', false, () => began);
     const waiter = {
       mark: '1-1.json',
@@ -62206,12 +64807,18 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     }
     // A mark that let a slot left to it stand, as a wait for memory under an older release does.
     late.release(join(directory, '1.lock'));
-    await delay(Math.max(0, firstLeft + SLOT_YIELD_MS - Date.now()));
-    assert.equal(
-      await late.takeFree(),
-      join(directory, '1.lock'),
-      'and the process leaves a waiter that let a slot stand no other',
-    );
+    // A clock set to the yield's end, since a timer may wake before the wall clock reaches it.
+    try {
+      Date.now = () => firstLeft + SLOT_YIELD_MS;
+      const stood = await late.takeFree();
+      assert.equal(
+        stood,
+        join(directory, '1.lock'),
+        `and the process leaves a waiter that let a slot stand no other: drew ${JSON.stringify(late.drawn)}, at ${String(Date.now())} with the first left by ${String(firstLeft)}, waiters ${JSON.stringify(slotWaiters(directory))}, files ${JSON.stringify(readdirSync(directory, { recursive: true }))}`,
+      );
+    } finally {
+      Date.now = realNow;
+    }
     late.releaseAll();
 
     const timing = new EngineSlots(directory, 2, me, undefined, () => 'timing');
@@ -92760,7 +95367,8 @@ async function testASceneNamingItByARelativePathIsFollowed(): Promise<void> {
 }
 
 /** The reason the follower gives a link out of the project, in place of the scenes behind it. */
-const LINK_OUT_LEFT = 'a link that leads out of the project, so no scene behind it was read or changed';
+const LINK_OUT_LEFT =
+  'a link that leads out of the project, so no scene reached only through it was read or changed';
 
 /** desk.tscn of the link-out cases, whose Top moves. */
 const LINKED_DESK =
@@ -92822,11 +95430,17 @@ interface LinkedProject {
  * Runs [body] on a project holding desk.tscn and [files], beside `outside`, a folder holding
  * [outsideFiles] that no project holds. [link] makes the links once the project is imported, given
  * the project's own folder and outside, and answers false when the platform refuses one, which
- * skips the case. With [through] the server is given the project by a junction to it.
+ * skips the case. With [through] the server is given the project by a junction to it, and with
+ * [spelt] by the path it answers for the project's own folder.
  */
 async function withLinksOut(
   label: string,
-  fixture: { files: Record<string, string>; outside?: Record<string, string>; through?: boolean },
+  fixture: {
+    files: Record<string, string>;
+    outside?: Record<string, string>;
+    through?: boolean;
+    spelt?: (real: string) => string;
+  },
   link: (real: string, outside: string) => boolean,
   body: (at: LinkedProject) => Promise<void>,
 ): Promise<void> {
@@ -92849,7 +95463,7 @@ async function withLinksOut(
   });
   mkdirSync(outside, { recursive: true });
   writeTree(outside, fixture.outside ?? {});
-  const project = fixture.through === true ? join(root, 'via') : real;
+  const project = fixture.through === true ? join(root, 'via') : (fixture.spelt?.(real) ?? real);
   if (fixture.through === true) {
     symlinkSync(real, project, 'junction');
   }
@@ -93187,6 +95801,531 @@ async function testARingOfJunctionsDoesNotHangTheFollower(): Promise<void> {
       const renamed = await renameTheTop(at);
       assert.deepEqual(get(renamed, 'followed'), ['res://room.tscn'], JSON.stringify(renamed));
       assert.deepEqual(linksLeft(renamed), linksOut(at.project).toSorted(), JSON.stringify(renamed));
+    },
+  );
+}
+
+/** The parent desk.tscn's Lamp has in the scene file [scene], or undefined when it has none. */
+function lampParent(scene: string): string | undefined {
+  return /name="Lamp" parent="([^"]+)"/.exec(scene)?.[1];
+}
+
+/** The scenes [answer] names as followed, sorted. */
+function followedOf(answer: unknown): string[] {
+  return asArray(get(answer, 'followed') ?? [])
+    .map(String)
+    .toSorted();
+}
+
+/** Each scene [answer] names both as followed and as not followed, which none may be. */
+function followedAndNot(answer: unknown): string[] {
+  const followed = new Set(followedOf(answer));
+  return asArray(get(answer, 'notFollowed') ?? [])
+    .map((row) => String(get(row, 'scenePath')))
+    .filter((path) => followed.has(path));
+}
+
+/** A scene inheriting desk.tscn, named [root]. */
+function deskHeir(root: string): string {
+  return (
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://desk.tscn" id="1_desk"]\n\n' +
+    `[node name="${root}" instance=ExtResource("1_desk")]\n`
+  );
+}
+
+/**
+ * A scene inheriting desk.tscn behind a junction inside the project is one scene by either path:
+ * a scene instancing it by the junction and one instancing it by its own folder are both followed.
+ */
+async function testAnHeirNamedByEitherPathOfALinkInsideIsFollowed(): Promise<void> {
+  await withLinksOut(
+    'heir by either path',
+    {
+      files: {
+        'real/mid.tscn': deskHeir('Mid'),
+        'room.tscn': deskKin('Room', 'res://inner/mid.tscn'),
+        'room2.tscn': deskKin('Room2', 'res://real/mid.tscn'),
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      for (const file of ['room.tscn', 'room2.tscn']) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
+/**
+ * An edit asked by either path of a scene behind a junction inside the project follows the scenes
+ * naming it by either path.
+ */
+async function testAnEditAskedByEitherPathOfALinkInsideFollowsBoth(): Promise<void> {
+  await withLinksOut(
+    'edit by either path',
+    {
+      files: {
+        'real/desk.tscn': LINKED_DESK,
+        'room.tscn': deskKin('Room', 'res://real/desk.tscn'),
+        'room2.tscn': deskKin('Room2', 'res://inner/desk.tscn'),
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      for (const [scenePath, from, to] of [
+        ['inner/desk.tscn', 'Top', 'Surface'],
+        ['real/desk.tscn', 'Surface', 'Top'],
+      ] as const) {
+        const renamed = await at.call('scene_node', {
+          op: 'set',
+          scenePath,
+          nodePath: from,
+          properties: { name: to },
+        });
+        const said = `${scenePath}: ${JSON.stringify(renamed)}`;
+        assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], said);
+        assert.equal(get(renamed, 'notFollowed'), undefined, said);
+        for (const file of ['room.tscn', 'room2.tscn']) {
+          assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
+        }
+      }
+    },
+  );
+}
+
+/**
+ * A scene the engine reaches only through a link out that leads back into a folder under a
+ * .gdignore is left as it was, and the only row is the link's, which says so.
+ */
+async function testASceneOnlyALinkOutReachesIsLeftAndSaidSo(): Promise<void> {
+  const kin = deskKin('Kin');
+  await withLinksOut(
+    'only through a link out',
+    { files: { 'hide/.gdignore': '', 'hide/deep/kin.tscn': kin } },
+    (real, outside) =>
+      linkTo(outside, join(real, 'shared')) && linkTo(join(real, 'hide', 'deep'), join(outside, 'back')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.equal(get(renamed, 'followed'), undefined, JSON.stringify(renamed));
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://shared/', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.equal(at.fileOf('hide/deep/kin.tscn'), kin, 'the scene only the link reaches is left');
+    },
+  );
+}
+
+/**
+ * A link out that leads back to the project's own folder reaches the same files, so an edit asked
+ * by either path follows the scenes naming the scene by either path.
+ */
+async function testALinkOutBackToTheProjectFollowsTheSameScenes(): Promise<void> {
+  await withLinksOut(
+    'link out back to the project',
+    {
+      files: {
+        'room.tscn': deskKin('Room'),
+        'room2.tscn': deskKin('Room2', 'res://shared/back/desk.tscn'),
+      },
+    },
+    (real, outside) => linkTo(outside, join(real, 'shared')) && linkTo(real, join(outside, 'back')),
+    async (at) => {
+      for (const [scenePath, from, to] of [
+        ['shared/back/desk.tscn', 'Top', 'Surface'],
+        ['desk.tscn', 'Surface', 'Top'],
+      ] as const) {
+        const renamed = await at.call('scene_node', {
+          op: 'set',
+          scenePath,
+          nodePath: from,
+          properties: { name: to },
+        });
+        const said = `${scenePath}: ${JSON.stringify(renamed)}`;
+        assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], said);
+        assert.deepEqual(
+          get(renamed, 'notFollowed'),
+          [{ scenePath: 'res://shared/', reason: LINK_OUT_LEFT }],
+          said,
+        );
+        assert.ok(at.fileOf('desk.tscn').includes(`[node name="${to}"`), at.fileOf('desk.tscn'));
+        for (const file of ['room.tscn', 'room2.tscn']) {
+          assert.equal(lampParent(at.fileOf(file)), `Desk/${to}`, `${said}\n${file}: ${at.fileOf(file)}`);
+        }
+      }
+    },
+  );
+}
+
+/**
+ * A scene file that is a link out of the project is not read: its one row is the link's, though
+ * the scene there names a scene through a junction inside.
+ */
+async function testAFileLinkOutIsNotRead(): Promise<void> {
+  const kin = deskKin('Kin').replace(
+    '[node name="Kin"',
+    '[ext_resource type="PackedScene" path="res://inner/lamp.tscn" id="2_lamp"]\n\n[node name="Kin"',
+  );
+  await withLinksOut(
+    'file link out unread',
+    {
+      files: {
+        'room.tscn': deskKin('Room'),
+        'real/lamp.tscn': '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n',
+      },
+      outside: { 'kin.tscn': kin },
+    },
+    (real, outside) =>
+      linkTo(join(real, 'real'), join(real, 'inner')) &&
+      linkTo(join(outside, 'kin.tscn'), join(real, 'out.tscn'), 'file'),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        get(renamed, 'notFollowed'),
+        [{ scenePath: 'res://out.tscn', reason: LINK_OUT_LEFT }],
+        JSON.stringify(renamed),
+      );
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(readFileSync(join(at.outside, 'kin.tscn'), 'utf8'), kin);
+    },
+  );
+}
+
+/** A scene naming another through a junction inside, with no tie to the edited scene, gets no row. */
+async function testASceneWithNoTieToTheEditGetsNoRow(): Promise<void> {
+  const hall =
+    '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://inner/lamp.tscn" id="1_lamp"]\n\n' +
+    '[node name="Hall" type="Node3D"]\n\n[node name="Lamp" parent="." instance=ExtResource("1_lamp")]\n';
+  await withLinksOut(
+    'no tie to the edit',
+    {
+      files: {
+        'room.tscn': deskKin('Room'),
+        'hall.tscn': hall,
+        'real/lamp.tscn': '[gd_scene format=3]\n\n[node name="Lamp" type="Node3D"]\n',
+      },
+    },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      assert.equal(at.fileOf('hall.tscn'), hall);
+    },
+  );
+}
+
+/**
+ * A scene the engine reaches by two paths through a junction inside is followed once, under the
+ * path with no link on it, and no row names a scene that was followed.
+ */
+async function testEachSceneIsFollowedOnceUnderOnePath(): Promise<void> {
+  await withLinksOut(
+    'followed once',
+    { files: { 'real/room.tscn': deskKin('Room') } },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(get(renamed, 'followed'), ['res://real/room.tscn'], JSON.stringify(renamed));
+      assert.deepEqual(followedAndNot(renamed), [], JSON.stringify(renamed));
+      const deleted = await at.call('scene_node', {
+        op: 'delete',
+        scenePath: 'desk.tscn',
+        nodePath: 'Surface',
+      });
+      assert.deepEqual(get(deleted, 'followed'), ['res://real/room.tscn'], JSON.stringify(deleted));
+      assert.deepEqual(followedAndNot(deleted), [], JSON.stringify(deleted));
+      assert.deepEqual(
+        asArray(get(deleted, 'dropped')).map((row) => get(row, 'scenePath')),
+        ['res://real/room.tscn'],
+        JSON.stringify(deleted),
+      );
+    },
+  );
+}
+
+/** A reparent and a delete asked by a junction's path follow a scene naming the other path. */
+async function testAMoveAndADeleteAskedThroughALinkInsideAreFollowed(): Promise<void> {
+  await withLinksOut(
+    'move and delete through a link',
+    { files: { 'real/desk.tscn': LINKED_DESK, 'room.tscn': deskKin('Room', 'res://real/desk.tscn') } },
+    (real) => linkTo(join(real, 'real'), join(real, 'inner')),
+    async (at) => {
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'inner/desk.tscn',
+        nodePath: 'Top/Lamp',
+        newParentPath: 'Leg',
+      });
+      assert.deepEqual(followedOf(moved), ['res://room.tscn'], JSON.stringify(moved));
+      assert.equal(lampParent(at.fileOf('room.tscn')), 'Desk/Leg', at.fileOf('room.tscn'));
+      const deleted = await at.call('scene_node', {
+        op: 'delete',
+        scenePath: 'inner/desk.tscn',
+        nodePath: 'Leg',
+      });
+      assert.deepEqual(followedOf(deleted), ['res://room.tscn'], JSON.stringify(deleted));
+      assert.deepEqual(
+        asArray(get(deleted, 'dropped')).map((row) => [get(row, 'scenePath'), get(row, 'nodePath')]),
+        [['res://room.tscn', 'Desk/Leg/Lamp']],
+        JSON.stringify(deleted),
+      );
+      assert.equal(lampParent(at.fileOf('room.tscn')), undefined, at.fileOf('room.tscn'));
+    },
+  );
+}
+
+/**
+ * Files the file system holds apart are followed apart, though lowering their names joins them: k
+ * and the Kelvin sign, i and the dotted capital I. Where the platform joins them itself, it skips.
+ */
+async function testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed(): Promise<void> {
+  await eachFollowedApart('names lowering joins', ['k.tscn', 'K.tscn', 'i.tscn', 'İ.tscn']);
+}
+
+/**
+ * Files the file system holds apart are followed apart, though upper-casing their names joins
+ * them: s and the long s, i and the dotless i, the micro sign and mu, and the two sigmas.
+ */
+async function testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed(): Promise<void> {
+  await eachFollowedApart('names upper-casing joins', [
+    's.tscn',
+    'ſ.tscn',
+    'i.tscn',
+    'ı.tscn',
+    'μ.tscn',
+    'µ.tscn',
+    'σ.tscn',
+    'ς.tscn',
+  ]);
+}
+
+/**
+ * Renames desk.tscn's Top in a project holding [scenes], each keeping a value below it, and checks
+ * each is followed on its own. Where the platform keeps fewer files than were written, it skips.
+ */
+async function eachFollowedApart(label: string, scenes: readonly string[]): Promise<void> {
+  await withLinksOut(
+    label,
+    { files: Object.fromEntries(scenes.map((file, at) => [file, deskKin(`Kin${at}`)])) },
+    (real) => {
+      const held = readdirSync(real).filter((file) => scenes.includes(file));
+      if (held.length !== scenes.length) {
+        console.log(`${label}: the platform keeps only ${JSON.stringify(held)}`);
+      }
+      return held.length === scenes.length;
+    },
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        followedOf(renamed),
+        scenes.map((file) => `res://${file}`).toSorted(),
+        JSON.stringify(renamed),
+      );
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      for (const file of scenes) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
+/**
+ * A project given by a path in another case than the disk holds, a lower-case drive letter or an
+ * upper-case folder, still follows a scene reached through a junction inside once. Linux keeps
+ * case, so there it skips, and the drive letter is tried on Windows only.
+ */
+async function testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce(): Promise<void> {
+  const spellings: [string, (real: string) => string][] = [
+    ['upper-case folder', (real) => join(dirname(real), basename(real).toUpperCase())],
+  ];
+  if (process.platform === 'win32') {
+    spellings.push(['lower-case drive', (real) => real.charAt(0).toLowerCase() + real.slice(1)]);
+  }
+  for (const [label, spelt] of spellings) {
+    await withLinksOut(
+      `project as ${label}`,
+      { files: { 'real/mid.tscn': deskKin('Mid') }, spelt },
+      (real) => process.platform !== 'linux' && linkTo(join(real, 'real'), join(real, 'inner')),
+      async (at) => {
+        const renamed = await renameTheTop(at);
+        assert.deepEqual(
+          get(renamed, 'followed'),
+          ['res://real/mid.tscn'],
+          `${label}: ${JSON.stringify(renamed)}`,
+        );
+        const deleted = await at.call('scene_node', {
+          op: 'delete',
+          scenePath: 'desk.tscn',
+          nodePath: 'Surface/Lamp',
+        });
+        assert.deepEqual(
+          asArray(get(deleted, 'dropped')).map((row) => get(row, 'scenePath')),
+          ['res://real/mid.tscn'],
+          `${label}: ${JSON.stringify(deleted)}`,
+        );
+      },
+    );
+  }
+}
+
+/** The short 8.3 spelling Windows gives [path], or [path] where the volume makes none. */
+function shortPathOf(path: string): string {
+  if (process.platform !== 'win32') {
+    return path;
+  }
+  const ran = spawnSyncHidden('cmd.exe', ['/d', '/s', '/c', `"for %I in ("${path}") do @echo %~sI"`], {
+    encoding: 'utf8',
+    windowsVerbatimArguments: true,
+  });
+  const said = ran.stdout.trim();
+  return said === '' ? path : said;
+}
+
+/**
+ * A project given by its short 8.3 path, whose links read back by the long names, still takes a
+ * scene reached through a junction inside as one file and saves through a file link to its
+ * target. It skips where the volume gives no short names.
+ */
+async function testAProjectGivenByItsShortNameFollowsLinkedScenesOnce(): Promise<void> {
+  let long = '';
+  let short = '';
+  await withLinksOut(
+    'project by its short name',
+    {
+      files: { 'real/mid.tscn': deskKin('Mid'), 'room.tscn': deskKin('Room', 'res://copy.tscn') },
+      spelt: (real) => {
+        long = realpathSync.native(real);
+        short = shortPathOf(long);
+        return short;
+      },
+    },
+    () => {
+      if (short.toLowerCase() === long.toLowerCase()) {
+        console.log(`project by its short name: the volume gives ${long} no short name`);
+        return false;
+      }
+      return (
+        linkTo(join(long, 'real'), join(long, 'inner')) &&
+        linkTo(join(long, 'desk.tscn'), join(long, 'copy.tscn'), 'file')
+      );
+    },
+    async (at) => {
+      const renamed = await at.call('scene_node', {
+        op: 'set',
+        scenePath: 'copy.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      const said = `${short}: ${JSON.stringify(renamed)}`;
+      assert.deepEqual(followedOf(renamed), ['res://real/mid.tscn', 'res://room.tscn'], said);
+      assert.ok(readlinkSync(join(long, 'copy.tscn')).length > 0, said);
+      for (const file of ['real/mid.tscn', 'room.tscn']) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${said}\n${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
+/**
+ * An edit asked by a path in another case than the disk holds is refused with the stored spelling,
+ * since a save under the asked spelling renames the file. Linux keeps case, so there it skips.
+ */
+async function testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName(): Promise<void> {
+  await withLinksOut(
+    'edit asked in another case',
+    { files: { 's.tscn': LINKED_DESK } },
+    () => process.platform !== 'linux',
+    async (at) => {
+      const said = await at.say('scene_node', {
+        op: 'set',
+        scenePath: 'S.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      assert.ok(said.includes('res://S.tscn is stored as res://s.tscn. Name it as stored.'), said);
+      assert.ok(readdirSync(at.real).includes('s.tscn'), JSON.stringify(readdirSync(at.real)));
+      assert.ok(!readdirSync(at.real).includes('S.tscn'), JSON.stringify(readdirSync(at.real)));
+      assert.equal(at.fileOf('s.tscn'), LINKED_DESK);
+    },
+  );
+}
+
+/**
+ * An edit asked through a file link inside the project writes the file the link leads to and
+ * leaves the link a link, so the scenes naming either path are followed.
+ */
+async function testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths(): Promise<void> {
+  await editThroughAFileLink('edit through a file link', false);
+}
+
+/**
+ * With the project opened through a junction to its folder, a file link naming its target by the
+ * real folder is still written through, so the link stays a link and both scenes are followed.
+ */
+async function testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction(): Promise<void> {
+  await editThroughAFileLink('file link through a junction', true);
+}
+
+/**
+ * Renames desk.tscn's Top through copy.tscn, a file link to desk.tscn by the project's real
+ * folder, with the project opened through a junction when [through], and checks what is left.
+ */
+async function editThroughAFileLink(label: string, through: boolean): Promise<void> {
+  await withLinksOut(
+    label,
+    {
+      files: { 'room.tscn': deskKin('Room', 'res://copy.tscn'), 'room2.tscn': deskKin('Room2') },
+      through,
+    },
+    (real) => linkTo(join(real, 'desk.tscn'), join(real, 'copy.tscn'), 'file'),
+    async (at) => {
+      const copy = join(at.real, 'copy.tscn');
+      const renamed = await at.call('scene_node', {
+        op: 'set',
+        scenePath: 'copy.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      assert.ok(readlinkSync(copy).length > 0, `copy.tscn is no link any more: ${JSON.stringify(renamed)}`);
+      assert.ok(at.fileOf('desk.tscn').includes('[node name="Surface"'), at.fileOf('desk.tscn'));
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn', 'res://room2.tscn'], JSON.stringify(renamed));
+      assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+      for (const file of ['room.tscn', 'room2.tscn']) {
+        assert.equal(lampParent(at.fileOf(file)), 'Desk/Surface', `${file}: ${at.fileOf(file)}`);
+      }
+    },
+  );
+}
+
+/**
+ * A scene saved through a file link to a file not named as a scene is saved in the asked format
+ * into that file. The link stays one, the file keeps its uid and nothing else is left beside it.
+ */
+async function testASaveThroughAFileLinkToAnotherNameKeepsTheLink(): Promise<void> {
+  const room = LINKED_DESK.replace('[gd_scene format=3]', '[gd_scene format=3 uid="uid://droomhw2x"]');
+  await withLinksOut(
+    'save through a file link to another name',
+    { files: { 'room.txt': room } },
+    (real) => linkTo(join(real, 'room.txt'), join(real, 'room.tscn'), 'file'),
+    async (at) => {
+      const before = readdirSync(at.real).toSorted();
+      // The text, so that a refusal says why.
+      const said = await at.say('scene_node', {
+        op: 'set',
+        scenePath: 'room.tscn',
+        nodePath: 'Top',
+        properties: { name: 'Surface' },
+      });
+      assert.ok(readlinkSync(join(at.real, 'room.tscn')).length > 0, said);
+      const saved = at.fileOf('room.txt');
+      assert.ok(saved.includes('[node name="Surface"'), `${said}\n${saved}`);
+      assert.ok(saved.startsWith('[gd_scene format=3 uid="uid://droomhw2x"]'), saved);
+      assert.deepEqual(readdirSync(at.real).toSorted(), before);
     },
   );
 }
@@ -100683,6 +103822,22 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASecondLinkToTheSameFolderOutIsNamedToo,
   testAFileLinkOutIsNotFollowed,
   testASceneReachedByALinkInsideTheProjectIsFollowed,
+  testAnHeirNamedByEitherPathOfALinkInsideIsFollowed,
+  testAnEditAskedByEitherPathOfALinkInsideFollowsBoth,
+  testASceneOnlyALinkOutReachesIsLeftAndSaidSo,
+  testALinkOutBackToTheProjectFollowsTheSameScenes,
+  testAFileLinkOutIsNotRead,
+  testASceneWithNoTieToTheEditGetsNoRow,
+  testEachSceneIsFollowedOnceUnderOnePath,
+  testAMoveAndADeleteAskedThroughALinkInsideAreFollowed,
+  testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed,
+  testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed,
+  testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce,
+  testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName,
+  testAProjectGivenByItsShortNameFollowsLinkedScenesOnce,
+  testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
+  testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,
+  testASaveThroughAFileLinkToAnotherNameKeepsTheLink,
   testALinkOutInsideAWalkedFolderIsNamed,
   testRelativePathsBehindALinkOutAreLeft,
   testADanglingLinkOutLeavesTheFollowerWorking,
@@ -100933,6 +104088,25 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWrittenLineBreakMatchesATwoLineLabel,
   testALayeredWordIsOneSignAndAShapeHasExtent,
   testAPlayedGamesReportsReachTheOutput,
+  testAFindIndexStepPastTheChildrenIsNotThere,
+  testAFindStepThatErrorsReturnsTheErrorAndStaysClean,
+  testEveryPathOpSaysWhatAReadStepReported,
+  testAChildStepWithAnOddSecondArgumentRaisesNoScriptError,
+  testAWaitOnAChildStepWaitsForTheChild,
+  testARefusalAfterAWalkCarriesTheWalksErrors,
+  testTwoPathsInOneRequestKeepBothSetsOfErrors,
+  testWalkErrorsDoNotPushOutTheCallsOwn,
+  testAResultReadWithPropertiesReportsItsStepErrors,
+  testAListCallRefusalCarriesTheStepErrors,
+  testAWaitKeepsTheErrorsOfEveryLook,
+  testAPropertyWatchReportsItsReadingsErrors,
+  testAnEvictedWatchStopsReading,
+  testOverlappingRequestsKeepTheirOwnErrors,
+  testAPropertyStepWhoseGetterErrorsIsReported,
+  testACallArgumentPathSaysWhatItsStepsReported,
+  testAnObjectTargetPathSaysWhatItsStepsReported,
+  testAGamesOwnErrorStillCountsBesideReads,
+  testIndexStepsInsideTheChildrenStillRead,
   testAPlayedGamesConsoleKeepsItsOrder,
   testAPickedUpRunReadsItsReportOnFromTheTranscript,
   testACallTakesAnObjectByItsPath,
@@ -101189,6 +104363,24 @@ const TESTS: (() => void | Promise<void>)[] = [
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
+  testALiveReservationShrinksTheRoomByWhatItOwes,
+  testAGoneHoldersReservationCountsNothing,
+  testSeveralLiveReservationsSum,
+  testAMalformedReservationCountsNothingAndThrowsNothing,
+  testAMarkNamedInTheReservedVariableCountsNothing,
+  testSeveralNamedMarksAreAllSkipped,
+  testAMarkPathSpeltDifferentlyStillMatches,
+  testTheFirstEngineWaitsOnceForTheWholeRun,
+  testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation,
+  testALaterReservationHoldsNoEngineAfterTheFirst,
+  testABadSlotCountNeverStopsTheRoomBeingRead,
+  testTheFirstEngineWaitsWhileReservedMemoryLeavesNoRoom,
+  testTheFirstEngineStartsOnceTheReservationIsGone,
+  testTheFirstEngineStartsAnywayAfterTheReservedWaitLimit,
+  testTheFirstEngineStartsAtOnceWithNothingReserved,
+  testReservationsAreReadFromTheMachineFolderNotThePool,
+  testTheRoomEveryReaderGetsIsLessTheReservations,
+  testTheSlotSweepLeavesReservationsAlone,
   testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
@@ -101391,6 +104583,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartRefusesAnotherReleasesRuntimeAddon,
   testABreakpointLineIsOneTheEngineMarks,
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
+  testObjectSnapshotsAskedTogetherGetTheirOwnAnswers,
+  testAnInnerClassIsCountedUnderItsNativeClass,
+  testEachSnapshotRefusalNamesItsOwnFix,
+  testASnapshotTellsAnEngineWithoutItFromABusyGame,
+  testASnapshotAskedOnceAsAHeldWorkerLeaves,
+  testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld,
+  testASnapshotStalledByAHeldWorkerNamesTheResume,
+  testASnapshotRightAfterALargeOneIsTaken,
+  testASnapshotOfAThreadLetGoMidFetchComesBackWhole,
+  testAnObjectSnapshotNeedsAGameThisServerStarted,
+  testAnObjectSnapshotOfAPlayedGameIsRefused,
+  testTheStartASnapshotRefusalNamesIsSpawnedHere,
+  testObjectSnapshotsShowWhatAnActionKept,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAPipelineCacheIsCarriedToTheNextRun,

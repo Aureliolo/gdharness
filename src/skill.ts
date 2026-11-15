@@ -164,6 +164,12 @@ knows, naming why the game is held and \`debug_control continue\` as what lets i
 \`debug_breakpoint\` holds for every start until \`debug_breakpoint remove\`, across a reconnect,
 so take it off when the question it was for is answered.
 
+## Objects a game keeps
+
+\`debug_objects snapshot\` before an action, then \`debug_objects diff\` with its id as \`before\`,
+names each class whose count moved. Both snapshots must come from the same run. It reads a game
+this server started, not one the editor plays.
+
 ## Editing
 
 \`scene_tree\` reads what a scene holds, rather than what the \`.tscn\` text implies, and

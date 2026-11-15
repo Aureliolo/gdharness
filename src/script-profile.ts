@@ -22,14 +22,17 @@ import {
   callSitesOf,
   codeOf,
   type DeclarationKind,
+  declaredClass,
   enclosingFunction,
-  Lines,
+  type Lines,
+  type Receiver,
+  type ReceiverDispatch,
+  type ScriptShape,
   type SelfDispatch,
-  shapeOf,
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
 import { isRecord } from './records.js';
-import { ClassGraph, type ClassId, declaredIn, Script } from './rename.js';
+import { ClassGraph, type ClassId, declaredIn, fileOf, Script } from './rename.js';
 import { parseProjectGodot } from './resources.js';
 import { RUNTIME_AUTOLOAD } from './setup.js';
 import { writeWhole } from './whole-file.js';
@@ -296,7 +299,8 @@ const PROFILER_SWITCH = 'profiler:servers';
  * through a method bind (`callv`, `emit_signal`, any `Node` method on a typed value) out of the
  * caller's self time. Off, that time stays in the caller's self, along with any script function the
  * engine called back. It is off unless asked for, because the engine reads an object's class after
- * a dynamic call to `free()` has destroyed it, which crashes a game on Linux and macOS.
+ * a dynamic call to `free()` has destroyed it, which crashes a game on Linux and macOS, and records
+ * the timings without a lock, which crashes a game running script on any thread but the main one.
  */
 export function profilerOn(frameFunctions: number, engineCalls = false): Uint8Array {
   return framedCommand(PROFILER_SWITCH, profilerOnData(frameFunctions, engineCalls));
@@ -847,9 +851,8 @@ interface ProfiledCallSite extends CallSite {
   readonly withinSelfIncludesSuper?: true;
 }
 
-/** The classes [param source] declares by name: its class_name and its inner classes, nested. */
-function classNamesOf(source: string): string[] {
-  const shape = shapeOf(source);
+/** The classes a script of [param shape] declares by name: its class_name and its inner classes, nested. */
+function classNamesOf(shape: ScriptShape): string[] {
   const inner = (body: ClassBody): string[] =>
     body.inner.flatMap((one) => [...(one.name === null ? [] : [one.name]), ...inner(one)]);
   return [...(shape.className === null ? [] : [shape.className.name]), ...inner(shape.body)];
@@ -864,19 +867,20 @@ function sameScript(a: string, b: string): boolean {
 }
 
 /**
- * The profile's row for the function [param within] that holds line [param line] of [param source],
- * or undefined when it made no counted call. Several functions of one script can share a bare name,
- * one per class, so the row is the one whose class is the innermost class holding the line.
+ * The profile's row for the function [param within] that holds line [param line] of the script
+ * [param read] holds, or undefined when it made no counted call. Several functions of one script can
+ * share a bare name, one per class, so the row is the one whose class is the innermost class
+ * holding the line.
  */
 function rowOfSite(
   rows: readonly ProfiledFunction[],
   script: string,
-  source: string,
+  read: { readonly shape: ScriptShape; readonly lines: Lines },
   line: number,
   within: string,
 ): ProfiledFunction | undefined {
-  const shape = shapeOf(source);
-  const offset = new Lines(source).offsetOf({ line: line - 1, character: 0 }) ?? 0;
+  const { shape } = read;
+  const offset = read.lines.offsetOf({ line: line - 1, character: 0 }) ?? 0;
   let body = shape.body;
   for (
     let inner = body.inner.find((one) => one.start <= offset && offset < one.end);
@@ -885,7 +889,7 @@ function rowOfSite(
   ) {
     body = inner;
   }
-  const innerNames = classNamesOf(source).filter((name) => name !== shape.className?.name);
+  const innerNames = classNamesOf(shape).filter((name) => name !== shape.className?.name);
   const endsWith = (owner: string, name: string): boolean => owner === name || owner.endsWith(`.${name}`);
   return rows.find((row) => {
     if (!sameScript(row.script, script) || bareName(row.function) !== within) {
@@ -916,15 +920,203 @@ function withinNumbersOf(
 /** How many places a callers answer lists before saying how many more there were. */
 const CALL_SITES = 40;
 
+/** A class a receiver names, and whether the use is on one of its objects or on the class itself. */
+interface Named {
+  readonly id: ClassId;
+  readonly object: boolean;
+  /** For an object, that it is of this class and of none below it. */
+  readonly exact?: boolean;
+}
+
 /**
- * Which uses of a name written bare, through `self` or through `super` the engine can send to the
- * asked class's own declaration of it, `reached`, which is the class's own or the nearest one above
- * it. A bare or `self` use counts where its class or one below it that does not declare the name
- * again resolves to it, or only its own class does for a static function written bare. A `super`
- * use counts where the class above the one it is written in resolves to it. A use whose chain
- * passes through a script the project does not hold counts, since it may.
+ * What a class declares that is seen from inside the classes it holds. Its variables, signals and
+ * functions, static ones included, are not: Godot reads the global class of that name instead.
  */
-class SelfUses {
+const SEEN_FROM_INSIDE: ReadonlySet<DeclarationKind> = new Set(['const', 'enum', 'enumValue', 'class']);
+
+/**
+ * Reads the class a receiver names the way the engine looks a name up from the class body it is
+ * written in: that class, the classes it extends with theirs, then the class around it, and the
+ * global classes last. A variable or constant found on the way is what its declaration gives it.
+ */
+class ClassScope {
+  private readonly graph: ClassGraph;
+  private readonly scripts: ReadonlyMap<string, Script>;
+  private readonly scopes = new Map<ClassId, readonly { readonly id: ClassId; readonly whole: boolean }[]>();
+  private readonly codeLines = new Map<string, string[]>();
+  private readonly lookups = new Map<string, Named | null>();
+  /** The declarations being read, so a constant naming itself ends rather than looping. */
+  private readonly reading = new Set<string>();
+
+  constructor(graph: ClassGraph, scripts: ReadonlyMap<string, Script>) {
+    this.graph = graph;
+    this.scripts = scripts;
+  }
+
+  /** What [param receiver], written in [param at], names, or null where the text does not say. */
+  named(at: ClassId, receiver: Receiver): Named | null {
+    let named = this.start(at, receiver);
+    for (const name of receiver.start === 'name' ? receiver.names.slice(1) : receiver.names) {
+      named = named === null ? null : this.member(named.id, name);
+    }
+    if (named === null || !receiver.made) {
+      return named;
+    }
+    // `new()` makes an object of exactly that class, never of one below it.
+    return named.object ? null : { id: named.id, object: true, exact: true };
+  }
+
+  private start(at: ClassId, receiver: Receiver): Named | null {
+    if (receiver.start === 'self') {
+      return { id: at, object: true };
+    }
+    return this.looked(at, receiver.names[0] ?? '');
+  }
+
+  /**
+   * What [param name] written in [param at] names. Every member of the class and of the classes it
+   * extends is seen, but of the classes around them only what belongs to no object.
+   */
+  private looked(at: ClassId, name: string): Named | null {
+    const key = `${at}\n${name}`;
+    let named = this.lookups.get(key);
+    if (named === undefined) {
+      named = this.lookedUp(at, name);
+      this.lookups.set(key, named);
+    }
+    return named;
+  }
+
+  /**
+   * A scope class whose class_name is [param name] answers before its members, inherited ones
+   * included, as the engine reads it. An inner class's own name loses to them.
+   */
+  private lookedUp(at: ClassId, name: string): Named | null {
+    const global = this.graph.named(name);
+    const owner = this.scopeOf(at).find(({ id, whole }) => {
+      const kind = this.graph.declaration(id, name)?.kind;
+      return id === global || (kind !== undefined && (whole || SEEN_FROM_INSIDE.has(kind)));
+    });
+    if (owner === undefined || owner.id === global) {
+      return global === null ? null : { id: global, object: false };
+    }
+    return this.declared(owner.id, name);
+  }
+
+  /** What the member [param name] of [param id], its own or inherited, names. */
+  private member(id: ClassId, name: string): Named | null {
+    const owner = [id, ...this.graph.ancestors(id)].find(
+      (one) => this.graph.declaration(one, name) !== undefined,
+    );
+    return owner === undefined ? null : this.declared(owner, name);
+  }
+
+  /** An object of the class [param text], a type as written in [param at]. */
+  private typed(at: ClassId, text: string): Named | null {
+    const [first = '', ...rest] = text.split('.');
+    let named = this.looked(at, first);
+    for (const part of rest) {
+      named = named === null || named.object ? null : this.member(named.id, part);
+    }
+    return named === null || named.object ? null : { id: named.id, object: true };
+  }
+
+  /** What [param owner]'s own declaration of [param name] names. */
+  private declared(owner: ClassId, name: string): Named | null {
+    const declared = this.graph.declaration(owner, name);
+    if (declared?.kind === 'class') {
+      const inner = this.graph.innerOf(owner, name);
+      return inner === null ? null : { id: inner, object: false };
+    }
+    const script = this.scripts.get(fileOf(owner));
+    const key = `${owner}:${name}`;
+    if (declared === undefined || script === undefined || this.reading.has(key)) {
+      return null;
+    }
+    if (declared.kind !== 'var' && declared.kind !== 'const') {
+      return null;
+    }
+    this.reading.add(key);
+    try {
+      const line = script.lines.positionOf(declared.offset).line;
+      const code = this.codeOf(script)[line] ?? '';
+      const typed = declaredClass(code, name);
+      if (typed !== null) {
+        return this.typed(owner, typed);
+      }
+      return declared.kind === 'const'
+        ? this.constant(owner, name, script.lines.lineAt(declared.offset), code)
+        : null;
+    } finally {
+      this.reading.delete(key);
+    }
+  }
+
+  /** The class an untyped constant holds: a preloaded script, or another class by name. */
+  private constant(owner: ClassId, name: string, text: string, code: string): Named | null {
+    const value = (line: string): string =>
+      new RegExp(`(?<![\\p{L}\\p{N}_.])${name}\\s*:?=\\s*(.*)$`, 'u').exec(line)?.[1] ?? '';
+    const loaded = /^preload\s*\(\s*(["'])(.+?)\1\s*\)/u.exec(value(text))?.[2];
+    if (loaded !== undefined) {
+      const id = this.graph.scriptAt(loaded, owner);
+      return id === null ? null : { id, object: false };
+    }
+    const alias = /^([\p{L}_][\p{L}\p{N}_]*(?:\s*\.\s*[\p{L}_][\p{L}\p{N}_]*)*)\s*$/u.exec(value(code))?.[1];
+    const named = alias === undefined ? null : this.typed(owner, alias.replace(/\s/g, ''));
+    return named === null ? null : { id: named.id, object: false };
+  }
+
+  private codeOf(script: Script): string[] {
+    let lines = this.codeLines.get(script.path);
+    if (lines === undefined) {
+      lines = codeOf(script.text, script.regions).split('\n');
+      this.codeLines.set(script.path, lines);
+    }
+    return lines;
+  }
+
+  /**
+   * The classes a name written in [param at] is looked up in, in the engine's order, each saying
+   * whether it is [param at] or a class it extends, whose every member is seen.
+   */
+  private scopeOf(at: ClassId): readonly { readonly id: ClassId; readonly whole: boolean }[] {
+    const cached = this.scopes.get(at);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const chain = new Set([at, ...this.graph.ancestors(at)]);
+    const found: { id: ClassId; whole: boolean }[] = [];
+    const visit = (id: ClassId | null): void => {
+      if (id === null || found.some((one) => one.id === id)) {
+        return;
+      }
+      found.push({ id, whole: chain.has(id) });
+      visit(this.graph.parentOf(id));
+      visit(this.graph.outerOf(id));
+    };
+    visit(at);
+    this.scopes.set(at, found);
+    return found;
+  }
+}
+
+/** What a script's uses on self and on other receivers can reach, as `callSitesOf` asks. Absent counts every use. */
+interface ScriptDispatch {
+  readonly onSelf?: SelfDispatch;
+  readonly onReceiver?: ReceiverDispatch;
+}
+
+/**
+ * Which uses of a name the engine can send to the asked class's own declaration of it, `reached`,
+ * which is the class's own or the nearest one above it. A bare or `self` use counts where its class
+ * or one below it that does not declare the name again resolves to it, or only its own class does
+ * for a static function written bare. A `super` use counts where the class above the one it is
+ * written in resolves to it. A use on an object of a class the receiver names counts as a `self`
+ * use in that class does. A use on the class itself, or on an object `new()` made of it, counts as
+ * a static call bound to that class does. A use whose chain passes through a script the project
+ * does not hold counts, since it may.
+ */
+class Dispatch {
   /** The classes whose objects, or those of a class below them, resolve the name to `reached`. */
   private readonly above = new Set<ClassId>();
   private readonly graph: ClassGraph;
@@ -948,8 +1140,14 @@ class SelfUses {
     }
   }
 
-  forScript(script: string): SelfDispatch {
-    return (offset, how) => this.reaches(this.graph.bodyAt(script, offset), how);
+  forScript(script: string, scope: ClassScope): ScriptDispatch {
+    return {
+      onSelf: (offset, how) => this.reaches(this.graph.bodyAt(script, offset), how),
+      onReceiver: (offset, receiver) => {
+        const named = scope.named(this.graph.bodyAt(script, offset), receiver);
+        return named === null || this.from(named.id, !named.object || named.exact === true);
+      },
+    };
   }
 
   private reaches(at: ClassId, how: 'bare' | 'self' | 'super'): boolean {
@@ -978,24 +1176,36 @@ class SelfUses {
   }
 }
 
+/** Whether one class may be the other, or sit above or below it, which a broken chain may hide. */
+function related(graph: ClassGraph, one: ClassId, other: ClassId): boolean {
+  return (
+    one === other ||
+    graph.ancestors(one).includes(other) ||
+    graph.ancestors(other).includes(one) ||
+    graph.nativeBase(one) === null ||
+    graph.nativeBase(other) === null
+  );
+}
+
 /**
- * How the uses on self in each script are dispatched for [param asked]'s [param name], and whether
- * the name is a property's: as the profile's rows say, or as the asked class declares it when they
- * say nothing. Every such use counts when no class was asked about, or where the asked class or its
- * declaration of the name cannot be found.
+ * How the uses in each script are dispatched for [param asked]'s [param name], and whether the name
+ * is a property's: as the profile's rows say, or as the asked class declares it when they say
+ * nothing. Every use counts when no class was asked about. Where the asked class or its declaration
+ * of the name cannot be found, every use on self counts, and a use on a project class only through
+ * one related to the asked class.
  */
-function selfUsesOf(
-  listed: readonly (readonly [string, string])[],
+function dispatchOf(
+  scripts: ReadonlyMap<string, Script>,
   asked: string | null,
   name: string,
   rowsSayProperty: boolean,
-): { property: boolean; forScript: (script: string) => SelfDispatch } {
-  const every = (): SelfDispatch => () => true;
+): { property: boolean; forScript: (script: string) => ScriptDispatch } {
+  // With no class asked about nothing is left out, so no receiver is read.
   if (asked === null) {
-    return { property: rowsSayProperty, forScript: every };
+    return { property: rowsSayProperty, forScript: () => ({}) };
   }
-  const scripts = new Map(listed.map(([script, source]) => [script, new Script(script, source)] as const));
   const graph = new ClassGraph(scripts, declaredIn(scripts));
+  const scope = new ClassScope(graph, scripts);
   const target = graph.named(asked);
   const declaredVar =
     target !== null &&
@@ -1005,10 +1215,16 @@ function selfUsesOf(
   const kind: DeclarationKind = property ? 'var' : 'func';
   const reached = target === null ? null : graph.resolvedFrom(target, name, kind);
   if (target === null || reached === null || reached === undefined) {
-    return { property, forScript: every };
+    const onReceiver =
+      (script: string): ReceiverDispatch =>
+      (offset, receiver) => {
+        const named = scope.named(graph.bodyAt(script, offset), receiver);
+        return named === null || (target !== null && related(graph, named.id, target));
+      };
+    return { property, forScript: (script) => ({ onReceiver: onReceiver(script) }) };
   }
-  const uses = new SelfUses(graph, target, reached, name, kind);
-  return { property, forScript: (script) => uses.forScript(script) };
+  const dispatch = new Dispatch(graph, target, reached, name, kind);
+  return { property, forScript: (script) => dispatch.forScript(script, scope) };
 }
 
 /**
@@ -1019,9 +1235,9 @@ function selfUsesOf(
  * Found by name in the source, because the engine's profiler counts calls and time per function and
  * records nothing about who made them. A place is a caller only if the name there is this function:
  * a method of the same name on another class is found as well, which the answer says. When one class
- * was asked about, a call through another class the project declares is left out, and so is a bare,
- * `self` or `super` one the engine would send to another class's function of that name, as
- * `SelfUses` decides.
+ * was asked about, a use the engine would send to another class's function of that name is left
+ * out, as `Dispatch` decides: one written bare, through `self` or `super`, through a class by name or
+ * through a variable declared as one.
  */
 export function callersOf(
   totals: ProfileTotals,
@@ -1053,27 +1269,29 @@ export function callersOf(
       (bareName(row.function) === bare || row.property === bare) &&
       (asked === null || ownerOf(row.function) === asked),
   );
-  const { property, forScript } = selfUsesOf(
-    listed,
+  // A class asked about needs every script read for the class graph. Otherwise only the scripts
+  // that name the function are read, each once.
+  const reads =
+    asked === null
+      ? new Map<string, Script>()
+      : new Map(listed.map(([script, source]) => [script, new Script(script, source)]));
+  const { property, forScript } = dispatchOf(
+    reads,
     asked,
     bare,
     propertyOf(name) !== null || target.some((row) => row.property === bare),
   );
-  const otherClasses = new Set<string>();
-  if (asked !== null) {
-    for (const [, source] of listed) {
-      for (const declared of classNamesOf(source).filter((one) => one !== asked)) {
-        otherClasses.add(declared);
-      }
+  const sites = listed.flatMap(([script, source]) => {
+    if (!source.includes(bare)) {
+      return [];
     }
-  }
-  const sites = listed.flatMap(([script, source]) =>
-    callSitesOf(source, bare, otherClasses, property, forScript(script)).map((site) => {
-      const within =
-        site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
+    const known = reads.get(script);
+    const read = known?.text === source ? known : new Script(script, source);
+    return callSitesOf(source, bare, property, forScript(script), read).map((site) => {
+      const within = site.within === null ? undefined : rowOfSite(rows, script, read, site.line, site.within);
       return { script, ...site, ...withinNumbersOf(within) };
-    }),
-  );
+    });
+  });
   sites.sort(
     (a, b) =>
       (b.withinTotalMs ?? -1) - (a.withinTotalMs ?? -1) ||

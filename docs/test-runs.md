@@ -254,6 +254,16 @@ can give back. On Windows it is the smaller of the physical memory free and what
 still commit. An allocation fails at the commit limit however much physical memory is free. An
 engine's own figure is what Windows has committed to it, and its resident memory on Linux and macOS.
 
+Memory that other work has reserved machine-wide and still owes comes off that figure, and the
+line on room says how much. The reservations are the `reserved/*.json` marks in the machine's slots
+folder, each `{"pid", "started", "owed"}` with `owed` in bytes. A mark counts while its holder lives,
+by the rule a slot lock follows. The holder sets `GODOT_ENGINE_RESERVED` to its mark's path for
+everything it starts, nested holders joined by the platform's path-list separator, and a mark named
+there counts nothing, so a run inside a reservation does not wait on it. Paths compare resolved,
+and without case on Windows. While a reservation counts and the room is short of one engine, the
+run's first engine waits too, once per run, and starts anyway after 10 minutes. The run prints one
+line saying it waits and how much is reserved.
+
 ### When some slots are held
 
 That deal needs every slot the run uses free as it begins. Another run or tool may hold some (a

@@ -3,6 +3,7 @@ extends RefCounted
 ## question, where one is on screen, a property's value, the metrics. What it changes, a property
 ## written or a method called, is in runtime_changes.gd.
 
+const GdhCallErrors = preload("call_errors.gd")
 const GdhFrames = preload("runtime_frames.gd")
 const GdhPaths = preload("runtime_paths.gd")
 const GdhRead = preload("reading.gd")
@@ -389,20 +390,30 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	if wanted_property.is_empty():
 		return entry
 	entry["property"] = wanted_property
+	# The errors this match's steps make are this match's answer, not the request's.
+	var made: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
+	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(made)
+	_read_found(entry, node, wanted_property)
+	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
+	GdhCallErrors.attach(entry, made)
+	return entry
+
+
+## Reads [param wanted_property] off [param node] into [param entry].
+func _read_found(entry: Dictionary, node: Node, wanted_property: String) -> void:
 	# Through a path as well, for the reason [method GdhPaths.walk_to] gives. A step that is not
 	# there on this node reads as not having the property rather than as a refusal, which is the
 	# rule this whole function is written to: a find matches nodes of several classes on purpose.
 	var reached: Dictionary = GdhPaths.walk_to(node, str(entry["path"]), wanted_property)
 	if reached.has("message"):
 		entry["has_property"] = false
-		return entry
+		return
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
 	var has: bool = GdhPaths.can_read(holder, named)
 	entry["has_property"] = has
 	if has:
 		entry["value"] = _values.serialize(GdhPaths.read_under(holder, named))
-	return entry
 
 
 ## Whether the caller named anything to match on, since every filter left out matches everything
@@ -957,7 +968,11 @@ func _serialize_node_tree(
 ) -> Dictionary:
 	var result: Dictionary = _serialize_node(node, include_properties)
 	if not named.is_empty():
+		var made: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
+		var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(made)
 		result["properties"] = _named_properties_of(node, str(result["path"]), named)
+		var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
+		GdhCallErrors.attach(result, made)
 
 	if depth < max_depth:
 		var children: Array = []

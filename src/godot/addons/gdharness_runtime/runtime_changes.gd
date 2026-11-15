@@ -484,6 +484,8 @@ static func _instead_of_a_call(reached: Dictionary, method: String, sort: String
 
 
 func call_method(params: Dictionary) -> Dictionary:
+	# Held across the method's awaits, after which another request may be the one reads add to.
+	var request_errors: GdhCallErrors.GdhCollected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var method: String = str(params.get("method", ""))
 	var args: Array = params.get("args", [])
@@ -572,7 +574,9 @@ func call_method(params: Dictionary) -> Dictionary:
 	_note_call(answer, awaited, outside, caught, named)
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
+		var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(request_errors)
 		answer.merge(_read_off_result(result, asked))
+		var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 	return answer
 
 

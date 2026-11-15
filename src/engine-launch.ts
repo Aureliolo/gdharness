@@ -30,7 +30,7 @@ import {
   spawnOnDesktop,
 } from './desktop.js';
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
-import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
+import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
@@ -246,27 +246,40 @@ interface MemoryRoom {
  * percentage memory_pressure prints, includes what it can take back. Windows refuses an allocation
  * at the commit limit rather than at physical memory, and a machine with 23 GB free and 4.9 GB left
  * to commit started sixteen engines that died with STATUS_COMMITMENT_LIMIT, so there the smaller
- * of the two is the room.
+ * of the two is the room. What other work has reserved on the machine and still owes comes off
+ * either ({@link reservedMemory}), since that memory is spoken for before it is taken.
  */
 export async function memoryAvailable(): Promise<MemoryRoom> {
+  const reserved = await reservedMemory();
   const level = await macMemoryLevel();
   if (level !== null) {
-    return { bytes: (totalmem() * level) / 100, said: 'of memory free' };
+    return lessReserved({ bytes: (totalmem() * level) / 100, said: 'of memory free' }, reserved);
   }
-  return memoryRoomOf(freemem(), await windowsCommitLeft());
+  return memoryRoomOf(freemem(), await windowsCommitLeft(), reserved);
 }
 
 /**
  * The room [param free] physical bytes and [param commit], what Windows can still commit (null
- * elsewhere, or why it did not say), leave engines: the smaller of the two.
+ * elsewhere, or why it did not say), leave engines: the smaller of the two, less the [param reserved]
+ * bytes other work still owes.
  */
-export function memoryRoomOf(free: number, commit: number | string | null): MemoryRoom {
+export function memoryRoomOf(free: number, commit: number | string | null, reserved = 0): MemoryRoom {
   if (typeof commit === 'string') {
-    return { bytes: free, said: 'of memory free', unread: commit };
+    return lessReserved({ bytes: free, said: 'of memory free', unread: commit }, reserved);
   }
-  return commit !== null && commit < free
-    ? { bytes: commit, said: 'of memory left to commit' }
-    : { bytes: free, said: 'of memory free' };
+  return lessReserved(
+    commit !== null && commit < free
+      ? { bytes: commit, said: 'of memory left to commit' }
+      : { bytes: free, said: 'of memory free' },
+    reserved,
+  );
+}
+
+/** [param room] less [param reserved] bytes, the line saying how much when any is. */
+function lessReserved(room: MemoryRoom, reserved: number): MemoryRoom {
+  return reserved > 0
+    ? { ...room, bytes: room.bytes - reserved, said: `${room.said} after ${gigabytes(reserved)} reserved` }
+    : room;
 }
 
 /**

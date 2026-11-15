@@ -438,6 +438,8 @@ interface SourceLine {
   readonly start: number;
   readonly text: string;
   readonly indent: number;
+  /** Whether it carries on the line above, inside open brackets or after a backslash. */
+  readonly continued: boolean;
 }
 
 /** What reading a script's lines needs, and the class_name found along the way. */
@@ -620,7 +622,8 @@ function parseBody(
     if (state.openEnum !== null) {
       state.openEnum = continueEnum(state.openEnum, line.text, state.declarations);
       state.index += 1;
-    } else if (line.text.trim() === '' || line.indent > indent) {
+    } else if (line.text.trim() === '' || line.indent > indent || line.continued) {
+      // A line carrying on the one above belongs to it, wherever it is indented.
       state.index += 1;
     } else if (line.indent < indent) {
       break;
@@ -642,14 +645,30 @@ function parseBody(
   };
 }
 
+const OPENS_OR_CLOSES = /[()[\]{}]/u;
+
+/** Whether [param text] ends in a backslash, past any white space, which joins the next line to it. */
+function endsInBackslash(text: string): boolean {
+  let at = text.length - 1;
+  while (at >= 0 && (text[at] === ' ' || text[at] === '\t' || text[at] === '\r')) {
+    at -= 1;
+  }
+  return text[at] === '\\';
+}
+
 /** What [param source] declares: its class_name, its own members, and its inner classes, nested. */
 export function shapeOf(source: string): ScriptShape {
   const code = codeOf(source, regionsOf(source));
   const lines: SourceLine[] = [];
   let start = 0;
+  let depth = 0;
+  let joined = false;
   for (const text of code.split('\n')) {
-    lines.push({ start, text, indent: indentOf(text) });
+    lines.push({ start, text, indent: indentOf(text), continued: depth > 0 || joined });
     start += text.length + 1;
+    // Most lines hold no bracket and no backslash, and the native searches pass them at once.
+    depth = OPENS_OR_CLOSES.test(text) ? Math.max(0, depth + bracketsOpenedBy(text)) : depth;
+    joined = text.includes('\\') && endsInBackslash(text);
   }
   const reader: ShapeReader = { source, code, lines, className: null };
   const { body } = parseBody(reader, null, null, 0, 0, 0);
@@ -998,17 +1017,18 @@ function parametersOf(text: string, from: number): string[] {
 const DOTTED = `${NAME}(?:\\.${NAME})*`;
 
 /**
- * The class [param text], a line declaring [param name], gives it: written after a colon, the class
- * whose `new()` it is assigned, or the class it is cast to with `as`. Its last part for a dotted
- * inner class, and null when the line says none.
+ * The class [param text], a line declaring [param name], gives it, as written: after a colon, or
+ * inferred with `:=` from a `new()` that ends the line. Both make the variable typed, so the engine
+ * refuses any value outside that class and those below it. Null for anything else: an untyped
+ * variable may later hold anything, whatever it starts with.
  */
-function declaredClass(text: string, name: string): string | null {
+export function declaredClass(text: string, name: string): string | null {
   const word = `(?<![\\p{L}\\p{N}_.])${escapedForPattern(name)}`;
-  const found =
+  return (
     new RegExp(`${word}\\s*:\\s*(${DOTTED})`, 'u').exec(text)?.[1] ??
-    new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\(`, 'u').exec(text)?.[1] ??
-    new RegExp(`${word}\\s*:?=[^\\n]*?\\bas\\s+(${DOTTED})\\s*$`, 'u').exec(text)?.[1];
-  return found === undefined ? null : found.slice(found.lastIndexOf('.') + 1);
+    new RegExp(`${word}\\s*:=\\s*(${DOTTED})\\.new\\s*\\([^()]*\\)\\s*$`, 'u').exec(text)?.[1] ??
+    null
+  );
 }
 
 /**
@@ -1054,6 +1074,21 @@ function localAt(lines: readonly string[], index: number, name: string): { type:
   return null;
 }
 
+/** The sum of what the brackets of [param text] open and close. */
+function bracketsOpenedBy(text: string): number {
+  let open = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    // Read as character codes, since every script line passes through here: ( [ { and ) ] }.
+    const code = text.charCodeAt(at);
+    if (code === 40 || code === 91 || code === 123) {
+      open += 1;
+    } else if (code === 41 || code === 93 || code === 125) {
+      open -= 1;
+    }
+  }
+  return open;
+}
+
 /**
  * What the line [param text], above the line asked about, says of the local [param name]: that it
  * binds it, that the walk upwards ends there, or neither. [param enclosing] is whether the line
@@ -1083,34 +1118,84 @@ function scopeVerdict(
   return patterns.declares.test(text) ? 'binds' : 'passes';
 }
 
-/**
- * The identifier written before the dot that ends just before [param offset] in [param code], and
- * whether it is itself a member of something written before it.
- */
-function receiverBefore(code: string, offset: number): { name: string; dotted: boolean } | null {
-  let at = offset - 1;
-  while (at >= 0 && /\s/.test(code[at] ?? '')) {
+/** Where [param code] at or before [param from] stops being white space or a line continuation. */
+function skippedBack(code: string, from: number): number {
+  let at = from;
+  while (at >= 0 && /[\s\\]/.test(code[at] ?? '')) {
     at -= 1;
   }
+  return at;
+}
+
+/**
+ * Where a `.new()` ending at the `)` at [param close] in [param code] starts its receiver, before the
+ * dot ahead of `new`. Null for any other call, whose result the text gives no class.
+ */
+function constructedBefore(code: string, close: number): number | null {
+  const open = openingParenBefore(code, close - 1);
+  if (open < 0) {
+    return null;
+  }
+  const callee = wordBefore(code, open - 1);
+  const dot = skippedBack(code, callee.start - 1);
+  return callee.word === 'new' && code[dot] === '.' ? skippedBack(code, dot - 1) : null;
+}
+
+/**
+ * The names written before the dot that ends just before [param offset] in [param code], first one
+ * first, and whether they end in `.new()`. Null where the receiver is anything else, such as a
+ * call's result, an index, a node path or a literal, whose class the text does not give.
+ */
+function receiverPathBefore(code: string, offset: number): { names: string[]; made: boolean } | null {
+  let at = skippedBack(code, offset - 1);
   if (code[at] !== '.') {
     return null;
   }
-  at -= 1;
-  while (at >= 0 && /\s/.test(code[at] ?? '')) {
-    at -= 1;
+  at = skippedBack(code, at - 1);
+  const made = code[at] === ')';
+  if (made) {
+    const before = constructedBefore(code, at);
+    if (before === null) {
+      return null;
+    }
+    at = before;
   }
-  let start = at + 1;
-  while (start > 0 && isIdentifierPart(code[start - 1])) {
-    start -= 1;
+  const names: string[] = [];
+  for (;;) {
+    const { word, start } = wordBefore(code, at);
+    if (!/^[\p{L}_]/u.test(word)) {
+      return null;
+    }
+    names.unshift(word);
+    const before = skippedBack(code, start - 1);
+    if (code[before] !== '.' || code[before - 1] === '.') {
+      return opensReceiver(code[before], word) ? { names, made } : null;
+    }
+    at = skippedBack(code, before - 1);
   }
-  if (start > at) {
-    return null;
+}
+
+/**
+ * Whether [param word], with [param before] the character ahead of it, can start a receiver: not a
+ * node path's `$` or `%`, and no keyword but `self` and `super`, which a blanked string leaves.
+ */
+function opensReceiver(before: string | undefined, word: string): boolean {
+  if (before === '$' || before === '%') {
+    return false;
   }
-  let before = start - 1;
-  while (before >= 0 && /\s/.test(code[before] ?? '')) {
-    before -= 1;
-  }
-  return { name: code.slice(start, at + 1), dotted: code[before] === '.' };
+  return !KEYWORDS.has(word) || word === 'self' || word === 'super';
+}
+
+/**
+ * What a member use is written on, read as far as the text says: `self`, or a name looked up from
+ * the class it is written in. Then the names written after that, and whether the path ends in
+ * `.new()`.
+ */
+export interface Receiver {
+  readonly start: 'self' | 'name';
+  /** The names after the start. For a name looked up, that name first. */
+  readonly names: readonly string[];
+  readonly made: boolean;
 }
 
 /** What a class declares by a name that, written bare in it, means that member and no function. */
@@ -1130,9 +1215,7 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * A bare name that is something else at that place is not the function: a parameter or local of
  * that name, or a variable, constant, signal or enum the class itself declares by it. Read as the
  * function, `made.bare_lift = lift` in a helper taking `lift: int` was listed as `lift` handed on
- * as a Callable. A member call whose receiver is one of [param otherClasses], or a local or a
- * variable of the class declared as one, is another class's method and is left out for a caller
- * asking about one class: `made.lift(by)` with `var made: Outcome` above it is Outcome's.
+ * as a Callable.
  *
  * With [param property] the name is a variable's, whose get and set blocks run wherever it is read or
  * assigned, so the class's own variable of that name is what is being looked for rather than
@@ -1141,32 +1224,44 @@ function bodyHolding(body: ClassBody, offset: number): ClassBody {
  * `sinks = value` in the set block of `sinks` is not a place that sets it.
  *
  * A use written bare, through `self` or through `super` runs whichever function of that name the
- * engine dispatches it to from the class holding it, and [param onSelf] says whether that can be
- * the one asked about: a bare `_settle()` in a script of an unrelated class calls that script's own.
+ * engine dispatches it to from the class holding it, and `onSelf` says whether that can be the one
+ * asked about: a bare `_settle()` in a script of an unrelated class calls that script's own. A use
+ * through a class, or through a class variable typed as one, runs what that class dispatches it to,
+ * and `onReceiver` says the same of it: `held.lift(by)` with `var held: Outcome` in the class body is
+ * Outcome's. A receiver the text gives no class, such as a local or a call's result, may be
+ * anything, so the use is kept.
+ *
+ * [param read] is what a caller that has already read the script hands over, so it is not read twice.
  */
 export function callSitesOf(
   source: string,
   name: string,
-  otherClasses: ReadonlySet<string> = new Set(),
   property = false,
-  onSelf: SelfDispatch = () => true,
+  dispatch: { readonly onSelf?: SelfDispatch; readonly onReceiver?: ReceiverDispatch } = {},
+  read?: { readonly regions: Region[]; readonly shape: ScriptShape; readonly lines: Lines },
 ): CallSite[] {
-  const regions = regionsOf(source);
+  const regions = read?.regions ?? regionsOf(source);
   const code = codeOf(source, regions);
   const codeLines = code.split('\n');
-  const lines = new Lines(source);
-  const shape = shapeOf(source);
+  const lines = read?.lines ?? new Lines(source);
+  const shape = read?.shape ?? shapeOf(source);
+  let locals: ReadonlySet<string> | null = null;
   const scan: CallScan = {
     source,
     name,
     property,
-    otherClasses,
     code,
     codeLines,
     lines,
     shape,
     accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
-    onSelf,
+    onSelf: dispatch.onSelf ?? (() => true),
+    onReceiver: dispatch.onReceiver ?? (() => true),
+    readsReceivers: dispatch.onSelf !== undefined || dispatch.onReceiver !== undefined,
+    locals: () => {
+      locals ??= localNamesOf(code, lines, shape.body);
+      return locals;
+    },
   };
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
@@ -1177,12 +1272,14 @@ export function callSitesOf(
 /** Whether a use at [param offset] written bare, through `self` or through `super` can reach the function asked about. */
 export type SelfDispatch = (offset: number, how: 'bare' | 'self' | 'super') => boolean;
 
+/** Whether a member use at [param offset] on [param receiver] can reach the function asked about. */
+export type ReceiverDispatch = (offset: number, receiver: Receiver) => boolean;
+
 /** What one `callSitesOf` call reads from, worked out once. */
 interface CallScan {
   readonly source: string;
   readonly name: string;
   readonly property: boolean;
-  readonly otherClasses: ReadonlySet<string>;
   readonly code: string;
   readonly codeLines: readonly string[];
   readonly lines: Lines;
@@ -1190,16 +1287,48 @@ interface CallScan {
   /** The zero-based line ranges of the property's own get and set blocks. */
   readonly accessors: readonly (readonly [number, number])[];
   readonly onSelf: SelfDispatch;
+  readonly onReceiver: ReceiverDispatch;
+  /** Whether a member use's receiver is read at all: not when nothing would leave it out. */
+  readonly readsReceivers: boolean;
+  /** Every name the script declares as a local anywhere, worked out the first time it is asked for. */
+  readonly locals: () => ReadonlySet<string>;
 }
 
-/** The class a variable of the class body holding [param at] is declared as, read off its own line. */
-function memberClass(scan: CallScan, member: string, at: number): string | null {
-  const declared = bodyHolding(scan.shape.body, at).declarations.find(
-    (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
-  );
-  return declared === undefined
-    ? null
-    : declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member);
+const DECLARED_IN_BODY = new RegExp(`(?<![\\p{L}\\p{N}_.])(var|const|for)\\s+(${NAME})`, 'gu');
+const FUNC_WORD = /(?<![\p{L}\p{N}_.])func(?![\p{L}\p{N}_])/gu;
+const SET_PARAMETER = new RegExp(`(?<![\\p{L}\\p{N}_.])set\\s*\\(\\s*(${NAME})`, 'gu');
+
+/**
+ * Every name [param code] declares as a local: by var, const or for anywhere but as a member of a
+ * class [param body] holds, as a parameter of any function or lambda, or as a set block's value.
+ */
+function localNamesOf(code: string, lines: Lines, body: ClassBody): Set<string> {
+  const members = new Set<string>();
+  const addMembers = (one: ClassBody): void => {
+    for (const declared of one.declarations) {
+      if (declared.kind === 'var' || declared.kind === 'const') {
+        members.add(`${lines.positionOf(declared.offset).line}:${declared.name}`);
+      }
+    }
+    one.inner.forEach(addMembers);
+  };
+  addMembers(body);
+  const names = new Set<string>();
+  for (const match of code.matchAll(DECLARED_IN_BODY)) {
+    const name = match[2] ?? '';
+    if (match[1] === 'for' || !members.has(`${lines.positionOf(match.index).line}:${name}`)) {
+      names.add(name);
+    }
+  }
+  for (const match of code.matchAll(FUNC_WORD)) {
+    for (const name of parametersOf(code, match.index)) {
+      names.add(name);
+    }
+  }
+  for (const match of code.matchAll(SET_PARAMETER)) {
+    names.add(match[1] ?? '');
+  }
+  return names;
 }
 
 /** The lines of the property's own get and set blocks: those indented under its declaration. */
@@ -1233,21 +1362,24 @@ function accessorsIn(
   ];
 }
 
-/** Whether a member call is this class's: not another class's method of the same name. */
-function isOwnMemberCall(scan: CallScan, offset: number, index: number): boolean {
-  const receiver = receiverBefore(scan.code, offset);
-  if (receiver === null || scan.otherClasses.size === 0) {
+/**
+ * Whether a member use at [param offset] can reach the function asked about. A receiver whose first
+ * name the script declares as a local anywhere may be that local, so
+ * it is kept.
+ */
+function isMemberUseKept(scan: CallScan, offset: number): boolean {
+  const path = scan.readsReceivers ? receiverPathBefore(scan.code, offset) : null;
+  if (path === null) {
     return true;
   }
-  if (scan.otherClasses.has(receiver.name)) {
-    return false;
+  const { names, made } = path;
+  const [first = '', ...rest] = names;
+  if (first === 'self' || first === 'super') {
+    return rest.length === 0 && !made
+      ? scan.onSelf(offset, first)
+      : scan.onReceiver(offset, { start: 'self', names: rest, made });
   }
-  if (receiver.dotted) {
-    return true;
-  }
-  const typed =
-    localAt(scan.codeLines, index, receiver.name)?.type ?? memberClass(scan, receiver.name, offset);
-  return typed === null || !scan.otherClasses.has(typed);
+  return scan.locals().has(first) || scan.onReceiver(offset, { start: 'name', names, made });
 }
 
 /** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
@@ -1271,11 +1403,7 @@ function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
   if (!one.afterDot) {
     return isBareFunctionUse(scan, one.offset, index) && scan.onSelf(one.offset, 'bare');
   }
-  const receiver = receiverBefore(scan.code, one.offset);
-  if (receiver !== null && !receiver.dotted && (receiver.name === 'self' || receiver.name === 'super')) {
-    return scan.onSelf(one.offset, receiver.name);
-  }
-  return isOwnMemberCall(scan, one.offset, index);
+  return isMemberUseKept(scan, one.offset);
 }
 
 function callSiteAt(scan: CallScan, one: Occurrence): CallSite {

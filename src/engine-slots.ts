@@ -57,7 +57,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { availableParallelism, homedir, totalmem } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
@@ -119,6 +119,25 @@ interface SlotsMachine {
   readonly cwd: string;
 }
 
+function thisMachine(): SlotsMachine {
+  return {
+    env: process.env,
+    platform: process.platform,
+    processors: availableParallelism(),
+    memory: totalmem(),
+    home: homedir(),
+    cwd: process.cwd(),
+  };
+}
+
+/** The machine's own slots directory: the variable, else the cache home's. The count is not read. */
+function machineSlotsDirectory(machine: SlotsMachine = thisMachine()): string {
+  const named = nonEmpty(machine.env[SLOTS_VARIABLE]);
+  return named === undefined
+    ? join(cacheHome(machine.env, machine.platform, machine.home), 'slots')
+    : resolve(machine.cwd, named);
+}
+
 /**
  * The slots a run takes: [param asked] where a command named them, else the variables, else the
  * machine's own directory and count. Every tool on the machine works the default out the same way,
@@ -129,20 +148,10 @@ export function machineSlots(
     directory: null,
     count: null,
   },
-  machine: SlotsMachine = {
-    env: process.env,
-    platform: process.platform,
-    processors: availableParallelism(),
-    memory: totalmem(),
-    home: homedir(),
-    cwd: process.cwd(),
-  },
+  machine: SlotsMachine = thisMachine(),
 ): SlotsChosen {
   const { env } = machine;
-  const named = nonEmpty(env[SLOTS_VARIABLE]);
-  const cache = cacheHome(env, machine.platform, machine.home);
-  const directory =
-    asked.directory ?? (named === undefined ? join(cache, 'slots') : resolve(machine.cwd, named));
+  const directory = asked.directory ?? machineSlotsDirectory(machine);
   const counted = nonEmpty(env[SLOT_COUNT_VARIABLE]);
   let count = asked.count;
   if (count === null && counted !== undefined) {
@@ -378,7 +387,9 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
   }
   return {
     wants: typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? wants : 1,
-    seen,
+    // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a waiter
+    // let a slot stand its whole yield still read as inside it, and kept the slot standing.
+    seen: Math.floor(seen),
     mark,
     taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
@@ -1003,6 +1014,87 @@ export function lockIsFree(
 export async function ownStart(): Promise<number> {
   const said = (await startTimesOf([process.pid])).get(process.pid);
   return said ?? Math.round(Date.now() - process.uptime() * 1000);
+}
+
+/** The folder under the machine's slots where other work marks the memory it has reserved. */
+export const RESERVED_FOLDER = 'reserved';
+
+/** One reservation mark: who holds it, how much it still owes, and what the file said. */
+interface ReservationMark {
+  readonly holder: SlotHolder;
+  readonly owed: number;
+  readonly content: string;
+  readonly writtenAt: number;
+  readonly path: string;
+}
+
+/** The marks in [param directory]'s reserved folder that name a holder and a positive whole `owed`. */
+function reservationMarks(directory: string): ReservationMark[] {
+  const folder = join(directory, RESERVED_FOLDER);
+  let names: string[];
+  try {
+    names = readdirSync(folder);
+  } catch {
+    return [];
+  }
+  const marks: ReservationMark[] = [];
+  for (const name of names.filter((one) => one.endsWith('.json'))) {
+    try {
+      const content = readFileSync(join(folder, name), 'utf8');
+      const holder = holderOf(content);
+      const parsed: unknown = JSON.parse(content);
+      const owed = isRecord(parsed) ? parsed['owed'] : undefined;
+      if (holder !== null && typeof owed === 'number' && Number.isInteger(owed) && owed > 0) {
+        const path = join(folder, name);
+        marks.push({ holder, owed, content, writtenAt: statSync(path).mtimeMs, path });
+      }
+    } catch {
+      // Unreadable or not JSON: it reserves nothing.
+    }
+  }
+  return marks;
+}
+
+/**
+ * The variable a holder of a reservation sets, for everything it starts, to the path of its mark.
+ * Nested holders join their paths with the platform's path-list separator. A program started inside
+ * a reservation does not wait on it.
+ */
+export const RESERVED_VARIABLE = 'GODOT_ENGINE_RESERVED';
+
+/** [param path] resolved, and lower-cased on Windows, which is how marks are compared. */
+function comparable(path: string): string {
+  const resolved = resolve(path);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * The bytes other work has reserved and still owes, summed over the live marks in
+ * `<directory>/reserved`. A mark counts by the rule a lock does ({@link lockIsFree}), and one
+ * [param env] names in {@link RESERVED_VARIABLE} counts nothing, since a gate that reserved its peak
+ * runs this inside it. The default directory is the machine's, never a pool's.
+ */
+export async function reservedMemory(
+  directory: string = machineSlotsDirectory(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
+  const own = new Set(
+    (nonEmpty(env[RESERVED_VARIABLE]) ?? '')
+      .split(delimiter)
+      .filter((path) => path !== '')
+      .map(comparable),
+  );
+  const live = reservationMarks(directory).filter(
+    (mark) => alive(mark.holder.pid) && !own.has(comparable(mark.path)),
+  );
+  if (live.length === 0) {
+    return 0;
+  }
+  const starts = await startTimesOf([...new Set(live.map((mark) => mark.holder.pid))]);
+  const now = Date.now();
+  return live
+    .filter((mark) => !lockIsFree(mark.content, mark.writtenAt, now, alive, (asked) => starts.get(asked)))
+    .reduce((sum, mark) => sum + mark.owed, 0);
 }
 
 /**
