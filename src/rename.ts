@@ -13,7 +13,15 @@
  * than find it later as a test failing on a node it cannot find.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, posix } from 'node:path';
 import {
   type ClassBody,
@@ -1154,153 +1162,88 @@ function literalsOf(file: ProjectText, script: Script | undefined): { offset: nu
   return found;
 }
 
-/**
- * Every path the string literals of [param texts] name, as a res:// path, each once, with whether
- * any of them wrote it as a res:// path rather than relative to its file.
- */
+/** Every path the string literals of [param texts] write in full as a res:// path, each once. */
 export function literalTargets(
   texts: readonly ProjectText[],
   scripts: ReadonlyMap<string, Script>,
-): Map<string, boolean> {
-  const targets = new Map<string, boolean>();
+): Set<string> {
+  const targets = new Set<string>();
   for (const file of texts) {
     for (const literal of literalsOf(file, scripts.get(file.path))) {
       const written = literal.value.startsWith('*') ? literal.value.slice(1) : literal.value;
-      if (written !== '' && !written.startsWith('uid://') && !written.includes('\n')) {
-        const target = resolvedPath(written, file.path);
-        targets.set(target, written.startsWith('res://') || (targets.get(target) ?? false));
+      if (written.startsWith('res://') && !written.includes('\n')) {
+        targets.add(resolvedPath(written, file.path));
       }
     }
   }
   return targets;
 }
 
-/** What the file system joins to a move: the paths and the spellings of a moved folder. */
-export interface DiskJoins {
-  /** Spellings of the moved folder, each written as a res:// path, which the disk says are it. */
-  readonly folders: string[];
-}
-
 /** The arguments of [function joinedByTheDisk]. */
 export interface JoinArguments {
   readonly projectPath: string;
-  /** What the string literals name, from [function literalTargets]. */
-  readonly targets: ReadonlyMap<string, boolean>;
+  /** What the string literals write as res:// paths, from [function literalTargets]. */
+  readonly targets: ReadonlySet<string>;
   /** Every path that names a moved file, where it goes. Spellings the disk joins are added. */
   readonly references: Map<string, string>;
-  /** The moved folder, or null for a move of files. */
-  readonly folder: { from: string; to: string } | null;
-  /** The identity of the entry at an absolute path, or null: [function entryKey] where not given. */
-  readonly identify: (absolute: string) => string | null;
+  /** Where the entry at an absolute path really is, or null where nothing is: [function reachedAt]. */
+  readonly resolve: (absolute: string) => string | null;
+}
+
+/** Where the entry at [param absolute] really is, each link followed and each name as stored, or null. */
+export function reachedAt(absolute: string): string | null {
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Whether a name could be joined to a spelling in [param lowered], the ASCII-lowered spellings the
- * disk is compared against. Names of printable ASCII only are joined by ASCII case on every file
- * system, so those are checked against the set. A name with any other character, or any spelling
- * that has one, is left to the disk. This says yes where the disk says no, never no where it
- * would say yes.
+ * Whether [param name] could be joined to a spelling in [param lowered], the ASCII-lowered
+ * spellings it is compared against. Names of printable ASCII only are joined by ASCII case on every
+ * file system, so those are checked against the set. A name with any other character, or any
+ * spelling that has one, is left to the disk. This says yes where the disk says no, never no where
+ * it would say yes.
  */
 function mightJoin(name: string, lowered: ReadonlySet<string>, otherNonAscii: boolean): boolean {
   return otherNonAscii || !/^[ -~]*$/.test(name) || lowered.has(name.toLowerCase());
 }
 
 /**
- * Adds to [param args].references each spelling in [param args].targets that the file system takes
- * for a moved file, as `res://DESK.tscn` is `res://desk.tscn` on Windows and macOS, or reaches it
- * through a link spelt in another case. The disk says so by the identity of the two entries, since
- * no fold of the letters is its own, and where it keeps them apart, as Linux does, nothing is
- * added. Only a spelling that is not already a reference joins, and it goes where the exact path
- * goes. Each moved file and each spelling asked about is looked at once. A folder is never added:
- * a string that resolves to it, such as a node's name, is no reference. A spelling written as a
- * res:// path that begins with the moved folder's name in another case is answered in
- * [type DiskJoins], to be listed where it is left alone.
+ * Adds to [param args].references each res:// spelling in [param args].targets that reaches the
+ * same directory entry as a moved file, as `res://DESK.tscn` reaches `res://desk.tscn` on Windows
+ * and macOS, or a path through a link spelt in another case. The file system answers, since no fold
+ * of the letters is its own: where it keeps two spellings apart, as Linux does, or where a name is
+ * a hard link, which reaches its own entry, nothing is added. The spelling goes where the exact
+ * path goes. Each distinct spelling is resolved once.
  */
-export function joinedByTheDisk(args: JoinArguments): DiskJoins {
-  const { targets, references, folder } = args;
-  const looked = new Looked(args.projectPath, args.identify);
-  const moved = movedByKey(references, looked);
-  const spellings = [...references.keys()];
-  const near = {
-    lowered: new Set(spellings.map((path) => path.toLowerCase())),
-    nonAscii: spellings.some((path) => /[^ -~]/.test(path)),
+export function joinedByTheDisk(args: JoinArguments): void {
+  const { targets, references, resolve } = args;
+  const reached = new Map<string, string | null>();
+  const reach = (path: string): string | null => {
+    if (!reached.has(path)) {
+      reached.set(path, resolve(`${args.projectPath}/${path.slice('res://'.length)}`));
+    }
+    return reached.get(path) ?? null;
   };
-  const folders = new Set<string>();
-  for (const [target, asPath] of targets) {
-    if (references.has(target) || !target.startsWith('res://')) {
-      continue;
-    }
-    const goesTo = couldBeAFile(target, asPath, near) ? movedTo(target, looked, moved) : undefined;
-    if (goesTo !== undefined) {
-      references.set(target, goesTo);
-    } else if (folder !== null && asPath) {
-      const head = joinedFolder(target, folder.from, looked);
-      if (head !== null) {
-        folders.add(head);
-      }
-    }
-  }
-  return { folders: [...folders] };
-}
-
-/**
- * Whether [param target] could be a spelling of a moved file: written as a res:// path or with an
- * extension, so no bare name is taken for one, and near a spelling that moves.
- */
-function couldBeAFile(
-  target: string,
-  asPath: boolean,
-  near: { lowered: ReadonlySet<string>; nonAscii: boolean },
-): boolean {
-  return (asPath || /\.[a-z0-9]+$/i.test(target)) && mightJoin(target, near.lowered, near.nonAscii);
-}
-
-/** Where each entry of [param references] goes, by its identity. */
-function movedByKey(references: ReadonlyMap<string, string>, looked: Looked): Map<string, string> {
   const moved = new Map<string, string>();
   for (const [path, goesTo] of references) {
-    const key = looked.keyOf(path);
-    if (key !== null && !moved.has(key)) {
-      moved.set(key, goesTo);
+    const at = reach(path);
+    if (at !== null && !moved.has(at)) {
+      moved.set(at, goesTo);
     }
   }
-  return moved;
-}
-
-/** The identity of each entry asked about, taken once. */
-class Looked {
-  private readonly seen = new Map<string, string | null>();
-  private readonly projectPath: string;
-  private readonly identify: (absolute: string) => string | null;
-
-  constructor(projectPath: string, identify: (absolute: string) => string | null) {
-    this.projectPath = projectPath;
-    this.identify = identify;
-  }
-
-  keyOf(path: string): string | null {
-    if (!this.seen.has(path)) {
-      this.seen.set(path, this.identify(`${this.projectPath}/${path.slice('res://'.length)}`));
+  const spellings = [...references.keys()];
+  const lowered = new Set(spellings.map((path) => path.toLowerCase()));
+  const nonAscii = spellings.some((path) => /[^ -~]/.test(path));
+  for (const target of targets) {
+    const at = references.has(target) || !mightJoin(target, lowered, nonAscii) ? null : reach(target);
+    const goesTo = at === null ? undefined : moved.get(at);
+    if (goesTo !== undefined) {
+      references.set(target, goesTo);
     }
-    return this.seen.get(path) ?? null;
   }
-}
-
-/** Where the moved file that [param target] is by identity goes, or undefined. */
-function movedTo(target: string, looked: Looked, moved: ReadonlyMap<string, string>): string | undefined {
-  const key = looked.keyOf(target);
-  return key === null ? undefined : moved.get(key);
-}
-
-/**
- * The start of [param target] that is as deep as the moved folder [param from] and is another
- * spelling of it by identity, or null.
- */
-function joinedFolder(target: string, from: string, looked: Looked): string | null {
-  const depth = from.slice('res://'.length).split('/').length;
-  const head = `res://${target.slice('res://'.length).split('/').slice(0, depth).join('/')}`;
-  const alike = head !== from && mightJoin(head, new Set([from.toLowerCase()]), false);
-  return alike && looked.keyOf(head) === looked.keyOf(from) && looked.keyOf(from) !== null ? head : null;
 }
 
 /**

@@ -441,6 +441,7 @@ import {
   NOT_INHERITED,
   RESOLVED_ELSEWHERE,
   type Rewrite,
+  reachedAt,
   scriptsOf,
 } from '../src/rename.js';
 import {
@@ -88900,8 +88901,9 @@ function loadedNames(project: string, scene: string): string[] | null {
 /**
  * A folder named in another case than the disk holds it is followed by a move of that folder: the
  * files in it are rewritten, and a string naming the folder or something below it in that case is
- * listed under leftAlone. The moved scene still loads, with its children named as before and its
- * parent="." kept. Where the file system keeps the spellings apart, as Linux does, none is touched.
+ * not listed, since it is no spelling of a moved file. The moved scene still loads, with its
+ * children named as before and its parent="." kept. Where the file system keeps the spellings
+ * apart, as Linux does, none is touched.
  */
 function testAFolderMoveRewritesAFolderSpeltInAnotherCase(): void {
   const named = (path: string): string =>
@@ -88928,7 +88930,7 @@ function testAFolderMoveRewritesAFolderSpeltInAnotherCase(): void {
     const left = asArray(get(outcome.report, 'leftAlone')).filter(
       (one) => get(one, 'file') === 'res://where.gd',
     );
-    assert.equal(left.length, folds ? 2 : 0, JSON.stringify(get(outcome.report, 'leftAlone')));
+    assert.equal(left.length, 0, JSON.stringify(get(outcome.report, 'leftAlone')));
     assert.equal(
       after('where.gd'),
       'extends Node\n\nconst D := "res://Scenes/deep"\nconst E := "res://SCENES"\n',
@@ -88995,19 +88997,95 @@ function testAMoveLooksAtEachEntryOnce(): void {
   }));
   const references = new Map(names.map((path) => [path, path.replace('bühne', 'stage')]));
   let asked = 0;
-  const joined = joinedByTheDisk({
+  joinedByTheDisk({
     projectPath: '/project',
     targets: literalTargets(texts, scriptsOf(texts)),
     references,
-    folder: { from: 'res://bühne', to: 'res://stage' },
-    identify: (absolute) => {
+    resolve: (absolute) => {
       asked += 1;
       return absolute.toLowerCase();
     },
   });
   assert.equal(references.size, 600, 'each upper-case spelling joins the file it names');
-  assert.deepEqual(joined.folders, []);
-  assert.ok(asked <= 1 + 300 + 300, `the disk was asked ${asked} times`);
+  assert.ok(asked <= 300 + 300, `the disk was asked ${asked} times`);
+}
+
+/**
+ * A second name of the moved file, a hard link, is another directory entry and keeps pointing at
+ * the file it is, whether any name in the move has a character the disk must judge or not. The
+ * exact spelling and, where the file system takes it for the file, a spelling in another case are
+ * rewritten.
+ */
+function testAMoveLeavesAHardLinkedSecondNameAlone(): void {
+  const named = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
+  const { project, folds } = caseMoveProject(
+    {
+      'bühne.tscn': LINKED_DESK,
+      'exact.tscn': named('res://bühne.tscn'),
+      'upper.tscn': named('res://BÜHNE.tscn'),
+      'alias.tscn': '',
+      'älias.tscn': '',
+      'a.tscn': named('res://alias.tscn'),
+      'b.tscn': named('res://älias.tscn'),
+    },
+    'BÜHNE.tscn',
+  );
+  try {
+    for (const alias of ['alias.tscn', 'älias.tscn']) {
+      rmSync(join(project, alias));
+      linkSync(join(project, 'bühne.tscn'), join(project, alias));
+    }
+    movedIn(project, 'bühne.tscn', 'newdir/bühne.tscn');
+    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
+    assert.ok(after('exact.tscn').includes('path="res://newdir/bühne.tscn"'), after('exact.tscn'));
+    assert.equal(after('upper.tscn').includes('path="res://newdir/bühne.tscn"'), folds, after('upper.tscn'));
+    assert.ok(after('a.tscn').includes('path="res://alias.tscn"'), after('a.tscn'));
+    assert.ok(after('b.tscn').includes('path="res://älias.tscn"'), after('b.tscn'));
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A string that is not written as a res:// path stays as it was, in every case: the word of a
+ * label, a name, and a relative path in another case are no reference to the moved file.
+ */
+function testAMoveLeavesARelativeStringInAnotherCase(): void {
+  const script = 'extends Node\n\nconst A := "DESK.tscn"\nconst B := "desk"\nconst C := "Desk.TSCN"\n';
+  const { project } = caseMoveProject({ 'desk.tscn': LINKED_DESK, 'use.gd': script }, 'DESK.tscn');
+  try {
+    movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
+    assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), script);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The native realpath, which the move asks, gives one answer for a path in another case and the
+ * stored one where the file system takes them for one entry, and none where it does not: on
+ * Windows always, on macOS on a default volume, never on Linux.
+ */
+function testTheNativeRealpathAnswersWithTheStoredSpelling(): void {
+  const { project, folds } = caseMoveProject({ 'Stored/Desk.tscn': LINKED_DESK }, 'STORED/desk.tscn');
+  try {
+    const stored = join(project, 'Stored', 'Desk.tscn');
+    const other = join(project, 'STORED', 'desk.TSCN');
+    if (process.platform === 'win32') {
+      assert.ok(folds, 'NTFS and ReFS take STORED for Stored');
+    }
+    if (process.platform === 'linux') {
+      assert.ok(!folds, 'Linux keeps STORED and Stored apart');
+    }
+    assert.equal(reachedAt(other), folds ? reachedAt(stored) : null);
+    assert.equal(reachedAt(stored), realpathSync.native(stored));
+    if (folds) {
+      assert.ok(reachedAt(other)?.endsWith(join('Stored', 'Desk.tscn')), String(reachedAt(other)));
+    }
+  } finally {
+    sweep(project);
+  }
 }
 
 /**
@@ -105240,6 +105318,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveLeavesAFileOnlyGodotsFoldJoins,
   testAFolderMoveLeavesStringsThatOnlyResolveToTheFolder,
   testAMoveLooksAtEachEntryOnce,
+  testAMoveLeavesAHardLinkedSecondNameAlone,
+  testAMoveLeavesARelativeStringInAnotherCase,
+  testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
   testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins,
   testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,

@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { entryKey, relativeWithin, sameEntry } from './paths.js';
+import { relativeWithin, sameEntry } from './paths.js';
 import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
@@ -35,6 +35,7 @@ import {
   mentionIgnored,
   planMove,
   type Rewrite,
+  reachedAt,
   rewritesOf,
   scriptsOf,
 } from './rename.js';
@@ -356,13 +357,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   // The files that move on disk stay those of `moves`. A text keeps the path the walk reached it by,
   // which the engine resolves its relative paths against, and `references` says where it goes.
   const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
-  const joined = joinedByTheDisk({
-    projectPath,
-    targets: literalTargets(texts, scripts),
-    references,
-    folder: isDirectory ? { from, to } : null,
-    identify: entryKey,
-  });
+  joinedByTheDisk({ projectPath, targets: literalTargets(texts, scripts), references, resolve: reachedAt });
   const placeOf = new Map(texts.map((file) => [file.path, file.realPath ?? file.path]));
   const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);
   let plan = planMove(
@@ -370,7 +365,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       texts,
       scripts,
       moves: references,
-      named: [from, ...joined.folders],
+      named: [from],
       exists: (path) => existsSync(join(projectPath, path.slice('res://'.length))),
     },
     { edits: [], mentions: [] },
@@ -396,7 +391,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
 
   const left = leftAloneReport(
     mentions,
-    [from, ...joined.folders, ...moves.keys()].flatMap((path) => [path, path.replace(/^res:\/\//, '')]),
+    [from, ...moves.keys()].flatMap((path) => [path, path.replace(/^res:\/\//, '')]),
   );
   const absoluteOf = (path: string): string => join(projectPath, path.slice('res://'.length));
   const rewritten = new Map(rewrites.map((rewrite) => [placeOf.get(rewrite.path) ?? rewrite.path, rewrite]));

@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync
 import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
 import { LSPTimeout } from './lsp_client.js';
-import { entryKey, relativeWithin } from './paths.js';
+import { relativeWithin } from './paths.js';
 import { ignoredTexts, linksOut, type ProjectText, type Reach, scanProject } from './project-scan.js';
 import {
   ClassGraph,
@@ -30,6 +30,7 @@ import {
   RESOLVED_ELSEWHERE,
   type Resolved,
   type Rewrite,
+  reachedAt,
   rewritesOf,
   type Script,
   scriptsOf,
@@ -526,8 +527,7 @@ function renamed(
       projectPath,
       targets: literalTargets(texts, scripts),
       references: moves,
-      folder: null,
-      identify: entryKey,
+      resolve: reachedAt,
     });
     plan = planMove(
       {
