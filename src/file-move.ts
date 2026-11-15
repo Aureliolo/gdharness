@@ -33,6 +33,7 @@ import {
   mentionIgnored,
   planMove,
   type Rewrite,
+  reloadableInTheEditor,
   rewritesOf,
   scriptsOf,
 } from './rename.js';
@@ -413,7 +414,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     .map(afterwards);
   const scenesChanged = rewrites
     .map((rewrite) => rewrite.path)
-    .filter((path) => /\.(tscn|tres)$/i.test(path))
+    .filter(reloadableInTheEditor)
     .map(afterwards);
   const changed = changedReport(plan.edits, rewrites).map((entry) => ({
     ...entry,

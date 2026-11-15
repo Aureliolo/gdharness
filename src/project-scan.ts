@@ -356,7 +356,7 @@ export interface IgnoredText extends ProjectText {
  */
 const BINARY_EXTENSIONS = new Set([
   ...[...ASSET_EXTENSIONS].filter(
-    (extension) => !['svg', 'gltf', 'gdshader', 'shader', 'fnt'].includes(extension),
+    (extension) => !['svg', 'gltf', 'gdshader', 'gdshaderinc', 'shader', 'fnt'].includes(extension),
   ),
   'scn',
   'res',

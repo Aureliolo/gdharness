@@ -644,7 +644,7 @@ function classUseKind(
 /** The `script_class` a scene or resource file records for the class. */
 function planResourceClasses(plan: PlanBuilder, texts: readonly ProjectText[], oldName: string): void {
   for (const file of texts) {
-    if (!/\.(tscn|tres)$/.test(file.path)) {
+    if (!SCENE_OR_RESOURCE.test(file.path)) {
       continue;
     }
     for (const section of sectionsOf(file.text)) {
@@ -1061,7 +1061,7 @@ function planScenes(
     plan,
   };
   for (const file of texts) {
-    if (!/\.(tscn|tres)$/.test(file.path) || !file.text.includes(oldName)) {
+    if (!SCENE_OR_RESOURCE.test(file.path) || !file.text.includes(oldName)) {
       continue;
     }
     if (kind === 'var') {
@@ -1127,9 +1127,69 @@ interface MoveArguments {
   readonly exists: (path: string) => boolean;
 }
 
+interface Literal {
+  readonly offset: number;
+  readonly value: string;
+  /**
+   * What a relative path here is read against: the file's folder or the project's root. Null where
+   * it is no path.
+   */
+  readonly base: 'file' | 'root' | null;
+}
+
+/**
+ * What precedes a string handed to `ResourceLoader`, which reads a relative path from the root,
+ * with the type argument C# puts after the name, any space or line break before the string and the
+ * prefix of a raw, StringName, NodePath or verbatim string.
+ */
+const FROM_THE_ROOT =
+  /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*\w+|\bGD\s*\.\s*Load|\b(?:change_scene_to_file|ChangeSceneToFile))\s*(?:<[^()]*>)?\s*\(\s*[rR&^@]*$/;
+/** What precedes a string in a scene that holds text or a name, which is never a path. */
+const TEXT_IN_A_SCENE =
+  /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
+/** The files of Godot's text formats, where a line starting with `;` is a comment. */
+const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|escn|tres|cfg|gdextension)$/;
+/** Godot's text scene and resource files. */
+export const SCENE_OR_RESOURCE_EXTENSIONS = ['.tscn', '.escn', '.tres'] as const;
+const SCENE_OR_RESOURCE = new RegExp(
+  `(?:${SCENE_OR_RESOURCE_EXTENSIONS.join('|').replaceAll('.', '\\.')})$`,
+  'i',
+);
+
+/**
+ * Whether an open editor can read [param path] again after a rewrite. An `.escn` is an imported
+ * scene: told to reload one, the editor closes its tab instead.
+ */
+export function reloadableInTheEditor(path: string): boolean {
+  return /\.(?:tscn|tres)$/i.test(path);
+}
+
+/**
+ * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
+ * listed reads it against the file, the way a move always has.
+ *
+ * - `.import` files hold no relative path, nor do comment lines of Godot's text formats.
+ * - In a scene, the text and names it holds are no path.
+ * - The argument of `load` and a `ResourceLoader` method is read from the root.
+ */
+function relativeBase(file: ProjectText, offset: number): Literal['base'] {
+  // The opening quote sits just before the contents.
+  const quoteAt = offset - 1;
+  const before = file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
+  if (file.path.endsWith('.import') || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
+    return null;
+  }
+  if (SCENE_OR_RESOURCE.test(file.path) && TEXT_IN_A_SCENE.test(before)) {
+    return null;
+  }
+  return FROM_THE_ROOT.test(file.text.slice(Math.max(0, quoteAt - 200), quoteAt)) ? 'root' : 'file';
+}
+
+const PLAIN_STRING = /"((?:[^"\\\n]|\\.)*)"/g;
+
 /** Every string literal of [param file], with where its contents start. */
-function literalsOf(file: ProjectText, script: Script | undefined): { offset: number; value: string }[] {
-  const found: { offset: number; value: string }[] = [];
+function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
+  const found: Literal[] = [];
   if (script !== undefined) {
     for (const region of script.regions) {
       if (region.kind !== 'string') {
@@ -1144,12 +1204,21 @@ function literalsOf(file: ProjectText, script: Script | undefined): { offset: nu
       ) {
         continue;
       }
-      found.push({ offset: region.start + quote.index + 1, value: literal.slice(quote.index + 1, -1) });
+      const offset = region.start + quote.index + 1;
+      found.push({
+        offset,
+        value: literal.slice(quote.index + 1, -1),
+        base: relativeBase(file, offset),
+      });
     }
     return found;
   }
-  for (const match of file.text.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)) {
-    found.push({ offset: match.index + 1, value: match[1] ?? '' });
+  for (const match of file.text.matchAll(PLAIN_STRING)) {
+    found.push({
+      offset: match.index + 1,
+      value: match[1] ?? '',
+      base: relativeBase(file, match.index + 1),
+    });
   }
   return found;
 }
@@ -1217,7 +1286,7 @@ function mentionNamedPaths(
 
 /** The path edit for a string literal of [param from], or null where it needs none. */
 function movedLiteral(
-  literal: { offset: number; value: string },
+  literal: Literal,
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
@@ -1228,7 +1297,7 @@ function movedLiteral(
   if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
     return null;
   }
-  const replacement = movedPath(written, from, goesTo, moves, exists);
+  const replacement = movedPath(written, literal.base, from, goesTo, moves, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
   if (replacement === null || replacement === written) {
@@ -1240,18 +1309,26 @@ function movedLiteral(
 /** [param written] as it must read once [param from] or the file it names has moved, or null. */
 function movedPath(
   written: string,
+  base: Literal['base'],
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
 ): string | null {
   const isAbsolute = written.startsWith('res://');
-  const target = resolvedPath(written, from);
+  if (!isAbsolute && base === null) {
+    return null;
+  }
+  const fromRoot = base === 'root' && !isAbsolute;
+  const target = resolvedPath(written, fromRoot ? 'res://_' : from);
   const targetGoesTo = moves.get(target);
   if (targetGoesTo !== undefined) {
+    if (fromRoot) {
+      return targetGoesTo.slice('res://'.length);
+    }
     return isAbsolute ? targetGoesTo : relativeTo(targetGoesTo, goesTo ?? from);
   }
-  if (goesTo !== undefined && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
+  if (goesTo !== undefined && !isAbsolute && !fromRoot && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
     return relativeTo(target, goesTo);
   }
   return null;
@@ -1297,7 +1374,7 @@ function mentionKindAt(script: Script | undefined, file: string, offset: number)
 }
 
 function sceneOrText(file: string): 'scene' | 'text' {
-  return /\.(tscn|tres)$/.test(file) ? 'scene' : 'text';
+  return SCENE_OR_RESOURCE.test(file) ? 'scene' : 'text';
 }
 
 /**
