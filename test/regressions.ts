@@ -88884,8 +88884,8 @@ function testAMovedFileIsNamedByItsNewPathEverywhere(): void {
 
 /**
  * Text that says the name of a file without the engine reading it as a path: a label, a resource
- * name, a print argument, a dictionary key, a call that is not a load, and a note, a data file and
- * a text file. [param spelling] is how each writes the name.
+ * name, a print argument, a dictionary key, a call that is not a load, and a note and a text file.
+ * [param spelling] is how each writes the name.
  */
 function nonReferencesTo(spelling: string): Record<string, string> {
   return {
@@ -88902,7 +88902,6 @@ function nonReferencesTo(spelling: string): Record<string, string> {
       '',
     ].join('\n'),
     'notes.md': `The file "${spelling}" holds the desk.\n`,
-    'data.json': `{"name": "${spelling}"}\n`,
     'notes.txt': `"${spelling}"\n`,
   };
 }
@@ -88933,6 +88932,7 @@ function referencesProject(): string {
       '',
     ].join('\n'),
     'scenes/refs.json': '{"scene": "res://scenes/desk.tscn"}\n',
+    'scenes/data.json': '{"name": "desk.tscn"}\n',
     ...Object.fromEntries(
       Object.entries(nonReferencesTo('desk.tscn')).map(([name, content]) => [`scenes/${name}`, content]),
     ),
@@ -88945,10 +88945,11 @@ function referencesProject(): string {
 }
 
 /**
- * A move rewrites a path the engine reads and nothing else. A relative path is one only where the
- * engine resolves it against the file holding it: the argument of `preload`, `load` and
- * `ResourceLoader.load`, and an `ext_resource` path. A label, a resource name, a print argument, a
- * dictionary key, a note and a data file spelling the same relative path stay as written.
+ * A move rewrites a path the engine reads and nothing else. A relative path is read against the
+ * file holding it in `preload` and an `ext_resource` path, and from the root in `load` and
+ * `ResourceLoader.load`, which stay as written when the root names nothing that moved. A label, a
+ * resource name, a note and a text file spelling the same relative word stay as written. A data
+ * file and any other code string follow the one file they name.
  */
 function testAMoveRewritesOnlyReferences(): void {
   const project = referencesProject();
@@ -88978,8 +88979,13 @@ function testAMoveRewritesOnlyReferences(): void {
     assert.match(loads, /const A := preload\("\.\.\/stage\/desk\.tscn"\)/, 'preload is followed');
     assert.match(
       loads,
-      /const B := load\("\.\.\/stage\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/stage\/desk\.tscn"\)/,
-      'a code string naming nothing from the root but the file beside the script is followed as a constant for a preload would be',
+      /const B := load\("desk\.tscn"\)\nconst C := ResourceLoader\.load\("desk\.tscn"\)/,
+      'a load that names nothing from the root stays, since the engine never reads it beside the script',
+    );
+    assert.equal(
+      read('scenes/data.json'),
+      '{"name": "../stage/desk.tscn"}\n',
+      'a data string naming the one file beside it follows',
     );
     assert.match(loads, /const E := load\("stage\/desk\.tscn"\)/, 'load from the root is followed');
     assert.match(
@@ -89026,6 +89032,7 @@ function testAMoveRewritesOnlyReferences(): void {
         'res://project.godot',
         'res://scenes/absolute.tres',
         'res://scenes/absolute.tscn',
+        'res://scenes/data.json',
         'res://scenes/loads.gd',
         'res://scenes/refs.json',
         'res://scenes/relative.tres',
@@ -89120,9 +89127,18 @@ function testAShaderIncludeIsFollowedAgainstTheShader(): void {
     'lib/common.gdshaderinc': 'float one() { return 1.0; }\n',
     'lib/more.gdshaderinc': '#include "common.gdshaderinc"\nfloat two() { return 2.0; }\n',
     'fx/b.gdshader': 'shader_type canvas_item;\n// see "../lib/common.gdshaderinc"\n',
+    'shared.gdshaderinc': 'float root_one() { return 1.0; }\n',
+    'fx/shared.gdshaderinc': 'float beside_one() { return 1.0; }\n',
+    'fx/c.gdshader': 'shader_type canvas_item;\n#include "shared.gdshaderinc"\n',
   });
   const read = (path: string): string => readFileSync(join(project, path), 'utf8');
   try {
+    movedIn(project, 'fx/shared.gdshaderinc', 'fx/lib/shared.gdshaderinc');
+    assert.match(
+      read('fx/c.gdshader'),
+      /#include "lib\/shared\.gdshaderinc"/,
+      'an include is read beside the shader even where the root holds a file of that name',
+    );
     movedIn(project, 'lib/common.gdshaderinc', 'core/common.gdshaderinc');
     assert.match(read('fx/a.gdshader'), /#include "\.\.\/core\/common\.gdshaderinc"/, 'a shader follows');
     assert.match(
@@ -89199,17 +89215,14 @@ function testAPluginAndAnExtensionFollowTheirFolder(): void {
 }
 
 /**
- * A constant that feeds a `preload` is read against the script, and one that feeds a `load` from
- * the root, so a code string is followed by the root reading first and the script's folder second.
- * Where both name a moved file the root reading wins and the other is listed.
+ * A constant that feeds a `preload` is read against the script. Where the root names no file, the
+ * one reading that names one is followed, and the engine still loads the preload.
  */
 function testAConstantForAPreloadIsFollowedAgainstTheScript(): void {
   const project = kindsProject({
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Constant"\n',
     'scenes/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
     'scenes/s.gd': 'extends RefCounted\n\nconst DESK_PATH := "desk.tscn"\nconst DESK := preload(DESK_PATH)\n',
-    'desk.tscn': '[gd_scene format=3]\n\n[node name="Root" type="Node2D"]\n',
-    'scenes/both.gd': 'extends Node\n\nconst P := "desk.tscn"\n',
     'probe.gd':
       'extends SceneTree\n\nfunc _initialize() -> void:\n\tvar script := load("res://scenes/s.gd") as GDScript\n\tvar desk: Variant = script.get_script_constant_map().get("DESK") if script != null else null\n\tprint("PROBE preload through a constant: ", desk.resource_path if desk != null else "nothing")\n\tquit()\n',
   });
@@ -89221,11 +89234,6 @@ function testAConstantForAPreloadIsFollowedAgainstTheScript(): void {
       asArray(get(outcome.report, 'leftAlone')).filter((one) => get(one, 'file') === 'res://scenes/s.gd'),
       [],
       'and nothing is listed for it',
-    );
-    assert.match(
-      read('scenes/both.gd'),
-      /const P := "\.\.\/stage\/desk\.tscn"/,
-      'the one beside the script moved',
     );
     const godot = process.env['GODOT_PATH'];
     if (godot !== undefined) {
@@ -89244,27 +89252,83 @@ function testAConstantForAPreloadIsFollowedAgainstTheScript(): void {
   }
 }
 
-/** A code string that reads as one moved file from the root and another beside the script is listed. */
-function testACodeStringThatNamesTwoMovedFilesIsListed(): void {
+/**
+ * A code string that reads as one existing file from the root and as another beside the script is
+ * left as written when either moves, and listed with both. The engine still loads the `preload`
+ * the string feeds.
+ */
+function testACodeStringThatNamesTwoFilesIsListed(): void {
+  const resource = '[gd_resource type="Resource" format=3]\n\n[resource]\n';
+  const script = 'extends RefCounted\n\nconst P := "x.tres"\nconst Q := preload(P)\n';
   const project = kindsProject({
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Two"\n',
+    'x.tres': resource,
+    'a/x.tres': resource,
+    'a/s.gd': script,
+    'probe.gd':
+      'extends SceneTree\n\nfunc _initialize() -> void:\n\tvar loaded := load("res://a/s.gd") as GDScript\n\tvar kept: Variant = loaded.get_script_constant_map().get("Q") if loaded != null else null\n\tprint("PROBE preload through a constant: ", kept.resource_path if kept != null else "nothing")\n\tquit()\n',
+  });
+  try {
+    const outcome = movedIn(project, 'x.tres', 'top/x.tres');
+    assert.equal(readFileSync(join(project, 'a/s.gd'), 'utf8'), script, 'the string is left as written');
+    const entry = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://a/s.gd',
+    );
+    assert.ok(entry !== undefined, JSON.stringify(get(outcome.report, 'leftAlone')));
+    assert.match(
+      text(get(entry, 'why')),
+      /as res:\/\/x\.tres from the project's root and as res:\/\/a\/x\.tres against this file/,
+    );
+    const godot = process.env['GODOT_PATH'];
+    if (godot !== undefined) {
+      const loaded = spawnSyncHidden(godot, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.match(
+        `${loaded.stdout}${loaded.stderr}`,
+        /PROBE preload through a constant: res:\/\/a\/x\.tres/,
+        'the engine still loads the preload after the move',
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+  const folders = kindsProject({
     'a/x.png': 'one',
     'a/sub/a/x.png': 'two',
     'a/sub/s.gd': 'extends Node\n\nconst P := "a/x.png"\n',
+    'beside/x.png': 'three',
+    'x.png': 'four',
+    'beside/s.gd': 'extends Node\n\nconst P := "x.png"\n',
   });
   try {
-    const outcome = movedIn(project, 'a', 'b');
-    assert.match(
-      readFileSync(join(project, 'b/sub/s.gd'), 'utf8'),
-      /const P := "b\/x\.png"/,
-      'the root reading wins',
+    const outcome = movedIn(folders, 'beside/x.png', 'elsewhere/x.png');
+    assert.equal(
+      readFileSync(join(folders, 'beside/s.gd'), 'utf8'),
+      'extends Node\n\nconst P := "x.png"\n',
+      'a string whose file beside the script moves is left too, with the root file in place',
     );
-    const entry = asArray(get(outcome.report, 'leftAlone')).find((one) =>
+    assert.ok(
+      asArray(get(outcome.report, 'leftAlone')).some((one) => get(one, 'file') === 'res://beside/s.gd'),
+      JSON.stringify(get(outcome.report, 'leftAlone')),
+    );
+    const both = movedIn(folders, 'a', 'b');
+    assert.equal(
+      readFileSync(join(folders, 'b/sub/s.gd'), 'utf8'),
+      'extends Node\n\nconst P := "a/x.png"\n',
+      'a string whose two files both move is left',
+    );
+    const entry = asArray(get(both.report, 'leftAlone')).find((one) =>
       text(get(one, 'file')).endsWith('/sub/s.gd'),
     );
-    assert.ok(entry !== undefined, JSON.stringify(get(outcome.report, 'leftAlone')));
-    assert.match(text(get(entry, 'why')), /names res:\/\/a\/sub\/a\/x\.png, which moved too/);
+    assert.ok(entry !== undefined, JSON.stringify(get(both.report, 'leftAlone')));
+    assert.match(
+      text(get(entry, 'why')),
+      /res:\/\/a\/x\.png from the project's root and as res:\/\/a\/sub\/a\/x\.png/,
+    );
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    rmSync(folders, { recursive: true, force: true });
   }
 }
 
@@ -89278,6 +89342,7 @@ function testALoadIsFollowedFromTheProjectRoot(): void {
   const files: Record<string, string> = {
     'desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
     'art.png': 'png',
+    'scenes/art.png': 'beside',
     'scenes/a.gd':
       'extends Node\n\nconst A := load("desk.tscn")\nconst B := ResourceLoader.load("desk.tscn")\nconst C := ResourceLoader.exists("desk.tscn")\nconst D := preload("desk.tscn")\nconst E := load("art.png")\n',
     'top.gd': 'extends Node\n\nconst A := load("desk.tscn")\nconst B := ResourceLoader.load("desk.tscn")\n',
@@ -89313,6 +89378,180 @@ function testALoadIsFollowedFromTheProjectRoot(): void {
       /const A := load\("stage\/desk\.tscn"\)/,
       'and the one already followed',
     );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** What a headless engine prints from `res://probe.gd` in [param project], or null without an engine. */
+function engineProbe(project: string): string | null {
+  const godot = process.env['GODOT_PATH'];
+  if (godot === undefined) {
+    return null;
+  }
+  const loaded = spawnSyncHidden(godot, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  return `${loaded.stdout}${loaded.stderr}`;
+}
+
+/**
+ * A kind of file nobody listed reads a relative string against its own folder, as a move always
+ * has: a glTF `uri`, a bitmap font page and an `.escn` resource. Text a scene holds is no path, and
+ * any other string in it still follows.
+ */
+function testAKindNobodyListedReadsAgainstItsFile(): void {
+  const project = kindsProject({
+    'models/tri.gltf': '{"buffers":[{"uri":"tri.bin"}],"images":[{"uri":"tex/skin.png"}]}\n',
+    'models/tri.bin': 'bin',
+    'models/tex/skin.png': 'png',
+    'fonts/f.fnt': 'info face="x"\npage id=0 file="f_0.png"\n',
+    'fonts/f_0.png': 'png',
+    'models/mat.tres': '[gd_resource type="Material" format=3]\n\n[resource]\n',
+    'models/scene.escn':
+      '[gd_scene format=3]\n\n[ext_resource type="Material" path="mat.tres" id="1"]\n\n[node name="N" type="Node3D"]\n',
+    'scenes/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'scenes/text.tscn': [
+      '[gd_scene format=3]',
+      '',
+      '[node name="desk.tscn" type="Label" groups=["a", "desk.tscn"]]',
+      'text = "desk.tscn"',
+      'tooltip_text = "desk.tscn"',
+      'placeholder_text = "desk.tscn"',
+      'target = "desk.tscn"',
+      '',
+    ].join('\n'),
+  });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  try {
+    movedIn(project, 'models/tri.gltf', 'models/sub/tri.gltf');
+    assert.equal(
+      read('models/sub/tri.gltf'),
+      '{"buffers":[{"uri":"../tri.bin"}],"images":[{"uri":"../tex/skin.png"}]}\n',
+      'a glTF uri follows its file',
+    );
+    movedIn(project, 'fonts/f_0.png', 'fonts/pages/f_0.png');
+    assert.match(read('fonts/f.fnt'), /file="pages\/f_0\.png"/, 'a font page follows');
+    movedIn(project, 'models/mat.tres', 'models/materials/mat.tres');
+    assert.match(read('models/scene.escn'), /path="materials\/mat\.tres"/, 'an .escn resource follows');
+    movedIn(project, 'scenes/desk.tscn', 'stage/desk.tscn');
+    assert.equal(
+      read('scenes/text.tscn'),
+      [
+        '[gd_scene format=3]',
+        '',
+        '[node name="desk.tscn" type="Label" groups=["a", "desk.tscn"]]',
+        'text = "desk.tscn"',
+        'tooltip_text = "desk.tscn"',
+        'placeholder_text = "desk.tscn"',
+        'target = "../stage/desk.tscn"',
+        '',
+      ].join('\n'),
+      'a node name, its groups and its text stay, and any other string follows',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A relative string handed to `load` is read from the root, so a file of the same name beside the
+ * script that moves is no reason to change it, and nothing is listed. The engine still loads it.
+ */
+function testARootLoadBesideAMovedNamesakeStays(): void {
+  const resource = '[gd_resource type="Resource" format=3]\n\n[resource]\n';
+  const loads =
+    'extends RefCounted\n\nfunc thing() -> Resource:\n\treturn load("thing.tres")\n\nfunc scene() -> void:\n\tvar tree := Engine.get_main_loop() as SceneTree\n\ttree.change_scene_to_file("thing.tscn")\n';
+  const project = kindsProject({
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Root"\n',
+    'thing.tres': resource,
+    'thing.tscn': '[gd_scene format=3]\n\n[node name="T" type="Node"]\n',
+    'scenes/thing.tres': resource,
+    'scenes/thing.tscn': '[gd_scene format=3]\n\n[node name="T" type="Node"]\n',
+    'scenes/a.gd': loads,
+    'Loader.cs': 'class Loader { object A = GD.Load("thing.tres"); }\n',
+    'probe.gd':
+      'extends SceneTree\n\nfunc _initialize() -> void:\n\tvar loaded := load("res://scenes/a.gd") as GDScript\n\tvar thing: Resource = loaded.new().thing()\n\tprint("PROBE root load: ", thing.resource_path)\n\tquit()\n',
+  });
+  try {
+    const first = movedIn(project, 'scenes/thing.tres', 'art/thing.tres');
+    movedIn(project, 'scenes/thing.tscn', 'art/thing.tscn');
+    assert.equal(readFileSync(join(project, 'scenes/a.gd'), 'utf8'), loads, 'a load and a scene change stay');
+    assert.equal(
+      readFileSync(join(project, 'Loader.cs'), 'utf8'),
+      'class Loader { object A = GD.Load("thing.tres"); }\n',
+      'GD.Load stays',
+    );
+    assert.deepEqual(asArray(get(first.report, 'leftAlone')), [], 'and nothing is listed');
+    const printed = engineProbe(project);
+    if (printed !== null) {
+      assert.match(printed, /PROBE root load: res:\/\/thing\.tres/, 'the engine loads it from the root');
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** An export preset and an `.import` file hold absolute paths only, whatever relative word they spell. */
+function testExportPresetsAndImportFilesTakeAbsolutePathsOnly(): void {
+  const project = kindsProject({
+    'desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'export_presets.cfg':
+      '[preset.0]\n\nname="desk.tscn"\nexport_path="desk.tscn"\nexport_files=PackedStringArray("res://desk.tscn")\n',
+    'other.import': '[remap]\n\nsource_file="desk.tscn"\nuse="res://desk.tscn"\n',
+    'data.cfg': '[a]\n\nscene="desk.tscn"\n',
+  });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  try {
+    movedIn(project, 'desk.tscn', 'stage/desk.tscn');
+    assert.equal(
+      read('export_presets.cfg'),
+      '[preset.0]\n\nname="desk.tscn"\nexport_path="desk.tscn"\nexport_files=PackedStringArray("res://stage/desk.tscn")\n',
+      'a preset keeps its name and output file and follows an absolute path',
+    );
+    assert.equal(
+      read('other.import'),
+      '[remap]\n\nsource_file="desk.tscn"\nuse="res://stage/desk.tscn"\n',
+      'an import file follows an absolute path only',
+    );
+    assert.match(read('data.cfg'), /scene="stage\/desk\.tscn"/, 'any other settings file follows');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The walk of a C# file follows every string form it models, and on one it cannot follow reads the
+ * rest of the line as code, so a reference after it is never taken for comment or text.
+ */
+function testTheCSharpWalkFailsSafe(): void {
+  const call = 'object b = Godot.GD.Load("content/desk.tscn");';
+  const lines: Record<string, string> = {
+    'A.cs': `class A { string a = @"C:\\dir\\"; ${call} }\n`,
+    'B.cs': `class B { string a = @$"C:\\{x}\\"; ${call} }\n`,
+    'C.cs': `class C { string a = $@"C:\\{x}\\"; ${call} }\n`,
+    'D.cs': `class D { string a = """a "x b"""; ${call} }\n`,
+    'E.cs': `class E { string a = """\n  one "two\n  """; ${call} }\n`,
+    'F.cs': `class F { string s = $"{Godot.GD.Load("content/desk.tscn")}"; }\n`,
+    'G.cs': `class G { string r = $"{(true ? "a" : "b")}"; ${call} }\n`,
+    'H.cs': `class H { string u = "abc\n  ${call} }\n`,
+    'I.cs': `class I { /* open\n  ${call} }\n`,
+    'J.cs': `class J { char c = '"'; ${call} } // "content/desk.tscn"\n`,
+  };
+  const project = kindsProject({
+    'content/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    ...lines,
+  });
+  try {
+    movedIn(project, 'content', 'stuff');
+    for (const [name, content] of Object.entries(lines)) {
+      assert.equal(
+        readFileSync(join(project, name), 'utf8'),
+        content.replaceAll('GD.Load("content/', 'GD.Load("stuff/'),
+        `${name} follows every call and keeps a comment`,
+      );
+    }
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -89357,8 +89596,8 @@ function testAFolderMoveRewritesOnlyReferences(): void {
     assert.match(loads, /const A := preload\("\.\.\/ui\/stage\/desk\.tscn"\)/, 'preload outside is followed');
     assert.match(
       loads,
-      /const B := load\("\.\.\/ui\/stage\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/ui\/stage\/desk\.tscn"\)/,
-      'a load that names nothing from the root but the folder beside the script is followed against the script',
+      /const B := load\("\.\.\/scenes\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/scenes\/desk\.tscn"\)/,
+      'a load that names nothing from the root stays',
     );
     assert.match(loads, /const E := load\("ui\/stage\/desk\.tscn"\)/, 'load from the root is followed');
     assert.match(
@@ -105398,12 +105637,16 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveRewritesOnlyReferences,
   testAFolderMoveRewritesOnlyReferences,
   testALoadIsFollowedFromTheProjectRoot,
+  testAKindNobodyListedReadsAgainstItsFile,
+  testARootLoadBesideAMovedNamesakeStays,
+  testExportPresetsAndImportFilesTakeAbsolutePathsOnly,
+  testTheCSharpWalkFailsSafe,
   testEachKindOfFileFollowsItsOwnBase,
   testAShaderIncludeIsFollowedAgainstTheShader,
   testAStringBeforeAReferenceDoesNotHideIt,
   testAPluginAndAnExtensionFollowTheirFolder,
   testAConstantForAPreloadIsFollowedAgainstTheScript,
-  testACodeStringThatNamesTwoMovedFilesIsListed,
+  testACodeStringThatNamesTwoFilesIsListed,
   testARenameThatMovesAScriptFollowsOnlyReferences,
   testAMoveNamesAPathFromTheRootItLeftAlone,
   testAMovedFileTakesItsSidecars,
