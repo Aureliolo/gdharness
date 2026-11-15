@@ -88928,6 +88928,8 @@ function referencesProject(): string {
       'const B := load("desk.tscn")',
       'const C := ResourceLoader.load("desk.tscn")',
       'const D := "res://scenes/desk.tscn"',
+      'const E := load("scenes/desk.tscn")',
+      'const F := ResourceLoader.load("scenes/desk.tscn")',
       '',
     ].join('\n'),
     'scenes/refs.json': '{"scene": "res://scenes/desk.tscn"}\n',
@@ -88972,11 +88974,16 @@ function testAMoveRewritesOnlyReferences(): void {
     );
     const loads = read('scenes/loads.gd');
     assert.match(loads, /const A := preload\("\.\.\/stage\/desk\.tscn"\)/, 'preload is followed');
-    assert.match(loads, /const B := load\("\.\.\/stage\/desk\.tscn"\)/, 'load is followed');
     assert.match(
       loads,
-      /const C := ResourceLoader\.load\("\.\.\/stage\/desk\.tscn"\)/,
-      'ResourceLoader.load is followed',
+      /const B := load\("desk\.tscn"\)\nconst C := ResourceLoader\.load\("desk\.tscn"\)/,
+      'load and ResourceLoader.load read a relative path from the root, so one beside the script is another file',
+    );
+    assert.match(loads, /const E := load\("stage\/desk\.tscn"\)/, 'load from the root is followed');
+    assert.match(
+      loads,
+      /const F := ResourceLoader\.load\("stage\/desk\.tscn"\)/,
+      'ResourceLoader.load from the root is followed',
     );
     assert.match(loads, /const D := "res:\/\/stage\/desk\.tscn"/, 'an absolute path in a script is followed');
     assert.match(
@@ -89029,6 +89036,56 @@ function testAMoveRewritesOnlyReferences(): void {
   }
 }
 
+/**
+ * `load` and the `ResourceLoader` methods that take a path read a relative one from the project's
+ * root, whichever script calls them. A move follows it there, and a script that moves keeps it as
+ * it was, since it does not depend on the script's folder.
+ */
+function testALoadIsFollowedFromTheProjectRoot(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-root-loads-'));
+  const files: Record<string, string> = {
+    'desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'art.png': 'png',
+    'scenes/a.gd':
+      'extends Node\n\nconst A := load("desk.tscn")\nconst B := ResourceLoader.load("desk.tscn")\nconst C := ResourceLoader.exists("desk.tscn")\nconst D := preload("desk.tscn")\nconst E := load("art.png")\n',
+    'top.gd': 'extends Node\n\nconst A := load("desk.tscn")\nconst B := ResourceLoader.load("desk.tscn")\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  try {
+    const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+    movedIn(project, 'desk.tscn', 'stage/desk.tscn');
+    const there = read('scenes/a.gd');
+    assert.match(there, /const A := load\("stage\/desk\.tscn"\)/, 'load in another folder follows');
+    assert.match(
+      there,
+      /const B := ResourceLoader\.load\("stage\/desk\.tscn"\)/,
+      'ResourceLoader.load in another folder follows',
+    );
+    assert.match(
+      there,
+      /const C := ResourceLoader\.exists\("stage\/desk\.tscn"\)/,
+      'a ResourceLoader method that takes a path follows',
+    );
+    assert.match(there, /const D := preload\("desk\.tscn"\)/, 'preload names the file beside the script');
+    assert.match(
+      read('top.gd'),
+      /load\("stage\/desk\.tscn"\)\nconst B := ResourceLoader\.load\("stage\/desk\.tscn"\)/,
+    );
+    movedIn(project, 'scenes/a.gd', 'other/a.gd');
+    assert.match(read('other/a.gd'), /const E := load\("art\.png"\)/, 'a moved script keeps its root path');
+    assert.match(
+      read('other/a.gd'),
+      /const A := load\("stage\/desk\.tscn"\)/,
+      'and the one already followed',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /** The same split for a folder: the files outside naming it, and the files inside reaching out. */
 function testAFolderMoveRewritesOnlyReferences(): void {
   const project = referencesProject();
@@ -89040,7 +89097,7 @@ function testAFolderMoveRewritesOnlyReferences(): void {
     }
     writeFileSync(
       join(project, 'game', 'loads.gd'),
-      'extends Node\n\nconst A := preload("../scenes/desk.tscn")\nconst B := load("../scenes/desk.tscn")\nconst C := ResourceLoader.load("../scenes/desk.tscn")\nconst D := "res://scenes/desk.tscn"\n',
+      'extends Node\n\nconst A := preload("../scenes/desk.tscn")\nconst B := load("../scenes/desk.tscn")\nconst C := ResourceLoader.load("../scenes/desk.tscn")\nconst D := "res://scenes/desk.tscn"\nconst E := load("scenes/desk.tscn")\nconst F := ResourceLoader.load("scenes/desk.tscn")\n',
     );
     writeFileSync(
       join(project, 'game', 'rel.tscn'),
@@ -89058,11 +89115,16 @@ function testAFolderMoveRewritesOnlyReferences(): void {
     }
     const loads = read('game/loads.gd');
     assert.match(loads, /const A := preload\("\.\.\/ui\/stage\/desk\.tscn"\)/, 'preload outside is followed');
-    assert.match(loads, /const B := load\("\.\.\/ui\/stage\/desk\.tscn"\)/, 'load outside is followed');
     assert.match(
       loads,
-      /const C := ResourceLoader\.load\("\.\.\/ui\/stage\/desk\.tscn"\)/,
-      'ResourceLoader.load outside is followed',
+      /const B := load\("\.\.\/scenes\/desk\.tscn"\)\nconst C := ResourceLoader\.load\("\.\.\/scenes\/desk\.tscn"\)/,
+      'load and ResourceLoader.load read a path from the root, so one climbing out of it names nothing moved',
+    );
+    assert.match(loads, /const E := load\("ui\/stage\/desk\.tscn"\)/, 'load from the root is followed');
+    assert.match(
+      loads,
+      /const F := ResourceLoader\.load\("ui\/stage\/desk\.tscn"\)/,
+      'ResourceLoader.load from the root is followed',
     );
     assert.match(loads, /const D := "res:\/\/ui\/stage\/desk\.tscn"/, 'an absolute path outside is followed');
     assert.match(
@@ -105087,6 +105149,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedFileIsNamedByItsNewPathEverywhere,
   testAMoveRewritesOnlyReferences,
   testAFolderMoveRewritesOnlyReferences,
+  testALoadIsFollowedFromTheProjectRoot,
   testARenameThatMovesAScriptFollowsOnlyReferences,
   testAMoveNamesAPathFromTheRootItLeftAlone,
   testAMovedFileTakesItsSidecars,

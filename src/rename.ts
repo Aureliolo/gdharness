@@ -1130,32 +1130,40 @@ interface MoveArguments {
 interface Literal {
   readonly offset: number;
   readonly value: string;
-  /** Whether the engine reads a path here relative to the file holding it. */
-  readonly relative: boolean;
+  /**
+   * What a relative path here is relative to: the file holding it, or the project's root. Null
+   * where the engine reads no path.
+   */
+  readonly base: 'file' | 'root' | null;
 }
 
-/** Where the engine resolves a relative path against the file: what a string literal follows. */
-const RELATIVE_AFTER: readonly { files: RegExp; before: RegExp }[] = [
+/**
+ * Where a relative path is a reference, and what it is relative to. A script's `preload`,
+ * `extends` and `@icon`, an `ext_resource` path and a shader `#include` resolve against the file.
+ * `load` and the `ResourceLoader` methods that take a path go through `_validate_local_path`, which
+ * puts `res://` before a relative path whichever script calls it.
+ */
+const RELATIVE_AFTER: readonly { files: RegExp; before: RegExp; base: 'file' | 'root' }[] = [
+  { files: /\.gd$/, before: /(?:\bpreload|\bextends|@icon)\s*\(?\s*$/, base: 'file' },
   {
     files: /\.gd$/,
-    before: /(?:\bpreload|(?<![.\w])load|\bResourceLoader\.load|\bextends|@icon)\s*\(?\s*$/,
+    before:
+      /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*(?:load|load_threaded_request|load_threaded_get_status|exists|get_dependencies|get_resource_uid|has_cached|get_cached_ref))\s*\(\s*$/,
+    base: 'root',
   },
-  { files: /\.(?:tscn|tres)$/, before: /^\[ext_resource\b.*\spath=$/ },
-  { files: /\.gdshaderinc?$/, before: /^\s*#include\s+$/ },
+  { files: /\.(?:tscn|tres)$/, before: /^\[ext_resource\b.*\spath=$/, base: 'file' },
+  { files: /\.gdshaderinc?$/, before: /^\s*#include\s+$/, base: 'file' },
 ];
 
-/** Whether the literal whose contents start at [param offset] of [param file] is read relative to it. */
-function readsRelative(file: ProjectText, offset: number): boolean {
-  const rule = RELATIVE_AFTER.find((one) => one.files.test(file.path));
-  if (rule === undefined) {
-    return false;
-  }
+/** What the literal whose contents start at [param offset] of [param file] is relative to, if a path. */
+function relativeBase(file: ProjectText, offset: number): 'file' | 'root' | null {
   // The opening quote sits just before the contents.
   const quoteAt = offset - 1;
   const text = file.path.endsWith('.gd')
     ? file.text.slice(Math.max(0, quoteAt - 80), quoteAt)
     : file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
-  return rule.before.test(text);
+  const rule = RELATIVE_AFTER.find((one) => one.files.test(file.path) && one.before.test(text));
+  return rule?.base ?? null;
 }
 
 /** Every string literal of [param file], with where its contents start. */
@@ -1179,7 +1187,7 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
       found.push({
         offset,
         value: literal.slice(quote.index + 1, -1),
-        relative: readsRelative(file, offset),
+        base: relativeBase(file, offset),
       });
     }
     return found;
@@ -1188,7 +1196,7 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
     found.push({
       offset: match.index + 1,
       value: match[1] ?? '',
-      relative: readsRelative(file, match.index + 1),
+      base: relativeBase(file, match.index + 1),
     });
   }
   return found;
@@ -1268,7 +1276,7 @@ function movedLiteral(
   if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
     return null;
   }
-  const replacement = movedPath(written, literal.relative, from, goesTo, moves, exists);
+  const replacement = movedPath(written, literal.base, from, goesTo, moves, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
   if (replacement === null || replacement === written) {
@@ -1280,20 +1288,27 @@ function movedLiteral(
 /** [param written] as it must read once [param from] or the file it names has moved, or null. */
 function movedPath(
   written: string,
-  relative: boolean,
+  base: Literal['base'],
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
 ): string | null {
   const isAbsolute = written.startsWith('res://');
-  if (!isAbsolute && !relative) {
+  if (!isAbsolute && base === null) {
     return null;
   }
-  const target = resolvedPath(written, from);
+  const fromRoot = !isAbsolute && base === 'root';
+  const target = resolvedPath(written, fromRoot ? 'res://_' : from);
   const targetGoesTo = moves.get(target);
   if (targetGoesTo !== undefined) {
+    if (fromRoot) {
+      return targetGoesTo.slice('res://'.length);
+    }
     return isAbsolute ? targetGoesTo : relativeTo(targetGoesTo, goesTo ?? from);
+  }
+  if (fromRoot) {
+    return null;
   }
   if (goesTo !== undefined && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
     return relativeTo(target, goesTo);
