@@ -7,7 +7,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 import { bytesOf, statOf } from './listed-reads.js';
-import { realAsFarAsItExists, relativeWithin } from './paths.js';
+import { realAsFarAsItExists, relativeWithin, sameEntry } from './paths.js';
 import { type LeftOut, leftOutAt, leftOutsOnPath, VERSION_MARKER, walkProject } from './project-walk.js';
 import { uidCacheEntries } from './uid-cache.js';
 
@@ -664,17 +664,6 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
       `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(. Leave regex out to search for the text as written.`,
       { cause: error },
     );
-  }
-}
-
-/** Whether two paths name one file or folder, by its identity on disk rather than its spelling. */
-function sameEntry(one: string, other: string): boolean {
-  try {
-    const first = statSync(one, { bigint: true });
-    const second = statSync(other, { bigint: true });
-    return first.ino === second.ino && first.dev === second.dev;
-  } catch {
-    return false;
   }
 }
 

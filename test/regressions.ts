@@ -388,6 +388,8 @@ import {
   realAsFarAsItExists,
   relativeWithin,
   resolveWithinProject,
+  sameEntry,
+  sameIdentity,
 } from '../src/paths.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
@@ -13493,6 +13495,26 @@ function testProjectGodotReadsExponentFloats(): void {
     { ...physics },
     { a: 0.00001, b: 15_000_000_000, c: 1, d: 'inf', e: -0.5, f: 2000, g: -0.045, h: '1e999', i: '1e' },
   );
+}
+
+/** File ids past 2^53 that a plain number cannot tell apart are still told apart. */
+function testTwoFilesWhoseIdsCollideAsPlainNumbersAreNotOne(): void {
+  const near = 2n ** 53n;
+  assert.equal(Number(near), Number(near + 1n), 'the two ids are one plain number');
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near + 1n, dev: 1n }), false);
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near, dev: 1n }), true);
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near, dev: 2n }), false);
+  const holder = mkdtempSync(join(tmpdir(), 'gdharness-same-entry-'));
+  try {
+    const first = join(holder, 'a.txt');
+    writeFileSync(first, 'a');
+    writeFileSync(join(holder, 'b.txt'), 'b');
+    assert.equal(sameEntry(first, join(holder, '.', 'a.txt')), true, 'one file by two spellings');
+    assert.equal(sameEntry(first, join(holder, 'b.txt')), false, 'two files');
+    assert.equal(sameEntry(first, join(holder, 'missing.txt')), false, 'a file that is not there');
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -104572,6 +104594,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDapFramesBodiesByBytes,
   testFramingCeilingFailsLoudly,
   testDictionariesHaveNothingBehindThem,
+  testTwoFilesWhoseIdsCollideAsPlainNumbersAreNotOne,
   testProjectPathsAreContained,
   testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled,
   testToolAndOpLookupsCannotReachThePrototype,
