@@ -36859,12 +36859,21 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
       );
 
       // A rename rewrites the scenes naming the bus, and the editor reads them again, or saves the
-      // old bus back over them. One with unsaved edits is named instead.
+      // old bus back over them. One with unsaved edits is named instead. An imported .escn is
+      // rewritten but never sent, since the editor closes one it is told to reload.
       writeFileSync(
         join(project, 'choir.tscn'),
         '[gd_scene format=3]\n\n[node name="Choir" type="AudioStreamPlayer"]\nbus = &"Voices"\n',
       );
+      const imported =
+        '[gd_scene format=3]\n\n[node name="Sung" type="AudioStreamPlayer"]\nbus = &"Voices"\n';
+      writeFileSync(join(project, 'sung.escn'), imported);
       const renamed = await call({ op: 'rename_audio_bus', busName: 'Voices', newBusName: 'Choir' });
+      assert.equal(
+        readFileSync(join(project, 'sung.escn'), 'utf8'),
+        imported.replace('&"Voices"', '&"Choir"'),
+        'the .escn is rewritten',
+      );
       assert.deepEqual(
         sent.splice(0),
         [

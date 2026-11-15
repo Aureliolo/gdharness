@@ -1157,6 +1157,14 @@ const SCENE_OR_RESOURCE = new RegExp(
 );
 
 /**
+ * Whether an open editor can read [param path] again after a rewrite. An `.escn` is an imported
+ * scene: told to reload one, the editor closes its tab instead.
+ */
+export function reloadableInTheEditor(path: string): boolean {
+  return /\.(?:tscn|tres)$/i.test(path);
+}
+
+/**
  * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
  * listed reads it against the file, the way a move always has.
  *

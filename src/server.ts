@@ -286,7 +286,7 @@ import {
 import { type LeftOut, leftOutAt } from './project-walk.js';
 import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
-import { applyRewrites, SCENE_OR_RESOURCE_EXTENSIONS } from './rename.js';
+import { applyRewrites, reloadableInTheEditor, SCENE_OR_RESOURCE_EXTENSIONS } from './rename.js';
 import {
   type NameTaken,
   type RenameOutcome,
@@ -8278,7 +8278,8 @@ class GodotServer {
       }
       // The scenes rewritten under the editor are read again there, or it saves the old bus back.
       const told: OperationParams = {};
-      const reread = await this.editorTakes('files_moved', { moved: [], changed: renamed.changed }, told);
+      const changed = renamed.changed.filter(reloadableInTheEditor);
+      const reread = await this.editorTakes('files_moved', { moved: [], changed }, told);
       const unsavedScenes = (readArray(told, 'unsavedScenes') ?? []).map(String);
       return this.jsonTextResponse({
         ...answer,
