@@ -16,6 +16,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './engine-slots.js';
 import { startTimesOf } from './process-children.js';
+import { Turns } from './turns.js';
 import { removeWhole } from './whole-file.js';
 
 /** The folder under a project's .godot that holds a lock for each file a write is under way to. */
@@ -47,26 +48,11 @@ export function writeLockOf(projectPath: string, file: string): string {
  */
 export async function inTurnFor<T>(projectPath: string, file: string, write: () => Promise<T>): Promise<T> {
   const lock = writeLockOf(projectPath, file);
-  const before = queueTails.get(lock) ?? Promise.resolve();
-  let release = (): void => undefined;
-  const mine = new Promise<void>((done) => {
-    release = done;
-  });
-  const tail = before.then(() => mine);
-  queueTails.set(lock, tail);
-  await before;
-  try {
-    return await takeTurn(projectPath, file, lock, write);
-  } finally {
-    release();
-    if (queueTails.get(lock) === tail) {
-      queueTails.delete(lock);
-    }
-  }
+  return await queued.run(() => takeTurn(projectPath, file, lock, write), lock);
 }
 
-/** The last write this server has queued for each lock, which the next one waits behind. */
-const queueTails = new Map<string, Promise<void>>();
+/** The writes this server has queued for each lock, each waiting behind the one before. */
+const queued = new Turns<string>();
 
 async function takeTurn<T>(
   projectPath: string,

@@ -389,6 +389,8 @@ import {
   realAsFarAsItExists,
   relativeWithin,
   resolveWithinProject,
+  sameEntry,
+  sameIdentity,
 } from '../src/paths.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
@@ -739,6 +741,7 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import { Turns } from '../src/turns.js';
 import {
   encodedUidCache,
   mendBeforeStart,
@@ -13495,6 +13498,26 @@ function testProjectGodotReadsExponentFloats(): void {
     { ...physics },
     { a: 0.00001, b: 15_000_000_000, c: 1, d: 'inf', e: -0.5, f: 2000, g: -0.045, h: '1e999', i: '1e' },
   );
+}
+
+/** File ids past 2^53 that a plain number cannot tell apart are still told apart. */
+function testTwoFilesWhoseIdsCollideAsPlainNumbersAreNotOne(): void {
+  const near = 2n ** 53n;
+  assert.equal(Number(near), Number(near + 1n), 'the two ids are one plain number');
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near + 1n, dev: 1n }), false);
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near, dev: 1n }), true);
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near, dev: 2n }), false);
+  const holder = mkdtempSync(join(tmpdir(), 'gdharness-same-entry-'));
+  try {
+    const first = join(holder, 'a.txt');
+    writeFileSync(first, 'a');
+    writeFileSync(join(holder, 'b.txt'), 'b');
+    assert.equal(sameEntry(first, join(holder, '.', 'a.txt')), true, 'one file by two spellings');
+    assert.equal(sameEntry(first, join(holder, 'b.txt')), false, 'two files');
+    assert.equal(sameEntry(first, join(holder, 'missing.txt')), false, 'a file that is not there');
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -104460,7 +104483,66 @@ async function testAFileTwoPathsReachIsRenamedOnce(): Promise<void> {
   }
 }
 
+/** Calls on one key run in the order made, a failure holds up none, and a settled key is forgotten. */
+async function testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten(): Promise<void> {
+  const turns = new Turns<string>();
+  const seen: string[] = [];
+  const call = (name: string, wait: number, fail = false): (() => Promise<string>) => {
+    return async () => {
+      seen.push(`${name} start`);
+      await delay(wait);
+      seen.push(`${name} end`);
+      if (fail) {
+        throw new Error(`${name} failed`);
+      }
+      return name;
+    };
+  };
+  const first = turns.run(call('a', 30, true), 'k');
+  const second = turns.run(call('b', 1), 'k');
+  const beside = turns.run(call('c', 1), 'other');
+  const third = turns.run(call('d', 1), 'k');
+  await assert.rejects(first, /a failed/);
+  assert.deepEqual(await Promise.all([second, beside, third]), ['b', 'c', 'd']);
+  assert.deepEqual(
+    seen.filter((line) => !line.startsWith('c')),
+    ['a start', 'a end', 'b start', 'b end', 'd start', 'd end'],
+    'a failed call holds up nobody, and the rest keep the order they were made in',
+  );
+  assert.ok(seen.indexOf('c end') < seen.indexOf('a end'), 'another key does not wait for this one');
+  assert.equal(turns.waiting, 0, 'no key stays once its last call has settled');
+  const unkeyed = new Turns();
+  const order: number[] = [];
+  await Promise.allSettled([
+    unkeyed.run(async () => {
+      await delay(10);
+      order.push(1);
+      throw new Error('first');
+    }),
+    unkeyed.run(() => {
+      order.push(2);
+      return Promise.resolve();
+    }),
+  ]);
+  assert.deepEqual(order, [1, 2], 'an unkeyed queue serves one at a time too');
+  assert.equal(unkeyed.waiting, 0);
+  let unhandled = 0;
+  const count = (): void => {
+    unhandled += 1;
+  };
+  process.on('unhandledRejection', count);
+  try {
+    const late = unkeyed.run(() => Promise.reject(new Error('late')));
+    await delay(20);
+    await assert.rejects(late, /late/);
+    assert.equal(unhandled, 0, 'a caller that attaches its handler late raises no unhandled rejection');
+  } finally {
+    process.off('unhandledRejection', count);
+  }
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
+  testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
   testTheClassCacheStepsOverAFolderHoldingAProject,
   testTheUidCacheStepsOverAFolderHoldingAProject,
@@ -105344,6 +105426,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDapFramesBodiesByBytes,
   testFramingCeilingFailsLoudly,
   testDictionariesHaveNothingBehindThem,
+  testTwoFilesWhoseIdsCollideAsPlainNumbersAreNotOne,
   testProjectPathsAreContained,
   testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled,
   testToolAndOpLookupsCannotReachThePrototype,

@@ -10,13 +10,16 @@
 
 import { jest } from 'bun:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import {
+  appendFileSync,
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -28,9 +31,13 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 import { extract } from '../scripts/install-godot.js';
+import { declaredClasses, declaredClassLines } from '../src/class-cache.js';
+import { openTheEditor } from '../src/editor-open.js';
 import { EngineSlots, ownStart, takenOverUnderSteal } from '../src/engine-slots.js';
+import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
 import { answersTo, GameLog, type LogEntry, type Severity } from '../src/game-log.js';
+import { BridgeTimeout, createBridge, EditorClosing, type GodotBridge } from '../src/godot-bridge.js';
 import {
   type DebuggerMessage,
   DebuggerStream,
@@ -45,7 +52,10 @@ import { keepPipelineCache } from '../src/pipeline-cache.js';
 import { startTimesOf } from '../src/process-children.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
 import { isRecord } from '../src/records.js';
+import { applyRewrites } from '../src/rename.js';
+import { type NameTaken, type RenameServices, renameSymbol } from '../src/rename-symbol.js';
 import { parseProjectGodot } from '../src/resources.js';
+import { noteRestartBegun, restartNotePath } from '../src/restart-note.js';
 import {
   amendRunRecord,
   clearRunRecord,
@@ -89,6 +99,7 @@ import {
   runShares,
 } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
+import { greeting } from './support/greeting.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -3542,6 +3553,1093 @@ async function aStrangerIsJudgedOnceAndForTheFileAsWritten(): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The editor bridge
+// ---------------------------------------------------------------------------------------------
+
+const BRIDGE_ANSWER_MS = 1000;
+
+/** The slice of a ws socket the bridge touches, in the state ws would hold it in. */
+class StandInEditor extends EventEmitter {
+  readyState = 1;
+  readonly sent: Record<string, unknown>[] = [];
+  closedWith = 0;
+
+  send(text: string): void {
+    const message: unknown = JSON.parse(text);
+    assert.ok(isRecord(message));
+    this.sent.push(message);
+  }
+
+  close(code = 1000, reason = ''): void {
+    this.readyState = 3;
+    this.closedWith = code;
+    this.emit('close', code, Buffer.from(reason));
+  }
+
+  terminate(): void {
+    this.readyState = 3;
+    this.emit('close', 1006, Buffer.from(''));
+  }
+}
+
+interface BridgeCall {
+  readonly tag: number;
+  readonly key: string | null;
+  state: 'queued' | 'sent' | 'settled';
+  wasSent: boolean;
+  deadline: number;
+  sock: StandInEditor | null;
+  expected: string;
+  got: string | null;
+}
+
+interface BridgeModel {
+  readonly bridge: GodotBridge;
+  readonly sockets: StandInEditor[];
+  readonly calls: BridgeCall[];
+  readonly project: string;
+  holds: StandInEditor | null;
+  greeted: boolean;
+  /** The editor has written the record a hidden editor leaves as it quits unused. */
+  idle: boolean;
+  clock: number;
+}
+
+interface BridgeStep {
+  kind:
+    | 'connect'
+    | 'hello'
+    | 'request'
+    | 'answer'
+    | 'stale'
+    | 'late'
+    | 'tick'
+    | 'drop'
+    | 'quiet'
+    | 'staleClose'
+    | 'idle';
+  key: number;
+  at: number;
+  how: 'ok' | 'fail' | 'unreadable' | 'closing';
+  ms: number;
+}
+
+const bridgeStep: fc.Arbitrary<BridgeStep> = fc.record({
+  kind: fc.constantFrom(
+    'connect' as const,
+    'connect' as const,
+    'hello' as const,
+    'hello' as const,
+    'request' as const,
+    'request' as const,
+    'answer' as const,
+    'answer' as const,
+    'stale' as const,
+    'late' as const,
+    'tick' as const,
+    'drop' as const,
+    'quiet' as const,
+    'quiet' as const,
+    'staleClose' as const,
+    'staleClose' as const,
+    'idle' as const,
+  ),
+  key: fc.integer({ min: -1, max: 1 }),
+  at: fc.nat(),
+  how: fc.constantFrom('ok' as const, 'fail' as const, 'unreadable' as const, 'closing' as const),
+  ms: fc.integer({ min: 1, max: 1500 }),
+});
+
+function bridgeOutcome(error: unknown): string {
+  if (error instanceof BridgeTimeout) {
+    return 'timeout';
+  }
+  if (error instanceof EditorClosing) {
+    return 'closing';
+  }
+  const said = error instanceof Error ? error.message : String(error);
+  const known: Record<string, string> = {
+    'Godot is not connected': 'not-connected',
+    'Godot disconnected during request': 'dropped',
+    'GodotBridge stopped': 'stopped',
+  };
+  if (said.startsWith('The editor answered')) {
+    return 'unreadable';
+  }
+  return known[said] ?? (said.startsWith('failed ') ? said : `other: ${said}`);
+}
+
+function bridgeConnected(model: BridgeModel): boolean {
+  return model.holds?.readyState === 1 && model.greeted;
+}
+
+function settleBridgeCall(call: BridgeCall, outcome: string): void {
+  call.state = 'settled';
+  call.expected = outcome;
+}
+
+/** The request goes out when the editor is served, or is refused at once. */
+function dispatchBridgeCall(model: BridgeModel, call: BridgeCall): void {
+  if (!bridgeConnected(model)) {
+    settleBridgeCall(call, 'not-connected');
+    return;
+  }
+  call.state = 'sent';
+  call.wasSent = true;
+  call.deadline = model.clock + BRIDGE_ANSWER_MS;
+  call.sock = model.holds;
+}
+
+/** A keyed request starts once every earlier request on its key has settled. */
+function promoteBridgeCalls(model: BridgeModel): void {
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const call of model.calls) {
+      const ahead = model.calls.some(
+        (other) => other.key === call.key && other.tag < call.tag && other.state !== 'settled',
+      );
+      if (call.state === 'queued' && call.key !== null && !ahead) {
+        dispatchBridgeCall(model, call);
+        moved = true;
+      }
+    }
+  }
+}
+
+function askBridge(model: BridgeModel, step: BridgeStep): void {
+  const tag = model.calls.length;
+  const key = step.key < 0 ? null : `res://scene-${String(step.key)}.tscn`;
+  const call: BridgeCall = {
+    tag,
+    key,
+    state: 'queued',
+    wasSent: false,
+    deadline: 0,
+    sock: null,
+    expected: '',
+    got: null,
+  };
+  model.calls.push(call);
+  const args = key === null ? { tag } : { tag, scenePath: key };
+  model.bridge.invokeTool('probe', args).then(
+    (value) => {
+      assert.equal(call.got, null, 'a request settles once');
+      call.got = `ok:${JSON.stringify(value)}`;
+    },
+    (error: unknown) => {
+      assert.equal(call.got, null, 'a request settles once');
+      call.got = bridgeOutcome(error);
+    },
+  );
+  if (key === null) {
+    dispatchBridgeCall(model, call);
+  }
+}
+
+/** What the editor was sent, by request tag. */
+function bridgeWire(model: BridgeModel): Map<number, string> {
+  const wire = new Map<number, string>();
+  for (const sock of model.sockets) {
+    for (const message of sock.sent) {
+      const args = message['args'];
+      if (message['type'] === 'tool_invoke' && isRecord(args) && typeof message['id'] === 'string') {
+        const tag = Number(args['tag']);
+        assert.ok(!wire.has(tag), `request ${String(tag)} went out once`);
+        wire.set(tag, message['id']);
+      }
+    }
+  }
+  return wire;
+}
+
+function answerBridge(model: BridgeModel, step: BridgeStep): void {
+  const sent = model.calls.filter((call) => call.state === 'sent' && call.sock === model.holds);
+  const call = sent[step.at % Math.max(sent.length, 1)];
+  const id = call === undefined ? undefined : bridgeWire(model).get(call.tag);
+  if (call === undefined || id === undefined || model.holds === null) {
+    return;
+  }
+  const failed = `failed ${String(call.tag)}`;
+  const answers = {
+    ok: [{ success: true, result: { answer: call.tag } }, `ok:${JSON.stringify({ answer: call.tag })}`],
+    fail: [{ success: false, error: failed }, failed],
+    unreadable: [{ success: 'yes' }, 'unreadable'],
+    closing: [{ success: false, closing: true, error: 'The editor is quitting.' }, 'closing'],
+  } as const;
+  const [fields, outcome] = answers[step.how];
+  model.holds.emit('message', Buffer.from(JSON.stringify({ type: 'tool_result', id, ...fields })));
+  settleBridgeCall(call, outcome);
+}
+
+/** An answer on a socket the bridge no longer holds, or for a request already settled, changes nothing. */
+function misdirectedAnswer(model: BridgeModel, step: BridgeStep): void {
+  const aimed = step.kind === 'stale' ? 'sent' : 'settled';
+  const calls = model.calls.filter((call) => call.state === aimed && (aimed === 'sent' || call.wasSent));
+  const call = calls[step.at % Math.max(calls.length, 1)];
+  const id = call === undefined ? undefined : bridgeWire(model).get(call.tag);
+  const old = model.sockets.filter((sock) => sock !== model.holds);
+  const through = step.kind === 'stale' ? old[step.at % Math.max(old.length, 1)] : model.holds;
+  if (id === undefined || through === undefined || through === null) {
+    return;
+  }
+  const reply = { type: 'tool_result', id, success: true, result: { answer: 'wrong request' } };
+  through.emit('message', Buffer.from(JSON.stringify(reply)));
+}
+
+function connectBridgeSocket(model: BridgeModel): void {
+  const sock = new StandInEditor();
+  model.sockets.push(sock);
+  const accept: unknown = Reflect.get(model.bridge, 'handleConnection');
+  assert.ok(typeof accept === 'function');
+  const held = model.holds !== null && model.holds.readyState !== 3;
+  Reflect.apply(accept, model.bridge, [sock]);
+  if (held) {
+    assert.equal(sock.closedWith, 4000, 'a second editor is refused while the first is open');
+    return;
+  }
+  model.holds = sock;
+  model.greeted = false;
+}
+
+function dropBridgeSocket(model: BridgeModel): void {
+  const sock = model.holds;
+  if (sock === null) {
+    return;
+  }
+  sock.terminate();
+  // A call held when an editor that wrote its idle record goes was turned away, not run.
+  const outcome = model.greeted && model.idle ? 'closing' : 'dropped';
+  for (const call of model.calls) {
+    if (call.state === 'sent') {
+      settleBridgeCall(call, outcome);
+    }
+  }
+  model.holds = null;
+  model.greeted = false;
+}
+
+function greetBridge(model: BridgeModel): void {
+  if (model.holds !== null && !model.greeted) {
+    const hello = greeting(model.project, { opened_by_a_server: true });
+    model.holds.emit('message', Buffer.from(JSON.stringify(hello)));
+    model.greeted = true;
+  }
+}
+
+function tickBridge(model: BridgeModel, step: BridgeStep): void {
+  model.clock += step.ms;
+  jest.advanceTimersByTime(step.ms);
+  for (const call of model.calls) {
+    if (call.state === 'sent' && call.deadline <= model.clock) {
+      settleBridgeCall(call, 'timeout');
+    }
+  }
+}
+
+/** The editor writes the record a hidden editor leaves as it quits unused. */
+function writeIdleRecord(model: BridgeModel): void {
+  mkdirSync(join(model.project, '.godot'), { recursive: true });
+  const record = {
+    pid: process.pid,
+    closedAt: new Date().toISOString(),
+    idleMinutes: 10,
+    arguments: [],
+    scenes: [],
+  };
+  writeFileSync(join(model.project, '.godot', 'gdharness-editor-idle.json'), JSON.stringify(record));
+  model.idle = true;
+}
+
+function closeAReplacedSocket(model: BridgeModel, step: BridgeStep): void {
+  const old = model.sockets.filter((sock) => sock !== model.holds);
+  old[step.at % Math.max(old.length, 1)]?.emit('close', 1000, Buffer.from(''));
+}
+
+function goQuiet(model: BridgeModel): void {
+  if (model.holds?.readyState === 1) {
+    model.holds.readyState = 3;
+  }
+}
+
+const BRIDGE_STEPS: Record<BridgeStep['kind'], (model: BridgeModel, step: BridgeStep) => void> = {
+  connect: connectBridgeSocket,
+  hello: greetBridge,
+  request: askBridge,
+  answer: answerBridge,
+  stale: misdirectedAnswer,
+  late: misdirectedAnswer,
+  tick: tickBridge,
+  drop: dropBridgeSocket,
+  quiet: goQuiet,
+  staleClose: closeAReplacedSocket,
+  idle: writeIdleRecord,
+};
+
+/** Lets the bridge's own follow-ups run, then holds every request and the wire to the model. */
+async function checkBridgeModel(model: BridgeModel): Promise<void> {
+  await new Promise((settle) => setImmediate(settle));
+  promoteBridgeCalls(model);
+  const wire = bridgeWire(model);
+  for (const call of model.calls) {
+    assert.equal(wire.has(call.tag), call.wasSent, `request ${String(call.tag)} is sent exactly when served`);
+    assert.equal(call.got, call.state === 'settled' ? call.expected : null, `request ${String(call.tag)}`);
+  }
+  const pending: unknown = Reflect.get(model.bridge, 'pendingRequests');
+  assert.ok(pending instanceof Map);
+  assert.equal(pending.size, model.calls.filter((call) => call.state === 'sent').length, 'pending requests');
+  assert.equal(model.bridge.isConnected(), bridgeConnected(model));
+}
+
+async function everyBridgeRequestSettlesOnceWithItsOwnAnswer(): Promise<void> {
+  const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  jest.useFakeTimers();
+  try {
+    await fc.assert(
+      fc.asyncProperty(fc.array(bridgeStep, { maxLength: 40, size: 'max' }), async (steps) => {
+        jest.clearAllTimers();
+        const project = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-bridge-'));
+        try {
+          const model: BridgeModel = {
+            bridge: createBridge(0, BRIDGE_ANSWER_MS, '127.0.0.1'),
+            sockets: [],
+            calls: [],
+            project,
+            holds: null,
+            greeted: false,
+            idle: false,
+            clock: 0,
+          };
+          for (const step of steps) {
+            BRIDGE_STEPS[step.kind](model, step);
+            await checkBridgeModel(model);
+          }
+          await model.bridge.stop();
+          for (const call of model.calls) {
+            if (call.state === 'sent') {
+              settleBridgeCall(call, 'stopped');
+            }
+          }
+          model.holds = null;
+          await checkBridgeModel(model);
+          jest.advanceTimersByTime(2 * BRIDGE_ANSWER_MS);
+          await checkBridgeModel(model);
+          assert.ok(
+            model.calls.every((call) => call.state === 'settled' && call.got === call.expected),
+            'nothing is left pending after the bridge closes',
+          );
+          assert.equal(jest.getTimerCount(), 0, 'no timer outlives the bridge');
+        } finally {
+          sweep(project);
+        }
+      }),
+      { numRuns: 150 },
+    );
+  } finally {
+    jest.useRealTimers();
+    quiet.mockRestore();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Moving files in a project
+// ---------------------------------------------------------------------------------------------
+
+/** A file of the model project. Its text names the files in [field refs] by their current paths. */
+interface ProjectFile {
+  readonly name: string;
+  readonly head: string;
+  readonly refs: readonly number[];
+  readonly sidecars: readonly string[];
+  at: string;
+  /** What an edit made while a move was planned added. */
+  extra: string;
+}
+
+interface MoveStep {
+  readonly kind: 'move' | 'onto' | 'back' | 'raced';
+  readonly file: number;
+  readonly folder: string;
+  readonly alternative: boolean;
+  readonly other: number;
+}
+
+const moveStep: fc.Arbitrary<MoveStep> = fc.record({
+  kind: fc.constantFrom('move' as const, 'move' as const, 'onto' as const, 'back' as const, 'raced' as const),
+  file: fc.integer({ min: 0, max: 3 }),
+  folder: fc.constantFrom('', 'a/', 'b/c/', 'a/'),
+  alternative: fc.boolean(),
+  other: fc.integer({ min: 0, max: 3 }),
+});
+
+function newProjectFiles(): ProjectFile[] {
+  return [
+    {
+      name: 'main.tscn',
+      head: '[gd_scene format=3]\n',
+      refs: [1, 2, 3],
+      sidecars: [],
+      at: 'main.tscn',
+      extra: '',
+    },
+    { name: 's.gd', head: 'extends Node\n', refs: [2, 3], sidecars: ['.uid'], at: 's.gd', extra: '' },
+    { name: 'u.gd', head: 'extends RefCounted\n', refs: [], sidecars: ['.uid'], at: 'u.gd', extra: '' },
+    { name: 'icon.png', head: 'PNG', refs: [], sidecars: ['.import', '.uid'], at: 'icon.png', extra: '' },
+  ];
+}
+
+/** The text a file has when every path it names is where the model holds it. */
+function renderProjectFile(files: readonly ProjectFile[], file: ProjectFile): string {
+  const lines = file.refs.map((ref) => {
+    const path = `res://${files[ref]?.at ?? ''}`;
+    return file.name.endsWith('.gd')
+      ? `const R${String(ref)} = preload("${path}")`
+      : `[ext_resource path="${path}" id="${String(ref)}"]`;
+  });
+  return `${file.head}${lines.join('\n')}\n${file.extra}`;
+}
+
+function writeModelProject(root: string, files: readonly ProjectFile[]): void {
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, 'project.godot'), 'config_version=5\n');
+  for (const file of files) {
+    writeFileSync(join(root, file.at), renderProjectFile(files, file));
+    for (const sidecar of file.sidecars) {
+      writeFileSync(join(root, `${file.at}${sidecar}`), `sidecar of ${file.name}\n`);
+    }
+  }
+}
+
+/** Every file the model says the project holds, with its text. */
+function expectedProject(root: string, files: readonly ProjectFile[]): Map<string, string> {
+  const expected = new Map<string, string>([[join(root, 'project.godot'), 'config_version=5\n']]);
+  for (const file of files) {
+    expected.set(join(root, file.at), renderProjectFile(files, file));
+    for (const sidecar of file.sidecars) {
+      expected.set(join(root, `${file.at}${sidecar}`), `sidecar of ${file.name}\n`);
+    }
+  }
+  return expected;
+}
+
+function projectOnDisk(root: string): Map<string, string> {
+  return new Map(filesUnder(root).map((path) => [path, readFileSync(path, 'utf8')]));
+}
+
+function holdsTheModel(root: string, files: readonly ProjectFile[], when: string): void {
+  const found = projectOnDisk(root);
+  const wanted = expectedProject(root, files);
+  assert.deepEqual(
+    [...found.keys()].toSorted(),
+    [...wanted.keys()].toSorted(),
+    `${when}: every file is at one path, each with its sidecars, and none is left staged`,
+  );
+  for (const [path, text] of wanted) {
+    assert.equal(found.get(path), text, `${when}: ${relative(root, path)}`);
+  }
+}
+
+/** Where the step sends the file, as a path in the project. */
+function moveTarget(files: readonly ProjectFile[], step: MoveStep, original: readonly string[]): string {
+  const file = files[step.file];
+  assert.ok(file !== undefined);
+  if (step.kind === 'back') {
+    return original[step.file] ?? file.at;
+  }
+  if (step.kind === 'onto') {
+    return files[step.other]?.at ?? file.at;
+  }
+  const base = step.alternative ? `renamed${file.name.slice(file.name.lastIndexOf('.'))}` : file.name;
+  return `${step.folder}${base}`;
+}
+
+function aMoveIsAllowed(files: readonly ProjectFile[], file: ProjectFile, target: string): boolean {
+  return files.every((other) => other.at !== target) && target !== file.at;
+}
+
+function racedMove(root: string, files: ProjectFile[], step: MoveStep, target: string): void {
+  const file = files[step.file];
+  const edited = files[step.other];
+  assert.ok(file !== undefined && edited !== undefined);
+  const outcome = planFileMove(root, join(root, file.at), join(root, target));
+  assert.ok(outcome.ok);
+  appendFileSync(join(root, edited.at), '# edited\n');
+  edited.extra += '# edited\n';
+  const rewritten = files.some((other) => other === edited && other.refs.includes(step.file));
+  if (rewritten) {
+    assert.throws(() => {
+      applyFileMove(outcome);
+    }, /changed on disk/);
+    return;
+  }
+  applyFileMove(outcome);
+  file.at = target;
+}
+
+function applyMoveStep(
+  root: string,
+  files: ProjectFile[],
+  step: MoveStep,
+  original: readonly string[],
+): void {
+  const file = files[step.file];
+  assert.ok(file !== undefined);
+  const target = moveTarget(files, step, original);
+  const allowed = aMoveIsAllowed(files, file, target);
+  if (step.kind === 'raced' && allowed) {
+    racedMove(root, files, step, target);
+    return;
+  }
+  const outcome = planFileMove(root, join(root, file.at), join(root, target));
+  assert.equal(outcome.ok, allowed, `${file.at} to ${target}: ${outcome.ok ? 'allowed' : outcome.reason}`);
+  if (outcome.ok) {
+    applyFileMove(outcome);
+    file.at = target;
+  }
+}
+
+function aMoveLeavesEveryFileAtOnePath(): void {
+  fc.assert(
+    fc.property(fc.array(moveStep, { maxLength: 14, size: 'max' }), (steps) => {
+      inTemp((root) => {
+        const files = newProjectFiles();
+        const original = files.map((file) => file.at);
+        writeModelProject(root, files);
+        holdsTheModel(root, files, 'start');
+        for (const step of steps) {
+          applyMoveStep(root, files, step, original);
+          holdsTheModel(root, files, JSON.stringify(step));
+        }
+      });
+    }),
+    { numRuns: 40 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Renaming classes, methods and script files
+// ---------------------------------------------------------------------------------------------
+
+interface RenameModel {
+  readonly classes: [string, string];
+  method: string;
+  readonly paths: [string, string];
+}
+
+const ORIGINAL_NAMES: Readonly<RenameModel> = {
+  classes: ['Alpha', 'Beta'],
+  method: 'attack',
+  paths: ['alpha.gd', 'beta.gd'],
+};
+
+const CLASS_POOL = ['Alpha', 'Beta', 'Gamma', 'Delta'];
+const METHOD_POOL = ['attack', 'strike', 'hit'];
+const PATH_POOL = ['alpha.gd', 'beta.gd', 'x.gd', 'sub/y.gd'];
+
+interface RenameStep {
+  readonly kind: 'class' | 'method';
+  readonly which: 0 | 1;
+  readonly pick: number;
+  readonly back: boolean;
+  readonly move: boolean;
+  /** A name and a place given outright, for the steps that put everything back. */
+  readonly name: string | null;
+  readonly path: string | null;
+}
+
+const renameStep: fc.Arbitrary<RenameStep> = fc.record({
+  kind: fc.constantFrom('class' as const, 'class' as const, 'method' as const),
+  which: fc.constantFrom(0 as const, 1 as const),
+  pick: fc.nat(),
+  back: fc.boolean(),
+  move: fc.boolean(),
+  name: fc.constant(null),
+  path: fc.constant(null),
+});
+
+/** Every file the model project holds, from its names. */
+function renameTexts(model: RenameModel): Map<string, string> {
+  const [alpha, beta] = model.classes;
+  const [alphaPath, betaPath] = model.paths;
+  return new Map([
+    ['project.godot', 'config_version=5\n'],
+    [alphaPath, `class_name ${alpha}\nextends Node\n\n\nfunc ${model.method}() -> void:\n\tpass\n`],
+    [`${alphaPath}.uid`, 'uid://alpha\n'],
+    [
+      betaPath,
+      `class_name ${beta}\nextends ${alpha}\n\nvar held: ${alpha} = null\n\n\nfunc run() -> void:\n\t${model.method}()\n\theld.${model.method}()\n`,
+    ],
+    [`${betaPath}.uid`, 'uid://beta\n'],
+    [
+      'main.tscn',
+      `[gd_scene format=3]\n\n[ext_resource type="Script" path="res://${alphaPath}" id="1"]\n[ext_resource type="Script" path="res://${betaPath}" id="2"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n`,
+    ],
+  ]);
+}
+
+function writeTexts(root: string, texts: ReadonlyMap<string, string>): void {
+  for (const [path, text] of texts) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
+}
+
+function readTexts(root: string): Map<string, string> {
+  return new Map(
+    filesUnder(root).map((path) => [relative(root, path).split(sep).join('/'), readFileSync(path, 'utf8')]),
+  );
+}
+
+interface Located {
+  readonly file: string;
+  readonly line: number;
+  readonly character: number;
+}
+
+/** A language server that resolves a word to every place the project's scripts spell it. */
+function wordsResolvedByName(root: string): Pick<RenameServices, 'references' | 'definitions'> {
+  const places = (text: string, position: { line: number; character: number }, only: RegExp): Located[] => {
+    const line = text.split('\n')[position.line] ?? '';
+    const word = /[A-Za-z_]\w*/g;
+    let name = '';
+    for (let found = word.exec(line); found !== null; found = word.exec(line)) {
+      if (found.index <= position.character && position.character <= found.index + found[0].length) {
+        name = found[0];
+      }
+    }
+    const asWord = new RegExp(`\\b${name}\\b`, 'g');
+    return filesUnder(root)
+      .filter((file) => file.endsWith('.gd'))
+      .flatMap((file) =>
+        readFileSync(file, 'utf8')
+          .split('\n')
+          .flatMap((source, lineNumber) =>
+            [...source.matchAll(asWord)]
+              .filter((hit) => only.test(source.slice(0, hit.index)))
+              .map((hit) => ({ file, line: lineNumber, character: hit.index })),
+          ),
+      );
+  };
+  return {
+    references: async (_file, text, position) => await Promise.resolve(places(text, position, /^/)),
+    definitions: async (_file, text, position) => await Promise.resolve(places(text, position, /func\s+$/)),
+  };
+}
+
+function nothingTaken(names: readonly string[]): Promise<Record<string, NameTaken>> {
+  return Promise.resolve(Object.fromEntries(names.map((name) => [name, { as: [], declaredBy: null }])));
+}
+
+interface Renaming {
+  readonly symbol: string;
+  readonly newName: string;
+  readonly script: number;
+  readonly to: string | null;
+  readonly allowed: boolean;
+}
+
+function planRenaming(model: RenameModel, step: RenameStep): Renaming | null {
+  const script = step.kind === 'class' ? step.which : 0;
+  const pick = (pool: readonly string[]): string => pool[step.pick % pool.length] ?? '';
+  const original = step.kind === 'class' ? ORIGINAL_NAMES.classes[step.which] : ORIGINAL_NAMES.method;
+  const symbol = step.kind === 'class' ? model.classes[step.which] : model.method;
+  const newName =
+    step.name ?? (step.back ? original : pick(step.kind === 'class' ? CLASS_POOL : METHOD_POOL));
+  const target = step.path ?? (step.back ? ORIGINAL_NAMES.paths[script] : pick(PATH_POOL));
+  const to = step.kind === 'class' && step.move && target !== model.paths[script] ? target : null;
+  if (newName === symbol) {
+    return null;
+  }
+  const nameFree = step.kind === 'method' || !model.classes.includes(newName);
+  const placeFree = to === null || !model.paths.includes(to);
+  return { symbol, newName, script, to, allowed: nameFree && placeFree };
+}
+
+async function applyRenameStep(root: string, model: RenameModel, step: RenameStep): Promise<void> {
+  const renaming = planRenaming(model, step);
+  if (renaming === null) {
+    return;
+  }
+  const { symbol, newName, script, to, allowed } = renaming;
+  const outcome = await renameSymbol(
+    {
+      projectPath: root,
+      scriptPath: join(root, model.paths[script] ?? ''),
+      symbol,
+      newName,
+      newScriptPath: to === null ? null : join(root, to),
+    },
+    { namesTaken: nothingTaken, ...wordsResolvedByName(root) },
+  );
+  assert.equal(outcome.ok, allowed, `${symbol} to ${newName}: ${outcome.ok ? 'allowed' : outcome.reason}`);
+  if (!outcome.ok) {
+    return;
+  }
+  applyRewrites(outcome.rewrites);
+  if (step.kind === 'class') {
+    model.classes[step.which] = newName;
+  } else {
+    model.method = newName;
+  }
+  if (to !== null) {
+    model.paths[script] = to;
+  }
+}
+
+function theProjectHoldsTheRenames(root: string, model: RenameModel, when: string): void {
+  const found = readTexts(root);
+  const wanted = renameTexts(model);
+  assert.deepEqual([...found.keys()].toSorted(), [...wanted.keys()].toSorted(), `${when}: the files`);
+  for (const [path, text] of wanted) {
+    assert.equal(found.get(path), text, `${when}: ${path}`);
+  }
+}
+
+/** Every name and place changed away from where it began and then changed back, step by step. */
+const RENAMES_BACK: readonly RenameStep[] = [
+  { kind: 'class', which: 0, pick: 0, back: false, move: true, name: 'Park0', path: 'park0.gd' },
+  { kind: 'class', which: 1, pick: 0, back: false, move: true, name: 'Park1', path: 'park1.gd' },
+  { kind: 'class', which: 0, pick: 0, back: true, move: true, name: null, path: null },
+  { kind: 'class', which: 1, pick: 0, back: true, move: true, name: null, path: null },
+  { kind: 'method', which: 0, pick: 0, back: true, move: false, name: null, path: null },
+];
+
+async function aSequenceOfRenamesKeepsEveryReference(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(fc.array(renameStep, { maxLength: 10, size: 'max' }), async (steps) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-rename-'));
+      try {
+        const model: RenameModel = {
+          classes: [...ORIGINAL_NAMES.classes],
+          method: ORIGINAL_NAMES.method,
+          paths: [...ORIGINAL_NAMES.paths],
+        };
+        writeTexts(root, renameTexts(model));
+        const original = readTexts(root);
+        for (const step of steps) {
+          await applyRenameStep(root, model, step);
+          theProjectHoldsTheRenames(root, model, JSON.stringify(step));
+        }
+        for (const step of RENAMES_BACK) {
+          await applyRenameStep(root, model, step);
+        }
+        assert.deepEqual(readTexts(root), original, 'every rename back restores the original bytes');
+      } finally {
+        sweep(root);
+      }
+    }),
+    { numRuns: 25 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The classes a project declares
+// ---------------------------------------------------------------------------------------------
+
+type ClassBase = { kind: 'none' } | { kind: 'engine' } | { kind: 'class' | 'path'; of: number };
+
+interface ClassScript {
+  exists: boolean;
+  folder: string;
+  name: string | null;
+  base: ClassBase;
+  nameFirst: boolean;
+}
+
+interface ClassStep {
+  readonly kind: 'name' | 'base' | 'move' | 'delete' | 'create';
+  readonly slot: number;
+  readonly name: string | null;
+  readonly base: ClassBase;
+  readonly folder: string;
+}
+
+const classStep: fc.Arbitrary<ClassStep> = fc.record({
+  kind: fc.constantFrom(
+    'name' as const,
+    'base' as const,
+    'base' as const,
+    'move' as const,
+    'delete' as const,
+    'create' as const,
+  ),
+  slot: fc.integer({ min: 0, max: 3 }),
+  name: fc.constantFrom(null, 'Alpha', 'Beta', 'Gamma', 'Delta'),
+  base: fc.oneof(
+    fc.constant<ClassBase>({ kind: 'none' }),
+    fc.constant<ClassBase>({ kind: 'engine' }),
+    fc.record({
+      kind: fc.constantFrom('class' as const, 'path' as const),
+      of: fc.integer({ min: 0, max: 3 }),
+    }),
+  ),
+  folder: fc.constantFrom('', 'a/', 'b/c/'),
+});
+
+function classPathOf(scripts: readonly ClassScript[], slot: number): string {
+  return `res://${scripts[slot]?.folder ?? ''}s${String(slot)}.gd`;
+}
+
+/** The source of one script, with the class it extends spelled as the model says it is written. */
+function classSource(scripts: readonly ClassScript[], slot: number): string {
+  const script = scripts[slot];
+  assert.ok(script !== undefined);
+  const base = script.base;
+  const extending =
+    base.kind === 'none'
+      ? []
+      : [
+          base.kind === 'engine'
+            ? 'extends Node'
+            : base.kind === 'class'
+              ? `extends ${scripts[base.of]?.name ?? 'Node'}`
+              : `extends "${classPathOf(scripts, base.of)}"`,
+        ];
+  const named = script.name === null ? [] : [`class_name ${script.name}`];
+  return `${[...(script.nameFirst ? [...named, ...extending] : [...extending, ...named]), 'var x := 1'].join('\n')}\n`;
+}
+
+/** What a script extends, as a reader of the project would work it out: through scripts with no class_name. */
+function classBaseOf(scripts: readonly ClassScript[], slot: number, seen: readonly number[]): string {
+  const base = scripts[slot]?.base ?? { kind: 'none' as const };
+  if (base.kind === 'none') {
+    return 'RefCounted';
+  }
+  if (base.kind === 'engine') {
+    return 'Node';
+  }
+  if (base.kind === 'class') {
+    return scripts[base.of]?.name ?? 'Node';
+  }
+  const target = scripts[base.of];
+  if (target?.exists !== true) {
+    return `"${classPathOf(scripts, base.of)}"`;
+  }
+  if (target.name !== null) {
+    return target.name;
+  }
+  return seen.includes(base.of)
+    ? `"${classPathOf(scripts, base.of)}"`
+    : classBaseOf(scripts, base.of, [...seen, base.of]);
+}
+
+function applyClassStep(scripts: ClassScript[], step: ClassStep): void {
+  const script = scripts[step.slot];
+  assert.ok(script !== undefined);
+  const taken = scripts.some((other) => other !== script && other.exists && other.name === step.name);
+  if (step.kind === 'create') {
+    script.exists = true;
+  } else if (step.kind === 'delete') {
+    script.exists = false;
+  } else if (!script.exists) {
+    return;
+  } else if (step.kind === 'name' && (step.name === null || !taken)) {
+    script.name = step.name;
+    script.nameFirst = step.slot % 2 === 0;
+  } else if (step.kind === 'base') {
+    script.base = step.base;
+  } else if (step.kind === 'move') {
+    script.folder = step.folder;
+  }
+}
+
+function writeClassScripts(root: string, scripts: readonly ClassScript[]): void {
+  const wanted = new Map(
+    scripts.flatMap((script, slot) =>
+      script.exists
+        ? [[join(root, classPathOf(scripts, slot).slice('res://'.length)), classSource(scripts, slot)]]
+        : [],
+    ),
+  );
+  for (const path of filesUnder(root)) {
+    if (path.endsWith('.gd') && !wanted.has(path)) {
+      rmSync(path);
+    }
+  }
+  for (const [path, text] of wanted) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  }
+}
+
+function theScanHoldsTheClasses(root: string, scripts: readonly ClassScript[], when: string): void {
+  const declared = new Map<string, string>();
+  const lines = new Map<string, { path: string; extends: string }>();
+  scripts.forEach((script, slot) => {
+    if (script.exists && script.name !== null) {
+      declared.set(script.name, classPathOf(scripts, slot));
+      lines.set(script.name, {
+        path: classPathOf(scripts, slot),
+        extends: classBaseOf(scripts, slot, [slot]),
+      });
+    }
+  });
+  assert.deepEqual(declaredClasses(root), declared, `${when}: the classes and where they are`);
+  assert.deepEqual(
+    new Map(
+      [...declaredClassLines(root)].map(([name, line]) => [name, { path: line.path, extends: line.extends }]),
+    ),
+    lines,
+    `${when}: what each class extends`,
+  );
+}
+
+function theClassesFollowEveryChangeOfTheScripts(): void {
+  fc.assert(
+    fc.property(fc.array(classStep, { maxLength: 16, size: 'max' }), (steps) => {
+      inTemp((root) => {
+        writeFileSync(join(root, 'project.godot'), 'config_version=5\n');
+        const scripts: ClassScript[] = [0, 1, 2, 3].map(() => ({
+          exists: true,
+          folder: '',
+          name: null,
+          base: { kind: 'none' },
+          nameFirst: true,
+        }));
+        for (const step of steps) {
+          applyClassStep(scripts, step);
+          writeClassScripts(root, scripts);
+          theScanHoldsTheClasses(root, scripts, JSON.stringify(step));
+        }
+      });
+    }),
+    { numRuns: 60 },
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Opening a project's editor
+// ---------------------------------------------------------------------------------------------
+
+type AddonState = 'none' | 'disabled' | 'ready' | 'other';
+
+/** The project's state at one open, and whether two opens arrive at once. */
+interface OpenStep {
+  readonly twice: boolean;
+  readonly addon: AddonState;
+  readonly under: boolean;
+}
+
+const openStep: fc.Arbitrary<OpenStep> = fc.record({
+  twice: fc.boolean(),
+  addon: fc.constantFrom(
+    'none' as const,
+    'disabled' as const,
+    'ready' as const,
+    'ready' as const,
+    'ready' as const,
+    'ready' as const,
+    'other' as const,
+  ),
+  under: fc.boolean(),
+});
+
+const ENABLED_PLUGIN =
+  'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n';
+
+function setAddonState(project: string, state: AddonState): void {
+  rmSync(join(project, 'addons'), { recursive: true, force: true });
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  if (state === 'none') {
+    return;
+  }
+  installAddons(project);
+  if (state !== 'disabled') {
+    writeFileSync(join(project, 'project.godot'), ENABLED_PLUGIN);
+  }
+  if (state === 'other') {
+    writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'), 'another\n');
+  }
+}
+
+/** Why an open of a project in this state is refused, the engine being one that will not start. */
+function openRefusal(state: AddonState, restarting: boolean): RegExp {
+  if (state === 'none' || state === 'disabled') {
+    return /addon is not (installed|enabled)/;
+  }
+  if (state === 'other') {
+    return /would be asked nothing but to quit/;
+  }
+  return restarting ? /restart of this project's editor is under way/ : /^Could not start the editor/;
+}
+
+async function openAsked(project: string): Promise<string> {
+  const start = { hidden: true, silent: true, until: null };
+  const outcome = await openTheEditor(
+    { projectPath: project, start },
+    join(project, 'no-such-engine'),
+    'unused-holder',
+  );
+  assert.ok('refused' in outcome, `an engine that cannot start opens no editor: ${JSON.stringify(outcome)}`);
+  return outcome.refused;
+}
+
+function setRestartNote(project: string, underway: boolean): void {
+  rmSync(restartNotePath(project), { force: true });
+  if (underway) {
+    noteRestartBegun({
+      projectPath: project,
+      editorPid: null,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: new Date().toISOString(),
+      byPid: process.pid,
+    });
+  }
+}
+
+/** The opens of one step all end, each with the cause the project's state gives, and none keeps its turn. */
+async function opensAreRefusedWithTheirCause(
+  project: string,
+  step: OpenStep,
+  held: { state: AddonState; restarting: boolean },
+): Promise<void> {
+  const asked = step.twice ? 2 : 1;
+  const refusals = await Promise.all(Array.from({ length: asked }, async () => await openAsked(project)));
+  for (const refusal of refusals) {
+    assert.match(refusal, openRefusal(held.state, held.restarting), JSON.stringify(step));
+  }
+  assert.equal(
+    existsSync(join(project, '.godot', 'gdharness-editor-open')),
+    false,
+    'no open is left holding its turn',
+  );
+}
+
+async function everyOpenIsServedOrRefusedWithItsCause(): Promise<void> {
+  const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    await everyOpenEnds();
+  } finally {
+    quiet.mockRestore();
+  }
+}
+
+async function everyOpenEnds(): Promise<void> {
+  await fc.assert(
+    fc.asyncProperty(fc.array(openStep, { maxLength: 4, size: 'max' }), async (steps) => {
+      const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-fuzz-open-'));
+      try {
+        const held = { state: 'none' as AddonState, restarting: false };
+        setAddonState(project, held.state);
+        for (const step of steps) {
+          if (step.addon !== held.state) {
+            held.state = step.addon;
+            setAddonState(project, held.state);
+          }
+          if (step.under !== held.restarting) {
+            held.restarting = step.under;
+            setRestartNote(project, held.restarting);
+          }
+          await opensAreRefusedWithTheirCause(project, step, held);
+        }
+      } finally {
+        sweep(project);
+      }
+    }),
+    { numRuns: 6 },
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -3586,5 +4684,10 @@ await theKeeperAnswersEachConnectionOnce();
 await noMoreThanFourConnectionsWaitForOneGame();
 await aLateWaitEndsAfterHalfAnHour();
 await aProcessStartIsReadAgainOnlyAfterTenSeconds();
+await everyBridgeRequestSettlesOnceWithItsOwnAnswer();
+aMoveLeavesEveryFileAtOnePath();
+await aSequenceOfRenamesKeepsEveryReference();
+theClassesFollowEveryChangeOfTheScripts();
+await everyOpenIsServedOrRefusedWithItsCause();
 
 console.log('fuzz properties held');

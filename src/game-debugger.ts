@@ -30,6 +30,7 @@ import {
 import { countSnapshot, SNAPSHOT_SLICE_BYTES, SPAWNING_START } from './object-snapshot.js';
 import { isRecord } from './records.js';
 import { shippedAddonsDirectory } from './setup.js';
+import { Turns } from './turns.js';
 
 /** One frame of a held game's stack, innermost first. */
 interface DebugFrame {
@@ -445,7 +446,7 @@ export class GameDebugger {
   /** Told each error the engine prints for what this debugger asked rather than for the game. */
   private readonly raised: (by: RaisedBy, text: string, file: string) => void;
   /** Requests answered one at a time: each reads the replies to the commands it sent. */
-  private queue: Promise<unknown> = Promise.resolve();
+  private readonly queue = new Turns();
   private readonly server: Server;
   readonly port: number;
   private readonly breakpoints: readonly string[];
@@ -707,9 +708,7 @@ export class GameDebugger {
     if (request.op === 'snapshot') {
       return this.snapshot();
     }
-    const answered = this.queue.then(() => this.answer(request));
-    this.queue = answered.catch(() => undefined);
-    return answered;
+    return this.queue.run(() => this.answer(request));
   }
 
   private async answer(request: DebugRequest): Promise<DebugAnswer> {

@@ -255,6 +255,23 @@ export function isSameDirectory(onePath: string, otherPath: string): boolean {
   return relative(realAsFarAsItExists(resolve(onePath)), realAsFarAsItExists(resolve(otherPath))) === '';
 }
 
+/** Whether two stats name one entry. Both are read as bigints, since file ids pass 2^53. */
+export function sameIdentity(
+  one: { ino: bigint; dev: bigint },
+  other: { ino: bigint; dev: bigint },
+): boolean {
+  return one.ino === other.ino && one.dev === other.dev;
+}
+
+/** Whether two paths name one file or folder, by its identity on disk rather than its spelling. */
+export function sameEntry(one: string, other: string): boolean {
+  try {
+    return sameIdentity(statSync(one, { bigint: true }), statSync(other, { bigint: true }));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * [param candidatePath] relative to [param rootPath] with forward slashes, empty for the root
  * itself, or null when it is not underneath it.

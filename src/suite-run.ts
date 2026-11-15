@@ -111,6 +111,7 @@ import {
   windowedSaid,
   writeJson,
 } from './suite-plan.js';
+import { Turns } from './turns.js';
 import { getLocalVersion } from './version.js';
 
 /**
@@ -1342,7 +1343,7 @@ export class MemoryGate {
   private readonly lookMs: number;
   private readonly reservation: ReservationWait | undefined;
   private readonly going = new Set<Admitted>();
-  private turn: Promise<unknown> = Promise.resolve();
+  private readonly turn = new Turns();
   /** Whether the run's first engine is yet to start, which is the only one a reservation holds. */
   private firstPending: boolean;
   /** When the first engine began waiting for a reservation, and whether the run has said so. */
@@ -1386,9 +1387,7 @@ export class MemoryGate {
    * others draw theirs.
    */
   admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-    const admitted = this.turn.then(() => this.room(signal, need));
-    this.turn = admitted.catch(() => undefined);
-    return admitted;
+    return this.turn.run(() => this.room(signal, need));
   }
 
   private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
