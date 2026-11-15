@@ -1141,8 +1141,7 @@ interface Literal {
 }
 
 /** What precedes a string whose path the engine reads against the file's folder. */
-const AGAINST_THE_FILE =
-  /(?:\b(?:preload|extends)\s*\(?\s*|@icon\s*\(\s*|^\s*#include\s+|^\[ext_resource\b.*\spath=)$/;
+const AGAINST_THE_FILE = /(?:\b(?:preload|extends)\s*\(?\s*|@icon\s*\(\s*|^\s*#include\s+)$/;
 /** What precedes a string handed to `ResourceLoader`, which reads a relative path from the root. */
 const FROM_THE_ROOT =
   /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*\w+|\bGD\s*\.\s*Load(?:<[^>()]*>)?|\b(?:change_scene_to_file|ChangeSceneToFile))\s*\(\s*$/;
@@ -1185,8 +1184,8 @@ const PLAIN_STRING = /"((?:[^"\\\n]|\\.)*)"/g;
 const HOLE = String.raw`\{(?:[^{}"]|"(?:[^"\\\n]|\\.)*")*\}`;
 /**
  * What C# and shader code holds that decides where a string starts: a comment, then a raw string, a
- * `$@`, `@$`, `$` or `@` string with its interpolation holes, a plain string and a character. A
- * quote none of them ends is the rest of its line, which is code.
+ * `$@`, `@$`, `$` or `@` string with its interpolation holes, a plain string and a character. Text
+ * none of them matches is code, and a `/*` with no end is code too, never a comment.
  */
 const CODE_TOKEN = new RegExp(
   [
@@ -1197,7 +1196,6 @@ const CODE_TOKEN = new RegExp(
     '@"(?:[^"]|"")*"',
     String.raw`"(?:[^"\\\n]|\\.)*"`,
     String.raw`'(?:[^'\\\n]|\\.)*'`,
-    String.raw`[$@]*(?<rest>"[^\n]*)`,
   ].join('|'),
   'g',
 );
@@ -1221,9 +1219,6 @@ function literalsOfCode(file: ProjectText): Literal[] {
     const end = match.index + token.length;
     if (match.groups?.['comment'] !== undefined) {
       return plainLiterals(file, match.index, end, true);
-    }
-    if (match.groups?.['rest'] !== undefined) {
-      return plainLiterals(file, match.index, end);
     }
     if (token.startsWith("'")) {
       return [];

@@ -89271,10 +89271,11 @@ function testACodeStringThatNamesTwoFilesIsListed(): void {
   try {
     const outcome = movedIn(project, 'x.tres', 'top/x.tres');
     assert.equal(readFileSync(join(project, 'a/s.gd'), 'utf8'), script, 'the string is left as written');
-    const entry = asArray(get(outcome.report, 'leftAlone')).find(
+    const entries = asArray(get(outcome.report, 'leftAlone')).filter(
       (one) => get(one, 'file') === 'res://a/s.gd',
     );
-    assert.ok(entry !== undefined, JSON.stringify(get(outcome.report, 'leftAlone')));
+    assert.equal(entries.length, 1, `one entry, with a reason that is true: ${JSON.stringify(entries)}`);
+    const entry = entries[0];
     assert.match(
       text(get(entry, 'why')),
       /as res:\/\/x\.tres from the project's root and as res:\/\/a\/x\.tres against this file/,
@@ -89488,6 +89489,33 @@ function testARootLoadBesideAMovedNamesakeStays(): void {
     if (printed !== null) {
       assert.match(printed, /PROBE root load: res:\/\/thing\.tres/, 'the engine loads it from the root');
     }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The direct argument of `preload`, `extends` and `@icon` is read against the script, so a file of
+ * the same name at the root is no second reading, and the one beside the script is followed.
+ */
+function testAPreloadAnExtendsAndAnIconAreReadBesideTheScript(): void {
+  const project = kindsProject({
+    'base.gd': 'extends Node\n',
+    'scenes/base.gd': 'extends Node\n',
+    'tool.gd': 'extends Node\n',
+    'scenes/tool.gd': 'extends Node\n',
+    'icon.svg': '<svg/>\n',
+    'scenes/icon.svg': '<svg/>\n',
+    'scenes/a.gd': '@icon("icon.svg")\nextends "base.gd"\n\nconst T := preload("tool.gd")\n',
+  });
+  try {
+    movedIn(project, 'scenes/base.gd', 'stage/base.gd');
+    movedIn(project, 'scenes/tool.gd', 'stage/tool.gd');
+    movedIn(project, 'scenes/icon.svg', 'stage/icon.svg');
+    assert.equal(
+      readFileSync(join(project, 'scenes/a.gd'), 'utf8'),
+      '@icon("../stage/icon.svg")\nextends "../stage/base.gd"\n\nconst T := preload("../stage/tool.gd")\n',
+    );
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -105639,6 +105667,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALoadIsFollowedFromTheProjectRoot,
   testAKindNobodyListedReadsAgainstItsFile,
   testARootLoadBesideAMovedNamesakeStays,
+  testAPreloadAnExtendsAndAnIconAreReadBesideTheScript,
   testExportPresetsAndImportFilesTakeAbsolutePathsOnly,
   testTheCSharpWalkFailsSafe,
   testEachKindOfFileFollowsItsOwnBase,
