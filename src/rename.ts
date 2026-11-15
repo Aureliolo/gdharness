@@ -1173,17 +1173,64 @@ function relativeBase(file: ProjectText, offset: number): Literal['base'] {
     return AGAINST_THE_SCRIPT.test(file.text.slice(Math.max(0, quoteAt - 80), quoteAt)) ? 'file' : 'code';
   }
   if (['cs', 'gdshader', 'gdshaderinc'].includes(extension)) {
-    return baseInUntokenisedCode(line);
+    return AGAINST_THE_SHADER.test(line) ? 'file' : 'code';
   }
   return null;
 }
 
-/** A line comment is prose, which these files have no tokenizer to tell apart from code. */
-function baseInUntokenisedCode(lineBefore: string): Literal['base'] {
-  if (lineBefore.includes('//')) {
-    return null;
+const QUOTED = /"((?:[^"\\\n]|\\.)*)"/y;
+const VERBATIM = /"((?:[^"]|"")*)"/y;
+const CHARACTER = /'(?:[^'\\\n]|\\.)*'/y;
+
+/** The strings of a comment, which are prose: only an absolute path in one is a reference. */
+function literalsInComment(text: string, start: number, end: number): Literal[] {
+  return [...text.slice(start, end).matchAll(/"((?:[^"\\\n]|\\.)*)"/g)].map((match) => ({
+    offset: start + match.index + 1,
+    value: match[1] ?? '',
+    base: null,
+  }));
+}
+
+/**
+ * The strings of a C# or shader file, found by walking it so that a `//` or a `/*` inside a string
+ * does not start a comment, and a quote inside a comment or a character does not start a string.
+ */
+function literalsOfUntokenisedCode(file: ProjectText): Literal[] {
+  const found: Literal[] = [];
+  let at = 0;
+  while (at < file.text.length) {
+    const token = tokenAt(file, at);
+    found.push(...(token?.literals ?? []));
+    at = token === null ? at + 1 : token.end;
   }
-  return AGAINST_THE_SHADER.test(lineBefore) ? 'file' : 'code';
+  return found;
+}
+
+function stickyMatch(pattern: RegExp, text: string, from: number): RegExpExecArray | null {
+  pattern.lastIndex = from;
+  return pattern.exec(text);
+}
+
+/** The comment, string or character starting at [param at], with the strings in it and where it ends. */
+function tokenAt(file: ProjectText, at: number): { end: number; literals: Literal[] } | null {
+  const { text } = file;
+  if (text.startsWith('//', at) || text.startsWith('/*', at)) {
+    const closeAt = text.indexOf(text.startsWith('//', at) ? '\n' : '*/', at + 2);
+    const end = closeAt < 0 ? text.length : closeAt;
+    return { end, literals: literalsInComment(text, at, end) };
+  }
+  const verbatim = text[at] === '@' && text[at + 1] === '"' ? stickyMatch(VERBATIM, text, at + 1) : null;
+  const quoted = verbatim ?? (text[at] === '"' ? stickyMatch(QUOTED, text, at) : null);
+  if (quoted !== null) {
+    const literal = {
+      offset: quoted.index + 1,
+      value: quoted[1] ?? '',
+      base: relativeBase(file, quoted.index + 1),
+    };
+    return { end: quoted.index + quoted[0].length, literals: [literal] };
+  }
+  const character = text[at] === "'" ? stickyMatch(CHARACTER, text, at) : null;
+  return character === null ? null : { end: at + character[0].length, literals: [] };
 }
 
 /** The base of every string in a file named, or of a kind, whatever the string follows. */
@@ -1224,6 +1271,9 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
       });
     }
     return found;
+  }
+  if (/\.(?:cs|gdshader|gdshaderinc)$/.test(file.path)) {
+    return literalsOfUntokenisedCode(file);
   }
   for (const match of file.text.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)) {
     found.push({

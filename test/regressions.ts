@@ -89136,6 +89136,43 @@ function testAShaderIncludeIsFollowedAgainstTheShader(): void {
   }
 }
 
+/**
+ * A comment starts where the language says, not at the first `//` or `#` on a line. A URL or a
+ * colour string before a reference must not hide it, and a string in a comment is not one.
+ */
+function testAStringBeforeAReferenceDoesNotHideIt(): void {
+  const project = kindsProject({
+    'content/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
+    'Top.cs':
+      'class Top {\n  void Run() { var u = "http://x"; GD.Load("content/desk.tscn"); }\n  void Two() { var v = @"a ""//"" b"; GD.Load("content/desk.tscn"); } // "content/desk.tscn"\n  /* "content/desk.tscn" */ void Three() { GD.Load("content/desk.tscn"); char c = \'"\'; GD.Load("content/desk.tscn"); }\n}\n',
+    'fx/a.gdshader':
+      'shader_type canvas_item;\nvoid fragment() { load_it("http://x", "content/desk.tscn"); } // "content/desk.tscn"\n',
+    'top.gd':
+      'extends Node\n\nfunc _ready() -> void:\n\tvar c := "#ff0000"; load("content/desk.tscn")\n\t# "content/desk.tscn"\n',
+  });
+  const read = (path: string): string => readFileSync(join(project, path), 'utf8');
+  try {
+    movedIn(project, 'content/desk.tscn', 'stuff/desk.tscn');
+    assert.equal(
+      read('Top.cs'),
+      'class Top {\n  void Run() { var u = "http://x"; GD.Load("stuff/desk.tscn"); }\n  void Two() { var v = @"a ""//"" b"; GD.Load("stuff/desk.tscn"); } // "content/desk.tscn"\n  /* "content/desk.tscn" */ void Three() { GD.Load("stuff/desk.tscn"); char c = \'"\'; GD.Load("stuff/desk.tscn"); }\n}\n',
+      'every call is followed, and a string in a comment is not',
+    );
+    assert.equal(
+      read('fx/a.gdshader'),
+      'shader_type canvas_item;\nvoid fragment() { load_it("http://x", "stuff/desk.tscn"); } // "content/desk.tscn"\n',
+      'a shader string after a URL is followed',
+    );
+    assert.equal(
+      read('top.gd'),
+      'extends Node\n\nfunc _ready() -> void:\n\tvar c := "#ff0000"; load("stuff/desk.tscn")\n\t# "content/desk.tscn"\n',
+      'a script string after a colour is followed',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /** A plugin's script and an extension's libraries and icons are joined to the file's own folder. */
 function testAPluginAndAnExtensionFollowTheirFolder(): void {
   const project = kindsProject({
@@ -105363,6 +105400,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALoadIsFollowedFromTheProjectRoot,
   testEachKindOfFileFollowsItsOwnBase,
   testAShaderIncludeIsFollowedAgainstTheShader,
+  testAStringBeforeAReferenceDoesNotHideIt,
   testAPluginAndAnExtensionFollowTheirFolder,
   testAConstantForAPreloadIsFollowedAgainstTheScript,
   testACodeStringThatNamesTwoMovedFilesIsListed,
