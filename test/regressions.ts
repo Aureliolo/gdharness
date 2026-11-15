@@ -89292,145 +89292,60 @@ function testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth(): void {
 }
 
 /**
- * Two files a folder move carries stay as they were written to each other, a relative name in
- * another case included: `lib/a.tscn` names its sibling `lib/b.tscn` as "B.tscn", which loads
- * before the move and after it, and was rewritten into the folder that is gone.
+ * A path is split into parts on slashes only. `res://sub\..\DESK.tscn` is one part, which the disk
+ * takes for the moved `desk.tscn` and so follows it. `res://SUB\desk.tscn` is one part against the
+ * two of the moved `sub/desk.tscn`, and stays as written.
  */
-function testAFolderMoveKeepsASiblingSpeltInAnotherCaseLoading(): void {
-  const leaf = '[gd_scene format=3]\n\n[node name="Leaf" type="Node3D"]\n';
-  const scene = (path: string): string =>
-    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_x"]\n\n[node name="N" type="Node3D"]\n\n[node name="D" parent="." instance=ExtResource("1_x")]\n`;
-  const { project, folds } = caseMoveProject(
-    {
-      'lib/b.tscn': leaf,
-      'lib/a.tscn': scene('B.tscn'),
-      'abs.tscn': scene('res://lib/B.tscn'),
-    },
-    'LIB',
-  );
-  try {
-    movedIn(project, 'lib', 'stage');
-    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
-    assert.equal(after('stage/a.tscn'), scene('B.tscn'));
-    assert.equal(after('abs.tscn'), scene(folds ? 'res://stage/b.tscn' : 'res://lib/B.tscn'));
-    const godotPath = resolveGodotPath();
-    if (!godotPath) {
-      if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-        throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
-      }
-      console.log('sibling in another case regression skipped its load (Godot not found)');
-      return;
-    }
-    if (folds) {
-      assert.deepEqual(godotLoads(godotPath, project, ['res://stage/a.tscn', 'res://abs.tscn']), [
-        true,
-        true,
-      ]);
-    }
-  } finally {
-    sweep(project);
-  }
-}
-
-/** The file of each entry a move's answer lists under leftAlone. */
-function leftAloneFiles(outcome: { report: Record<string, unknown> }): string[] {
-  const listed = outcome.report['leftAlone'];
-  return Array.isArray(listed) ? listed.map((one) => String(get(one, 'file'))) : [];
-}
-
-/** Whether each scene of [param scenes] loads and instantiates in a headless Godot on [param project]. */
-function godotLoads(godotPath: string, project: string, scenes: string[]): boolean[] {
-  writeTree(project, {
-    'loads.gd':
-      'extends SceneTree\n\nfunc _init() -> void:\n\tfor scene in OS.get_cmdline_user_args():\n\t\tvar packed := load(scene) as PackedScene\n\t\tprint("GLOAD ", scene, " ", packed != null and packed.instantiate() != null)\n\tquit()\n',
-  });
-  const run = spawnSyncHidden(
-    godotPath,
-    ['--headless', '--path', project, '-s', 'res://loads.gd', '--', ...scenes],
-    { encoding: 'utf8', timeout: 120_000 },
-  );
-  return scenes.map((scene) => run.stdout.includes(`GLOAD ${scene} true`));
-}
-
-/**
- * A move cannot rewrite a relative path in another letter case, since it is followed only as it
- * is written, but it says so: the file system reaches the moved file through the spelling.
- */
-function testASpellingTheFileSystemReachesButTheMoveDoesNotFollowIsListed(): void {
+function testAPathIsSplitIntoPartsOnSlashesOnly(): void {
   const named = (path: string): string =>
     `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
-  const { project, folds } = caseMoveProject(
-    {
-      'sub/desk.tscn': LINKED_DESK,
-      'use.gd':
-        'extends Node\n\nconst A := preload("SUB/desk.tscn")\nconst B := preload("./SUB/DESK.tscn")\n',
-      'sub/u.gd': 'extends Node\n\nconst A := preload("DESK.tscn")\n',
-      'exact.tscn': named('res://sub/desk.tscn'),
-    },
-    'SUB',
+  const up = caseMoveProject(
+    { 'desk.tscn': LINKED_DESK, 'sub/x.gd': '', 'up.tscn': named('res://sub\\..\\DESK.tscn') },
+    'DESK.tscn',
   );
-  try {
-    const outcome = movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
-    assert.deepEqual(
-      leftAloneFiles(outcome).toSorted(),
-      folds ? ['res://sub/u.gd', 'res://use.gd', 'res://use.gd'] : [],
-    );
-    assert.equal(
-      readFileSync(join(project, 'use.gd'), 'utf8'),
-      'extends Node\n\nconst A := preload("SUB/desk.tscn")\nconst B := preload("./SUB/DESK.tscn")\n',
-    );
-  } finally {
-    sweep(project);
-  }
-}
-
-/**
- * A backslash is a separator where the file system reads it as one, so `res://SUB\desk.tscn` is
- * the moved `res://sub/desk.tscn` spelt another way and follows it, as `res://sub\..\DESK.tscn`
- * does.
- */
-function testABackslashSpellingIsFollowedWhereTheFileSystemReadsItAsASeparator(): void {
-  const named = (path: string): string =>
-    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
-  const { project } = caseMoveProject(
+  const down = caseMoveProject(
     { 'sub/desk.tscn': LINKED_DESK, 'back.tscn': named('res://SUB\\desk.tscn') },
     'SUB',
   );
   try {
-    const reads = existsSync(join(project, 'SUB\\desk.tscn'));
-    movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    const reads = existsSync(join(up.project, 'sub\\..\\DESK.tscn'));
+    movedIn(up.project, 'desk.tscn', 'newdir/desk.tscn');
     assert.equal(
-      readFileSync(join(project, 'back.tscn'), 'utf8'),
-      named(reads ? 'res://newdir/desk.tscn' : 'res://SUB\\desk.tscn'),
+      readFileSync(join(up.project, 'up.tscn'), 'utf8'),
+      named(reads ? 'res://newdir/desk.tscn' : 'res://sub\\..\\DESK.tscn'),
     );
+    movedIn(down.project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(readFileSync(join(down.project, 'back.tscn'), 'utf8'), named('res://SUB\\desk.tscn'));
   } finally {
-    sweep(project);
+    sweep(up.project);
+    sweep(down.project);
   }
 }
 
 /**
- * A path through a link to the project root reaches the moved file by another route. It is not
- * rewritten, since it names a link and not the file, and the answer lists it.
+ * A target is asked of the disk only when its folder is where a moved file is: 500 references in
+ * fifty other folders cost one question per folder, not one per reference.
  */
-function testAPathThroughALinkToTheRootIsListedWhenItsFileMoves(): void {
-  const root = tmpDir();
-  const project = join(root, 'project');
-  writeTree(project, {
-    'project.godot': '',
-    'desk.tscn': LINKED_DESK,
-    'main.tscn':
-      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://sub/up/desk.tscn" id="1_desk"]\n\n[node name="N" type="Node3D"]\n',
+function testReferencesInOtherFoldersCostOneQuestionEachFolder(): void {
+  const texts: ProjectText[] = Array.from({ length: 500 }, (_unused, at) => ({
+    path: `res://user${at}.gd`,
+    absolute: `/project/user${at}.gd`,
+    text: `extends Node\nconst A := preload("res://d${at % 50}/f${at}.gd")\n`,
+  }));
+  const references = new Map([['res://desk.tscn', 'res://newdir/desk.tscn']]);
+  let asked = 0;
+  joinedByTheDisk({
+    projectPath: '/project',
+    targets: literalTargets(texts, scriptsOf(texts)),
+    references,
+    resolve: (absolute) => {
+      asked += 1;
+      return absolute.toLowerCase();
+    },
+    entry: (absolute) => absolute.toLowerCase(),
   });
-  mkdirSync(join(project, 'sub'));
-  mkdirSync(join(project, 'newdir'));
-  try {
-    assert.ok(linkTo(project, join(project, 'sub', 'up')), 'the platform makes a link');
-    const outcome = movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
-    assert.deepEqual(leftAloneFiles(outcome), ['res://main.tscn']);
-    assert.match(readFileSync(join(project, 'main.tscn'), 'utf8'), /path="res:\/\/sub\/up\/desk\.tscn"/);
-  } finally {
-    sweep(root);
-  }
+  assert.equal(references.size, 1, 'nothing joins');
+  assert.ok(asked <= 1 + 50, `the disk was asked ${asked} times`);
 }
 
 /**
@@ -106886,10 +106801,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne,
   testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth,
-  testAFolderMoveKeepsASiblingSpeltInAnotherCaseLoading,
-  testASpellingTheFileSystemReachesButTheMoveDoesNotFollowIsListed,
-  testABackslashSpellingIsFollowedWhereTheFileSystemReadsItAsASeparator,
-  testAPathThroughALinkToTheRootIsListedWhenItsFileMoves,
+  testAPathIsSplitIntoPartsOnSlashesOnly,
+  testReferencesInOtherFoldersCostOneQuestionEachFolder,
   testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
   testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins,

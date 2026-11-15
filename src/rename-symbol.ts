@@ -524,7 +524,7 @@ function renamed(
   let plan = step.plan;
   if (moveTo !== null) {
     const moves = new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo]));
-    const joins = joinedByTheDisk({
+    const joined = joinedByTheDisk({
       projectPath,
       targets: literalTargets(texts, scripts),
       references: moves,
@@ -536,7 +536,7 @@ function renamed(
         texts,
         scripts,
         moves,
-        joins,
+        joined,
         named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },
