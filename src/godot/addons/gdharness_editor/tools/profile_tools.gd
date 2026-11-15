@@ -178,9 +178,15 @@ func _reset() -> void:
 func _active_session() -> int:
 	if _sessions == null:
 		return -1
-	var all: Array[EditorDebuggerSession] = _sessions.get_sessions()
+	# Untyped, since the engine builds the list without a type. A typed Array here fails at runtime,
+	# and the call would answer 0, a session, with none active.
+	var all: Array = _sessions.get_sessions()
 	for index: int in all.size():
-		if all[index].is_active():
+		var listed: Variant = all[index]
+		if not listed is EditorDebuggerSession:
+			continue
+		var session: EditorDebuggerSession = listed
+		if session.is_active():
 			return index
 	return -1
 

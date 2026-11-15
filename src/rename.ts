@@ -247,6 +247,25 @@ export class ClassGraph {
     return best;
   }
 
+  /** The inner class [param name] that [param id] declares, or null. */
+  innerOf(id: ClassId, name: string): ClassId | null {
+    const node = this.nodes.get(id);
+    const inner = node === undefined ? null : classId(node.file, [...node.inner, name]);
+    return inner !== null && this.nodes.has(inner) ? inner : null;
+  }
+
+  /** The class [param id] is declared inside, or null for a script's own class. */
+  outerOf(id: ClassId): ClassId | null {
+    const node = this.nodes.get(id);
+    return node === undefined || node.inner.length === 0 ? null : classId(node.file, node.inner.slice(0, -1));
+  }
+
+  /** The script's class at [param written], a path as [param from]'s script spells it, or null. */
+  scriptAt(written: string, from: ClassId): ClassId | null {
+    const id = classId(resolvedPath(written, fileOf(from)), []);
+    return this.nodes.has(id) ? id : null;
+  }
+
   /** What [param id] declares by [param name], or undefined. */
   declaration(id: ClassId, name: string): { kind: DeclarationKind; offset: number } | undefined {
     const found = this.nodes.get(id)?.body.declarations.find((one) => one.name === name);

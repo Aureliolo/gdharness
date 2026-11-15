@@ -2,6 +2,7 @@ extends RefCounted
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
+const GdhCallErrors = preload("call_errors.gd")
 const GdhChanges = preload("runtime_changes.gd")
 const GdhDeclared = preload("declared_values.gd")
 const GdhPaths = preload("runtime_paths.gd")
@@ -312,13 +313,18 @@ func _watch_property(node_path: String, property: String) -> Dictionary:
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
-	var watched: Dictionary = _watched(node, node_path, property)
+	var watched: Dictionary = _watched(node, node_path, property, GdhCallErrors.bound())
 	if watched.has("message"):
 		return watched
 	var trace: GdhTrace = GdhTrace.new(node, node_path, property)
 	trace.see(0, 0, 0.0, watched["value"], _values)
 	while _traces.size() >= MOST_WATCHES:
-		var _gone: bool = _traces.erase(_traces.keys().min())
+		var oldest: Variant = _traces.keys().min()
+		# Its recording ends with it: nobody can collect it now, and a reading made after would
+		# be an error shown in no answer.
+		var evicted: GdhTrace = _traces[oldest]
+		evicted.collected = true
+		var _gone: bool = _traces.erase(oldest)
 	var id: int = _next_watch
 	_next_watch += 1
 	_traces[id] = trace
@@ -361,7 +367,7 @@ func _record(trace: GdhTrace) -> void:
 				"%s was freed %d frames after the watch was armed" % [trace.node_path, frame]
 			)
 			return
-		var watched: Dictionary = _watched(node, trace.node_path, trace.property)
+		var watched: Dictionary = _watched(node, trace.node_path, trace.property, trace.errors)
 		if watched.has("message"):
 			trace.ended = "%d frames after the watch was armed: %s" % [frame, watched["message"]]
 			return
@@ -447,12 +453,16 @@ func recorded(params: Dictionary) -> Dictionary:
 		)
 	if not trace.ended.is_empty():
 		answer["ended"] = trace.ended
+	GdhCallErrors.attach(answer, trace.errors)
 	return answer
 
 
 ## Waits until a property reads as the value given, or until something under the path says what
 ## was given, or the time runs out, and answers with what it read last either way.
 func wait_until(params: Dictionary) -> Dictionary:
+	# Every look of the wait adds to the request's collector, which another request may replace
+	# as the bound one while the wait is suspended.
+	var request_errors: GdhCallErrors.GdhCollected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var says: String = str(params.get("says", ""))
@@ -481,7 +491,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# met" after the whole timeout, which is what a game that never reached the state answers too,
 	# so a mistyped name and a condition that did not happen read the same. The property read
 	# refuses that typo in one call, and two tools disagreeing about it is the fault.
-	var watched: Dictionary = _watched(node, node_path, property)
+	var watched: Dictionary = _watched(node, node_path, property, request_errors)
 	if watched.has("message"):
 		return watched
 
@@ -515,7 +525,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		frames += 1
 		if not is_instance_valid(node):
 			return { "type": "error", "message": "%s was freed while waiting" % node_path }
-		watched = _watched(node, node_path, property)
+		watched = _watched(node, node_path, property, request_errors)
 		if watched.has("message"):
 			return watched
 		current = watched["value"]
@@ -664,6 +674,7 @@ static func _property_wait_unasked(property: String, params: Dictionary) -> Stri
 func _wait_in_order(
 	node: Node, params: Dictionary, current: Variant, timeout_ms: int
 ) -> Dictionary:
+	var request_errors: GdhCallErrors.GdhCollected = GdhCallErrors.bound()
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var compare: String = str(params.get("compare", ""))
@@ -695,7 +706,7 @@ func _wait_in_order(
 		frames += 1
 		if not is_instance_valid(node):
 			return { "type": "error", "message": "%s was freed while waiting" % node_path }
-		var watched: Dictionary = _watched(node, node_path, property)
+		var watched: Dictionary = _watched(node, node_path, property, request_errors)
 		if watched.has("message"):
 			return watched
 		current = watched["value"]
@@ -844,7 +855,17 @@ static func _enum_by_name(watched: Dictionary, sent: Variant, node_path: String)
 ## node every time rather than read off the holder found at the start, because a game replaces what
 ## its nodes hold: a run object built afresh each day would leave a wait watching the day before. A
 ## step that has gone in the meantime ends the wait with what went.
-static func _watched(node: Node, node_path: String, property: String) -> Dictionary:
+static func _watched(
+	node: Node, node_path: String, property: String, errors: GdhCallErrors.GdhCollected
+) -> Dictionary:
+	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(errors)
+	var looked: Dictionary = _look(node, node_path, property)
+	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
+	return looked
+
+
+## One look at [param property] of [param node], which [method _watched] reads the errors of.
+static func _look(node: Node, node_path: String, property: String) -> Dictionary:
 	var reached: Dictionary = GdhPaths.walk_to(node, node_path, property)
 	if reached.has("message"):
 		return reached
@@ -1019,6 +1040,8 @@ class GdhTrace:
 	var elapsed_ms: int = 0
 	var ended: String = ""
 	var collected: bool = false
+	## The errors the watch's readings make, which the recording answers with.
+	var errors: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
 	var _last: Variant = null
 	var _seen: bool = false
 

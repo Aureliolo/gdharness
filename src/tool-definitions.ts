@@ -1956,13 +1956,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          "start: with profile: true, time the calls scripts make through engine methods (callv, emit_signal, any Node method). Each function then carries engineMs, and its selfMs leaves those calls out. Without it the profiler does not time them: they stay in the caller's selfMs, no row has engineMs and scriptMs can count that work twice. Refused without profile: true. Risk: on Linux and macOS a game whose script calls free() on an object through an untyped or dynamic call can crash, an engine fault in every Godot version, so leave it off unless the split is needed. Default false.",
+          "start: with profile: true, time the calls scripts make through engine methods (callv, emit_signal, any Node method). Each function then carries engineMs, and its selfMs leaves those calls out. Without it the profiler does not time them: they stay in the caller's selfMs, no row has engineMs and scriptMs can count that work twice. Refused without profile: true. On every platform and in every Godot version to date, the engine's native-call timing crashes the game or corrupts strings when any script runs on a thread other than the main one: through WorkerThreadPool or Thread, a node processing on a sub-thread, or threaded resource loading. A Godot 4.7.2 game running script in six WorkerThreadPool tasks crashed in 20 runs of 20. A script that calls free() on an object through an untyped or dynamic call has the engine read the freed object, which crashes games on Linux and macOS. profile: true alone is safe in both cases. Default false.",
       },
       callersOf: {
         type: 'string',
         ops: ['profile'],
         description:
-          "profile: also answer, under callers, where the project's scripts name this function in code: its name, or Class.name for the functions of one class. Each place has its script, line, the named function it is written in (within), whether the function is called there or passed on as a Callable (called), and the profile's calls, self and total milliseconds for the function it is in, those taking the most time first, forty at most. Found by name in the source, since the engine's profiler records nothing about who made a call, so a method of the same name on another class is listed too, except, when Class.name was asked, one called through another class of the project by name or through a parameter, local or class variable declared as one. A use written bare or through self or super is left out too where the engine would send it to another class's own function of that name, read off the class it is written in. A call made through a string is not listed. A parameter, local or class variable of the same name is not the function and is not listed. A property's get or set block, which the profile names Class.@name_getter or Class.@name_setter, is asked about by that name or by the property's, and Class.name is read as a property when Class declares name as a variable: the places are where the property is named, each saying instead of called whether it writes the property (access write), which runs the set block, or reads it (access read), which runs the get block, and the rows are both blocks'. Inside the property's own blocks its name is the value stored, which the engine reads and writes without running them, so those lines are not places.",
+          "profile: also answer, under callers, where the project's scripts name this function in code: its name, or Class.name for the functions of one class. Each place has its script, line, the named function it is written in (within), whether the function is called there or passed on as a Callable (called), and the profile's calls, self and total milliseconds for the function it is in, those taking the most time first, forty at most. Found by name in the source, since the engine's profiler records nothing about who made a call, so a method of the same name on another class is listed too, except, when Class.name was asked, a use the engine would send to another class's own function of that name. That is read off the class the use is written in for a bare, self or super use, and otherwise off the class named before the dot or the class a class variable is typed as, by an annotation or by a Class.new() that ends its declaration. A receiver named like a local anywhere in its script is kept. A class named runs what it resolves the name to, and a variable's object may be of any class below the one it is typed as. A receiver with no type read this way, such as an untyped variable, one cast with as or a call's result, is kept. Where Class or its own function of that name is not found, only uses through a project class unrelated to Class are left out. A call made through a string is not listed. A parameter, local or class variable of the same name is not the function and is not listed. A property's get or set block, which the profile names Class.@name_getter or Class.@name_setter, is asked about by that name or by the property's, and Class.name is read as a property when Class declares name as a variable: the places are where the property is named, each saying instead of called whether it writes the property (access write), which runs the set block, or reads it (access read), which runs the get block, and the rows are both blocks'. Inside the property's own blocks its name is the value stored, which the engine reads and writes without running them, so those lines are not places.",
       },
       mark: {
         type: 'boolean',
@@ -2986,6 +2986,38 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       output: { effect: 'read', summary: 'console output captured through the debug adapter', requires: [] },
     },
     defaultOperation: 'stack',
+  },
+  {
+    name: 'debug_objects',
+    title: 'Object snapshots',
+    description:
+      "Counts the objects the running game holds by class, from the engine's own object snapshot, and compares two snapshots to show what an action kept alive. Each snapshot is kept under the id its answer names, until this server ends. A scripted object is counted under its script's class_name, or under the script's path when it declares none, with its engine class beside it. Objects of inner classes are counted under their native class, as the engine's profiler counts them, and note says how many. kind says whether a class is RefCounted, a Node or neither, and refCounted and nodes total them. Only for a game this server started, since the editor's ObjectDB Profiler takes every snapshot a game the editor plays sends. editor_run start with any of args, engineArgs, env or savesIn starts one, as does any start with no editor serving the project. The engine has the snapshot only when built with debug features, as the editor and debug export templates are.",
+    parameters: {
+      before: {
+        type: 'string',
+        ops: ['diff'],
+        description: 'diff: the id of the earlier snapshot, such as s1.',
+      },
+      after: {
+        type: 'string',
+        ops: ['diff'],
+        description: 'diff: the id of the later snapshot. Default a snapshot taken now, kept and named.',
+      },
+    },
+    requires: [],
+    operations: {
+      snapshot: {
+        effect: 'read',
+        summary: 'take a snapshot, keep it and answer its counts by class, most objects first',
+        requires: [],
+      },
+      diff: {
+        effect: 'read',
+        summary:
+          'each class whose count changed between two snapshots of the same run, with before, after and change, biggest change first. unchangedClasses counts the rest',
+        requires: ['before'],
+      },
+    },
   },
 ];
 

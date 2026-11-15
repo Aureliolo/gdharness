@@ -3,9 +3,12 @@ extends RefCounted
 ## run off the game the node keeps. Every op that reads, writes, calls or waits on a game's state
 ## walks the same way, so the walk and what it says when a step is not there live in one place.
 
+const GdhCallErrors = preload("call_errors.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhValues = preload("runtime_values.gd")
+## What the server is told raised the errors a read makes, as it is for a debugger call.
+const READ_MARK: String = "path read"
 ## The calls a path makes on a list or a map: those that take no arguments and change nothing.
 ##
 ## Named rather than asked of the engine, because asking about a method a list does not have logs an
@@ -554,7 +557,7 @@ static func packed(value: Variant) -> bool:
 ## exactly like a game that never reached the state. The read refuses a mistyped name in one call
 ## and says so, and the two tools disagreeing about one typo is worth more than the duplication.
 static func nothing_under(holder: Variant, named: String, called: String) -> String:
-	return "" if can_read(holder, named) else nothing_there(holder, named, called)
+	return "" if can_read(holder, named, false) else nothing_there(holder, named, called)
 
 
 ## Whether [param named] is something [param holder] has.
@@ -563,7 +566,10 @@ static func nothing_under(holder: Variant, named: String, called: String) -> Str
 ## is a list and an in-tray is a map, and a path that could not step into either stopped at the
 ## first one. An index reads the way a property does, and a negative one counts from the end the
 ## way GDScript's own does, so reading the last of something does not mean asking how many first.
-static func can_read(holder: Variant, named: String) -> bool:
+##
+## [param counting_children] says a child step past the last child is a step that is not there.
+## A wait passes false: the child it waits for may not have come yet.
+static func can_read(holder: Variant, named: String, counting_children: bool = true) -> bool:
 	var method: String = method_of(named)
 	var given: Dictionary = arguments_of(named) if not method.is_empty() else { "args": [] }
 	if given.has("message"):
@@ -596,9 +602,32 @@ static func can_read(holder: Variant, named: String) -> bool:
 	if holder is Object:
 		var object: Object = holder
 		if not method.is_empty():
-			return call_refused(object, method, "", args.size()).is_empty()
+			return (
+				call_refused(object, method, "", args.size()).is_empty()
+				and (not counting_children or _child_gone(object, method, args).is_empty())
+			)
 		return _has_property(object, named) or not constant_of(object, named).is_empty()
 	return false
+
+
+## Why the child a step asks a node for is not there, or "" when it is or the step asks for none.
+##
+## Checked before the call, because the engine reports an error for an index past the children
+## and that error would land in the game's output. A negative index counts from the end.
+static func _child_gone(object: Object, method: String, args: Array) -> String:
+	if method != "get_child" or not object is Node or args.is_empty() or args.size() > 2:
+		return ""
+	# Only a call whose result is certain is answered here. The engine converts other kinds of
+	# second argument, or refuses them, and says which.
+	if not args[0] is int or (args.size() == 2 and not args[1] is bool):
+		return ""
+	var node: Node = object
+	var internal: bool = args.size() == 2 and args[1]
+	var count: int = node.get_child_count(internal)
+	var index: int = args[0]
+	if index >= -count and index < count:
+		return ""
+	return "has %d %s" % [count, "child" if count == 1 else "children"]
 
 
 ## The key of [param map] a step names, in a list of one, or an empty list when it names none.
@@ -970,8 +999,38 @@ static func read_under(holder: Variant, named: String) -> Variant:
 	var method: String = method_of(named)
 	if not method.is_empty():
 		var args: Array = arguments_of(named)["args"]
-		return object.callv(method, args)
-	return constant_of(object, named)[0] if is_constant(object, named) else object.get(named)
+		return _called_reading(object, method, args)
+	if is_constant(object, named):
+		return constant_of(object, named)[0]
+	var caught: GdhCallErrors = GdhCallErrors.new()
+	OS.add_logger(caught)
+	var got: Variant = object.get(named)
+	_keep_reports(caught)
+	return got
+
+
+## The answer of [param method] on [param object], with what the engine reported while it ran kept
+## for the request's answer and announced to the server, so a read's error is the read's and not
+## the game's. A child past the last one answers null without asking the engine.
+static func _called_reading(object: Object, method: String, args: Array) -> Variant:
+	if not _child_gone(object, method, args).is_empty():
+		return null
+	var caught: GdhCallErrors = GdhCallErrors.new()
+	OS.add_logger(caught)
+	var answer: Variant = object.callv(method, args)
+	_keep_reports(caught)
+	return answer
+
+
+## Ends the listening of [param caught] and keeps and announces what it heard.
+static func _keep_reports(caught: GdhCallErrors) -> void:
+	OS.remove_logger(caught)
+	var reported: Array[String] = caught.errors()
+	if reported.is_empty():
+		return
+	caught.announce(READ_MARK)
+	for text: String in reported:
+		GdhCallErrors.note(text)
 
 
 ## Where [param named] lands in a list of [param size], or -1 for a step that is not in it.
@@ -1041,8 +1100,21 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
-		return call_refused(object, method, called_as, given_count)
+		return _method_step_refused(object, named, called_as, given_args)
 	return _no_property(object, named, called_as)
+
+
+## Why the method step [param named] cannot be taken on [param object], said about [param
+## called_as].
+static func _method_step_refused(
+	object: Object, named: String, called_as: String, given_args: Array
+) -> String:
+	var method: String = method_of(named)
+	var refused: String = call_refused(object, method, called_as, given_args.size())
+	if not refused.is_empty():
+		return refused
+	var gone: String = _child_gone(object, method, given_args)
+	return "" if gone.is_empty() else "%s %s, so it has no %s" % [called_as, gone, named]
 
 
 ## Why [param object] has no property [param named], with the method most likely meant.
