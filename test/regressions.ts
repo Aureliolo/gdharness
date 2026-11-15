@@ -96256,6 +96256,161 @@ async function testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName(): Promise<v
 }
 
 /**
+ * Runs [body] on a project holding desk.tscn and [files], told whether the file system there takes
+ * a path in another case for the file, as NTFS and a default APFS volume do and Linux does not.
+ * Where [apart] is given, the case skips unless the file system holds each of those names as its
+ * own file.
+ */
+async function withCaseFolding(
+  label: string,
+  files: Record<string, string>,
+  body: (at: LinkedProject, folds: boolean) => Promise<void>,
+  apart: readonly string[] = [],
+): Promise<void> {
+  let folds = false;
+  await withLinksOut(
+    label,
+    { files },
+    (real) => {
+      folds = existsSync(join(real, 'DESK.tscn'));
+      const held = readdirSync(real).filter((file) => apart.includes(file));
+      return held.length === apart.length;
+    },
+    async (at) => {
+      await body(at, folds);
+    },
+  );
+}
+
+/** The rename of the Top of [scene] to Surface, a scene of the case-folding cases. */
+async function renameTopIn(at: LinkedProject, scene: string): Promise<unknown> {
+  return await at.call('scene_node', {
+    op: 'set',
+    scenePath: scene,
+    nodePath: 'Top',
+    properties: { name: 'Surface' },
+  });
+}
+
+/**
+ * A scene naming desk.tscn as res://DESK.tscn, by an instance and by an inheritance, is followed
+ * where the file system takes that for desk.tscn, and its entries are moved with a rename and a
+ * reparent. Where the file system keeps the two apart, as Linux does, it is not followed.
+ */
+async function testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt(): Promise<void> {
+  const heir =
+    deskHeir('Heir').replace('res://desk.tscn', 'res://DESK.tscn') +
+    '\n[node name="Lamp" parent="Top"]\nvisible = false\n';
+  await withCaseFolding(
+    'a path in another case',
+    { 'room.tscn': deskKin('Room', 'res://DESK.tscn'), 'heir.tscn': heir },
+    async (at, folds) => {
+      if (process.platform === 'win32') {
+        assert.ok(folds, 'NTFS takes DESK.tscn for desk.tscn');
+      }
+      if (process.platform === 'linux') {
+        assert.ok(!folds, 'Linux keeps DESK.tscn and desk.tscn apart');
+      }
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(
+        followedOf(renamed),
+        folds ? ['res://heir.tscn', 'res://room.tscn'] : [],
+        JSON.stringify(renamed),
+      );
+      assert.equal(lampParent(at.fileOf('room.tscn')), folds ? 'Desk/Surface' : 'Desk/Top');
+      assert.equal(lampParent(at.fileOf('heir.tscn')), folds ? 'Surface' : 'Top');
+      assert.ok(at.fileOf('room.tscn').includes('path="res://DESK.tscn"'), at.fileOf('room.tscn'));
+      if (!folds) {
+        return;
+      }
+      const moved = await at.call('scene_node', {
+        op: 'reparent',
+        scenePath: 'desk.tscn',
+        nodePath: 'Surface/Lamp',
+        newParentPath: 'Leg',
+      });
+      assert.deepEqual(followedOf(moved), ['res://heir.tscn', 'res://room.tscn'], JSON.stringify(moved));
+      assert.equal(lampParent(at.fileOf('room.tscn')), 'Desk/Leg');
+      assert.equal(lampParent(at.fileOf('heir.tscn')), 'Leg');
+    },
+  );
+}
+
+/** A folder named in another case than the disk holds it is taken for that folder as a file is. */
+async function testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt(): Promise<void> {
+  await withCaseFolding(
+    'a folder in another case',
+    {
+      'scenes/desk.tscn': LINKED_DESK,
+      'room.tscn': deskKin('Room', 'res://Scenes/desk.tscn'),
+    },
+    async (at, folds) => {
+      const renamed = await renameTopIn(at, 'scenes/desk.tscn');
+      assert.deepEqual(followedOf(renamed), folds ? ['res://room.tscn'] : [], JSON.stringify(renamed));
+      assert.equal(lampParent(at.fileOf('room.tscn')), folds ? 'Desk/Surface' : 'Desk/Top');
+    },
+  );
+}
+
+/** A path in another case that names no file at all matches nothing, whichever file system. */
+async function testAMissingFileInAnotherCaseMatchesNothing(): Promise<void> {
+  const room = deskKin('Room', 'res://DESKS.tscn');
+  await withCaseFolding('a missing file in another case', { 'room.tscn': room }, async (at) => {
+    const renamed = await renameTheTop(at);
+    assert.deepEqual(followedOf(renamed), [], JSON.stringify(renamed));
+    assert.equal(get(renamed, 'notFollowed'), undefined, JSON.stringify(renamed));
+    assert.equal(at.fileOf('room.tscn'), room);
+  });
+}
+
+/**
+ * A spelling the file system holds apart from the one asked is left alone: s and the long s are two
+ * files, and res://S.tscn is the first, which inherits desk.tscn, never the second, which does not.
+ * Where the platform keeps fewer files than were written, it skips.
+ */
+async function testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks(): Promise<void> {
+  const unrelated = '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n';
+  await withCaseFolding(
+    'godot joins what the disk keeps apart',
+    {
+      's.tscn': deskHeir('S'),
+      'ſ.tscn': unrelated,
+      'room.tscn': deskKin('Room', 'res://S.tscn'),
+    },
+    async (at, folds) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(followedOf(renamed), folds ? ['res://room.tscn'] : [], JSON.stringify(renamed));
+      assert.equal(lampParent(at.fileOf('room.tscn')), folds ? 'Desk/Surface' : 'Desk/Top');
+      assert.equal(at.fileOf('ſ.tscn'), unrelated);
+    },
+    ['s.tscn', 'ſ.tscn'],
+  );
+}
+
+/**
+ * A scene naming desk.tscn by its uid beside a path in another case is followed on every file
+ * system, since the engine loads a uid the project knows before the path written beside it.
+ */
+async function testAUidBesideAPathInAnotherCaseIsFollowedEverywhere(): Promise<void> {
+  const room = deskKin('Room').replace(
+    'type="PackedScene" path="res://desk.tscn"',
+    'type="PackedScene" uid="uid://cdeskcase01" path="res://DESK.tscn"',
+  );
+  await withCaseFolding(
+    'a uid beside a path in another case',
+    {
+      'desk.tscn': LINKED_DESK.replace('format=3', 'format=3 uid="uid://cdeskcase01"'),
+      'room.tscn': room,
+    },
+    async (at) => {
+      const renamed = await renameTheTop(at);
+      assert.deepEqual(followedOf(renamed), ['res://room.tscn'], JSON.stringify(renamed));
+      assert.equal(lampParent(at.fileOf('room.tscn')), 'Desk/Surface');
+    },
+  );
+}
+
+/**
  * An edit asked through a file link inside the project writes the file the link leads to and
  * leaves the link a link, so the scenes naming either path are followed.
  */
@@ -103834,6 +103989,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFilesWhoseNamesOnlyUpperCasingJoinsAreEachFollowed,
   testAProjectGivenInAnotherCaseFollowsALinkedSceneOnce,
   testAnEditAskedInAnotherCaseIsRefusedAndKeepsTheName,
+  testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
+  testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
+  testAMissingFileInAnotherCaseMatchesNothing,
+  testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks,
+  testAUidBesideAPathInAnotherCaseIsFollowedEverywhere,
   testAProjectGivenByItsShortNameFollowsLinkedScenesOnce,
   testAnEditThroughAFileLinkKeepsTheLinkAndFollowsBothPaths,
   testAFileLinkSpeltByTheRealFolderKeepsItsLinkThroughAJunction,

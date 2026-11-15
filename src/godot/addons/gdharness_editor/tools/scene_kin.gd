@@ -655,11 +655,14 @@ class GdhScenes:
 	## The text of each scene read, keyed by the spelling it was read under.
 	var texts: Dictionary = {}
 	## The spelling read for each file on disk, keyed by its path with every name as listed. A key
-	## is matched exactly: no case fold the engine has is the file system's own, which keeps s and
-	## ſ apart, so a path in another case than the file's is no spelling of it.
+	## is matched exactly. No case fold the engine has is the file system's own, which keeps s and ſ
+	## apart, so a path in another case than the file's is taken to the listed spelling by asking
+	## the disk, in [method one].
 	var _spelt: Dictionary = {}
 	## Where each res:// folder asked about lies on disk, "" where a link on it cannot be followed.
 	var _folders: Dictionary = {}
+	## What the disk holds under another spelling, keyed by the path asked.
+	var _kept: Dictionary = {}
 	var _project: String = ""
 	var _disk: DirAccess = null
 
@@ -688,11 +691,31 @@ class GdhScenes:
 	## The spelling [param path], a scene's res:// path spelt any way, was read under, or
 	## [param path] when no scene read lies at that file.
 	func one(path: String) -> String:
-		if texts.has(path) or not path.begins_with("res://"):
+		if texts.has(path) or not path.begins_with("res://") or not _may_be_scene(path):
 			return path
-		if path.get_extension().to_lower() != "tscn":
-			return path
-		return str(_spelt.get(_file(path), path))
+		var file: String = _file(path)
+		if _spelt.has(file):
+			return _spelt[file]
+		var stored: String = _stored(path)
+		return str(_spelt.get(_file(stored), path)) if not stored.is_empty() else path
+
+
+	## Whether [param path] can name a scene. An extension of ASCII letters only is a scene's in no
+	## spelling but tscn in any case, which every file system joins by ASCII case alone. Any other
+	## extension is let through, since a file system may join it to tscn by its own rules.
+	func _may_be_scene(path: String) -> bool:
+		var extension: String = path.get_extension()
+		var ascii: bool = extension.to_utf8_buffer().size() == extension.length()
+		return extension.to_lower() == "tscn" or not ascii
+
+
+	## The res:// spelling the disk holds for [param path], which is not that file's own, or "". The
+	## disk decides which entry is the one asked for, never a case fold, and it is asked once per
+	## path.
+	func _stored(path: String) -> String:
+		if not _kept.has(path):
+			_kept[path] = GdhSceneFile.stored_as(path)
+		return _kept[path]
 
 
 	## Where the res:// [param path] lies on disk, each name as [param path] spells it, or "".
