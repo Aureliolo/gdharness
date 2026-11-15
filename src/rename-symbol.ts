@@ -554,7 +554,8 @@ function renamed(
       ? null
       : { from: declaringPath, to: moveTo, absoluteTo: request.newScriptPath },
   );
-  const left = leftAloneReport(asWritten(plan.mentions, rewrites), [symbol]);
+  const kept = stillWorded(plan.mentions, rewrites, symbol);
+  const left = leftAloneReport(asWritten(kept, rewrites), [symbol]);
   const graph = new ClassGraph(scripts, declared);
   const rank = (path: string): number =>
     (declaringFiles.includes(path) ? 0 : 1000) + graph.ancestors(`${path}#`).length;
@@ -577,7 +578,7 @@ function renamed(
       ...(moveTo === null ? {} : { moved: { from: declaringPath, to: moveTo } }),
       changed: changedReport(plan.edits, rewrites),
       ...left.lists,
-      summary: summaryOf(plan.edits, plan.mentions, rewrites, left.counts),
+      summary: summaryOf(plan.edits, kept, rewrites, left.counts),
     },
   };
 }
@@ -808,6 +809,19 @@ export function changedReport(
           })(),
         })),
     };
+  });
+}
+
+/**
+ * The mentions of [param symbol] whose word is still in their line once the rewrites are written.
+ * A scene path such as `res://Player.gd` is a mention of the class name until the move edits it,
+ * and nothing is left alone on a line that no longer holds the word.
+ */
+function stillWorded(mentions: readonly Mention[], rewrites: readonly Rewrite[], symbol: string): Mention[] {
+  const after = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite.after.split('\n')]));
+  return mentions.filter((mention) => {
+    const line = mention.line < 1 ? undefined : after.get(mention.file)?.[mention.line - 1];
+    return mention.why !== undefined || line === undefined || line.includes(symbol);
   });
 }
 

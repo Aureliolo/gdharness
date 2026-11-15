@@ -1650,7 +1650,8 @@ function byCodeUnit(a: string, b: string): number {
 }
 
 /**
- * Units are dealt slowest first, ties by path then case, all by code unit, so the plan is a function
+ * Units are dealt slowest first and each engine runs its suites cheapest first, ties by path then
+ * case, all by code unit, so the plan is a function
  * of the units alone: not of the order they were listed in, nor of the machine's locale.
  */
 function aPlanDependsOnItsUnitsAlone(): void {
@@ -1671,18 +1672,35 @@ function aPlanDependsOnItsUnitsAlone(): void {
         assert.deepEqual(dealt(shuffled, declared, most), dealt(units, declared, most));
 
         const one = dealt(units, declared, 1);
-        const expected = units
-          .toSorted(
-            (a, b) =>
-              b.cost - a.cost ||
-              byCodeUnit(a.suite, b.suite) ||
-              byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
-          )
-          .map((unit) => unit.suite);
+        const totals = new Map<string, number>();
+        for (const unit of units) {
+          totals.set(unit.suite, (totals.get(unit.suite) ?? 0) + unit.cost);
+        }
         assert.deepEqual(
           one.flatMap((plan) => plan.suites.map((suite) => suite.path)),
-          [...new Set(expected)],
-          'in one engine the suites come in the order of their slowest unit, ties by code unit',
+          [...totals.keys()].toSorted(
+            (a, b) => (totals.get(a) ?? 0) - (totals.get(b) ?? 0) || byCodeUnit(a, b),
+          ),
+          'in one engine the suites come cheapest total first, ties by code unit',
+        );
+        const lanes = dealt(units, declared, most);
+        const loads = lanes.map(() => 0);
+        const expectedLanes = lanes.map((): string[] => []);
+        const dealing = units.toSorted(
+          (a, b) =>
+            b.cost - a.cost || byCodeUnit(a.suite, b.suite) || byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? ''),
+        );
+        for (const unit of dealing) {
+          const lightest = loads.indexOf(Math.min(...loads));
+          loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
+          expectedLanes[lightest]?.push(`${unit.suite}:${unit.cases[0] ?? ''}`);
+        }
+        assert.deepEqual(
+          lanes.map((plan) =>
+            plan.suites.flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)).toSorted(),
+          ),
+          expectedLanes.map((held) => held.toSorted()),
+          'units go slowest first to the lane with least, equal costs by path then case in code-unit order',
         );
         assert.equal(
           one.reduce(
