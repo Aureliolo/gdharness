@@ -88949,7 +88949,7 @@ function referencesProject(): string {
  * A move rewrites a path the engine reads and nothing else. A relative path is read against the
  * file holding it in `preload` and an `ext_resource` path, and from the root in `load` and
  * `ResourceLoader.load`, which stay as written when the root names nothing that moved. A label, a
- * resource name, a note and a text file spelling the same relative word stay as written. A data
+ * resource name spelling the same relative word stay as written. A note, a text file, a data
  * file and any other code string follow the one file they name.
  */
 function testAMoveRewritesOnlyReferences(): void {
@@ -88969,8 +88969,16 @@ function testAMoveRewritesOnlyReferences(): void {
         .replace('{"desk.tscn"', '{"../stage/desk.tscn"'),
       'a code string that names the file beside the script is followed, a comment is not',
     );
-    assert.equal(read('scenes/notes.md'), kept['notes.md'], 'a note keeps the relative name');
-    assert.equal(read('scenes/notes.txt'), kept['notes.txt'], 'a text file keeps the relative name');
+    assert.equal(
+      read('scenes/notes.md'),
+      (kept['notes.md'] ?? '').replace('"desk.tscn"', '"../stage/desk.tscn"'),
+      'a quoted word in prose follows, as it always has',
+    );
+    assert.equal(
+      read('scenes/notes.txt'),
+      (kept['notes.txt'] ?? '').replace('"desk.tscn"', '"../stage/desk.tscn"'),
+      'and so does one in a text file',
+    );
     assert.equal(
       read('scenes/refs.json'),
       '{"scene": "res://stage/desk.tscn"}\n',
@@ -89035,6 +89043,8 @@ function testAMoveRewritesOnlyReferences(): void {
         'res://scenes/absolute.tscn',
         'res://scenes/data.json',
         'res://scenes/loads.gd',
+        'res://scenes/notes.md',
+        'res://scenes/notes.txt',
         'res://scenes/refs.json',
         'res://scenes/relative.tres',
         'res://scenes/relative.tscn',
@@ -89060,7 +89070,7 @@ function kindsProject(files: Record<string, string>): string {
  * Each kind of file has its own rule for what a path in it is read against, which the engine's own
  * source sets. `project.godot` and every code string go through `ResourceLoader`, so they read a
  * relative path from the root. A shader `#include` reads against the shader. A data file is read
- * from the root, quoted prose never. An `.md` word is not a path, an absolute one is.
+ * from the root, quoted prose against the file holding it.
  */
 function testEachKindOfFileFollowsItsOwnBase(): void {
   const project = kindsProject({
@@ -89110,8 +89120,8 @@ function testEachKindOfFileFollowsItsOwnBase(): void {
     assert.match(read('tool.cfg'), /scene="stuff\/desk\.tscn"/, 'a settings file read from the root follows');
     assert.equal(
       read('notes.md'),
-      'Quoted "res://stuff/desk.tscn" and the word "content/desk.tscn" in prose.\n',
-      'prose takes an absolute path and keeps a relative word',
+      'Quoted "res://stuff/desk.tscn" and the word "stuff/desk.tscn" in prose.\n',
+      'prose takes an absolute path and a quoted relative one',
     );
     const left = asArray(get(outcome.report, 'leftAlone')).map((one) => text(get(one, 'file')));
     assert.equal(left.includes('res://project.godot'), false, `no setting is left alone: ${left.join(', ')}`);
@@ -89469,6 +89479,75 @@ function testARootLoadBesideAMovedNamesakeStays(): void {
 }
 
 /**
+ * A load whose string has a raw, StringName, NodePath or verbatim prefix, or sits on the line after
+ * the bracket, is read from the root like any other. A file of that name beside the script that
+ * moves is no reason to change it, and the engine still loads it.
+ */
+function testALoadSpelledWithAPrefixOrALineBreakIsReadFromTheRoot(): void {
+  const resource = '[gd_resource type="Resource" format=3]\n\n[resource]\n';
+  const script = [
+    'extends RefCounted',
+    '',
+    'func a() -> Resource:',
+    '\treturn load(r"thing.tres")',
+    '',
+    'func b() -> Resource:',
+    '\treturn load(&"thing.tres")',
+    '',
+    'func c() -> Resource:',
+    '\treturn load(',
+    '\t\t"thing.tres")',
+    '',
+    'func d() -> Resource:',
+    '\treturn ResourceLoader.load(',
+    '\t\t^"thing.tres")',
+    '',
+    'func e() -> void:',
+    '\tvar tree := Engine.get_main_loop() as SceneTree',
+    '\ttree.change_scene_to_file(',
+    '\t\t"thing.tscn")',
+    '',
+  ].join('\n');
+  const csharp =
+    'class Loader {\n  object A = GD.Load(@"thing.tres");\n  object B = ResourceLoader.Load(\n    "thing.tres");\n  object C = GD.Load<Godot.Resource>(\n    @"thing.tres");\n}\n';
+  const project = kindsProject({
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Spelling"\n',
+    'thing.tres': resource,
+    'thing.tscn': '[gd_scene format=3]\n\n[node name="T" type="Node"]\n',
+    'scenes/thing.tres': resource,
+    'scenes/thing.tscn': '[gd_scene format=3]\n\n[node name="T" type="Node"]\n',
+    'scenes/a.gd': script,
+    'scenes/Loader.cs': csharp,
+    'probe.gd': [
+      'extends SceneTree',
+      '',
+      'func _initialize() -> void:',
+      '\tvar loaded := load("res://scenes/a.gd") as GDScript',
+      '\tvar holder: Object = loaded.new()',
+      '\tfor name in ["a", "b", "c", "d"]:',
+      '\t\tvar thing: Resource = holder.call(name)',
+      '\t\tprint("PROBE ", name, " ", thing.resource_path)',
+      '\tquit()',
+      '',
+    ].join('\n'),
+  });
+  try {
+    movedIn(project, 'scenes/thing.tres', 'art/thing.tres');
+    movedIn(project, 'scenes/thing.tscn', 'art/thing.tscn');
+    assert.equal(readFileSync(join(project, 'scenes/a.gd'), 'utf8'), script, 'every GDScript spelling stays');
+    assert.equal(readFileSync(join(project, 'scenes/Loader.cs'), 'utf8'), csharp, 'every C# spelling stays');
+    const printed = engineProbe(project);
+    if (printed !== null) {
+      for (const name of ['a', 'b', 'c', 'd']) {
+        assert.match(printed, new RegExp(`PROBE ${name} res://thing\\.tres`), `${name} loads from the root`);
+      }
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * The direct argument of `preload`, `extends` and `@icon` is read against the script, so a file of
  * the same name at the root is no second reading, and the one beside the script is followed.
  */
@@ -89524,16 +89603,19 @@ function testExportPresetsAndImportFilesTakeAbsolutePathsOnly(): void {
 }
 
 /**
- * Prose in any letter case and a `;` comment line of Godot's text formats hold no relative path.
- * The line that is no comment, in the same file, still follows.
+ * A quoted relative path in prose, a CMake list and a Markdown image follows, as it always has. A
+ * `;` comment line of Godot's text formats holds no relative path, and the line that is no comment,
+ * in the same file, still follows.
  */
-function testAProseAndACommentLineHoldNoRelativePath(): void {
+function testAProseFollowsAndACommentLineHoldsNoRelativePath(): void {
   const comment = '; "desk.tscn" and "../scenes/desk.tscn"';
   const files: Record<string, string> = {
     'scenes/desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
     'scenes/NOTES.MD': 'The file "desk.tscn" holds the desk.\n',
     'scenes/NOTES.TXT': '"desk.tscn"\n',
     'scenes/notes.rst': 'The file "desk.tscn" holds the desk.\n',
+    'scenes/CMakeLists.txt': 'target_sources(app PRIVATE "desk.tscn")\n',
+    'scenes/README.md': '<img src="desk.tscn">\n',
     'scenes/s.tscn': `[gd_scene format=3]\n\n${comment}\n[ext_resource type="PackedScene" path="desk.tscn" id="1"]\n`,
     'scenes/plugin.cfg': `[plugin]\n\n  ${comment}\nscript="desk.tscn"\n`,
     'scenes/k.gdextension': `[icons]\n\n${comment}\nKit = "desk.tscn"\n`,
@@ -89545,8 +89627,18 @@ function testAProseAndACommentLineHoldNoRelativePath(): void {
   const read = (path: string): string => readFileSync(join(project, path), 'utf8');
   try {
     movedIn(project, 'scenes/desk.tscn', 'stage/desk.tscn');
-    for (const name of ['scenes/NOTES.MD', 'scenes/NOTES.TXT', 'scenes/notes.rst']) {
-      assert.equal(read(name), files[name], `${name} keeps the relative word`);
+    for (const name of [
+      'scenes/NOTES.MD',
+      'scenes/NOTES.TXT',
+      'scenes/notes.rst',
+      'scenes/CMakeLists.txt',
+      'scenes/README.md',
+    ]) {
+      assert.equal(
+        read(name),
+        files[name]?.replace('"desk.tscn"', '"../stage/desk.tscn"'),
+        `${name} follows the quoted path`,
+      );
     }
     assert.equal(
       read('scenes/s.tscn'),
@@ -89599,7 +89691,13 @@ function testAFolderMoveRewritesOnlyReferences(): void {
     const read = (path: string): string => readFileSync(join(project, path), 'utf8');
     movedIn(project, 'scenes', 'ui/stage');
     for (const [name, content] of Object.entries(outside)) {
-      if (name !== 'say.gd') {
+      if (name.startsWith('notes.')) {
+        assert.equal(
+          read(`game/${name}`),
+          content.replace('"../scenes/desk.tscn"', '"../ui/stage/desk.tscn"'),
+          `${name} outside follows the quoted word`,
+        );
+      } else if (name !== 'say.gd') {
         assert.equal(read(`game/${name}`), content, `${name} outside keeps the relative name as text`);
       }
     }
@@ -89705,7 +89803,11 @@ async function testARenameThatMovesAScriptFollowsOnlyReferences(): Promise<void>
       /print\("heroes\/hero\.gd"\)/,
       'a string that names the file from the root is followed, print argument or not',
     );
-    assert.equal(read('notes.md'), files['notes.md'], 'a note stays');
+    assert.equal(
+      read('notes.md'),
+      (files['notes.md'] ?? '').replace('"Player.gd"', '"heroes/hero.gd"'),
+      'a quoted word in a note follows',
+    );
     const left = asArray(get(outcome.report, 'leftAlone')).map(
       (one) => `${text(get(one, 'file'))}:${text(get(one, 'line'))}`,
     );
@@ -105880,8 +105982,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKindNobodyListedReadsAgainstItsFile,
   testARootLoadBesideAMovedNamesakeStays,
   testAPreloadAnExtendsAndAnIconAreReadBesideTheScript,
+  testALoadSpelledWithAPrefixOrALineBreakIsReadFromTheRoot,
   testExportPresetsAndImportFilesTakeAbsolutePathsOnly,
-  testAProseAndACommentLineHoldNoRelativePath,
+  testAProseFollowsAndACommentLineHoldsNoRelativePath,
   testEachKindOfFileFollowsItsOwnBase,
   testAShaderIncludeIsFollowedAgainstTheShader,
   testAStringBeforeAReferenceDoesNotHideIt,

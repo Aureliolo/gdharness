@@ -1139,14 +1139,15 @@ interface Literal {
 
 /**
  * What precedes a string handed to `ResourceLoader`, which reads a relative path from the root,
- * with the type argument C# puts after the name.
+ * with the type argument C# puts after the name, any space or line break before the string and the
+ * prefix of a raw, StringName, NodePath or verbatim string.
  */
 const FROM_THE_ROOT =
-  /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*\w+|\bGD\s*\.\s*Load|\b(?:change_scene_to_file|ChangeSceneToFile))\s*(?:<[^()]*>)?\s*\(\s*$/;
+  /(?:(?<![.\w])load|\bResourceLoader\s*\.\s*\w+|\bGD\s*\.\s*Load|\b(?:change_scene_to_file|ChangeSceneToFile))\s*(?:<[^()]*>)?\s*\(\s*[rR&^@]*$/;
 /** What precedes a string in a scene that holds text or a name, which is never a path. */
 const TEXT_IN_A_SCENE =
   /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
-const NO_RELATIVE_PATH = /\.(?:md|txt|rst|import)$|\/export_presets\.cfg$/i;
+const NO_RELATIVE_PATH = /\.import$|\/export_presets\.cfg$/;
 /** The files of Godot's text formats, where a line starting with `;` is a comment. */
 const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|tres|cfg|gdextension)$/;
 const SCENE_OR_RESOURCE = /\.(?:tscn|tres)$/;
@@ -1155,21 +1156,22 @@ const SCENE_OR_RESOURCE = /\.(?:tscn|tres)$/;
  * What a relative string at [param offset] of [param file] is read against. A kind of file nobody
  * listed reads it against the file, the way a move always has.
  *
- * - Prose, `.import` files, export presets and comment lines of Godot's text formats hold no
- *   relative path.
+ * - `.import` files and export presets hold no relative path, nor do comment lines of Godot's
+ *   text formats.
  * - In a scene, the text and names it holds are no path.
  * - The argument of `load` and a `ResourceLoader` method is read from the root.
  */
 function relativeBase(file: ProjectText, offset: number): Literal['base'] {
   // The opening quote sits just before the contents.
-  const before = file.text.slice(file.text.lastIndexOf('\n', offset - 2) + 1, offset - 1);
+  const quoteAt = offset - 1;
+  const before = file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
   if (NO_RELATIVE_PATH.test(file.path) || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
     return null;
   }
   if (SCENE_OR_RESOURCE.test(file.path) && TEXT_IN_A_SCENE.test(before)) {
     return null;
   }
-  return FROM_THE_ROOT.test(before) ? 'root' : 'file';
+  return FROM_THE_ROOT.test(file.text.slice(Math.max(0, quoteAt - 200), quoteAt)) ? 'root' : 'file';
 }
 
 const PLAIN_STRING = /"((?:[^"\\\n]|\\.)*)"/g;
