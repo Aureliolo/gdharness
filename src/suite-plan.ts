@@ -852,6 +852,8 @@ export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
  * median case, and a suite just split out of a slow one or a project's first run is anything but.
  * Priced at the guess, three suites of 80 s each, two of them new, went to one engine of the three
  * asked for.
+ *
+ * What a lane is dealt stays as the dealing made it, and each engine runs it by [function cheapestFirst].
  */
 export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
   if (units.length === 0) {
@@ -882,9 +884,41 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
     loads[lightest] = (loads[lightest] ?? 0) + unit.cost;
   }
   return [
-    ...(windowed.length > 0 ? [planOf(windowed, declared, true, 0, units)] : []),
-    ...bins.flatMap((bin, lane) => (bin.length === 0 ? [] : [planOf(bin, declared, false, lane, units)])),
+    ...(windowed.length > 0 ? [planOf(cheapestFirst(windowed, declared), declared, true, 0, units)] : []),
+    ...bins.flatMap((bin, lane) =>
+      bin.length === 0 ? [] : [planOf(cheapestFirst(bin, declared), declared, false, lane, units)],
+    ),
   ];
+}
+
+/**
+ * [param units] as one engine runs them: each suite's units together in the order the suite
+ * declares its cases, then a case's rows by index, and the suites cheapest first by their total
+ * here, a tie going by path. A case can memoise setup for those after it, which its time then
+ * holds, so a suite's own order is never touched. The first suites of an engine meet its siblings
+ * still starting, so a slow unit run first there is slowed by their load and then ranks first again.
+ */
+export function cheapestFirst(units: readonly Unit[], declared: CasesBySuite): Unit[] {
+  const suites = new Map<string, Unit[]>();
+  for (const unit of units) {
+    suites.set(unit.suite, [...(suites.get(unit.suite) ?? []), unit]);
+  }
+  const position = (unit: Unit): number => {
+    const at = (declared.get(unit.suite) ?? []).indexOf(unit.cases[0] ?? '');
+    return at === -1 ? Number.POSITIVE_INFINITY : at;
+  };
+  const inSuite = (a: Unit, b: Unit): number =>
+    (position(a) === position(b) ? 0 : position(a) < position(b) ? -1 : 1) ||
+    byCodeUnit(a.cases[0] ?? '', b.cases[0] ?? '') ||
+    (a.row?.index ?? 0) - (b.row?.index ?? 0);
+  const total = (own: readonly Unit[]): number => own.reduce((sum, unit) => sum + unit.cost, 0);
+  return [...suites]
+    .map(([path, own]) => {
+      const inOrder = own.toSorted(inSuite);
+      return { path, own: inOrder, cost: total(inOrder) };
+    })
+    .toSorted((a, b) => a.cost - b.cost || byCodeUnit(a.path, b.path))
+    .flatMap((suite) => suite.own);
 }
 
 /** Orders two strings by code unit, as every other by-path order here does and whatever the locale. */
@@ -986,14 +1020,14 @@ export class Shares {
     if (this.windowed.length > 0) {
       const windowed = this.windowed;
       this.windowed = [];
-      return planOf(windowed, this.declared, true, lane, this.all);
+      return planOf(cheapestFirst(windowed, this.declared), this.declared, true, lane, this.all);
     }
     if (this.headless.length === 0) {
       return null;
     }
     const { share, rest } = this.headlessSplit();
     this.headless = rest;
-    return planOf(share, this.declared, false, lane, this.all);
+    return planOf(cheapestFirst(share, this.declared), this.declared, false, lane, this.all);
   }
 
   /** The suites [method next] would hand now, handing out nothing. */

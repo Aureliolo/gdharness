@@ -665,6 +665,7 @@ import {
   withNestedErrors,
 } from '../src/suite-judge.js';
 import {
+  cheapestFirst,
   type DeclaredSuite,
   dealt,
   type EnginePlan,
@@ -66609,8 +66610,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
           false,
           9,
           [
-            [big.path, ['test_y']],
             [small.path, ['test_s']],
+            [big.path, ['test_y']],
           ],
           [`${big.path}:test_x`, `${big.path}:test_z`],
         ],
@@ -104541,6 +104542,195 @@ async function testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten():
   }
 }
 
+/**
+ * An engine runs the cheap end of what it was dealt first, while the units go to lanes slowest first
+ * as ever. A slow unit run first meets its sibling engines starting and ranks first again for it.
+ */
+function testAnEngineRunsTheCheapEndOfItsUnitsFirst(): void {
+  const unit = (name: string, cost: number, windowed = false, cases = ['test_one'], row?: number): Unit => ({
+    suite: `res://tests/${name}_test.gd`,
+    cases,
+    ...(row === undefined ? {} : { row: { index: row, rest: false } }),
+    cost,
+    timed: true,
+    windowed,
+    accessible: false,
+    headless: !windowed,
+  });
+  const declaredOf = (units: readonly Unit[]): Map<string, readonly string[]> =>
+    new Map(units.map((one) => [one.suite, one.cases]));
+  const named = (plan: EnginePlan): string[] =>
+    plan.suites.map((one) => one.path.replace('res://tests/', '').replace('_test.gd', ''));
+
+  const lone = [unit('big', 20), unit('a', 1), unit('b', 1), unit('c', 1)];
+  const [only] = dealt(lone, declaredOf(lone), 1);
+  assert.deepEqual(only && named(only), ['a', 'b', 'c', 'big'], 'a lane dealt a 20 s unit runs it last');
+  assert.equal(only?.cost, 23, 'and its total is what it was');
+
+  const many = [unit('s20', 20), unit('s9', 9), unit('s8', 8), unit('s3', 3), unit('s2', 2), unit('s1', 1)];
+  const lanes = dealt(many, declaredOf(many), 3);
+  assert.deepEqual(
+    lanes.map((plan) => [plan.lane, plan.cost]),
+    [
+      [0, 20],
+      [1, 12],
+      [2, 11],
+    ],
+    'units go slowest first to the lane with least, so every lane keeps its total',
+  );
+  assert.deepEqual(
+    lanes.map(named),
+    [['s20'], ['s1', 's2', 's9'], ['s3', 's8']],
+    'and each lane runs its cheapest suite first',
+  );
+
+  const mixed = [unit('w1', 4, true), unit('w2', 2, true), unit('h1', 10), unit('h2', 1), unit('h3', 2)];
+  const [window, after] = dealt(mixed, declaredOf(mixed), 1);
+  assert.deepEqual(
+    [window?.windowed, window && named(window), after?.windowed, after && named(after)],
+    [true, ['w2', 'w1'], false, ['h2', 'h3', 'h1']],
+    'the windowed engine and the headless one after it in its lane each order their own units',
+  );
+
+  // A suite is as dear as its units together, and its units keep the declared case and row order.
+  const declared = ['test_a', 'test_b'];
+  const split = [
+    unit('x', 1, false, ['test_b']),
+    unit('x', 5, false, ['test_a']),
+    unit('y', 3),
+    unit('z', 4, false, ['test_a'], 1),
+    unit('z', 0.5, false, ['test_a'], 0),
+  ];
+  const along = new Map([...declaredOf(split), ['res://tests/x_test.gd', declared]]);
+  assert.deepEqual(
+    cheapestFirst(split, along).map((one) => [one.suite.slice(12, 13), one.cases[0], one.row?.index]),
+    [
+      ['y', 'test_one', undefined],
+      ['z', 'test_a', 0],
+      ['z', 'test_a', 1],
+      ['x', 'test_a', undefined],
+      ['x', 'test_b', undefined],
+    ],
+    'a suite splits no further than its total, and its later cheaper case stays after the earlier',
+  );
+
+  // Ties go by path, case and row, whatever order the units arrive in.
+  const ties = [
+    unit('c', 2),
+    unit('a', 2),
+    unit('b', 2),
+    unit('m', 1, false, ['test_a'], 1),
+    unit('m', 1, false, ['test_a'], 0),
+  ];
+  const reference = cheapestFirst(ties, declaredOf(ties));
+  const turned = [2, 4, 0, 3, 1].map((at) => ties.at(at) ?? unit('missing', 0));
+  for (const shuffled of [ties.toReversed(), turned]) {
+    assert.deepEqual(
+      cheapestFirst(shuffled, declaredOf(ties)),
+      reference,
+      'a plan is the same in any input order',
+    );
+  }
+  assert.deepEqual(
+    reference.map((one) => [one.suite.slice(12, 13), one.row?.index]),
+    [
+      ['a', undefined],
+      ['b', undefined],
+      ['c', undefined],
+      ['m', 0],
+      ['m', 1],
+    ],
+    'equal costs order by path, then row',
+  );
+
+  // Shares are drawn slowest first, each one run cheapest first.
+  const queue = [30, 25, 20, 15, 10, 5].map((cost) => unit(`s${String(cost)}`, cost));
+  const shares = new Shares(queue, declaredOf(queue), 2);
+  const drawn: string[][] = [];
+  for (let share = shares.next(0); share !== null; share = shares.next(0)) {
+    drawn.push(named(share));
+  }
+  assert.deepEqual(
+    drawn,
+    [
+      ['s20', 's30'],
+      ['s5', 's25'],
+      ['s10', 's15'],
+    ],
+    'the first share holds the slowest, and each runs its cheaper suites first',
+  );
+}
+
+/**
+ * Real engine: an engine's suites run in the order its plan lists them, which puts the dearest suite
+ * last. Each suite appends its name to a file as it runs.
+ */
+function testAnEngineRunsItsSuitesCheapestFirstInTheGame(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('cheapest-first regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-cheap-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  try {
+    const marker = join(project, 'order.txt').replaceAll('\\', '/');
+    const suite = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tvar file := FileAccess.open("${marker}", FileAccess.READ_WRITE if FileAccess.file_exists("${marker}") else FileAccess.WRITE)\n\tfile.seek_end()\n\tfile.store_line("${name}")\n\tfile.close()\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="CheapFirst"\n',
+      'tests/a_slow_test.gd': suite('a'),
+      'tests/b_quick_test.gd': suite('b'),
+      'tests/c_quick_test.gd': suite('c'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const gateTimes = join(project, 'gate', 'suite-times.json');
+    mkdirSync(dirname(gateTimes), { recursive: true });
+    writeFileSync(
+      gateTimes,
+      JSON.stringify({
+        'res://tests/a_slow_test.gd': { seconds: 20, cases: { test_a: 20 } },
+        'res://tests/b_quick_test.gd': { seconds: 1, cases: { test_b: 1 } },
+        'res://tests/c_quick_test.gd': { seconds: 1, cases: { test_c: 1 } },
+      }),
+    );
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--times',
+        gateTimes,
+        '--engines',
+        '1',
+        '--slot-count',
+        '1',
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+    assert.deepEqual(
+      readFileSync(join(project, 'order.txt'), 'utf8').split('\n').filter(Boolean),
+      ['b', 'c', 'a'],
+      'the engine ran the 1 s suites before the 20 s one it was dealt first',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
@@ -105266,6 +105456,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuiteIsFoundUnderAnySpellingOfItsPath,
   testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
+  testAnEngineRunsTheCheapEndOfItsUnitsFirst,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
   testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut,
   testACutRunIsDrivenThroughItsEngines,
@@ -105482,6 +105673,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPacedRunsCompileCheckIsOneOfItsLanes,
   testAGatesRunFollowsItsLanesFile,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
+  testAnEngineRunsItsSuitesCheapestFirstInTheGame,
 ];
 
 /**
