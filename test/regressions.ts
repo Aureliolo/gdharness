@@ -408,6 +408,7 @@ import {
   startTimesOf,
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
+import type { ProjectText } from '../src/project-scan.js';
 import {
   folderFiles,
   ignoredTexts,
@@ -433,7 +434,15 @@ import {
 } from '../src/project-walk.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
 import { forceNextImport, importRecord } from '../src/reimport.js';
-import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
+import {
+  applyRewrites,
+  joinedByTheDisk,
+  literalTargets,
+  NOT_INHERITED,
+  RESOLVED_ELSEWHERE,
+  type Rewrite,
+  scriptsOf,
+} from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
   type RenameServices,
@@ -88850,7 +88859,50 @@ function testAMoveRewritesWhatTheFileSystemTakesForTheMovedFile(): void {
   }
 }
 
-/** A folder named in another case than the disk holds it is followed by a move of that folder. */
+/** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
+function loadedNames(project: string, scene: string): string[] | null {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('loading the moved scene skipped (Godot not found)');
+    return null;
+  }
+  writeFileSync(
+    join(project, 'runner.gd'),
+    [
+      'extends SceneTree',
+      '',
+      '',
+      'func _init() -> void:',
+      `\tvar packed: PackedScene = load("${scene}")`,
+      '\tvar names: Array[String] = []',
+      '\tif packed != null:',
+      '\t\tvar root: Node = packed.instantiate()',
+      '\t\tnames.append(str(root.name))',
+      '\t\tfor child: Node in root.get_children():',
+      '\t\t\tnames.append(str(child.name))',
+      '\tprint("NAMES " + JSON.stringify(names))',
+      '\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  const answered = /NAMES (\[.*\])/.exec(`${run.stdout}\n${run.stderr}`)?.[1];
+  assert.ok(answered !== undefined, `${run.stdout}\n${run.stderr}`);
+  return asArray(JSON.parse(answered)).map(String);
+}
+
+/**
+ * A folder named in another case than the disk holds it is followed by a move of that folder: the
+ * files in it are rewritten, and a string naming the folder or something below it in that case is
+ * listed under leftAlone. The moved scene still loads, with its children named as before and its
+ * parent="." kept. Where the file system keeps the spellings apart, as Linux does, none is touched.
+ */
 function testAFolderMoveRewritesAFolderSpeltInAnotherCase(): void {
   const named = (path: string): string =>
     `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_hero"]\n\n[node name="N" type="Node3D"]\n`;
@@ -88860,11 +88912,12 @@ function testAFolderMoveRewritesAFolderSpeltInAnotherCase(): void {
       'exact.tscn': named('res://scenes/hero.tscn'),
       'folder.tscn': named('res://Scenes/hero.tscn'),
       'both.tscn': named('res://SCENES/HERO.tscn'),
+      'where.gd': 'extends Node\n\nconst D := "res://Scenes/deep"\nconst E := "res://SCENES"\n',
     },
     'SCENES/hero.tscn',
   );
   try {
-    movedIn(project, 'scenes', 'stage');
+    const outcome = movedIn(project, 'scenes', 'stage');
     const after = (file: string): string => readFileSync(join(project, file), 'utf8');
     assert.ok(after('exact.tscn').includes('path="res://stage/hero.tscn"'), after('exact.tscn'));
     for (const file of ['folder.tscn', 'both.tscn']) {
@@ -88872,6 +88925,170 @@ function testAFolderMoveRewritesAFolderSpeltInAnotherCase(): void {
       assert.ok(after(file).includes(wanted), after(file));
       assert.equal(after(file).includes('res://stage/hero.tscn'), folds, after(file));
     }
+    const left = asArray(get(outcome.report, 'leftAlone')).filter(
+      (one) => get(one, 'file') === 'res://where.gd',
+    );
+    assert.equal(left.length, folds ? 2 : 0, JSON.stringify(get(outcome.report, 'leftAlone')));
+    assert.equal(
+      after('where.gd'),
+      'extends Node\n\nconst D := "res://Scenes/deep"\nconst E := "res://SCENES"\n',
+    );
+    assert.equal(after('stage/hero.tscn'), LINKED_DESK);
+    const names = loadedNames(project, 'res://stage/hero.tscn');
+    if (names !== null) {
+      assert.deepEqual(names, ['Desk', 'Top', 'Leg'], 'the moved scene loads with its children');
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A folder move leaves every string that only resolves to the folder, on every platform: a node
+ * named like the folder, a group, the project's name, a resource's name, and the "." of a scene
+ * directly inside it, which a rewrite turned into an empty parent the engine crashes on.
+ */
+function testAFolderMoveLeavesStringsThatOnlyResolveToTheFolder(): void {
+  const { project } = caseMoveProject(
+    {
+      'enemies/bat.tscn': LINKED_DESK,
+      'main.tscn':
+        '[gd_scene format=3]\n\n[node name="Enemies" type="Node2D"]\ngroups = ["enemies"]\n\n[node name="Spawner" type="Node" parent="Enemies"]\n',
+      'theme.tres': '[gd_resource type="Theme" format=3]\n\n[resource]\nresource_name = "Enemies"\n',
+      'use.gd':
+        'extends Node\n\nfunc _ready() -> void:\n\tget_node("Enemies")\n\tadd_to_group("enemies")\n\tget_node(".")\n',
+    },
+    'ENEMIES/bat.tscn',
+  );
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Enemies"\n',
+    );
+    const before = new Map(
+      ['main.tscn', 'theme.tres', 'use.gd', 'project.godot'].map((file) => [
+        file,
+        readFileSync(join(project, file), 'utf8'),
+      ]),
+    );
+    movedIn(project, 'enemies', 'actors');
+    for (const [file, written] of before) {
+      assert.equal(readFileSync(join(project, file), 'utf8'), written, file);
+    }
+    assert.equal(readFileSync(join(project, 'actors/bat.tscn'), 'utf8'), LINKED_DESK);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Each entry is looked at once: a moved file and each distinct spelling a reference gives, however
+ * many files move and however many names have a character the disk must judge. A project of 300
+ * moved files named with an umlaut and 300 references into them took the disk 180,000 questions.
+ */
+function testAMoveLooksAtEachEntryOnce(): void {
+  const names = Array.from({ length: 300 }, (_unused, at) => `res://bühne/f${at}.gd`);
+  const texts: ProjectText[] = names.map((path, at) => ({
+    path: `res://user${at}.gd`,
+    absolute: `/project/user${at}.gd`,
+    text: `extends Node\nconst A := preload("${path.toUpperCase().replace('RES://', 'res://')}")\n`,
+  }));
+  const references = new Map(names.map((path) => [path, path.replace('bühne', 'stage')]));
+  let asked = 0;
+  const joined = joinedByTheDisk({
+    projectPath: '/project',
+    targets: literalTargets(texts, scriptsOf(texts)),
+    references,
+    folder: { from: 'res://bühne', to: 'res://stage' },
+    identify: (absolute) => {
+      asked += 1;
+      return absolute.toLowerCase();
+    },
+  });
+  assert.equal(references.size, 600, 'each upper-case spelling joins the file it names');
+  assert.deepEqual(joined.folders, []);
+  assert.ok(asked <= 1 + 300 + 300, `the disk was asked ${asked} times`);
+}
+
+/**
+ * A reference through a link spelt in another case is rewritten where the file system joins it to
+ * the moved file, as the exact link spelling is. inner is a junction to real, and real/mid.tscn
+ * moves. Where the platform refuses a junction, or keeps case, it skips or leaves them.
+ */
+function testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase(): void {
+  const named = (path: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_mid"]\n\n[node name="N" type="Node3D"]\n`;
+  const { project, folds } = caseMoveProject(
+    {
+      'real/mid.tscn': LINKED_DESK,
+      'a.tscn': named('res://inner/mid.tscn'),
+      'b.tscn': named('res://INNER/mid.tscn'),
+      'c.tscn': named('res://Inner/MID.tscn'),
+      'd.tscn': named('res://REAL/mid.tscn'),
+    },
+    'REAL/mid.tscn',
+  );
+  try {
+    if (!linkTo(join(project, 'real'), join(project, 'inner'))) {
+      console.log('link spelt in another case skipped (the platform refused a link)');
+      return;
+    }
+    movedIn(project, 'real/mid.tscn', 'moved.tscn');
+    const after = (file: string): string => readFileSync(join(project, file), 'utf8');
+    assert.ok(after('a.tscn').includes('path="res://moved.tscn"'), after('a.tscn'));
+    for (const file of ['b.tscn', 'c.tscn', 'd.tscn']) {
+      assert.equal(after(file).includes('path="res://moved.tscn"'), folds, `${file}: ${after(file)}`);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class rename that moves its script rewrites a preload of the script in another case where the
+ * file system joins it, as a move of the file does, and leaves it where the disk keeps it apart.
+ */
+async function testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins(): Promise<void> {
+  const { project, folds } = caseMoveProject(
+    {
+      'player.gd': 'class_name Player\nextends Node\n',
+      'user.gd':
+        'extends Node\n\nconst A := preload("res://player.gd")\nconst B := preload("res://PLAYER.gd")\n',
+    },
+    'PLAYER.gd',
+  );
+  try {
+    const wordsIn = (word: string): { file: string; line: number; character: number }[] =>
+      ['player.gd', 'user.gd'].flatMap((file) =>
+        readFileSync(join(project, file), 'utf8')
+          .split('\n')
+          .flatMap((source, line) =>
+            [...source.matchAll(new RegExp(`\\b${word}\\b`, 'g'))].map((hit) => ({
+              file: join(project, file),
+              line,
+              character: hit.index,
+            })),
+          ),
+      );
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'player.gd'),
+        symbol: 'Player',
+        newName: 'Hero',
+        newScriptPath: join(project, 'hero.gd'),
+      },
+      {
+        namesTaken: engineSaying(),
+        references: async () => await Promise.resolve(wordsIn('Player')),
+        definitions: async () => await Promise.resolve(wordsIn('Player')),
+      },
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    applyRewrites(outcome.rewrites);
+    const user = readFileSync(join(project, 'user.gd'), 'utf8');
+    assert.ok(user.includes('preload("res://hero.gd")'), user);
+    assert.equal(user.includes('preload("res://PLAYER.gd")'), !folds, user);
   } finally {
     sweep(project);
   }
@@ -105021,6 +105238,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveRewritesWhatTheFileSystemTakesForTheMovedFile,
   testAFolderMoveRewritesAFolderSpeltInAnotherCase,
   testAMoveLeavesAFileOnlyGodotsFoldJoins,
+  testAFolderMoveLeavesStringsThatOnlyResolveToTheFolder,
+  testAMoveLooksAtEachEntryOnce,
+  testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
+  testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins,
   testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks,

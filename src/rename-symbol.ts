@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync
 import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
 import { LSPTimeout } from './lsp_client.js';
-import { relativeWithin } from './paths.js';
+import { entryKey, relativeWithin } from './paths.js';
 import { ignoredTexts, linksOut, type ProjectText, type Reach, scanProject } from './project-scan.js';
 import {
   ClassGraph,
@@ -18,6 +18,8 @@ import {
   type Edit,
   type EditKind,
   fileOf,
+  joinedByTheDisk,
+  literalTargets,
   type Mention,
   mentionIgnored,
   NOT_INHERITED,
@@ -519,11 +521,19 @@ function renamed(
   const { what, resolvedBy, took, overrides, declaringFiles } = step;
   let plan = step.plan;
   if (moveTo !== null) {
+    const moves = new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo]));
+    joinedByTheDisk({
+      projectPath,
+      targets: literalTargets(texts, scripts),
+      references: moves,
+      folder: null,
+      identify: entryKey,
+    });
     plan = planMove(
       {
         texts,
         scripts,
-        moves: new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo])),
+        moves,
         named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },

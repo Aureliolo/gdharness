@@ -263,6 +263,19 @@ export function sameIdentity(
   return one.ino === other.ino && one.dev === other.dev;
 }
 
+/**
+ * A key naming the file or folder at [param path] by its identity on disk, equal for every spelling
+ * of it, or null when nothing is there.
+ */
+export function entryKey(path: string): string | null {
+  try {
+    const found = statSync(path, { bigint: true });
+    return `${found.dev}:${found.ino}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Whether two paths name one file or folder, by its identity on disk rather than its spelling. */
 export function sameEntry(one: string, other: string): boolean {
   try {
