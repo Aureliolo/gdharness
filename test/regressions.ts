@@ -34,6 +34,7 @@ import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
+import { headingIdsOf } from '../scripts/doc-slug.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
@@ -388,6 +389,8 @@ import {
   realAsFarAsItExists,
   relativeWithin,
   resolveWithinProject,
+  sameEntry,
+  sameIdentity,
 } from '../src/paths.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
@@ -708,6 +711,7 @@ import {
   reportsFault,
   roomSaid,
   runShares,
+  type ShareReuse,
   sharesSaid,
   silenceWhile,
   startsSaid,
@@ -737,6 +741,7 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import { Turns } from '../src/turns.js';
 import {
   encodedUidCache,
   mendBeforeStart,
@@ -13493,6 +13498,26 @@ function testProjectGodotReadsExponentFloats(): void {
     { ...physics },
     { a: 0.00001, b: 15_000_000_000, c: 1, d: 'inf', e: -0.5, f: 2000, g: -0.045, h: '1e999', i: '1e' },
   );
+}
+
+/** File ids past 2^53 that a plain number cannot tell apart are still told apart. */
+function testTwoFilesWhoseIdsCollideAsPlainNumbersAreNotOne(): void {
+  const near = 2n ** 53n;
+  assert.equal(Number(near), Number(near + 1n), 'the two ids are one plain number');
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near + 1n, dev: 1n }), false);
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near, dev: 1n }), true);
+  assert.equal(sameIdentity({ ino: near, dev: 1n }, { ino: near, dev: 2n }), false);
+  const holder = mkdtempSync(join(tmpdir(), 'gdharness-same-entry-'));
+  try {
+    const first = join(holder, 'a.txt');
+    writeFileSync(first, 'a');
+    writeFileSync(join(holder, 'b.txt'), 'b');
+    assert.equal(sameEntry(first, join(holder, '.', 'a.txt')), true, 'one file by two spellings');
+    assert.equal(sameEntry(first, join(holder, 'b.txt')), false, 'two files');
+    assert.equal(sameEntry(first, join(holder, 'missing.txt')), false, 'a file that is not there');
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -62968,6 +62993,759 @@ async function testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor(): Pr
   assert.ok(costs.length <= 17, `engines started, 21 before: ${String(costs.length)}`);
 }
 
+/** What a stand-in engine answers for a share: its number, and the start time it printed if it started. */
+interface StandInRan {
+  readonly index: number;
+  readonly printed: { readonly started: { readonly seconds: number } | null };
+}
+
+/**
+ * Stand-in engines that run every share their lane draws after the first, counting the engines
+ * started and the shares run. [param between] runs once a share has begun, before the engine asks for
+ * the next.
+ */
+function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<void> = () => delay(1)): {
+  engines: () => number;
+  shares: EnginePlan[];
+  run: (
+    plan: EnginePlan,
+    index: number,
+    lock: string,
+    holds?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ) => Promise<StandInRan>;
+} {
+  let engines = 0;
+  const shares: EnginePlan[] = [];
+  const ranOf = (index: number, first: boolean): StandInRan => ({
+    index,
+    printed: { started: first ? { seconds: 10 } : null },
+  });
+  const run = async (
+    plan: EnginePlan,
+    index: number,
+    _lock: string,
+    _held?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ): Promise<StandInRan> => {
+    engines += 1;
+    shares.push(plan);
+    let at = index;
+    let first = true;
+    await between(plan, shares.length);
+    for (let next = await reuse?.next(); next !== undefined && next !== null; next = await reuse?.next()) {
+      reuse?.done(ranOf(at, first));
+      first = false;
+      at = next.index;
+      shares.push(next.plan);
+      await between(next.plan, shares.length);
+    }
+    return ranOf(at, first);
+  };
+  return { engines: () => engines, shares, run };
+}
+
+/** An engine that finishes its share while shares remain runs the next in the same process. */
+async function testAnEngineFinishingItsShareTakesTheNextInTheSameProcess(): Promise<void> {
+  const units = Array.from({ length: 40 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const rig = reusingEngines();
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 2, [], {}, rig.run);
+  assert.equal(rig.engines(), 2, 'one engine started for each of the two lanes');
+  assert.ok(rig.shares.length >= 8, `and the shares dealt outnumber them: ${String(rig.shares.length)}`);
+  assert.equal(ran.length, rig.shares.length, 'every share has a result of its own');
+  assert.deepEqual(
+    ran.map((one) => one.index),
+    Array.from({ length: rig.shares.length }, (_, at) => at),
+    'numbered in the order they were dealt',
+  );
+  assert.deepEqual(
+    rig.shares.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    units.map((unit) => unit.suite).toSorted(),
+    'and every suite ran once',
+  );
+}
+
+/** When no share remains the engine exits, and a lane still waiting for a slot stops waiting. */
+async function testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting(): Promise<void> {
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const released: string[] = [];
+  let stopped = 0;
+  const slots = {
+    take: (signal?: AbortSignal): Promise<string> =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          stopped += 1;
+          reject(new Error('stopped waiting'));
+        });
+      }),
+    release: (lock: string): void => {
+      released.push(lock);
+    },
+  };
+  let stoppedAtTheLastShare = -1;
+  const rig = reusingEngines(async (_plan, shares) => {
+    if (shares === 4) {
+      await delay(50);
+      stoppedAtTheLastShare = stopped;
+    }
+  });
+  const ran = await Promise.race([
+    runShares(slots, units, declared, 3, ['A'], {}, rig.run),
+    delay(10_000).then(() => null),
+  ]);
+  assert.ok(ran !== null, 'the run ends although two lanes never got a slot');
+  assert.equal(rig.engines(), 1, 'the one slot held ran every share in one engine');
+  assert.equal(ran.length, 4, 'with a result for each share');
+  assert.equal(stoppedAtTheLastShare, 2, 'and both waiting lanes stopped waiting while the last share ran');
+  assert.deepEqual(released, ['A'], 'the slot goes back once, after the engine exits');
+}
+
+/**
+ * A run held by memory admits each engine for the one share it is dealt, so each share has an engine
+ * of its own and the admissions are the ones the gate would have made before shares were reused.
+ */
+async function testARunHeldByMemoryStartsAnEngineForEachShare(): Promise<void> {
+  const gib = 1024 ** 3;
+  const events: string[] = [];
+  class RecordingGate extends MemoryGate {
+    override admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+      events.push(`admit ${String(need() / gib)}`);
+      return super.admit(signal, need).then((admitted) => {
+        const ended = admitted.ended;
+        return Object.assign(admitted, {
+          ended: () => {
+            events.push('ended');
+            ended();
+          },
+        });
+      });
+    }
+  }
+  const gate = new RecordingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(64 * gib), 5);
+  const units = ['s0', 's1', 's2'].map((name) => SHARE_UNIT(name, 120));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const peaks = [5, 3, 1];
+  const times = Object.fromEntries(
+    units.map((unit, at) => [
+      unit.suite,
+      { seconds: 120, cases: { test_one: 120 }, peak: (peaks[at] ?? 0) * gib },
+    ]),
+  );
+  const rig = reusingEngines();
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 1, ['N'], times, rig.run, undefined, gate);
+  assert.equal(rig.engines(), ran.length, 'an engine for every share dealt');
+  assert.ok(ran.length >= 3, `and the run dealt several: ${String(ran.length)}`);
+  assert.deepEqual(
+    events,
+    ['admit 5', 'ended', 'admit 3', 'ended', 'admit 1', 'ended'],
+    "each engine is admitted at its own share's need and gives it back when it exits",
+  );
+}
+
+/** A lane told fewer lanes gives its slot back after its share instead of drawing another. */
+async function testALaneToldToStopGivesItsSlotBackBetweenShares(): Promise<void> {
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const events: string[] = [];
+  let told: number | null = null;
+  const waiting: Array<() => void> = [];
+  const slots = {
+    take: (): Promise<string> => {
+      events.push('take');
+      return Promise.resolve('B');
+    },
+    release: (lock: string): void => {
+      events.push(`release ${lock}`);
+    },
+  };
+  const raised = {
+    ceiling: 1,
+    told: (): Promise<number | null> => Promise.resolve(told),
+    untilTold: (_lane: number, signal: AbortSignal): Promise<void> =>
+      new Promise((resume, reject) => {
+        waiting.push(resume);
+        signal.addEventListener('abort', () => {
+          reject(new Error('the run is over'));
+        });
+      }),
+    past: (_above: number, signal: AbortSignal): Promise<number> =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new Error('the run is over'));
+        });
+      }),
+  };
+  const rig = reusingEngines((_plan, shares) => {
+    if (shares === 1) {
+      told = 0;
+    }
+    return delay(1);
+  });
+  const pending = runShares(slots, units, declared, 1, ['A'], {}, rig.run, undefined, undefined, raised);
+  assert.ok(await cameTrue(() => waiting.length === 1, 5000), 'the lane parks once told to stop');
+  assert.deepEqual(events, ['release A'], 'having given its slot back');
+  assert.equal(rig.shares.length, 1, 'after one share, not drawing a second for the engine it had');
+  told = 1;
+  for (const resume of waiting) {
+    resume();
+  }
+  const ran = await pending;
+  assert.equal(rig.engines(), 2, 'and a new engine starts when it is told to go on');
+  assert.equal(ran.length, 4, 'every share ran');
+  assert.deepEqual(events, ['release A', 'take', 'release B'], 'in a slot it took again');
+}
+
+/** An engine started with display flags ends after its windowed share, then a headless one starts in its lane. */
+async function testAWindowedEngineIsNotReusedForHeadlessShares(): Promise<void> {
+  const units = [
+    { ...SHARE_UNIT('win', 30), windowed: true, accessible: true },
+    ...Array.from({ length: 6 }, (_, at) => SHARE_UNIT(`h${String(at)}`, 30)),
+  ];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const rig = reusingEngines();
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(slots, units, declared, 1, [], {}, rig.run);
+  assert.ok(rig.shares[0]?.windowed === true, 'the windowed share is dealt first');
+  assert.equal(rig.engines(), 2, 'the windowed engine ends after it, and one headless engine takes the rest');
+  assert.deepEqual(
+    rig.shares.map((plan) => plan.windowed),
+    [true, ...rig.shares.slice(1).map(() => false)],
+    'no headless share ran in the windowed engine',
+  );
+  assert.ok(ran.length > 2, 'and the headless shares after the first reuse their engine');
+}
+
+/**
+ * Two lanes whose engines finish light shares together and are dealt heavy ones next never hold more
+ * than the memory has: each engine is admitted through the gate's one look at a time.
+ */
+async function testTwoEnginesFinishingTogetherAreNotAdmittedBeyondTheMemory(): Promise<void> {
+  const gib = 1024 ** 3;
+  const kept = 4 * gib;
+  const units = [
+    SHARE_UNIT('light0', 120),
+    SHARE_UNIT('light1', 120),
+    SHARE_UNIT('heavy0', 119),
+    SHARE_UNIT('heavy1', 119),
+  ];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const peaks: Record<string, number> = {
+    'res://light0.gd': gib,
+    'res://light1.gd': gib,
+    'res://heavy0.gd': 3 * gib,
+    'res://heavy1.gd': 3 * gib,
+  };
+  const times = Object.fromEntries(
+    units.map((unit) => [
+      unit.suite,
+      { seconds: unit.cost, cases: { test_one: unit.cost }, peak: peaks[unit.suite] ?? 0 },
+    ]),
+  );
+  const holding = new Map<number, number>();
+  let engineCount = 0;
+  let worst = Number.POSITIVE_INFINITY;
+  const free = (): number => kept + 5 * gib - [...holding.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    async () => {
+      const at = free();
+      await delay(5);
+      return at;
+    },
+    20,
+  );
+  const names = ['A', 'B'];
+  const slots = {
+    take: (): Promise<string> => Promise.resolve(names.shift() ?? 'X'),
+    release: (lock: string): void => {
+      names.push(lock);
+    },
+  };
+  const run = async (
+    plan: EnginePlan,
+    index: number,
+    _lock: string,
+    _holds?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ): Promise<StandInRan> => {
+    const id = engineCount;
+    engineCount += 1;
+    holding.set(id, 0);
+    try {
+      let at = index;
+      let current = plan;
+      for (;;) {
+        await delay(10);
+        holding.set(id, Math.max(holding.get(id) ?? 0, peaks[current.suites[0]?.path ?? ''] ?? 0));
+        worst = Math.min(worst, free() - kept);
+        await delay(30);
+        const next = await reuse?.next();
+        if (next === undefined || next === null) {
+          break;
+        }
+        reuse?.done({ index: at, printed: { started: null } });
+        at = next.index;
+        current = next.plan;
+      }
+      return { index: at, printed: { started: null } };
+    } finally {
+      holding.delete(id);
+    }
+  };
+  const ran = await runShares(slots, units, declared, 2, [], times, run, undefined, gate);
+  assert.equal(ran.length, 4, 'every share ran');
+  assert.ok(worst >= 0, `the room past what is kept never went below nothing: ${String(worst / gib)} GiB`);
+}
+
+/** A reused engine's runner prints its share's compile time on a line of its own. */
+function testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine(): void {
+  const printed = readRun('gdharness timing: reused engine, compiled together 450 ms\n');
+  assert.equal(printed.reusedCompiledSeconds, 0.45, 'read in seconds');
+  assert.equal(printed.started, null, 'and not taken for the start of an engine');
+  assert.equal(readRun('').reusedCompiledSeconds, null, 'a share without the line has none');
+}
+
+/**
+ * Two lanes whose idle engines hold the memory their next shares need beside each other do not wait
+ * for each other: each engine exits after its share and its lane asks the gate for the next.
+ */
+async function testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther(): Promise<void> {
+  const gib = 1024 ** 3;
+  const kept = 4 * gib;
+  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const times = Object.fromEntries(
+    units.map((unit) => [unit.suite, { seconds: 120, cases: { test_one: 120 }, peak: 2 * gib }]),
+  );
+  const holding = new Map<number, number>();
+  let engineCount = 0;
+  const free = (): number => kept + 4.5 * gib - [...holding.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free()), 20);
+  const names = ['A', 'B'];
+  const slots = {
+    take: (): Promise<string> => Promise.resolve(names.shift() ?? 'X'),
+    release: (lock: string): void => {
+      names.push(lock);
+    },
+  };
+  const run = async (
+    _plan: EnginePlan,
+    index: number,
+    _lock: string,
+    _holds?: (bytes: number) => void,
+    reuse?: ShareReuse<StandInRan>,
+  ): Promise<StandInRan> => {
+    const id = engineCount;
+    engineCount += 1;
+    holding.set(id, 2 * gib);
+    try {
+      let at = index;
+      for (;;) {
+        await delay(50);
+        const next = await reuse?.next();
+        if (next === undefined || next === null) {
+          break;
+        }
+        reuse?.done({ index: at, printed: { started: null } });
+        at = next.index;
+      }
+      return { index: at, printed: { started: null } };
+    } finally {
+      holding.delete(id);
+    }
+  };
+  const ran = await Promise.race([
+    runShares(slots, units, declared, 2, [], times, run, undefined, gate),
+    delay(10_000).then(() => null),
+  ]);
+  assert.ok(ran !== null, 'the run ends although two engines each hold what the other needs');
+  assert.equal(ran.length, 8, 'with a result for every share');
+}
+
+/** A case body that writes a report into the folder gdUnit4 was told to put its reports in. */
+const STRAY_REPORT =
+  '\tvar args: PackedStringArray = OS.get_cmdline_args()\n' +
+  '\tvar at: int = args.find("-rd")\n' +
+  '\tvar dir: String = ProjectSettings.globalize_path(args[at + 1])\n' +
+  '\tDirAccess.make_dir_recursive_absolute(dir)\n' +
+  '\tvar file: FileAccess = FileAccess.open(dir.path_join("stray.html"), FileAccess.WRITE)\n' +
+  '\tfile.store_string("x")\n' +
+  '\tfile.close()\n';
+
+/**
+ * A report gdUnit4 wrote during one share of a reused engine fails that share, and the shares after
+ * it are judged on what they wrote themselves.
+ */
+function testAStrayReportFailsOnlyTheShareOfAReusedEngineThatWroteIt(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(STRAY_REPORT), b: sharedEngineSuite(''), c: sharedEngineSuite('') },
+    1,
+  );
+  try {
+    assert.notEqual(run.status, 0, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.passed),
+      [false, true, true],
+      'only the share that wrote the report fails',
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** A later share that writes a report under a name an earlier share used fails too. */
+function testAReportRewrittenUnderTheSameNameFailsTheShareThatRewroteIt(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(STRAY_REPORT), b: sharedEngineSuite(STRAY_REPORT), c: sharedEngineSuite('') },
+    1,
+  );
+  try {
+    assert.notEqual(run.status, 0, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.passed),
+      [false, false, true],
+      'each share that wrote the report fails, the one that wrote none passes',
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * The ids the docs site gives headings are the ones GitHub gives them, which markdownlint's link
+ * check (MD051) judges: a link to each id passes, and a link to an id no heading has fails.
+ */
+function testDocsHeadingsHaveTheIdsMarkdownlintComputes(): void {
+  const markdown = [
+    "# A gate's lanes file",
+    '## Intro',
+    '## Intro',
+    '## Intro',
+    '## Use foo_bar here',
+    '## See [the docs](https://example.com/x)',
+    '## A &amp; B',
+    '## A & B',
+    '## <code>x</code> y',
+    '## `Code` and **bold**',
+    '## The v1.2 format (and more)',
+    '## Plain - dashes',
+    '## Fenêtres ä',
+    '',
+  ].join('\n');
+  const ids = headingIdsOf(markdown);
+  assert.deepEqual(ids, [
+    'a-gates-lanes-file',
+    'intro',
+    'intro-1',
+    'intro-2',
+    'use-foo_bar-here',
+    'see-the-docs',
+    'a--b',
+    'a--b-1',
+    'x-y',
+    'code-and-bold',
+    'the-v12-format-and-more',
+    'plain---dashes',
+    'fenêtres-ä',
+  ]);
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slug-'));
+  try {
+    writeTree(directory, {
+      '.markdownlint-cli2.jsonc': '{"config": {"default": false, "MD051": true}}',
+      'ok.md': `${markdown}\n${ids.map((id) => `- [to](#${id})`).join('\n')}\n`,
+      'wrong.md': `${markdown}\n- [to](#no-such-heading)\n`,
+    });
+    const lint = (file: string): number | null =>
+      spawnSyncHidden(
+        process.execPath,
+        [join('node_modules', 'markdownlint-cli2', 'markdownlint-cli2-bin.mjs'), join(directory, file)],
+        { encoding: 'utf8', cwd: process.cwd() },
+      ).status;
+    assert.equal(lint('ok.md'), 0, 'markdownlint accepts a link to each id the site gives');
+    assert.notEqual(lint('wrong.md'), 0, 'and refuses one to an id no heading has, so it is judging');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** One suite of the shared-engine runs, whose one case runs [param body] and then passes. */
+function sharedEngineSuite(body: string): string {
+  return `extends GdUnitTestSuite\n\nfunc test_it() -> void:\n${body}\tassert_bool(true).is_true()\n`;
+}
+
+/**
+ * Runs `gdharness test` over [param suites], each kept as 40 s of work so each is a share of its own,
+ * with [param slotCount] slots for the two engines it asks for. With one slot the second engine never
+ * gets one, and the first takes every share.
+ */
+function sharedEngineRun(
+  engines: { godotPath: string; gdunit: string },
+  suites: Readonly<Record<string, string>>,
+  slotCount: number,
+  extra: readonly string[] = [],
+): { said: string; status: number | null; result: RunResult; cleanup: () => void } {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shared-engine-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shared-engine-slots-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\nconfig/name="SharedEngine"\n',
+    ...Object.fromEntries(Object.entries(suites).map(([name, body]) => [`tests/${name}_test.gd`, body])),
+  });
+  cpSync(engines.gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+  const times = join(project, 'gate', 'suite-times.json');
+  const resultFile = join(project, 'gate', 'result.json');
+  mkdirSync(dirname(times), { recursive: true });
+  writeFileSync(
+    times,
+    JSON.stringify(
+      Object.fromEntries(
+        Object.keys(suites).map((name) => [
+          `res://tests/${name}_test.gd`,
+          // Seen to hold a quarter of a gigabyte, so a runner with little memory free still has room
+          // for both engines: a run memory holds starts an engine for every share.
+          { seconds: 40, cases: { test_it: 40 }, peak: 0.25 * 1024 ** 3 },
+        ]),
+      ),
+    ),
+  );
+  const ran = spawnSyncHidden(
+    process.execPath,
+    [
+      'build/cli.js',
+      'test',
+      project,
+      '--slots',
+      slots,
+      '--times',
+      times,
+      '--result',
+      resultFile,
+      '--engines',
+      '2',
+      '--slot-count',
+      String(slotCount),
+      ...extra,
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, GODOT_PATH: engines.godotPath },
+      timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+    },
+  );
+  const said = `${ran.stdout}${ran.stderr}`;
+  const cleanup = (): void => {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  };
+  if (/^Memory had room for /m.test(said)) {
+    cleanup();
+    assert.fail(`the machine had too little memory free for the run these cases need: ${said}`);
+  }
+  return { said, status: ran.status, result: readRunResult(resultFile), cleanup };
+}
+
+/** With Godot, a run dealt shares over one slot starts one engine for three shares. */
+function testARunDealtSharesOverOneSlotStartsOneEngineForThem(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(''), b: sharedEngineSuite(''), c: sharedEngineSuite('') },
+    1,
+  );
+  try {
+    assert.equal(run.status, 0, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.suites),
+      [['res://tests/a_test.gd'], ['res://tests/b_test.gd'], ['res://tests/c_test.gd']],
+      `three shares, a suite each: ${run.said}`,
+    );
+    assert.match(
+      run.said,
+      /^Before its first suite the engine spent /m,
+      `and one engine was started for them: ${run.said}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * A share run in an engine already started has no start time of its own, so the figure the share
+ * floor and the run's line on starts are read from is the first share's alone.
+ */
+function testAShareInAReusedEngineHasNoStartTime(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(engines, { a: sharedEngineSuite(''), b: sharedEngineSuite('') }, 1);
+  try {
+    assert.equal(run.status, 0, run.said);
+    const starts = run.result.engines.map((engine) => engine.startSeconds);
+    assert.ok(
+      (starts[0] ?? 0) > 0 && starts[1] === null,
+      `the first share has the start its engine took, and the share after it none rather than 0: ${JSON.stringify(starts)}`,
+    );
+    const compiled = run.result.engines.map((engine) => engine.compiledSeconds);
+    assert.ok(
+      compiled.every((seconds) => seconds !== null),
+      `and each share has the time its suites compiled together, the reused one from the runner's own line: ${JSON.stringify(compiled)}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * Each share of an engine that takes several is judged on its own lines: a crash fails the share it
+ * happened in, the shares before it keep their results, and the run goes on in a new engine.
+ */
+function testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    {
+      a: sharedEngineSuite(''),
+      b: sharedEngineSuite('\tOS.crash("deliberate")\n'),
+      c: sharedEngineSuite(''),
+    },
+    1,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.deepEqual(
+      run.result.engines.map((engine) => [engine.suites[0], engine.passed]),
+      [
+        ['res://tests/a_test.gd', true],
+        ['res://tests/b_test.gd', false],
+        ['res://tests/c_test.gd', true],
+      ],
+      `only the share that crashed failed: ${run.said}`,
+    );
+    assert.deepEqual(
+      run.result.engines.map((engine) => engine.startSeconds === null),
+      [false, true, false],
+      `the share after the crash started an engine of its own: ${JSON.stringify(run.result.engines)}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/**
+ * A share that ran out of memory in an engine that took several runs again alone, and each share has
+ * the figure for what the engine held while it ran.
+ */
+function testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const starving =
+    '\tawait get_tree().create_timer(1.5).timeout\n\tprinterr("ERROR: Parameter \\"mem\\" is null.\\n   at: alloc_static (core/os/memory.cpp:75)")\n\tassert_int(1).is_equal(2)\n';
+  const waiting = '\tawait get_tree().create_timer(1.5).timeout\n';
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(waiting), b: sharedEngineSuite(starving), c: sharedEngineSuite(waiting) },
+    1,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.match(
+      run.said,
+      /The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB, engine 2 \d+\.\d GB\./,
+      `every share has the figure for what its engine held while it ran: ${run.said}`,
+    );
+    const logs = run.result.logs ?? '';
+    assert.deepEqual(
+      ['engine-0-again', 'engine-1-again', 'engine-2-again'].map((name) => existsSync(join(logs, name))),
+      [false, true, false],
+      `only the share that ran out of memory ran again: ${logs}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** A suite that hangs in an engine taken over for a later share is ended by the deadline counted from its share. */
+function testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    {
+      a: sharedEngineSuite('\tawait get_tree().create_timer(8.0).timeout\n'),
+      b: sharedEngineSuite('\tawait get_tree().create_timer(60.0).timeout\n'),
+    },
+    1,
+    ['--deadline', '12'],
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    const passed = run.result.engines.map((engine) => engine.passed);
+    assert.deepEqual(passed, [true, false], `the hung share failed, the one before it passed: ${run.said}`);
+    assert.match(run.said, /the engine ran past the 12 s deadline/, run.said);
+    const seconds = run.result.engines.map((engine) => engine.seconds);
+    assert.ok(
+      (seconds[1] ?? 0) >= 10,
+      `after the 12 s of its own, not the 12 s of the engine: ${JSON.stringify(seconds)}`,
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** A run whose slots were all free as it began deals its engines their parts and reuses none. */
+function testARunNotDealtInSharesStartsEveryEngineForItsOwnPart(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: sharedEngineSuite(''), b: sharedEngineSuite('\tassert_int(1).is_equal(2)\n') },
+    2,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.doesNotMatch(run.said, /a share at a time/, run.said);
+    const logs = run.result.engines.map((engine) => engine.log ?? '');
+    assert.equal(logs.length, 2, 'two engines ran');
+    for (const log of logs) {
+      assert.equal(basename(log), 'engine.log', 'each wrote the log it always has');
+      assert.equal(existsSync(join(dirname(log), 'process.log')), false, 'and none was handed shares');
+      assert.equal(existsSync(join(dirname(log), 'shares')), false);
+    }
+    assert.ok(
+      run.result.engines.every((engine) => engine.startSeconds !== null),
+      'every engine has its start',
+    );
+  } finally {
+    run.cleanup();
+  }
+}
+
 /** A run's lanes read the lanes file before each share and give a slot back when told fewer. */
 async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promise<void> {
   const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fall-'));
@@ -104052,7 +104830,66 @@ async function testAFileTwoPathsReachIsRenamedOnce(): Promise<void> {
   }
 }
 
+/** Calls on one key run in the order made, a failure holds up none, and a settled key is forgotten. */
+async function testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten(): Promise<void> {
+  const turns = new Turns<string>();
+  const seen: string[] = [];
+  const call = (name: string, wait: number, fail = false): (() => Promise<string>) => {
+    return async () => {
+      seen.push(`${name} start`);
+      await delay(wait);
+      seen.push(`${name} end`);
+      if (fail) {
+        throw new Error(`${name} failed`);
+      }
+      return name;
+    };
+  };
+  const first = turns.run(call('a', 30, true), 'k');
+  const second = turns.run(call('b', 1), 'k');
+  const beside = turns.run(call('c', 1), 'other');
+  const third = turns.run(call('d', 1), 'k');
+  await assert.rejects(first, /a failed/);
+  assert.deepEqual(await Promise.all([second, beside, third]), ['b', 'c', 'd']);
+  assert.deepEqual(
+    seen.filter((line) => !line.startsWith('c')),
+    ['a start', 'a end', 'b start', 'b end', 'd start', 'd end'],
+    'a failed call holds up nobody, and the rest keep the order they were made in',
+  );
+  assert.ok(seen.indexOf('c end') < seen.indexOf('a end'), 'another key does not wait for this one');
+  assert.equal(turns.waiting, 0, 'no key stays once its last call has settled');
+  const unkeyed = new Turns();
+  const order: number[] = [];
+  await Promise.allSettled([
+    unkeyed.run(async () => {
+      await delay(10);
+      order.push(1);
+      throw new Error('first');
+    }),
+    unkeyed.run(() => {
+      order.push(2);
+      return Promise.resolve();
+    }),
+  ]);
+  assert.deepEqual(order, [1, 2], 'an unkeyed queue serves one at a time too');
+  assert.equal(unkeyed.waiting, 0);
+  let unhandled = 0;
+  const count = (): void => {
+    unhandled += 1;
+  };
+  process.on('unhandledRejection', count);
+  try {
+    const late = unkeyed.run(() => Promise.reject(new Error('late')));
+    await delay(20);
+    await assert.rejects(late, /late/);
+    assert.equal(unhandled, 0, 'a caller that attaches its handler late raises no unhandled rejection');
+  } finally {
+    process.off('unhandledRejection', count);
+  }
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
+  testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
   testTheClassCacheStepsOverAFolderHoldingAProject,
   testTheUidCacheStepsOverAFolderHoldingAProject,
@@ -104752,6 +105589,23 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
+  testAnEngineFinishingItsShareTakesTheNextInTheSameProcess,
+  testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting,
+  testARunHeldByMemoryStartsAnEngineForEachShare,
+  testALaneToldToStopGivesItsSlotBackBetweenShares,
+  testARunDealtSharesOverOneSlotStartsOneEngineForThem,
+  testAShareInAReusedEngineHasNoStartTime,
+  testAWindowedEngineIsNotReusedForHeadlessShares,
+  testTwoEnginesFinishingTogetherAreNotAdmittedBeyondTheMemory,
+  testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther,
+  testAStrayReportFailsOnlyTheShareOfAReusedEngineThatWroteIt,
+  testAReportRewrittenUnderTheSameNameFailsTheShareThatRewroteIt,
+  testDocsHeadingsHaveTheIdsMarkdownlintComputes,
+  testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine,
+  testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn,
+  testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone,
+  testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
+  testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
   testAParkedLanesSlotGoesToTheMachineNotTheCheck,
   testARunBegunAtItsCeilingStillFollowsTheLanesFile,
@@ -104926,6 +105780,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDapFramesBodiesByBytes,
   testFramingCeilingFailsLoudly,
   testDictionariesHaveNothingBehindThem,
+  testTwoFilesWhoseIdsCollideAsPlainNumbersAreNotOne,
   testProjectPathsAreContained,
   testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled,
   testToolAndOpLookupsCannotReachThePrototype,

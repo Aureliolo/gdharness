@@ -12,6 +12,7 @@ import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 import { addonMismatch, SERVER_VERSION } from './server-version.js';
 import { installedEditorDigest, shippedEditorDigest } from './setup.js';
+import { Turns } from './turns.js';
 
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
@@ -521,7 +522,7 @@ export class GodotBridge extends EventEmitter {
   private readonly oneShots = new Map<number, string>();
   private turnedAway: TurnedAway | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
-  private resourceQueues = new Map<string, Promise<void>>();
+  private resourceQueues = new Turns<string>();
 
   private readonly wantedPort: number;
   private boundPort: number | null = null;
@@ -771,7 +772,7 @@ export class GodotBridge extends EventEmitter {
       turnedAway: this.turnedAway ?? undefined,
       identifying: identifying ? true : undefined,
       pendingRequests: this.requestsInFlight().length,
-      queuedResources: this.resourceQueues.size,
+      queuedResources: this.resourceQueues.waiting,
       listeningSince: this.listeningSince ?? undefined,
       // Not for port 0, which asks for whichever port is free and so is never moved off.
       portWanted:
@@ -1302,21 +1303,7 @@ export class GodotBridge extends EventEmitter {
   }
 
   private enqueueResourceRequest<T>(resourceKey: string, task: () => Promise<T>): Promise<T> {
-    const previous = this.resourceQueues.get(resourceKey) ?? Promise.resolve();
-
-    const taskPromise = previous.catch(() => undefined).then(task);
-
-    const tail = taskPromise.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.resourceQueues.set(resourceKey, tail);
-
-    return taskPromise.finally(() => {
-      if (this.resourceQueues.get(resourceKey) === tail) {
-        this.resourceQueues.delete(resourceKey);
-      }
-    });
+    return this.resourceQueues.run(task, resourceKey);
   }
 
   private getResourceKey(args: Record<string, unknown>): string | undefined {

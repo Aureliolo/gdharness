@@ -23,8 +23,8 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { relativeWithin } from './paths.js';
-import { ignoredTexts, installedByUs, linksOut, type Reach, sameEntry, scanProject } from './project-scan.js';
+import { relativeWithin, sameEntry } from './paths.js';
+import { ignoredTexts, installedByUs, linksOut, type Reach, scanProject } from './project-scan.js';
 import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
@@ -89,17 +89,6 @@ function filesUnder(directory: string): string[] {
     }
     return entry.isDirectory() ? filesUnder(path) : [path];
   });
-}
-
-/** Whether two paths are one file, as a rename that changes only the case of a name sees them. */
-function sameFile(one: string, other: string): boolean {
-  try {
-    const a = statSync(one);
-    const b = statSync(other);
-    return a.ino === b.ino && a.dev === b.dev;
-  } catch {
-    return false;
-  }
 }
 
 /** Why [param path], a `res://` path, is somewhere the engine does not look, or null. */
@@ -240,7 +229,7 @@ function destinationReason(
   if (isDirectory && to.startsWith(`${from}/`)) {
     return `${from} cannot be moved into itself.`;
   }
-  if (existsSync(absoluteTo) && !sameFile(absoluteFrom, absoluteTo)) {
+  if (existsSync(absoluteTo) && !sameEntry(absoluteFrom, absoluteTo)) {
     return `${to} already exists, so nothing was moved there.`;
   }
   const blocker = fileInTheWay(absoluteTo);
@@ -294,7 +283,7 @@ function movesOf(
 function collisionReason(projectPath: string, moves: ReadonlyMap<string, string>): string | null {
   for (const [source, target] of moves) {
     const taken = join(projectPath, target.slice('res://'.length));
-    if (existsSync(taken) && !sameFile(join(projectPath, source.slice('res://'.length)), taken)) {
+    if (existsSync(taken) && !sameEntry(join(projectPath, source.slice('res://'.length)), taken)) {
       return `${target} already exists, so nothing was moved there.`;
     }
   }
@@ -556,7 +545,7 @@ function checkUnchangedOnDisk(outcome: Extract<MoveOutcome, { ok: true }>): void
         `${file.from} changed on disk while the move was being worked out, so nothing was written`,
       );
     }
-    if (existsSync(file.absoluteTo) && !sameFile(file.absoluteFrom, file.absoluteTo)) {
+    if (existsSync(file.absoluteTo) && !sameEntry(file.absoluteFrom, file.absoluteTo)) {
       throw new Error(`${file.to} already exists, so nothing was written`);
     }
   }

@@ -73,6 +73,7 @@ import {
   startTimesOf,
 } from './process-children.js';
 import { isRecord } from './records.js';
+import { Turns } from './turns.js';
 import { readWhole, removeWhole, writeWhole } from './whole-file.js';
 
 /**
@@ -1124,7 +1125,7 @@ export class EngineSlots {
    */
   private jobLent = false;
   /** The last look at the inherited slot, which the next one waits for. */
-  private inheriting: Promise<void> = Promise.resolve();
+  private readonly inheriting = new Turns();
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
   drawn: SlotsDrawn = { numbers: [] };
   private saidAt = Number.NEGATIVE_INFINITY;
@@ -1412,7 +1413,7 @@ export class EngineSlots {
    * two takes begun together cannot both read it as unused before either has claimed it.
    */
   private inheritedByOne(): Promise<string | null> {
-    const claim = this.inheriting.then(async () => {
+    return this.inheriting.run(async () => {
       if (this.inherited !== null) {
         return null;
       }
@@ -1420,11 +1421,6 @@ export class EngineSlots {
       this.inherited = lock;
       return lock;
     });
-    this.inheriting = claim.then(
-      () => undefined,
-      () => undefined,
-    );
-    return claim;
   }
 
   /**
