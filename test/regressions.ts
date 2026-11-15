@@ -181,7 +181,6 @@ import {
   inOneSlot,
   keptSlotsOf,
   LANES_VARIABLE,
-  lineageIn,
   lockIsFree,
   machineSlots,
   markBegan,
@@ -191,6 +190,7 @@ import {
   poolCount,
   QUEUED_FOLDER,
   RESERVED_FOLDER,
+  RESERVED_VARIABLE,
   reservedMemory,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
@@ -60042,92 +60042,59 @@ async function testAMalformedReservationCountsNothingAndThrowsNothing(): Promise
   }
 }
 
-/** A mark held by this process or one above it is the run's own reservation and is not waited on. */
-async function testAReservationOfThisProcessOrAnAncestorCountsNothing(): Promise<void> {
+/** The path of the mark `name` in [param fixture]. */
+function markPath(fixture: { readonly directory: string }, name: string): string {
+  return join(fixture.directory, RESERVED_FOLDER, name);
+}
+
+/** A mark the variable names is the run's own reservation and is not waited on, and one it does not name is. */
+async function testAMarkNamedInTheReservedVariableCountsNothing(): Promise<void> {
   const fixture = reservationFixture();
   try {
-    const own = await ownStart();
-    fixture.mark('own.json', { pid: process.pid, started: own, owed: 5 * RESERVED_GIB });
-    assert.equal(await reservedMemory(fixture.directory), 0, 'a process does not wait on its own mark');
+    fixture.mark('own.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
     fixture.mark('other.json', { ...(await fixture.holder()), owed: 3 * RESERVED_GIB });
-    assert.equal(await reservedMemory(fixture.directory), 3 * RESERVED_GIB, 'a stranger still counts');
+    const named = { [RESERVED_VARIABLE]: markPath(fixture, 'own.json') };
+    assert.equal(await reservedMemory(fixture.directory, named), 3 * RESERVED_GIB, 'only the other counts');
+    assert.equal(await reservedMemory(fixture.directory, {}), 8 * RESERVED_GIB, 'unnamed, both count');
   } finally {
     fixture.close();
   }
 }
 
-/**
- * A gate two levels up (the gate, then a shell, then the reader) is an ancestor whose mark counts
- * nothing, and a stranger's beside it still counts.
- */
-async function testAReservationOfAGrandparentCountsNothing(): Promise<void> {
+/** Nested holders name several marks, joined by the path-list separator, and every one is skipped. */
+async function testSeveralNamedMarksAreAllSkipped(): Promise<void> {
   const fixture = reservationFixture();
   try {
-    const script = join(fixture.directory, 'chain.mjs');
-    writeFileSync(
-      script,
-      [
-        `import { spawnHidden } from ${JSON.stringify(pathToFileURL(resolve('src', 'spawn.ts')).href)};`,
-        "import { existsSync, writeFileSync } from 'node:fs';",
-        "import { join } from 'node:path';",
-        'const [role, dir, module] = process.argv.slice(2);',
-        "const next = { gate: 'shell', shell: 'reader' }[role];",
-        "const answer = join(dir, 'answer');",
-        'setTimeout(() => process.exit(1), 90000);',
-        'if (next === undefined) {',
-        '  const { reservedMemory } = await import(module);',
-        '  const look = setInterval(async () => {',
-        "    if (existsSync(join(dir, 'go'))) {",
-        '      clearInterval(look);',
-        '      writeFileSync(answer, String(await reservedMemory(dir)));',
-        '      process.exit(0);',
-        '    }',
-        '  }, 50);',
-        '} else {',
-        "  spawnHidden(process.execPath, [process.argv[1], next, dir, module], { stdio: 'ignore' });",
-        '  setInterval(() => existsSync(answer) && process.exit(0), 50);',
-        '}',
-      ].join('\n'),
-    );
-    const module = pathToFileURL(resolve('src', 'engine-slots.ts')).href;
-    const gate = spawnHidden(process.execPath, [script, 'gate', fixture.directory, module], {
-      stdio: 'ignore',
-    });
-    const pid = gate.pid ?? 0;
-    const started = (await startTimesOf([pid])).get(pid);
-    assert.notEqual(started, undefined, 'the platform says when the gate started');
-    fixture.mark('gate.json', { pid, started, owed: 6 * RESERVED_GIB });
-    fixture.mark('stranger.json', { ...(await fixture.holder()), owed: 2 * RESERVED_GIB });
-    await delay(1500);
-    writeFileSync(join(fixture.directory, 'go'), '');
-    const answer = join(fixture.directory, 'answer');
-    assert.ok(await cameTrue(() => existsSync(answer), 60_000), 'the reader answered');
-    gate.kill();
-    assert.equal(readFileSync(answer, 'utf8'), String(2 * RESERVED_GIB), 'only the stranger counts');
+    fixture.mark('a.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
+    fixture.mark('b.json', { ...(await fixture.holder()), owed: 6 * RESERVED_GIB });
+    fixture.mark('c.json', { ...(await fixture.holder()), owed: 1 * RESERVED_GIB });
+    const named = {
+      [RESERVED_VARIABLE]: [markPath(fixture, 'a.json'), markPath(fixture, 'b.json')].join(delimiter),
+    };
+    assert.equal(await reservedMemory(fixture.directory, named), RESERVED_GIB, 'only the third counts');
   } finally {
     fixture.close();
   }
 }
 
-/** A parent counts as an ancestor only where it started before its child, which a reused pid did not. */
-function testOnlyAParentThatStartedFirstIsAnAncestor(): void {
-  const tree = (parentStart: number): ProcessTree =>
-    new Map([
-      [10, { parent: 20, command: '', startedAt: 5000 }],
-      [20, { parent: 30, command: '', startedAt: parentStart }],
-      [30, { parent: 0, command: '', startedAt: 1000 }],
-    ]);
-  assert.deepEqual(
-    [...lineageIn(tree(2000), 10)].toSorted((a, b) => a - b),
-    // The top of the chain names pid 0, the system's own, which no mark can hold.
-    [0, 10, 20, 30],
-  );
-  assert.deepEqual(
-    [...lineageIn(tree(9000), 10)],
-    [10],
-    'a later process holding the parent number is a stranger',
-  );
-  assert.deepEqual([...lineageIn(undefined, 10)], [10], 'no tree names only the process');
+/** A path spelt with other slashes, and on Windows another case, still names the mark. */
+async function testAMarkPathSpeltDifferentlyStillMatches(): Promise<void> {
+  const fixture = reservationFixture();
+  try {
+    fixture.mark('own.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
+    const plain = markPath(fixture, 'own.json');
+    const spellings = [
+      join(fixture.directory, RESERVED_FOLDER, '..', RESERVED_FOLDER, 'own.json'),
+      process.platform === 'win32' ? plain.replaceAll('\\', '/') : plain,
+      process.platform === 'win32' ? plain.toUpperCase() : plain,
+    ];
+    for (const spelt of spellings) {
+      assert.equal(await reservedMemory(fixture.directory, { [RESERVED_VARIABLE]: spelt }), 0, spelt);
+    }
+    assert.equal(await reservedMemory(fixture.directory, {}), 5 * RESERVED_GIB, 'and unnamed it counts');
+  } finally {
+    fixture.close();
+  }
 }
 
 /** A count variable that cannot be read never stops the room being read. */
@@ -60225,6 +60192,69 @@ async function testTheFirstEngineStartsAnywayAfterTheReservedWaitLimit(): Promis
   clock.ms += 1;
   await asked;
   assert.equal(admitted, true, 'at the limit it starts');
+}
+
+/** Three lanes of two engines under a standing reservation wait once, for the first engine only, and say so once. */
+async function testTheFirstEngineWaitsOnceForTheWholeRun(): Promise<void> {
+  const told: string[] = [];
+  const limitMs = 400;
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(-18 * RESERVED_GIB),
+    20,
+    { owed: () => Promise.resolve(30 * RESERVED_GIB), say: (line) => told.push(line), limitMs },
+  );
+  const control = new AbortController();
+  const began = Date.now();
+  const starts: number[] = [];
+  const lane = async (): Promise<void> => {
+    for (let engine = 0; engine < 2; engine += 1) {
+      const admitted = await gate.admit(control.signal, () => 1.5 * RESERVED_GIB);
+      starts.push(Date.now() - began);
+      await delay(30);
+      admitted.ended();
+    }
+  };
+  const finished = await Promise.race([
+    Promise.all([lane(), lane(), lane()]).then(
+      () => 'finished',
+      () => 'aborted',
+    ),
+    delay(limitMs * 6).then(() => 'stuck'),
+  ]);
+  control.abort();
+  assert.equal(finished, 'finished', `the lanes did not wait again and again: ${starts.join(', ')}`);
+  assert.equal(starts.length, 6, 'every engine started');
+  assert.ok((starts[0] ?? 0) >= limitMs - 50, `the first waited the limit: ${starts[0]}`);
+  assert.ok(
+    Math.max(...starts) - (starts[0] ?? 0) < limitMs,
+    `and the other five did not wait again: ${starts.join(', ')}`,
+  );
+  assert.equal(told.length, 1, 'and the line is said once');
+}
+
+/** A reservation that leaves room for the first engine holds nothing. */
+async function testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation(): Promise<void> {
+  const told: string[] = [];
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(40 * RESERVED_GIB),
+    5,
+    { owed: () => Promise.resolve(2 * RESERVED_GIB), say: (line) => told.push(line), limitMs: 60_000 },
+  );
+  const control = new AbortController();
+  const first = await Promise.race([
+    gate
+      .admit(control.signal, () => RESERVED_GIB)
+      .then(
+        () => 'started',
+        () => 'aborted',
+      ),
+    delay(1000).then(() => 'waited'),
+  ]);
+  control.abort();
+  assert.equal(first, 'started', 'the first engine starts at once');
+  assert.deepEqual(told, [], 'and nothing is said');
 }
 
 /** With nothing reserved the first engine starts at once and the memory is not read. */
@@ -101608,9 +101638,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGoneHoldersReservationCountsNothing,
   testSeveralLiveReservationsSum,
   testAMalformedReservationCountsNothingAndThrowsNothing,
-  testAReservationOfThisProcessOrAnAncestorCountsNothing,
-  testAReservationOfAGrandparentCountsNothing,
-  testOnlyAParentThatStartedFirstIsAnAncestor,
+  testAMarkNamedInTheReservedVariableCountsNothing,
+  testSeveralNamedMarksAreAllSkipped,
+  testAMarkPathSpeltDifferentlyStillMatches,
+  testTheFirstEngineWaitsOnceForTheWholeRun,
+  testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation,
   testABadSlotCountNeverStopsTheRoomBeingRead,
   testTheFirstEngineWaitsWhileReservedMemoryLeavesNoRoom,
   testTheFirstEngineStartsOnceTheReservationIsGone,

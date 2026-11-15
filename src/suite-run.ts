@@ -1339,6 +1339,10 @@ export class MemoryGate {
   private readonly reservation: ReservationWait | undefined;
   private readonly going = new Set<Admitted>();
   private turn: Promise<unknown> = Promise.resolve();
+  /** Whether the run's first engine is yet to start, which is the only one a reservation holds. */
+  private firstPending: boolean;
+  /** When the first engine began waiting for a reservation, and whether the run has said so. */
+  private readonly wait: { since?: number; said?: true } = {};
 
   constructor(
     slots: Pick<EngineSlots, 'markWaiting'>,
@@ -1350,11 +1354,12 @@ export class MemoryGate {
     this.read = read;
     this.lookMs = lookMs;
     this.reservation = reservation;
+    this.firstPending = reservation !== undefined;
   }
 
-  /** Whether the first engine of the run is held by a reservation, said once in [param wait] when it first is. */
-  private async heldByReservation(needed: number, wait: { since?: number; said?: true }): Promise<boolean> {
-    const { reservation } = this;
+  /** Whether the first engine of the run is held by a reservation, said once when it first is. */
+  private async heldByReservation(needed: number): Promise<boolean> {
+    const { reservation, wait } = this;
     const reserved = reservation === undefined ? 0 : await reservation.owed();
     if (reservation === undefined || reserved <= 0 || roomForAnother(await this.read(), 0, needed)) {
       return false;
@@ -1385,7 +1390,6 @@ export class MemoryGate {
   private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
     let unmark: (() => void) | undefined;
     let needed = 0;
-    const wait: { since?: number; said?: true } = {};
     try {
       for (;;) {
         signal.throwIfAborted();
@@ -1395,7 +1399,7 @@ export class MemoryGate {
         const owed = [...this.going].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
         const room =
           this.going.size === 0
-            ? !(await this.heldByReservation(needed, wait))
+            ? !(this.firstPending && (await this.heldByReservation(needed)))
             : roomForAnother(await this.read(), owed, needed);
         if (room) {
           break;
@@ -1406,6 +1410,7 @@ export class MemoryGate {
     } finally {
       unmark?.();
     }
+    this.firstPending = false;
     const engine: Admitted = {
       need: needed,
       held: 0,

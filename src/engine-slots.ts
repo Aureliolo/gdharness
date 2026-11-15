@@ -57,7 +57,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { availableParallelism, homedir, totalmem } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
@@ -1023,6 +1023,7 @@ interface ReservationMark {
   readonly owed: number;
   readonly content: string;
   readonly writtenAt: number;
+  readonly path: string;
 }
 
 /** The marks in [param directory]'s reserved folder that name a holder and a positive whole `owed`. */
@@ -1042,7 +1043,8 @@ function reservationMarks(directory: string): ReservationMark[] {
       const parsed: unknown = JSON.parse(content);
       const owed = isRecord(parsed) ? parsed['owed'] : undefined;
       if (holder !== null && typeof owed === 'number' && Number.isInteger(owed) && owed > 0) {
-        marks.push({ holder, owed, content, writtenAt: statSync(join(folder, name)).mtimeMs });
+        const path = join(folder, name);
+        marks.push({ holder, owed, content, writtenAt: statSync(path).mtimeMs, path });
       }
     } catch {
       // Unreadable or not JSON: it reserves nothing.
@@ -1052,53 +1054,43 @@ function reservationMarks(directory: string): ReservationMark[] {
 }
 
 /**
- * [param pid] and every process above it in [param tree], which a reservation of theirs is not owed
- * to. A parent counts only where the tree links it to its child: Windows keeps a dead creator's pid
- * as an orphan's parent, and a later process may hold that number.
+ * The variable a holder of a reservation sets, for everything it starts, to the path of its mark.
+ * Nested holders join their paths with the platform's path-list separator. A program started inside
+ * a reservation does not wait on it.
  */
-export function lineageIn(tree: ProcessTree | undefined, pid: number): Set<number> {
-  return new Set<number>([pid, ...(tree === undefined ? [] : ancestorsIn(tree, pid, -1))]);
-}
+export const RESERVED_VARIABLE = 'GODOT_ENGINE_RESERVED';
 
-/** When each of [param pids] started: from [param tree] where it dates them, else asked of the platform. */
-async function startsFrom(
-  pids: readonly number[],
-  tree: ProcessTree | undefined,
-): Promise<Map<number, number>> {
-  const starts = new Map<number, number>();
-  for (const pid of pids) {
-    const began = tree?.get(pid)?.startedAt;
-    if (began !== undefined) {
-      starts.set(pid, began);
-    }
-  }
-  if (tree !== undefined && starts.size === pids.length) {
-    return starts;
-  }
-  const missing = pids.filter((pid) => !starts.has(pid));
-  for (const [pid, began] of await startTimesOf(missing)) {
-    starts.set(pid, began);
-  }
-  return starts;
+/** [param path] resolved, and lower-cased on Windows, which is how marks are compared. */
+function comparable(path: string): string {
+  const resolved = resolve(path);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 /**
  * The bytes other work has reserved and still owes, summed over the live marks in
- * `<directory>/reserved`. A mark counts by the rule a lock does ({@link lockIsFree}), and one held by
- * this process or an ancestor counts nothing, since a gate that reserved its peak runs this inside
- * it. The default directory is the machine's, never a pool's.
+ * `<directory>/reserved`. A mark counts by the rule a lock does ({@link lockIsFree}), and one
+ * [param env] names in {@link RESERVED_VARIABLE} counts nothing, since a gate that reserved its peak
+ * runs this inside it. The default directory is the machine's, never a pool's.
  */
-export async function reservedMemory(directory: string = machineSlotsDirectory()): Promise<number> {
-  const live = reservationMarks(directory).filter((mark) => alive(mark.holder.pid));
+export async function reservedMemory(
+  directory: string = machineSlotsDirectory(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
+  const own = new Set(
+    (nonEmpty(env[RESERVED_VARIABLE]) ?? '')
+      .split(delimiter)
+      .filter((path) => path !== '')
+      .map(comparable),
+  );
+  const live = reservationMarks(directory).filter(
+    (mark) => alive(mark.holder.pid) && !own.has(comparable(mark.path)),
+  );
   if (live.length === 0) {
     return 0;
   }
-  const tree = await processTree();
-  const starts = await startsFrom([...new Set(live.map((mark) => mark.holder.pid))], tree);
-  const lineage = lineageIn(tree, process.pid);
+  const starts = await startTimesOf([...new Set(live.map((mark) => mark.holder.pid))]);
   const now = Date.now();
   return live
-    .filter((mark) => !lineage.has(mark.holder.pid))
     .filter((mark) => !lockIsFree(mark.content, mark.writtenAt, now, alive, (asked) => starts.get(asked)))
     .reduce((sum, mark) => sum + mark.owed, 0);
 }
