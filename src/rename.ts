@@ -1147,7 +1147,6 @@ const FROM_THE_ROOT =
 /** What precedes a string in a scene that holds text or a name, which is never a path. */
 const TEXT_IN_A_SCENE =
   /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
-const NO_RELATIVE_PATH = /\.import$|\/export_presets\.cfg$/;
 /** The files of Godot's text formats, where a line starting with `;` is a comment. */
 const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|tres|cfg|gdextension)$/;
 const SCENE_OR_RESOURCE = /\.(?:tscn|tres)$/;
@@ -1165,7 +1164,7 @@ function relativeBase(file: ProjectText, offset: number): Literal['base'] {
   // The opening quote sits just before the contents.
   const quoteAt = offset - 1;
   const before = file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
-  if (NO_RELATIVE_PATH.test(file.path) || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
+  if (file.path.endsWith('.import') || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
     return null;
   }
   if (SCENE_OR_RESOURCE.test(file.path) && TEXT_IN_A_SCENE.test(before)) {

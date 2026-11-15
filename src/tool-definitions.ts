@@ -1573,7 +1573,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['rename'],
         description:
-          'rename: also move the declaring script here, with its .uid beside it, rewriting every string that names it by path in the same style it was written (res:// or relative), and the relative paths in the moved script itself. Text that is no path stays as the move leaves it: scene and resource text, tooltip, placeholder and resource names, node names and groups, GDScript comments, `;` comment lines of Godot text files, and relative words in .import files and export presets.',
+          'rename: also move the declaring script here, with its .uid beside it, rewriting every string that names it by path in the same style it was written (res:// or relative), and the relative paths in the moved script itself. A relative string stays as written in the `text`, `tooltip_text`, `placeholder_text` and `resource_name` of a scene or resource, in node names and groups, on a `;` comment line of a Godot text file and in a .import file, while a res:// path there is rewritten. A GDScript comment stays whole, a res:// path in it too.',
       },
       preview: {
         type: 'boolean',
@@ -1718,7 +1718,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['move'],
         description:
-          'move: where it goes, inside the project, and for a file with the extension it has. A file goes with its .import and .uid, and a directory with everything in it. Every path naming what moved in a scene, resource, script, project.godot or other text file is rewritten in the style it was written in, res:// or relative, and so is every relative path inside a moved file. These stay as written: the `text`, `tooltip_text`, `placeholder_text` and `resource_name` of a scene or resource, node names and groups, GDScript comments, `;` comment lines of Godot text files, and relative words in .import files and export presets, which take absolute paths only. A string naming it any other way, such as the start of a path built at run time, is answered under leftAlone rather than changed, and so is a scene or resource saved as .scn or .res, which this cannot rewrite.',
+          'move: where it goes, inside the project, and for a file with the extension it has. A file goes with its .import and .uid, and a directory with everything in it. Every path naming what moved in a scene, resource, script, project.godot or other text file is rewritten in the style it was written in, res:// or relative, and so is every relative path inside a moved file. A relative string stays as written in the `text`, `tooltip_text`, `placeholder_text` and `resource_name` of a scene or resource, in node names and groups, on a `;` comment line of a Godot text file and in a .import file, while a res:// path there is rewritten. A GDScript comment stays whole, a res:// path in it too. A string naming it any other way, such as the start of a path built at run time, is answered under leftAlone rather than changed, and so is a scene or resource saved as .scn or .res, which this cannot rewrite.',
       },
       preview: {
         type: 'boolean',

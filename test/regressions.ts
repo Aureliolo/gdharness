@@ -89559,7 +89559,8 @@ function testAPreloadAnExtendsAndAnIconAreReadBesideTheScript(): void {
     'scenes/tool.gd': 'extends Node\n',
     'icon.svg': '<svg/>\n',
     'scenes/icon.svg': '<svg/>\n',
-    'scenes/a.gd': '@icon("icon.svg")\nextends "base.gd"\n\nconst T := preload("tool.gd")\n',
+    'scenes/a.gd':
+      '@icon("icon.svg")\nextends "base.gd"\n\nconst T := preload("tool.gd")\n# res://scenes/base.gd and "res://scenes/base.gd"\n',
   });
   try {
     movedIn(project, 'scenes/base.gd', 'stage/base.gd');
@@ -89567,19 +89568,22 @@ function testAPreloadAnExtendsAndAnIconAreReadBesideTheScript(): void {
     movedIn(project, 'scenes/icon.svg', 'stage/icon.svg');
     assert.equal(
       readFileSync(join(project, 'scenes/a.gd'), 'utf8'),
-      '@icon("../stage/icon.svg")\nextends "../stage/base.gd"\n\nconst T := preload("../stage/tool.gd")\n',
+      '@icon("../stage/icon.svg")\nextends "../stage/base.gd"\n\nconst T := preload("../stage/tool.gd")\n# res://scenes/base.gd and "res://scenes/base.gd"\n',
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
 }
 
-/** An export preset and an `.import` file hold absolute paths only, whatever relative word they spell. */
-function testExportPresetsAndImportFilesTakeAbsolutePathsOnly(): void {
+/**
+ * An export preset reads `export_path` and `exclude_filter` from the project root, so a move
+ * follows them. An `.import` file holds absolute paths only, whatever relative word it spells.
+ */
+function testExportPresetsFollowAndImportFilesTakeAbsolutePathsOnly(): void {
   const project = kindsProject({
     'desk.tscn': '[gd_scene format=3]\n\n[node name="Desk" type="Node2D"]\n',
     'export_presets.cfg':
-      '[preset.0]\n\nname="desk.tscn"\nexport_path="desk.tscn"\nexport_files=PackedStringArray("res://desk.tscn")\n',
+      '[preset.0]\n\nexport_path="desk.tscn"\nexclude_filter="desk.tscn"\nexport_files=PackedStringArray("res://desk.tscn")\n',
     'other.import': '[remap]\n\nsource_file="desk.tscn"\nuse="res://desk.tscn"\n',
     'data.cfg': '[a]\n\nscene="desk.tscn"\n',
   });
@@ -89588,8 +89592,8 @@ function testExportPresetsAndImportFilesTakeAbsolutePathsOnly(): void {
     movedIn(project, 'desk.tscn', 'stage/desk.tscn');
     assert.equal(
       read('export_presets.cfg'),
-      '[preset.0]\n\nname="desk.tscn"\nexport_path="desk.tscn"\nexport_files=PackedStringArray("res://stage/desk.tscn")\n',
-      'a preset keeps its name and output file and follows an absolute path',
+      '[preset.0]\n\nexport_path="stage/desk.tscn"\nexclude_filter="stage/desk.tscn"\nexport_files=PackedStringArray("res://stage/desk.tscn")\n',
+      'a preset follows its export path, its exclude filter and an absolute path',
     );
     assert.equal(
       read('other.import'),
@@ -105983,7 +105987,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARootLoadBesideAMovedNamesakeStays,
   testAPreloadAnExtendsAndAnIconAreReadBesideTheScript,
   testALoadSpelledWithAPrefixOrALineBreakIsReadFromTheRoot,
-  testExportPresetsAndImportFilesTakeAbsolutePathsOnly,
+  testExportPresetsFollowAndImportFilesTakeAbsolutePathsOnly,
   testAProseFollowsAndACommentLineHoldsNoRelativePath,
   testEachKindOfFileFollowsItsOwnBase,
   testAShaderIncludeIsFollowedAgainstTheShader,
