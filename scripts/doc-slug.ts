@@ -10,20 +10,25 @@ const ENTITIES: Readonly<Record<string, string>> = {
 
 /** The text a reader sees in [param html], one heading's rendered inline markup. */
 function textOf(html: string): string {
-  return html
-    .replaceAll(/<[^>]*>/g, '')
-    .replaceAll(
-      /&(?:#x([0-9a-f]+)|#(\d+)|([a-z]+));/gi,
-      (whole, hex?: string, decimal?: string, name?: string) => {
-        if (hex !== undefined) {
-          return String.fromCodePoint(Number.parseInt(hex, 16));
-        }
-        if (decimal !== undefined) {
-          return String.fromCodePoint(Number(decimal));
-        }
-        return ENTITIES[(name ?? '').toLowerCase()] ?? whole;
-      },
-    );
+  // Until none is left, since removing one tag can join the pieces of another: <<b>i>.
+  let bare = html;
+  let before = '';
+  while (bare !== before) {
+    before = bare;
+    bare = bare.replaceAll(/<[^>]*>/g, '');
+  }
+  return bare.replaceAll(
+    /&(?:#x([0-9a-f]+)|#(\d+)|([a-z]+));/gi,
+    (whole, hex?: string, decimal?: string, name?: string) => {
+      if (hex !== undefined) {
+        return String.fromCodePoint(Number.parseInt(hex, 16));
+      }
+      if (decimal !== undefined) {
+        return String.fromCodePoint(Number(decimal));
+      }
+      return ENTITIES[(name ?? '').toLowerCase()] ?? whole;
+    },
+  );
 }
 
 /**
