@@ -189,7 +189,6 @@ jobs:
       # Seven: macOS runs the write regressions slowest, and by its own figures six parts carry
       # about 975 of the 1200 seconds a part's run is given, seven about 836.
       regression-parts: '["1/7", "2/7", "3/7", "4/7", "5/7", "6/7", "7/7"]'
-      engine-fixtures-with-editor-fixtures: true
 
   # One check per platform, named by platform rather than by runner image, because the name is
   # what the branch ruleset requires, and an image bump must not rename a required check out from
