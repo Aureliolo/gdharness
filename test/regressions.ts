@@ -78802,6 +78802,64 @@ async function testARebuiltClassListAnswersAGoneScriptsClassAsRemoved(): Promise
 }
 
 /**
+ * Two scripts declaring one class_name, as a deleted script brought back beside its moved
+ * namesake leaves them: res://s1.gd and res://a/s2.gd. The engine registers a folder's subfolders
+ * before its own files and each registration replaces the path, so the name is res://s1.gd's.
+ */
+const TWICE_DECLARED: Readonly<Record<string, string>> = {
+  'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Twice"\n',
+  's0.gd': 'var x := 1\n',
+  's1.gd': 'class_name Delta\nvar x := 1\n',
+  'a/s2.gd': 'class_name Delta\nvar x := 1\n',
+  's3.gd': 'var x := 1\n',
+};
+
+function testATwiceDeclaredClassIsTheOneTheScanRegistersLast(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-declared-'));
+  try {
+    writeTree(project, TWICE_DECLARED);
+    assert.deepEqual(declaredClasses(project), new Map([['Delta', 'res://s1.gd']]));
+    assert.deepEqual(
+      [...declaredClassLines(project)].map(([name, line]) => [name, line.path, line.extends]),
+      [['Delta', 'res://s1.gd', 'RefCounted']],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/** The rebuilt class list holds a twice-declared name once, at the path the engine would register. */
+async function testARebuiltClassListHoldsATwiceDeclaredClassOnce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('twice-declared class rebuild regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-rebuilt-'));
+  try {
+    writeTree(project, TWICE_DECLARED);
+    const outcome = await runOperation(
+      { godotPath, script: resolve('src', 'godot', 'operations', 'godot_operations.gd'), debug: false },
+      'refresh_class_cache',
+      {},
+      project,
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const written = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.deepEqual(
+      [...written.matchAll(/"path": "([^"]*)"/g)].map((found) => found[1]),
+      ['res://s1.gd'],
+    );
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * The file an operation answers in keeps a float as it was: a tiny one was written as zero, and a
  * huge or a fractional one lost digits.
  */
@@ -107714,6 +107772,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheAnswerFileKeepsAFloatAsItWas,
   testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
   testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
+  testATwiceDeclaredClassIsTheOneTheScanRegistersLast,
+  testARebuiltClassListHoldsATwiceDeclaredClassOnce,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,

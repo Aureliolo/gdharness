@@ -4480,18 +4480,32 @@ function writeClassScripts(root: string, scripts: readonly ClassScript[]): void 
   }
 }
 
+/** The engine's scan order of two model paths: a folder's subfolders before its own files, each by name. */
+function scanOrder(a: string, b: string): number {
+  const left = a.split('/');
+  const right = b.split('/');
+  const at = left.findIndex((part, index) => part !== right[index]);
+  const leftIsFolder = at < left.length - 1;
+  if (leftIsFolder !== at < right.length - 1) {
+    return leftIsFolder ? -1 : 1;
+  }
+  return (left[at] ?? '') < (right[at] ?? '') ? -1 : 1;
+}
+
+/**
+ * Where two scripts declare one class_name, the engine keeps the one its scan registers last, since
+ * each registration replaces the path held for the name.
+ */
 function theScanHoldsTheClasses(root: string, scripts: readonly ClassScript[], when: string): void {
   const declared = new Map<string, string>();
   const lines = new Map<string, { path: string; extends: string }>();
-  scripts.forEach((script, slot) => {
-    if (script.exists && script.name !== null) {
-      declared.set(script.name, classPathOf(scripts, slot));
-      lines.set(script.name, {
-        path: classPathOf(scripts, slot),
-        extends: classBaseOf(scripts, slot, [slot]),
-      });
-    }
-  });
+  const named = scripts
+    .flatMap((script, slot) => (script.exists && script.name !== null ? [{ name: script.name, slot }] : []))
+    .toSorted((a, b) => scanOrder(classPathOf(scripts, a.slot), classPathOf(scripts, b.slot)));
+  for (const { name, slot } of named) {
+    declared.set(name, classPathOf(scripts, slot));
+    lines.set(name, { path: classPathOf(scripts, slot), extends: classBaseOf(scripts, slot, [slot]) });
+  }
   assert.deepEqual(declaredClasses(root), declared, `${when}: the classes and where they are`);
   assert.deepEqual(
     new Map(
