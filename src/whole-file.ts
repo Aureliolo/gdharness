@@ -138,7 +138,8 @@ export function writeWhole(path: string, text: string): boolean {
 
 /**
  * Makes [param path] holding [param text], and answers whether this call made it. Another process
- * reading the file finds it whole or not there, never empty.
+ * reading the file finds it whole or not there, never empty. For marks and steal files, which are
+ * never raced for as slot locks are ({@link madeInPlace}).
  *
  * The text goes to a file beside it, named as the gates' Python queue names its own
  * ({@link stagedWriterOf}), and is linked into place, which fails where the path exists. A rename
@@ -180,8 +181,14 @@ export function stagedWriterOf(name: string): number | undefined {
   return pid === undefined ? undefined : Number(pid);
 }
 
-/** Makes [param path] holding [param text] where a link cannot, and answers whether it did. */
-function madeInPlace(path: string, text: string): boolean {
+/**
+ * Makes [param path] by creating its name exclusively and then writing [param text], and answers
+ * whether this call made it. A reader landing between the two finds the file empty. A slot lock is
+ * made so, since a taker that stages its text first loses nearly every race to one that only
+ * creates the name: every reader that takes, steals or removes a lock holds an empty one as held
+ * ({@link lockIsFree}). Also what {@link makeWhole} falls back on where a link cannot be made.
+ */
+export function madeInPlace(path: string, text: string): boolean {
   try {
     writeFileSync(path, text, { encoding: 'utf8', flag: 'wx' });
     return true;

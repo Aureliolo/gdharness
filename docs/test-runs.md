@@ -743,12 +743,16 @@ A tool of a game's own that starts engines takes slots the same way, in the step
 - To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`). Write
   `{"pid": <your pid>, "started": <your process's start time>}` into it.
 - The time is in milliseconds since the epoch, as the operating system reports it.
-- gdharness and the gates' queue write the text to a file beside the lock,
-  `.<n>.lock.<pid>-<thread>.writing`, and put it in place under the lock's name without replacing a
-  lock that exists (a hard link, or a rename that Windows refuses onto a taken name). A reader then
-  never finds the lock empty, and never opens a `.writing` file or counts it as a lock or a mark. A
-  writer that has gone leaves its file, which any sweep may remove by the pid in its name.
-  Still pass over a lock that is empty, as one made by an older taker may be.
+- A lock may be read empty for a moment, between its creation and its text. Hold an empty lock as
+  held, whatever decides on it: a take, a steal, a sweep or a removal. Never read it as free or as
+  garbage. One still empty 10 seconds after it was made belongs to a taker that died, and is free.
+- gdharness and the gates' queue create a lock this way, since a taker that stages its text first
+  loses almost every race to one that only creates the name.
+- The marks, the steal files and a lock put back under its steal file are written whole. The text
+  goes to a file beside, `.<name>.<pid>-<thread>.writing`, and is put in place under the name without
+  replacing a file that exists (a hard link, or a rename that Windows refuses onto a taken name). A
+  reader never finds these empty, and never opens a `.writing` file or counts it as a lock or a mark.
+  A writer that has gone leaves its file, which any sweep may remove by the pid in its name.
 - An optional `"by"` says what took the slot, such as the tool and its project. A run waiting for a
   slot names each holder by it, or by its pid when it is missing.
 
@@ -888,11 +892,21 @@ every change and every five seconds while a gate waits.
 
 Count what side work may take from the folder as it is now. That is the free slots of the gates,
 less those the seated gates are owed, and none while a measurement holds the quiet window
-(`window.json`). The owed part is the queue's to count. Where the file is fresh, take its `spare`
-less the gates' slots whose locks were written after it, and no more than are free. Where it is
-missing, older than ten seconds, unreadable or written by a holder that has gone, take none if a gate
-is seated and every free slot of the gates if none is. A game never takes a spare slot, since it
-holds one as long as it plays.
+(`window.json`). The owed part is the queue's to count. Read the free slots once, and count and
+name the slots from that one read. By the state of the queue:
+
+- No gate mark is live: take every free slot of the gates, whatever the file says.
+- A gate mark is live and the file is fresh: take its `spare` less the gates' slots whose locks were
+  written after it, and no more than are free. A file is fresh when it is under ten seconds old,
+  readable and written by a holder that is alive, and no `.seated` file is newer than its `written`,
+  since it could not have counted that seat.
+- A gate mark is live and the file is not fresh, seated gate or not: take none of the gates' slots.
+  Its ticker writes a fresh file within five seconds.
+
+After taking a gate slot, count again from the folder. When side work holds more gate slots written
+since the count than it allows, the newest of them gives its slot back and waits, so two takers that
+read one spare slot do not both keep a slot. A game never takes a spare slot, since it holds one as
+long as it plays.
 
 ### A gate's lanes file
 

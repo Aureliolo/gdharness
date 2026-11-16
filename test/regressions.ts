@@ -177,6 +177,7 @@ import {
   FolderChanges,
   FollowedLanes,
   gamesKeptOf,
+  giveBackSlot,
   holderOf,
   inheritsSlot,
   inOneSlot,
@@ -65711,6 +65712,9 @@ function eightSlotsWithTheKeptOnesHeld(
   for (const slot of [6, 7, ...held]) {
     utimesSync(join(directory, `${String(slot)}.lock`), old, old);
   }
+  if (seated) {
+    utimesSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated'), old, old);
+  }
   if (spare !== undefined) {
     writeFileSync(join(directory, SPARE_FILE), spare);
   }
@@ -65718,31 +65722,210 @@ function eightSlotsWithTheKeptOnesHeld(
 }
 
 /**
- * With `spare.json` missing, or cut short as a reader of a writer that died would find it, a gate
- * queued and not seated owes the free slots nothing: `slots.shares` counts `owed` 0, `side` every
- * free gate slot, and `slots.drawn` gives side work all eight, however long it waits.
+ * A gate whose process is alive keeps the free slots of the gates from side work unless a fresh
+ * count from a live writer says how many are spare, seated or not: a queue process counting for a
+ * waiting gate writes the count under its own pid, and a count whose writer has ended says nothing
+ * about the gate its ticker still counts for. With no live gate, the free slots are side work's
+ * whatever the file says.
  */
-async function testSideWorkTakesTheGateSlotsOfAnUnseatedGateWithNoSpareCount(): Promise<void> {
+async function testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount(): Promise<void> {
   const started = await ownStart();
-  const cut = `{"spare": 6, "pid": ${String(process.pid)}, `;
-  for (const [why, spare] of [
+  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
+  const counted = (pid: number, written: number): string =>
+    `{"spare": 6, "pid": ${String(pid)}, "started": ${String(started)}, "written": ${String(written)}}`;
+  const states = [
     ['a missing count', undefined],
-    ['an unreadable one', cut],
-  ] as const) {
-    const directory = eightSlotsWithTheKeptOnesHeld(started, false, [], spare);
-    try {
-      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-      const lock = await side.takeFree();
-      assert.equal(
-        lock === null ? null : basename(lock),
-        '5.lock',
-        `side work takes a gate slot with ${why}`,
-      );
-      assert.deepEqual(side.drawn.numbers, [7, 6, 5, 4, 3, 2, 1, 0], `${why} draws every slot`);
-      side.releaseAll();
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
+    ['an unreadable one', `{"spare": 6, "pid": ${String(process.pid)}, `],
+    ['a count whose writer has gone', counted(gone.pid, Date.now() - 500)],
+    ['a stale count', counted(process.pid, Date.now() - SPARE_STALE_MS - 1000)],
+  ] as const;
+  for (const seated of [false, true]) {
+    for (const [why, spare] of states) {
+      const directory = eightSlotsWithTheKeptOnesHeld(started, seated, [], spare);
+      try {
+        const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+        const gate = seated ? 'a seated gate' : 'a queued gate';
+        assert.equal(await side.takeFree(), null, `${gate} with ${why} keeps its free slots`);
+        assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
+        rmSync(join(directory, QUEUED_FOLDER, 'gate-1.json'));
+        const lock = await side.takeFree();
+        assert.equal(
+          lock === null ? null : basename(lock),
+          '5.lock',
+          `side work takes one once the gate is gone`,
+        );
+        assert.deepEqual(side.drawn.numbers, [7, 6, 5, 4, 3, 2, 1, 0], `and draws every slot with ${why}`);
+        side.releaseAll();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
     }
+  }
+  const dead = eightSlotsWithTheKeptOnesHeld(started, false, [], counted(gone.pid, Date.now()));
+  try {
+    writeFileSync(
+      join(dead, QUEUED_FOLDER, 'gate-1.json'),
+      `{"pid": ${String(gone.pid)}, "started": ${String(started)}}`,
+    );
+    const side = new EngineSlots(dead, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const lock = await side.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '5.lock', 'a gate that has gone keeps nothing');
+    side.releaseAll();
+  } finally {
+    rmSync(dead, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A gate seated after the count was written is one the count could not have counted, as it stood
+ * before that seat (`slots.seated_mark`, newer than `written`). Side work takes no gate slot on
+ * it, and takes the counted share once a count written after the seat stands.
+ */
+async function testACountFromBeforeASeatIsStaleForSideWork(): Promise<void> {
+  const started = await ownStart();
+  const pid = String(process.pid);
+  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  const seat = join(directory, QUEUED_FOLDER, 'gate-1.json.seated');
+  const counted = (written: number): string =>
+    `{"spare": 2, "pid": ${pid}, "started": ${String(started)}, "written": ${String(written)}}`;
+  try {
+    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+    writeFileSync(join(directory, SPARE_FILE), counted(Date.now() - 3000));
+    const seatedAt = new Date(Date.now() - 1000);
+    utimesSync(seat, seatedAt, seatedAt);
+    assert.equal(
+      await side.takeFree(),
+      null,
+      'a seat newer than the count leaves the free slots to its gate',
+    );
+    assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
+    writeFileSync(join(directory, SPARE_FILE), counted(Date.now() - 500));
+    const lock = await side.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '5.lock', 'and the count written after it stands');
+    side.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two side takes that begin together under a count of 1 never both keep a gate slot. Each reads
+ * one spare slot before either takes it, so the one that comes second counts the folder again and
+ * gives its slot back. Run 60 times, each with the takes started together.
+ */
+async function testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots(): Promise<void> {
+  const started = await ownStart();
+  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  try {
+    const makeSide = (): EngineSlots =>
+      new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const held: number[] = [];
+    for (let round = 0; round < 60; round += 1) {
+      writeFileSync(
+        join(directory, SPARE_FILE),
+        `{"spare": 1, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
+      );
+      const sides = [makeSide(), makeSide()];
+      const took = await Promise.all(sides.map((side) => side.takeFree()));
+      const mine = took.filter((lock) => lock !== null).length;
+      held.push(mine);
+      assert.ok(mine <= 1, `round ${String(round)} held ${String(mine)}`);
+      assert.equal(
+        [4, 5].filter((slot) => existsSync(join(directory, `${String(slot)}.lock`))).length,
+        mine,
+        'and the slot given back is free',
+      );
+      for (const side of sides) {
+        side.releaseAll();
+      }
+    }
+    assert.ok(
+      held.some((count) => count === 1),
+      'one of the two takes is kept',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Runs [param after] right after [param slots] first reads the free slots of the folder, as
+ * another taker's take would land there, and answers how many times the folder has been read.
+ */
+function afterTheFirstLook(slots: EngineSlots, after: () => void): () => number {
+  const read: unknown = Reflect.get(slots, 'openSlots');
+  if (typeof read !== 'function') {
+    throw new TypeError('the read of the free slots is there to watch');
+  }
+  let looks = 0;
+  Reflect.set(slots, 'openSlots', async (): Promise<unknown> => {
+    looks += 1;
+    const open: unknown = await Reflect.apply(read, slots, []);
+    if (looks === 1) {
+      after();
+    }
+    return open;
+  });
+  return () => looks;
+}
+
+/** A count of one spare gate slot, as a live queue process writes it half a second ago. */
+function oneSpareSlot(directory: string, started: number): void {
+  writeFileSync(
+    join(directory, SPARE_FILE),
+    `{"spare": 1, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
+  );
+}
+
+/**
+ * One take counts the share and names its slots from one read of the folder. A slot taken between
+ * the take's first look and its tries is one it names and finds held, where a second read would
+ * name the next free slot, which a seated gate is owed.
+ */
+async function testASideTakeReadsTheFreeSlotsOnce(): Promise<void> {
+  const started = await ownStart();
+  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  try {
+    oneSpareSlot(directory, started);
+    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const looks = afterTheFirstLook(side, () => {
+      writeFileSync(join(directory, '5.lock'), JSON.stringify({ pid: process.pid, started }));
+    });
+    assert.equal(
+      await side.takeFree(),
+      null,
+      'the slot another took after the look is not replaced by the next',
+    );
+    assert.equal(looks(), 1, 'and the folder was read once');
+    assert.deepEqual(side.drawn.numbers, [7, 6, 5], JSON.stringify(side.drawn));
+    assert.equal(existsSync(join(directory, '4.lock')), false, 'the gate keeps the slot it is owed');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two takers that counted one spare gate slot from different reads of the folder take different
+ * slots: the second names slot 5 from a read before the first made slot 4. The second counts the
+ * folder again, finds two gate slots written since the count against a count of one, and gives back
+ * the newer. The first keeps its slot.
+ */
+async function testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack(): Promise<void> {
+  const started = await ownStart();
+  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  try {
+    oneSpareSlot(directory, started);
+    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+    afterTheFirstLook(side, () => {
+      writeFileSync(join(directory, '4.lock'), JSON.stringify({ pid: process.pid, started }));
+    });
+    assert.equal(await side.takeFree(), null, 'the newer take gives its slot back and waits');
+    assert.equal(existsSync(join(directory, '5.lock')), false, 'so slot 5 is free');
+    assert.equal(existsSync(join(directory, '4.lock')), true, 'and the first keeps slot 4');
+    assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -65906,23 +66089,91 @@ async function testTwoProcessesMakingTheSameLockNeverOverwriteEachOther(): Promi
 }
 
 /**
- * A slot's lock is made through its staged file: with the staged name taken by a folder, which the
- * text cannot be written to, no lock is made, where a lock opened and written in place would be.
+ * A slot's lock is made by creating its name exclusively and writing after, as the gates' Python
+ * queue makes its own (`slots.created`): with the staged name taken by a folder, which a staged
+ * write would stop on, the slot is taken all the same.
  */
-async function testASlotLockIsMadeThroughItsStagedFile(): Promise<void> {
+async function testASlotLockIsCreatedWithoutAStagedFile(): Promise<void> {
   const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-staged-lock-'));
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-created-lock-'));
   try {
     mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
     const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
-    assert.equal(await slots.takeFree(), null, 'no lock is made while its staged name is taken');
-    assert.equal(existsSync(join(directory, '0.lock')), false, 'and none is left');
-    rmSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`), { recursive: true });
     const lock = await slots.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '0.lock', 'and the slot is taken once it is free');
+    assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken with no staged file');
+    assert.equal(
+      readFileSync(join(directory, '0.lock'), 'utf8'),
+      JSON.stringify({ pid: process.pid, started }),
+      'and holds its holder',
+    );
     slots.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A slot lock made by `slots.created` is empty until its text is written, and every reader that
+ * takes, steals, sweeps or removes holds an empty one as held: the lock rule, the take of a slot, a
+ * take over, the sweep of a lock past the count, the gates' free slots a side take names and the
+ * removal of a slot another process holds. One empty past {@link UNWRITTEN_MS} belongs to a taker
+ * that died.
+ */
+async function testEveryReaderHoldsAnEmptySlotLockAsHeld(): Promise<void> {
+  const started = await ownStart();
+  const now = Date.now();
+  assert.equal(
+    lockIsFree(
+      '',
+      now,
+      now,
+      () => true,
+      () => undefined,
+    ),
+    false,
+    'the lock rule',
+  );
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-empty-lock-'));
+  try {
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started }, undefined, () => 'other');
+    const empty = (slot: number): string => {
+      const lock = join(directory, `${String(slot)}.lock`);
+      writeFileSync(lock, '');
+      return lock;
+    };
+    empty(0);
+    empty(1);
+    const beyond = empty(5);
+    assert.equal(await slots.takeFree(), null, 'a take finds both slots held, and takes none over');
+    assert.deepEqual(
+      [0, 1, 5].map((slot) => readFileSync(join(directory, `${String(slot)}.lock`), 'utf8')),
+      ['', '', ''],
+      'the sweep leaves the lock past the count, and the empty locks are not removed',
+    );
+    giveBackSlot(beyond, process.pid);
+    assert.equal(existsSync(beyond), true, 'and a give-back leaves an empty lock to its maker');
+    const old = new Date(Date.now() - UNWRITTEN_MS - 1000);
+    utimesSync(join(directory, '0.lock'), old, old);
+    const lock = await slots.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '0.lock', 'one past the limit is its dead taker');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  const eight = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  try {
+    writeFileSync(
+      join(eight, SPARE_FILE),
+      `{"spare": 2, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
+    );
+    writeFileSync(join(eight, '5.lock'), '');
+    const side = new EngineSlots(eight, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const lock = await side.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '4.lock', 'a side take names it no free gate slot');
+    assert.deepEqual(side.drawn.numbers, [7, 6, 4], JSON.stringify(side.drawn));
+    side.releaseAll();
+  } finally {
+    rmSync(eight, { recursive: true, force: true });
   }
 }
 
@@ -108877,12 +109128,17 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGatesInTheQueueKeepTheirSlots,
   testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsAge,
   testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot,
-  testSideWorkTakesTheGateSlotsOfAnUnseatedGateWithNoSpareCount,
+  testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount,
+  testACountFromBeforeASeatIsStaleForSideWork,
   testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem,
+  testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots,
+  testASideTakeReadsTheFreeSlotsOnce,
+  testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack,
   testAFileMadeInTheSlotsFolderIsNeverReadEmpty,
   testTwoProcessesMakingTheSameLockNeverOverwriteEachOther,
   testTheSlotSweepJudgesStagedFilesByTheirWritersName,
-  testASlotLockIsMadeThroughItsStagedFile,
+  testASlotLockIsCreatedWithoutAStagedFile,
+  testEveryReaderHoldsAnEmptySlotLockAsHeld,
   testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,

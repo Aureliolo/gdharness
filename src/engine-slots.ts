@@ -73,7 +73,7 @@ import {
 } from './process-children.js';
 import { isRecord } from './records.js';
 import { Turns } from './turns.js';
-import { makeWhole, readWhole, removeWhole, stagedWriterOf, writeWhole } from './whole-file.js';
+import { madeInPlace, makeWhole, readWhole, removeWhole, stagedWriterOf, writeWhole } from './whole-file.js';
 
 /**
  * The variable an engine started on a slot is given, naming that slot's lock, so a program the
@@ -594,6 +594,25 @@ type SlotTaker = 'gate' | 'timing' | 'tier' | 'other';
  * between all of it ({@link SPARE_FILE}).
  */
 type GateQueue = 'none' | 'queued' | number;
+
+/**
+ * One look at the machine's queue: {@link GateQueue}, the gates' free slots it was counted from, and
+ * how many side work may hold in all ([param limit], unlimited where no count bounds it) with the
+ * gates' slots taken since the count, oldest first ([param since]). A take names its slots from the
+ * same free slots the share was counted from.
+ */
+interface GateLook {
+  readonly queue: GateQueue;
+  readonly free: readonly number[];
+  readonly limit: number;
+  readonly since: readonly number[];
+}
+
+/** What a gate's mark and its seat say, the newest seat's time included. */
+interface GateMarks {
+  readonly live: number;
+  readonly newestSeat: number;
+}
 
 /**
  * The slot numbers of [param count] a take by [param taker] may try now, in the order it tries
@@ -1297,8 +1316,8 @@ export class EngineSlots {
     if (await this.starvedOutFor(taker)) {
       return null;
     }
-    let queue: GateQueue | undefined;
-    const queued = async (): Promise<GateQueue> => (queue ??= await this.gateQueue());
+    let look: GateLook | undefined;
+    const queued = async (): Promise<GateLook> => (look ??= await this.gateLook());
     this.drawn = await this.drawnFor(taker, game, queued);
     if (game && this.drawn.limit === 'kept' && (await this.gamesFillTheKeptSlots())) {
       return null;
@@ -1312,22 +1331,36 @@ export class EngineSlots {
       taker === 'timing'
         ? this.drawn.numbers
         : await this.leftAfterThoseAhead(line ?? new SlotLine(taker, game), queued);
-    return await this.lockOneOf(tried, game);
+    const lock = await this.lockOneOf(tried, game);
+    if (lock !== null && typeof look?.queue === 'number' && (await this.overTheShare(lock))) {
+      this.release(lock);
+      this.drawn = slotsDrawnOn(this.count, taker, 'queued');
+      return null;
+    }
+    return lock;
+  }
+
+  /**
+   * Whether the gate slot at [param lock], just taken by side work, is one too many: the folder
+   * counted again holds more gate slots of side work than its share, and this one is among the
+   * newest. Two takers that both counted one spare slot before either took it then cannot both keep
+   * theirs. Every taker orders the locks by when they were written and names the same one.
+   */
+  private async overTheShare(lock: string): Promise<boolean> {
+    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
+    const again = await this.gateLook();
+    return again.since.length > again.limit && again.since.indexOf(slot) >= again.limit;
   }
 
   /** The slots a [param taker] may take now, given the machine's queue [param queued] reads. */
   private async drawnFor(
     taker: SlotTaker,
     game: boolean,
-    queued: () => Promise<GateQueue>,
+    queued: () => Promise<GateLook>,
   ): Promise<SlotsDrawn> {
-    const queue = taker === 'other' ? forAGame(await queued(), game) : 'none';
-    return slotsDrawnOn(
-      this.count,
-      taker,
-      queue,
-      typeof queue === 'number' ? await this.openSlots() : undefined,
-    );
+    const look = taker === 'other' ? await queued() : undefined;
+    const queue = look === undefined ? 'none' : forAGame(look.queue, game);
+    return slotsDrawnOn(this.count, taker, queue, typeof queue === 'number' ? look?.free : undefined);
   }
 
   /** The slots with no lock or a lock whose holder has gone, the lowest first. */
@@ -1352,7 +1385,7 @@ export class EngineSlots {
     const holder: SlotHolder = game ? { ...this.holder, game: true } : this.holder;
     for (const slot of slots) {
       const lock = join(this.directory, `${String(slot)}.lock`);
-      if (this.made(lock, holder) || (await this.takenOver(lock, holder))) {
+      if (madeInPlace(lock, JSON.stringify(holder)) || (await this.takenOver(lock, holder))) {
         this.held.add(lock);
         return lock;
       }
@@ -1385,7 +1418,7 @@ export class EngineSlots {
    * The slots of the last draw that [param placed] may try, once the free ones the takers ahead of it
    * take first are left to them. It records the slots it left for them in the draw.
    */
-  private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateQueue>): Promise<number[]> {
+  private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateLook>): Promise<number[]> {
     const drawnBefore = this.drawn.numbers;
     const now = Date.now();
     const waiting = slotWaiters(this.directory);
@@ -1417,7 +1450,7 @@ export class EngineSlots {
    */
   private async claimedAhead(
     ahead: readonly SlotWaiter[],
-    queued: () => Promise<GateQueue>,
+    queued: () => Promise<GateLook>,
   ): Promise<Map<number, string>> {
     if (ahead.length === 0) {
       return new Map();
@@ -1584,22 +1617,32 @@ export class EngineSlots {
   }
 
   /**
-   * The machine's queue: whether a live gate has a mark in it. A mark whose gate has gone is removed
-   * with its `.seated` file, by the rule a lock is freed by, and one not yet written names nobody and
-   * is passed over.
+   * One look at the machine's queue, with the free slots read once for the whole look. A mark whose
+   * gate has gone is removed with its `.seated` file, by the rule a lock is freed by, and one not
+   * yet written names nobody and is passed over.
    */
-  private async gateQueue(): Promise<GateQueue> {
-    const marks = join(this.directory, QUEUED_FOLDER);
+  private async gateLook(): Promise<GateLook> {
+    const marks = await this.gateMarks();
+    if (marks.live === 0) {
+      return { queue: 'none', free: [], limit: Number.POSITIVE_INFINITY, since: [] };
+    }
+    const share = await this.sideShare(marks.newestSeat);
+    return { ...share.look, queue: share.side > 0 ? share.side : 'queued' };
+  }
+
+  /** The live gates' marks in the queue folder, and when the newest of them was seated. */
+  private async gateMarks(): Promise<GateMarks> {
+    const folder = join(this.directory, QUEUED_FOLDER);
     let names: string[];
     try {
-      names = readdirSync(marks).filter((name) => name.endsWith('.json'));
+      names = readdirSync(folder).filter((name) => name.endsWith('.json'));
     } catch {
-      return 'none';
+      return { live: 0, newestSeat: 0 };
     }
     let live = 0;
-    let seated = 0;
+    let newestSeat = 0;
     for (const name of names) {
-      const mark = join(marks, name);
+      const mark = join(folder, name);
       const content = readWhole(mark);
       if (content === null || holderOf(content) === null) {
         continue;
@@ -1609,55 +1652,56 @@ export class EngineSlots {
         removeWhole(`${mark}${SEATED_SUFFIX}`);
       } else {
         live += 1;
-        seated += existsSync(`${mark}${SEATED_SUFFIX}`) ? 1 : 0;
+        newestSeat = Math.max(newestSeat, this.writtenAt(`${mark}${SEATED_SUFFIX}`) ?? 0);
       }
     }
-    if (live === 0) {
-      return 'none';
-    }
-    const side = await this.sideShare(seated);
-    return side > 0 ? side : 'queued';
+    return { live, newestSeat };
   }
 
   /**
-   * How many of the gates' free slots side work may take now, counted from the folder as the gates'
-   * Python queue counts it: `Shares.side` (the free gate slots less those the seated gates are
-   * owed, none while a measurement holds the quiet window) and `drawn` give side work that many,
-   * named from the top.
+   * How many of the gates' free slots side work may take now, and the look it was counted from, as
+   * the gates' Python queue counts it: `Shares.side` (the free gate slots less those the seated
+   * gates are owed, none while a measurement holds the quiet window) and `drawn` give side work that
+   * many, named from the top, all from one read of the folder.
    *
    * What a seated gate is owed rests on the queue's own tickets, its pool and the machine's memory,
    * which this process cannot read. A queue process counts it and writes the result to
-   * {@link SPARE_FILE}, so a fresh count stands for the gates' share. The slots taken since it was
-   * written come off it, since each is one the count could not have given to anything else. Where no
-   * fresh count stands, no queue process is counting: a seated gate keeps every free slot, and with
-   * none seated side work takes all of them, as `shares` does for gates the queue has not seated.
+   * {@link SPARE_FILE}. A live gate is in the queue, so side work takes none of the gates' slots
+   * unless a fresh count says how many. A count is fresh when a live process wrote it within
+   * {@link SPARE_STALE_MS} and no gate was seated after it was written, since it could not have
+   * counted that seat. The slots taken since it was written come off it, since each is one the count
+   * could not have given to anything else.
    */
-  private async sideShare(seated: number): Promise<number> {
-    if (await this.windowHeld()) {
-      return 0;
-    }
+  private async sideShare(newestSeat: number): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
     const gated = Math.max(1, this.count - keptSlotsOf(this.count));
     const free = (await this.openSlots()).filter((slot) => slot < gated);
+    const none = { side: 0, look: { free, limit: 0, since: [] } };
+    if (await this.windowHeld()) {
+      return none;
+    }
     const path = join(this.directory, SPARE_FILE);
     const said = countWritten(readWhole(path), Date.now(), 'spare');
-    if (said === null || (await this.free(path))) {
-      return seated > 0 ? 0 : free.length;
+    if (said === null || said.written < newestSeat || (await this.free(path))) {
+      return none;
     }
-    let taken = 0;
-    for (let slot = 0; slot < gated; slot += 1) {
-      if (!free.includes(slot) && this.lockedSince(slot, said.written)) {
-        taken += 1;
-      }
-    }
-    return Math.max(0, Math.min(said.count - taken, free.length));
+    const since = Array.from({ length: gated }, (_, slot) => slot)
+      .filter((slot) => !free.includes(slot))
+      .flatMap((slot) => {
+        const at = this.writtenAt(join(this.directory, `${String(slot)}.lock`));
+        return at !== undefined && at > said.written ? [{ slot, at }] : [];
+      })
+      .toSorted((a, b) => a.at - b.at || a.slot - b.slot)
+      .map((one) => one.slot);
+    const side = Math.max(0, Math.min(said.count - since.length, free.length));
+    return { side, look: { free, limit: said.count, since } };
   }
 
-  /** Whether the lock of [param slot] was written after [param time], in milliseconds. */
-  private lockedSince(slot: number, time: number): boolean {
+  /** When the file at [param path] was last written, in milliseconds, or undefined where it is not there. */
+  private writtenAt(path: string): number | undefined {
     try {
-      return statSync(join(this.directory, `${String(slot)}.lock`)).mtimeMs > time;
+      return statSync(path).mtimeMs;
     } catch {
-      return false;
+      return undefined;
     }
   }
 
