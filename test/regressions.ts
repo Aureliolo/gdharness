@@ -40780,6 +40780,23 @@ function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
       assert.ok(!refusal.ok, spelling);
       assert.equal(reason(spelling), refusal.reason, spelling);
     }
+    if (process.platform === 'win32') {
+      // Windows opens a colon a ".." step cancels as the folder it leaves, so it names no stream.
+      const cancelled = exportedBuild(project, `${builds}\\x:y\\..\\${program}`);
+      assert.equal(cancelled.ok && cancelled.absolutePath, real, JSON.stringify(cancelled));
+    } else {
+      // A colon is an ordinary character elsewhere, and a backslash is part of a relative name.
+      mkdirSync(join(builds, 'night:ly'));
+      writeFileSync(join(builds, 'night:ly', program), 'a build', { mode: 0o755 });
+      const colonDir = exportedBuild(project, join(builds, 'night:ly', program));
+      assert.equal(
+        colonDir.ok && colonDir.absolutePath,
+        realpathSync.native(join(builds, 'night:ly', program)),
+      );
+      const backslashed = resolveWithinProject(project, '\\export\\missing');
+      assert.ok(!backslashed.ok);
+      assert.equal(reason('\\export\\missing'), backslashed.reason);
+    }
     assert.match(reason('C:game.exe'), /contains ':'/);
     assert.match(reason('export/game\0.exe'), /null byte/);
 

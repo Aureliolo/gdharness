@@ -556,9 +556,12 @@ function fileOutsideTheProject(at: string, given: string): ExportedBuild {
       reason: `${at} is a network or device path, which is not read here. Give a path on a local disk.`,
     };
   }
-  const colon = colonRefusal(given, given.replace(/^[A-Za-z]:/, ''));
-  if (colon !== null) {
-    return { ok: false, reason: colon };
+  // Windows reads a colon after the drive as a stream or a drive-relative name, never as a file. Elsewhere it is an ordinary character.
+  if (process.platform === 'win32' && at.replace(/^[A-Za-z]:/, '').includes(':')) {
+    return {
+      ok: false,
+      reason: `Path '${given}' contains ':', which Windows reads as a stream or a drive-relative name, not a file to start.`,
+    };
   }
   let real: string;
   try {
@@ -584,6 +587,7 @@ export function exportedBuild(projectPath: string, candidatePath: string): Expor
     !found.ok &&
     found.outside === true &&
     !trimmed.startsWith(RESOURCE_SCHEME) &&
+    !isWithinRoot(resolve(projectPath), at) &&
     !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed));
   if (outside) {
     return fileOutsideTheProject(at, trimmed);
