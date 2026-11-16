@@ -53,6 +53,8 @@ type Containment =
       readonly link?: string;
       /** Whether anything is there through that link, which a link whose target is gone lacks. */
       readonly reached?: boolean;
+      /** Set when the only fault is that the path lies outside the project, which no other refusal sets. */
+      readonly outside?: true;
     };
 
 /**
@@ -506,7 +508,7 @@ export function resolveWithinProject(
   // Refused here rather than left to the containment check below, which would accept a leading
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
-    return { ok: false, reason: absolutePathReason(trimmed, withoutScheme, root) };
+    return { ok: false, reason: absolutePathReason(trimmed, withoutScheme, root), outside: true };
   }
 
   const colonReason = colonRefusal(trimmed, withoutScheme);
@@ -517,7 +519,7 @@ export function resolveWithinProject(
   const absolutePath = resolve(root, withoutScheme);
 
   if (!isWithinRoot(root, absolutePath)) {
-    return { ok: false, reason: `Path '${trimmed}' resolves outside the project directory.` };
+    return { ok: false, reason: `Path '${trimmed}' resolves outside the project directory.`, outside: true };
   }
 
   const relativePath = relative(root, absolutePath).split(sep).join('/');
@@ -554,7 +556,7 @@ function fileOutsideTheProject(at: string, given: string): ExportedBuild {
       reason: `${at} is a network or device path, which is not read here. Give a path on a local disk.`,
     };
   }
-  const colon = colonRefusal(given, at.replace(/^[A-Za-z]:/, ''));
+  const colon = colonRefusal(given, given.replace(/^[A-Za-z]:/, ''));
   if (colon !== null) {
     return { ok: false, reason: colon };
   }
@@ -580,10 +582,9 @@ export function exportedBuild(projectPath: string, candidatePath: string): Expor
   const at = resolve(projectPath, trimmed);
   const outside =
     !found.ok &&
-    found.link === undefined &&
+    found.outside === true &&
     !trimmed.startsWith(RESOURCE_SCHEME) &&
-    !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed)) &&
-    !isWithinRoot(resolve(projectPath), at);
+    !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed));
   if (outside) {
     return fileOutsideTheProject(at, trimmed);
   }

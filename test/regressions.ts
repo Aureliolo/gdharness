@@ -40761,6 +40761,27 @@ function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
     assert.match(reason('.'), /is the project directory itself/);
     assert.equal(exportedBuild(project, join(project, 'export', `${program}.bin`)).ok, true);
     assert.match(reason(`${join(project, 'export', program)}:inner.exe`), /contains ':'/);
+    // Only the refusal for lying outside is lifted. Every other one keeps the project's text and cause.
+    for (const spelling of [
+      'uid://abc',
+      'user://save.dat',
+      'http://example.com/game.exe',
+      'file:///builds/game.exe',
+      'RES://export/game.exe',
+      'res:/../../builds/game.exe',
+      'export/game.exe:stream/../..',
+      'X:../builds',
+      'C:Windows\\System32\\whoami.exe',
+      'C:game.exe',
+      'C:',
+      'export/game\0.exe',
+    ]) {
+      const refusal = resolveWithinProject(project, spelling);
+      assert.ok(!refusal.ok, spelling);
+      assert.equal(reason(spelling), refusal.reason, spelling);
+    }
+    assert.match(reason('C:game.exe'), /contains ':'/);
+    assert.match(reason('export/game\0.exe'), /null byte/);
 
     if (process.platform === 'win32') {
       windowsProgramPathsAreJudged({ project, builds, there });
