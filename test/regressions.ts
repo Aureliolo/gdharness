@@ -89334,6 +89334,7 @@ function testReferencesInOtherFoldersCostOneQuestionEachFolder(): void {
   }));
   const references = new Map([['res://desk.tscn', 'res://newdir/desk.tscn']]);
   let asked = 0;
+  let entries = 0;
   joinedByTheDisk({
     projectPath: '/project',
     targets: literalTargets(texts, scriptsOf(texts)),
@@ -89342,10 +89343,14 @@ function testReferencesInOtherFoldersCostOneQuestionEachFolder(): void {
       asked += 1;
       return absolute.toLowerCase();
     },
-    entry: (absolute) => absolute.toLowerCase(),
+    entry: (absolute) => {
+      entries += 1;
+      return absolute.toLowerCase();
+    },
   });
   assert.equal(references.size, 1, 'nothing joins');
   assert.ok(asked <= 1 + 50, `the disk was asked ${asked} times`);
+  assert.equal(entries, 0, 'no target in another folder is looked at');
 }
 
 /**
