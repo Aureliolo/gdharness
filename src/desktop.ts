@@ -44,6 +44,7 @@ export const HIDDEN_DESKTOP = 'gdharness';
 const DESKTOP_VARIABLE = 'GDHARNESS_DESKTOP';
 
 const SOURCE = `using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -173,18 +174,85 @@ public static class GdharnessDesktop {
     return quoted.Append(quote).ToString();
   }
 
-  // A message box the process opened on the desktop, as the marker line a run reads, or null. Nobody
-  // can press it here, so the process waits on it for good. Only a box of this process counts, since
-  // every engine a run starts shares the desktop.
-  static string BoxOf(IntPtr desktop, int processId) {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct ProcessEntry {
+    public uint size, usage, processId;
+    public IntPtr heap;
+    public uint module, threads, parentProcessId;
+    public int priority;
+    public uint flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string exeFile;
+  }
+  [DllImport("kernel32.dll")] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+  [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+  const uint SnapshotProcesses = 0x2;
+  const uint ProcessTerminate = 0x1;
+  const uint ProcessQueryLimited = 0x1000;
+
+  // When the process began, or -1 where it cannot be read.
+  static long CreatedAt(uint processId) {
+    IntPtr handle = OpenProcess(ProcessQueryLimited, false, processId);
+    if (handle == IntPtr.Zero) {
+      return -1;
+    }
+    long created, exited, kernel, user;
+    bool read = GetProcessTimes(handle, out created, out exited, out kernel, out user);
+    CloseHandle(handle);
+    return read ? created : -1;
+  }
+
+  // The process and everything it started that is still running. A parent is only a parent when it
+  // began before its child, since Windows hands a pid to a later process once its owner has gone.
+  static Dictionary<uint, long> FamilyOf(uint root) {
+    Dictionary<uint, uint> parents = new Dictionary<uint, uint>();
+    IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
+    if (snapshot != IntPtr.Zero && snapshot != new IntPtr(-1)) {
+      ProcessEntry entry = new ProcessEntry();
+      entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+      for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
+        parents[entry.processId] = entry.parentProcessId;
+      }
+      CloseHandle(snapshot);
+    }
+    Dictionary<uint, long> family = new Dictionary<uint, long>();
+    family[root] = CreatedAt(root);
+    bool grew = true;
+    while (grew) {
+      grew = false;
+      foreach (KeyValuePair<uint, uint> pair in parents) {
+        long parentBegan;
+        if (family.ContainsKey(pair.Key) || !family.TryGetValue(pair.Value, out parentBegan)) {
+          continue;
+        }
+        long began = CreatedAt(pair.Key);
+        if (began >= 0 && parentBegan >= 0 && began >= parentBegan) {
+          family[pair.Key] = began;
+          grew = true;
+        }
+      }
+    }
+    return family;
+  }
+
+  // A message box the process, or one it started, opened on the desktop, as the marker line a run
+  // reads, or null, with the pid of the process that owns it. Nobody can press it here, so its owner
+  // waits on it for good. Only a box of this family counts, since every engine a run starts shares
+  // the desktop.
+  static string BoxOf(IntPtr desktop, uint processId, out uint boxOwner) {
     string said = null;
+    uint found = 0;
+    Dictionary<uint, long> family = FamilyOf(processId);
     EnumDesktopWindows(desktop, delegate(IntPtr window, IntPtr unused) {
       uint owner;
       GetWindowThreadProcessId(window, out owner);
       // Not asked whether it is visible: a window of a non-interactive station never reads as shown.
-      if (owner != (uint)processId || !HasClass(window, DialogClass)) {
+      if (!family.ContainsKey(owner) || !HasClass(window, DialogClass)) {
         return true;
       }
+      found = owner;
       StringBuilder body = new StringBuilder();
       EnumChildWindows(window, delegate(IntPtr child, IntPtr also) {
         string text = TextOf(child);
@@ -196,6 +264,7 @@ public static class GdharnessDesktop {
       said = BoxMarker + "{" + Quote("title") + ":" + Quote(TextOf(window)) + "," + Quote("text") + ":" + Quote(body.ToString()) + "}";
       return false;
     }, IntPtr.Zero);
+    boxOwner = found;
     return said;
   }
 
@@ -380,6 +449,7 @@ public static class GdharnessDesktop {
     }
     bool stopped = false;
     uint looks = 0;
+    uint lastOwner = 0;
     DateTime lookAgain = DateTime.UtcNow;
     while (WaitForSingleObject(started.process, 100) == TimedOut) {
       if (!stopped && stopFile.Length > 0 && File.Exists(stopFile)) {
@@ -388,12 +458,25 @@ public static class GdharnessDesktop {
       }
       if (!stopped && desktopHandle != IntPtr.Zero && DateTime.UtcNow >= lookAgain) {
         lookAgain = DateTime.UtcNow.AddMilliseconds(500);
-        string box = BoxOf(desktopHandle, started.processId);
-        looks = box == null ? 0 : looks + 1;
+        uint owner;
+        string box = BoxOf(desktopHandle, (uint)started.processId, out owner);
+        looks = box == null ? 0 : (owner == lastOwner ? looks + 1 : 1);
+        lastOwner = box == null ? 0 : owner;
         if (looks >= BoxLooks) {
           Say(box);
-          TerminateProcess(started.process, 1);
-          stopped = true;
+          looks = 0;
+          lastOwner = 0;
+          // Only the owner of the box is ended: an editor stays up when a game it plays is stuck.
+          if (owner == (uint)started.processId) {
+            TerminateProcess(started.process, 1);
+            stopped = true;
+          } else {
+            IntPtr child = OpenProcess(ProcessTerminate, false, owner);
+            if (child != IntPtr.Zero) {
+              TerminateProcess(child, 1);
+              CloseHandle(child);
+            }
+          }
         }
       }
     }

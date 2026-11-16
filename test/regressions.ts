@@ -19984,6 +19984,51 @@ async function testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce(): Prom
 }
 
 /**
+ * A game an editor plays is a child of the process the helper started, and its box is ended alone:
+ * the editor stays up. The stand-in game is started by a parent that outlives it, as an editor
+ * outlives the game it plays.
+ */
+async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('played no-renderer regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-no-renderer-'));
+  const game = rendererLessEngine();
+  const editor = [
+    '-e',
+    `const { spawn } = require('node:child_process'); const game = spawn(${JSON.stringify(game)}, ['--path', '.'], { stdio: 'inherit' }); game.on('exit', () => { console.log('the game ended, the editor is up'); setInterval(() => undefined, 1000); });`,
+  ];
+  const start = spawnOnDesktop(
+    { desktop: HIDDEN_DESKTOP, directory: scratch, scratch, endsWithHelper: true },
+    process.execPath,
+    editor,
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let said = '';
+  for (const stream of [start.child.stdout, start.child.stderr]) {
+    stream?.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+  }
+  try {
+    const seen = await answeredWithin(
+      () => (said.includes('the game ended, the editor is up') ? true : undefined),
+      NO_RENDERER_END_MS,
+    );
+    assert.equal(seen, true, `the game ends and its parent says so: ${said}`);
+    assert.match(said, /desktop-box .*Unable to initialize video driver/, `the box is named: ${said}`);
+    const editorPid = start.pid();
+    assert.ok(editorPid !== undefined && alive(editorPid), 'and the process the helper started is still up');
+  } finally {
+    start.stop();
+    await exitedWithin(start.child, 60_000);
+    sweep(scratch);
+  }
+}
+
+/**
  * Ends what a case that went through the keeper left running, waits for the run's note to hold its
  * end, and only then removes the case's folders. A keeper writes the note as the game it holds ends,
  * and one written after the removal put the folder back.
@@ -110535,6 +110580,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
   testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce,
   testAKeeperCaseThatFailsLeavesNoRunFolder,
+  testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor,
   testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
