@@ -711,7 +711,7 @@ export class GameDebugger {
     return this.queue.run(() => this.answer(request));
   }
 
-  private async answer(request: DebugRequest): Promise<DebugAnswer> {
+  private async answer(request: Exclude<DebugRequest, { readonly op: 'snapshot' }>): Promise<DebugAnswer> {
     if (request.op === 'output') {
       return {
         output: [...this.output],
@@ -735,8 +735,6 @@ export class GameDebugger {
         return await this.variables(request.frame);
       case 'evaluate':
         return await this.evaluate(request.frame, request.expression);
-      case 'snapshot':
-        return await this.snapshot();
       default:
         return { refused: `Nothing here answers ${JSON.stringify(request)}.` };
     }
