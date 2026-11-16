@@ -9667,7 +9667,7 @@ async function restartAnEditorOpenedByAServerOrNot(opened: boolean): Promise<voi
         asked.push(tool);
       }
     });
-    opening.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: opened })));
+    opening.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: opened, hidden: false })));
 
     const greeted = await readTheGreetingOfTheFakeEditor(server);
     assert.ok(greeted, 'the server should read the greeting the editor sent');
@@ -9751,6 +9751,172 @@ async function assertAHiddenRestartOfAnEditorOpenedByHandIsRefused(
     hidden,
   );
   assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
+}
+
+/** What a restart of a stand-in editor came to: what it answered, what it was asked and what it reported. */
+interface RestartOfAStandIn {
+  readonly answer: string;
+  readonly asked: readonly string[];
+  readonly status: Record<string, unknown>;
+}
+
+/**
+ * Restarts a stand-in editor that greets with [param saying], with the call's [param args], and
+ * reports the answer, what the editor was asked and what editor_status said of it first.
+ *
+ * The engine is pointed at nothing, so an editor a server opened stops there and says so. A restart
+ * that goes ahead on an editor opened elsewhere waits for a comeback no stand-in makes, so it is
+ * read as soon as `restart_editor` has gone down the socket and the answer is then "no answer".
+ */
+async function restartAStandIn(
+  saying: Record<string, unknown>,
+  args: Record<string, unknown>,
+): Promise<RestartOfAStandIn> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+    },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const opening = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = opening;
+    await new Promise<void>((settle, reject) => {
+      opening.once('open', () => {
+        settle();
+      });
+      opening.once('error', reject);
+    });
+    const asked: string[] = [];
+    opening.on('message', (data: Buffer) => {
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      const tool = get(message, 'tool');
+      if (get(message, 'type') === 'tool_invoke' && typeof tool === 'string') {
+        asked.push(tool);
+      }
+    });
+    opening.send(JSON.stringify(greeting(process.cwd(), saying)));
+    const status = await readTheGreetingOfTheFakeEditor(server);
+    assert.ok(status, 'the server should read the greeting the editor sent');
+
+    const replied: { text: string | null } = { text: null };
+    server
+      .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart', ...args } }, 20_000)
+      .then((reply) => {
+        replied.text = textOf(reply) ?? '';
+      })
+      .catch(() => null);
+    for (
+      let waited = 0;
+      waited < 10_000 && replied.text === null && !asked.includes('restart_editor');
+      waited += 100
+    ) {
+      await delay(100);
+    }
+    return { answer: replied.text ?? 'no answer: the restart went ahead', asked, status };
+  } finally {
+    editor?.terminate();
+    await server.stop();
+  }
+}
+
+/** An editor opened by hand with no window is not asked to restart itself, so no window arrives on the desktop. */
+async function testAnEditorWithNoWindowIsNotRestartedIntoOne(): Promise<void> {
+  const { answer, asked, status } = await restartAStandIn({ hidden: true }, {});
+  assert.match(answer, /runs headless or hidden and was not opened by this server/, answer);
+  assert.match(answer, /would put one on the desktop/, answer);
+  assert.match(answer, /editor_launch close/, 'the steps that work are named');
+  assert.match(answer, /editor_launch open with hidden: true/, answer);
+  assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
+  assert.equal(status['connected'], true, 'and it is left connected');
+}
+
+/** The refusal of hidden: true for an editor with no window says what the restart would really do. */
+async function testAHiddenRestartOfAnEditorWithNoWindowIsRefusedTruly(): Promise<void> {
+  const { answer, asked } = await restartAStandIn({ hidden: true }, { hidden: true });
+  assert.match(answer, /restarts itself with a window, so it cannot come back hidden/, answer);
+  assert.doesNotMatch(answer, /as it was|opened by hand/, 'a window is not how it was');
+  assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
+}
+
+/** A caller that asks for a window gets the self-restart on an editor that had none. */
+async function testAnEditorWithNoWindowRestartsWhenAWindowIsAskedFor(): Promise<void> {
+  const { asked, answer } = await restartAStandIn({ hidden: true }, { hidden: false });
+  assert.ok(asked.includes('restart_editor'), `the editor is asked to restart itself: ${answer}`);
+}
+
+/** An editor opened by hand with a window restarts itself with no argument, and is refused hidden: true. */
+async function testAnEditorOpenedByHandWithAWindowRestartsAsItWas(): Promise<void> {
+  const plain = await restartAStandIn({ hidden: false }, {});
+  assert.ok(plain.asked.includes('restart_editor'), `asked to restart itself: ${plain.answer}`);
+  const wanting = await restartAStandIn({ hidden: false }, { hidden: true });
+  assert.match(wanting.answer, /opened by hand, and restarts itself as it was/, wanting.answer);
+  assert.equal(wanting.asked.includes('restart_editor'), false);
+}
+
+/** An editor a server opened is started again by the server, whether or not it has a window. */
+async function testAnEditorAServerOpenedIsNotJudgedByItsWindow(): Promise<void> {
+  for (const hidden of [true, false]) {
+    const { answer, asked } = await restartAStandIn({ hidden, opened_by_a_server: true }, {});
+    assert.match(answer, /GODOT_PATH is set to .*gdharness-no-such-engine/, answer);
+    assert.equal(
+      asked.includes('restart_editor'),
+      false,
+      `hidden ${String(hidden)}: never asked to restart itself`,
+    );
+  }
+}
+
+/**
+ * An editor another editor started, of a hidden one, is not restarted into a window either, and the
+ * addon hands its hiddenness on through the environment, since Godot's restart forwards neither
+ * `--headless` nor the marker after `--`.
+ */
+async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
+  const { answer, asked } = await restartAStandIn({ hidden: true, started_by_an_editor: true }, {});
+  assert.match(answer, /runs headless or hidden and was not opened by this server/, answer);
+  assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
+
+  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
+  assert.match(
+    addon,
+    /if is_hidden\(\):\n\t\tOS\.set_environment\(HIDDEN_VARIABLE, "1"\)/,
+    'a hidden editor puts the mark into the environment the next editor inherits',
+  );
+  assert.match(
+    addon,
+    /or not OS\.get_environment\(HIDDEN_VARIABLE\)\.is_empty\(\)/,
+    'and an editor reads that mark as hidden',
+  );
+}
+
+/** Whether a restart is refused follows the hidden editor_status reports, and no other reading. */
+async function testARestartFollowsTheHiddenEditorStatusReports(): Promise<void> {
+  for (const hidden of [true, false]) {
+    const { status, asked } = await restartAStandIn({ hidden }, {});
+    assert.equal(status['hidden'], hidden, JSON.stringify(status));
+    assert.equal(asked.includes('restart_editor'), !hidden, `hidden ${String(hidden)}`);
+  }
+}
+
+/** An editor opened elsewhere that never said whether it has a window is not restarted on a guess. */
+async function testAnEditorThatNeverSaidItHasNoWindowIsNotRestarted(): Promise<void> {
+  const unsaid = await restartAStandIn({ hidden: undefined }, {});
+  assert.match(unsaid.answer, /did not say whether it has a window/, unsaid.answer);
+  assert.equal(unsaid.asked.includes('restart_editor'), false, 'it was asked nothing');
+  const accepted = await restartAStandIn({ hidden: undefined }, { hidden: false });
+  assert.ok(accepted.asked.includes('restart_editor'), 'and hidden: false accepts a window');
+}
+
+/** The editor_launch description says what a restart of an editor opened elsewhere does. */
+function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
+  assert.match(
+    toolSpec('editor_launch')?.description ?? '',
+    /One opened by hand restarts itself and comes back with a window.*one that has no window is refused unless hidden: false accepts one\./s,
+  );
 }
 
 /**
@@ -31332,7 +31498,7 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     };
 
     editor = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-    await greet(editor);
+    await greet(editor, { hidden: false });
     let knows = false;
     for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
       await delay(100);
@@ -31475,7 +31641,7 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
     };
 
     editor = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-    await greet(editor);
+    await greet(editor, { hidden: false });
     let knows = false;
     for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
       await delay(100);
@@ -110857,6 +111023,15 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusPortConflict,
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,
+  testAnEditorWithNoWindowIsNotRestartedIntoOne,
+  testAHiddenRestartOfAnEditorWithNoWindowIsRefusedTruly,
+  testAnEditorWithNoWindowRestartsWhenAWindowIsAskedFor,
+  testAnEditorOpenedByHandWithAWindowRestartsAsItWas,
+  testAnEditorAServerOpenedIsNotJudgedByItsWindow,
+  testAnEditorStartedByAHiddenEditorIsHiddenToo,
+  testARestartFollowsTheHiddenEditorStatusReports,
+  testAnEditorThatNeverSaidItHasNoWindowIsNotRestarted,
+  testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes,
   testAStatusDuringArrivalIsOfOneMoment,
   testAnEditorIsReadOnceItHasSaidWhoItIs,
   testACallWaitsForAnArrivingEditor,

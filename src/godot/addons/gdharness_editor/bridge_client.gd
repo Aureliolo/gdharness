@@ -63,6 +63,10 @@ const HIDDEN_MARK: String = "--gdharness-hidden"
 ## tells the two apart when both are announced at once. Kept in step with `EDITOR_PID_VARIABLE`
 ## in the runtime autoload.
 const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
+## Put into this editor's environment as it loads when it runs with no window anybody sees, for the
+## editor Godot's own restart starts to inherit. That restart forwards neither `--headless` nor
+## anything after `--`, so without this the new editor reads itself as visible and has a window.
+const HIDDEN_VARIABLE: String = "GDHARNESS_HIDDEN_EDITOR"
 ## How many polls in a row the door has to stay connected before the WebSocket dials.
 ## See [member _door].
 const DOOR_POLLS: int = 2
@@ -142,6 +146,8 @@ func _ready() -> void:
 	var inherited: String = OS.get_environment(EDITOR_PID_VARIABLE)
 	_started_by_an_editor = not inherited.is_empty() and inherited != str(OS.get_process_id())
 	OS.set_environment(EDITOR_PID_VARIABLE, str(OS.get_process_id()))
+	if is_hidden():
+		OS.set_environment(HIDDEN_VARIABLE, "1")
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
@@ -539,11 +545,12 @@ func _keep_breakpoints_through_sessions() -> void:
 
 
 ## Whether this editor runs with no window anybody sees: headless, on the hidden desktop a server
-## started it on, or started with the mark a hidden editor carries.
+## started it on, started with the mark a hidden editor carries, or started by a hidden editor.
 static func is_hidden() -> bool:
 	return (
 		DisplayServer.get_name() == "headless"
 		or _on_the_hidden_desktop()
+		or not OS.get_environment(HIDDEN_VARIABLE).is_empty()
 		or OS.get_cmdline_user_args().has(HIDDEN_MARK)
 	)
 
