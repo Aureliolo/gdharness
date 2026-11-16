@@ -5141,7 +5141,9 @@ async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): P
     `the editor should be blind to the new class, or this proves nothing: ${blind.length} unseen`,
   );
 
+  const probeFrom = Date.now();
   const scanned = await call('editor_rescan', { projectPath: project });
+  console.log(`PROBE editor_rescan ${Date.now() - probeFrom}ms ${text(scanned)}`);
   const after = readFileSync(cache, 'utf8');
   const missing = ['OfferedClass', 'Filler0', 'Filler399'].filter((name) => !after.includes(name));
   // What the caller following that advice is entitled to, whichever way the scan went: the class

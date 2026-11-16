@@ -2715,6 +2715,11 @@ const PLAYING_STATUS_MS = 1_000;
  */
 const SCAN_SETTLED_MS = 500;
 
+const rescanProbe: { start: number; marks: unknown[] } = { start: 0, marks: [] };
+function probeMark(label: string, extra?: unknown): void {
+  rescanProbe.marks.push([label, Date.now() - rescanProbe.start, extra]);
+}
+
 /**
  * How long an idle editor may take to say so before the time counts as the editor being held up
  * rather than as a question asked. An idle editor answers in milliseconds, and one past a second
@@ -17948,6 +17953,8 @@ class GodotServer {
   private async handleRescanFilesystem(args: OperationParams): Promise<ToolResponse> {
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 30000;
     const started = Date.now();
+    rescanProbe.start = started;
+    rescanProbe.marks = [];
     const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
     return await this.startTheRescan(args, { started, timeoutMs, projectPath });
   }
@@ -17995,9 +18002,13 @@ class GodotServer {
       const idle = await this.waitOutTheEditorsOwnScan(() => deadline());
       waitedForEditorMs += idle.waitedMs;
       answerStalledMs += idle.stalledMs;
+      probeMark('waitedOut', idle);
       ({ before, writtenBefore } = this.cacheBeforeTheScan(projectPath));
+      probeMark('cacheBefore');
       blind = await this.classesTheEditorCannotSee(args);
+      probeMark('blind', blind.unseen.length);
       const first = await this.askViaBridge('rescan_filesystem', args);
+      probeMark('asked', first instanceof BridgeTimeout ? 'timeout' : first.content[0]?.text);
       if (first instanceof BridgeTimeout) {
         startUnanswered = true;
         break;
@@ -18088,6 +18099,7 @@ class GodotServer {
       looked = true;
       await new Promise((settle) => setTimeout(settle, 100));
       const status = await this.rescanStatus(args);
+      probeMark('status', status);
       if (status === null) {
         busy = true;
         idleSince = null;
@@ -18151,6 +18163,7 @@ class GodotServer {
     // with a changed file still on its old import, and the editor's scan of it began straight after.
     // Looked at once however late it is, since a scan never looked at is not known to be running.
     const busy = await this.untilTheScanSettles(args, deadline, completedBefore);
+    probeMark('settled', { atRisk: atRisk.length, ghosts: ghosts.length, unchecked: blind.unchecked });
 
     // The write lands after the scan says it has finished, so reading the file the moment the
     // editor goes idle reads the one that is about to be replaced. Waited for only where a class
@@ -18167,6 +18180,7 @@ class GodotServer {
       }
     }
 
+    probeMark('cacheWritten');
     return await this.repairTheClassCache(args, { ...call, ...from, busy });
   }
 
@@ -18204,6 +18218,7 @@ class GodotServer {
         ? []
         : atMissingPaths.filter((name) => !cachedAtMissingPaths(rebuilt, projectPath).includes(name));
     const stillAtMissingPaths = atMissingPaths.filter((name) => !dropped.includes(name));
+    probeMark('repaired', { lost: lost.length, atMissing: atMissingPaths.length });
 
     return await this.reloadAfterTheRescan(args, {
       ...settled,
@@ -18231,7 +18246,9 @@ class GodotServer {
     // A list is answered under reloads, each in the shape one script is answered in.
     const reloaded: ScriptReload = Array.isArray(asked) ? {} : (reloads[0]?.reloaded ?? {});
 
+    probeMark('reloads');
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
+    probeMark('checked', checked.unseen.length);
     const unseen = checked.unseen;
     // What this editor could not see before a scan an earlier rescan stopped waiting for, which
     // that scan may have brought in after nobody was looking.
@@ -18252,6 +18269,7 @@ class GodotServer {
         ? null
         : await this.reloadDependents(projectPath, broughtIn);
     const stillGone = lost.filter((name) => !restored.includes(name));
+    probeMark('dependents', dependents?.reloaded.length);
     return this.noteTheRescan(args, {
       ...repaired,
       asked,
@@ -18413,6 +18431,7 @@ class GodotServer {
       uidsReread: orNothing(uidsReread),
       uidsDuplicatedOnDisk: orNothing(uidsDuplicatedOnDisk),
       note: notes.length > 0 ? notes.join(' ') : undefined,
+      probe: rescanProbe.marks,
     });
   }
 
