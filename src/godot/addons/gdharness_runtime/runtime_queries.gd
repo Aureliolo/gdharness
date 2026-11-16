@@ -969,9 +969,8 @@ func _serialize_node_tree(
 	var result: Dictionary = _serialize_node(node, include_properties)
 	if not named.is_empty():
 		var made: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
-		var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(made)
+		var _before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(made)
 		result["properties"] = _named_properties_of(node, str(result["path"]), named)
-		var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 		GdhCallErrors.attach(result, made)
 
 	if depth < max_depth:

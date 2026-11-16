@@ -574,9 +574,8 @@ func call_method(params: Dictionary) -> Dictionary:
 	_note_call(answer, awaited, outside, caught, named)
 	var asked: Variant = params.get("properties")
 	if _reads_the_result(asked):
-		var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(request_errors)
+		var _before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(request_errors)
 		answer.merge(_read_off_result(result, asked))
-		var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
 	return answer
 
 
