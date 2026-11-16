@@ -40621,6 +40621,40 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
   }
 }
 
+/**
+ * A link inside a project is compared with the project first: one to a folder of the project is
+ * inside it, even when the project is served from a share, and one to a share outside it is refused
+ * however the path to it is spelt. Needs the right to make links, and the account's own admin share.
+ */
+function linksInsideAProjectAreJudged(at: {
+  project: string;
+  builds: string;
+  onShare: (path: string) => string;
+}): void {
+  const { project, builds, onShare } = at;
+  try {
+    symlinkSync('export', join(project, 'export2'), 'dir');
+    symlinkSync(onShare(builds), join(project, 'netlink-in'), 'dir');
+  } catch {
+    return;
+  }
+  const ours = exportedBuild(onShare(project), 'export2/game.exe');
+  assert.equal(ours.ok && ours.shownAs, 'export2/game.exe', JSON.stringify(ours));
+  const plain = join(project, 'netlink-in', 'game.exe');
+  for (const spelling of [
+    plain,
+    `\\\\?\\${plain}`,
+    `\\\\.\\${plain}`,
+    `//?/${plain.replaceAll('\\', '/')}`,
+    'res://netlink-in/game.exe',
+    'netlink-in/game.exe',
+  ]) {
+    const judged = exportedBuild(project, spelling);
+    assert.equal(judged.ok, false, `${spelling}: ${JSON.stringify(judged)}`);
+    assert.match(judged.ok ? '' : judged.reason, /is a network share or a device/, spelling);
+  }
+}
+
 /** Where a Windows path leads to a program, judged by its spelling and its links alone. */
 function windowsProgramPathsAreJudged(at: {
   sandbox: string;
@@ -40666,6 +40700,7 @@ function windowsProgramPathsAreJudged(at: {
     assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
     const resource = exportedBuild(shared, 'res://export/game.exe');
     assert.equal(resource.ok && resource.shownAs, 'export/game.exe', JSON.stringify(resource));
+    linksInsideAProjectAreJudged({ project, builds, onShare });
   }
   try {
     symlinkSync(onShare(builds), join(sandbox, 'netlink'), 'dir');

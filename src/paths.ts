@@ -625,7 +625,7 @@ function networkRefusal(path: string, root: string, hops = 0): string | null {
   if (plain === null || (!inside && plain.startsWith('\\\\'))) {
     return `${path} is a network share or a device, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
   }
-  const base = inside ? (trusted ?? plain) : parse(plain).root;
+  const base = inside ? trusted : parse(plain).root;
   const steps = relative(base, plain)
     .split(/[\\/]+/)
     .filter((step) => step !== '');
