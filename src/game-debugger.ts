@@ -773,26 +773,31 @@ export class GameDebugger {
   /**
    * The size of snapshot [param id] once the game has prepared it, or why it has none.
    *
-   * The game prepares a snapshot inside the handler of the request, before it reads the next
-   * message, and answers its messages in the order they came. So an inspection asked right after
-   * the request, which every game with debug features answers, comes back after the size. Its
-   * answer with no size before it shows an engine without the snapshot. A game answering neither
-   * while its frames go on has no debug features at all.
+   * The game prepares a snapshot inside the handler of the request on its main loop, and answers
+   * its messages in the order they came. An inspection asked right after the request is answered
+   * by every game with debug features. A held main thread answers it only after the size. A
+   * running one can answer it during the prepare: reading the game's objects runs their script,
+   * and every 2048 lines of script the engine reads and answers the messages waiting. Only the
+   * performance frame the main loop sends after the inspection's answer shows the prepare over, so
+   * an inspection answered and then that frame, with no size between, shows an engine without the
+   * snapshot. A game answering neither while its frames go on has no debug features at all.
    */
   private async prepare(id: number): Promise<number | DebugAnswer> {
     const sent = Date.now();
     const inspection = this.inspectionSent(MAIN_THREAD);
-    let frames = 0;
+    const heldHere = this.held?.thread === MAIN_THREAD;
+    const seen = { frames: 0, inspected: false };
     const answered = this.next((received) => {
       if (!('message' in received)) {
         return false;
       }
       if (received.message === 'performance:profile_frame') {
-        frames += Date.now() - sent >= FRAMES_COUNT_AFTER_MS ? 1 : 0;
-        return false;
+        seen.frames += Date.now() - sent >= FRAMES_COUNT_AFTER_MS ? 1 : 0;
+        return seen.inspected;
       }
       if (received.message === 'scene:inspect_object') {
-        return this.isInspectionAnswered(received.thread, MAIN_THREAD, inspection);
+        seen.inspected ||= this.isInspectionAnswered(received.thread, MAIN_THREAD, inspection);
+        return seen.inspected && heldHere;
       }
       return received.message === 'snapshot:snapshot_prepared' && received.data[0] === id;
     }, SNAPSHOT_PREPARE_MS);
@@ -809,7 +814,7 @@ export class GameDebugger {
     if (gone !== null) {
       return { ...gone, next: START_AGAIN };
     }
-    if (frames >= FRAMES_PAST_A_PREPARE) {
+    if (!seen.inspected && seen.frames >= FRAMES_PAST_A_PREPARE) {
       return { refused: NO_DEBUG_FEATURES, next: DEBUG_ENGINE };
     }
     const worker = this.held !== null && this.held.thread !== MAIN_THREAD ? this.held.thread : null;

@@ -47519,9 +47519,9 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
 
 /**
  * Why a game gave no snapshot is told from what it answered, in the order it answers.
- * - A game that answers the inspection asked right after the request, and not the request, has an
- *   engine without the snapshot, since the engine drops a message for a capture it lacks. That is
- *   known at once.
+ * - A game that answers the inspection asked right after the request, then sends its next frame
+ *   with no answer to the request, has an engine without the snapshot, since the engine drops a
+ *   message for a capture it lacks. That is known at that frame.
  * - A game that answers neither while its frames go on has no debug features at all.
  * - A game that sends nothing more was busy. The frames it had sent before it read the request,
  *   which arrive together as the request goes out, do not count as frames past it.
@@ -47534,6 +47534,7 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
     const reply = (message: string): void => {
       if (kind === 'inspects' && message === 'scene:inspect_object') {
         game.write(framedCommand('scene:inspect_object', []));
+        frame();
       }
       // What was sent before the request was read, still on its way as the request goes out.
       if (kind === 'busy' && message === 'snapshot:request_prepare_snapshot') {
@@ -47580,6 +47581,72 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
       'The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy.',
     next: 'debug_objects snapshot asks again, which the game answers once its frames go on',
   });
+}
+
+/**
+ * A running game can answer the inspection asked after a snapshot request while it still prepares
+ * the snapshot: reading its objects runs their script, and every 2048 lines of script the engine
+ * reads and answers the messages waiting. Its snapshot is taken all the same. A main thread held
+ * at a breakpoint reads nothing during a prepare, so there an inspection answered with no snapshot
+ * before it is refused at once, with no frame to wait for.
+ */
+async function testASnapshotPreparedAfterItsInspectionIsTaken(): Promise<void> {
+  const prepared = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  const answerOf = async (held: boolean): Promise<{ answer: DebugAnswer; ms: number }> => {
+    const { peer, game, taken } = await aStandInGame();
+    let id = 0;
+    const reply = (message: string, [asked = 0, begin = 0, end = 0]: number[]): void => {
+      if (message === 'snapshot:request_prepare_snapshot') {
+        id = asked;
+      } else if (message === 'scene:inspect_object') {
+        const after = [
+          framedCommand('snapshot:snapshot_prepared', [id, prepared.length]),
+          framedCommand('performance:profile_frame', [[1, 2, 3]]),
+        ];
+        game.write(Buffer.concat([framedCommand('scene:inspect_object', []), ...(held ? [] : after)]));
+      } else if (message === 'snapshot:request_snapshot_chunk') {
+        game.write(framedCommand('snapshot:snapshot_chunk', [asked, [...prepared.subarray(begin, end)]]));
+      }
+    };
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          reply(received.message, received.data.map(Number));
+        }
+      }
+    });
+    try {
+      if (held) {
+        const entered = taken('debug_enter');
+        game.write(framedCommand('debug_enter', [true, 'Breakpoint', true]));
+        await entered;
+      }
+      const began = Date.now();
+      const answer = await peer.ask({ op: 'snapshot' });
+      return { answer, ms: Date.now() - began };
+    } finally {
+      game.destroy();
+      peer.close();
+    }
+  };
+  const [running, held] = await Promise.all([answerOf(false), answerOf(true)]);
+  assert.deepEqual(
+    running.answer,
+    {
+      classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+      bytes: prepared.length,
+      unnamed: 0,
+      memoryBytes: 1234,
+    },
+    'the snapshot prepared after its inspection is taken',
+  );
+  assert.deepEqual(held.answer, {
+    refused:
+      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+  });
+  assert.ok(held.ms < 2000, `a held main thread is known from the order: ${held.ms} ms`);
 }
 
 /** The thread a stand-in game holds at a breakpoint. */
@@ -47709,6 +47776,7 @@ async function testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld(): P
       }
     } else if (message === 'scene:inspect_object') {
       game.write(framedCommand('scene:inspect_object', [], thread));
+      game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
     }
   });
   try {
@@ -48041,6 +48109,9 @@ async function testTheStartASnapshotRefusalNamesIsSpawnedHere(): Promise<void> {
  * inner classes, nested ones too, are counted under their native class with a note. A fresh game's counts keep
  * RefCounted and Node apart, thousands of objects come back whole over several slices, and a
  * snapshot of an earlier run is refused for a diff.
+ *
+ * The root's getter runs more than 2048 lines each time a snapshot reads it, so the engine answers
+ * the inspection sent after every request while it still prepares that request's snapshot.
  */
 async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
   const engine = resolveGodotPath();
@@ -48077,6 +48148,12 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
       'var items: Array[Resource] = []',
       'var notes: Array[Resource] = []',
       'var inners: Array[RefCounted] = []',
+      'var tally: int:',
+      '\tget:',
+      '\t\tvar total: int = 0',
+      '\t\tfor at: int in 2100:',
+      '\t\t\ttotal += at',
+      '\t\treturn total',
       '',
       '',
       'class Inner extends RefCounted:',
@@ -108008,6 +108085,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassIsCountedUnderItsNativeClass,
   testEachSnapshotRefusalNamesItsOwnFix,
   testASnapshotTellsAnEngineWithoutItFromABusyGame,
+  testASnapshotPreparedAfterItsInspectionIsTaken,
   testASnapshotAskedOnceAsAHeldWorkerLeaves,
   testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld,
   testASnapshotStalledByAHeldWorkerNamesTheResume,
