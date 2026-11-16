@@ -300,7 +300,7 @@ function relativeTo(target: string, from: string): string {
 export function scriptsOf(texts: readonly ProjectText[]): Map<string, Script> {
   const scripts = new Map<string, Script>();
   for (const file of texts) {
-    if (file.path.endsWith('.gd')) {
+    if (/\.gd$/i.test(file.path)) {
       scripts.set(file.path, new Script(file.path, file.text));
     }
   }
@@ -1059,7 +1059,7 @@ function planScenes(
   const byPath = new Map(texts.map((file) => [file.path, file.text]));
   const uids = new Map<string, string>();
   for (const file of texts) {
-    if (file.path.endsWith('.uid')) {
+    if (/\.uid$/i.test(file.path)) {
       uids.set(file.text.trim(), file.path.slice(0, -'.uid'.length));
     }
   }
@@ -1123,6 +1123,8 @@ function planSceneConnections(scene: SceneRename, path: string, kind: 'signal' |
 }
 
 interface MoveArguments {
+  /** The project's folder, which a path written from the disk's root leads through. */
+  readonly projectPath: string;
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   /** Each file that moves, by its `res://` path, to where it goes. */
@@ -1149,6 +1151,8 @@ interface Literal {
   readonly spelling: Spelling;
   /** The quote the literal is written in. */
   readonly quote: string;
+  /** What stands before the quote: the `r` of a raw string, the `&` of a StringName. */
+  readonly prefix: string;
   /**
    * What a relative path here is read against: the file's folder or the project's root. Null where
    * it is no path.
@@ -1167,7 +1171,7 @@ const FROM_THE_ROOT =
 const TEXT_IN_A_SCENE =
   /^(?:\s*(?:text|tooltip_text|placeholder_text|resource_name)\s*=\s*|\[node\b.*\s(?:name=|groups=\[(?:"[^"]*",\s*)*))$/;
 /** The files of Godot's text formats, where a line starting with `;` is a comment. */
-const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|escn|tres|cfg|gdextension)$/;
+const SEMICOLON_COMMENTS = /\/(?:project\.godot|override\.cfg)$|\.(?:tscn|escn|tres|cfg|gdextension)$/i;
 /** Godot's text scene and resource files. */
 export const SCENE_OR_RESOURCE_EXTENSIONS = ['.tscn', '.escn', '.tres'] as const;
 const SCENE_OR_RESOURCE = new RegExp(
@@ -1195,7 +1199,7 @@ function relativeBase(file: ProjectText, offset: number): Literal['base'] {
   // The opening quote sits just before the contents.
   const quoteAt = offset - 1;
   const before = file.text.slice(file.text.lastIndexOf('\n', quoteAt - 1) + 1, quoteAt);
-  if (file.path.endsWith('.import') || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
+  if (/\.import$/i.test(file.path) || (SEMICOLON_COMMENTS.test(file.path) && /^\s*;/.test(before))) {
     return null;
   }
   if (SCENE_OR_RESOURCE.test(file.path) && TEXT_IN_A_SCENE.test(before)) {
@@ -1234,6 +1238,7 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
         value: literal.slice(quote.index + 1, -1),
         spelling: gdscriptSpelling(literal.slice(0, quote.index)),
         quote: quote[0],
+        prefix: literal.slice(0, quote.index),
         base: relativeBase(file, offset),
       });
     }
@@ -1246,6 +1251,7 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
       value: match[1] ?? '',
       spelling,
       quote: '"',
+      prefix: '',
       base: relativeBase(file, match.index + 1),
     });
   }
@@ -1275,6 +1281,31 @@ const TEXT_ESCAPES: ReadonlyMap<string, string> = new Map([
 const ESCAPE = /\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{6})|([\s\S]))/g;
 const CONTROL_CHARACTER = /\p{Cc}/u;
 
+/** Where the written text of one character of a decoded value starts and ends. */
+type Span = readonly [start: number, end: number];
+
+/** A literal's value as the engine reads it, with where each UTF-16 unit of it was written. */
+interface Decoded {
+  readonly text: string;
+  readonly spans: readonly Span[];
+}
+
+/** The character an escape stands for, or null where the engine refuses it. */
+function escapedChars(
+  [, short, long, other]: readonly (string | undefined)[],
+  escapes: ReadonlyMap<string, string>,
+  spelling: Spelling,
+): string | null {
+  const hex = short ?? long;
+  if (hex !== undefined) {
+    const point = Number.parseInt(hex, 16);
+    return point > 0x10ffff ? null : String.fromCodePoint(point);
+  }
+  const char = other ?? '';
+  const known = escapes.get(char);
+  return /[uU]/.test(char) || (known === undefined && spelling !== 'text') ? null : (known ?? char);
+}
+
 /**
  * [param value] as the engine reads it, or null where it reads none. GDScript's tokenizer
  * (`gdscript_tokenizer.cpp`, `string`) takes the escapes of [constant GDSCRIPT_ESCAPES], with
@@ -1282,30 +1313,35 @@ const CONTROL_CHARACTER = /\p{Cc}/u;
  * of Godot's text formats (`variant_parser.cpp`, `get_token`) takes those of
  * [constant TEXT_ESCAPES], and any other character after a backslash stands for itself.
  */
-function decodedValue(value: string, spelling: Spelling): string | null {
+function decodedValue(value: string, spelling: Spelling): Decoded | null {
+  const spans: Span[] = [];
+  let text = '';
+  const copy = (from: number, to: number): void => {
+    text += value.slice(from, to);
+    for (let at = from; at < to; at += 1) {
+      spans.push([at, at + 1]);
+    }
+  };
   if (spelling === 'raw' || spelling === 'plain') {
-    return value;
+    copy(0, value.length);
+    return { text, spans };
   }
   const escapes = spelling === 'gdscript' ? GDSCRIPT_ESCAPES : TEXT_ESCAPES;
-  const refused: string[] = [];
-  const text = value.replaceAll(ESCAPE, (all, short?: string, long?: string, other?: string) => {
-    const hex = short ?? long;
-    if (hex !== undefined) {
-      const point = Number.parseInt(hex, 16);
-      if (point > 0x10ffff) {
-        refused.push(all);
-        return '';
-      }
-      return String.fromCodePoint(point);
+  let done = 0;
+  for (const match of value.matchAll(ESCAPE)) {
+    const chars = escapedChars(match, escapes, spelling);
+    if (chars === null) {
+      return null;
     }
-    const char = other ?? '';
-    const known = escapes.get(char);
-    if (/[uU]/.test(char) || (known === undefined && spelling !== 'text')) {
-      refused.push(all);
+    copy(done, match.index);
+    done = match.index + match[0].length;
+    text += chars;
+    for (let unit = 0; unit < chars.length; unit += 1) {
+      spans.push([match.index, done]);
     }
-    return known ?? char;
-  });
-  return refused.length === 0 ? text : null;
+  }
+  copy(done, value.length);
+  return { text, spans };
 }
 
 /** What the engine reads a string literal's path as. */
@@ -1314,6 +1350,8 @@ interface Reading {
   readonly autoload: string;
   /** The text after it, escapes decoded. */
   readonly text: string;
+  /** Where the literal wrote each UTF-16 unit of `text`. */
+  readonly spans: readonly Span[];
   /** `text` with each backslash a separator, as `String::simplify_path` takes it. */
   readonly read: string;
 }
@@ -1328,11 +1366,12 @@ interface Reading {
  */
 function readingOf(literal: Literal): Reading | null {
   const autoload = literal.value.startsWith('*') ? '*' : '';
-  const text = decodedValue(literal.value.slice(autoload.length), literal.spelling);
-  if (text === null || CONTROL_CHARACTER.test(text)) {
+  const decoded = decodedValue(literal.value.slice(autoload.length), literal.spelling);
+  if (decoded === null || CONTROL_CHARACTER.test(decoded.text)) {
     return null;
   }
-  return { autoload, text, read: literal.spelling === 'plain' ? text : text.replaceAll('\\', '/') };
+  const { text, spans } = decoded;
+  return { autoload, text, spans, read: literal.spelling === 'plain' ? text : text.replaceAll('\\', '/') };
 }
 
 /**
@@ -1347,7 +1386,7 @@ function readWithAnEscape(written: string): boolean {
  * The res:// path [param literal] of the file [param from] names, or null where it names none: a
  * path written in full, or a relative one a file or `load` reads, against its base.
  */
-function targetOf(literal: Literal, from: string): string | null {
+function targetOf(literal: Literal, from: string, projectPath: string | undefined): string | null {
   const read = readingOf(literal)?.read;
   if (read === undefined || read === '') {
     return null;
@@ -1355,23 +1394,69 @@ function targetOf(literal: Literal, from: string): string | null {
   if (read.startsWith('res://')) {
     return resolvedPath(read, from);
   }
+  if (read.startsWith('uid://')) {
+    return null;
+  }
+  const disk = diskPlace(read, projectPath);
+  if (disk !== null) {
+    return disk.target;
+  }
   const plain = literal.spelling === 'plain';
-  if (literal.base === null || read.startsWith('uid://') || (plain && readWithAnEscape(read))) {
+  if (literal.base === null || (plain && readWithAnEscape(read))) {
     return null;
   }
   const target = resolvedPath(read, literal.base === 'root' ? 'res://_' : from);
   return target.startsWith('res://..') ? null : target;
 }
 
-/** Every path the string literals of [param texts] name as a res:// path, each once. */
+/** A path written from the disk's root: its res:// path where it lies in the project, else null. */
+interface DiskPlace {
+  readonly target: string | null;
+  /** How many characters of the path lead to the project's folder, which a move never changes. */
+  readonly root: number;
+}
+
+/** What starts a path the engine takes as absolute: a root, or a drive or scheme before a slash. */
+const ABSOLUTE_PATH = /^\/|:\//;
+
+/**
+ * Where [param read], a path with slashes that is not `res://`, names a file by its place on the
+ * disk, or null where it is relative. The engine takes a path as absolute when it starts with a
+ * slash or holds `:/` (`String::is_absolute_path` in `ustring.cpp`), and `localize_path` turns one
+ * inside the project into its `res://` path. Anywhere else the disk path stays as it is, and a
+ * leading slash never makes a path relative to the project or the file.
+ */
+function diskPlace(read: string, projectPath: string | undefined): DiskPlace | null {
+  if (!ABSOLUTE_PATH.test(read)) {
+    return null;
+  }
+  const outside = { target: null, root: 0 };
+  if (projectPath === undefined) {
+    return outside;
+  }
+  const folder = projectPath.replaceAll('\\', '/').replace(/\/+$/, '');
+  const head = read.slice(0, folder.length);
+  const same = process.platform === 'win32' ? head.toLowerCase() === folder.toLowerCase() : head === folder;
+  const inside = same ? /^\/+([^/].*)$/s.exec(read.slice(folder.length)) : null;
+  const body = inside?.[1];
+  return body === undefined
+    ? outside
+    : { target: `res://${posix.normalize(body)}`, root: read.length - body.length };
+}
+
+/**
+ * Every path the string literals of [param texts] name as a res:// path, each once. A path written
+ * from the disk's root counts when [param projectPath] is given and it lies inside.
+ */
 export function literalTargets(
   texts: readonly ProjectText[],
   scripts: ReadonlyMap<string, Script>,
+  projectPath?: string,
 ): Set<string> {
   const targets = new Set<string>();
   for (const file of texts) {
     for (const literal of literalsOf(file, scripts.get(file.path))) {
-      const target = targetOf(literal, file.path);
+      const target = targetOf(literal, file.path, projectPath);
       if (target !== null) {
         targets.add(target);
       }
@@ -1512,7 +1597,7 @@ export function joinedByTheDisk(args: JoinArguments): void {
  * relative path, which names a different file once it is somewhere else.
  */
 export function planMove(args: MoveArguments, plan: Plan): Plan {
-  const { texts, scripts, moves, named, exists } = args;
+  const { texts, scripts, moves, named, exists, projectPath } = args;
   const edits = [...plan.edits];
   const mentions = [...plan.mentions];
   const editedAt = new Set(edits.map((one) => `${one.file}:${one.offset}`));
@@ -1526,7 +1611,7 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     const script = scripts.get(file.path);
     const goesTo = moves.get(file.path);
     for (const literal of literalsOf(file, script)) {
-      const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
+      const moved = movedLiteral(literal, { from: file.path, goesTo, moves, exists, projectPath });
       if (moved !== null) {
         add(file.path, moved.offset, moved.length, moved.replacement);
       }
@@ -1567,63 +1652,176 @@ function mentionNamedPaths(
   }
 }
 
-/** The path edit for a string literal of [param from], or null where it needs none. */
-function movedLiteral(
-  literal: Literal,
-  from: string,
-  goesTo: string | undefined,
-  moves: ReadonlyMap<string, string>,
-  exists: (path: string) => boolean,
-): { offset: number; length: number; replacement: string } | null {
+/** What a move needs to know of the file a literal is in, and of the project. */
+interface MoveContext {
+  /** The `res://` path of the file the literal is in. */
+  readonly from: string;
+  /** Where that file goes, when it moves. */
+  readonly goesTo: string | undefined;
+  readonly moves: ReadonlyMap<string, string>;
+  readonly exists: (path: string) => boolean;
+  readonly projectPath: string;
+}
+
+/** Where a literal's path goes: the new path with slashes, and how much of the old one leads to the project. */
+interface MovedPlace {
+  readonly path: string;
+  readonly root: number;
+}
+
+/** [param read], the path a literal names, as it must read once the files of [param context] have moved. */
+function movedPlace(read: string, base: Literal['base'], context: MoveContext): MovedPlace | null {
+  const { from, goesTo, moves, exists, projectPath } = context;
+  if (read.startsWith('res://')) {
+    const path = movedPath(read, base, from, goesTo, moves, exists);
+    return path === null ? null : { path, root: 'res://'.length };
+  }
+  const disk = diskPlace(read, projectPath);
+  if (disk !== null) {
+    const path = disk.target === null ? undefined : moves.get(disk.target);
+    return path === undefined ? null : { path, root: disk.root };
+  }
+  const path = movedPath(read, base, from, goesTo, moves, exists);
+  return path === null ? null : { path, root: 0 };
+}
+
+/** The path edit for a string literal, or null where it needs none. */
+function movedLiteral(literal: Literal, context: MoveContext): TextChange | null {
   const reading = readingOf(literal);
   if (reading === null || reading.read === '' || reading.read.startsWith('uid://')) {
     return null;
   }
-  const moved = movedPath(reading.read, literal.base, from, goesTo, moves, exists);
+  const moved = movedPlace(reading.read, literal.base, context);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
-  if (moved === null || moved === reading.read) {
+  if (moved === null || moved.path === reading.read) {
     return null;
   }
-  const replacement = spelledAs(moved, reading, literal);
-  const { autoload } = reading;
-  return replacement === null
-    ? null
-    : {
-        offset: literal.offset + autoload.length,
-        length: literal.value.length - autoload.length,
-        replacement,
-      };
+  return spelledAs(moved, reading, literal);
 }
 
-/** The number of `..` parts a path of [param parts] starts with. */
-function upwardsIn(parts: readonly string[]): number {
-  const stay = parts.findIndex((part) => part !== '..');
-  return stay === -1 ? parts.length : stay;
+/** One part of a path, with the separators after it and where it starts in the text. */
+interface Segment {
+  readonly name: string;
+  readonly separator: string;
+  readonly start: number;
+}
+
+/** The parts of [param text], split on slashes, and on backslashes unless [param plain] text. */
+function segmentsOf(text: string, plain: boolean): Segment[] {
+  const pattern = plain ? /([^/]*)(\/*)/g : /([^\\/]*)([\\/]*)/g;
+  return [...text.matchAll(pattern)]
+    .filter((one) => one[0] !== '')
+    .map((one) => ({ name: one[1] ?? '', separator: one[2] ?? '', start: one.index }));
+}
+
+/** The one of [param runs] that occurs most, the first of those that tie, or null for none. */
+function mostUsed(runs: readonly string[]): string | null {
+  const counts = new Map<string, number>();
+  for (const run of runs.filter((one) => one !== '')) {
+    counts.set(run, (counts.get(run) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  for (const [run, count] of counts) {
+    if (best === null || count > (counts.get(best) ?? 0)) {
+      best = run;
+    }
+  }
+  return best;
+}
+
+/** What replaces the text between [param start] and [param end] of a literal's written value. */
+interface Splice {
+  readonly start: number;
+  readonly end: number;
+  readonly middle: string;
 }
 
 /**
- * [param path], a path with slashes, written into [param literal] as its [param original] was: the
- * separator the original used, though a step upwards it did not have is a slash, and the escapes
- * and quote of the literal. Null where a raw string cannot hold the path.
+ * Where [param body], the path after the part a move leaves be, differs from what [param original]
+ * wrote after its first [param root] characters. The parts both have at the start and at the end
+ * stay as written, escapes and line continuations included. What lies between is written with the
+ * separator the original's own changed part used most, the first on a tie, and with the one its
+ * whole path used most where that part held none.
  */
-function spelledAs(path: string, original: Reading, literal: Literal): string | null {
-  if (literal.spelling === 'plain') {
-    return path;
+function splice(body: string, root: number, original: Reading, plain: boolean): Splice {
+  const own = segmentsOf(original.text.slice(root), plain);
+  const names = body.split('/');
+  const room = Math.min(own.length, names.length);
+  let head = 0;
+  while (head < room - 1 && own[head]?.name === names[head]) {
+    head += 1;
   }
-  const prefix = path.startsWith('res://') ? 'res://' : '';
-  const own = original.text.startsWith('res://') ? original.text.slice('res://'.length) : original.text;
-  const separator = /[\\/]+/.exec(own)?.[0] ?? '/';
-  const given = upwardsIn(own.split(/[\\/]+/));
-  const parts = path.slice(prefix.length).split('/');
-  const up = upwardsIn(parts);
-  const joined = parts
-    .map((part, at) => (at === parts.length - 1 ? part : part + (at >= up || at < given ? separator : '/')))
+  let tail = 0;
+  while (tail < room - head && own.at(-1 - tail)?.name === names.at(-1 - tail)) {
+    tail += 1;
+  }
+  const changed = own.slice(head, own.length - tail);
+  const separator =
+    mostUsed(changed.map((one) => one.separator)) ?? mostUsed(own.map((one) => one.separator)) ?? '/';
+  const fresh = names.slice(head, names.length - tail);
+  const middle = fresh
+    .map((name, at) => (at < fresh.length - 1 || tail > 0 ? name + separator : name))
     .join('');
-  if (literal.spelling === 'raw') {
-    return joined.includes(literal.quote) ? null : prefix + joined;
+  const from = root + (own[head]?.start ?? 0);
+  const to = tail > 0 ? root + (own[own.length - tail]?.start ?? 0) : original.text.length;
+  const at = (index: number): Span => original.spans[index] ?? [original.text.length, original.text.length];
+  // The first changed character starts the splice and the last one ends it, so a line continuation
+  // beside the changed part stays with the text that is kept.
+  const start = from === to ? (from === 0 ? 0 : at(from - 1)[1]) : at(from)[0];
+  return { start, end: from === to ? start : at(to - 1)[1], middle };
+}
+
+/** A change to the text of a file: [param length] characters from [param offset] become [param replacement]. */
+interface TextChange {
+  readonly offset: number;
+  readonly length: number;
+  readonly replacement: string;
+}
+
+/** [param text] as a quoted GDScript or scene string holds it: backslashes and [param quote] escaped. */
+function escapedIn(text: string, quote: string): string {
+  return text.replaceAll('\\', '\\\\').replaceAll(quote, `\\${quote}`);
+}
+
+/**
+ * The rewrite of [param literal], which [param original] was read from, so that it names [param
+ * moved]: only the part of the path that moves is written anew, in the separator the path used
+ * and the escapes of the literal. A raw string that cannot hold the new path in its quote takes
+ * the other quote, or loses its `r` and escapes the path where both quotes occur.
+ */
+function spelledAs(moved: MovedPlace, original: Reading, literal: Literal): TextChange {
+  const body = moved.path.startsWith('res://') ? moved.path.slice('res://'.length) : moved.path;
+  const plain = literal.spelling === 'plain';
+  const { autoload } = original;
+  const value = literal.value.slice(autoload.length);
+  const { start, end, middle } = splice(body, moved.root, original, plain);
+  const inPlace = (inner: string): TextChange => ({
+    offset: literal.offset + autoload.length,
+    length: value.length,
+    replacement: value.slice(0, start) + inner + value.slice(end),
+  });
+  if (plain || (literal.spelling === 'raw' && !middle.includes(literal.quote))) {
+    return inPlace(middle);
   }
-  return prefix + joined.replaceAll('\\', '\\\\').replaceAll(literal.quote, `\\${literal.quote}`);
+  if (literal.spelling !== 'raw') {
+    return inPlace(escapedIn(middle, literal.quote));
+  }
+  // A raw string keeps every character as written, so the written text is the path.
+  const whole = value.slice(0, start) + middle + value.slice(end);
+  const other = literal.quote === '"' ? "'" : '"';
+  const switched = !whole.includes(other);
+  const quote = switched ? other : literal.quote;
+  return {
+    offset: literal.offset - 1 - literal.prefix.length,
+    length: literal.prefix.length + 1 + autoload.length + value.length + 1,
+    replacement:
+      (switched ? literal.prefix : literal.prefix.replaceAll('r', '')) +
+      quote +
+      autoload +
+      (switched ? whole : escapedIn(whole, quote)) +
+      quote,
+  };
 }
 
 /** [param read] as it must read once [param from] or the file it names has moved, or null. */

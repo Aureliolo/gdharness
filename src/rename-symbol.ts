@@ -220,7 +220,7 @@ function checkedRename(
   let moveTo: string | null = null;
   if (request.newScriptPath !== null) {
     moveTo = resourcePathOf(projectPath, request.newScriptPath);
-    if (moveTo === null || !moveTo.endsWith('.gd')) {
+    if (moveTo === null || !/\.gd$/i.test(moveTo)) {
       return {
         ok: false,
         reason: `newScriptPath must be a .gd path inside the project, and ${request.newScriptPath} is not.`,
@@ -526,13 +526,14 @@ function renamed(
     const moves = new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo]));
     joinedByTheDisk({
       projectPath,
-      targets: literalTargets(texts, scripts),
+      targets: literalTargets(texts, scripts, projectPath),
       references: moves,
       resolve: reachedAt,
       entry: entryAt,
     });
     plan = planMove(
       {
+        projectPath,
         texts,
         scripts,
         moves,
@@ -563,7 +564,7 @@ function renamed(
     (declaringFiles.includes(path) ? 0 : 1000) + graph.ancestors(`${path}#`).length;
   const scriptsInOrder = rewrites
     .map((rewrite) => rewrite.path)
-    .filter((path) => path.endsWith('.gd'))
+    .filter((path) => /\.gd$/i.test(path))
     .toSorted((a, b) => rank(a) - rank(b) || a.localeCompare(b))
     .map((path) => (path === declaringPath && moveTo !== null ? moveTo : path));
   return {
