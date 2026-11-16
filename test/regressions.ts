@@ -40660,9 +40660,17 @@ function windowsProgramPathsAreJudged(at: { project: string; builds: string; the
   assert.match(rooted, /^Path '\/export\/game\.exe' is absolute and outside the project/, rooted);
   assert.match(rooted, /such as 'export\/game\.exe'/, rooted);
   assert.match(reason('\\export\\game.exe'), /such as 'export\/game\.exe'/);
-  for (const inside of [project.slice(2).replaceAll('\\', '/'), project.slice(2)]) {
-    const own = exportedBuild(project, `${inside}/export/game.exe`);
-    assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
+  // A path with no drive resolves on the drive of the working directory, so this runs from the
+  // project's own drive.
+  const startedIn = process.cwd();
+  process.chdir(project);
+  try {
+    for (const inside of [project.slice(2).replaceAll('\\', '/'), project.slice(2)]) {
+      const own = exportedBuild(project, `${inside}/export/game.exe`);
+      assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
+    }
+  } finally {
+    process.chdir(startedIn);
   }
   assert.match(reason(`${there}:inner.exe`), /contains ':'/);
   const onShare = (path: string): string => `\\\\localhost\\${path.replace(':', '$')}`;
