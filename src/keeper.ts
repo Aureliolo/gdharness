@@ -443,7 +443,8 @@ async function startTheGame(
   keeperStarted: Promise<number> | undefined;
   spawnedAt: number;
 }> {
-  const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
+  const outputFile = run === undefined ? spec.output : run.transcript;
+  const transcript = outputFile === undefined ? 'ignore' : openSync(outputFile, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own = run !== undefined && throughTheHelper(spec) ? scratchDirectory('keeper-stop') : null;
   const stopFile = own === null ? '' : join(own, 'stop');

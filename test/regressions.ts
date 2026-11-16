@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   cpSync,
@@ -121,6 +122,8 @@ import {
   bursts,
   clearEditorLog,
   editorConsole,
+  editorHelperOutputPath,
+  editorHelperOutputSize,
   editorLogPath,
   readEditorLogNote,
   shapeOf,
@@ -538,6 +541,7 @@ import {
   autoloadNotCompiledNote,
   bakingRenderer,
   beganBy,
+  boxThatEndedTheGame,
   CRASH_EXIT_GRACE_MS,
   captureDestinationRefusal,
   captureDetail,
@@ -20025,6 +20029,76 @@ async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Prom
     start.stop();
     await exitedWithin(start.child, 60_000);
     sweep(scratch);
+  }
+}
+
+/**
+ * What the desktop helper of a hidden editor says of a game the editor plays reaches the run: the
+ * helper's output is a file the keeper opens for it, and the verdict is read from where the play
+ * began, so a box an earlier game was ended on is not this game's. It lands in the run's log, which
+ * editor_output answers from. The full play needs an editor whose game cannot create a renderer,
+ * and an editor plays its game from its own executable, which no stand-in replaces, so this covers
+ * both halves the play joins: the output carried from an editor launch, and its reading.
+ */
+async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-box-'));
+  try {
+    const output = editorHelperOutputPath(project);
+    mkdirSync(dirname(output), { recursive: true });
+    const box = (title: string): string =>
+      `\n[gdharness] desktop-box ${JSON.stringify({ title, text: 'drivers' })}\n`;
+    writeFileSync(
+      output,
+      `ERROR: Can't initialize an EGL display.${box('Unable to initialize video driver')}`,
+    );
+    const from = editorHelperOutputSize(project);
+    const play = { throughEditor: true, projectPath: project, helperOutputFrom: from, log: new GameLog() };
+    assert.equal(boxThatEndedTheGame(play), null, "an earlier game's box is not this game's");
+    appendFileSync(
+      output,
+      `ERROR: Failed to create ANGLE OpenGL window.${box('Unable to initialize video driver')}`,
+    );
+    const verdict = boxThatEndedTheGame(play) ?? '';
+    assert.match(verdict, /could not create a renderer/, 'the verdict names the renderer');
+    assert.match(verdict, /Failed to create ANGLE OpenGL window/, 'the engine line is quoted');
+    assert.ok(
+      play.log.all.some((entry) => entry.text === verdict),
+      'and the run has it, for editor_output',
+    );
+
+    if (process.platform !== 'win32') {
+      console.log('editor helper output regression: the launch half is Windows-only');
+      return;
+    }
+    rmSync(output, { force: true });
+    const launcher = join(project, 'launch.mjs');
+    const answer = join(project, 'answer.json');
+    const spec = {
+      command: process.execPath,
+      args: ['-e', "console.log('from the editor'); setInterval(() => undefined, 1000);", '--', project],
+      desktop: `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`,
+      output,
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], { encoding: 'utf8', timeout: 90_000 });
+    assert.ok(existsSync(answer), `the editor launches: ${ran.stdout}${ran.stderr}`);
+    const carried = await answeredWithin(
+      () =>
+        existsSync(output) && readFileSync(output, 'utf8').includes('from the editor') ? true : undefined,
+      30_000,
+    );
+    assert.equal(carried, true, 'what the editor prints reaches the helper output file');
+  } finally {
+    await endEnginesUnder(project);
+    sweep(project);
   }
 }
 
@@ -110595,6 +110669,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce,
   testAKeeperCaseThatFailsLeavesNoRunFolder,
   testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor,
+  testAnEditorsGameBoxIsReadFromTheHelperOutput,
   testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,

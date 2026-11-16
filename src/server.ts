@@ -113,6 +113,8 @@ import {
   bursts,
   type EditorLogNote,
   editorConsole,
+  editorHelperEntries,
+  editorHelperOutputSize,
   editorLogPath,
   readEditorLogNote,
   theConsoleWasNotCaptured,
@@ -1829,6 +1831,29 @@ const PROFILE_SEND_MS = 5000;
  * worth a call is a wall with a count, and the ones below twenty are already in the entries.
  */
 const MOST_GROUPS = 20;
+
+/**
+ * Why the desktop helper ended [param run]'s game on a message box nobody can press, or null. A game
+ * this server started prints the helper's line into its own transcript. A game an editor plays has
+ * the helper of the editor, whose output is read from where this play began, and the verdict is put
+ * in the run's log too, which is what editor_output answers from.
+ */
+export function boxThatEndedTheGame(
+  run: Pick<GodotProcess, 'throughEditor' | 'projectPath' | 'helperOutputFrom' | 'log'> | null,
+): string | null {
+  if (run === null) {
+    return null;
+  }
+  const printed =
+    run.throughEditor && run.projectPath !== null
+      ? editorHelperEntries(run.projectPath, run.helperOutputFrom ?? 0)
+      : run.log.all;
+  const ending = desktopBoxEnding(printed);
+  if (ending !== null && run.throughEditor && !run.log.all.some((entry) => entry.text === ending)) {
+    run.log.record('error', ending);
+  }
+  return ending;
+}
 
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
@@ -14142,7 +14167,7 @@ class GodotServer {
     if (going !== null && !running) {
       this.drainTranscript(going);
     }
-    const endedOnABox = going === null || running ? null : desktopBoxEnding(going.log.all);
+    const endedOnABox = running ? null : boxThatEndedTheGame(going);
     const verdict = runtimeVerdict(endpoint, {
       addon: true,
       ...(endedOnABox === null ? {} : { endedOnABox }),
@@ -14327,6 +14352,7 @@ class GodotServer {
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
       ...(which === null ? {} : { play: which }),
       bootScene: runtimeWaitMs.scene,
+      helperOutputFrom: editorHelperOutputSize(projectPath),
       slot,
     };
     this.activeProcess = played;

@@ -10,7 +10,7 @@ import { alive } from './alive.js';
 import { DEFAULT_DAP_PORT } from './dap_client.js';
 import { HIDDEN_DESKTOP } from './desktop.js';
 import { placeEmptyScriptDocs } from './doc-cache.js';
-import { clearEditorLog, editorLogPath, writeEditorLogNote } from './editor-log.js';
+import { clearEditorLog, editorHelperOutputPath, editorLogPath, writeEditorLogNote } from './editor-log.js';
 import { EngineUsageError } from './errors.js';
 import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -227,7 +227,9 @@ export async function openEditorProcess(
     },
     // A hidden editor is on a desktop of its own, because the games it plays are its children and
     // land where it is. A visible one is shown without being activated, so it takes nobody's keyboard.
-    ...(start.hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
+    ...(start.hidden
+      ? { desktop: HIDDEN_DESKTOP, output: editorHelperOutputPath(projectPath) }
+      : { noActivate: true }),
   });
   if ('error' in launched) {
     return { pid: null, startedAt: null, error: launched.error, arguments: args };
