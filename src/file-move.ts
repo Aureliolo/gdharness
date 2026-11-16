@@ -247,7 +247,7 @@ function destinationReason(
 /** Why the file [param from] cannot become [param to], when it moves with another file or changes extension. */
 function fileMoveReason(projectPath: string, from: string, to: string): string | null {
   const owner = SIDECARS.map((sidecar) =>
-    from.endsWith(sidecar) ? from.slice(0, -sidecar.length) : null,
+    from.toLowerCase().endsWith(sidecar) ? from.slice(0, -sidecar.length) : null,
   ).find((path) => path !== null && existsSync(join(projectPath, path.slice('res://'.length))));
   if (owner !== undefined && owner !== null) {
     return `${from} belongs to ${owner} and moves with it: move ${owner} instead.`;
@@ -361,7 +361,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
   joinedByTheDisk({
     projectPath,
-    targets: literalTargets(texts, scripts),
+    targets: literalTargets(texts, scripts, projectPath),
     references,
     resolve: reachedAt,
     entry: entryAt,
@@ -370,6 +370,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);
   let plan = planMove(
     {
+      projectPath,
       texts,
       scripts,
       moves: references,
@@ -418,7 +419,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   const graph = new ClassGraph(scripts, declaredIn(scripts));
   const scriptsInOrder = rewrites
     .map((rewrite) => rewrite.path)
-    .filter((path) => path.endsWith('.gd'))
+    .filter((path) => /\.gd$/i.test(path))
     .toSorted(
       (a, b) => graph.ancestors(`${a}#`).length - graph.ancestors(`${b}#`).length || a.localeCompare(b),
     )

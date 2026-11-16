@@ -439,6 +439,7 @@ import {
   joinedByTheDisk,
   literalTargets,
   NOT_INHERITED,
+  planMove,
   RESOLVED_ELSEWHERE,
   type Rewrite,
   reachedAt,
@@ -89156,8 +89157,11 @@ function assertLoads(project: string, scene: string, names: readonly string[]): 
   }
 }
 
-/** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
-function loadedNames(project: string, scene: string): string[] | null {
+/**
+ * What a headless engine prints running [param runner], a `SceneTree` script, in [param project],
+ * or null where no engine is there to run it.
+ */
+function headlessOutput(project: string, runner: string): string | null {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -89166,8 +89170,18 @@ function loadedNames(project: string, scene: string): string[] | null {
     console.log('loading the moved scene skipped (Godot not found)');
     return null;
   }
-  writeFileSync(
-    join(project, 'runner.gd'),
+  writeFileSync(join(project, 'runner.gd'), runner);
+  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  return `${run.stdout}\n${run.stderr}`;
+}
+
+/** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
+function loadedNames(project: string, scene: string): string[] | null {
+  const output = headlessOutput(
+    project,
     [
       'extends SceneTree',
       '',
@@ -89185,13 +89199,51 @@ function loadedNames(project: string, scene: string): string[] | null {
       '',
     ].join('\n'),
   );
-  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
-    encoding: 'utf8',
-    timeout: 120000,
-  });
-  const answered = /NAMES (\[.*\])/.exec(`${run.stdout}\n${run.stderr}`)?.[1];
-  assert.ok(answered !== undefined, `${run.stdout}\n${run.stderr}`);
+  if (output === null) {
+    return null;
+  }
+  const answered = /NAMES (\[.*\])/.exec(output)?.[1];
+  assert.ok(answered !== undefined, output);
   return asArray(JSON.parse(answered)).map(String);
+}
+
+/**
+ * That each script of [param scripts] loads in a headless engine and can make an instance, which a
+ * `preload` naming no file prevents, where an engine is there. A path of [param absent] must name
+ * no file to the engine.
+ */
+function assertScriptsLoad(
+  project: string,
+  scripts: readonly string[],
+  absent: readonly string[] = [],
+): void {
+  const output = headlessOutput(
+    project,
+    [
+      'extends SceneTree',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tvar answers: Array[String] = []',
+      ...scripts.flatMap((path, at) => [
+        `\tvar script${at}: Script = load("${path}")`,
+        `\tanswers.append(str(script${at} != null and script${at}.can_instantiate()))`,
+      ]),
+      ...absent.map((path) => `\tanswers.append(str(not ResourceLoader.exists("${path}")))`),
+      '\tprint("ANSWERS " + JSON.stringify(answers))',
+      '\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+  if (output !== null) {
+    const answered = /ANSWERS (\[.*\])/.exec(output)?.[1];
+    assert.ok(answered !== undefined, output);
+    assert.deepEqual(
+      asArray(JSON.parse(answered)).map(String),
+      [...scripts, ...absent].map(() => 'true'),
+      `${scripts.join(', ')} load${absent.length > 0 ? ` and ${absent.join(', ')} name no file` : ''}: ${output}`,
+    );
+  }
 }
 
 /**
@@ -89546,35 +89598,598 @@ function testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth(): void {
   }
 }
 
+/** A scene with one ext_resource at [param path], written as it is, and a root N. */
+function sceneNaming(path: string): string {
+  return `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
+}
+
 /**
- * A path is split into parts on slashes only. `res://sub\..\DESK.tscn` is one part, which the disk
- * takes for the moved `desk.tscn` and so follows it. `res://SUB\desk.tscn` is one part against the
- * two of the moved `sub/desk.tscn`, and stays as written.
+ * A backslash is a separator in a path Godot reads, on every platform, so a move follows
+ * `res://sub\..\desk.tscn` and `res://SUB\desk.tscn` as it follows the slashes. A scene writes each
+ * backslash doubled, as does a script, and a raw string writes it single. The new path keeps the
+ * separator written, and the scene and the script still load.
  */
-function testAPathIsSplitIntoPartsOnSlashesOnly(): void {
-  const named = (path: string): string =>
-    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
+function testABackslashIsASeparatorInAPathGodotReads(): void {
   const up = caseMoveProject(
-    { 'desk.tscn': LINKED_DESK, 'sub/x.gd': '', 'up.tscn': named('res://sub\\..\\DESK.tscn') },
+    {
+      'desk.tscn': LINKED_DESK,
+      'sub/x.gd': '',
+      'up.tscn': sceneNaming('res://sub\\\\..\\\\DESK.tscn'),
+      'up.gd': 'extends Node\n\nconst A := preload(r"res://sub\\..\\desk.tscn")\n',
+    },
     'DESK.tscn',
   );
   const down = caseMoveProject(
-    { 'sub/desk.tscn': LINKED_DESK, 'back.tscn': named('res://SUB\\desk.tscn') },
+    { 'sub/desk.tscn': LINKED_DESK, 'back.tscn': sceneNaming('res://SUB\\\\desk.tscn') },
     'SUB',
   );
   try {
-    const reads = existsSync(join(up.project, 'sub\\..\\DESK.tscn'));
     movedIn(up.project, 'desk.tscn', 'newdir/desk.tscn');
+    const read = (project: string, file: string): string => readFileSync(join(project, file), 'utf8');
     assert.equal(
-      readFileSync(join(up.project, 'up.tscn'), 'utf8'),
-      named(reads ? 'res://newdir/desk.tscn' : 'res://sub\\..\\DESK.tscn'),
+      read(up.project, 'up.tscn'),
+      sceneNaming(up.folds ? 'res://newdir\\\\desk.tscn' : 'res://sub\\\\..\\\\DESK.tscn'),
+    );
+    assert.equal(
+      read(up.project, 'up.gd'),
+      'extends Node\n\nconst A := preload(r"res://newdir\\desk.tscn")\n',
     );
     movedIn(down.project, 'sub/desk.tscn', 'newdir/desk.tscn');
-    assert.equal(readFileSync(join(down.project, 'back.tscn'), 'utf8'), named('res://SUB\\desk.tscn'));
+    assert.equal(
+      read(down.project, 'back.tscn'),
+      sceneNaming(down.folds ? 'res://newdir\\\\desk.tscn' : 'res://SUB\\\\desk.tscn'),
+    );
+    assertScriptsLoad(up.project, ['res://up.gd']);
+    if (up.folds) {
+      assertLoads(up.project, 'res://up.tscn', ['N']);
+    }
+    if (down.folds) {
+      assertLoads(down.project, 'res://back.tscn', ['N']);
+    }
   } finally {
     sweep(up.project);
     sweep(down.project);
   }
+}
+
+/**
+ * A scene's `\\\\` is two backslashes once read, which Godot folds into one separator: a move
+ * follows `res://sub\\\\desk.tscn` and writes the new path with the same two, as the scene loads.
+ */
+function testADoubledBackslashInASceneIsOneSeparator(): void {
+  const { project } = caseMoveProject(
+    { 'sub/desk.tscn': LINKED_DESK, 'use.tscn': sceneNaming('res://sub\\\\\\\\desk.tscn') },
+    'SUB',
+  );
+  try {
+    movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(project, 'use.tscn'), 'utf8'),
+      sceneNaming('res://newdir\\\\\\\\desk.tscn'),
+    );
+    assertLoads(project, 'res://use.tscn', ['N']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A folder move leaves a moved script's own `"sub\\b.tres"` and `r"sub\b.tres"` as written: they
+ * name the same file beside it afterwards. The script still loads.
+ */
+function testAFolderMoveKeepsABackslashPathBetweenItsFiles(): void {
+  const script = 'extends Node\n\nconst S := preload("sub\\\\b.tres")\nconst R := preload(r"sub\\b.tres")\n';
+  const { project } = caseMoveProject(
+    { 'a/sub/b.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n', 'a/x.gd': script },
+    'A/x.gd',
+  );
+  try {
+    movedIn(project, 'a', 'newdir/a');
+    assert.equal(readFileSync(join(project, 'newdir', 'a', 'x.gd'), 'utf8'), script);
+    assertScriptsLoad(project, ['res://newdir/a/x.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A relative `"ART\\desk.tscn"` in another case follows a move of `art/desk.tscn` as the slash
+ * spelling does, with the backslash it was written with, and the script still loads. Where the
+ * file system keeps case, the other case stays.
+ */
+function testAMoveFollowsABackslashPathInAnotherCase(): void {
+  const { project, folds } = caseMoveProject(
+    {
+      'art/desk.tscn': LINKED_DESK,
+      'use.gd':
+        'extends Node\n\nconst A := preload("ART\\\\desk.tscn")\nconst B := preload("art\\\\desk.tscn")\n',
+    },
+    'ART/desk.tscn',
+  );
+  try {
+    movedIn(project, 'art/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(project, 'use.gd'), 'utf8'),
+      `extends Node\n\nconst A := preload("${folds ? 'newdir\\\\desk.tscn' : 'ART\\\\desk.tscn'}")\nconst B := preload("newdir\\\\desk.tscn")\n`,
+    );
+    if (folds) {
+      assertScriptsLoad(project, ['res://use.gd']);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * An absolute `"res://\tdesk.tscn"` reads a tab where a name starts and names no file, though the
+ * disk would take its backslash for a separator and reach `tdesk.tscn`. It stays when that file
+ * moves, and Godot finds nothing at the path.
+ */
+function testAMoveLeavesAnAbsoluteStringReadWithATab(): void {
+  const use = 'extends Node\n\nconst A := "res://\\tdesk.tscn"\nconst B := "\\tdesk.tscn"\n';
+  const { project } = caseMoveProject({ 'tdesk.tscn': LINKED_DESK, 'use.gd': use }, 'TDESK.tscn');
+  try {
+    movedIn(project, 'tdesk.tscn', 'newdir/tdesk.tscn');
+    assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), use);
+    assertScriptsLoad(project, ['res://use.gd'], ['res://\\tdesk.tscn']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A raw string has no escapes, so `r"levels\tutorial.tscn"` is `levels/tutorial.tscn` and follows a
+ * move, while `"levels\tutorial.tscn"` beside it holds a tab and stays. The script still loads.
+ */
+function testAMoveFollowsARawStringAndLeavesTheEscapeBesideIt(): void {
+  const { project } = caseMoveProject(
+    {
+      'levels/tutorial.tscn': LINKED_DESK,
+      'use.gd':
+        'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst R := preload(r"levels\\tutorial.tscn")\n',
+    },
+    'LEVELS/tutorial.tscn',
+  );
+  try {
+    movedIn(project, 'levels/tutorial.tscn', 'newdir/tutorial.tscn');
+    assert.equal(
+      readFileSync(join(project, 'use.gd'), 'utf8'),
+      'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst R := preload(r"newdir\\tutorial.tscn")\n',
+    );
+    assertScriptsLoad(project, ['res://use.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class rename that moves its script reads a path written with backslashes as Godot does: the
+ * raw `r"sub\..\player.gd"` follows, and the string naming a tab before `player.gd` stays.
+ */
+async function testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes(): Promise<void> {
+  const { project } = caseMoveProject(
+    {
+      'player.gd': 'class_name Player\nextends Node\n',
+      'sub/x.gd': '',
+      'user.gd':
+        'extends Node\n\nconst A := preload(r"sub\\..\\player.gd")\nconst B := "res://\\tplayer.gd"\n',
+    },
+    'PLAYER.gd',
+  );
+  try {
+    await renamePlayerAndMoveItsScript(project);
+    assert.equal(
+      readFileSync(join(project, 'user.gd'), 'utf8'),
+      'extends Node\n\nconst A := preload(r"hero.gd")\nconst B := "res://\\tplayer.gd"\n',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The texts of [param files], by project-relative name, once [param moves] are planned, with no
+ * disk behind them. A relative path of a moved file names a file wherever [param exists] says so.
+ */
+function plannedTexts(
+  files: Readonly<Record<string, string>>,
+  moves: readonly (readonly [string, string])[],
+  exists: (path: string) => boolean = () => true,
+): Record<string, string> {
+  const texts: ProjectText[] = Object.entries(files).map(([name, written]) => ({
+    path: `res://${name}`,
+    absolute: `/project/${name}`,
+    text: written,
+  }));
+  const plan = planMove(
+    {
+      projectPath: '/project',
+      texts,
+      scripts: scriptsOf(texts),
+      moves: new Map(moves),
+      named: [],
+      exists,
+    },
+    { edits: [], mentions: [] },
+  );
+  return Object.fromEntries(
+    texts.map((file) => [
+      file.path.slice('res://'.length),
+      plan.edits
+        .filter((edit) => edit.file === file.path)
+        .toSorted((a, b) => b.offset - a.offset)
+        .reduce(
+          (source, edit) =>
+            source.slice(0, edit.offset) + edit.replacement + source.slice(edit.offset + edit.length),
+          file.text,
+        ),
+    ]),
+  );
+}
+
+/** That a headless engine finds a resource at each of [param paths] in [param project], where one is there. */
+function assertResourcesExist(project: string, paths: readonly string[]): void {
+  const output = headlessOutput(
+    project,
+    [
+      'extends SceneTree',
+      '',
+      '',
+      'func _init() -> void:',
+      `\tvar paths: Array = JSON.parse_string(${JSON.stringify(JSON.stringify(paths))})`,
+      '\tvar answers: Array[String] = []',
+      '\tfor path: String in paths:',
+      '\t\tanswers.append(str(ResourceLoader.exists(path)))',
+      '\tprint("ANSWERS " + JSON.stringify(answers))',
+      '\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+  if (output !== null) {
+    const answered = /ANSWERS (\[.*\])/.exec(output)?.[1];
+    assert.ok(answered !== undefined, output);
+    assert.deepEqual(
+      asArray(JSON.parse(answered)).map(String),
+      paths.map(() => 'true'),
+      `${paths.join(', ')} name a file: ${output}`,
+    );
+  }
+}
+
+/**
+ * A path starting with a slash or a backslash is absolute to Godot, not relative to the project or
+ * the file: `"\\sub\\desk.tscn"`, `"/sub/desk.tscn"` and `r"\sub\desk.tscn"` name the root of the
+ * disk's drive. A move of the project's `sub/desk.tscn` leaves all three as they are, and unlisted.
+ */
+function testAStringStartingWithASlashNamesNoFileOfTheProject(): void {
+  const use =
+    'extends Node\n\nconst A := "\\\\sub\\\\desk.tscn"\nconst B := "/sub/desk.tscn"\nconst C := r"\\sub\\desk.tscn"\n';
+  const { project } = caseMoveProject({ 'sub/desk.tscn': LINKED_DESK, 'use.gd': use }, 'SUB');
+  try {
+    const outcome = movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), use);
+    assert.deepEqual(
+      outcome.inPlace.map((rewrite) => rewrite.path),
+      [],
+    );
+    assert.deepEqual(
+      asArray(get(outcome.report, 'leftAlone')).filter((one) => get(one, 'file') === 'res://use.gd'),
+      [],
+    );
+    assertScriptsLoad(project, ['res://use.gd'], ['/sub/desk.tscn', '\\\\sub\\\\desk.tscn']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A path written from the disk's root that leads into the project is the file's `res://` path to
+ * Godot (`ProjectSettings.localize_path`), so a move follows it in the form written: slashes,
+ * backslashes, a raw string and the other case of the drive letter. Godot finds the file at each
+ * new path.
+ */
+function testAnAbsolutePathInsideTheProjectFollowsAMove(): void {
+  const { project } = caseMoveProject({ 'sub/desk.tscn': LINKED_DESK }, 'SUB');
+  const slash = project.replaceAll('\\', '/');
+  const forms: [string, string][] = [[`"${slash}/sub/desk.tscn"`, `"${slash}/newdir/desk.tscn"`]];
+  const named = [`${slash}/newdir/desk.tscn`];
+  if (process.platform === 'win32') {
+    const back = slash.replaceAll('/', '\\');
+    const doubled = back.replaceAll('\\', '\\\\');
+    const letter = slash.slice(0, 1);
+    const other =
+      (letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()) + slash.slice(1);
+    forms.push(
+      [`"${doubled}\\\\sub\\\\desk.tscn"`, `"${doubled}\\\\newdir\\\\desk.tscn"`],
+      [`r"${back}\\sub\\desk.tscn"`, `r"${back}\\newdir\\desk.tscn"`],
+      [`"${other}/sub/desk.tscn"`, `"${other}/newdir/desk.tscn"`],
+    );
+    named.push(`${back}\\newdir\\desk.tscn`, `${other}/newdir/desk.tscn`);
+  }
+  const script = (texts: readonly string[]): string =>
+    `extends Node\n\n${texts.map((literal, at) => `const P${at} := ${literal}`).join('\n')}\n`;
+  try {
+    writeTree(project, { 'use.gd': script(forms.map(([before]) => before)) });
+    const outcome = movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), script(forms.map(([, after]) => after)));
+    assert.deepEqual(
+      outcome.inPlace.map((rewrite) => rewrite.path),
+      ['res://use.gd'],
+    );
+    assert.ok(
+      asArray(get(outcome.report, 'changed')).some((one) => get(one, 'file') === 'res://use.gd'),
+      JSON.stringify(outcome.report),
+    );
+    assertResourcesExist(project, named);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * An absolute disk path into the project, written in another letter case than the file and folder
+ * on disk, follows a file move and a rename that moves its script where the file system joins the
+ * spellings, and stays where it keeps them apart.
+ */
+async function testAnAbsolutePathInAnotherCaseFollowsWhereTheFileSystemJoinsIt(): Promise<void> {
+  const move = caseMoveProject({ 'sub/desk.tscn': LINKED_DESK }, 'SUB/DESK.tscn');
+  const rename = caseMoveProject(
+    { 'player.gd': 'class_name Player\nextends Node\n', 'user.gd': '' },
+    'PLAYER.gd',
+  );
+  try {
+    const slash = (project: string): string => project.replaceAll('\\', '/');
+    writeTree(move.project, {
+      'use.gd': `extends Node\n\nconst A := "${slash(move.project)}/SUB/DESK.tscn"\n`,
+    });
+    writeTree(rename.project, {
+      'user.gd': `extends Node\n\nconst A := "${slash(rename.project)}/PLAYER.gd"\n`,
+    });
+    movedIn(move.project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(move.project, 'use.gd'), 'utf8'),
+      `extends Node\n\nconst A := "${slash(move.project)}/${move.folds ? 'newdir/desk.tscn' : 'SUB/DESK.tscn'}"\n`,
+    );
+    await renamePlayerAndMoveItsScript(rename.project);
+    assert.equal(
+      readFileSync(join(rename.project, 'user.gd'), 'utf8'),
+      `extends Node\n\nconst A := "${slash(rename.project)}/${rename.folds ? 'hero.gd' : 'PLAYER.gd'}"\n`,
+    );
+  } finally {
+    sweep(move.project);
+    sweep(rename.project);
+  }
+}
+
+/**
+ * A raw string cannot hold its own quote, so a move to a folder named `it's` writes `r'...'` with
+ * the other quote, and drops the `r` and escapes where the path holds both quotes. The script
+ * loads, nothing is listed as left alone, and a string that was not raw keeps its escapes.
+ */
+function testARawStringThatCannotHoldTheNewPathIsRewrittenToLoad(): void {
+  const use =
+    'extends Node\n\nconst S := preload(r\'res://desk.tscn\')\nconst D := preload(r"res://desk.tscn")\nconst C := preload("res://desk.tscn")\n';
+  const { project } = caseMoveProject({ 'desk.tscn': LINKED_DESK, 'use.gd': use }, 'DESK.tscn');
+  try {
+    mkdirSync(join(project, "it's"));
+    const outcome = movedIn(project, 'desk.tscn', "it's/desk.tscn");
+    assert.equal(
+      readFileSync(join(project, 'use.gd'), 'utf8'),
+      'extends Node\n\nconst S := preload(r"res://it\'s/desk.tscn")\nconst D := preload(r"res://it\'s/desk.tscn")\nconst C := preload("res://it\'s/desk.tscn")\n',
+    );
+    assert.deepEqual(get(outcome.report, 'leftAlone'), []);
+    assertScriptsLoad(project, ['res://use.gd']);
+  } finally {
+    sweep(project);
+  }
+  const both = plannedTexts(
+    { 'use.gd': 'const S := preload(r\'res://desk.tscn\')\nconst D := preload(r"res://desk.tscn")\n' },
+    [['res://desk.tscn', 'res://it\'s"s/desk.tscn']],
+  );
+  assert.equal(
+    both['use.gd'],
+    'const S := preload(\'res://it\\\'s"s/desk.tscn\')\nconst D := preload("res://it\'s\\"s/desk.tscn")\n',
+  );
+}
+
+/**
+ * A class rename that moves its script into a folder named `it's` rewrites a raw `r'...'` preload of
+ * the script so that it still loads, and lists nothing as left alone.
+ */
+async function testARenameThatMovesItsScriptRewritesARawStringThatCannotHoldThePath(): Promise<void> {
+  const { project } = caseMoveProject(
+    {
+      'player.gd': 'class_name Player\nextends Node\n',
+      'sub/x.gd': '',
+      'user.gd': "extends Node\n\nconst D := preload(r'res://sub\\..\\player.gd')\n",
+    },
+    'PLAYER.gd',
+  );
+  try {
+    const outcome = await renamePlayerAndMoveItsScript(project, "it's/hero.gd");
+    assert.equal(
+      readFileSync(join(project, 'user.gd'), 'utf8'),
+      'extends Node\n\nconst D := preload(r"res://it\'s\\hero.gd")\n',
+    );
+    assert.deepEqual(get(outcome.report, 'leftAlone'), []);
+    assertScriptsLoad(project, ['res://user.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Godot takes a file's kind from its extension in any case, so a scene in `.TSCN` is read as the
+ * text of a scene: its backslash path follows a move as the one in a `.tscn` does, and a script in
+ * `.GD` is read as GDScript. A `;` comment in `.TRES` and a relative string in `.IMPORT` name no
+ * file, as in their lower case spellings.
+ */
+function testAnExtensionInCapitalsIsReadAsTheEngineReadsIt(): void {
+  const { project } = caseMoveProject(
+    {
+      'my sub/desk.tscn': LINKED_DESK,
+      'a.TSCN': sceneNaming('res://my sub\\\\desk.tscn'),
+      'b.tscn': sceneNaming('res://my sub\\\\desk.tscn'),
+      'c.TSCN': sceneNaming('res://my sub/desk.tscn'),
+      'Use.GD': 'extends Node\n\nconst A := preload(r"res://my sub\\desk.tscn")\n',
+    },
+    'A.tscn',
+  );
+  try {
+    const outcome = movedIn(project, 'my sub/desk.tscn', 'newdir/desk.tscn');
+    for (const file of ['a.TSCN', 'b.tscn']) {
+      assert.equal(readFileSync(join(project, file), 'utf8'), sceneNaming('res://newdir\\\\desk.tscn'), file);
+      assertLoads(project, `res://${file}`, ['N']);
+    }
+    assert.equal(readFileSync(join(project, 'c.TSCN'), 'utf8'), sceneNaming('res://newdir/desk.tscn'));
+    assert.equal(
+      readFileSync(join(project, 'Use.GD'), 'utf8'),
+      'extends Node\n\nconst A := preload(r"res://newdir\\desk.tscn")\n',
+    );
+    assert.deepEqual(outcome.scriptsInOrder, ['res://Use.GD']);
+  } finally {
+    sweep(project);
+  }
+  const comment = '[gd_resource type="Resource" format=3]\n; "desk.tscn"\n';
+  const note = '[remap]\n"desk.tscn"\n';
+  const files = {
+    'sub/note.tres': comment,
+    'sub/note.TRES': comment,
+    'sub/image.png.import': note,
+    'sub/image.png.IMPORT': note,
+  };
+  assert.deepEqual(plannedTexts(files, [['res://sub/desk.tscn', 'res://newdir/desk.tscn']]), files);
+}
+
+/**
+ * A `.UID` file beside a script is the script's uid sidecar as `.uid` is, so a scene naming the
+ * script only by that uid is followed by a member rename, and a move of the sidecar is refused as
+ * a move of the script's own file is.
+ */
+async function testAUidSidecarInCapitalsIsReadLikeOneInLowerCase(): Promise<void> {
+  const scene =
+    '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kidscript" id="1"]\n\n[node name="Kid" type="Node"]\nscript = ExtResource("1")\nlevel = 9\n';
+  const project = renameProjectWith({
+    'kid.gd': 'extends Told\n',
+    'kid.gd.UID': 'uid://kidscript\n',
+    'kid.tscn': scene,
+  });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'level',
+        newName: 'power',
+        newScriptPath: null,
+      },
+      {
+        namesTaken: engineSaying(),
+        references: async (absolute, _text, position) =>
+          await Promise.resolve([{ file: absolute, ...position }]),
+        definitions: async () => await Promise.resolve([]),
+      },
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    applyRewrites(outcome.rewrites);
+    assert.equal(readFileSync(join(project, 'kid.tscn'), 'utf8'), scene.replace('level = ', 'power = '));
+    const refused = planFileMove(project, join(project, 'kid.gd.UID'), join(project, 'newdir', 'kid.gd.UID'));
+    assert.ok(!refused.ok && refused.reason.includes('belongs to res://kid.gd'), JSON.stringify(refused));
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A class rename that moves its script to `hero.GD` is taken, and the script is among those written. */
+async function testARenameMayMoveItsScriptToACapitalExtension(): Promise<void> {
+  const { project } = caseMoveProject(
+    { 'player.gd': 'class_name Player\nextends Node\n', 'user.gd': '' },
+    'PLAYER.gd',
+  );
+  try {
+    const outcome = await renamePlayerAndMoveItsScript(project, 'hero.GD');
+    assert.ok(outcome.scriptsInOrder.includes('res://hero.GD'), JSON.stringify(outcome.scriptsInOrder));
+    assert.ok(existsSync(join(project, 'hero.GD')));
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A rewrite changes only the part of the path that moves. A `\u` or `\U` escape and a line
+ * continuation outside it stay as written, and the new part takes the separator the path used, so
+ * `"..\\c.tres"` of a script one folder down reads `"..\\..\\c.tres"`. The scripts load.
+ */
+function testARewriteLeavesWhatIsOutsideTheMovedPartAsWritten(): void {
+  const resource = '[gd_resource type="Resource" format=3]\n\n[resource]\n';
+  const escapes =
+    'extends Node\n\nconst A := preload("res://sub/d\\u0065sk.tscn")\nconst B := preload("res://sub/des\\U00006B.tscn")\nconst C := preload("res://sub/\\\ndesk.tscn")\n';
+  const down =
+    'extends Node\n\nconst A := preload("..\\\\c.tres")\nconst B := preload(r"..\\c.tres")\nconst S := preload("sub\\\\b.tres")\n';
+  const { project } = caseMoveProject(
+    {
+      'sub/desk.tscn': LINKED_DESK,
+      'esc.gd': escapes,
+      'c.tres': resource,
+      'a/sub/b.tres': resource,
+      'a/x.gd': down,
+      'a/deep/note.txt': '',
+    },
+    'SUB/desk.tscn',
+  );
+  try {
+    movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(project, 'esc.gd'), 'utf8'),
+      escapes.replaceAll('res://sub/', 'res://newdir/'),
+    );
+    assertScriptsLoad(project, ['res://esc.gd']);
+    movedIn(project, 'a/x.gd', 'a/deep/x.gd');
+    assert.equal(
+      readFileSync(join(project, 'a', 'deep', 'x.gd'), 'utf8'),
+      'extends Node\n\nconst A := preload("..\\\\..\\\\c.tres")\nconst B := preload(r"..\\..\\c.tres")\nconst S := preload("..\\\\sub\\\\b.tres")\n',
+    );
+    assertScriptsLoad(project, ['res://a/deep/x.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * New text takes the separator the changed part of the path used most, the first of those that tie,
+ * and where that part held none, the one the whole path used most.
+ */
+function testANewPathTakesTheSeparatorTheOldOneUsedMost(): void {
+  const preloading = (path: string): string => `const A := preload("${path}")\n`;
+  const moved = (file: string, written: string, from: string, to: string): string | undefined =>
+    plannedTexts({ [file]: preloading(written) }, [[from, to]])[file];
+  assert.equal(
+    moved('use.gd', String.raw`res://a/b\\c\\desk.tscn`, 'res://a/b/c/desk.tscn', 'res://x/y/z/w/desk.tscn'),
+    preloading(String.raw`res://x\\y\\z\\w\\desk.tscn`),
+  );
+  assert.equal(
+    moved('use.gd', String.raw`res://a/b\\desk.tscn`, 'res://a/b/desk.tscn', 'res://x/y/desk.tscn'),
+    preloading('res://x/y/desk.tscn'),
+  );
+  assert.equal(
+    moved('a/x.gd', String.raw`s1/s2\\s3/b.tres`, 'res://a/x.gd', 'res://a/deep/x.gd'),
+    preloading(String.raw`../s1/s2\\s3/b.tres`),
+  );
+}
+
+/**
+ * A control character is no part of a path: `"res://a\tb.tscn"` and `"a\nb.tscn"` name no file, so a
+ * move of a file whose name holds the tab or the newline leaves both the absolute and the relative
+ * string as written.
+ */
+function testAControlCharacterInAStringNamesNoFile(): void {
+  const use =
+    'const A := "res://a\\tb.tscn"\nconst B := "a\\tb.tscn"\nconst C := "res://a\\nb.tscn"\nconst D := "a\\nb.tscn"\n';
+  const after = plannedTexts({ 'use.gd': use }, [
+    ['res://a\tb.tscn', 'res://newdir/a\tb.tscn'],
+    ['res://a\nb.tscn', 'res://newdir/a\nb.tscn'],
+  ]);
+  assert.equal(after['use.gd'], use);
 }
 
 /**
@@ -89669,10 +90284,13 @@ function testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase(): void {
 }
 
 /**
- * Renames `Player` of player.gd to `Hero` in [param project] and moves the script to hero.gd,
+ * Renames `Player` of player.gd to `Hero` in [param project] and moves the script to [param target],
  * writing the rewrites. The words searched are those of `player.gd` and `user.gd`.
  */
-async function renamePlayerAndMoveItsScript(project: string): Promise<void> {
+async function renamePlayerAndMoveItsScript(
+  project: string,
+  target = 'hero.gd',
+): Promise<Extract<Awaited<ReturnType<typeof renameSymbol>>, { ok: true }>> {
   const wordsIn = (word: string): { file: string; line: number; character: number }[] =>
     ['player.gd', 'user.gd'].flatMap((file) =>
       readFileSync(join(project, file), 'utf8')
@@ -89691,7 +90309,7 @@ async function renamePlayerAndMoveItsScript(project: string): Promise<void> {
       scriptPath: join(project, 'player.gd'),
       symbol: 'Player',
       newName: 'Hero',
-      newScriptPath: join(project, 'hero.gd'),
+      newScriptPath: join(project, target),
     },
     {
       namesTaken: engineSaying(),
@@ -89701,6 +90319,7 @@ async function renamePlayerAndMoveItsScript(project: string): Promise<void> {
   );
   assert.ok(outcome.ok, JSON.stringify(outcome));
   applyRewrites(outcome.rewrites);
+  return outcome;
 }
 
 /**
@@ -89789,7 +90408,7 @@ function testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles(): void
  * for a separator and so reaches `tdesk.tscn`. Both stay as written.
  */
 function testAMoveLeavesAStringReadWithAnEscape(): void {
-  const levels = 'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst B := "levels\\\\tutorial.tscn"\n';
+  const levels = 'extends Node\n\nconst A := "levels\\tutorial.tscn"\n';
   const tab = 'extends Node\n\nconst A := "\\tdesk.tscn"\n';
   const down = caseMoveProject(
     { 'levels/tutorial.tscn': LINKED_DESK, 'use.gd': levels },
@@ -89809,9 +90428,8 @@ function testAMoveLeavesAStringReadWithAnEscape(): void {
 
 /**
  * A moved script's own relative strings follow it as they always have, a backslash among them: a
- * raw string has no escapes, and where the disk reads a backslash as a separator, as Windows does,
- * `r"sub\b.tres"` still reaches `sub/b.tres` once the script moves. Elsewhere it names no file and
- * stays.
+ * raw string has no escapes, and Godot on every platform reads a backslash in a path as a
+ * separator, so `r"sub\b.tres"` still reaches `sub/b.tres` once the script moves.
  */
 function testAMovedScriptKeepsItsRawStringReaching(): void {
   const { project } = caseMoveProject(
@@ -89822,14 +90440,12 @@ function testAMovedScriptKeepsItsRawStringReaching(): void {
     'A.gd',
   );
   try {
-    const separates = existsSync(join(project, 'sub\\b.tres'));
     movedIn(project, 'a.gd', 'newdir/a.gd');
     assert.equal(
       readFileSync(join(project, 'newdir', 'a.gd'), 'utf8'),
-      separates
-        ? 'extends Node\n\nconst B := preload(r"../sub\\b.tres")\n'
-        : 'extends Node\n\nconst B := preload(r"sub\\b.tres")\n',
+      'extends Node\n\nconst B := preload(r"..\\sub\\b.tres")\n',
     );
+    assertScriptsLoad(project, ['res://newdir/a.gd']);
   } finally {
     sweep(project);
   }
@@ -107222,7 +107838,24 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedScriptKeepsItsRawStringReaching,
   testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth,
-  testAPathIsSplitIntoPartsOnSlashesOnly,
+  testABackslashIsASeparatorInAPathGodotReads,
+  testADoubledBackslashInASceneIsOneSeparator,
+  testAFolderMoveKeepsABackslashPathBetweenItsFiles,
+  testAMoveFollowsABackslashPathInAnotherCase,
+  testAMoveLeavesAnAbsoluteStringReadWithATab,
+  testAMoveFollowsARawStringAndLeavesTheEscapeBesideIt,
+  testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes,
+  testAStringStartingWithASlashNamesNoFileOfTheProject,
+  testAnAbsolutePathInsideTheProjectFollowsAMove,
+  testAnAbsolutePathInAnotherCaseFollowsWhereTheFileSystemJoinsIt,
+  testARawStringThatCannotHoldTheNewPathIsRewrittenToLoad,
+  testARenameThatMovesItsScriptRewritesARawStringThatCannotHoldThePath,
+  testAnExtensionInCapitalsIsReadAsTheEngineReadsIt,
+  testAUidSidecarInCapitalsIsReadLikeOneInLowerCase,
+  testARenameMayMoveItsScriptToACapitalExtension,
+  testARewriteLeavesWhatIsOutsideTheMovedPartAsWritten,
+  testANewPathTakesTheSeparatorTheOldOneUsedMost,
+  testAControlCharacterInAStringNamesNoFile,
   testReferencesInOtherFoldersCostOneQuestionEachFolder,
   testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
