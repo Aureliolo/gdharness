@@ -743,6 +743,16 @@ A tool of a game's own that starts engines takes slots the same way, in the step
 - To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`). Write
   `{"pid": <your pid>, "started": <your process's start time>}` into it.
 - The time is in milliseconds since the epoch, as the operating system reports it.
+- A lock may be read empty for a moment, between its creation and its text. Hold an empty lock as
+  held, whatever decides on it: a take, a steal, a sweep or a removal. Never read it as free or as
+  garbage. One still empty 10 seconds after it was made belongs to a taker that died, and is free.
+- gdharness and the gates' queue create a lock this way, since a taker that stages its text first
+  loses almost every race to one that only creates the name.
+- The marks, the steal files and a lock put back under its steal file are written whole. The text
+  goes to a file beside, `.<name>.<pid>-<thread>.writing`, and is put in place under the name without
+  replacing a file that exists (a hard link, or a rename that Windows refuses onto a taken name). A
+  reader never finds these empty, and never opens a `.writing` file or counts it as a lock or a mark.
+  A writer that has gone leaves its file, which any sweep may remove by the pid in its name.
 - An optional `"by"` says what took the slot, such as the tool and its project. A run waiting for a
   slot names each holder by it, or by its pid when it is missing.
 
@@ -782,12 +792,13 @@ Take in the order you began to wait. At each look, read every live mark but your
 ones.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited two minutes or more. The second is everyone else, games included.
+  and have waited two minutes or more. The second is everyone else, games included. The wait
+  changes only the place in line, never which slots a taker may take.
 - The first group is ahead of the second. Within each group, those whose `since` is earlier are
   ahead of you, the earliest first.
 - A mark naming no `since` waits since its file was made, and one naming another `taker` is `other`.
-- Give each, in turn, the first free slot of those it may take now (below, aged by its own `since`)
-  not given to one before it. Leave those slots alone.
+- Give each, in turn, the first free slot of those it may take now (below) not given to one before
+  it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
   its coming free. From then on, leave that waiter nothing, unless it has looked since. A waiter
   says it looks by touching `<mark name without .json>.seen` beside its mark at each look, and
@@ -835,6 +846,10 @@ Each gate in the machine's queue, waiting for its seat or holding it, keeps a ma
 to its release. The mark is `<directory>/queued/<its ticket>.json` and holds what a lock does. An
 empty `<its ticket>.json.seated` sits beside it once the gate has its seat.
 
+A round's setup, which runs in its seat before its gate queues, makes the same pair of files while
+it runs. Its mark is named by time and pid and holds a `seat` key naming the round's seat. It counts
+as a seated gate and goes when the setup ends.
+
 A mark is live by the rule a lock is held by. One not yet written names nobody and is passed over.
 One whose holder has gone is removed with its `.seated` file.
 
@@ -853,9 +868,8 @@ set. Each kind of engine takes:
 - An engine with `GODOT_ENGINE_TIER` set (`fast` or `full` for a gate's own step, `ship` for a build
   or upload) takes any slot, whatever the queue holds. It tries the gates' slots from the top first.
 - Any other engine takes any slot while no mark is live, and only the kept slots while one is. It
-  also takes the gates' slots, from the top, while some are spare (see Spare slots of the gates).
-- After two minutes of waiting, one that is not a game takes any slot, so gates never hold it back
-  for good.
+  also takes as many of the gates' free slots as are spare, the highest first (see Spare slots of the
+  gates). However long it has waited, it takes no more.
 
 ### A starved measurement's claim
 
@@ -871,11 +885,28 @@ by the rule a lock is freed by.
 ### Spare slots of the gates
 
 The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`, `written` in
-milliseconds since the epoch. `spare` counts the gates' free slots no queued gate can take now, from
-the queue's seats, pool and memory. The file is written through a `.part` file and a rename, at
-every change and every five seconds while a gate waits. A missing file counts as none, as does one
-older than ten seconds or written by a holder that has gone. A game never takes a spare slot, since
-it holds one as long as it plays.
+milliseconds since the epoch. `spare` counts the gates' free slots that all engines outside a gate
+may take between them, young or aged. It is read from the queue's seats, pool and memory. A seated
+mark of a round's setup leaves it at 0. The file is written through a `.part` file and a rename, at
+every change and every five seconds while a gate waits.
+
+Count what side work may take from the folder as it is now. That is the free slots of the gates,
+less those the seated gates are owed, and none while a measurement holds the quiet window
+(`window.json`). The owed part is the queue's to count. Read the free slots once, and count and
+name the slots from that one read. By the state of the queue:
+
+- No gate mark is live: take every free slot of the gates, whatever the file says.
+- A gate mark is live and the file is fresh: take its `spare` less the gates' slots whose locks were
+  written after it, and no more than are free. A file is fresh when it is under ten seconds old,
+  readable and written by a holder that is alive, and no `.seated` file is newer than its `written`,
+  since it could not have counted that seat.
+- A gate mark is live and the file is not fresh, seated gate or not: take none of the gates' slots.
+  Its ticker writes a fresh file within five seconds.
+
+After taking a gate slot, count again from the folder. When side work holds more gate slots written
+since the count than it allows, the newest of them gives its slot back and waits, so two takers that
+read one spare slot do not both keep a slot. A game never takes a spare slot, since it holds one as
+long as it plays.
 
 ### A gate's lanes file
 
