@@ -81498,10 +81498,24 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   assert.deepEqual(
     starting,
     // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
-    // spawn.ts cannot do. The helper itself is started through spawnHidden.
-    [join('src', 'desktop.ts'), join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
+    // spawn.ts cannot do. The helper itself is started through spawnHidden. The stand-in engine is a
+    // compiled program that cannot import spawn.ts, so each start in its source is checked below.
+    [
+      join('src', 'desktop.ts'),
+      join('src', 'spawn.ts'),
+      join('test', 'support', 'hidden-spawn.ts'),
+      join('test', 'support', 'renderer-less-engine.ts'),
+    ],
     'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
       'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
+  );
+  const standIn = readFileSync(join('test', 'support', 'renderer-less-engine.ts'), 'utf8');
+  const standInStarts = standIn.split(['Bun', 'spawn'].join('.')).slice(1);
+  assert.ok(standInStarts.length >= 1, 'the stand-in engine starts the engine it hands a start to');
+  assert.deepEqual(
+    standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
+    [],
+    'every start the stand-in engine makes passes windowsHide',
   );
 
   // Godot's own: `OS.create_process(path, arguments, open_console)` and
