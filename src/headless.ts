@@ -523,14 +523,15 @@ const REFRESH_CLASS_LIST = 'refresh_class_cache';
 /**
  * [param outcome] of a class list rebuild, answered against [param listedBefore], the list before
  * the start dropped what names a gone script: `removed` holds every class it held that the list no
- * longer does, and a class it held at another path is `changed`, not `added`.
+ * longer does, and a class it held at another path is `changed`, not `added`. A list the engine
+ * could not read gave it no class, so its answer stands as the engine gave it.
  */
 function answeredAgainst(
   outcome: HeadlessOutcome,
   listedBefore: ReadonlyMap<string, string>,
   projectPath: string,
 ): HeadlessOutcome {
-  if (!outcome.ok) {
+  if (!outcome.ok || outcome.payload['unreadableList'] === true) {
     return outcome;
   }
   const names = (key: string): string[] | null => {

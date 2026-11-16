@@ -96,6 +96,7 @@ import {
   writeYaml,
 } from '../src/config-formats.js';
 import { configDisagrees } from '../src/config-pin.js';
+import { configFileReads } from '../src/config-text.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
@@ -79077,6 +79078,89 @@ async function testAClassMovedFromAGoneDeclarerIsAnsweredChanged(): Promise<void
   }
 }
 
+/** A class list cut short after its last entry, which the engine reads as no list at all. */
+function cutClassList(betaAt: string): string {
+  const whole = godotClassList([
+    ['Alpha', 'RefCounted', 'res://a.gd'],
+    ['Beta', 'RefCounted', betaAt],
+  ]);
+  return `${whole.slice(0, whole.lastIndexOf(']'))}\n`;
+}
+
+/**
+ * A class list the engine cannot read gives it no class, whatever entries its text holds, so every
+ * declaration is stale and a suite run imports first. ConfigFile takes a trailing comma and refuses
+ * a missing one.
+ */
+function testAClassListTheEngineCannotReadIsStale(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-list-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Cut"\n',
+      'a.gd': 'class_name Alpha\nvar x := 1\n',
+      'b.gd': 'class_name Beta\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': cutClassList('res://b.gd'),
+    });
+    assert.deepEqual(staleClassNames(project), ['Alpha', 'Beta']);
+    assert.equal(
+      importNeeded(project),
+      'The engine cannot read the class cache, so it would start knowing no class_name, and the project is imported first.',
+    );
+    const whole = godotClassList([
+      ['Alpha', 'RefCounted', 'res://a.gd'],
+      ['Beta', 'RefCounted', 'res://b.gd'],
+    ]);
+    assert.equal(configFileReads(whole), true, 'the form Godot writes');
+    assert.equal(configFileReads(whole.replace('}]', '},]')), true, 'a trailing comma');
+    assert.equal(configFileReads(whole.replace('}, {', '} {')), false, 'a missing comma');
+    assert.equal(configFileReads(cutClassList('res://b.gd')), false, 'cut short');
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), whole);
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A rebuild over a class list the engine cannot read answers every class it writes as added, the
+ * one whose listed script is gone too, and says the list could not be read.
+ */
+async function testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('unreadable class list regression skipped (Godot not found)');
+    return;
+  }
+  for (const [betaFile, betaAt] of [
+    ['b.gd', 'res://b.gd'],
+    ['b2.gd', 'res://b.gd'],
+  ] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-rebuilt-'));
+    try {
+      writeTree(project, {
+        'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutRebuilt"\n',
+        'a.gd': 'class_name Alpha\nvar x := 1\n',
+        [betaFile]: 'class_name Beta\nvar x := 1\n',
+        '.godot/global_script_class_cache.cfg': cutClassList(betaAt),
+      });
+      const outcome = await rebuildClassList(godotPath, project);
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const { added, removed, changed, unreadableList } = outcome.payload;
+      assert.deepEqual(
+        { added, removed, changed, unreadableList },
+        { added: ['Alpha', 'Beta'], removed: [], changed: [], unreadableList: true },
+        `Beta declared in ${betaFile}`,
+      );
+      assert.deepEqual(staleClassNames(project), []);
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
 /** The answer project_import refresh_classes renders names a twice-declared class and how to mend it. */
 async function testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -108035,6 +108119,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACSharpClassBesideAGDScriptOneIsListedOnce,
   testAClassListedAtAFileItsLanguageDoesNotOwnIsStale,
   testAClassMovedFromAGoneDeclarerIsAnsweredChanged,
+  testAClassListTheEngineCannotReadIsStale,
+  testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded,
   testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testEveryDesktopStartGoesThroughOneCall,

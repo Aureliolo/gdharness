@@ -20,7 +20,10 @@ func _init(p_log: GdhLog) -> void:
 
 
 func refresh_class_cache(_params: Dictionary) -> Dictionary:
-	var cached: Array = _read_cache()
+	var read: Variant = _read_cache()
+	var cached: Array = []
+	if read is Array:
+		cached = read
 	var before: Dictionary = _entries_by_class(cached)
 
 	var skipped: Array[Dictionary] = []
@@ -60,6 +63,29 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to write " + CACHE_PATH + ": " + error_string(err))
 
+	var differences: Dictionary = _differences(before, after)
+	var answer: Dictionary = {
+		"path": CACHE_PATH,
+		"classes": entries.size(),
+		"added": differences["added"],
+		"removed": differences["removed"],
+		"changed": differences["changed"],
+		"skipped": skipped,
+	}
+	if not carried.is_empty():
+		answer["carried"] = carried
+	# A list the engine could not read gave it none of its classes, so each is answered added.
+	if read == null:
+		answer["unreadableList"] = true
+	# The engine refuses each of these scripts but the one kept, with "Class hides a global script
+	# class" (modules/gdscript/gdscript_analyzer.cpp).
+	if not twice_declared.is_empty():
+		answer["twiceDeclared"] = twice_declared
+	return answer
+
+
+# The classes [param after] gained, lost and holds otherwise than [param before], by name.
+static func _differences(before: Dictionary, after: Dictionary) -> Dictionary:
 	var added: Array[String] = []
 	var removed: Array[String] = []
 	var changed: Array[String] = []
@@ -71,22 +97,7 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	for name: String in before:
 		if not after.has(name):
 			removed.append(name)
-
-	var answer: Dictionary = {
-		"path": CACHE_PATH,
-		"classes": entries.size(),
-		"added": added,
-		"removed": removed,
-		"changed": changed,
-		"skipped": skipped,
-	}
-	if not carried.is_empty():
-		answer["carried"] = carried
-	# The engine refuses each of these scripts but the one kept, with "Class hides a global script
-	# class" (modules/gdscript/gdscript_analyzer.cpp).
-	if not twice_declared.is_empty():
-		answer["twiceDeclared"] = twice_declared
-	return answer
+	return { "added": added, "removed": removed, "changed": changed }
 
 
 static func _add_declarer(declarers: Dictionary, entry: Dictionary) -> void:
@@ -390,10 +401,14 @@ func _header_in(lines: PackedStringArray) -> Dictionary:
 	return header
 
 
-func _read_cache() -> Array:
+# The list's entries, or null for a list that is there and does not load, cut short or edited by
+# hand, which the engine starts with no classes from.
+func _read_cache() -> Variant:
+	if not FileAccess.file_exists(CACHE_PATH):
+		return []
 	var config: ConfigFile = ConfigFile.new()
 	if config.load(CACHE_PATH) != OK:
-		return []
+		return null
 	var list: Variant = config.get_value("", "list", [])
 	if list is Array:
 		return list

@@ -12,6 +12,7 @@
 
 import { existsSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
+import { configFileReads } from './config-text.js';
 import { codeOf, shapeOf } from './gdscript-source.js';
 import { bytesOf } from './listed-reads.js';
 import { walkProject } from './project-walk.js';
@@ -250,6 +251,15 @@ export function cachedClasses(projectPath: string): Map<string, string> | null {
     listed.set(entry[1] ?? '', entry[2] ?? '');
   }
   return listed;
+}
+
+/**
+ * Whether the project has a class cache the engine cannot read, cut short or edited by hand. The
+ * engine then starts with no class, whatever entries the text holds.
+ */
+export function classListUnreadable(projectPath: string): boolean {
+  const text = readWhole(join(projectPath, '.godot', 'global_script_class_cache.cfg'));
+  return text !== null && !configFileReads(text);
 }
 
 /**
@@ -1217,9 +1227,13 @@ export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: s
  *
  * A name more than one script declares is current at any of them, since the rebuild keeps the
  * cache's pick while it still declares the name. So is a script in another language the cache
- * names, which the rebuild carries while it is there.
+ * names, which the rebuild carries while it is there. A cache the engine cannot read gives it no
+ * class, so every declaration is stale.
  */
 export function staleAgainst(cached: Map<string, string>, projectPath: string): string[] {
+  if (classListUnreadable(projectPath)) {
+    return [...classDeclarers(projectPath).keys()];
+  }
   const languages = cachedLanguages(projectPath);
   const holds = (name: string, scripts: readonly string[]): boolean => {
     const held = cached.get(name);
