@@ -90018,9 +90018,8 @@ function testAMoveLeavesAStringReadWithAnEscape(): void {
 
 /**
  * A moved script's own relative strings follow it as they always have, a backslash among them: a
- * raw string has no escapes, and where the disk reads a backslash as a separator, as Windows does,
- * `r"sub\b.tres"` still reaches `sub/b.tres` once the script moves. Elsewhere it names no file and
- * stays.
+ * raw string has no escapes, and Godot on every platform reads a backslash in a path as a
+ * separator, so `r"sub\b.tres"` still reaches `sub/b.tres` once the script moves.
  */
 function testAMovedScriptKeepsItsRawStringReaching(): void {
   const { project } = caseMoveProject(
@@ -90031,13 +90030,10 @@ function testAMovedScriptKeepsItsRawStringReaching(): void {
     'A.gd',
   );
   try {
-    const separates = existsSync(join(project, 'sub\\b.tres'));
     movedIn(project, 'a.gd', 'newdir/a.gd');
     assert.equal(
       readFileSync(join(project, 'newdir', 'a.gd'), 'utf8'),
-      separates
-        ? 'extends Node\n\nconst B := preload(r"../sub\\b.tres")\n'
-        : 'extends Node\n\nconst B := preload(r"sub\\b.tres")\n',
+      'extends Node\n\nconst B := preload(r"../sub\\b.tres")\n',
     );
     assertScriptsLoad(project, ['res://newdir/a.gd']);
   } finally {
