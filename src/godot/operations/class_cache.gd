@@ -20,27 +20,28 @@ func _init(p_log: GdhLog) -> void:
 
 
 func refresh_class_cache(_params: Dictionary) -> Dictionary:
-	var cached: Array = _read_cache()
-	var before: Dictionary = _entries_by_class(cached)
+	var unreadable: bool = list_unreadable()
+	var cached: Array = ProjectSettings.get_global_class_list()
+	var before: Dictionary = _entries_by_class(known_entries(cached))
 
-	var entries: Array = []
 	var skipped: Array[Dictionary] = []
+	var declarers: Dictionary = {}
 	for path: String in _files.find_files("res://", ".gd", true):
 		var entry: Dictionary = _entry_for(path, skipped)
 		if not entry.is_empty():
-			entries.append(entry)
+			_add_declarer(declarers, entry)
 	# Another language's classes are kept while their files are there. Only GDScript is read here
 	# and the list is written whole, so a C# project's global classes were dropped from it and
 	# answered as removed, and nothing started next could resolve them.
-	var carried: Array[String] = []
 	for entry: Variant in cached:
 		if not entry is Dictionary:
 			continue
 		var listed: Dictionary = entry
-		var language: String = str(listed.get("language", "GDScript"))
-		if language != "GDScript" and FileAccess.file_exists(str(listed.get("path", ""))):
-			entries.append(listed)
-			carried.append(str(listed.get("class", "")))
+		if _is_carried(listed):
+			_add_declarer(declarers, listed)
+	var carried: Array[String] = []
+	var twice_declared: Array[Dictionary] = []
+	var entries: Array = _kept_entries(declarers, before, carried, twice_declared)
 	# By name as text: StringName's own order is by identity, not by spelling.
 	entries.sort_custom(
 		func(a: Dictionary, b: Dictionary) -> bool: return str(a["class"]) < str(b["class"])
@@ -60,6 +61,29 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to write " + CACHE_PATH + ": " + error_string(err))
 
+	var differences: Dictionary = _differences(before, after)
+	var answer: Dictionary = {
+		"path": CACHE_PATH,
+		"classes": entries.size(),
+		"added": differences["added"],
+		"removed": differences["removed"],
+		"changed": differences["changed"],
+		"skipped": skipped,
+	}
+	if not carried.is_empty():
+		answer["carried"] = carried
+	# A list the engine could not read gave it none of its classes, so each is answered added.
+	if unreadable:
+		answer["unreadableList"] = true
+	# The engine refuses each of these scripts but the one kept, with "Class hides a global script
+	# class" (modules/gdscript/gdscript_analyzer.cpp).
+	if not twice_declared.is_empty():
+		answer["twiceDeclared"] = twice_declared
+	return answer
+
+
+# The classes [param after] gained, lost and holds otherwise than [param before], by name.
+static func _differences(before: Dictionary, after: Dictionary) -> Dictionary:
 	var added: Array[String] = []
 	var removed: Array[String] = []
 	var changed: Array[String] = []
@@ -71,18 +95,98 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	for name: String in before:
 		if not after.has(name):
 			removed.append(name)
+	return { "added": added, "removed": removed, "changed": changed }
 
-	var answer: Dictionary = {
-		"path": CACHE_PATH,
-		"classes": entries.size(),
-		"added": added,
-		"removed": removed,
-		"changed": changed,
-		"skipped": skipped,
-	}
-	if not carried.is_empty():
-		answer["carried"] = carried
-	return answer
+
+static func _add_declarer(declarers: Dictionary, entry: Dictionary) -> void:
+	var name: String = str(entry.get("class", ""))
+	if not declarers.has(name):
+		declarers[name] = []
+	var all: Array = declarers[name]
+	all.append(entry)
+
+
+static func _is_gdscript(entry: Dictionary) -> bool:
+	return str(entry.get("language", "GDScript")) == "GDScript"
+
+
+# Another language's entry is carried while its file is there, and a C# one only at a .cs file. The
+# extension of a language a GDExtension adds is not known here, so its entry is taken at any file.
+static func _is_carried(entry: Dictionary) -> bool:
+	var path: String = str(entry.get("path", ""))
+	var language: String = str(entry.get("language", "GDScript"))
+	if language == "GDScript" or (language == "C#" and path.get_extension() != "cs"):
+		return false
+	return FileAccess.file_exists(path)
+
+
+# One entry per name, the declarer that holds it, naming in [param carried] each kept from another
+# language and in [param twice_declared] each name more than one script declares.
+static func _kept_entries(
+	declarers: Dictionary,
+	before: Dictionary,
+	carried: Array[String],
+	twice_declared: Array[Dictionary]
+) -> Array:
+	var entries: Array = []
+	for name: String in declarers:
+		var all: Array = declarers[name]
+		all.sort_custom(_scans_before)
+		var cached: Dictionary = before.get(name, {})
+		var kept: Dictionary = _kept_of(all, str(cached.get("path", "")))
+		entries.append(kept)
+		if not _is_gdscript(kept):
+			carried.append(name)
+		if all.size() > 1:
+			twice_declared.append(_twice_declared(name, all, str(kept["path"])))
+	return entries
+
+
+# A class more than one script declares, which is an error in the project, not a list to repair:
+# the engine fails every declarer but the one it holds with "Class hides a global script class"
+# (modules/gdscript/gdscript_analyzer.cpp), and which one it holds can change from one editor
+# start to the next (editor/file_system/editor_file_system.cpp, _process_file_system).
+static func _twice_declared(name: String, all: Array, kept: String) -> Dictionary:
+	var scripts: Array[String] = []
+	for one: Dictionary in all:
+		scripts.append(str(one["path"]))
+	var listed: String = ", ".join(scripts.slice(0, -1)) + " and " + str(scripts.back())
+	var note: String = (
+		(
+			'%s is declared by %s. Godot fails all but one of them with "Class "%s" hides a global'
+			+ ' script class". The list keeps %s, and the editor may keep another at its next'
+			+ " start. Rename the class in all but one script."
+		)
+		% [name, listed, name, kept]
+	)
+	return { "class": name, "scripts": scripts, "kept": kept, "note": note }
+
+
+# Which of a name's declarers, in the scan's order, the list keeps: the one it holds while that
+# still declares the name, so a rebuild does not move it, and otherwise the last, as a first scan
+# registers them in turn and each registration replaces the path (_first_scan_process_scripts,
+# ScriptServer::add_global_class).
+static func _kept_of(all: Array, held: String) -> Dictionary:
+	for one: Dictionary in all:
+		if str(one["path"]) == held:
+			return one
+	var last: Dictionary = all.back()
+	return last
+
+
+# Whether the scan reaches [param a] before [param b]: a folder's subfolders before its own files,
+# each sorted with the engine's FileNoCaseComparator (editor_file_system.cpp, _scan_new_dir), which
+# is String.filenocasecmp_to. find_files lists by code point, as DirAccess sorts.
+static func _scans_before(a: Dictionary, b: Dictionary) -> bool:
+	var left: PackedStringArray = str(a["path"]).trim_prefix("res://").split("/")
+	var right: PackedStringArray = str(b["path"]).trim_prefix("res://").split("/")
+	var at: int = 0
+	while at < left.size() - 1 and at < right.size() - 1 and left[at] == right[at]:
+		at += 1
+	var left_is_folder: bool = at < left.size() - 1
+	if left_is_folder != (at < right.size() - 1):
+		return left_is_folder
+	return left[at].filenocasecmp_to(right[at]) < 0
 
 
 # The cache entry for one script, or empty for a script with no class_name.
@@ -295,14 +399,28 @@ func _header_in(lines: PackedStringArray) -> Dictionary:
 	return header
 
 
-func _read_cache() -> Array:
-	var config: ConfigFile = ConfigFile.new()
-	if config.load(CACHE_PATH) != OK:
-		return []
-	var list: Variant = config.get_value("", "list", [])
-	if list is Array:
-		return list
-	return []
+# Whether the engine started knowing fewer classes than the list file names. It knows none from a
+# file cut short or edited by hand, or one whose `list` key a byte order mark, a stray word or a
+# [section] header above it hides, and none of the entries a list written before 4.4 holds.
+static func list_unreadable() -> bool:
+	if not FileAccess.file_exists(CACHE_PATH):
+		return false
+	var named: int = FileAccess.get_file_as_string(CACHE_PATH).count('"class":')
+	return known_entries(ProjectSettings.get_global_class_list()).size() < named
+
+
+# The entries of [param loaded] the engine registered. The list was loaded once at start, and
+# ScriptServer::init_languages skips an entry that lacks any of these keys
+# (core/object/script_language.cpp:293-299), as one written before 4.4 lacks is_abstract and
+# is_tool.
+static func known_entries(loaded: Array) -> Array:
+	var known: Array = []
+	for entry: Variant in loaded:
+		if entry is Dictionary:
+			var listed: Dictionary = entry
+			if listed.has_all(["class", "language", "path", "base", "is_abstract", "is_tool"]):
+				known.append(listed)
+	return known
 
 
 func _entries_by_class(entries: Array) -> Dictionary:

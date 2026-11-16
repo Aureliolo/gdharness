@@ -37,7 +37,9 @@ import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote }
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
+  type CallNotes,
   type CallProgress,
+  callNotes,
   callProgress,
   callSignal,
   type SlotWaits,
@@ -5392,6 +5394,11 @@ class GodotServer {
   private readonly unlistedClasses = new Map<string, string>();
   /** By project, the class cache rebuild in progress, which a call arriving meanwhile waits on. */
   private readonly classRebuilds = new Map<string, Promise<ClassRebuild>>();
+  /**
+   * By project, the rebuild of a class list the engine could not read that failed, with the list
+   * file's size and time when it did. It is tried again once the file changes.
+   */
+  private readonly failedListRebuilds = new Map<string, { file: string; failure: string }>();
   /** The pending calls answered while the kept game was held, whose timing counts the hold. */
   private readonly heldWhilePending = new Set<number>();
   /** The object snapshots taken while this server runs, by the id each answer named. */
@@ -6119,8 +6126,9 @@ class GodotServer {
       const call = this.callsTaken++;
       this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
+      const notes: CallNotes = { classList: new Set() };
       try {
-        const answer = await withCallSignal(
+        const answered = await withCallSignal(
           ctx.mcpReq.signal,
           () => this.answered(spec.name, checked.op ?? '', args),
           progress,
@@ -6129,7 +6137,9 @@ class GodotServer {
             said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
           },
           slotWaits,
+          notes,
         );
+        const answer = this.withCallNotes(answered, notes);
         // A test run whose class rebuild took a minute could not be told from a slow rebuild, since
         // every step's time holds its wait for a slot and the wait was said only as progress.
         const waited =
@@ -6343,6 +6353,13 @@ class GodotServer {
       ...answer,
       content: [...answer.content, { type: 'text', text: answerJson(block) }],
     };
+  }
+
+  /** [param answer] with what the code below its call noted for it in [param notes]. */
+  private withCallNotes(answer: ToolResponse, notes: CallNotes): ToolResponse {
+    return notes.classList.size === 0
+      ? answer
+      : this.saying(answer, { classListNote: [...notes.classList].join(' ') });
   }
 
   /**
@@ -7798,9 +7815,10 @@ class GodotServer {
    * The class cache rebuilt when the declarations on disk name a class it lacks, with the classes
    * the rebuild then listed. A rebuild leaves some out, such as a script extending itself, and
    * those are not rebuilt for again until the set changes, so a list no rebuild completes costs one
-   * engine rather than one before every call.
+   * engine rather than one before every call. [param unreadable] rebuilds whatever the files say,
+   * for a list an engine reported it could not read, which no reading of the files can tell.
    */
-  private async rebuildStaleClasses(projectPath: string): Promise<ClassRebuild> {
+  private async rebuildStaleClasses(projectPath: string, unreadable = false): Promise<ClassRebuild> {
     // Calls sent together each find the same classes missing. Unshared, each starts its own rebuild
     // engine, waits for a slot of its own and writes the same cache file.
     const running = this.classRebuilds.get(projectPath);
@@ -7812,16 +7830,16 @@ class GodotServer {
       const after = await this.rebuildStaleClasses(projectPath);
       return after.ok ? { ok: true, listed: [...joined.listed, ...after.listed] } : after;
     }
-    const rebuild = this.rebuildStaleClassesNow(projectPath).finally(() => {
+    const rebuild = this.rebuildStaleClassesNow(projectPath, unreadable).finally(() => {
       this.classRebuilds.delete(projectPath);
     });
     this.classRebuilds.set(projectPath, rebuild);
     return await rebuild;
   }
 
-  private async rebuildStaleClassesNow(projectPath: string): Promise<ClassRebuild> {
+  private async rebuildStaleClassesNow(projectPath: string, unreadable: boolean): Promise<ClassRebuild> {
     const stale = staleClassNames(projectPath);
-    if (stale.length === 0 || stale.join('\n') === this.unlistedClasses.get(projectPath)) {
+    if (!unreadable && (stale.length === 0 || stale.join('\n') === this.unlistedClasses.get(projectPath))) {
       return { ok: true, listed: [] };
     }
     const outcome = await this.operation(REFRESH_CLASS_CACHE, {}, projectPath);
@@ -8887,7 +8905,65 @@ class GodotServer {
       outcome.ok && rebuilt.listed.length > 0
         ? { ...outcome, payload: { ...outcome.payload, classesRebuiltFirst: rebuilt.listed } }
         : outcome;
-    return withScanWait(withEngineNote(told, engine.note), scanned);
+    const mended = await this.withAnUnreadableClassListRebuilt(operation, told, projectPath);
+    return withScanWait(withEngineNote(mended, engine.note), scanned);
+  }
+
+  /**
+   * [param outcome], with the class list rebuilt after it when its engine could not read the list.
+   * No reading of the files tells that list apart from a sound one, so only an engine that started
+   * on it can, and the operation it ran knew no class_name. The note saying so goes on the answer of
+   * the call being answered, whichever fields of this outcome its tool keeps, and on the outcome
+   * outside a call.
+   */
+  private async withAnUnreadableClassListRebuilt(
+    operation: string,
+    outcome: HeadlessOutcome,
+    projectPath: string,
+  ): Promise<HeadlessOutcome> {
+    if (operation === REFRESH_CLASS_CACHE || outcome.classListUnreadable !== true) {
+      return outcome;
+    }
+    const failure = await this.rebuildAnUnreadableClassList(projectPath);
+    const said =
+      "The engine could not read the class list, so this call ran knowing no class_name, and an error naming one of the project's classes comes from that.";
+    const classListNote =
+      failure === undefined
+        ? `${said} The list has been rebuilt from the scripts, so the next call knows them.`
+        : `${said} Rebuilding the list failed, and is tried again once the list file changes: ${failure}`;
+    const notes = callNotes();
+    if (notes !== undefined) {
+      notes.classList.add(classListNote);
+      return outcome;
+    }
+    return outcome.ok
+      ? { ...outcome, payload: { ...outcome.payload, classListNote } }
+      : { ...outcome, message: `${outcome.message} ${classListNote}` };
+  }
+
+  /**
+   * The class list of [param projectPath] rebuilt, or why that failed. A rebuild that failed is not
+   * run again until the list file changes, so a list no rebuild can write costs one engine rather
+   * than one after every operation.
+   */
+  private async rebuildAnUnreadableClassList(projectPath: string): Promise<string | undefined> {
+    const listFile = join(projectPath, '.godot', 'global_script_class_cache.cfg');
+    const fileState = (): string => {
+      const stat = statOf(listFile);
+      return stat === undefined ? 'none' : `${stat.size} ${stat.mtimeMs}`;
+    };
+    const failed = this.failedListRebuilds.get(projectPath);
+    if (failed !== undefined && failed.file === fileState()) {
+      return failed.failure;
+    }
+    const mended = await this.rebuildStaleClasses(projectPath, true);
+    if (mended.ok) {
+      this.failedListRebuilds.delete(projectPath);
+      return undefined;
+    }
+    const failure = mended.outcome.ok ? 'the rebuild gave no reason' : mended.outcome.message;
+    this.failedListRebuilds.set(projectPath, { file: fileState(), failure });
+    return failure;
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {

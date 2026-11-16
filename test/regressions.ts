@@ -62,6 +62,7 @@ import {
   type Contradicted,
   cachedClasses,
   cacheWrittenAt,
+  classDeclarers,
   classesNamedIn,
   contradictedDiagnostics,
   declaredClasses,
@@ -75,6 +76,7 @@ import {
   type MissingMember,
   missingMemberIn,
   scriptsInside,
+  staleAgainst,
   staleAnalysisNote,
   staleClassNames,
   uncachedClassNote,
@@ -294,6 +296,7 @@ import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/
 import {
   ASIDE,
   answerIn,
+  type HeadlessOutcome,
   judgeImport,
   librariesNotCopied,
   notImportedNote,
@@ -79759,6 +79762,612 @@ async function testARebuiltClassListAnswersAGoneScriptsClassAsRemoved(): Promise
 }
 
 /**
+ * Class names two scripts declare, each with its declarers in the editor's scan order: a folder's
+ * subfolders before its own files, each by FileNoCaseComparator, so a leading `_` first, digits as
+ * numbers and letter case ignored. A code point sort orders Cas, Fol, FolNat, Nat, TwIcon and Und
+ * the other way. A Godot 4.7.2 editor's first scan of the project kept the second of each.
+ */
+const TWICE_DECLARED_PAIRS: readonly (readonly [name: string, first: string, last: string])[] = [
+  ['Cas', 'a.gd', 'B.gd'],
+  ['Deep', 'deep/x/y.gd', 'deep/z.gd'],
+  ['Delta', 'a/s2.gd', 's1.gd'],
+  ['Fol', 'b/k.gd', 'C/k.gd'],
+  ['FolNat', 'd9/k.gd', 'd10/k.gd'],
+  ['Nat', 's9.gd', 's10.gd'],
+  ['TwIcon', 'tw/a1.gd', 'tw/A2.gd'],
+  ['Und', '_v.gd', 'V.gd'],
+];
+
+const TWICE_DECLARED: Readonly<Record<string, string>> = {
+  'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Twice"\n',
+  'icon.svg': '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>\n',
+  ...Object.fromEntries(
+    TWICE_DECLARED_PAIRS.flatMap(([name, first, last]) => [
+      [first, `class_name ${name}\nvar x := 1\n`],
+      [last, `class_name ${name}\nvar x := 1\n`],
+    ]),
+  ),
+  'tw/a1.gd': '@icon("res://icon.svg")\nclass_name TwIcon\nextends Node\nvar x := 1\n',
+  'tw/A2.gd': '@tool\nclass_name TwIcon\nextends Node2D\nvar x := 1\n',
+};
+
+/** Each twice-declared name at its [param at] declarer. */
+function twiceDeclaredAt(at: 'first' | 'last'): Map<string, string> {
+  return new Map(
+    TWICE_DECLARED_PAIRS.map(([name, first, last]) => [name, `res://${at === 'first' ? first : last}`]),
+  );
+}
+
+/** A class list holding each twice-declared name at its first declarer, written as the editor writes one. */
+function aListAtEachFirstDeclarer(): string {
+  const entry = (name: string, path: string): string => {
+    const icon = name === 'TwIcon' ? 'res://icon.svg' : '';
+    const base = name === 'TwIcon' ? 'Node' : 'RefCounted';
+    return `{\n"base": &"${base}",\n"class": &"${name}",\n"icon": "${icon}",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "${path}"\n}`;
+  };
+  return `list=[${[...twiceDeclaredAt('first')].map(([name, path]) => entry(name, path)).join(', ')}]\n`;
+}
+
+function rebuildClassList(godotPath: string, project: string): Promise<HeadlessOutcome> {
+  return runOperation(
+    { godotPath, script: resolve('src', 'godot', 'operations', 'godot_operations.gd'), debug: false },
+    'refresh_class_cache',
+    {},
+    project,
+  );
+}
+
+/** Each class of the class list at [param project] to its path, refusing a name listed twice. */
+function listedPaths(project: string): Map<string, string> {
+  const written = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+  const names = [...written.matchAll(/"class": &"([^"]*)"/g)].map((found) => found[1]);
+  assert.equal(new Set(names).size, names.length, `each class listed once: ${names.join(', ')}`);
+  return cachedClasses(project) ?? new Map<string, string>();
+}
+
+/** What the rebuild answers of a class [param scripts] declare, where the list keeps [param kept]. */
+function twiceDeclaredAnswer(
+  name: string,
+  scripts: readonly string[],
+  kept: string,
+): Record<string, unknown> {
+  const listed = `${scripts.slice(0, -1).join(', ')} and ${scripts.at(-1) ?? ''}`;
+  return {
+    class: name,
+    scripts,
+    kept,
+    note:
+      `${name} is declared by ${listed}. Godot fails all but one of them with "Class "${name}" hides a ` +
+      `global script class". The list keeps ${kept}, and the editor may keep another at its next start. ` +
+      'Rename the class in all but one script.',
+  };
+}
+
+/**
+ * A twice-declared name goes to the declarer the editor's first scan keeps, and a cache holding
+ * any of its declarers is current, since the rebuild keeps the list's pick while it still
+ * declares the name.
+ */
+function testATwiceDeclaredClassGoesWhereTheFirstScanPutsIt(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-declared-'));
+  try {
+    writeTree(project, TWICE_DECLARED);
+    assert.deepEqual(
+      classDeclarers(project),
+      new Map(TWICE_DECLARED_PAIRS.map(([name, first, last]) => [name, [`res://${first}`, `res://${last}`]])),
+    );
+    assert.deepEqual(declaredClasses(project), twiceDeclaredAt('last'));
+    assert.deepEqual(
+      new Map([...declaredClassLines(project)].map(([name, line]) => [name, line.path])),
+      twiceDeclaredAt('last'),
+    );
+    assert.deepEqual(staleAgainst(twiceDeclaredAt('first'), project), []);
+    assert.deepEqual(staleAgainst(twiceDeclaredAt('last'), project), []);
+    assert.deepEqual(
+      staleAgainst(new Map([...twiceDeclaredAt('last'), ['Delta', 'res://gone.gd']]), project),
+      ['Delta'],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * With no list to keep a pick from, the rebuild lists each twice-declared name once at the script
+ * the editor's first scan keeps, and names the declarers, since the engine refuses the others.
+ */
+async function testARebuiltClassListHoldsATwiceDeclaredClassOnce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('twice-declared class rebuild regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-rebuilt-'));
+  try {
+    writeTree(project, TWICE_DECLARED);
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(listedPaths(project), twiceDeclaredAt('last'));
+    const twice = outcome.payload['twiceDeclared'];
+    assert.ok(Array.isArray(twice), JSON.stringify(outcome.payload));
+    assert.deepEqual(
+      twice.toSorted((a: { class: string }, b: { class: string }) => (a.class < b.class ? -1 : 1)),
+      TWICE_DECLARED_PAIRS.map(([name, first, last]) =>
+        twiceDeclaredAnswer(name, [`res://${first}`, `res://${last}`], `res://${last}`),
+      ),
+    );
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A rebuild over a list holding a declarer of each twice-declared name leaves every pick, and
+ * answers nothing changed.
+ */
+async function testARebuildKeepsTheListsPickOfATwiceDeclaredClass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log("list's twice-declared pick regression skipped (Godot not found)");
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-kept-'));
+  try {
+    writeTree(project, {
+      ...TWICE_DECLARED,
+      '.godot/global_script_class_cache.cfg': aListAtEachFirstDeclarer(),
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed } = outcome.payload;
+    assert.deepEqual({ added, removed, changed }, { added: [], removed: [], changed: [] });
+    assert.deepEqual(listedPaths(project), twiceDeclaredAt('first'));
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A C# class the list holds beside a GDScript one of the same name stays the one entry of it. */
+async function testACSharpClassBesideAGDScriptOneIsListedOnce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('C# beside GDScript class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-sharp-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Sharp"\n',
+      'sharp.gd': 'class_name Sharp\nextends Node\nvar x := 1\n',
+      'Sharp.cs': 'using Godot;\n[GlobalClass]\npublic partial class Sharp : Node {}\n',
+      '.godot/global_script_class_cache.cfg':
+        'list=[{\n"base": &"Node",\n"class": &"Sharp",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "res://Sharp.cs"\n}]\n',
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(outcome.payload['carried'], ['Sharp'], JSON.stringify(outcome.payload));
+    assert.deepEqual(outcome.payload['changed'], [], JSON.stringify(outcome.payload));
+    assert.deepEqual(outcome.payload['twiceDeclared'], [
+      twiceDeclaredAnswer('Sharp', ['res://Sharp.cs', 'res://sharp.gd'], 'res://Sharp.cs'),
+    ]);
+    assert.deepEqual(listedPaths(project), new Map([['Sharp', 'res://Sharp.cs']]));
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class the list names at a file of no language that owns it is stale: a GDScript entry at an
+ * .svg resolves nothing, and a script extending the class fails to parse. A C# entry counts only
+ * at a .cs file.
+ */
+function testAClassListedAtAFileItsLanguageDoesNotOwnIsStale(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-foreign-path-'));
+  const csharp = (path: string): string =>
+    `list=[{\n"base": &"Node",\n"class": &"Ex",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}]\n`;
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Foreign"\n',
+      'ex.gd': 'class_name Ex\nextends Node\n',
+      'uses.gd': 'extends Ex\n',
+      'icon.svg': '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>\n',
+      'Ex.cs': 'using Godot;\n[GlobalClass]\npublic partial class Ex : Node {}\n',
+      'Ex.txt': 'not a script\n',
+    });
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    mkdirSync(dirname(cache), { recursive: true });
+    writeFileSync(cache, godotClassList([['Ex', 'Node', 'res://icon.svg']]));
+    assert.deepEqual(staleClassNames(project), ['Ex'], 'a GDScript entry at an .svg');
+    writeFileSync(cache, csharp('res://Ex.txt'));
+    assert.deepEqual(staleClassNames(project), ['Ex'], 'a C# entry at a .txt');
+    writeFileSync(cache, csharp('res://Ex.cs'));
+    assert.deepEqual(staleClassNames(project), [], 'a C# entry at its .cs');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class whose listed declarer is gone, and which another script still declares, is answered
+ * changed: the engine's start drops the gone entry before the rebuild reads the list.
+ */
+async function testAClassMovedFromAGoneDeclarerIsAnsweredChanged(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('moved class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-moved-class-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Moved"\n',
+      'm1.gd': 'class_name Mv\nvar x := 1\n',
+      'm3.gd': 'class_name Mv\nvar x := 1\n',
+      'kept.gd': 'class_name Kept\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': godotClassList([
+        ['Kept', 'RefCounted', 'res://kept.gd'],
+        ['Mv', 'RefCounted', 'res://m2.gd'],
+      ]),
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed } = outcome.payload;
+    assert.deepEqual({ added, removed, changed }, { added: [], removed: [], changed: ['Mv'] });
+    assert.deepEqual(listedPaths(project).get('Mv'), 'res://m3.gd');
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A class list of Alpha and Beta, with Beta at [param betaAt]. */
+function alphaBetaList(betaAt: string): string {
+  return godotClassList([
+    ['Alpha', 'RefCounted', 'res://a.gd'],
+    ['Beta', 'RefCounted', betaAt],
+  ]);
+}
+
+/** A class list cut short after its last entry, which the engine reads as no list at all. */
+function cutClassList(betaAt: string): string {
+  const whole = alphaBetaList(betaAt);
+  return `${whole.slice(0, whole.lastIndexOf(']'))}\n`;
+}
+
+/** What gdharness says of a call whose engine could not read the class list. */
+const UNREADABLE_LIST_SAID =
+  "The engine could not read the class list, so this call ran knowing no class_name, and an error naming one of the project's classes comes from that.";
+const UNREADABLE_LIST_REBUILT = `${UNREADABLE_LIST_SAID} The list has been rebuilt from the scripts, so the next call knows them.`;
+const UNREADABLE_LIST_NOT_REBUILT = `${UNREADABLE_LIST_SAID} Rebuilding the list failed, and is tried again once the list file changes: `;
+
+/** A project of Alpha, Beta and a script using Alpha, with [param list] as its class list. */
+function projectOverAClassList(prefix: string, list: string): string {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="OverAList"\n',
+    'a.gd': 'class_name Alpha\nvar x := 1\n',
+    'b.gd': 'class_name Beta\nvar x := 1\n',
+    'c.gd': 'extends RefCounted\n\n\nfunc make() -> RefCounted:\n\treturn Alpha.new()\n',
+    '.godot/global_script_class_cache.cfg': list,
+  });
+  return project;
+}
+
+/**
+ * [param run] given a server on [param project] and a call of it that answers with its text. The
+ * project is swept afterwards. Skipped without Godot.
+ */
+async function withAServerOn(
+  project: string,
+  run: (
+    server: ServerProcess,
+    call: (name: string, args: OperationParams) => Promise<string>,
+  ) => Promise<void>,
+  env: Record<string, string> = {},
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    sweep(project);
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('class list server regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-over-list-rt-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      ...env,
+    },
+  });
+  const call = async (name: string, args: OperationParams): Promise<string> => {
+    const response = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return textOf(response) ?? JSON.stringify(response);
+  };
+  try {
+    await server.initialize('over-a-list');
+    await run(server, call);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+const NODE2D_INHERITANCE = { op: 'inheritance', className: 'Node2D' } as const;
+
+/**
+ * A call whose engine could not read the class list ran knowing no class_name, though the text of
+ * the list names every class. The list is rebuilt after it, once, and the answer says so. The
+ * engine's parse error of the list is reported once, from the engine's own start.
+ */
+async function testAnOperationOnAnUnreadableClassListRebuildsIt(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-mend-', cutClassList('res://b.gd'));
+  await withAServerOn(project, async (_server, call) => {
+    assert.deepEqual(staleClassNames(project), [], 'no reading of the files tells the list is unreadable');
+    const first = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.equal(first.split('ConfigFile parse error').length - 1, 1, first);
+    assert.deepEqual(
+      listedPaths(project),
+      new Map([
+        ['Alpha', 'res://a.gd'],
+        ['Beta', 'res://b.gd'],
+      ]),
+    );
+    const second = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(!second.includes('could not read the class list'), second);
+  });
+}
+
+/**
+ * script_diagnostics builds its answer from the fields of its engines' answers, and still says that
+ * the errors of its first call come from a class list the engine could not read, which it rebuilt.
+ */
+async function testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-diag-', cutClassList('res://b.gd'));
+  await withAServerOn(project, async (_server, call) => {
+    const first = await call('script_diagnostics', { scriptPath: 'res://c.gd' });
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    const second = await call('script_diagnostics', { scriptPath: 'res://c.gd' });
+    assert.ok(!second.includes('could not read the class list'), second);
+    assert.match(second, /"clean":\s*true/);
+  });
+}
+
+/**
+ * The engine skips every entry of a list written before 4.4, which lacks is_abstract and is_tool,
+ * so it knows none of the classes such a list names. A call on it rebuilds the list and says so.
+ */
+async function testAClassListWrittenBefore44IsRebuilt(): Promise<void> {
+  const before44 = alphaBetaList('res://b.gd').replaceAll('"is_abstract": false,\n"is_tool": false,\n', '');
+  const project = projectOverAClassList('gdharness-list-43-', before44);
+  await withAServerOn(project, async (_server, call) => {
+    assert.deepEqual(staleClassNames(project), []);
+    const first = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.match(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"is_tool": false/,
+    );
+    const second = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(!second.includes('could not read the class list'), second);
+  });
+}
+
+/**
+ * A class list the engine cannot read and no rebuild can write is rebuilt once, not after every
+ * operation, and each answer meanwhile says the rebuild failed.
+ */
+async function testAClassListNoRebuildCanWriteIsTriedOnce(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-locked-', cutClassList('res://b.gd'));
+  const listFile = join(project, '.godot', 'global_script_class_cache.cfg');
+  chmodSync(listFile, 0o444);
+  try {
+    await withAServerOn(
+      project,
+      async (server, call) => {
+        for (const round of [1, 2, 3]) {
+          const answer = await call('editor_classes', NODE2D_INHERITANCE);
+          assert.ok(answer.includes(UNREADABLE_LIST_NOT_REBUILT), `call ${round}: ${answer}`);
+        }
+        assert.equal(server.stderr.split('Running refresh_class_cache in').length - 1, 1, server.stderr);
+        chmodSync(listFile, 0o644);
+      },
+      { GDHARNESS_DEBUG: '1' },
+    );
+  } finally {
+    if (existsSync(listFile)) {
+      chmodSync(listFile, 0o644);
+    }
+  }
+}
+
+/**
+ * A class list the engine loads without a top-level `list` gives it no class either: a byte order
+ * mark or a stray word joins the key's name, and a section header above it moves it out of the top
+ * level. The engine skips every entry of a list written before 4.4, which lacks is_abstract and
+ * is_tool. The rebuild answers every class it writes as added, and says the list could not be read.
+ */
+async function testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('keyless class list regression skipped (Godot not found)');
+    return;
+  }
+  const whole = alphaBetaList('res://b.gd');
+  for (const [what, list] of [
+    ['a byte order mark', `﻿${whole}`],
+    ['a stray word', `junk\n${whole}`],
+    ['a section header', `[classes]\n${whole}`],
+    ['a list written before 4.4', whole.replaceAll('"is_abstract": false,\n"is_tool": false,\n', '')],
+  ] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-keyless-list-'));
+    try {
+      writeTree(project, {
+        'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Keyless"\n',
+        'a.gd': 'class_name Alpha\nvar x := 1\n',
+        'b.gd': 'class_name Beta\nvar x := 1\n',
+        '.godot/global_script_class_cache.cfg': list,
+      });
+      const outcome = await rebuildClassList(godotPath, project);
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const { added, removed, changed, unreadableList } = outcome.payload;
+      assert.deepEqual(
+        { added, removed, changed, unreadableList },
+        { added: ['Alpha', 'Beta'], removed: [], changed: [], unreadableList: true },
+        what,
+      );
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
+/**
+ * A rebuild over a cut list naming a class whose script is gone answers that class removed, as the
+ * text of the list held it, though the engine never did.
+ */
+async function testARebuildOverACutListAnswersAGoneScriptsClassRemoved(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('cut list gone class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-gone-'));
+  try {
+    const whole = godotClassList([
+      ['Alpha', 'RefCounted', 'res://a.gd'],
+      ['Beta', 'RefCounted', 'res://b.gd'],
+      ['Gamma', 'RefCounted', 'res://gone.gd'],
+    ]);
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutGone"\n',
+      'a.gd': 'class_name Alpha\nvar x := 1\n',
+      'b.gd': 'class_name Beta\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': `${whole.slice(0, whole.lastIndexOf(']'))}\n`,
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed, unreadableList } = outcome.payload;
+    assert.deepEqual(
+      { added, removed, changed, unreadableList },
+      { added: ['Alpha', 'Beta'], removed: ['Gamma'], changed: [], unreadableList: true },
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A rebuild over a class list the engine cannot read answers every class it writes as added, the
+ * one whose listed script is gone too, and says the list could not be read.
+ */
+async function testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('unreadable class list regression skipped (Godot not found)');
+    return;
+  }
+  for (const [betaFile, betaAt] of [
+    ['b.gd', 'res://b.gd'],
+    ['b2.gd', 'res://b.gd'],
+  ] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-rebuilt-'));
+    try {
+      writeTree(project, {
+        'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutRebuilt"\n',
+        'a.gd': 'class_name Alpha\nvar x := 1\n',
+        [betaFile]: 'class_name Beta\nvar x := 1\n',
+        '.godot/global_script_class_cache.cfg': cutClassList(betaAt),
+      });
+      const outcome = await rebuildClassList(godotPath, project);
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const { added, removed, changed, unreadableList } = outcome.payload;
+      assert.deepEqual(
+        { added, removed, changed, unreadableList },
+        { added: ['Alpha', 'Beta'], removed: [], changed: [], unreadableList: true },
+        `Beta declared in ${betaFile}`,
+      );
+      assert.deepEqual(staleClassNames(project), []);
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
+/** The answer project_import refresh_classes renders names a twice-declared class and how to mend it. */
+async function testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('twice-declared answer regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-answer-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-answer-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="TwiceAnswer"\n',
+    's1.gd': 'class_name Delta\nvar x := 1\n',
+    'a/s2.gd': 'class_name Delta\nvar x := 1\n',
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  try {
+    await server.initialize('twice-answer');
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answered = parseTextContent(response);
+    assert.ok(answered !== null, textOf(response) ?? JSON.stringify(response));
+    assert.deepEqual(get(answered, 'twiceDeclared'), [
+      twiceDeclaredAnswer('Delta', ['res://a/s2.gd', 'res://s1.gd'], 'res://s1.gd'),
+    ]);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * The file an operation answers in keeps a float as it was: a tiny one was written as zero, and a
  * huge or a fractional one lost digits.
  */
@@ -88193,9 +88802,14 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
     writeFileSync(join(project, 'squire.gd'), 'class_name Squire\nextends Node\n');
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    // In the form an editor writes, since the engine skips an entry that lacks any of its keys.
+    const heroOnly = godotClassList([['Hero', 'Node', 'res://hero.gd']]);
     writeFileSync(
       cache,
-      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+      godotClassList([
+        ['Hero', 'Node', 'res://hero.gd'],
+        ['Squire', 'Node', 'res://squire.gd'],
+      ]),
     );
 
     await server.initialize('regression-test');
@@ -88216,7 +88830,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
       const tool = String(message['tool']);
       const args = isRecord(message['args']) ? message['args'] : {};
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+        writeFileSync(cache, heroOnly);
       }
       const result =
         tool === 'rescan_filesystem'
@@ -88260,7 +88874,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     // The editor saves, which writes the cache from the list it holds: no scan, no call here,
     // just the file getting shorter between two rebuilds. Downstream this put the same six classes
     // into classes.added on every test run of an afternoon, with nothing saying whose doing it was.
-    writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+    writeFileSync(cache, heroOnly);
     const second = await refresh();
     assert.deepEqual(
       asArray(get(second, 'added') ?? []).map(String),
@@ -109364,6 +109978,20 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheAnswerFileKeepsAFloatAsItWas,
   testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
   testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
+  testATwiceDeclaredClassGoesWhereTheFirstScanPutsIt,
+  testARebuiltClassListHoldsATwiceDeclaredClassOnce,
+  testARebuildKeepsTheListsPickOfATwiceDeclaredClass,
+  testACSharpClassBesideAGDScriptOneIsListedOnce,
+  testAClassListedAtAFileItsLanguageDoesNotOwnIsStale,
+  testAClassMovedFromAGoneDeclarerIsAnsweredChanged,
+  testAnOperationOnAnUnreadableClassListRebuildsIt,
+  testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList,
+  testAClassListWrittenBefore44IsRebuilt,
+  testAClassListNoRebuildCanWriteIsTriedOnce,
+  testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded,
+  testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded,
+  testARebuildOverACutListAnswersAGoneScriptsClassRemoved,
+  testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
