@@ -47523,21 +47523,38 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
 
 /**
  * Why a game gave no snapshot is told from what it answered, in the order it answers.
- * - A game that answers the inspection asked right after the request, and not the request, has an
- *   engine without the snapshot, since the engine drops a message for a capture it lacks. That is
- *   known at once.
+ * - A game that answers the inspection asked right after the request, then sends its next frame
+ *   with no answer to the request, has an engine without the snapshot, since the engine drops a
+ *   message for a capture it lacks. That is known at that frame.
+ * - One whose main thread stops at a breakpoint after that answer is told to let it go on first,
+ *   since a break inside a prepare reads the same.
+ * - One that has sent no frame since it connected is refused at the answer, saying a snapshot
+ *   still being prepared reads the same and naming the call that sends frames.
+ * - One whose frames stop after that answer is refused at the end of the wait, saying so, and
+ *   naming that call as what to try if the game turned its profiler off.
  * - A game that answers neither while its frames go on has no debug features at all.
  * - A game that sends nothing more was busy. The frames it had sent before it read the request,
  *   which arrive together as the request goes out, do not count as frames past it.
  */
 async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void> {
-  type Game = 'inspects' | 'frames' | 'busy';
+  type Game = 'inspects' | 'breaks' | 'silent' | 'stops' | 'frames' | 'busy';
   const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
     const { peer, game } = await aStandInGame();
     const frame = (): boolean => game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
+    let asked = false;
+    // What each game without the snapshot sends after its answer to the inspection.
+    const afterInspection: Partial<Record<Game, () => unknown>> = {
+      inspects: frame,
+      breaks: () => game.write(framedCommand('debug_enter', [true, 'Breakpoint', true])),
+      silent: () => undefined,
+      stops: () => undefined,
+    };
     const reply = (message: string): void => {
-      if (kind === 'inspects' && message === 'scene:inspect_object') {
+      asked ||= message === 'snapshot:request_prepare_snapshot';
+      const after = afterInspection[kind];
+      if (after !== undefined && message === 'scene:inspect_object') {
         game.write(framedCommand('scene:inspect_object', []));
+        after();
       }
       // What was sent before the request was read, still on its way as the request goes out.
       if (kind === 'busy' && message === 'snapshot:request_prepare_snapshot') {
@@ -47552,8 +47569,11 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
         }
       }
     });
-    const ticking = setInterval(() => kind === 'frames' && frame(), 200);
+    const ticking = setInterval(() => (kind === 'frames' || (kind === 'stops' && !asked)) && frame(), 200);
     try {
+      if (kind === 'silent') {
+        await delay(3500);
+      }
       const began = Date.now();
       const answer = await peer.ask({ op: 'snapshot' });
       return { answer, ms: Date.now() - began };
@@ -47563,17 +47583,35 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
       peer.close();
     }
   };
-  const [inspected, frames, busy] = await Promise.all([
+  const [inspected, breaks, silent, stops, frames, busy] = await Promise.all([
     answerOf('inspects'),
+    answerOf('breaks'),
+    answerOf('silent'),
+    answerOf('stops'),
     answerOf('frames'),
     answerOf('busy'),
   ]);
-  assert.deepEqual(inspected.answer, {
+  const noSnapshot =
+    'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.';
+  const debugEngine =
+    'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot';
+  assert.deepEqual(inspected.answer, { refused: noSnapshot, next: debugEngine });
+  assert.deepEqual(breaks.answer, {
     refused:
-      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
-    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+      "The game's main thread stopped at a breakpoint as it was asked for the snapshot, and a held main thread finishes no snapshot until it goes on.",
+    next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
   });
-  assert.ok(inspected.ms < 2000, `known from the order, not the wait: ${inspected.ms} ms`);
+  assert.deepEqual(silent.answer, {
+    refused: `${noSnapshot} It has sent no performance frame since its debugger connected either, so a snapshot still being prepared cannot be told apart from a missing one.`,
+    next: 'EngineDebugger.profiler_enable("performance", true) in the game sends its performance frames again, then debug_objects snapshot asks again',
+  });
+  for (const [name, known] of Object.entries({ inspected, breaks, silent })) {
+    assert.ok(known.ms < 2000, `${name} is known from the order, not the wait: ${known.ms} ms`);
+  }
+  assert.deepEqual(stops.answer, {
+    refused: `${noSnapshot} It sent no frame in the 20 s after that answer either, which a game still preparing a snapshot that large does too.`,
+    next: 'debug_objects snapshot asks again, after EngineDebugger.profiler_enable("performance", true) in the game if it turned its performance profiler off',
+  });
   assert.match(
     String(frames.answer['refused']),
     /^The game answered neither the snapshot request nor the inspection asked after it within 20 s, while its frames went on/,
@@ -47584,6 +47622,153 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
       'The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy.',
     next: 'debug_objects snapshot asks again, which the game answers once its frames go on',
   });
+}
+
+/**
+ * A running game can answer the inspection asked after a snapshot request while it still prepares
+ * the snapshot: reading its objects runs their script, and every 2048 lines of script the engine
+ * reads and answers the messages waiting. Its snapshot is taken all the same:
+ * - also when it was asked while a continue was on its way, and the game left its break before
+ *   reading the request;
+ * - also after a hold of over three seconds, with no frame sent until the one the game sends as it
+ *   goes on, just before it reads the request;
+ * - also from a game whose frames come more than three seconds apart, which prepares for a while
+ *   after its answer.
+ * A main thread held at a breakpoint reads nothing during a prepare, so there an inspection
+ * answered with no snapshot before it is refused at once, with no frame to wait for.
+ */
+async function testASnapshotPreparedAfterItsInspectionIsTaken(): Promise<void> {
+  const prepared = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  type Game = 'running' | 'held' | 'continued' | 'continuedLate' | 'slow';
+  const frame = framedCommand('performance:profile_frame', [[1, 2, 3]]);
+  const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
+    const { peer, game, taken } = await aStandInGame();
+    const held = kind === 'held';
+    const goesOn = kind === 'continued' || kind === 'continuedLate';
+    let id = 0;
+    let continued = (): void => undefined;
+    const toldToGoOn = new Promise<void>((settle) => {
+      continued = settle;
+    });
+    const sizeAndFrame = (): Uint8Array[] => [
+      framedCommand('snapshot:snapshot_prepared', [id, prepared.length]),
+      frame,
+    ];
+    const replies: Record<string, (data: number[]) => void> = {
+      continue: () => {
+        continued();
+      },
+      'snapshot:request_prepare_snapshot': ([asked = 0]) => {
+        id = asked;
+        // Its break was left as the continue came, and that news reaches the keeper only now, with
+        // the frame its main loop sends before it reads the request.
+        if (goesOn) {
+          game.write(
+            Buffer.concat([framedCommand('debug_exit', []), ...(kind === 'continuedLate' ? [frame] : [])]),
+          );
+        }
+      },
+      'scene:inspect_object': () => {
+        const after = held || kind === 'slow' ? [] : sizeAndFrame();
+        game.write(Buffer.concat([framedCommand('scene:inspect_object', []), ...after]));
+        if (kind === 'slow') {
+          setTimeout(() => game.write(Buffer.concat(sizeAndFrame())), 500);
+        }
+      },
+      'snapshot:request_snapshot_chunk': ([asked = 0, begin = 0, end = 0]) => {
+        game.write(framedCommand('snapshot:snapshot_chunk', [asked, [...prepared.subarray(begin, end)]]));
+      },
+    };
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          replies[received.message]?.(received.data.map(Number));
+        }
+      }
+    });
+    try {
+      if (held || goesOn) {
+        const entered = taken('debug_enter');
+        game.write(framedCommand('debug_enter', [true, 'Breakpoint', true]));
+        await entered;
+      }
+      if (kind === 'slow') {
+        game.write(frame);
+      }
+      // Past the three seconds in which a game with its profiler on sends a frame.
+      await delay({ slow: 3500, continuedLate: 3500 }[kind as string] ?? 0);
+      const going = goesOn ? peer.ask({ op: 'resume', how: 'continue' }) : undefined;
+      if (going !== undefined) {
+        await toldToGoOn;
+      }
+      const began = Date.now();
+      const answer = await peer.ask({ op: 'snapshot' });
+      const ms = Date.now() - began;
+      assert.deepEqual(await going, going === undefined ? undefined : { continued: true }, kind);
+      return { answer, ms };
+    } finally {
+      game.destroy();
+      peer.close();
+    }
+  };
+  const [running, held, continued, continuedLate, slow] = await Promise.all([
+    answerOf('running'),
+    answerOf('held'),
+    answerOf('continued'),
+    answerOf('continuedLate'),
+    answerOf('slow'),
+  ]);
+  const counts = {
+    classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+    bytes: prepared.length,
+    unnamed: 0,
+    memoryBytes: 1234,
+  };
+  assert.deepEqual(running.answer, counts, 'the snapshot prepared after its inspection is taken');
+  assert.deepEqual(continued.answer, counts, 'a snapshot asked as a continue goes out is taken');
+  assert.deepEqual(continuedLate.answer, counts, 'a snapshot asked as a long hold ends is taken');
+  assert.deepEqual(slow.answer, counts, 'a snapshot of a game with seconds between frames is taken');
+  assert.deepEqual(held.answer, {
+    refused:
+      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+  });
+  assert.ok(held.ms < 2000, `a held main thread is known from the order: ${held.ms} ms`);
+}
+
+/**
+ * A pause asked beside a snapshot of a running game stops it inside the prepare, after it answered
+ * the inspection. The snapshot is refused for the break, with the resume that lets the prepare
+ * finish, and the pause still gets the break it asked for.
+ */
+async function testAPauseAskedBesideASnapshotGetsItsBreak(): Promise<void> {
+  const { peer, game } = await aStandInGame();
+  const replies: Record<string, () => void> = {
+    'scene:inspect_object': () => game.write(framedCommand('scene:inspect_object', [])),
+    break: () => game.write(framedCommand('debug_enter', [true, '', true])),
+    get_stack_dump: () => game.write(framedCommand('stack_dump', [1, 'res://main.gd', 8, '@tally_getter'])),
+  };
+  const stream = new DebuggerStream();
+  game.on('data', (chunk: Buffer) => {
+    for (const received of stream.push(chunk)) {
+      if ('message' in received) {
+        replies[received.message]?.();
+      }
+    }
+  });
+  try {
+    const [snapshot, pause] = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'pause' })]);
+    assert.deepEqual(snapshot, {
+      refused:
+        "The game's main thread stopped at a breakpoint as it was asked for the snapshot, and a held main thread finishes no snapshot until it goes on.",
+      next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
+    });
+    assert.equal(pause['paused'], true, JSON.stringify(pause));
+  } finally {
+    game.destroy();
+    peer.close();
+  }
 }
 
 /** The thread a stand-in game holds at a breakpoint. */
@@ -47713,6 +47898,7 @@ async function testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld(): P
       }
     } else if (message === 'scene:inspect_object') {
       game.write(framedCommand('scene:inspect_object', [], thread));
+      game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
     }
   });
   try {
@@ -48045,6 +48231,9 @@ async function testTheStartASnapshotRefusalNamesIsSpawnedHere(): Promise<void> {
  * inner classes, nested ones too, are counted under their native class with a note. A fresh game's counts keep
  * RefCounted and Node apart, thousands of objects come back whole over several slices, and a
  * snapshot of an earlier run is refused for a diff.
+ *
+ * The root's getter runs more than 2048 lines each time a snapshot reads it, so the engine answers
+ * the inspection sent after every request while it still prepares that request's snapshot.
  */
 async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
   const engine = resolveGodotPath();
@@ -48081,6 +48270,12 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
       'var items: Array[Resource] = []',
       'var notes: Array[Resource] = []',
       'var inners: Array[RefCounted] = []',
+      'var tally: int:',
+      '\tget:',
+      '\t\tvar total: int = 0',
+      '\t\tfor at: int in 2100:',
+      '\t\t\ttotal += at',
+      '\t\treturn total',
       '',
       '',
       'class Inner extends RefCounted:',
@@ -110087,6 +110282,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassIsCountedUnderItsNativeClass,
   testEachSnapshotRefusalNamesItsOwnFix,
   testASnapshotTellsAnEngineWithoutItFromABusyGame,
+  testASnapshotPreparedAfterItsInspectionIsTaken,
+  testAPauseAskedBesideASnapshotGetsItsBreak,
   testASnapshotAskedOnceAsAHeldWorkerLeaves,
   testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld,
   testASnapshotStalledByAHeldWorkerNamesTheResume,
