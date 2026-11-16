@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { entriesOf } from './listed-reads.js';
 
 /**
@@ -541,114 +541,51 @@ export function resolveWithinProject(
   return { ok: true, absolutePath, relativePath };
 }
 
-/** An exported build judged for a start: the program to run and how an answer names it. */
+/** An exported build judged for a start: the file to run and how an answer names it. */
 export type ExportedBuild =
   | { readonly ok: true; readonly absolutePath: string; readonly shownAs: string }
   | { readonly ok: false; readonly reason: string };
 
-/** What a program is called on [param platform], for a refusal. */
-const PROGRAM_KIND: Readonly<Record<string, string>> = {
-  win32: 'a Windows program ending in .exe',
-  darwin: 'an .app bundle or an executable file',
-};
-
-/** The program inside a macOS bundle: the one named like it, else the only file in Contents/MacOS. */
-function bundleProgram(bundle: string): string | null {
-  const folder = join(bundle, 'Contents', 'MacOS');
-  const named = join(folder, basename(bundle, extname(bundle)));
-  if (isLocalFile(named)) {
-    return named;
-  }
-  try {
-    const files = readdirSync(folder).filter((name) => isLocalFile(join(folder, name)));
-    return files.length === 1 && files[0] !== undefined ? join(folder, files[0]) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The refusal for [param real], an existing path, as a program the platform can start, or null when
- * it is one. [param shown] names it in the refusal.
- */
-function notAProgram(real: string, shown: string, platform: string): { reason: string } | { file: string } {
-  const kind = PROGRAM_KIND[platform] ?? 'an executable file';
-  const isBundle = platform === 'darwin' && extname(real).toLowerCase() === '.app';
-  if (isBundle && statSync(real).isDirectory()) {
-    const inner = bundleProgram(real);
-    return inner === null
-      ? { reason: `${shown} is an .app bundle with no program in Contents/MacOS to start. Give ${kind}.` }
-      : { file: inner };
-  }
-  if (!statSync(real).isFile()) {
-    return { reason: `${shown} is not a file, so there is nothing to start. Give ${kind}.` };
-  }
-  const runs =
-    platform === 'win32' ? extname(real).toLowerCase() === '.exe' : (statSync(real).mode & 0o111) !== 0;
-  return runs ? { file: real } : { reason: `${shown} is not a program this platform can run. Give ${kind}.` };
-}
-
-/** The refusal for a path that cannot be a program's, or null when it can be one. */
-function notAProgramPath(trimmed: string): string | null {
-  if (trimmed.includes('\0')) {
-    return 'Path contains a null byte.';
-  }
-  if (process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed)) {
-    return `Path '${trimmed}' has no drive, so it names a place on whichever drive this server runs on. Give the whole path with its drive, or a path relative to the project such as '${trimmed.replace(/^[\\/]+/, '').replaceAll('\\', '/')}'.`;
-  }
-  if (!isAbsolute(trimmed) && trimmed.includes(':') && !trimmed.startsWith(RESOURCE_SCHEME)) {
-    return `Path '${trimmed}' is not a path to a program. Give its absolute path, or one relative to the project such as 'export/game.exe'.`;
-  }
-  return null;
-}
-
-/** A program outside the project, which must exist and be one the platform can run. */
-function programOutsideTheProject(at: string, platform: string): ExportedBuild {
-  // A network or device spelling is refused as it is for every other path: nothing here reads it.
+/** A file outside the project, which must exist. A network or device spelling is refused, as for any path. */
+function fileOutsideTheProject(at: string, given: string): ExportedBuild {
   if (/^[\\/]{2}/.test(at)) {
     return {
       ok: false,
       reason: `${at} is a network or device path, which is not read here. Give a path on a local disk.`,
     };
   }
+  const colon = colonRefusal(given, at.replace(/^[A-Za-z]:/, ''));
+  if (colon !== null) {
+    return { ok: false, reason: colon };
+  }
   let real: string;
   try {
     real = realpathSync.native(at);
   } catch {
-    const kind = PROGRAM_KIND[platform] ?? 'an executable file';
-    return { ok: false, reason: `There is no file at ${at} to start. Give the path of ${kind}.` };
+    return { ok: false, reason: `There is no file at ${at} to start. Give the absolute path of the build.` };
   }
-  const judged = notAProgram(real, at, platform);
-  return 'reason' in judged
-    ? { ok: false, reason: judged.reason }
-    : { ok: true, absolutePath: judged.file, shownAs: judged.file.split(sep).join('/') };
+  return statSync(real).isFile()
+    ? { ok: true, absolutePath: real, shownAs: real.split(sep).join('/') }
+    : { ok: false, reason: `${at} is not a file, so there is nothing to start.` };
 }
 
 /**
- * An exported build to start: a program inside the project, judged as a file inside it is, or an
- * existing program anywhere else on a local disk, named by its absolute path or relative to the
- * project. What the project's own rule refuses for lying outside it, a link out of it excepted, is
- * judged as a program instead.
+ * An exported build to start: a file inside the project, judged as every file inside it is, or an
+ * existing file anywhere else, named by its absolute path or relative to the project. A path the
+ * project's own rule refuses only for lying outside the project is taken when the file is there.
  */
-export function exportedBuild(
-  projectPath: string,
-  candidatePath: string,
-  platform: string = process.platform,
-): ExportedBuild {
+export function exportedBuild(projectPath: string, candidatePath: string): ExportedBuild {
   const trimmed = candidatePath.trim();
-  const refused = trimmed === '' ? 'Path is empty.' : notAProgramPath(trimmed);
-  if (refused !== null) {
-    return { ok: false, reason: refused };
-  }
   const found = resolveWithinProject(projectPath, trimmed);
   const at = resolve(projectPath, trimmed);
   const outside =
     !found.ok &&
     found.link === undefined &&
     !trimmed.startsWith(RESOURCE_SCHEME) &&
+    !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed)) &&
     !isWithinRoot(resolve(projectPath), at);
   if (outside) {
-    return programOutsideTheProject(at, platform);
+    return fileOutsideTheProject(at, trimmed);
   }
   if (!found.ok) {
     return found;
@@ -662,8 +599,7 @@ export function exportedBuild(
       reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
     };
   }
-  const judged = notAProgram(real, found.relativePath, platform);
-  return 'reason' in judged
-    ? { ok: false, reason: judged.reason }
-    : { ok: true, absolutePath: judged.file, shownAs: found.relativePath };
+  return statSync(real).isFile()
+    ? { ok: true, absolutePath: real, shownAs: found.relativePath }
+    : { ok: false, reason: `${found.relativePath} is not a file, so there is nothing to start.` };
 }

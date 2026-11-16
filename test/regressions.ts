@@ -40647,17 +40647,24 @@ function projectsAreJudgedWhereTheyAreOpened(at: {
   }
 }
 
-/** Where a Windows path leads to a program, judged by its spelling alone. */
+/** How a Windows path is judged by its spelling alone. */
 function windowsProgramPathsAreJudged(at: { project: string; builds: string; there: string }): void {
   const { project, builds, there } = at;
   const reason = (candidate: string, folder = project): string => {
     const judged = exportedBuild(folder, candidate);
     return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
   };
+  // A rooted path with no drive is the project's when it lands inside it, and is refused with the
+  // project's own suggestion when it does not, never looked up on the server's current drive.
   const rooted = reason('/export/game.exe');
-  assert.match(rooted, /^Path '\/export\/game\.exe' has no drive/, rooted);
+  assert.match(rooted, /^Path '\/export\/game\.exe' is absolute and outside the project/, rooted);
   assert.match(rooted, /such as 'export\/game\.exe'/, rooted);
   assert.match(reason('\\export\\game.exe'), /such as 'export\/game\.exe'/);
+  for (const inside of [project.slice(2).replaceAll('\\', '/'), project.slice(2)]) {
+    const own = exportedBuild(project, `${inside}/export/game.exe`);
+    assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
+  }
+  assert.match(reason(`${there}:inner.exe`), /contains ':'/);
   const onShare = (path: string): string => `\\\\localhost\\${path.replace(':', '$')}`;
   for (const form of [
     onShare(there),
@@ -40706,6 +40713,7 @@ function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
     writeFileSync(there, 'a build', { mode: 0o755 });
     writeFileSync(join(project, 'export', program), 'a build', { mode: 0o755 });
     writeFileSync(join(builds, 'notes.txt'), 'text', { mode: 0o644 });
+    writeFileSync(join(project, 'export', `${program}.bin`), 'data', { mode: 0o644 });
 
     const real = realpathSync.native(there);
     assert.deepEqual(exportedBuild(project, there), {
@@ -40723,30 +40731,32 @@ function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
       return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
     };
     const missing = reason(join(builds, 'missing', program));
-    assert.match(missing, /^There is no file at .* to start\. Give the path of /, missing);
-    assert.match(reason(join(builds, 'folder')), /is not a file, so there is nothing to start\. Give /);
-    assert.match(reason(join(builds, 'notes.txt')), /is not a program this platform can run\. Give /);
-    for (const refused of [missing, reason(join(builds, 'notes.txt'))]) {
+    assert.match(missing, /^There is no file at .* to start\./, missing);
+    const folder = reason(join(builds, 'folder'));
+    assert.match(folder, /is not a file, so there is nothing to start\./, folder);
+    for (const refused of [missing, folder]) {
       assert.doesNotMatch(refused, /outside the project/, refused);
     }
+    // Any existing file is a build to start, inside the project or outside it: whether it can run
+    // is the start's to report.
+    const notes = exportedBuild(project, join(builds, 'notes.txt'));
+    assert.equal(notes.ok && notes.absolutePath, realpathSync.native(join(builds, 'notes.txt')));
     const climbing = exportedBuild(project, `../builds/${program}`);
     assert.equal(climbing.ok && climbing.absolutePath, real, JSON.stringify(climbing));
     assert.match(reason('../builds/missing'), /^There is no file at .*builds[\\/]missing to start/);
-    assert.match(reason('uid://abc'), /^Path 'uid:\/\/abc' is not a path to a program/);
+    // Each guard of "outside": a res:// path is the project's even when it climbs, and the project's
+    // own directory and its named streams are answered as the project answers them.
+    assert.match(
+      reason('res://../../builds/game.exe'),
+      /^Path 'res:\/\/\.\.\/\.\.\/builds\/game\.exe' resolves outside/,
+    );
+    assert.match(reason('.'), /is the project directory itself/);
+    assert.equal(exportedBuild(project, join(project, 'export', `${program}.bin`)).ok, true);
+    assert.match(reason(`${join(project, 'export', program)}:inner.exe`), /contains ':'/);
 
     if (process.platform === 'win32') {
       windowsProgramPathsAreJudged({ project, builds, there });
     }
-
-    const bundle = join(builds, 'Game.app');
-    mkdirSync(join(bundle, 'Contents', 'MacOS'), { recursive: true });
-    writeFileSync(join(bundle, 'Contents', 'MacOS', 'Game'), 'a build', { mode: 0o755 });
-    const opened = exportedBuild(project, bundle, 'darwin');
-    assert.equal(
-      opened.ok && opened.absolutePath,
-      realpathSync.native(join(bundle, 'Contents', 'MacOS', 'Game')),
-      JSON.stringify(opened),
-    );
   } finally {
     sweep(sandbox);
   }
