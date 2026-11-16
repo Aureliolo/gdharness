@@ -2716,16 +2716,10 @@ const PLAYING_STATUS_MS = 1_000;
 const SCAN_SETTLED_MS = 500;
 
 /**
- * How many script reloads are sent to the editor before the first of them is answered. The editor
- * runs every request it has read in one frame, so this bounds how long that frame takes.
+ * How many scripts one reload request to the editor names. The editor reloads them all in the frame
+ * it reads the request, so this bounds how long that frame takes.
  */
-const RELOADS_IN_FLIGHT = 64;
-
-const rescanProbe: { start: number; marks: unknown[] } = { start: 0, marks: [] };
-const reloadProbe = { count: 0, spellUsec: 0, totalUsec: 0 };
-function probeMark(label: string, extra?: unknown): void {
-  rescanProbe.marks.push([label, Date.now() - rescanProbe.start, extra]);
-}
+const RELOADS_PER_REQUEST = 64;
 
 /**
  * How long an idle editor may take to say so before the time counts as the editor being held up
@@ -17960,8 +17954,6 @@ class GodotServer {
   private async handleRescanFilesystem(args: OperationParams): Promise<ToolResponse> {
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 30000;
     const started = Date.now();
-    rescanProbe.start = started;
-    rescanProbe.marks = [];
     const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
     return await this.startTheRescan(args, { started, timeoutMs, projectPath });
   }
@@ -18009,13 +18001,9 @@ class GodotServer {
       const idle = await this.waitOutTheEditorsOwnScan(() => deadline());
       waitedForEditorMs += idle.waitedMs;
       answerStalledMs += idle.stalledMs;
-      probeMark('waitedOut', idle);
       ({ before, writtenBefore } = this.cacheBeforeTheScan(projectPath));
-      probeMark('cacheBefore');
       blind = await this.classesTheEditorCannotSee(args);
-      probeMark('blind', blind.unseen.length);
       const first = await this.askViaBridge('rescan_filesystem', args);
-      probeMark('asked', first instanceof BridgeTimeout ? 'timeout' : first.content[0]?.text);
       if (first instanceof BridgeTimeout) {
         startUnanswered = true;
         break;
@@ -18106,7 +18094,6 @@ class GodotServer {
       looked = true;
       await new Promise((settle) => setTimeout(settle, 100));
       const status = await this.rescanStatus(args);
-      probeMark('status', status);
       if (status === null) {
         busy = true;
         idleSince = null;
@@ -18170,7 +18157,6 @@ class GodotServer {
     // with a changed file still on its old import, and the editor's scan of it began straight after.
     // Looked at once however late it is, since a scan never looked at is not known to be running.
     const busy = await this.untilTheScanSettles(args, deadline, completedBefore);
-    probeMark('settled', { atRisk: atRisk.length, ghosts: ghosts.length, unchecked: blind.unchecked });
 
     // The write lands after the scan says it has finished, so reading the file the moment the
     // editor goes idle reads the one that is about to be replaced. Waited for only where a class
@@ -18187,7 +18173,6 @@ class GodotServer {
       }
     }
 
-    probeMark('cacheWritten');
     return await this.repairTheClassCache(args, { ...call, ...from, busy });
   }
 
@@ -18225,7 +18210,6 @@ class GodotServer {
         ? []
         : atMissingPaths.filter((name) => !cachedAtMissingPaths(rebuilt, projectPath).includes(name));
     const stillAtMissingPaths = atMissingPaths.filter((name) => !dropped.includes(name));
-    probeMark('repaired', { lost: lost.length, atMissing: atMissingPaths.length });
 
     return await this.reloadAfterTheRescan(args, {
       ...settled,
@@ -18253,12 +18237,7 @@ class GodotServer {
     // A list is answered under reloads, each in the shape one script is answered in.
     const reloaded: ScriptReload = Array.isArray(asked) ? {} : (reloads[0]?.reloaded ?? {});
 
-    probeMark('reloads');
-    reloadProbe.count = 0;
-    reloadProbe.spellUsec = 0;
-    reloadProbe.totalUsec = 0;
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
-    probeMark('checked', checked.unseen.length);
     const unseen = checked.unseen;
     // What this editor could not see before a scan an earlier rescan stopped waiting for, which
     // that scan may have brought in after nobody was looking.
@@ -18279,7 +18258,6 @@ class GodotServer {
         ? null
         : await this.reloadDependents(projectPath, broughtIn);
     const stillGone = lost.filter((name) => !restored.includes(name));
-    probeMark('dependents', { naming: dependents?.reloaded.length, ...reloadProbe });
     return this.noteTheRescan(args, {
       ...repaired,
       asked,
@@ -18441,7 +18419,6 @@ class GodotServer {
       uidsReread: orNothing(uidsReread),
       uidsDuplicatedOnDisk: orNothing(uidsDuplicatedOnDisk),
       note: notes.length > 0 ? notes.join(' ') : undefined,
-      probe: rescanProbe.marks,
     });
   }
 
@@ -18585,23 +18562,30 @@ class GodotServer {
     classes: readonly string[],
   ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; reloadedFirst: ReloadedFirst[] }> {
     const declaring = scriptsDeclaring(projectPath, classes).filter(({ tool }) => !tool);
-    await this.reloadAllAtOnce(declaring.map(({ script }) => script));
+    await this.reloadInBatches(declaring.map(({ script }) => script));
     return await this.reloadInEditor(scriptsNaming(projectPath, classes), projectPath);
   }
 
   /**
-   * Reloads each of [param scripts] in the editor, in order, sending them [constant
-   * RELOADS_IN_FLIGHT] at a time rather than one after another.
+   * Reloads each of [param scripts] in the editor, in order, [constant RELOADS_PER_REQUEST] to a
+   * request.
    *
-   * The editor reads its requests once a frame, so one sent after the last was answered waits for
-   * the next frame. A headless editor sleeps between frames: on Linux 401 reloads one at a time
-   * took 2.9 s, and on macOS, whose frames are longer, ten times that. Sent together, the editor
-   * runs them in the frame they arrive, in the order they were sent.
+   * A request for each script costs a frame each, since the editor reads its requests once a frame
+   * and a headless editor sleeps about 7 ms between frames. Each also lists its script's folder to
+   * find the spelling on disk, which a list request does once. On Linux, 401 scripts reloaded one
+   * at a time took 2.9 s of a 3.6 s rescan.
+   *
+   * The answers are not read: a script that did not reload is named by the scripts that fail on it.
    */
-  private async reloadAllAtOnce(scripts: readonly string[]): Promise<void> {
-    for (let from = 0; from < scripts.length; from += RELOADS_IN_FLIGHT) {
-      const chunk = scripts.slice(from, from + RELOADS_IN_FLIGHT);
-      await Promise.all(chunk.map((script) => this.reloadOnce(script)));
+  private async reloadInBatches(scripts: readonly string[]): Promise<void> {
+    for (let from = 0; from < scripts.length; from += RELOADS_PER_REQUEST) {
+      try {
+        await this.godotBridge.invokeTool('reload_script', {
+          scriptPaths: scripts.slice(from, from + RELOADS_PER_REQUEST),
+        });
+      } catch {
+        // A request that failed is left unread for the reason above.
+      }
     }
   }
 
@@ -18680,9 +18664,6 @@ class GodotServer {
   }> {
     try {
       const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
-      reloadProbe.count += 1;
-      reloadProbe.spellUsec += readNumber(answer, 'probeSpellUsec') ?? 0;
-      reloadProbe.totalUsec += readNumber(answer, 'probeTotalUsec') ?? 0;
       const unsaved = answer['unsavedInEditor'] === true;
       const failed = answer['failed'];
       if (typeof failed === 'number' && failed !== 0) {

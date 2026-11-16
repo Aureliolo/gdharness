@@ -60,19 +60,8 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	var started: bool = false
 	var completed_before: int = _scans_completed
 	var uids: Dictionary = { "reread": [], "duplicated": [] }
-	var probe: Dictionary = {
-		"frames": Engine.get_process_frames(),
-		"ticks": Time.get_ticks_msec(),
-		"lowCpu": OS.low_processor_usage_mode,
-		"lowCpuSleep": OS.low_processor_usage_mode_sleep_usec,
-		"maxFps": Engine.max_fps,
-		"progress": filesystem.get_scanning_progress(),
-		"finishedAt": _scan_finished_at_msec,
-	}
 	if not GdhRead.as_bool(args.get("statusOnly", false)) and not busy:
-		var reread_from: int = Time.get_ticks_usec()
 		uids = _reread_changed_uids(filesystem)
-		probe["rereadUsec"] = Time.get_ticks_usec() - reread_from
 		# Files the caller has just written, moved or deleted, read again one by one. The scan finds
 		# a script that appeared and leaves the global class of one that has gone in the editor's
 		# list, which it then writes back into the class cache at a path that is not there. Reading
@@ -82,9 +71,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 			var paths: Array = named
 			for path: Variant in paths:
 				filesystem.update_file(str(path))
-		var scan_from: int = Time.get_ticks_usec()
 		filesystem.scan()
-		probe["scanCallUsec"] = Time.get_ticks_usec() - scan_from
 		# Whether the scan ran, read off the editor rather than assumed. A threaded scan reports
 		# itself from inside the call, and one run on this thread has finished and signalled before
 		# it returns.
@@ -103,7 +90,6 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		"scansCompleted": _scans_completed,
 		"uidsReread": uids["reread"],
 		"uidsDuplicatedOnDisk": uids["duplicated"],
-		"probe": probe,
 	}
 
 

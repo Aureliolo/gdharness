@@ -85877,9 +85877,8 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
         writeFileSync(cache, cached);
       }
       if (tool === 'reload_script') {
-        const scriptPath = String(args['scriptPath']);
-        reloadsAskedFor.push(scriptPath);
-        socket.send(JSON.stringify(reloadScriptReply(scriptPath, message['id'])));
+        reloadsAskedFor.push(...reloadsNamed(args));
+        socket.send(JSON.stringify(reloadRequestReply(args, message['id'])));
         return;
       }
       // Nothing held behind its file, as the editor addon answers for scripts it compiled from disk.
@@ -86173,6 +86172,35 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
   }
 }
 
+/** The scripts a reload_script request names, one under scriptPath or a list under scriptPaths. */
+function reloadsNamed(args: Record<string, unknown>): string[] {
+  const listed = args['scriptPaths'];
+  return Array.isArray(listed) ? listed.map(String) : [String(args['scriptPath'])];
+}
+
+/** The result of a reload_script request from each script's own [param answers], in the form asked. */
+function reloadsAnswered(
+  args: Record<string, unknown>,
+  answers: Record<string, unknown>[],
+): Record<string, unknown> {
+  return Array.isArray(args['scriptPaths']) ? { ok: true, reloads: answers } : (answers[0] ?? {});
+}
+
+/** The fixture editor's whole reply to a reload_script request, one script or a list. */
+function reloadRequestReply(args: Record<string, unknown>, id: unknown): Record<string, unknown> {
+  const replies = reloadsNamed(args).map((scriptPath) => reloadScriptReply(scriptPath, id));
+  if (!Array.isArray(args['scriptPaths'])) {
+    return replies[0] ?? {};
+  }
+  // A script the editor refuses alone is one refused entry in a list.
+  const entries = replies.map((reply) =>
+    reply['success'] === true && isRecord(reply['result'])
+      ? reply['result']
+      : { ok: false, error: reply['error'] },
+  );
+  return { type: 'tool_result', id, success: true, result: reloadsAnswered(args, entries) };
+}
+
 /** The fixture editor's answer to reload_script: refused, uncompiled, under the spelling on disk, grown or empty. */
 function reloadScriptReply(scriptPath: string, id: unknown): Record<string, unknown> {
   const uncompiled = {
@@ -86314,7 +86342,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
         };
       }
       if (tool === 'reload_script') {
-        return answerAReload(String(args['scriptPath']));
+        return reloadsAnswered(args, reloadsNamed(args).map(answerAReload));
       }
       return { ok: true, classes: holds };
     };
@@ -86693,7 +86721,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
       }
       return () => {
         if (tool === 'reload_script') {
-          reloadsAskedFor.push(String(args['scriptPath']));
+          reloadsAskedFor.push(...reloadsNamed(args));
         }
         answer({ ok: true, methods: [] });
       };

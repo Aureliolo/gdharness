@@ -49,13 +49,28 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 ## The list of methods afterwards is the evidence rather than an `ok` beside it. A reload that
 ## returned OK and compiled nothing is exactly the failure worth catching, and the members it now
 ## has are the only thing that can tell those apart.
+##
+## [code]scriptPaths[/code] reloads a list in order, answered under [code]reloads[/code] one entry a
+## script. Each folder is listed once for the whole list: a rescan reloads every script declaring a
+## class it brought in, and listing a folder of 800 entries for each of 400 scripts is most of that.
 func reload_script(args: Dictionary) -> Dictionary:
-	var asked: String = str(args.get("scriptPath", ""))
+	var listed: Variant = args.get("scriptPaths")
+	if not listed is Array:
+		return _reload(str(args.get("scriptPath", "")), {})
+	var paths: Array = listed
+	var listings: Dictionary = {}
+	var reloads: Array[Dictionary] = []
+	for entry: Variant in paths:
+		reloads.append(_reload(str(entry), listings))
+	return { "ok": true, "reloads": reloads }
+
+
+## Reloads the script at [param asked], finding its spelling on disk through [param listings], the
+## folders already listed.
+func _reload(asked: String, listings: Dictionary) -> Dictionary:
 	if asked.is_empty():
 		return { "ok": false, "error": "scriptPath is required" }
-	var probe_from: int = Time.get_ticks_usec()
-	var path: String = _spelled_as_on_disk(asked, {})
-	var probe_spell: int = Time.get_ticks_usec() - probe_from
+	var path: String = _spelled_as_on_disk(asked, listings)
 	if not ResourceLoader.exists(path):
 		return { "ok": false, "error": "No script at " + path }
 
@@ -134,8 +149,6 @@ func reload_script(args: Dictionary) -> Dictionary:
 	answer["methods"] = _method_names(script)
 	answer["constants"] = _constant_names(script)
 	_reread_open_tabs(path, answer)
-	answer["probeSpellUsec"] = probe_spell
-	answer["probeTotalUsec"] = Time.get_ticks_usec() - probe_from
 	return answer
 
 

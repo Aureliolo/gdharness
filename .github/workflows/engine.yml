@@ -122,7 +122,7 @@ jobs:
       # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
       # again here, where a skip is a failure.
       - name: Bridge integration test with the engine
-        if: false
+        if: matrix.part == 'editor fixtures'
         run: bun run test:integration
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
@@ -132,7 +132,7 @@ jobs:
       # checks alone, which a tool answering plausible nonsense passes as well as a working one.
       - name: Editor fixtures
         if: matrix.part == 'editor fixtures' && !cancelled()
-        run: bun test/editor.ts testARescanKeepsWhatTheRebuildWrote
+        run: bun run test:editor
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 

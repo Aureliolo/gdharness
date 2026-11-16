@@ -1,7 +1,7 @@
 extends SceneTree
 ## The editor addon's reload_script on a script held by a live instance: a reload that does not
 ## compile leaves the copy usable, and says so, and a path spelled in another case reloads the copy
-## held under the spelling on disk.
+## held under the spelling on disk. A list is reloaded in order, each answered as it is alone.
 ##
 ## A failed compile leaves a script unusable while its member lists read as before: an instance it
 ## already made loses its methods. So what is checked is the instance, not the lists, before and
@@ -53,6 +53,20 @@ func _initialize() -> void:
 		_fail("and the copy it compiled is usable")
 	elif held.call("chime") != 2:
 		_fail("and the same instance has the new method")
+
+	var listed: Dictionary = tools.reload_script(
+		{ "scriptPaths": ["res://Reload_Tower.gd", "res://no_such_tower.gd"] }
+	)
+	var reloads: Array = listed.get("reloads", [])
+	if reloads.size() != 2:
+		_fail("a list is answered one entry a script: %s" % JSON.stringify(listed))
+	else:
+		var first: Dictionary = reloads[0]
+		var second: Dictionary = reloads[1]
+		if first.get("script") != TOWER or first.get("failed") != OK:
+			_fail("in the order asked, each as one alone: %s" % JSON.stringify(listed))
+		if second.get("ok") != false:
+			_fail("and a script that is not there is refused alone: %s" % JSON.stringify(listed))
 
 	held.free()
 	tools.free()
