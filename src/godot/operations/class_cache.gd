@@ -23,12 +23,16 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	var cached: Array = _read_cache()
 	var before: Dictionary = _entries_by_class(cached)
 
-	var entries: Array = []
+	# One entry per name. Where two scripts declare one, the engine keeps the one its scan registers
+	# last, and find_files walks in the scan's order. Two entries would leave the pick to the sort
+	# below, which is not stable.
+	var declared: Dictionary = {}
 	var skipped: Array[Dictionary] = []
 	for path: String in _files.find_files("res://", ".gd", true):
 		var entry: Dictionary = _entry_for(path, skipped)
 		if not entry.is_empty():
-			entries.append(entry)
+			declared[str(entry["class"])] = entry
+	var entries: Array = declared.values()
 	# Another language's classes are kept while their files are there. Only GDScript is read here
 	# and the list is written whole, so a C# project's global classes were dropped from it and
 	# answered as removed, and nothing started next could resolve them.
