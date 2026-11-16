@@ -86172,6 +86172,143 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
   }
 }
 
+/** A rescan that brought 130 classes in: what it answered and the reloads each request named. */
+interface BatchedRescan {
+  readonly answer: unknown;
+  readonly said: string;
+  readonly requests: string[][];
+  readonly declaring: string[];
+  readonly naming: string[];
+}
+
+/**
+ * A rescan bringing 130 classes in, more than one reload request carries, with four scripts naming
+ * the first. The fixture editor serves one request at a time, as the editor's main thread does,
+ * and spends [param costMs] on each script a reload names. [param answerWaitMs] sets the server's
+ * answer wait.
+ */
+async function aRescanBringingIn130Classes(costMs: number, answerWaitMs?: number): Promise<BatchedRescan> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+      ...(answerWaitMs === undefined ? {} : { GDHARNESS_ANSWER_WAIT_MS: String(answerWaitMs) }),
+    },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-batched-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    const names = Array.from({ length: 130 }, (_, index) => `Batched${String(index).padStart(3, '0')}`);
+    for (const name of names) {
+      writeFileSync(
+        join(project, 'kit', `${name.toLowerCase()}.gd`),
+        `class_name ${name}\nextends RefCounted\n`,
+      );
+    }
+    const naming = ['res://u0.gd', 'res://u1.gd', 'res://u2.gd', 'res://u3.gd'];
+    for (const script of naming) {
+      writeFileSync(join(project, script.slice('res://'.length)), 'extends Node\n\nvar run: Batched000\n');
+    }
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const cached = `list=[${names.map((name) => `{\n"class": &"${name}",\n"path": "res://kit/${name.toLowerCase()}.gd"\n}`).join(', ')}]\n`;
+    writeFileSync(cache, cached);
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((settle, reject) => {
+      socket.once('open', () => {
+        settle();
+      });
+      socket.once('error', reject);
+    });
+
+    let holds: string[] = [];
+    const requests: string[][] = [];
+    let serving = Promise.resolve();
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      const answer = async (): Promise<void> => {
+        let result: Record<string, unknown> = { ok: true, classes: holds };
+        if (tool === 'rescan_filesystem') {
+          if (args['statusOnly'] !== true) {
+            holds = names;
+            writeFileSync(cache, cached);
+          }
+          result = { ok: true, scanning: false, importing: false, pending: false };
+        } else if (tool === 'reload_script') {
+          const asked = reloadsNamed(args);
+          requests.push(asked);
+          await delay(costMs * asked.length);
+          result = reloadsAnswered(
+            args,
+            asked.map((script) => ({ ok: true, script, methods: [] })),
+          );
+        }
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      };
+      serving = serving.then(answer);
+    });
+    socket.send(JSON.stringify(greeting(project)));
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const declaring = names.map((name) => `res://kit/${name.toLowerCase()}.gd`);
+    const said = textOf(scanned) ?? JSON.stringify(scanned);
+    return { answer: parseTextContent(scanned), said, requests, declaring, naming };
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * A rescan bringing in more classes than one reload request carries sends every declaring script
+ * once, in order, before the scripts naming them. A build leaving out the last script of every
+ * request passed every other rescan regression, since each has a single declaring script.
+ */
+async function testARescanReloadsEveryDeclaringScriptOnceInOrder(): Promise<void> {
+  const { answer, said, requests, declaring, naming } = await aRescanBringingIn130Classes(0);
+  assert.deepEqual(requests.flat(), [...declaring, ...naming], said);
+  assert.ok(
+    requests.length > 2 && requests.every((asked) => asked.length <= 64),
+    `130 scripts in requests of at most 64: ${JSON.stringify(requests.map((asked) => asked.length))}`,
+  );
+  assert.equal(get(answer, 'ok'), true, said);
+}
+
+/**
+ * A list of reloads gets the answer wait of each script in it. Waited for as one, a list of 64
+ * scripts at 40 ms each ran past a one-second wait: the server sent the next list while the editor
+ * was still on the first, and the scripts naming the classes timed out behind them, answered as
+ * not reloaded though every one compiled.
+ */
+async function testAListOfSlowReloadsIsWaitedOut(): Promise<void> {
+  const { answer, said, naming } = await aRescanBringingIn130Classes(40, 1000);
+  assert.equal(get(answer, 'ok'), true, said);
+  assert.deepEqual(asArray(get(answer, 'dependentsReloaded') ?? []).map(String), naming, said);
+  assert.equal(get(answer, 'dependentsNotReloaded'), undefined, said);
+}
+
 /** The scripts a reload_script request names, one under scriptPath or a list under scriptPaths. */
 function reloadsNamed(args: Record<string, unknown>): string[] {
   const listed = args['scriptPaths'];
@@ -108072,6 +108209,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testARescanReloadsWhatNamesAClassItBroughtIn,
+  testARescanReloadsEveryDeclaringScriptOnceInOrder,
+  testAListOfSlowReloadsIsWaitedOut,
   testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt,
   testARebuildSaysWhatItsOwnEngineCouldNotKnow,
   testARescanTheEditorDidNotAnswerIsFinishedByTheNext,

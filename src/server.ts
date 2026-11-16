@@ -18576,13 +18576,14 @@ class GodotServer {
    * at a time took 2.9 s of a 3.6 s rescan.
    *
    * The answers are not read: a script that did not reload is named by the scripts that fail on it.
+   * Each script keeps the answer wait it has alone, so a list of heavy scripts is waited out rather
+   * than given up on with the editor still at it, which queued every later request behind it.
    */
   private async reloadInBatches(scripts: readonly string[]): Promise<void> {
     for (let from = 0; from < scripts.length; from += RELOADS_PER_REQUEST) {
+      const batch = scripts.slice(from, from + RELOADS_PER_REQUEST);
       try {
-        await this.godotBridge.invokeTool('reload_script', {
-          scriptPaths: scripts.slice(from, from + RELOADS_PER_REQUEST),
-        });
+        await this.godotBridge.invokeTool('reload_script', { scriptPaths: batch }, { calls: batch.length });
       } catch {
         // A request that failed is left unread for the reason above.
       }
