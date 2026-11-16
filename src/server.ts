@@ -3397,6 +3397,11 @@ const HOLD_ASKED_EVERY_MS = 1000;
 export const CRASH_EXIT_GRACE_MS = 10_000;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
+const EXECUTABLE_SOLUTIONS = [
+  'Give the absolute path of the program, or one relative to the project such as "export/game.exe"',
+  'Export the build first with project_export run, if it is not built yet',
+];
+
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
   'Point projectPath at the project the file belongs to',
@@ -13481,7 +13486,7 @@ class GodotServer {
     }
     const exported = build === undefined ? null : exportedBuild(project.value.path, build);
     if (exported !== null && !exported.ok) {
-      return this.createErrorResponse(exported.reason, PATH_SOLUTIONS);
+      return this.createErrorResponse(exported.reason, EXECUTABLE_SOLUTIONS);
     }
     if (exported !== null && scene !== undefined) {
       return this.createErrorResponse(
@@ -14985,6 +14990,7 @@ class GodotServer {
       projectPath,
       arguments: [],
       command,
+      ...(running.exported === true ? { exported: true as const } : {}),
     });
   }
 
@@ -15309,6 +15315,7 @@ class GodotServer {
       startedBy,
       ...(keeper === undefined ? {} : { keeper }),
       ...(profile === undefined ? {} : { profile }),
+      ...(debugged ? {} : { exported: true as const }),
       command: godotPath,
       exitCode: null,
       exitSignal: null,
@@ -15880,6 +15887,7 @@ class GodotServer {
       throughEditor: false,
       brokeOn: null,
       pickedUp: true,
+      ...(record.exported === true ? { exported: true as const } : {}),
       ...(record.restartedFrom === undefined ? {} : { restartedFrom: record.restartedFrom }),
     };
   }

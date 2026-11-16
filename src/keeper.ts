@@ -483,6 +483,7 @@ function startingNote(
     keeperPid: process.pid,
     ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
     ...(run.profile === undefined ? {} : { profile: run.profile }),
+    ...(run.debugged === false ? { exported: true as const } : {}),
     arguments: args,
     command: spec.command,
   };

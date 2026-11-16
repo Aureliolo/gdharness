@@ -120,6 +120,8 @@ export interface GodotProcess {
    * `endedWithoutACode` needs to say whose the missing exit code was.
    */
   pickedUp?: boolean;
+  /** True for an exported build, which runs with no `--path` and no debugger. */
+  exported?: true;
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
   throughEditor: boolean;
   /**

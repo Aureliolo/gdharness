@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { entriesOf } from './listed-reads.js';
+import { spawnSyncHidden } from './spawn.js';
 
 /**
  * Paths that arrive as tool arguments and are then opened, written, or handed to Godot.
@@ -588,33 +589,106 @@ function notAProgram(real: string, shown: string, platform: string): { reason: s
   return runs ? { file: real } : { reason: `${shown} is not a program this platform can run. Give ${kind}.` };
 }
 
-/** The refusal for a program named by a path outside the project, or the program's real path. */
-function programOutsideTheProject(trimmed: string, platform: string): ExportedBuild {
-  if (/^[\\/]{2}/.test(trimmed)) {
-    return {
-      ok: false,
-      reason: `${trimmed} is a network path, which is not asked about here. Give a path on a local disk.`,
-    };
+/** A `\\?\` or `\\.\` path as the plain path it names: `\\?\UNC\host\share` is a share, `\\?\X:\a` is `X:\a`. */
+function plainWindowsPath(path: string): string {
+  const long = /^\\\\[?.]\\/.exec(path);
+  if (long === null) {
+    return path;
   }
-  const kind = PROGRAM_KIND[platform] ?? 'an executable file';
-  let real: string;
-  try {
-    real = realpathSync.native(trimmed);
-  } catch {
-    return { ok: false, reason: `There is no file at ${trimmed} to start. Give the path of ${kind}.` };
+  const rest = path.slice(long[0].length);
+  return /^UNC\\/i.test(rest) ? `\\\\${rest.slice(4)}` : rest;
+}
+
+/** What Windows says kind of disk drive [param letter] is, asked without touching what is behind it. */
+function driveKind(letter: string): string | null {
+  const key = letter.toUpperCase();
+  const known = DRIVE_KINDS.get(key);
+  if (known !== undefined && known.until > Date.now()) {
+    return known.kind;
   }
-  const judged = notAProgram(real, trimmed, platform);
-  if ('reason' in judged) {
-    return { ok: false, reason: judged.reason };
+  const ran = spawnSyncHidden(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', `[System.IO.DriveInfo]::new('${key}').DriveType`],
+    { encoding: 'utf8', timeout: 15_000 },
+  );
+  const kind = ran.status === 0 ? ran.stdout.trim() : null;
+  DRIVE_KINDS.set(key, { kind, until: Date.now() + DRIVE_KIND_MS });
+  return kind;
+}
+
+/** How long a drive's kind is kept: a start asks once for the drive it runs from, not once per call. */
+const DRIVE_KIND_MS = 60_000;
+const DRIVE_KINDS = new Map<string, { kind: string | null; until: number }>();
+
+/**
+ * Why [param path] is not read, or null when it is on a local disk. Windows is asked only about its
+ * own side: a share that does not answer holds this server for as long as the network takes to give
+ * up, so a share, a drive mapped to one and a link leading to one are refused without touching
+ * them. The links are followed one at a time through the local folders, and what each leads to is
+ * judged in turn.
+ */
+function networkRefusal(path: string, platform = process.platform, hops = 0): string | null {
+  if (platform !== 'win32') {
+    return null;
   }
-  return { ok: true, absolutePath: judged.file, shownAs: judged.file.split(sep).join('/') };
+  const plain = resolve(plainWindowsPath(path));
+  if (plain.startsWith('\\\\')) {
+    return `${path} is on a network share, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
+  }
+  const letter = /^([A-Za-z]):/.exec(plain)?.[1];
+  const kind = letter === undefined ? null : driveKind(letter);
+  if (letter !== undefined && kind === 'Network') {
+    return `${path} is on drive ${letter}:, which is mapped to a network share, and a share that does not answer would hold this server. Give a path on a local disk.`;
+  }
+  if (letter !== undefined && kind === null) {
+    return `Could not tell whether drive ${letter}: is a local disk, so ${path} is not started. Give a path on a local disk.`;
+  }
+  const root = parse(plain).root;
+  const steps = plain
+    .slice(root.length)
+    .split(/[\\/]+/)
+    .filter((step) => step !== '');
+  let at = root;
+  for (const [index, step] of steps.entries()) {
+    at = join(at, step);
+    const found = lstatSync(at, { throwIfNoEntry: false });
+    if (found === undefined || hops >= 32) {
+      return null;
+    }
+    if (found.isSymbolicLink()) {
+      const target = resolve(dirname(at), plainWindowsPath(readlinkSync(at)));
+      return networkRefusal(join(target, ...steps.slice(index + 1)), platform, hops + 1);
+    }
+  }
+  return null;
+}
+
+/** The refusal for a path with no file at it, saying where it looked. */
+function nothingAt(shown: string, inside: boolean, platform: string): string {
+  return inside
+    ? `There is no ${shown} in the project to start: export the build first, with project_export run.`
+    : `There is no file at ${shown} to start. Give the path of ${PROGRAM_KIND[platform] ?? 'an executable file'}.`;
+}
+
+/** The refusal for a path that cannot be a program's, or null when it can be one. */
+function notAProgramPath(trimmed: string): string | null {
+  if (trimmed.includes('\0')) {
+    return 'Path contains a null byte.';
+  }
+  if (process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed)) {
+    return `Path '${trimmed}' has no drive, so it names a place on whichever drive this server runs on. Give the whole path with its drive, or a path relative to the project such as '${trimmed.replace(/^[\\/]+/, '').replaceAll('\\', '/')}'.`;
+  }
+  if (!isAbsolute(trimmed) && trimmed.includes(':') && !trimmed.startsWith(RESOURCE_SCHEME)) {
+    return `Path '${trimmed}' is not a path to a program. Give its absolute path, or one relative to the project such as 'export/game.exe'.`;
+  }
+  return null;
 }
 
 /**
- * An exported build to start: a program inside the project, named relative to it or by its absolute
- * path, or any program on a local disk named by its absolute path. A program inside the project goes
- * through the gate, which refuses a link out of it, so a link there pointing at another program is
- * never started as the game. A program outside is a path the caller chose, as `godot` is.
+ * An exported build to start: a program named by its absolute path, or relative to the project
+ * (with or without `res://`), wherever it is. A program is what the caller chose to run, as `godot`
+ * is, so the project holds no claim on where it sits, and a link out of the project is followed.
+ * What an answer calls the program is its path relative to the project when it is spelt inside it.
  */
 export function exportedBuild(
   projectPath: string,
@@ -622,29 +696,31 @@ export function exportedBuild(
   platform: string = process.platform,
 ): ExportedBuild {
   const trimmed = candidatePath.trim();
-  if (
-    isAbsolute(trimmed) &&
-    !trimmed.includes('\0') &&
-    !trimmed.startsWith(RESOURCE_SCHEME) &&
-    insideProject(resolve(projectPath), trimmed) === null
-  ) {
-    return programOutsideTheProject(resolve(trimmed), platform);
+  if (trimmed === '') {
+    return { ok: false, reason: 'Path is empty.' };
   }
-  const found = resolveWithinProject(projectPath, candidatePath);
-  if (!found.ok) {
-    return found;
+  const refused = notAProgramPath(trimmed);
+  if (refused !== null) {
+    return { ok: false, reason: refused };
   }
+  const root = resolve(projectPath);
+  const given = trimmed.startsWith(RESOURCE_SCHEME) ? trimmed.slice(RESOURCE_SCHEME.length) : trimmed;
+  const at = resolve(root, given);
+  const network = networkRefusal(at);
+  if (network !== null) {
+    return { ok: false, reason: network };
+  }
+  const where = insideProject(root, at);
+  const inside = where === '' ? null : where;
   let real: string;
   try {
-    real = realpathSync.native(found.absolutePath);
+    real = realpathSync.native(at);
   } catch {
-    return {
-      ok: false,
-      reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
-    };
+    return { ok: false, reason: nothingAt(inside ?? trimmed, inside !== null, platform) };
   }
-  const judged = notAProgram(real, found.relativePath, platform);
-  return 'reason' in judged
-    ? { ok: false, reason: judged.reason }
-    : { ok: true, absolutePath: judged.file, shownAs: found.relativePath };
+  const judged = notAProgram(real, inside ?? trimmed, platform);
+  if ('reason' in judged) {
+    return { ok: false, reason: judged.reason };
+  }
+  return { ok: true, absolutePath: judged.file, shownAs: inside ?? judged.file.split(sep).join('/') };
 }
