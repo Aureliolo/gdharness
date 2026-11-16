@@ -1738,6 +1738,28 @@ interface Splice {
 }
 
 /**
+ * How many parts [param own] and [param names] share at the start and at the end. The end is shared
+ * only where [param own] ends on a name, as the new path does: a trailing slash the disk also
+ * reaches the file by is not kept.
+ */
+function sharedParts(own: readonly Segment[], names: readonly string[]): { head: number; tail: number } {
+  const room = Math.min(own.length, names.length);
+  let head = 0;
+  while (head < room - 1 && own[head]?.name === names[head]) {
+    head += 1;
+  }
+  let tail = 0;
+  while (
+    own.at(-1)?.separator === '' &&
+    tail < room - head &&
+    own.at(-1 - tail)?.name === names.at(-1 - tail)
+  ) {
+    tail += 1;
+  }
+  return { head, tail };
+}
+
+/**
  * Where [param body], the path after the part a move leaves be, differs from what [param original]
  * wrote after its first [param root] characters. The parts both have at the start and at the end
  * stay as written, escapes and line continuations included. What lies between is written with the
@@ -1747,15 +1769,7 @@ interface Splice {
 function splice(body: string, root: number, original: Reading, plain: boolean): Splice {
   const own = segmentsOf(original.text.slice(root), plain);
   const names = body.split('/');
-  const room = Math.min(own.length, names.length);
-  let head = 0;
-  while (head < room - 1 && own[head]?.name === names[head]) {
-    head += 1;
-  }
-  let tail = 0;
-  while (tail < room - head && own.at(-1 - tail)?.name === names.at(-1 - tail)) {
-    tail += 1;
-  }
+  const { head, tail } = sharedParts(own, names);
   const changed = own.slice(head, own.length - tail);
   const separator =
     mostUsed(changed.map((one) => one.separator)) ?? mostUsed(own.map((one) => one.separator)) ?? '/';
