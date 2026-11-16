@@ -2718,6 +2718,12 @@ const PLAYING_STATUS_MS = 1_000;
 const SCAN_SETTLED_MS = 500;
 
 /**
+ * How many scripts one reload request to the editor names. The editor reloads them all in the frame
+ * it reads the request, so this bounds how long that frame takes.
+ */
+const RELOADS_PER_REQUEST = 64;
+
+/**
  * How long an idle editor may take to say so before the time counts as the editor being held up
  * rather than as a question asked. An idle editor answers in milliseconds, and one past a second
  * was working through an earlier request on the thread that answers.
@@ -18631,12 +18637,33 @@ class GodotServer {
     projectPath: string,
     classes: readonly string[],
   ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; reloadedFirst: ReloadedFirst[] }> {
-    for (const { script, tool } of scriptsDeclaring(projectPath, classes)) {
-      if (!tool) {
-        await this.reloadOnce(script);
+    const declaring = scriptsDeclaring(projectPath, classes).filter(({ tool }) => !tool);
+    await this.reloadInBatches(declaring.map(({ script }) => script));
+    return await this.reloadInEditor(scriptsNaming(projectPath, classes), projectPath);
+  }
+
+  /**
+   * Reloads each of [param scripts] in the editor, in order, [constant RELOADS_PER_REQUEST] to a
+   * request.
+   *
+   * A request for each script costs a frame each, since the editor reads its requests once a frame
+   * and a headless editor sleeps about 7 ms between frames. Each also lists its script's folder to
+   * find the spelling on disk, which a list request does once. On Linux, 401 scripts reloaded one
+   * at a time took 2.9 s of a 3.6 s rescan.
+   *
+   * The answers are not read: a script that did not reload is named by the scripts that fail on it.
+   * Each script keeps the answer wait it has alone, so a list of heavy scripts is waited out rather
+   * than given up on with the editor still at it, which queued every later request behind it.
+   */
+  private async reloadInBatches(scripts: readonly string[]): Promise<void> {
+    for (let from = 0; from < scripts.length; from += RELOADS_PER_REQUEST) {
+      const batch = scripts.slice(from, from + RELOADS_PER_REQUEST);
+      try {
+        await this.godotBridge.invokeTool('reload_script', { scriptPaths: batch }, { calls: batch.length });
+      } catch {
+        // A request that failed is left unread for the reason above.
       }
     }
-    return await this.reloadInEditor(scriptsNaming(projectPath, classes), projectPath);
   }
 
   /**
