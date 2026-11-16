@@ -1603,13 +1603,17 @@ export class EngineSlots {
     removeWhole(seenNoteOf(mark));
   }
 
-  /** Which of the slots [param numbers] a live game editor_run started holds. */
+  /**
+   * Which of the slots [param numbers] a live game editor_run started holds. A lock that names no
+   * holder yet is a taker still writing it, which may be a game's, so it counts as one.
+   */
   private async heldByGames(numbers: readonly number[]): Promise<number[]> {
     const games: number[] = [];
     for (const slot of numbers) {
       const lock = join(this.directory, `${String(slot)}.lock`);
       const content = readWhole(lock);
-      if (content !== null && holderOf(content)?.game === true && !(await this.free(lock))) {
+      const holder = content === null ? null : holderOf(content);
+      if (content !== null && (holder === null || holder.game === true) && !(await this.free(lock))) {
         games.push(slot);
       }
     }

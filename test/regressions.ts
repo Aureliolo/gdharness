@@ -66178,6 +66178,32 @@ async function testEveryReaderHoldsAnEmptySlotLockAsHeld(): Promise<void> {
 }
 
 /**
+ * An empty lock among the kept slots, which a taker is still writing, counts toward the slots games
+ * hold: with a game on one of two it may take, a further game finds none to take.
+ */
+async function testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-empty-kept-'));
+  try {
+    mkdirSync(join(directory, QUEUED_FOLDER));
+    writeFileSync(
+      join(directory, QUEUED_FOLDER, 'ticket.json'),
+      JSON.stringify({ pid: process.pid, started }),
+    );
+    publishesNothingSpare(directory, started);
+    const sessions = new EngineSlots(directory, 16, { pid: process.pid, started }, undefined, () => 'other');
+    const game = await sessions.takeFree(true);
+    assert.equal(game === null ? null : basename(game), '15.lock', 'a game takes the highest kept slot');
+    writeFileSync(join(directory, '14.lock'), '');
+    assert.equal(await sessions.takeFree(true), null, 'a further game finds the kept slots it may take held');
+    assert.deepEqual(sessions.drawn, { numbers: [14, 15], limit: 'games' }, 'held by the games limit');
+    sessions.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * Files staged as `.<name>.<pid>-<thread>.writing` in the slots folder and its waiting folder, by
  * either side: a live writer's is left whatever it says inside, a dead writer's is removed whatever
  * it says, and none reads as a mark. The names of the writers decide, since a staged file is never
@@ -109139,6 +109165,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheSlotSweepJudgesStagedFilesByTheirWritersName,
   testASlotLockIsCreatedWithoutAStagedFile,
   testEveryReaderHoldsAnEmptySlotLockAsHeld,
+  testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame,
   testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
