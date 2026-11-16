@@ -22,7 +22,7 @@ import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { cachedClasses, classListUnreadable, staleAgainst } from './class-cache.js';
+import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   coresNamed,
   type EngineLaunch,
@@ -1904,9 +1904,6 @@ export function importNeeded(projectPath: string): string | null {
   const unlisted = unlistedExtensions(projectPath);
   if (unlisted.length > 0) {
     return `No import has listed the project's extensions, ${named(unlisted)}, so the engine would load none of them, and the project is imported first.`;
-  }
-  if (classListUnreadable(projectPath)) {
-    return 'The engine cannot read the class cache, so it would start knowing no class_name, and the project is imported first.';
   }
   const uncached = staleAgainst(cached, projectPath).toSorted();
   if (uncached.length > 0) {

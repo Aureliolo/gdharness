@@ -20,7 +20,7 @@ func _init(p_log: GdhLog) -> void:
 
 
 func refresh_class_cache(_params: Dictionary) -> Dictionary:
-	var read: Variant = _read_cache()
+	var read: Variant = read_list()
 	var cached: Array = []
 	if read is Array:
 		cached = read
@@ -401,13 +401,25 @@ func _header_in(lines: PackedStringArray) -> Dictionary:
 	return header
 
 
-# The list's entries, or null for a list that is there and does not load, cut short or edited by
-# hand, which the engine starts with no classes from.
-func _read_cache() -> Variant:
+# Whether the engine started with no class from a list file that holds something.
+static func list_unreadable() -> bool:
+	return read_list() == null
+
+
+# The list's entries, or null for a file the engine starts with no class from though it holds
+# something. ProjectSettings::get_global_class_list reads the top-level `list` key once the file
+# loads, so a file cut short or edited by hand gives none, and so does one that loads with no such
+# key: a byte order mark or a stray word joins the key's name, and a [section] header above it
+# moves it out of the top level.
+static func read_list() -> Variant:
 	if not FileAccess.file_exists(CACHE_PATH):
 		return []
 	var config: ConfigFile = ConfigFile.new()
 	if config.load(CACHE_PATH) != OK:
+		return null
+	if not config.has_section_key("", "list"):
+		if FileAccess.get_file_as_string(CACHE_PATH).strip_edges().is_empty():
+			return []
 		return null
 	var list: Variant = config.get_value("", "list", [])
 	if list is Array:

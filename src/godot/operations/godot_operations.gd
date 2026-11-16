@@ -42,6 +42,9 @@ const ANSWERED: String = "[gdharness] answered"
 ## what the autoloads print in between as theirs rather than the operation's.
 const WAITING: String = "[gdharness] waiting for the autoloads"
 const BEGUN: String = "[gdharness] begun"
+## Printed before an operation when the engine started with no class from the class list file,
+## which it could not read. Kept in step with `UNREADABLE_CLASS_LIST` in src/headless.ts.
+const UNREADABLE_CLASS_LIST: String = "[gdharness] the class list could not be read"
 ## The operations that compile the project's scripts. The engine knows an autoload's name only once
 ## the autoload is in the tree, which is after `_init`, so a script naming one compiled here failed
 ## with "Identifier not found" while the game and the editor ran it. A scene tool, and a read of a
@@ -122,6 +125,10 @@ func _answer_after_the_autoloads(
 
 ## Runs [param operation] and writes its answer to [param answer_path], then quits.
 func _answer(operation: String, params: Dictionary, answer_path: String) -> void:
+	# Said before the operation, which may fail for want of a class, and which the rebuild answers
+	# itself, with what it made of the list.
+	if operation != "refresh_class_cache" and GdhClassCache.list_unreadable():
+		printerr(UNREADABLE_CLASS_LIST)
 	var payload: Dictionary = _run(operation, params)
 	if payload.is_empty():
 		quit(1)

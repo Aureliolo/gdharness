@@ -96,7 +96,6 @@ import {
   writeYaml,
 } from '../src/config-formats.js';
 import { configDisagrees } from '../src/config-pin.js';
-import { configFileReads } from '../src/config-text.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
@@ -79078,44 +79077,159 @@ async function testAClassMovedFromAGoneDeclarerIsAnsweredChanged(): Promise<void
   }
 }
 
-/** A class list cut short after its last entry, which the engine reads as no list at all. */
-function cutClassList(betaAt: string): string {
-  const whole = godotClassList([
+/** A class list of Alpha and Beta, with Beta at [param betaAt]. */
+function alphaBetaList(betaAt: string): string {
+  return godotClassList([
     ['Alpha', 'RefCounted', 'res://a.gd'],
     ['Beta', 'RefCounted', betaAt],
   ]);
+}
+
+/** A class list cut short after its last entry, which the engine reads as no list at all. */
+function cutClassList(betaAt: string): string {
+  const whole = alphaBetaList(betaAt);
   return `${whole.slice(0, whole.lastIndexOf(']'))}\n`;
 }
 
+/** What gdharness says of a call whose engine could not read the class list it then rebuilt. */
+const UNREADABLE_LIST_REBUILT =
+  'The engine could not read the class list, so this ran knowing no class_name. The list has been rebuilt from the scripts, and the next call has them.';
+
 /**
- * A class list the engine cannot read gives it no class, whatever entries its text holds, so every
- * declaration is stale and a suite run imports first. ConfigFile takes a trailing comma and refuses
- * a missing one.
+ * A call whose engine could not read the class list ran knowing no class_name, though the text of
+ * the list names every class. The list is rebuilt after it, once, and the answer says so.
  */
-function testAClassListTheEngineCannotReadIsStale(): void {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-list-'));
+async function testAnOperationOnAnUnreadableClassListRebuildsIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('unreadable class list mend regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-mend-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-mend-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutMend"\n',
+    'a.gd': 'class_name Alpha\nvar x := 1\n',
+    'b.gd': 'class_name Beta\nvar x := 1\n',
+    '.godot/global_script_class_cache.cfg': cutClassList('res://b.gd'),
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  const ask = async (): Promise<string> =>
+    textOf(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_classes',
+          arguments: { projectPath: project, op: 'inheritance', className: 'Node2D' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ) ?? '';
   try {
-    writeTree(project, {
-      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Cut"\n',
-      'a.gd': 'class_name Alpha\nvar x := 1\n',
-      'b.gd': 'class_name Beta\nvar x := 1\n',
-      '.godot/global_script_class_cache.cfg': cutClassList('res://b.gd'),
-    });
-    assert.deepEqual(staleClassNames(project), ['Alpha', 'Beta']);
-    assert.equal(
-      importNeeded(project),
-      'The engine cannot read the class cache, so it would start knowing no class_name, and the project is imported first.',
+    await server.initialize('cut-mend');
+    assert.deepEqual(staleClassNames(project), [], 'no reading of the files tells the list is unreadable');
+    const first = await ask();
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.deepEqual(
+      listedPaths(project),
+      new Map([
+        ['Alpha', 'res://a.gd'],
+        ['Beta', 'res://b.gd'],
+      ]),
     );
+    assert.equal(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8').endsWith(']\n'),
+      true,
+    );
+    const second = await ask();
+    assert.ok(!second.includes('could not read the class list'), second);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A class list the engine loads without a top-level `list` gives it no class either: a byte order
+ * mark or a stray word joins the key's name, and a section header above it moves it out of the top
+ * level. The rebuild answers every class it writes as added, and says the list could not be read.
+ */
+async function testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('keyless class list regression skipped (Godot not found)');
+    return;
+  }
+  const whole = alphaBetaList('res://b.gd');
+  for (const [what, list] of [
+    ['a byte order mark', `﻿${whole}`],
+    ['a stray word', `junk\n${whole}`],
+    ['a section header', `[classes]\n${whole}`],
+  ] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-keyless-list-'));
+    try {
+      writeTree(project, {
+        'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Keyless"\n',
+        'a.gd': 'class_name Alpha\nvar x := 1\n',
+        'b.gd': 'class_name Beta\nvar x := 1\n',
+        '.godot/global_script_class_cache.cfg': list,
+      });
+      const outcome = await rebuildClassList(godotPath, project);
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const { added, removed, changed, unreadableList } = outcome.payload;
+      assert.deepEqual(
+        { added, removed, changed, unreadableList },
+        { added: ['Alpha', 'Beta'], removed: [], changed: [], unreadableList: true },
+        what,
+      );
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
+/**
+ * A rebuild over a cut list naming a class whose script is gone answers that class removed, as the
+ * text of the list held it, though the engine never did.
+ */
+async function testARebuildOverACutListAnswersAGoneScriptsClassRemoved(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('cut list gone class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-gone-'));
+  try {
     const whole = godotClassList([
       ['Alpha', 'RefCounted', 'res://a.gd'],
       ['Beta', 'RefCounted', 'res://b.gd'],
+      ['Gamma', 'RefCounted', 'res://gone.gd'],
     ]);
-    assert.equal(configFileReads(whole), true, 'the form Godot writes');
-    assert.equal(configFileReads(whole.replace('}]', '},]')), true, 'a trailing comma');
-    assert.equal(configFileReads(whole.replace('}, {', '} {')), false, 'a missing comma');
-    assert.equal(configFileReads(cutClassList('res://b.gd')), false, 'cut short');
-    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), whole);
-    assert.deepEqual(staleClassNames(project), []);
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutGone"\n',
+      'a.gd': 'class_name Alpha\nvar x := 1\n',
+      'b.gd': 'class_name Beta\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': `${whole.slice(0, whole.lastIndexOf(']'))}\n`,
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed, unreadableList } = outcome.payload;
+    assert.deepEqual(
+      { added, removed, changed, unreadableList },
+      { added: ['Alpha', 'Beta'], removed: ['Gamma'], changed: [], unreadableList: true },
+    );
   } finally {
     sweep(project);
   }
@@ -108119,8 +108233,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACSharpClassBesideAGDScriptOneIsListedOnce,
   testAClassListedAtAFileItsLanguageDoesNotOwnIsStale,
   testAClassMovedFromAGoneDeclarerIsAnsweredChanged,
-  testAClassListTheEngineCannotReadIsStale,
+  testAnOperationOnAnUnreadableClassListRebuildsIt,
   testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded,
+  testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded,
+  testARebuildOverACutListAnswersAGoneScriptsClassRemoved,
   testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testEveryDesktopStartGoesThroughOneCall,

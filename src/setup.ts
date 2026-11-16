@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cachedClasses, classListUnreadable, staleAgainst } from './class-cache.js';
+import { cachedClasses, staleAgainst } from './class-cache.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { bytesOf, statOf } from './listed-reads.js';
 import { VERSION_MARKER } from './project-scan.js';
@@ -827,10 +827,6 @@ export function inspectProject(projectPath: string): ProjectReport {
   if (cached === null) {
     problems.push(
       'no class cache (.godot/global_script_class_cache.cfg), so the engine knows no class_name. Run gdharness classes, or open the editor',
-    );
-  } else if (classListUnreadable(projectPath)) {
-    problems.push(
-      'the engine cannot read the class cache (.godot/global_script_class_cache.cfg), so it knows no class_name. Run project_import refresh_classes or gdharness classes',
     );
   } else if (staleClasses.length > 0) {
     problems.push(

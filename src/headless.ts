@@ -61,6 +61,8 @@ interface Reported {
   readonly beforeOperationOmitted?: number;
   /** Which engine ran, when it was not the server's own. */
   readonly engineNote?: string;
+  /** The engine could not read the class list, so the operation ran knowing no class_name. */
+  readonly classListUnreadable?: true;
 }
 
 export type HeadlessOutcome =
@@ -199,6 +201,12 @@ export const ANSWERED = '[gdharness] answered';
  */
 export const WAITING = '[gdharness] waiting for the autoloads';
 export const BEGUN = '[gdharness] begun';
+
+/**
+ * What the operations script prints before an operation when the engine could not read the class
+ * list. Kept in step with godot_operations.gd.
+ */
+const UNREADABLE_CLASS_LIST = '[gdharness] the class list could not be read';
 
 /**
  * What the operations script prints around engine output it provokes for a question of its own,
@@ -524,16 +532,17 @@ const REFRESH_CLASS_LIST = 'refresh_class_cache';
  * [param outcome] of a class list rebuild, answered against [param listedBefore], the list before
  * the start dropped what names a gone script: `removed` holds every class it held that the list no
  * longer does, and a class it held at another path is `changed`, not `added`. A list the engine
- * could not read gave it no class, so its answer stands as the engine gave it.
+ * could not read gave it no class, so each class it wrote stays `added`.
  */
 function answeredAgainst(
   outcome: HeadlessOutcome,
   listedBefore: ReadonlyMap<string, string>,
   projectPath: string,
 ): HeadlessOutcome {
-  if (!outcome.ok || outcome.payload['unreadableList'] === true) {
+  if (!outcome.ok) {
     return outcome;
   }
+  const unreadable = outcome.payload['unreadableList'] === true;
   const names = (key: string): string[] | null => {
     const answered = outcome.payload[key];
     return Array.isArray(answered)
@@ -548,13 +557,13 @@ function answeredAgainst(
   const unanswered = [...listedBefore.keys()].filter(
     (name) => !listedAfter.has(name) && !removed.includes(name),
   );
-  const moved = added.filter((name) => listedBefore.has(name));
+  const moved = unreadable ? [] : added.filter((name) => listedBefore.has(name));
   if (unanswered.length === 0 && moved.length === 0) {
     return outcome;
   }
   const payload = {
     ...outcome.payload,
-    added: added.filter((name) => !listedBefore.has(name)),
+    added: added.filter((name) => !moved.includes(name)),
     removed: [...removed, ...unanswered],
     changed: [
       ...changed,
@@ -611,6 +620,20 @@ async function operationOutcome(
   } finally {
     discard(paramsDir);
   }
+  const outcome = judgedOutcome(operation, engine, ran, answer);
+  const unreadable = withoutAsides(ran.log.everything()).some(
+    (entry) => entry.source === 'stderr' && entry.text === UNREADABLE_CLASS_LIST,
+  );
+  return unreadable ? { ...outcome, classListUnreadable: true } : outcome;
+}
+
+/** The outcome of [param operation]'s run [param ran], which wrote [param answer]. */
+function judgedOutcome(
+  operation: string,
+  engine: HeadlessEngine,
+  ran: EngineRun,
+  answer: ReturnType<typeof answerIn>,
+): HeadlessOutcome {
   const seen = operationLogOf(ran);
   const { problems, afterAnswered } = seen;
 

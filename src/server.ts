@@ -7798,9 +7798,10 @@ class GodotServer {
    * The class cache rebuilt when the declarations on disk name a class it lacks, with the classes
    * the rebuild then listed. A rebuild leaves some out, such as a script extending itself, and
    * those are not rebuilt for again until the set changes, so a list no rebuild completes costs one
-   * engine rather than one before every call.
+   * engine rather than one before every call. [param unreadable] rebuilds whatever the files say,
+   * for a list an engine reported it could not read, which no reading of the files can tell.
    */
-  private async rebuildStaleClasses(projectPath: string): Promise<ClassRebuild> {
+  private async rebuildStaleClasses(projectPath: string, unreadable = false): Promise<ClassRebuild> {
     // Calls sent together each find the same classes missing. Unshared, each starts its own rebuild
     // engine, waits for a slot of its own and writes the same cache file.
     const running = this.classRebuilds.get(projectPath);
@@ -7812,16 +7813,16 @@ class GodotServer {
       const after = await this.rebuildStaleClasses(projectPath);
       return after.ok ? { ok: true, listed: [...joined.listed, ...after.listed] } : after;
     }
-    const rebuild = this.rebuildStaleClassesNow(projectPath).finally(() => {
+    const rebuild = this.rebuildStaleClassesNow(projectPath, unreadable).finally(() => {
       this.classRebuilds.delete(projectPath);
     });
     this.classRebuilds.set(projectPath, rebuild);
     return await rebuild;
   }
 
-  private async rebuildStaleClassesNow(projectPath: string): Promise<ClassRebuild> {
+  private async rebuildStaleClassesNow(projectPath: string, unreadable: boolean): Promise<ClassRebuild> {
     const stale = staleClassNames(projectPath);
-    if (stale.length === 0 || stale.join('\n') === this.unlistedClasses.get(projectPath)) {
+    if (!unreadable && (stale.length === 0 || stale.join('\n') === this.unlistedClasses.get(projectPath))) {
       return { ok: true, listed: [] };
     }
     const outcome = await this.operation(REFRESH_CLASS_CACHE, {}, projectPath);
@@ -8887,7 +8888,31 @@ class GodotServer {
       outcome.ok && rebuilt.listed.length > 0
         ? { ...outcome, payload: { ...outcome.payload, classesRebuiltFirst: rebuilt.listed } }
         : outcome;
-    return withScanWait(withEngineNote(told, engine.note), scanned);
+    const mended = await this.withAnUnreadableClassListRebuilt(operation, told, projectPath);
+    return withScanWait(withEngineNote(mended, engine.note), scanned);
+  }
+
+  /**
+   * [param outcome], with the class list rebuilt after it when its engine could not read the list,
+   * and a note saying so. No reading of the files tells that list apart from a sound one, so only
+   * an engine that started on it can, and the operation it ran knew no class_name.
+   */
+  private async withAnUnreadableClassListRebuilt(
+    operation: string,
+    outcome: HeadlessOutcome,
+    projectPath: string,
+  ): Promise<HeadlessOutcome> {
+    if (operation === REFRESH_CLASS_CACHE || outcome.classListUnreadable !== true) {
+      return outcome;
+    }
+    const mended = await this.rebuildStaleClasses(projectPath, true);
+    const said = 'The engine could not read the class list, so this ran knowing no class_name';
+    const classListNote = mended.ok
+      ? `${said}. The list has been rebuilt from the scripts, and the next call has them.`
+      : `${said}, and rebuilding the list failed: ${mended.outcome.ok ? '' : mended.outcome.message}`;
+    return outcome.ok
+      ? { ...outcome, payload: { ...outcome.payload, classListNote } }
+      : { ...outcome, message: `${outcome.message} ${classListNote}` };
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
