@@ -336,6 +336,7 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
   if (run.status !== 0) {
     throw failedRun(name, run, output);
   }
+  console.log(`fixture ${name} took ${(run.ms / 1000).toFixed(1)}s`);
   assertNoEngineErrors(name, output, PROVOKED[name]);
   const payload = lastJsonLine(run.stdout, name);
   assert.equal(get(payload, 'ok'), true, `${name} should report success JSON`);
@@ -6861,8 +6862,11 @@ async function runEveryCase(godotPath: string, projectDir: string): Promise<void
     'the engine and the server should agree on the temporary directory',
   );
   runFixture(godotPath, projectDir, 'input_action');
-  for (const run of Object.values(CASES)) {
+  // Said for each, so a leg nearing its limit shows which cases grew.
+  for (const [name, run] of Object.entries(CASES)) {
+    const began = performance.now();
     await run(godotPath, projectDir);
+    console.log(`case ${name} took ${((performance.now() - began) / 1000).toFixed(1)}s`);
   }
 }
 
