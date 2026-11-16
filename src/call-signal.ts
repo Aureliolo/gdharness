@@ -25,10 +25,20 @@ export interface SlotWaits {
   said: ((waitedMs: number) => string) | undefined;
 }
 
+/**
+ * What the code below a call found that its answer says whichever tool answers, such as a class
+ * list the engine could not read. A tool that builds its answer from an operation's fields drops a
+ * note put on that operation's payload.
+ */
+export interface CallNotes {
+  readonly classList: Set<string>;
+}
+
 interface Call {
   readonly signal: AbortSignal | undefined;
   readonly progress: CallProgress | undefined;
   readonly slotWaits: SlotWaits | undefined;
+  readonly notes: CallNotes | undefined;
 }
 
 const current = new AsyncLocalStorage<Call>();
@@ -52,7 +62,7 @@ interface StillGoing {
  * also sent [param still] whenever it has said nothing for its interval: only the calls that
  * reported for themselves were heard during a long wait, so a game watched for forty-five minutes
  * was cut off at thirty while it was still running. Every wait for an engine slot during the call
- * is added to [param slotWaits].
+ * is added to [param slotWaits], and every note for its answer to [param notes].
  */
 export async function withCallSignal<T>(
   signal: AbortSignal | undefined,
@@ -60,11 +70,12 @@ export async function withCallSignal<T>(
   progress?: CallProgress,
   still?: StillGoing,
   slotWaits?: SlotWaits,
+  notes?: CallNotes,
 ): Promise<T> {
   if (progress === undefined) {
-    return signal === undefined && slotWaits === undefined
+    return signal === undefined && slotWaits === undefined && notes === undefined
       ? await answer()
-      : await current.run({ signal, progress: undefined, slotWaits }, answer);
+      : await current.run({ signal, progress: undefined, slotWaits, notes }, answer);
   }
   const began = Date.now();
   const rising = risingOnly(progress);
@@ -88,7 +99,7 @@ export async function withCallSignal<T>(
   };
   rearm();
   try {
-    return await current.run({ signal, progress: told, slotWaits }, answer);
+    return await current.run({ signal, progress: told, slotWaits, notes }, answer);
   } finally {
     // A ticker of the call's own can still fire once after it has answered.
     going = undefined;
@@ -122,4 +133,9 @@ export function callProgress(): CallProgress | undefined {
 /** Where the call being answered adds up its waits for engine slots, or undefined. */
 export function callSlotWaits(): SlotWaits | undefined {
   return current.getStore()?.slotWaits;
+}
+
+/** Where the call being answered keeps the notes its answer says, or undefined outside one. */
+export function callNotes(): CallNotes | undefined {
+  return current.getStore()?.notes;
 }

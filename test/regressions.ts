@@ -79091,63 +79091,68 @@ function cutClassList(betaAt: string): string {
   return `${whole.slice(0, whole.lastIndexOf(']'))}\n`;
 }
 
-/** What gdharness says of a call whose engine could not read the class list it then rebuilt. */
-const UNREADABLE_LIST_REBUILT =
-  'The engine could not read the class list, so this ran knowing no class_name. The list has been rebuilt from the scripts, and the next call has them.';
+/** What gdharness says of a call whose engine could not read the class list. */
+const UNREADABLE_LIST_SAID =
+  "The engine could not read the class list, so this call ran knowing no class_name, and an error naming one of the project's classes comes from that.";
+const UNREADABLE_LIST_REBUILT = `${UNREADABLE_LIST_SAID} The list has been rebuilt from the scripts, so the next call knows them.`;
+const UNREADABLE_LIST_NOT_REBUILT = `${UNREADABLE_LIST_SAID} Rebuilding the list failed, and is tried again once the list file changes: `;
+
+/** A project of Alpha, Beta and a script using Alpha, with [param list] as its class list. */
+function projectOverAClassList(prefix: string, list: string): string {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="OverAList"\n',
+    'a.gd': 'class_name Alpha\nvar x := 1\n',
+    'b.gd': 'class_name Beta\nvar x := 1\n',
+    'c.gd': 'extends RefCounted\n\n\nfunc make() -> RefCounted:\n\treturn Alpha.new()\n',
+    '.godot/global_script_class_cache.cfg': list,
+  });
+  return project;
+}
 
 /**
- * A call whose engine could not read the class list ran knowing no class_name, though the text of
- * the list names every class. The list is rebuilt after it, once, and the answer says so.
+ * [param run] given a server on [param project] and a call of it that answers with its text. The
+ * project is swept afterwards. Skipped without Godot.
  */
-async function testAnOperationOnAnUnreadableClassListRebuildsIt(): Promise<void> {
+async function withAServerOn(
+  project: string,
+  run: (
+    server: ServerProcess,
+    call: (name: string, args: OperationParams) => Promise<string>,
+  ) => Promise<void>,
+  env: Record<string, string> = {},
+): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
+    sweep(project);
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
       throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
     }
-    console.log('unreadable class list mend regression skipped (Godot not found)');
+    console.log('class list server regression skipped (Godot not found)');
     return;
   }
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-mend-'));
-  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-mend-rt-'));
-  writeTree(project, {
-    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutMend"\n',
-    'a.gd': 'class_name Alpha\nvar x := 1\n',
-    'b.gd': 'class_name Beta\nvar x := 1\n',
-    '.godot/global_script_class_cache.cfg': cutClassList('res://b.gd'),
-  });
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-over-list-rt-'));
   const server = new ServerProcess({
-    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      ...env,
+    },
   });
-  const ask = async (): Promise<string> =>
-    textOf(
-      await server.request(
-        'tools/call',
-        {
-          name: 'editor_classes',
-          arguments: { projectPath: project, op: 'inheritance', className: 'Node2D' },
-        },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    ) ?? '';
+  const call = async (name: string, args: OperationParams): Promise<string> => {
+    const response = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return textOf(response) ?? JSON.stringify(response);
+  };
   try {
-    await server.initialize('cut-mend');
-    assert.deepEqual(staleClassNames(project), [], 'no reading of the files tells the list is unreadable');
-    const first = await ask();
-    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
-    assert.deepEqual(
-      listedPaths(project),
-      new Map([
-        ['Alpha', 'res://a.gd'],
-        ['Beta', 'res://b.gd'],
-      ]),
-    );
-    assert.equal(
-      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8').endsWith(']\n'),
-      true,
-    );
-    const second = await ask();
-    assert.ok(!second.includes('could not read the class list'), second);
+    await server.initialize('over-a-list');
+    await run(server, call);
   } finally {
     await server.stop();
     sweep(project);
@@ -79155,10 +79160,100 @@ async function testAnOperationOnAnUnreadableClassListRebuildsIt(): Promise<void>
   }
 }
 
+const NODE2D_INHERITANCE = { op: 'inheritance', className: 'Node2D' } as const;
+
+/**
+ * A call whose engine could not read the class list ran knowing no class_name, though the text of
+ * the list names every class. The list is rebuilt after it, once, and the answer says so. The
+ * engine's parse error of the list is reported once, from the engine's own start.
+ */
+async function testAnOperationOnAnUnreadableClassListRebuildsIt(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-mend-', cutClassList('res://b.gd'));
+  await withAServerOn(project, async (_server, call) => {
+    assert.deepEqual(staleClassNames(project), [], 'no reading of the files tells the list is unreadable');
+    const first = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.equal(first.split('ConfigFile parse error').length - 1, 1, first);
+    assert.deepEqual(
+      listedPaths(project),
+      new Map([
+        ['Alpha', 'res://a.gd'],
+        ['Beta', 'res://b.gd'],
+      ]),
+    );
+    const second = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(!second.includes('could not read the class list'), second);
+  });
+}
+
+/**
+ * script_diagnostics builds its answer from the fields of its engines' answers, and still says that
+ * the errors of its first call come from a class list the engine could not read, which it rebuilt.
+ */
+async function testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-diag-', cutClassList('res://b.gd'));
+  await withAServerOn(project, async (_server, call) => {
+    const first = await call('script_diagnostics', { scriptPath: 'res://c.gd' });
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    const second = await call('script_diagnostics', { scriptPath: 'res://c.gd' });
+    assert.ok(!second.includes('could not read the class list'), second);
+    assert.match(second, /"clean":\s*true/);
+  });
+}
+
+/**
+ * The engine skips every entry of a list written before 4.4, which lacks is_abstract and is_tool,
+ * so it knows none of the classes such a list names. A call on it rebuilds the list and says so.
+ */
+async function testAClassListWrittenBefore44IsRebuilt(): Promise<void> {
+  const before44 = alphaBetaList('res://b.gd').replaceAll('"is_abstract": false,\n"is_tool": false,\n', '');
+  const project = projectOverAClassList('gdharness-list-43-', before44);
+  await withAServerOn(project, async (_server, call) => {
+    assert.deepEqual(staleClassNames(project), []);
+    const first = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.match(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"is_tool": false/,
+    );
+    const second = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(!second.includes('could not read the class list'), second);
+  });
+}
+
+/**
+ * A class list the engine cannot read and no rebuild can write is rebuilt once, not after every
+ * operation, and each answer meanwhile says the rebuild failed.
+ */
+async function testAClassListNoRebuildCanWriteIsTriedOnce(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-locked-', cutClassList('res://b.gd'));
+  const listFile = join(project, '.godot', 'global_script_class_cache.cfg');
+  chmodSync(listFile, 0o444);
+  try {
+    await withAServerOn(
+      project,
+      async (server, call) => {
+        for (const round of [1, 2, 3]) {
+          const answer = await call('editor_classes', NODE2D_INHERITANCE);
+          assert.ok(answer.includes(UNREADABLE_LIST_NOT_REBUILT), `call ${round}: ${answer}`);
+        }
+        assert.equal(server.stderr.split('Running refresh_class_cache in').length - 1, 1, server.stderr);
+        chmodSync(listFile, 0o644);
+      },
+      { GDHARNESS_DEBUG: '1' },
+    );
+  } finally {
+    if (existsSync(listFile)) {
+      chmodSync(listFile, 0o644);
+    }
+  }
+}
+
 /**
  * A class list the engine loads without a top-level `list` gives it no class either: a byte order
  * mark or a stray word joins the key's name, and a section header above it moves it out of the top
- * level. The rebuild answers every class it writes as added, and says the list could not be read.
+ * level. The engine skips every entry of a list written before 4.4, which lacks is_abstract and
+ * is_tool. The rebuild answers every class it writes as added, and says the list could not be read.
  */
 async function testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -79174,6 +79269,7 @@ async function testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded():
     ['a byte order mark', `﻿${whole}`],
     ['a stray word', `junk\n${whole}`],
     ['a section header', `[classes]\n${whole}`],
+    ['a list written before 4.4', whole.replaceAll('"is_abstract": false,\n"is_tool": false,\n', '')],
   ] as const) {
     const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-keyless-list-'));
     try {
@@ -87749,9 +87845,14 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
     writeFileSync(join(project, 'squire.gd'), 'class_name Squire\nextends Node\n');
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    // In the form an editor writes, since the engine skips an entry that lacks any of its keys.
+    const heroOnly = godotClassList([['Hero', 'Node', 'res://hero.gd']]);
     writeFileSync(
       cache,
-      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+      godotClassList([
+        ['Hero', 'Node', 'res://hero.gd'],
+        ['Squire', 'Node', 'res://squire.gd'],
+      ]),
     );
 
     await server.initialize('regression-test');
@@ -87772,7 +87873,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
       const tool = String(message['tool']);
       const args = isRecord(message['args']) ? message['args'] : {};
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+        writeFileSync(cache, heroOnly);
       }
       const result =
         tool === 'rescan_filesystem'
@@ -87816,7 +87917,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     // The editor saves, which writes the cache from the list it holds: no scan, no call here,
     // just the file getting shorter between two rebuilds. Downstream this put the same six classes
     // into classes.added on every test run of an afternoon, with nothing saying whose doing it was.
-    writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+    writeFileSync(cache, heroOnly);
     const second = await refresh();
     assert.deepEqual(
       asArray(get(second, 'added') ?? []).map(String),
@@ -108234,6 +108335,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClassListedAtAFileItsLanguageDoesNotOwnIsStale,
   testAClassMovedFromAGoneDeclarerIsAnsweredChanged,
   testAnOperationOnAnUnreadableClassListRebuildsIt,
+  testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList,
+  testAClassListWrittenBefore44IsRebuilt,
+  testAClassListNoRebuildCanWriteIsTriedOnce,
   testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded,
   testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded,
   testARebuildOverACutListAnswersAGoneScriptsClassRemoved,

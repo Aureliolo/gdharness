@@ -532,7 +532,7 @@ const REFRESH_CLASS_LIST = 'refresh_class_cache';
  * [param outcome] of a class list rebuild, answered against [param listedBefore], the list before
  * the start dropped what names a gone script: `removed` holds every class it held that the list no
  * longer does, and a class it held at another path is `changed`, not `added`. A list the engine
- * could not read gave it no class, so each class it wrote stays `added`.
+ * could not read gave it none of the classes it names, so each class it wrote stays `added`.
  */
 function answeredAgainst(
   outcome: HeadlessOutcome,

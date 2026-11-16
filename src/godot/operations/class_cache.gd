@@ -20,11 +20,9 @@ func _init(p_log: GdhLog) -> void:
 
 
 func refresh_class_cache(_params: Dictionary) -> Dictionary:
-	var read: Variant = read_list()
-	var cached: Array = []
-	if read is Array:
-		cached = read
-	var before: Dictionary = _entries_by_class(cached)
+	var unreadable: bool = list_unreadable()
+	var cached: Array = ProjectSettings.get_global_class_list()
+	var before: Dictionary = _entries_by_class(known_entries(cached))
 
 	var skipped: Array[Dictionary] = []
 	var declarers: Dictionary = {}
@@ -75,7 +73,7 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	if not carried.is_empty():
 		answer["carried"] = carried
 	# A list the engine could not read gave it none of its classes, so each is answered added.
-	if read == null:
+	if unreadable:
 		answer["unreadableList"] = true
 	# The engine refuses each of these scripts but the one kept, with "Class hides a global script
 	# class" (modules/gdscript/gdscript_analyzer.cpp).
@@ -401,30 +399,28 @@ func _header_in(lines: PackedStringArray) -> Dictionary:
 	return header
 
 
-# Whether the engine started with no class from a list file that holds something.
+# Whether the engine started knowing fewer classes than the list file names. It knows none from a
+# file cut short or edited by hand, or one whose `list` key a byte order mark, a stray word or a
+# [section] header above it hides, and none of the entries a list written before 4.4 holds.
 static func list_unreadable() -> bool:
-	return read_list() == null
-
-
-# The list's entries, or null for a file the engine starts with no class from though it holds
-# something. ProjectSettings::get_global_class_list reads the top-level `list` key once the file
-# loads, so a file cut short or edited by hand gives none, and so does one that loads with no such
-# key: a byte order mark or a stray word joins the key's name, and a [section] header above it
-# moves it out of the top level.
-static func read_list() -> Variant:
 	if not FileAccess.file_exists(CACHE_PATH):
-		return []
-	var config: ConfigFile = ConfigFile.new()
-	if config.load(CACHE_PATH) != OK:
-		return null
-	if not config.has_section_key("", "list"):
-		if FileAccess.get_file_as_string(CACHE_PATH).strip_edges().is_empty():
-			return []
-		return null
-	var list: Variant = config.get_value("", "list", [])
-	if list is Array:
-		return list
-	return []
+		return false
+	var named: int = FileAccess.get_file_as_string(CACHE_PATH).count('"class":')
+	return known_entries(ProjectSettings.get_global_class_list()).size() < named
+
+
+# The entries of [param loaded] the engine registered. The list was loaded once at start, and
+# ScriptServer::init_languages skips an entry that lacks any of these keys
+# (core/object/script_language.cpp:293-299), as one written before 4.4 lacks is_abstract and
+# is_tool.
+static func known_entries(loaded: Array) -> Array:
+	var known: Array = []
+	for entry: Variant in loaded:
+		if entry is Dictionary:
+			var listed: Dictionary = entry
+			if listed.has_all(["class", "language", "path", "base", "is_abstract", "is_tool"]):
+				known.append(listed)
+	return known
 
 
 func _entries_by_class(entries: Array) -> Dictionary:
