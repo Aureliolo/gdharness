@@ -589,41 +589,43 @@ function notAProgram(real: string, shown: string, platform: string): { reason: s
 }
 
 /**
- * [param path] as a plain local path, or the reason it is a share or a device. `\\?\X:\a` and
- * `\\.\X:\a` are `X:\a`. Every other `\\?\` or `\\.\` form (`UNC`, `GLOBALROOT`, a volume) and
- * every `\\host` path reaches a share or a device.
+ * [param path] as the plain path both a local drive and a share are compared in, or null for a
+ * device form that is neither. `\\?\X:\a`, `\\.\X:\a` and `//?/X:/a` are `X:\a`, and `\\?\UNC\h\s`
+ * is `\\h\s`. A `GLOBALROOT` or volume form reaches a device.
  */
-function localSpelling(path: string): { plain: string } | { refusal: string } {
-  const shown = `${path} is a network share or a device`;
-  const reason = `${shown}, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
-  const device = /^\\\\[?.]\\/.exec(path);
-  if (device !== null) {
-    const rest = path.slice(device[0].length);
-    return /^[A-Za-z]:[\\/]/.test(rest) ? { plain: rest } : { refusal: reason };
+function comparable(path: string): string | null {
+  const device = /^[\\/]{2}[?.][\\/]/.exec(path);
+  if (device === null) {
+    return resolve(path);
   }
-  return path.startsWith('\\\\') ? { refusal: reason } : { plain: path };
+  const rest = path.slice(device[0].length);
+  if (/^[A-Za-z]:[\\/]/.test(rest)) {
+    return resolve(rest);
+  }
+  const unc = /^UNC[\\/]/i.exec(rest);
+  return unc === null ? null : resolve(`\\\\${rest.slice(unc[0].length)}`);
 }
 
 /**
- * Why a program outside the project cannot be read, or null. Judged by spelling and by reading the
- * links on the way, never by touching what they lead to: a share that does not answer holds this
- * server for as long as the network takes to give up, and a process asked about a path would hold
- * it too. A share, a device form and a link chain leading to either are refused, and so is a chain
- * past [const MOST_LINKS]. A drive letter is taken as it is: whether one is mapped to a share is
- * known only by asking the system, which this does not do.
- *
- * [param below] is a folder already trusted, as the project is, whose own spelling is not judged.
+ * Why a program cannot be read, or null. Each step is compared with the project [param root] first:
+ * what lands inside it, a share root included, keeps the project's own rule. What lands outside is
+ * judged by its spelling and by reading the links on the way, never by touching what they lead to,
+ * since a share that does not answer holds this server for as long as the network takes to give up.
+ * A share, a device and a link chain leading to either are refused, and so is a chain past
+ * [const MOST_LINKS]. A drive letter is taken as it is: whether one is mapped to a share is known
+ * only by asking the system, which this does not do.
  */
-function networkRefusal(path: string, below: string | null = null, hops = 0): string | null {
+function networkRefusal(path: string, root: string, hops = 0): string | null {
   if (process.platform !== 'win32') {
     return null;
   }
-  const spelt = below === null ? localSpelling(path) : { plain: path };
-  if ('refusal' in spelt) {
-    return spelt.refusal;
+  const plain = comparable(path);
+  const trusted = comparable(root);
+  const inside = plain !== null && trusted !== null && relativeWithin(trusted, plain) !== null;
+  if (plain === null || (!inside && plain.startsWith('\\\\'))) {
+    return `${path} is a network share or a device, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
   }
-  const plain = resolve(spelt.plain);
-  const base = below ?? parse(plain).root;
+  const base = inside ? (trusted ?? plain) : parse(plain).root;
   const steps = relative(base, plain)
     .split(/[\\/]+/)
     .filter((step) => step !== '');
@@ -639,7 +641,7 @@ function networkRefusal(path: string, below: string | null = null, hops = 0): st
         return `${path} leads through more than ${String(MOST_LINKS)} links, so it is not followed. Give the program's own path.`;
       }
       const target = resolve(dirname(at), readlinkSync(at));
-      return networkRefusal(join(target, ...steps.slice(index + 1)), null, hops + 1);
+      return networkRefusal(join(target, ...steps.slice(index + 1)), root, hops + 1);
     }
   }
   return null;
@@ -696,7 +698,7 @@ export function exportedBuild(
   }
   const where = insideProject(root, at);
   const inside = where === '' ? null : where;
-  const network = networkRefusal(at, inside === null ? null : root);
+  const network = networkRefusal(at, root);
   if (network !== null) {
     return { ok: false, reason: network };
   }
