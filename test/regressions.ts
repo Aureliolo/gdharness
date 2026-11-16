@@ -40814,19 +40814,21 @@ async function testAnExportedBuildOutsideTheProjectIsStarted(): Promise<void> {
  * `--path`, so the run is told by its absolute path and its start, not by the project.
  */
 async function testAnOutsideBuildStartedByAnEarlierServerIsStoppedByTheNext(): Promise<void> {
-  await anOutsideBuildAcrossAReconnect(false);
+  await anOutsideBuildAcrossAReconnect('next');
 }
 
 /**
  * The same with the keeper gone too, so the stop has only the process to go on: it ends the build by
  * signal, once the run's note, its absolute path and its start show the process to be the build.
+ * Asked of the server that started it as well, whose own record of the run says the same.
  */
 async function testAnOutsideBuildWhoseKeeperIsGoneIsStoppedBySignal(): Promise<void> {
-  await anOutsideBuildAcrossAReconnect(true);
+  await anOutsideBuildAcrossAReconnect('keeperGone');
+  await anOutsideBuildAcrossAReconnect('sameServer');
 }
 
-/** Starts an outside build from one server and stops it through the next, with or without its keeper. */
-async function anOutsideBuildAcrossAReconnect(keeperGone: boolean): Promise<void> {
+/** Starts an outside build from one server and stops it through the next or the same, with or without its keeper. */
+async function anOutsideBuildAcrossAReconnect(mode: 'next' | 'keeperGone' | 'sameServer'): Promise<void> {
   const node = spawnSyncHidden('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
   const nodePath = node.status === 0 ? node.stdout.trim() : '';
   if (nodePath === '' || process.platform !== 'win32') {
@@ -40870,9 +40872,11 @@ async function anOutsideBuildAcrossAReconnect(keeperGone: boolean): Promise<void
     );
     pid = asNumber(get(started, 'pid'), JSON.stringify(started));
     await met.meet(pid);
-    await first.stop();
+    if (mode !== 'sameServer') {
+      await first.stop();
+    }
     assert.ok(alive(pid), 'the build outlives the server that started it');
-    if (keeperGone) {
+    if (mode !== 'next') {
       const keeperPid = readRunRecord(project, [runtimeDir])?.keeperPid ?? 0;
       assert.ok(keeperPid > 0 && alive(keeperPid), 'the run has a keeper to end');
       process.kill(keeperPid);
@@ -40883,8 +40887,10 @@ async function anOutsideBuildAcrossAReconnect(keeperGone: boolean): Promise<void
       assert.ok(alive(pid), 'and the build is still going');
     }
 
-    next = new ServerProcess({ env });
-    await next.initialize('regression-test');
+    next = mode === 'sameServer' ? first : new ServerProcess({ env });
+    if (mode !== 'sameServer') {
+      await next.initialize('regression-test');
+    }
     const output = parseTextContent(await callOn(next)('editor_output', {}));
     assert.equal(
       get(output, 'running'),
@@ -40893,7 +40899,11 @@ async function anOutsideBuildAcrossAReconnect(keeperGone: boolean): Promise<void
     );
     const stopped = parseTextContent(await callOn(next)('editor_run', { op: 'stop' }));
     assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
-    assert.equal(get(stopped, 'endedThrough'), keeperGone ? 'signal' : 'keeper', JSON.stringify(stopped));
+    assert.equal(
+      get(stopped, 'endedThrough'),
+      mode === 'next' ? 'keeper' : 'signal',
+      JSON.stringify(stopped),
+    );
     assert.equal(await met.gone(pid, 15_000), true, `the stop ended it: ${JSON.stringify(stopped)}`);
   } finally {
     await met.end();
