@@ -89927,6 +89927,41 @@ function testAnAbsolutePathInsideTheProjectFollowsAMove(): void {
 }
 
 /**
+ * An absolute disk path into the project, written in another letter case than the file and folder
+ * on disk, follows a file move and a rename that moves its script where the file system joins the
+ * spellings, and stays where it keeps them apart.
+ */
+async function testAnAbsolutePathInAnotherCaseFollowsWhereTheFileSystemJoinsIt(): Promise<void> {
+  const move = caseMoveProject({ 'sub/desk.tscn': LINKED_DESK }, 'SUB/DESK.tscn');
+  const rename = caseMoveProject(
+    { 'player.gd': 'class_name Player\nextends Node\n', 'user.gd': '' },
+    'PLAYER.gd',
+  );
+  try {
+    const slash = (project: string): string => project.replaceAll('\\', '/');
+    writeTree(move.project, {
+      'use.gd': `extends Node\n\nconst A := "${slash(move.project)}/SUB/DESK.tscn"\n`,
+    });
+    writeTree(rename.project, {
+      'user.gd': `extends Node\n\nconst A := "${slash(rename.project)}/PLAYER.gd"\n`,
+    });
+    movedIn(move.project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(move.project, 'use.gd'), 'utf8'),
+      `extends Node\n\nconst A := "${slash(move.project)}/${move.folds ? 'newdir/desk.tscn' : 'SUB/DESK.tscn'}"\n`,
+    );
+    await renamePlayerAndMoveItsScript(rename.project);
+    assert.equal(
+      readFileSync(join(rename.project, 'user.gd'), 'utf8'),
+      `extends Node\n\nconst A := "${slash(rename.project)}/${rename.folds ? 'hero.gd' : 'PLAYER.gd'}"\n`,
+    );
+  } finally {
+    sweep(move.project);
+    sweep(rename.project);
+  }
+}
+
+/**
  * A raw string cannot hold its own quote, so a move to a folder named `it's` writes `r'...'` with
  * the other quote, and drops the `r` and escapes where the path holds both quotes. The script
  * loads, nothing is listed as left alone, and a string that was not raw keeps its escapes.
@@ -107812,6 +107847,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes,
   testAStringStartingWithASlashNamesNoFileOfTheProject,
   testAnAbsolutePathInsideTheProjectFollowsAMove,
+  testAnAbsolutePathInAnotherCaseFollowsWhereTheFileSystemJoinsIt,
   testARawStringThatCannotHoldTheNewPathIsRewrittenToLoad,
   testARenameThatMovesItsScriptRewritesARawStringThatCannotHoldThePath,
   testAnExtensionInCapitalsIsReadAsTheEngineReadsIt,
