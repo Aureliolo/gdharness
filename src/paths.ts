@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { entriesOf } from './listed-reads.js';
 
 /**
@@ -541,12 +541,95 @@ export function resolveWithinProject(
   return { ok: true, absolutePath, relativePath };
 }
 
+/** An exported build judged for a start: the program to run and how an answer names it. */
+export type ExportedBuild =
+  | { readonly ok: true; readonly absolutePath: string; readonly shownAs: string }
+  | { readonly ok: false; readonly reason: string };
+
+/** What a program is called on [param platform], for a refusal. */
+const PROGRAM_KIND: Readonly<Record<string, string>> = {
+  win32: 'a Windows program ending in .exe',
+  darwin: 'an .app bundle or an executable file',
+};
+
+/** The program inside a macOS bundle: the one named like it, else the only file in Contents/MacOS. */
+function bundleProgram(bundle: string): string | null {
+  const folder = join(bundle, 'Contents', 'MacOS');
+  const named = join(folder, basename(bundle, extname(bundle)));
+  if (isLocalFile(named)) {
+    return named;
+  }
+  try {
+    const files = readdirSync(folder).filter((name) => isLocalFile(join(folder, name)));
+    return files.length === 1 && files[0] !== undefined ? join(folder, files[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * An exported build to start, which must already be a file inside the project. The gate has
- * refused a link out of the project, so a link inside it pointing at any program on the machine is
- * never started as the game.
+ * The refusal for [param real], an existing path, as a program the platform can start, or null when
+ * it is one. [param shown] names it in the refusal.
  */
-export function exportedBuild(projectPath: string, candidatePath: string): Containment {
+function notAProgram(real: string, shown: string, platform: string): { reason: string } | { file: string } {
+  const kind = PROGRAM_KIND[platform] ?? 'an executable file';
+  const isBundle = platform === 'darwin' && extname(real).toLowerCase() === '.app';
+  if (isBundle && statSync(real).isDirectory()) {
+    const inner = bundleProgram(real);
+    return inner === null
+      ? { reason: `${shown} is an .app bundle with no program in Contents/MacOS to start. Give ${kind}.` }
+      : { file: inner };
+  }
+  if (!statSync(real).isFile()) {
+    return { reason: `${shown} is not a file, so there is nothing to start. Give ${kind}.` };
+  }
+  const runs =
+    platform === 'win32' ? extname(real).toLowerCase() === '.exe' : (statSync(real).mode & 0o111) !== 0;
+  return runs ? { file: real } : { reason: `${shown} is not a program this platform can run. Give ${kind}.` };
+}
+
+/** The refusal for a program named by a path outside the project, or the program's real path. */
+function programOutsideTheProject(trimmed: string, platform: string): ExportedBuild {
+  if (/^[\\/]{2}/.test(trimmed)) {
+    return {
+      ok: false,
+      reason: `${trimmed} is a network path, which is not asked about here. Give a path on a local disk.`,
+    };
+  }
+  const kind = PROGRAM_KIND[platform] ?? 'an executable file';
+  let real: string;
+  try {
+    real = realpathSync.native(trimmed);
+  } catch {
+    return { ok: false, reason: `There is no file at ${trimmed} to start. Give the path of ${kind}.` };
+  }
+  const judged = notAProgram(real, trimmed, platform);
+  if ('reason' in judged) {
+    return { ok: false, reason: judged.reason };
+  }
+  return { ok: true, absolutePath: judged.file, shownAs: judged.file.split(sep).join('/') };
+}
+
+/**
+ * An exported build to start: a program inside the project, named relative to it or by its absolute
+ * path, or any program on a local disk named by its absolute path. A program inside the project goes
+ * through the gate, which refuses a link out of it, so a link there pointing at another program is
+ * never started as the game. A program outside is a path the caller chose, as `godot` is.
+ */
+export function exportedBuild(
+  projectPath: string,
+  candidatePath: string,
+  platform: string = process.platform,
+): ExportedBuild {
+  const trimmed = candidatePath.trim();
+  if (
+    isAbsolute(trimmed) &&
+    !trimmed.includes('\0') &&
+    !trimmed.startsWith(RESOURCE_SCHEME) &&
+    insideProject(resolve(projectPath), trimmed) === null
+  ) {
+    return programOutsideTheProject(resolve(trimmed), platform);
+  }
   const found = resolveWithinProject(projectPath, candidatePath);
   if (!found.ok) {
     return found;
@@ -560,8 +643,8 @@ export function exportedBuild(projectPath: string, candidatePath: string): Conta
       reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
     };
   }
-  if (!statSync(real).isFile()) {
-    return { ok: false, reason: `${found.relativePath} is not a file, so there is nothing to start.` };
-  }
-  return { ok: true, absolutePath: real, relativePath: found.relativePath };
+  const judged = notAProgram(real, found.relativePath, platform);
+  return 'reason' in judged
+    ? { ok: false, reason: judged.reason }
+    : { ok: true, absolutePath: judged.file, shownAs: found.relativePath };
 }

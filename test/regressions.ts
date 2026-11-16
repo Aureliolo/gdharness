@@ -40591,15 +40591,15 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
   try {
     mkdirSync(join(project, 'export'), { recursive: true });
     mkdirSync(outside);
-    writeFileSync(join(project, 'export', 'game.exe'), 'a build');
-    writeFileSync(join(outside, 'game.exe'), 'another program');
+    writeFileSync(join(project, 'export', 'game.exe'), 'a build', { mode: 0o755 });
+    writeFileSync(join(outside, 'game.exe'), 'another program', { mode: 0o755 });
     symlinkSync(outside, join(project, 'linked'), 'junction');
 
     const found = exportedBuild(project, 'export/game.exe');
     assert.deepEqual(found, {
       ok: true,
       absolutePath: realpathSync.native(join(project, 'export', 'game.exe')),
-      relativePath: 'export/game.exe',
+      shownAs: 'export/game.exe',
     });
     const reason = (candidate: string): string => {
       const judged = exportedBuild(project, candidate);
@@ -40610,6 +40610,122 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
     assert.match(reason('export'), /^export is not a file/);
     assert.match(reason('../outside/game.exe'), /resolves outside the project directory/);
   } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * An executable names a program to run, so one kept outside the project is taken, as one inside is.
+ * A path that is not there, a folder and a file the platform cannot run are refused by what is
+ * wrong with them, never by the rule for files inside the project.
+ */
+function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-outside-'));
+  const project = join(sandbox, 'project');
+  const builds = join(sandbox, 'builds');
+  try {
+    mkdirSync(join(project, 'export'), { recursive: true });
+    mkdirSync(join(builds, 'folder'), { recursive: true });
+    const program = process.platform === 'win32' ? 'game.exe' : 'game';
+    const there = join(builds, program);
+    writeFileSync(there, 'a build', { mode: 0o755 });
+    writeFileSync(join(project, 'export', program), 'a build', { mode: 0o755 });
+    writeFileSync(join(builds, 'notes.txt'), 'text', { mode: 0o644 });
+
+    const real = realpathSync.native(there);
+    assert.deepEqual(exportedBuild(project, there), {
+      ok: true,
+      absolutePath: real,
+      shownAs: real.split(sep).join('/'),
+    });
+    assert.deepEqual(exportedBuild(project, `export/${program}`), {
+      ok: true,
+      absolutePath: realpathSync.native(join(project, 'export', program)),
+      shownAs: `export/${program}`,
+    });
+    const reason = (candidate: string): string => {
+      const judged = exportedBuild(project, candidate);
+      return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
+    };
+    const missing = reason(join(builds, 'missing', program));
+    assert.match(missing, /^There is no file at .* to start\. Give the path of /, missing);
+    assert.match(reason(join(builds, 'folder')), /is not a file, so there is nothing to start\. Give /);
+    assert.match(reason(join(builds, 'notes.txt')), /is not a program this platform can run\. Give /);
+    for (const refused of [missing, reason(join(builds, 'notes.txt'))]) {
+      assert.doesNotMatch(refused, /outside the project/, refused);
+    }
+
+    const bundle = join(builds, 'Game.app');
+    mkdirSync(join(bundle, 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(join(bundle, 'Contents', 'MacOS', 'Game'), 'a build', { mode: 0o755 });
+    const opened = exportedBuild(project, bundle, 'darwin');
+    assert.equal(
+      opened.ok && opened.absolutePath,
+      realpathSync.native(join(bundle, 'Contents', 'MacOS', 'Game')),
+      JSON.stringify(opened),
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * An exported build kept in a folder beside the project is started and stopped as one inside it is.
+ * It is a copy of Node, which starts no window and writes where it is told.
+ */
+async function testAnExportedBuildOutsideTheProjectIsStarted(): Promise<void> {
+  const node = spawnSyncHidden('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
+  const nodePath = node.status === 0 ? node.stdout.trim() : '';
+  if (nodePath === '' || process.platform !== 'win32') {
+    console.log('outside exported build regression skipped (needs a copy of node as a Windows build)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-beside-'));
+  const project = join(sandbox, 'project');
+  const builds = join(sandbox, 'builds');
+  const runtimeDir = join(sandbox, 'runtime');
+  mkdirSync(project);
+  mkdirSync(builds);
+  mkdirSync(runtimeDir);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Beside"\n');
+  const build = join(builds, 'game.exe');
+  cpSync(nodePath, build);
+  const script = join(builds, 'game-stand-in.js');
+  writeFileSync(script, 'setInterval(() => {}, 1000);\n');
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir, GODOT_PATH: '' },
+  });
+  const met = new MetProcesses();
+  try {
+    await server.initialize('regression-test');
+    const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, ...args } },
+        60_000,
+      );
+    const refused = textOf(await call({ op: 'start', executable: join(builds, 'missing.exe') })) ?? '';
+    assert.match(refused, /^There is no file at .* to start\./, refused);
+    const answered = await call({
+      op: 'start',
+      executable: build,
+      headless: false,
+      silent: false,
+      visible: true,
+      args: [script],
+    });
+    const started = parseTextContent(answered);
+    const shown = textOf(answered) ?? JSON.stringify(answered);
+    const pid = asNumber(get(started, 'pid'), shown);
+    await met.meet(pid);
+    assert.equal(get(started, 'executable'), realpathSync.native(build).split(sep).join('/'), shown);
+    assert.ok(alive(pid), 'it runs until stopped');
+    const stopped = parseTextContent(await call({ op: 'stop' }));
+    assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+    assert.equal(await met.gone(pid, 15_000), true, `stop ended it: ${JSON.stringify(stopped)}`);
+  } finally {
+    await met.end();
+    await server.stop();
     sweep(sandbox);
   }
 }
@@ -109893,6 +110009,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAServerAnswersBeforeItsEngineDoes,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
+  testAnExecutableOutsideTheProjectIsJudgedAsAProgram,
+  testAnExportedBuildOutsideTheProjectIsStarted,
   testLibraryCopiesAreMovedAsideAndSwept,
   testAHeldLibraryCopyIsSetAsideAndSweptLater,
   testNotRunIsPutDownToFailFastOnlyWhenSet,

@@ -13886,7 +13886,7 @@ class GodotServer {
       engineNote: engine.note ?? undefined,
       alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
       pid: started.pid,
-      executable: exported?.ok === true ? exported.relativePath : undefined,
+      executable: exported?.ok === true ? exported.shownAs : undefined,
       // Named for a start that left it to the project, whose command line names no scene.
       scene:
         exported !== null
