@@ -88993,6 +88993,14 @@ function testAMoveRewritesWhatTheFileSystemTakesForTheMovedFile(): void {
   }
 }
 
+/** That the scene at [scene] loads with [names], where an engine is there to load it. */
+function assertLoads(project: string, scene: string, names: readonly string[]): void {
+  const loaded = loadedNames(project, scene);
+  if (loaded !== null) {
+    assert.deepEqual(loaded, names, `${scene} loads after the move`);
+  }
+}
+
 /** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
 function loadedNames(project: string, scene: string): string[] | null {
   const godotPath = resolveGodotPath();
@@ -89316,10 +89324,10 @@ function testAMoveFollowsARelativePathInAnotherCase(): void {
       down.folds ? sceneInstancing(['newdir/desk.tscn']) : sceneInstancing(['SUB/desk.tscn']),
     );
     if (up.folds) {
-      assert.deepEqual(loadedNames(up.project, 'res://use.tscn'), ['Root', 'N1', 'N2']);
+      assertLoads(up.project, 'res://use.tscn', ['Root', 'N1', 'N2']);
     }
     if (down.folds) {
-      assert.deepEqual(loadedNames(down.project, 'res://use.tscn'), ['Root', 'N1']);
+      assertLoads(down.project, 'res://use.tscn', ['Root', 'N1']);
     }
   } finally {
     sweep(up.project);
@@ -89613,7 +89621,7 @@ function testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles(): void
         : sceneInstancing(['B.tscn', '../LIB/b.tscn', '../lib/B.tscn']),
     );
     if (folds) {
-      assert.deepEqual(loadedNames(project, 'res://stage/a.tscn'), ['Root', 'N1', 'N2', 'N3']);
+      assertLoads(project, 'res://stage/a.tscn', ['Root', 'N1', 'N2', 'N3']);
     }
   } finally {
     sweep(project);
@@ -89641,6 +89649,29 @@ function testAMoveLeavesAStringReadWithAnEscape(): void {
   } finally {
     sweep(down.project);
     sweep(up.project);
+  }
+}
+
+/**
+ * A moved script's own relative strings follow it as they always have, a backslash among them: a
+ * raw string has no escapes, and `r"sub\b.tres"` still reaches `sub/b.tres` once the script moves.
+ */
+function testAMovedScriptKeepsItsRawStringReaching(): void {
+  const { project } = caseMoveProject(
+    {
+      'sub/b.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      'a.gd': 'extends Node\n\nconst B := preload(r"sub\\b.tres")\n',
+    },
+    'A.gd',
+  );
+  try {
+    movedIn(project, 'a.gd', 'newdir/a.gd');
+    assert.equal(
+      readFileSync(join(project, 'newdir', 'a.gd'), 'utf8'),
+      'extends Node\n\nconst B := preload(r"../sub\\b.tres")\n',
+    );
+  } finally {
+    sweep(project);
   }
 }
 
@@ -106988,6 +107019,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveFollowsARelativePathInAnotherCase,
   testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles,
   testAMoveLeavesAStringReadWithAnEscape,
+  testAMovedScriptKeepsItsRawStringReaching,
   testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth,
   testAPathIsSplitIntoPartsOnSlashesOnly,

@@ -1496,7 +1496,7 @@ function movedPath(
   exists: (path: string) => boolean,
 ): string | null {
   const isAbsolute = written.startsWith('res://');
-  if (!isAbsolute && (base === null || readWithAnEscape(written))) {
+  if (!isAbsolute && base === null) {
     return null;
   }
   const fromRoot = base === 'root' && !isAbsolute;
