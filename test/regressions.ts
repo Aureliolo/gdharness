@@ -9408,6 +9408,46 @@ async function testAReplyOfTheWrongShapeIsRefusedAtOnce(): Promise<void> {
   assert.deepEqual(bridge.getStatus().pendingRequests, 0, 'and nothing is left waiting');
 }
 
+/**
+ * The status counts the resources with a call waiting or running, one for each resource however
+ * many calls it has, and none once every call is answered.
+ */
+async function testTheStatusCountsTheResourcesWithCallsQueued(): Promise<void> {
+  const bridge = createBridge(0, 20_000, '127.0.0.1');
+  const socket = new FakeSocket('editor');
+  connectFake(bridge, socket);
+  saysHello(socket, process.cwd());
+  const settled = [
+    bridge.invokeTool('scene_tree', { scenePath: 'res://a.tscn' }),
+    bridge.invokeTool('scene_tree', { scenePath: 'res://a.tscn' }),
+    bridge.invokeTool('scene_tree', { resourcePath: 'res://b.tres' }),
+  ];
+  assert.equal(bridge.getStatus().queuedResources, 2, 'two resources, three calls');
+  const invoked = (): string[] =>
+    socket.sent
+      .map((payload) => JSON.parse(String(payload)) as unknown)
+      .filter((payload) => get(payload, 'type') === 'tool_invoke')
+      .map((payload) => asString(get(payload, 'id')));
+  const answered = new Set<string>();
+  const answerWhatWasAsked = async (): Promise<void> => {
+    for (const id of invoked()) {
+      if (!answered.has(id)) {
+        answered.add(id);
+        socket.emit(
+          'message',
+          Buffer.from(JSON.stringify({ type: 'tool_result', id, success: true, result: { ok: true } })),
+        );
+      }
+    }
+    await delay(20);
+  };
+  for (let round = 0; round < 3; round += 1) {
+    await answerWhatWasAsked();
+  }
+  await Promise.all(settled);
+  assert.equal(bridge.getStatus().queuedResources, 0, 'nothing is queued once every call is answered');
+}
+
 async function testABridgeOnNoPortSaysSo(): Promise<void> {
   const port = await reservePort();
   const holder = createServer();
@@ -47619,6 +47659,42 @@ async function testASnapshotAskedOnceAsAHeldWorkerLeaves(): Promise<void> {
 }
 
 /**
+ * A command is taken once the thread it went to answers the inspection sent after it. Another
+ * thread's answer is not that one. A worker that leaves its break drops the inspections it never
+ * read, so the next one sent to it after it is held again is its first.
+ */
+async function testACommandIsTakenWhenTheThreadItWentToAnswers(): Promise<void> {
+  let answerOn: number | null = null;
+  const { peer, game } = await aGameWithAHeldWorker((message, _data, thread) => {
+    if (message === 'scene:inspect_object' && thread === HELD_WORKER && answerOn !== null) {
+      game.write(framedCommand('scene:inspect_object', [], answerOn));
+    }
+  });
+  const breakpoint = { op: 'breakpoint', script: 'res://main.gd', line: 3, set: true } as const;
+  try {
+    answerOn = 0;
+    assert.deepEqual(
+      await peer.ask(breakpoint),
+      { sent: true, taken: false },
+      'the main thread answering is not the worker answering',
+    );
+    answerOn = null;
+    game.write(framedCommand('debug_exit', [], HELD_WORKER));
+    game.write(framedCommand('debug_enter', [true, 'Breakpoint', true, HELD_WORKER], HELD_WORKER));
+    await delay(200);
+    answerOn = HELD_WORKER;
+    assert.deepEqual(
+      await peer.ask(breakpoint),
+      { sent: true, taken: true },
+      'what the worker dropped as it left is not owed',
+    );
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
  * Two snapshots asked together of an engine without the snapshot, while a worker is held, are both
  * refused as soon as the inspections are answered. The worker leaves its break with what was asked
  * of it unread, which must not leave either waiting the full 20 s.
@@ -51255,6 +51331,35 @@ async function testAResultReadWithPropertiesReportsItsStepErrors(): Promise<void
       }),
     );
     assert.match(asArray(get(answer, 'errors')).map(text).join('\n'), /noisy step/);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/**
+ * A tree read with named properties puts the errors a node's property steps made on that node, and
+ * on no other node.
+ */
+async function testATreeReadPutsAPropertyStepsErrorsOnItsNode(): Promise<void> {
+  await withAReadingGame('tree property errors regression', async ({ ask, counted }) => {
+    const answer: unknown = JSON.parse(
+      await ask('runtime_inspect', {
+        op: 'tree',
+        nodePath: '/root/Main',
+        depth: 1,
+        properties: ['noisy():name'],
+      }),
+    );
+    assert.match(
+      asArray(get(answer, 'root', 'errors'))
+        .map(text)
+        .join('\n'),
+      /noisy step/,
+      'the node that made the errors carries them',
+    );
+    for (const child of asArray(get(answer, 'root', 'children'))) {
+      assert.equal(get(child, 'errors'), undefined, `${text(get(child, 'name'))} made none`);
+    }
     const verdict = await counted();
     assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
   });
@@ -91008,6 +91113,45 @@ function testAMoveWritesEveryFileOrNone(): void {
   }
 }
 
+/**
+ * A file that already sits where a moved file or its sidecar would land stops the move. A sidecar's
+ * target is found at planning, and a file that appears at the target after the plan is found when
+ * the plan is applied.
+ */
+function testAMoveStopsAtAFileAlreadyAtItsTarget(): void {
+  const project = moveProject();
+  try {
+    mkdirSync(join(project, 'sprites'));
+    writeFileSync(join(project, 'sprites', 'hero.png.import'), 'taken\n');
+    const sidecar = planFileMove(
+      project,
+      join(project, 'art', 'hero.png'),
+      join(project, 'sprites', 'hero.png'),
+    );
+    assert.ok(!sidecar.ok, 'the import file is in the way');
+    assert.match(
+      sidecar.reason,
+      /res:\/\/sprites\/hero\.png\.import already exists, so nothing was moved there/,
+    );
+
+    const planned = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.tscn'),
+      join(project, 'actors', 'hero.tscn'),
+    );
+    assert.ok(planned.ok, JSON.stringify(planned));
+    mkdirSync(join(project, 'actors'));
+    writeFileSync(join(project, 'actors', 'hero.tscn'), 'taken\n');
+    assert.throws(() => {
+      applyFileMove(planned);
+    }, /res:\/\/actors\/hero\.tscn already exists, so nothing was written/);
+    assert.equal(readFileSync(join(project, 'actors', 'hero.tscn'), 'utf8'), 'taken\n');
+    assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')), 'the file is where it was');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /** A move that fails halfway leaves no staging file behind. */
 function testAFailedMoveLeavesNoStagingFile(): void {
   const project = moveProject();
@@ -106988,6 +107132,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedDirectoryTakesEverythingInIt,
   testAMoveThatCannotBeMadeIsRefused,
   testAMoveWritesEveryFileOrNone,
+  testAMoveStopsAtAFileAlreadyAtItsTarget,
   testAFailedMoveLeavesNoStagingFile,
   testAMovePlanRefusesATargetTheWritesCannotUse,
   testAMoveRefusesToRewriteAFileThatIsNotUtf8,
@@ -107184,6 +107329,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProcessTurnedAwayRaisesNoConnection,
   testAFrameFromASocketBeingClosedLeavesTheLiveEditor,
   testAReplyOfTheWrongShapeIsRefusedAtOnce,
+  testTheStatusCountsTheResourcesWithCallsQueued,
+  testACommandIsTakenWhenTheThreadItWentToAnswers,
   testATurnedAwayEditorLeavesTheServerUp,
   testATestServerTakesNoRealEditorsPort,
   testAProjectUpgradedUnderTheServerIsSaid,
@@ -107350,6 +107497,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoPathsInOneRequestKeepBothSetsOfErrors,
   testWalkErrorsDoNotPushOutTheCallsOwn,
   testAResultReadWithPropertiesReportsItsStepErrors,
+  testATreeReadPutsAPropertyStepsErrorsOnItsNode,
   testAListCallRefusalCarriesTheStepErrors,
   testAWaitKeepsTheErrorsOfEveryLook,
   testAPropertyWatchReportsItsReadingsErrors,
