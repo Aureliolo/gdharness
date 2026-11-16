@@ -227,25 +227,31 @@ const FRAMES_COUNT_AFTER_MS = 1500;
  */
 const FRAMES_PAST_A_PREPARE = 3;
 /**
- * How recent the game's last performance frame must be for it to count as sending them. The engine
- * sends one from the profiler tick at the end of a main loop pass once 1000 ms have passed since the
- * last (main.cpp, `EngineDebugger::iteration`, and remote_debugger.cpp, `PerformanceProfiler::tick`
- * at 4.7.2), so a pass of up to two seconds still sends one inside this.
+ * How long after it connects a game with its performance profiler on has sent its first frame. The
+ * engine turns the profiler on as its debugger starts (remote_debugger.cpp, the `RemoteDebugger`
+ * constructor, at 4.7.2). Its tick at the end of each main loop pass (main.cpp,
+ * `EngineDebugger::iteration`) sends a frame once 1000 ms have passed since the last
+ * (`PerformanceProfiler::tick`), so the first pass sends one.
  */
-const FRAMES_SENT_WITHIN_MS = 3000;
+const FIRST_FRAME_WITHIN_MS = 3000;
 /** The refusal of a game that answered what was asked after a prepare and not the prepare. */
 const NO_SNAPSHOT = `The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.`;
 /** The refusal of a game that answered the inspection, then sent neither the size nor a frame. */
 const NO_SNAPSHOT_NOR_FRAME = `${NO_SNAPSHOT} It sent no frame in the ${SNAPSHOT_PREPARE_MS / 1000} s after that answer either, which a game still preparing a snapshot that large does too.`;
-/** The refusal of a running game that answered the inspection and had sent no recent frame. */
-const NO_SNAPSHOT_UNFRAMED = `${NO_SNAPSHOT} It had sent no performance frame in the ${FRAMES_SENT_WITHIN_MS / 1000} s before the request either, so a snapshot still being prepared cannot be told apart from a missing one.`;
-/**
- * The fix for a game that sends no performance frames. The engine turns its performance profiler
- * on as its debugger starts (remote_debugger.cpp, the `RemoteDebugger` constructor, at 4.7.2), and
- * `EngineDebugger.profiler_enable` turns it back on after a game turned it off (core_bind.cpp).
- */
-const FRAMES_AGAIN =
-  'EngineDebugger.profiler_enable("performance", true) in the game sends its performance frames again, then debug_objects snapshot asks again';
+/** The refusal of a running game that answered the inspection and has never sent a frame. */
+const NO_SNAPSHOT_UNFRAMED = `${NO_SNAPSHOT} It has sent no performance frame since its debugger connected either, so a snapshot still being prepared cannot be told apart from a missing one.`;
+/** `EngineDebugger.profiler_enable` turns the profiler back on after a game turned it off (core_bind.cpp). */
+const PROFILER_ON = 'EngineDebugger.profiler_enable("performance", true) in the game';
+/** The fix for a game that sends no performance frames. */
+const FRAMES_AGAIN = `${PROFILER_ON} sends its performance frames again, then debug_objects snapshot asks again`;
+/** The fix for a game whose frames stopped after it answered the inspection. */
+const FRAMES_MAYBE = `debug_objects snapshot asks again, after ${PROFILER_ON} if it turned its performance profiler off`;
+/** The refusal of a game whose main thread stopped at a breakpoint after the request went out. */
+const MAIN_STOPPED =
+  "The game's main thread stopped at a breakpoint as it was asked for the snapshot, and a held main thread finishes no snapshot until it goes on.";
+/** The fix for a game held at a breakpoint while it was asked. */
+const RESUME_THEN_ASK =
+  'debug_control resume lets the held thread go, then debug_objects snapshot asks again';
 /** The refusal of a game whose frames went on while it answered nothing asked of it. */
 const NO_DEBUG_FEATURES = `The game answered neither the snapshot request nor the inspection asked after it within ${SNAPSHOT_PREPARE_MS / 1000} s, while its frames went on, which is what an engine without debug features does, as a release template is.`;
 /** The refusal of a game that sent nothing at all while it was asked. */
@@ -429,6 +435,8 @@ interface Held {
 interface Waiter {
   readonly wanted: (received: DebuggerMessage) => boolean;
   readonly resolve: (received: DebuggerMessage | null) => void;
+  /** Whether it is shown every `debug_enter` before the request reading it is. */
+  readonly hearsBreaks: boolean;
 }
 
 export class GameDebugger {
@@ -442,11 +450,10 @@ export class GameDebugger {
   private outputDropped = 0;
   /** How many snapshots have been asked for, which numbers each one's requests. */
   private snapshotsAsked = 0;
-  /**
-   * When the game last sent a performance frame, or connected, since it sends its first frame on
-   * the first pass of its main loop.
-   */
-  private lastFrameAt = 0;
+  /** When the game connected. */
+  private connectedAt = 0;
+  /** Whether the game has sent a performance frame since it connected. */
+  private framed = false;
   /**
    * How many inspections have been sent to each thread and answered by it. A thread answers them in
    * order with nothing that names which, so the count says which answer is whose.
@@ -542,7 +549,7 @@ export class GameDebugger {
       return;
     }
     this.connection = socket;
-    this.lastFrameAt = Date.now();
+    this.connectedAt = Date.now();
     // Only the one game ever dials it, and it dials once.
     this.server.close();
     const send: ObserverSend = (message, data, thread) => {
@@ -619,7 +626,7 @@ export class GameDebugger {
       }
       this.leftItsBreak(received.thread);
     } else if (received.message === 'performance:profile_frame') {
-      this.lastFrameAt = Date.now();
+      this.framed = true;
     } else if (received.message === 'output') {
       this.takeOutput(received.data);
     } else if (received.message === 'error') {
@@ -632,9 +639,24 @@ export class GameDebugger {
     this.deliver(received);
   }
 
-  /** Hands [param received] to the first request waiting for it, or keeps a reply for a later one. */
+  /**
+   * Hands [param received] to the first request waiting for it, or keeps a reply for a later one. A
+   * break is first shown to every request that hears breaks, and still reaches the one reading it,
+   * such as a pause asked beside a snapshot.
+   */
   private deliver(received: Extract<DebuggerMessage, { message: string }>): void {
-    const at = this.waiters.findIndex((waiter) => waiter.wanted(received));
+    const isBreak = received.message === 'debug_enter';
+    if (isBreak) {
+      for (const waiter of this.waiters.filter((one) => one.hearsBreaks)) {
+        if (waiter.wanted(received)) {
+          this.waiters.splice(this.waiters.indexOf(waiter), 1);
+          waiter.resolve(received);
+        }
+      }
+    }
+    const at = this.waiters.findIndex(
+      (waiter) => !(isBreak && waiter.hearsBreaks) && waiter.wanted(received),
+    );
     if (at !== -1) {
       this.waiters.splice(at, 1)[0]?.resolve(received);
     } else if (REPLIES.has(received.message)) {
@@ -700,8 +722,15 @@ export class GameDebugger {
     this.connection?.write(framedCommand(message, data, thread));
   }
 
-  /** The next message [param wanted] takes, or null when none comes within [param ms] or the game goes. */
-  private next(wanted: (received: DebuggerMessage) => boolean, ms: number): Promise<DebuggerMessage | null> {
+  /**
+   * The next message [param wanted] takes, or null when none comes within [param ms] or the game
+   * goes. With [param hearsBreaks], every break the game sends is shown to it first.
+   */
+  private next(
+    wanted: (received: DebuggerMessage) => boolean,
+    ms: number,
+    hearsBreaks = false,
+  ): Promise<DebuggerMessage | null> {
     const kept = this.inbox.findIndex(wanted);
     if (kept !== -1) {
       return Promise.resolve(this.inbox.splice(kept, 1)[0] ?? null);
@@ -716,6 +745,7 @@ export class GameDebugger {
           clearTimeout(timer);
           resolve(received);
         },
+        hearsBreaks,
       };
       const timer = setTimeout(() => {
         const at = this.waiters.indexOf(waiter);
@@ -811,45 +841,51 @@ export class GameDebugger {
    * and every 2048 lines of script the engine reads and answers the messages waiting. Only the
    * performance frame the main loop sends after the inspection's answer shows the prepare over, so
    * an inspection answered and then that frame, with no size between, shows an engine without the
-   * snapshot. That frame is waited for only from a game that has been sending frames, and only
-   * while its main thread runs: a main thread held at a breakpoint as it answers, or stopping at
-   * one during the wait, reads nothing more until it goes on. A game answering neither while its
-   * frames go on has no debug features at all.
+   * snapshot. That frame is waited for only from a game that has sent frames, and only while its
+   * main thread runs. A main thread held since before the request answers in order, so its answer
+   * is final. One that stops at a breakpoint after the request went out may stop inside the
+   * prepare, as a pause asked beside it does, so it is told to go on first. A game answering
+   * neither while its frames go on has no debug features at all.
    */
   private async prepare(id: number): Promise<number | DebugAnswer> {
     const sent = Date.now();
     const inspection = this.inspectionSent(MAIN_THREAD);
-    const framing = sent - this.lastFrameAt <= FRAMES_SENT_WITHIN_MS;
-    const seen = { frames: 0, inspected: false };
-    const answered = this.next((received) => {
-      if (!('message' in received)) {
-        return false;
-      }
-      switch (received.message) {
-        case 'performance:profile_frame':
-          seen.frames += Date.now() - sent >= FRAMES_COUNT_AFTER_MS ? 1 : 0;
-          return seen.inspected;
-        case 'scene:inspect_object':
-          seen.inspected ||= this.isInspectionAnswered(received.thread, MAIN_THREAD, inspection);
-          return seen.inspected && (!framing || this.held?.thread === MAIN_THREAD);
-        case 'debug_enter':
-          return seen.inspected && received.thread === MAIN_THREAD;
-        default:
-          return received.message === 'snapshot:snapshot_prepared' && received.data[0] === id;
-      }
-    }, SNAPSHOT_PREPARE_MS);
+    const seen = { frames: 0, inspected: false, stopped: false, listening: false };
+    const answered = this.next(
+      (received) => {
+        if (!('message' in received)) {
+          return false;
+        }
+        switch (received.message) {
+          case 'performance:profile_frame':
+            seen.frames += Date.now() - sent >= FRAMES_COUNT_AFTER_MS ? 1 : 0;
+            return seen.inspected;
+          case 'scene:inspect_object':
+            seen.inspected ||= this.isInspectionAnswered(received.thread, MAIN_THREAD, inspection);
+            return seen.inspected && (this.held?.thread === MAIN_THREAD || this.neverFramed());
+          case 'debug_enter':
+            seen.stopped ||= seen.listening && received.thread === MAIN_THREAD;
+            return seen.stopped && seen.inspected;
+          default:
+            return received.message === 'snapshot:snapshot_prepared' && received.data[0] === id;
+        }
+      },
+      SNAPSHOT_PREPARE_MS,
+      true,
+    );
+    seen.listening = true;
     this.send('snapshot:request_prepare_snapshot', [id, 'gdharness'], SNAPSHOT_THREAD);
     this.send('scene:inspect_object', [0], SNAPSHOT_THREAD);
     const got = await answered;
     if (got !== null && 'message' in got) {
-      return this.prepared(got, framing);
+      return this.prepared(got, seen.stopped);
     }
     const gone = this.unreachableRefusal();
     if (gone !== null) {
       return { ...gone, next: START_AGAIN };
     }
     if (seen.inspected) {
-      return { refused: NO_SNAPSHOT_NOR_FRAME, next: DEBUG_ENGINE };
+      return { refused: NO_SNAPSHOT_NOR_FRAME, next: FRAMES_MAYBE };
     }
     if (seen.frames >= FRAMES_PAST_A_PREPARE) {
       return { refused: NO_DEBUG_FEATURES, next: DEBUG_ENGINE };
@@ -859,27 +895,32 @@ export class GameDebugger {
       ? { refused: SNAPSHOT_STALLED, next: ASK_AGAIN }
       : {
           refused: `${SNAPSHOT_STALLED} Thread ${worker} is held at a breakpoint, and a main loop that waits on it stops too, while the main loop is what answers a snapshot.`,
-          next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
+          next: RESUME_THEN_ASK,
         };
   }
 
+  /** Whether the game has sent no performance frame in all the time its profiler would have. */
+  private neverFramed(): boolean {
+    return !this.framed && Date.now() - this.connectedAt > FIRST_FRAME_WITHIN_MS;
+  }
+
   /**
-   * The size [param got] gives, or the refusal it ends a prepare with. [param framing] says whether
-   * the game had been sending performance frames as the request went out.
+   * The size [param got] gives, or the refusal it ends a prepare with. [param stopped] says whether
+   * the main thread stopped at a breakpoint after the request went out.
    */
   private prepared(
     got: Extract<DebuggerMessage, { message: string }>,
-    framing: boolean,
+    stopped: boolean,
   ): number | DebugAnswer {
-    if (got.message === 'debug_enter') {
-      // The break is news to whoever else waits for it, such as a pause asked beside the snapshot.
-      this.deliver(got);
-    }
     const size = got.data[1];
     if (got.message === 'snapshot:snapshot_prepared' && typeof size === 'number') {
       return size;
     }
-    return got.message === 'scene:inspect_object' && !framing && this.held?.thread !== MAIN_THREAD
+    const heldHere = this.held?.thread === MAIN_THREAD;
+    if (stopped && heldHere) {
+      return { refused: MAIN_STOPPED, next: RESUME_THEN_ASK };
+    }
+    return got.message === 'scene:inspect_object' && !heldHere
       ? { refused: NO_SNAPSHOT_UNFRAMED, next: FRAMES_AGAIN }
       : { refused: NO_SNAPSHOT, next: DEBUG_ENGINE };
   }
