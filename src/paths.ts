@@ -1,7 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { entriesOf } from './listed-reads.js';
-import { spawnSyncHidden } from './spawn.js';
 
 /**
  * Paths that arrive as tool arguments and are then opened, written, or handed to Godot.
@@ -589,75 +588,58 @@ function notAProgram(real: string, shown: string, platform: string): { reason: s
   return runs ? { file: real } : { reason: `${shown} is not a program this platform can run. Give ${kind}.` };
 }
 
-/** A `\\?\` or `\\.\` path as the plain path it names: `\\?\UNC\host\share` is a share, `\\?\X:\a` is `X:\a`. */
-function plainWindowsPath(path: string): string {
-  const long = /^\\\\[?.]\\/.exec(path);
-  if (long === null) {
-    return path;
+/**
+ * [param path] as a plain local path, or the reason it is a share or a device. `\\?\X:\a` and
+ * `\\.\X:\a` are `X:\a`. Every other `\\?\` or `\\.\` form (`UNC`, `GLOBALROOT`, a volume) and
+ * every `\\host` path reaches a share or a device.
+ */
+function localSpelling(path: string): { plain: string } | { refusal: string } {
+  const shown = `${path} is a network share or a device`;
+  const reason = `${shown}, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
+  const device = /^\\\\[?.]\\/.exec(path);
+  if (device !== null) {
+    const rest = path.slice(device[0].length);
+    return /^[A-Za-z]:[\\/]/.test(rest) ? { plain: rest } : { refusal: reason };
   }
-  const rest = path.slice(long[0].length);
-  return /^UNC\\/i.test(rest) ? `\\\\${rest.slice(4)}` : rest;
+  return path.startsWith('\\\\') ? { refusal: reason } : { plain: path };
 }
-
-/** What Windows says kind of disk drive [param letter] is, asked without touching what is behind it. */
-function driveKind(letter: string): string | null {
-  const key = letter.toUpperCase();
-  const known = DRIVE_KINDS.get(key);
-  if (known !== undefined && known.until > Date.now()) {
-    return known.kind;
-  }
-  const ran = spawnSyncHidden(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', `[System.IO.DriveInfo]::new('${key}').DriveType`],
-    { encoding: 'utf8', timeout: 15_000 },
-  );
-  const kind = ran.status === 0 ? ran.stdout.trim() : null;
-  DRIVE_KINDS.set(key, { kind, until: Date.now() + DRIVE_KIND_MS });
-  return kind;
-}
-
-/** How long a drive's kind is kept: a start asks once for the drive it runs from, not once per call. */
-const DRIVE_KIND_MS = 60_000;
-const DRIVE_KINDS = new Map<string, { kind: string | null; until: number }>();
 
 /**
- * Why [param path] is not read, or null when it is on a local disk. Windows is asked only about its
- * own side: a share that does not answer holds this server for as long as the network takes to give
- * up, so a share, a drive mapped to one and a link leading to one are refused without touching
- * them. The links are followed one at a time through the local folders, and what each leads to is
- * judged in turn.
+ * Why a program outside the project cannot be read, or null. Judged by spelling and by reading the
+ * links on the way, never by touching what they lead to: a share that does not answer holds this
+ * server for as long as the network takes to give up, and a process asked about a path would hold
+ * it too. A share, a device form and a link chain leading to either are refused, and so is a chain
+ * past [const MOST_LINKS]. A drive letter is taken as it is: whether one is mapped to a share is
+ * known only by asking the system, which this does not do.
+ *
+ * [param below] is a folder already trusted, as the project is, whose own spelling is not judged.
  */
-function networkRefusal(path: string, platform = process.platform, hops = 0): string | null {
-  if (platform !== 'win32') {
+function networkRefusal(path: string, below: string | null = null, hops = 0): string | null {
+  if (process.platform !== 'win32') {
     return null;
   }
-  const plain = resolve(plainWindowsPath(path));
-  if (plain.startsWith('\\\\')) {
-    return `${path} is on a network share, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
+  const spelt = below === null ? localSpelling(path) : { plain: path };
+  if ('refusal' in spelt) {
+    return spelt.refusal;
   }
-  const letter = /^([A-Za-z]):/.exec(plain)?.[1];
-  const kind = letter === undefined ? null : driveKind(letter);
-  if (letter !== undefined && kind === 'Network') {
-    return `${path} is on drive ${letter}:, which is mapped to a network share, and a share that does not answer would hold this server. Give a path on a local disk.`;
-  }
-  if (letter !== undefined && kind === null) {
-    return `Could not tell whether drive ${letter}: is a local disk, so ${path} is not started. Give a path on a local disk.`;
-  }
-  const root = parse(plain).root;
-  const steps = plain
-    .slice(root.length)
+  const plain = resolve(spelt.plain);
+  const base = below ?? parse(plain).root;
+  const steps = relative(base, plain)
     .split(/[\\/]+/)
     .filter((step) => step !== '');
-  let at = root;
+  let at = base;
   for (const [index, step] of steps.entries()) {
     at = join(at, step);
     const found = lstatSync(at, { throwIfNoEntry: false });
-    if (found === undefined || hops >= 32) {
+    if (found === undefined) {
       return null;
     }
     if (found.isSymbolicLink()) {
-      const target = resolve(dirname(at), plainWindowsPath(readlinkSync(at)));
-      return networkRefusal(join(target, ...steps.slice(index + 1)), platform, hops + 1);
+      if (hops >= MOST_LINKS) {
+        return `${path} leads through more than ${String(MOST_LINKS)} links, so it is not followed. Give the program's own path.`;
+      }
+      const target = resolve(dirname(at), readlinkSync(at));
+      return networkRefusal(join(target, ...steps.slice(index + 1)), null, hops + 1);
     }
   }
   return null;
@@ -704,14 +686,20 @@ export function exportedBuild(
     return { ok: false, reason: refused };
   }
   const root = resolve(projectPath);
-  const given = trimmed.startsWith(RESOURCE_SCHEME) ? trimmed.slice(RESOURCE_SCHEME.length) : trimmed;
-  const at = resolve(root, given);
-  const network = networkRefusal(at);
-  if (network !== null) {
-    return { ok: false, reason: network };
+  let at = resolve(root, trimmed);
+  if (trimmed.startsWith(RESOURCE_SCHEME)) {
+    const resource = resolveWithinProject(projectPath, trimmed, { forTheEngine: true });
+    if (!resource.ok) {
+      return resource;
+    }
+    at = resource.absolutePath;
   }
   const where = insideProject(root, at);
   const inside = where === '' ? null : where;
+  const network = networkRefusal(at, inside === null ? null : root);
+  if (network !== null) {
+    return { ok: false, reason: network };
+  }
   let real: string;
   try {
     real = realpathSync.native(at);
