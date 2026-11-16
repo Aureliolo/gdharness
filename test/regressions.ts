@@ -66178,6 +66178,37 @@ async function testEveryReaderHoldsAnEmptySlotLockAsHeld(): Promise<void> {
 }
 
 /**
+ * A file the slots take for marks and steal files, never raced for, is made through a staged file
+ * and linked into place, so a reader never finds it empty. With the staged name taken by a folder
+ * the file is not made, and with the name free it is made holding its holder.
+ */
+async function testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-staged-take-'));
+  try {
+    const staged = join(directory, `.mark.json.${String(process.pid)}-0.writing`);
+    mkdirSync(staged);
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
+    assert.equal(
+      await slots.takeFile(join(directory, 'mark.json')),
+      false,
+      'no file is made through a taken name',
+    );
+    assert.equal(existsSync(join(directory, 'mark.json')), false, 'and none is left');
+    rmSync(staged, { recursive: true });
+    assert.equal(await slots.takeFile(join(directory, 'mark.json')), true, 'with the name free it is made');
+    assert.equal(
+      readFileSync(join(directory, 'mark.json'), 'utf8'),
+      JSON.stringify({ pid: process.pid, started }),
+      'holding its holder',
+    );
+    assert.deepEqual(readdirSync(directory), ['mark.json'], 'and no staged file is left');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * A taker waiting ahead is left the free slots its own kind may take, the gates' ones included while
  * no gate is queued and the spare ones while a count gives some. A newcomer finds none of them.
  */
@@ -109209,6 +109240,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryReaderHoldsAnEmptySlotLockAsHeld,
   testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame,
   testATakerAheadClaimsTheGateSlotsItsKindMayTake,
+  testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile,
   testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
