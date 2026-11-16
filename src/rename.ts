@@ -1136,9 +1136,19 @@ interface MoveArguments {
   readonly exists: (path: string) => boolean;
 }
 
+/**
+ * How a string literal is written: with GDScript's escapes, as a raw string with none, with the
+ * escapes of Godot's text formats, or as plain text that no engine decodes.
+ */
+type Spelling = 'gdscript' | 'raw' | 'text' | 'plain';
+
 interface Literal {
   readonly offset: number;
+  /** The contents as written in the file, escapes undecoded. */
   readonly value: string;
+  readonly spelling: Spelling;
+  /** The quote the literal is written in. */
+  readonly quote: string;
   /**
    * What a relative path here is read against: the file's folder or the project's root. Null where
    * it is no path.
@@ -1196,6 +1206,11 @@ function relativeBase(file: ProjectText, offset: number): Literal['base'] {
 
 const PLAIN_STRING = /"((?:[^"\\\n]|\\.)*)"/g;
 
+/** How a GDScript string with [param prefix] before its quote is written: `r` makes it raw. */
+function gdscriptSpelling(prefix: string): Spelling {
+  return prefix.includes('r') ? 'raw' : 'gdscript';
+}
+
 /** Every string literal of [param file], with where its contents start. */
 function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
   const found: Literal[] = [];
@@ -1217,24 +1232,112 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
       found.push({
         offset,
         value: literal.slice(quote.index + 1, -1),
+        spelling: gdscriptSpelling(literal.slice(0, quote.index)),
+        quote: quote[0],
         base: relativeBase(file, offset),
       });
     }
     return found;
   }
+  const spelling = SEMICOLON_COMMENTS.test(file.path) ? 'text' : 'plain';
   for (const match of file.text.matchAll(PLAIN_STRING)) {
     found.push({
       offset: match.index + 1,
       value: match[1] ?? '',
+      spelling,
+      quote: '"',
       base: relativeBase(file, match.index + 1),
     });
   }
   return found;
 }
 
+const GDSCRIPT_ESCAPES: ReadonlyMap<string, string> = new Map([
+  ['a', '\u0007'],
+  ['b', '\b'],
+  ['f', '\f'],
+  ['n', '\n'],
+  ['r', '\r'],
+  ['t', '\t'],
+  ['v', '\v'],
+  ["'", "'"],
+  ['"', '"'],
+  ['\\', '\\'],
+  ['\n', ''],
+]);
+const TEXT_ESCAPES: ReadonlyMap<string, string> = new Map([
+  ['b', '\b'],
+  ['f', '\f'],
+  ['n', '\n'],
+  ['r', '\r'],
+  ['t', '\t'],
+]);
+const ESCAPE = /\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{6})|([\s\S]))/g;
+const CONTROL_CHARACTER = /\p{Cc}/u;
+
 /**
- * Whether GDScript or a scene reads [param written] with an escape such as `\t`: a doubled
- * backslash is a backslash, and any other is the start of one.
+ * [param value] as the engine reads it, or null where it reads none. GDScript's tokenizer
+ * (`gdscript_tokenizer.cpp`, `string`) takes the escapes of [constant GDSCRIPT_ESCAPES], with
+ * `\u` and `\U` hexadecimal and any other an error, and a raw string has none. The variant parser
+ * of Godot's text formats (`variant_parser.cpp`, `get_token`) takes those of
+ * [constant TEXT_ESCAPES], and any other character after a backslash stands for itself.
+ */
+function decodedValue(value: string, spelling: Spelling): string | null {
+  if (spelling === 'raw' || spelling === 'plain') {
+    return value;
+  }
+  const escapes = spelling === 'gdscript' ? GDSCRIPT_ESCAPES : TEXT_ESCAPES;
+  const refused: string[] = [];
+  const text = value.replaceAll(ESCAPE, (all, short?: string, long?: string, other?: string) => {
+    const hex = short ?? long;
+    if (hex !== undefined) {
+      const point = Number.parseInt(hex, 16);
+      if (point > 0x10ffff) {
+        refused.push(all);
+        return '';
+      }
+      return String.fromCodePoint(point);
+    }
+    const char = other ?? '';
+    const known = escapes.get(char);
+    if (/[uU]/.test(char) || (known === undefined && spelling !== 'text')) {
+      refused.push(all);
+    }
+    return known ?? char;
+  });
+  return refused.length === 0 ? text : null;
+}
+
+/** What the engine reads a string literal's path as. */
+interface Reading {
+  /** The `*` an autoload entry starts with, or nothing. */
+  readonly autoload: string;
+  /** The text after it, escapes decoded. */
+  readonly text: string;
+  /** `text` with each backslash a separator, as `String::simplify_path` takes it. */
+  readonly read: string;
+}
+
+/**
+ * How the engine reads [param literal], or null where it names no file: an escape the engine
+ * refuses, or a control character such as the tab of `\t`. In every platform's Godot a backslash
+ * in a path is a separator: `ResourceLoader` and `ProjectSettings.localize_path` simplify the path
+ * first (`resource_loader.cpp` `_validate_local_path`, `project_settings.cpp` `localize_path`),
+ * and `String::simplify_path` (`ustring.cpp`) turns each into a slash before it folds `.` and
+ * `..`. Plain text no engine decodes keeps its backslashes as names.
+ */
+function readingOf(literal: Literal): Reading | null {
+  const autoload = literal.value.startsWith('*') ? '*' : '';
+  const text = decodedValue(literal.value.slice(autoload.length), literal.spelling);
+  if (text === null || CONTROL_CHARACTER.test(text)) {
+    return null;
+  }
+  return { autoload, text, read: literal.spelling === 'plain' ? text : text.replaceAll('\\', '/') };
+}
+
+/**
+ * Whether [param written], plain text no engine decodes, holds a single backslash: prose or a note
+ * naming `\t`, which names no path. A doubled one stays a path.
  */
 function readWithAnEscape(written: string): boolean {
   return written.replaceAll('\\\\', '').includes('\\');
@@ -1242,21 +1345,21 @@ function readWithAnEscape(written: string): boolean {
 
 /**
  * The res:// path [param literal] of the file [param from] names, or null where it names none: a
- * path written in full, or a relative one a file or `load` reads, against its base. A relative
- * string the engine reads with an escape names no path of this disk's.
+ * path written in full, or a relative one a file or `load` reads, against its base.
  */
 function targetOf(literal: Literal, from: string): string | null {
-  const written = literal.value.startsWith('*') ? literal.value.slice(1) : literal.value;
-  if (written === '' || written.includes('\n')) {
+  const read = readingOf(literal)?.read;
+  if (read === undefined || read === '') {
     return null;
   }
-  if (written.startsWith('res://')) {
-    return resolvedPath(written, from);
+  if (read.startsWith('res://')) {
+    return resolvedPath(read, from);
   }
-  if (literal.base === null || written.startsWith('uid://') || readWithAnEscape(written)) {
+  const plain = literal.spelling === 'plain';
+  if (literal.base === null || read.startsWith('uid://') || (plain && readWithAnEscape(read))) {
     return null;
   }
-  const target = resolvedPath(written, literal.base === 'root' ? 'res://_' : from);
+  const target = resolvedPath(read, literal.base === 'root' ? 'res://_' : from);
   return target.startsWith('res://..') ? null : target;
 }
 
@@ -1472,35 +1575,72 @@ function movedLiteral(
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
 ): { offset: number; length: number; replacement: string } | null {
-  const autoload = literal.value.startsWith('*') ? '*' : '';
-  const written = literal.value.slice(autoload.length);
-  if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
+  const reading = readingOf(literal);
+  if (reading === null || reading.read === '' || reading.read.startsWith('uid://')) {
     return null;
   }
-  const replacement = movedPath(written, literal.base, from, goesTo, moves, exists);
+  const moved = movedPath(reading.read, literal.base, from, goesTo, moves, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
-  if (replacement === null || replacement === written) {
+  if (moved === null || moved === reading.read) {
     return null;
   }
-  return { offset: literal.offset + autoload.length, length: written.length, replacement };
+  const replacement = spelledAs(moved, reading, literal);
+  const { autoload } = reading;
+  return replacement === null
+    ? null
+    : {
+        offset: literal.offset + autoload.length,
+        length: literal.value.length - autoload.length,
+        replacement,
+      };
 }
 
-/** [param written] as it must read once [param from] or the file it names has moved, or null. */
+/** The number of `..` parts a path of [param parts] starts with. */
+function upwardsIn(parts: readonly string[]): number {
+  const stay = parts.findIndex((part) => part !== '..');
+  return stay === -1 ? parts.length : stay;
+}
+
+/**
+ * [param path], a path with slashes, written into [param literal] as its [param original] was: the
+ * separator the original used, though a step upwards it did not have is a slash, and the escapes
+ * and quote of the literal. Null where a raw string cannot hold the path.
+ */
+function spelledAs(path: string, original: Reading, literal: Literal): string | null {
+  if (literal.spelling === 'plain') {
+    return path;
+  }
+  const prefix = path.startsWith('res://') ? 'res://' : '';
+  const own = original.text.startsWith('res://') ? original.text.slice('res://'.length) : original.text;
+  const separator = /[\\/]+/.exec(own)?.[0] ?? '/';
+  const given = upwardsIn(own.split(/[\\/]+/));
+  const parts = path.slice(prefix.length).split('/');
+  const up = upwardsIn(parts);
+  const joined = parts
+    .map((part, at) => (at === parts.length - 1 ? part : part + (at >= up || at < given ? separator : '/')))
+    .join('');
+  if (literal.spelling === 'raw') {
+    return joined.includes(literal.quote) ? null : prefix + joined;
+  }
+  return prefix + joined.replaceAll('\\', '\\\\').replaceAll(literal.quote, `\\${literal.quote}`);
+}
+
+/** [param read] as it must read once [param from] or the file it names has moved, or null. */
 function movedPath(
-  written: string,
+  read: string,
   base: Literal['base'],
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
   exists: (path: string) => boolean,
 ): string | null {
-  const isAbsolute = written.startsWith('res://');
+  const isAbsolute = read.startsWith('res://');
   if (!isAbsolute && base === null) {
     return null;
   }
   const fromRoot = base === 'root' && !isAbsolute;
-  const target = resolvedPath(written, fromRoot ? 'res://_' : from);
+  const target = resolvedPath(read, fromRoot ? 'res://_' : from);
   const targetGoesTo = moves.get(target);
   if (targetGoesTo !== undefined) {
     if (fromRoot) {
@@ -1508,7 +1648,7 @@ function movedPath(
     }
     return isAbsolute ? targetGoesTo : relativeTo(targetGoesTo, goesTo ?? from);
   }
-  if (goesTo !== undefined && !isAbsolute && !fromRoot && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
+  if (goesTo !== undefined && !isAbsolute && !fromRoot && /\.[a-z0-9]+$/i.test(read) && exists(target)) {
     return relativeTo(target, goesTo);
   }
   return null;

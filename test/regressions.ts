@@ -89156,8 +89156,11 @@ function assertLoads(project: string, scene: string, names: readonly string[]): 
   }
 }
 
-/** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
-function loadedNames(project: string, scene: string): string[] | null {
+/**
+ * What a headless engine prints running [param runner], a `SceneTree` script, in [param project],
+ * or null where no engine is there to run it.
+ */
+function headlessOutput(project: string, runner: string): string | null {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -89166,8 +89169,18 @@ function loadedNames(project: string, scene: string): string[] | null {
     console.log('loading the moved scene skipped (Godot not found)');
     return null;
   }
-  writeFileSync(
-    join(project, 'runner.gd'),
+  writeFileSync(join(project, 'runner.gd'), runner);
+  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  return `${run.stdout}\n${run.stderr}`;
+}
+
+/** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
+function loadedNames(project: string, scene: string): string[] | null {
+  const output = headlessOutput(
+    project,
     [
       'extends SceneTree',
       '',
@@ -89185,13 +89198,51 @@ function loadedNames(project: string, scene: string): string[] | null {
       '',
     ].join('\n'),
   );
-  const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--script', 'res://runner.gd'], {
-    encoding: 'utf8',
-    timeout: 120000,
-  });
-  const answered = /NAMES (\[.*\])/.exec(`${run.stdout}\n${run.stderr}`)?.[1];
-  assert.ok(answered !== undefined, `${run.stdout}\n${run.stderr}`);
+  if (output === null) {
+    return null;
+  }
+  const answered = /NAMES (\[.*\])/.exec(output)?.[1];
+  assert.ok(answered !== undefined, output);
   return asArray(JSON.parse(answered)).map(String);
+}
+
+/**
+ * That each script of [param scripts] loads in a headless engine and can make an instance, which a
+ * `preload` naming no file prevents, where an engine is there. A path of [param absent] must name
+ * no file to the engine.
+ */
+function assertScriptsLoad(
+  project: string,
+  scripts: readonly string[],
+  absent: readonly string[] = [],
+): void {
+  const output = headlessOutput(
+    project,
+    [
+      'extends SceneTree',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tvar answers: Array[String] = []',
+      ...scripts.flatMap((path, at) => [
+        `\tvar script${at}: Script = load("${path}")`,
+        `\tanswers.append(str(script${at} != null and script${at}.can_instantiate()))`,
+      ]),
+      ...absent.map((path) => `\tanswers.append(str(not ResourceLoader.exists("${path}")))`),
+      '\tprint("ANSWERS " + JSON.stringify(answers))',
+      '\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+  if (output !== null) {
+    const answered = /ANSWERS (\[.*\])/.exec(output)?.[1];
+    assert.ok(answered !== undefined, output);
+    assert.deepEqual(
+      asArray(JSON.parse(answered)).map(String),
+      [...scripts, ...absent].map(() => 'true'),
+      `${scripts.join(', ')} load${absent.length > 0 ? ` and ${absent.join(', ')} name no file` : ''}: ${output}`,
+    );
+  }
 }
 
 /**
@@ -89546,34 +89597,192 @@ function testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth(): void {
   }
 }
 
+/** A scene with one ext_resource at [param path], written as it is, and a root N. */
+function sceneNaming(path: string): string {
+  return `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
+}
+
 /**
- * A path is split into parts on slashes only. `res://sub\..\DESK.tscn` is one part, which the disk
- * takes for the moved `desk.tscn` and so follows it. `res://SUB\desk.tscn` is one part against the
- * two of the moved `sub/desk.tscn`, and stays as written.
+ * A backslash is a separator in a path Godot reads, on every platform, so a move follows
+ * `res://sub\..\desk.tscn` and `res://SUB\desk.tscn` as it follows the slashes. A scene writes each
+ * backslash doubled, as does a script, and a raw string writes it single. The new path keeps the
+ * separator written, and the scene and the script still load.
  */
-function testAPathIsSplitIntoPartsOnSlashesOnly(): void {
-  const named = (path: string): string =>
-    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="${path}" id="1_desk"]\n\n[node name="N" type="Node3D"]\n`;
+function testABackslashIsASeparatorInAPathGodotReads(): void {
   const up = caseMoveProject(
-    { 'desk.tscn': LINKED_DESK, 'sub/x.gd': '', 'up.tscn': named('res://sub\\..\\DESK.tscn') },
+    {
+      'desk.tscn': LINKED_DESK,
+      'sub/x.gd': '',
+      'up.tscn': sceneNaming('res://sub\\\\..\\\\DESK.tscn'),
+      'up.gd': 'extends Node\n\nconst A := preload(r"res://sub\\..\\desk.tscn")\n',
+    },
     'DESK.tscn',
   );
   const down = caseMoveProject(
-    { 'sub/desk.tscn': LINKED_DESK, 'back.tscn': named('res://SUB\\desk.tscn') },
+    { 'sub/desk.tscn': LINKED_DESK, 'back.tscn': sceneNaming('res://SUB\\\\desk.tscn') },
     'SUB',
   );
   try {
-    const reads = existsSync(join(up.project, 'sub\\..\\DESK.tscn'));
     movedIn(up.project, 'desk.tscn', 'newdir/desk.tscn');
+    const read = (project: string, file: string): string => readFileSync(join(project, file), 'utf8');
     assert.equal(
-      readFileSync(join(up.project, 'up.tscn'), 'utf8'),
-      named(reads ? 'res://newdir/desk.tscn' : 'res://sub\\..\\DESK.tscn'),
+      read(up.project, 'up.tscn'),
+      sceneNaming(up.folds ? 'res://newdir\\\\desk.tscn' : 'res://sub\\\\..\\\\DESK.tscn'),
+    );
+    assert.equal(
+      read(up.project, 'up.gd'),
+      'extends Node\n\nconst A := preload(r"res://newdir\\desk.tscn")\n',
     );
     movedIn(down.project, 'sub/desk.tscn', 'newdir/desk.tscn');
-    assert.equal(readFileSync(join(down.project, 'back.tscn'), 'utf8'), named('res://SUB\\desk.tscn'));
+    assert.equal(
+      read(down.project, 'back.tscn'),
+      sceneNaming(down.folds ? 'res://newdir\\\\desk.tscn' : 'res://SUB\\\\desk.tscn'),
+    );
+    assertScriptsLoad(up.project, ['res://up.gd']);
+    if (up.folds) {
+      assertLoads(up.project, 'res://up.tscn', ['N']);
+    }
+    if (down.folds) {
+      assertLoads(down.project, 'res://back.tscn', ['N']);
+    }
   } finally {
     sweep(up.project);
     sweep(down.project);
+  }
+}
+
+/**
+ * A scene's `\\\\` is two backslashes once read, which Godot folds into one separator: a move
+ * follows `res://sub\\\\desk.tscn` and writes the new path with the same two, as the scene loads.
+ */
+function testADoubledBackslashInASceneIsOneSeparator(): void {
+  const { project } = caseMoveProject(
+    { 'sub/desk.tscn': LINKED_DESK, 'use.tscn': sceneNaming('res://sub\\\\\\\\desk.tscn') },
+    'SUB',
+  );
+  try {
+    movedIn(project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(project, 'use.tscn'), 'utf8'),
+      sceneNaming('res://newdir\\\\\\\\desk.tscn'),
+    );
+    assertLoads(project, 'res://use.tscn', ['N']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A folder move leaves a moved script's own `"sub\\b.tres"` and `r"sub\b.tres"` as written: they
+ * name the same file beside it afterwards. The script still loads.
+ */
+function testAFolderMoveKeepsABackslashPathBetweenItsFiles(): void {
+  const script = 'extends Node\n\nconst S := preload("sub\\\\b.tres")\nconst R := preload(r"sub\\b.tres")\n';
+  const { project } = caseMoveProject(
+    { 'a/sub/b.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n', 'a/x.gd': script },
+    'A/x.gd',
+  );
+  try {
+    movedIn(project, 'a', 'newdir/a');
+    assert.equal(readFileSync(join(project, 'newdir', 'a', 'x.gd'), 'utf8'), script);
+    assertScriptsLoad(project, ['res://newdir/a/x.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A relative `"ART\\desk.tscn"` in another case follows a move of `art/desk.tscn` as the slash
+ * spelling does, with the backslash it was written with, and the script still loads. Where the
+ * file system keeps case, the other case stays.
+ */
+function testAMoveFollowsABackslashPathInAnotherCase(): void {
+  const { project, folds } = caseMoveProject(
+    {
+      'art/desk.tscn': LINKED_DESK,
+      'use.gd':
+        'extends Node\n\nconst A := preload("ART\\\\desk.tscn")\nconst B := preload("art\\\\desk.tscn")\n',
+    },
+    'ART/desk.tscn',
+  );
+  try {
+    movedIn(project, 'art/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      readFileSync(join(project, 'use.gd'), 'utf8'),
+      `extends Node\n\nconst A := preload("${folds ? 'newdir\\\\desk.tscn' : 'ART\\\\desk.tscn'}")\nconst B := preload("newdir\\\\desk.tscn")\n`,
+    );
+    if (folds) {
+      assertScriptsLoad(project, ['res://use.gd']);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * An absolute `"res://\tdesk.tscn"` reads a tab where a name starts and names no file, though the
+ * disk would take its backslash for a separator and reach `tdesk.tscn`. It stays when that file
+ * moves, and Godot finds nothing at the path.
+ */
+function testAMoveLeavesAnAbsoluteStringReadWithATab(): void {
+  const use = 'extends Node\n\nconst A := "res://\\tdesk.tscn"\nconst B := "\\tdesk.tscn"\n';
+  const { project } = caseMoveProject({ 'tdesk.tscn': LINKED_DESK, 'use.gd': use }, 'TDESK.tscn');
+  try {
+    movedIn(project, 'tdesk.tscn', 'newdir/tdesk.tscn');
+    assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), use);
+    assertScriptsLoad(project, ['res://use.gd'], ['res://\\tdesk.tscn']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A raw string has no escapes, so `r"levels\tutorial.tscn"` is `levels/tutorial.tscn` and follows a
+ * move, while `"levels\tutorial.tscn"` beside it holds a tab and stays. The script still loads.
+ */
+function testAMoveFollowsARawStringAndLeavesTheEscapeBesideIt(): void {
+  const { project } = caseMoveProject(
+    {
+      'levels/tutorial.tscn': LINKED_DESK,
+      'use.gd':
+        'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst R := preload(r"levels\\tutorial.tscn")\n',
+    },
+    'LEVELS/tutorial.tscn',
+  );
+  try {
+    movedIn(project, 'levels/tutorial.tscn', 'newdir/tutorial.tscn');
+    assert.equal(
+      readFileSync(join(project, 'use.gd'), 'utf8'),
+      'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst R := preload(r"newdir\\tutorial.tscn")\n',
+    );
+    assertScriptsLoad(project, ['res://use.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class rename that moves its script reads a path written with backslashes as Godot does: the
+ * preload of `res://sub\..\player.gd` follows, and the string naming a tab before `player.gd` stays.
+ */
+async function testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes(): Promise<void> {
+  const { project } = caseMoveProject(
+    {
+      'player.gd': 'class_name Player\nextends Node\n',
+      'sub/x.gd': '',
+      'user.gd':
+        'extends Node\n\nconst A := preload("res://sub\\\\..\\\\player.gd")\nconst B := "res://\\tplayer.gd"\n',
+    },
+    'PLAYER.gd',
+  );
+  try {
+    await renamePlayerAndMoveItsScript(project);
+    assert.equal(
+      readFileSync(join(project, 'user.gd'), 'utf8'),
+      'extends Node\n\nconst A := preload("res://hero.gd")\nconst B := "res://\\tplayer.gd"\n',
+    );
+  } finally {
+    sweep(project);
   }
 }
 
@@ -89789,7 +89998,7 @@ function testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles(): void
  * for a separator and so reaches `tdesk.tscn`. Both stay as written.
  */
 function testAMoveLeavesAStringReadWithAnEscape(): void {
-  const levels = 'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst B := "levels\\\\tutorial.tscn"\n';
+  const levels = 'extends Node\n\nconst A := "levels\\tutorial.tscn"\n';
   const tab = 'extends Node\n\nconst A := "\\tdesk.tscn"\n';
   const down = caseMoveProject(
     { 'levels/tutorial.tscn': LINKED_DESK, 'use.gd': levels },
@@ -89830,6 +90039,7 @@ function testAMovedScriptKeepsItsRawStringReaching(): void {
         ? 'extends Node\n\nconst B := preload(r"../sub\\b.tres")\n'
         : 'extends Node\n\nconst B := preload(r"sub\\b.tres")\n',
     );
+    assertScriptsLoad(project, ['res://newdir/a.gd']);
   } finally {
     sweep(project);
   }
@@ -107222,7 +107432,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedScriptKeepsItsRawStringReaching,
   testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth,
-  testAPathIsSplitIntoPartsOnSlashesOnly,
+  testABackslashIsASeparatorInAPathGodotReads,
+  testADoubledBackslashInASceneIsOneSeparator,
+  testAFolderMoveKeepsABackslashPathBetweenItsFiles,
+  testAMoveFollowsABackslashPathInAnotherCase,
+  testAMoveLeavesAnAbsoluteStringReadWithATab,
+  testAMoveFollowsARawStringAndLeavesTheEscapeBesideIt,
+  testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes,
   testReferencesInOtherFoldersCostOneQuestionEachFolder,
   testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
