@@ -202,6 +202,7 @@ export const REGRESSION_SECONDS: Readonly<
     testOptionsWrittenAreSaidWhenTheirReimportFails: 5,
     testAnEditAskedByEitherPathOfALinkInsideFollowsBoth: 5,
     testEachSceneIsFollowedOnceUnderOnePath: 5,
+    testACommandIsTakenWhenTheThreadItWentToAnswers: 5,
   },
   win32: {
     testTheTestCommandDealsAndReportsARun: 198,
@@ -459,6 +460,7 @@ export const REGRESSION_SECONDS: Readonly<
     testARunThatQuitsAtOnceOnItsOwnDesktopEnds: 5,
     testFilesWhoseNamesOnlyLoweringJoinsAreEachFollowed: 5,
     testASaveThroughAFileLinkToAnotherNameKeepsTheLink: 5,
+    testACommandIsTakenWhenTheThreadItWentToAnswers: 5,
   },
   darwin: {
     testAReimportReimportsThroughTheEngine: 160,
@@ -697,6 +699,7 @@ export const REGRESSION_SECONDS: Readonly<
     testAnEditAskedByEitherPathOfALinkInsideFollowsBoth: 5,
     testAMoveAndADeleteAskedThroughALinkInsideAreFollowed: 5,
     testRelativePathsBehindALinkOutAreLeft: 5,
+    testACommandIsTakenWhenTheThreadItWentToAnswers: 5,
   },
 };
 
