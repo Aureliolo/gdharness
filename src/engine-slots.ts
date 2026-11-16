@@ -608,12 +608,6 @@ interface GateLook {
   readonly since: readonly number[];
 }
 
-/** What a gate's mark and its seat say, the newest seat's time included. */
-interface GateMarks {
-  readonly live: number;
-  readonly newestSeat: number;
-}
-
 /**
  * The slot numbers of [param count] a take by [param taker] may try now, in the order it tries
  * them, and what holds it to them, given [param queue]. A gate's engine takes the first count less
@@ -1635,7 +1629,7 @@ export class EngineSlots {
   }
 
   /** The live gates' marks in the queue folder, and when the newest of them was seated. */
-  private async gateMarks(): Promise<GateMarks> {
+  private async gateMarks(): Promise<{ live: number; newestSeat: number }> {
     const folder = join(this.directory, QUEUED_FOLDER);
     let names: string[];
     try {
