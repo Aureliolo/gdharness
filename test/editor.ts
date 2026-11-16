@@ -1587,7 +1587,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   try {
     await server.initialize('editor-fixture');
 
-    await timed('the editor start', async () => await waitForTheBridge({ editor, engineOutput, invoke }));
+    await sayHowLong('the editor start', () => waitForTheBridge({ editor, engineOutput, invoke }));
 
     const printed = (): string => engineOutput.join('');
     await body({
@@ -5126,7 +5126,9 @@ async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): P
   // A headless engine records the file first, which is the state the editor's own scan goes past:
   // change-detecting, and the file already looks imported. That is what made the class invisible
   // to the editor downstream while being correct everywhere on disk.
+  const probeBegan = performance.now();
   const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  console.log(`PROBE refresh_classes ${Math.round(performance.now() - probeBegan)}ms`);
   assert.ok(
     readFileSync(cache, 'utf8').includes('OfferedClass'),
     `the rebuild should have written it: ${text(rebuilt)}`,
@@ -5141,7 +5143,11 @@ async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): P
     `the editor should be blind to the new class, or this proves nothing: ${blind.length} unseen`,
   );
 
+  const scanBegan = performance.now();
   const scanned = await call('editor_rescan', { projectPath: project });
+  console.log(
+    `PROBE editor_rescan ${Math.round(performance.now() - scanBegan)}ms ${JSON.stringify({ ...asObject(scanned), broughtIn: undefined }).slice(0, 2000)}`,
+  );
   const after = readFileSync(cache, 'utf8');
   const missing = ['OfferedClass', 'Filler0', 'Filler399'].filter((name) => !after.includes(name));
   // What the caller following that advice is entitled to, whichever way the scan went: the class
@@ -9447,7 +9453,7 @@ async function testAnEvaluateNamesAGlobalClassThatDoesNotParse({
 }
 
 /** Runs [param run] and says how long it took, so a leg nearing its limit shows which cases grew. */
-async function timed(name: string, run: () => Promise<void>): Promise<void> {
+async function sayHowLong(name: string, run: () => Promise<void>): Promise<void> {
   const began = performance.now();
   await run();
   console.log(`${name} took ${((performance.now() - began) / 1000).toFixed(1)}s`);
@@ -9582,13 +9588,13 @@ async function main(): Promise<void> {
   if (chosen.length > 0) {
     await withEditor(godotPath, async (editor) => {
       for (const [name, run] of chosen) {
-        await timed(name, async () => await run(editor));
+        await sayHowLong(name, () => run(editor));
       }
     });
   }
   // After the shared pair has been taken down, so only one editor is up at a time.
   for (const [name, run] of alone) {
-    await timed(name, async () => await run(godotPath));
+    await sayHowLong(name, () => run(godotPath));
   }
 
   console.log(`editor tests passed (${chosen.length + alone.length})`);
