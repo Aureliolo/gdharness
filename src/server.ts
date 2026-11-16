@@ -98,6 +98,7 @@ import {
   type StoppedAt,
 } from './dap_client.js';
 import {
+  desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
@@ -1861,6 +1862,11 @@ interface AfterWaiting {
    * looks again, and was answered as one that never announced.
    */
   readonly runtimeCameUp?: boolean;
+  /**
+   * Why the desktop's helper ended the game on a message box nobody can press, which a game that
+   * could not create a renderer opens. Nothing is coming from a game ended there.
+   */
+  readonly endedOnABox?: string;
 }
 
 /**
@@ -1923,6 +1929,9 @@ export function runtimeVerdict(
       port: endpoint.port,
       ...(endpoint.userDir === undefined ? {} : { userDir: endpoint.userDir }),
     };
+  }
+  if (after.endedOnABox !== undefined) {
+    return { listening: false, mayYetAnnounce: false, note: after.endedOnABox, heldAt: null };
   }
   if (!after.addon) {
     return {
@@ -10062,6 +10071,11 @@ class GodotServer {
         `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
       );
     }
+    const onABox = onDesktop ? desktopBoxEnding(run.log.all) : null;
+    if (onABox !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(`The tests did not finish: ${onABox}`);
+    }
     return await this.testRead({
       ...prepared,
       run,
@@ -14128,8 +14142,10 @@ class GodotServer {
     if (going !== null && !running) {
       this.drainTranscript(going);
     }
+    const endedOnABox = going === null || running ? null : desktopBoxEnding(going.log.all);
     const verdict = runtimeVerdict(endpoint, {
       addon: true,
+      ...(endedOnABox === null ? {} : { endedOnABox }),
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
       heldAt: await this.whereTheStartedGameIsHeld(going, endpoint === null && running),

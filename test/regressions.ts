@@ -790,6 +790,7 @@ import {
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, readPng, solidPng } from './support/png.js';
+import { REAL_ENGINE_VARIABLE, rendererLessEngine } from './support/renderer-less-engine.js';
 import {
   bandWalk,
   listenOnAReservedPort,
@@ -19790,6 +19791,219 @@ async function quitsAtOnceOnItsOwnDesktop(project: string, runtime: string): Pro
     typeof asked === 'object' && 'unreached' in asked,
     `which has gone, since what it held has: ${JSON.stringify(asked)}`,
   );
+}
+
+/** What a run reads when the engine on the hidden desktop could not create a renderer, lines included. */
+const NO_RENDERER_VERDICT =
+  /the windowed engine could not create a renderer on the hidden desktop.*Can't initialize an EGL display.*Failed to create ANGLE OpenGL window.*headless/s;
+
+/** How long a run on a lost renderer is given to end, against the minutes a hung box took. */
+const NO_RENDERER_END_MS = 60_000;
+
+/**
+ * An engine that cannot create a renderer on the hidden desktop opens a box nobody can press, and
+ * waited on it until the caller's limit. An engine run for an export ends at once now, and names
+ * the renderer in its failure with the engine's own lines. The engine is a stand-in printing what
+ * Godot prints and opening the box Godot opens.
+ */
+async function testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('no-renderer run regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-run-'));
+  try {
+    const began = Date.now();
+    const run = await Promise.race([
+      runEngine(rendererLessEngine(), ['--path', scratch], { desktop: { directory: scratch, scratch } }),
+      delay(NO_RENDERER_END_MS * 2).then(() => null),
+    ]);
+    assert.ok(run !== null, 'the run ends rather than waiting on the box');
+    assert.match(run.failure ?? '', NO_RENDERER_VERDICT, `the failure names the renderer: ${run.failure}`);
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it ends at once');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * The same engine under the watch every suite run uses, which names the end it gave the engine.
+ */
+async function testATestEngineThatMakesNoRendererEnds(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('no-renderer watch regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-watch-'));
+  try {
+    const directory = join(scratch, 'engine');
+    mkdirSync(directory);
+    const began = Date.now();
+    const end = await watchedEngine(
+      {
+        godotPath: rendererLessEngine(),
+        projectPath: scratch,
+        deadlineSeconds: 300,
+        running: new Set<() => void>(),
+        cores: null,
+      },
+      join(scratch, '0.lock'),
+      ['--path', scratch],
+      directory,
+      join(directory, 'engine.log'),
+      300,
+    );
+    assert.match(end.ended ?? '', NO_RENDERER_VERDICT, `the end names the renderer: ${end.ended}`);
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it comes at once');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A windowed suite run on a machine whose engine makes no renderer ends with a verdict naming it,
+ * through project_test and through the test command. Windows opens the box the engine shows on a
+ * desktop nobody can press on, and both runs waited on it until their limit. The engine hands
+ * every start that needs no window to the real one, so the import and the listing work.
+ */
+async function testAWindowedSuiteWhoseEngineMakesNoRendererEnds(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('no-renderer suite regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
+  const lacking = rendererLessEngine();
+  try {
+    const began = Date.now();
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--import', 'tests/window_test.gd'],
+      {
+        encoding: 'utf8',
+        env: { ...env, GODOT_PATH: lacking, [REAL_ENGINE_VARIABLE]: engines.godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.notEqual(ran.status, 0, `the run fails: ${said}`);
+    assert.match(said, NO_RENDERER_VERDICT, `the test command names the renderer: ${said}`);
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS * 3, 'and ends before its limit');
+
+    await withStdioServer(
+      async (call) => {
+        const asked = Date.now();
+        const answer = await call(
+          'project_test',
+          { projectPath: project, path: 'res://tests/window_test.gd' },
+          4 * ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.match(answer, NO_RENDERER_VERDICT, `project_test names the renderer: ${answer}`);
+        assert.ok(Date.now() - asked < NO_RENDERER_END_MS * 3, 'and ends before its limit');
+      },
+      { GODOT_PATH: lacking, [REAL_ENGINE_VARIABLE]: engines.godotPath },
+    );
+  } finally {
+    await endEnginesUnder(project);
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A game started windowed on a machine whose engine makes no renderer is answered as one that will
+ * not announce, with the renderer named, rather than as one that may yet announce. Its box is one
+ * nobody can press, and the start waited out its whole budget for a game that could never come up.
+ * Then the case's own folders go, the run's note included, which the keeper writes last.
+ */
+async function testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('no-renderer start regression skipped (Godot not found)');
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('no-renderer start regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-start-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-start-rt-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: rendererLessEngine(),
+      [REAL_ENGINE_VARIABLE]: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtime,
+    },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="No renderer"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const began = Date.now();
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    const announced = get(parseTextContent(started), 'runtime');
+    assert.equal(get(announced, 'listening'), false, `nothing listens: ${textOf(started)}`);
+    assert.equal(get(announced, 'mayYetAnnounce'), false, `and nothing is coming: ${textOf(started)}`);
+    assert.match(
+      String(get(announced, 'note')),
+      NO_RENDERER_VERDICT,
+      `the note says why: ${textOf(started)}`,
+    );
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and the start answers at once');
+  } finally {
+    await server.stop().catch(() => undefined);
+    await sweepAKeeperCase(project, runtime);
+  }
+  assert.equal(existsSync(runtime), false, 'the run folder goes with the case');
+}
+
+/**
+ * Ends what a case that went through the keeper left running, waits for the run's note to hold its
+ * end, and only then removes the case's folders. A keeper writes the note as the game it holds ends,
+ * and one written after the removal put the folder back.
+ */
+async function sweepAKeeperCase(project: string, runtime: string): Promise<void> {
+  await endEnginesUnder(project);
+  const note = runRecordPath(project, runtime);
+  for (let waited = 0; waited < 15_000 && existsSync(note); waited += 100) {
+    let record: unknown = null;
+    try {
+      record = JSON.parse(readFileSync(note, 'utf8'));
+    } catch {
+      // Being written, so it is read again.
+    }
+    if (get(record, 'exitCode') !== undefined || get(record, 'endedAt') !== undefined) {
+      break;
+    }
+    await delay(100);
+  }
+  sweep(project, runtime);
 }
 
 /**
@@ -110268,6 +110482,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
+  testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds,
+  testATestEngineThatMakesNoRendererEnds,
+  testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
+  testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce,
   testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
