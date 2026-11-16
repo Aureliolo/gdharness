@@ -66178,6 +66178,48 @@ async function testEveryReaderHoldsAnEmptySlotLockAsHeld(): Promise<void> {
 }
 
 /**
+ * A taker waiting ahead is left the free slots its own kind may take, the gates' ones included while
+ * no gate is queued and the spare ones while a count gives some. A newcomer finds none of them.
+ */
+async function testATakerAheadClaimsTheGateSlotsItsKindMayTake(): Promise<void> {
+  const started = await ownStart();
+  const me = { pid: process.pid, started };
+  const waiting = (directory: string): void => {
+    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
+    writeFileSync(
+      join(directory, WAITING_FOLDER, '1-1.json'),
+      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }),
+    );
+  };
+  const open = slotsWithGatesQueued({}, [12, 13, 14, 15], started);
+  const spare = eightSlotsWithTheKeptOnesHeld(
+    started,
+    true,
+    [0, 1, 2, 3],
+    `{"spare": 1, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
+  );
+  try {
+    waiting(open);
+    waiting(spare);
+    const free = new EngineSlots(open, 16, me, undefined, () => 'other');
+    const lock = await free.takeFree();
+    assert.equal(
+      lock === null ? null : basename(lock),
+      '10.lock',
+      'the highest gate slot is left to the one ahead',
+    );
+    const counted = new EngineSlots(spare, 8, me, undefined, () => 'other');
+    assert.equal(await counted.takeFree(), null, 'and so is the one spare gate slot');
+    assert.deepEqual(counted.drawn.left, [5], JSON.stringify(counted.drawn));
+    free.releaseAll();
+    counted.releaseAll();
+  } finally {
+    rmSync(open, { recursive: true, force: true });
+    rmSync(spare, { recursive: true, force: true });
+  }
+}
+
+/**
  * An empty lock among the kept slots, which a taker is still writing, counts toward the slots games
  * hold: with a game on one of two it may take, a further game finds none to take.
  */
@@ -109166,6 +109208,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotLockIsCreatedWithoutAStagedFile,
   testEveryReaderHoldsAnEmptySlotLockAsHeld,
   testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame,
+  testATakerAheadClaimsTheGateSlotsItsKindMayTake,
   testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
