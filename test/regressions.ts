@@ -40731,7 +40731,7 @@ function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
     }
     const climbing = exportedBuild(project, `../builds/${program}`);
     assert.equal(climbing.ok && climbing.absolutePath, real, JSON.stringify(climbing));
-    assert.match(reason('../builds/missing'), /^There is no file at \.\.\/builds\/missing to start/);
+    assert.match(reason('../builds/missing'), /^There is no file at .*builds[\\/]missing to start/);
     assert.match(reason('uid://abc'), /^Path 'uid:\/\/abc' is not a path to a program/);
 
     if (process.platform === 'win32') {
