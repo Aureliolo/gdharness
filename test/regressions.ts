@@ -89763,7 +89763,7 @@ function testAMoveFollowsARawStringAndLeavesTheEscapeBesideIt(): void {
 
 /**
  * A class rename that moves its script reads a path written with backslashes as Godot does: the
- * preload of `res://sub\..\player.gd` follows, and the string naming a tab before `player.gd` stays.
+ * raw `r"sub\..\player.gd"` follows, and the string naming a tab before `player.gd` stays.
  */
 async function testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes(): Promise<void> {
   const { project } = caseMoveProject(
@@ -89771,7 +89771,7 @@ async function testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes(): Promi
       'player.gd': 'class_name Player\nextends Node\n',
       'sub/x.gd': '',
       'user.gd':
-        'extends Node\n\nconst A := preload("res://sub\\\\..\\\\player.gd")\nconst B := "res://\\tplayer.gd"\n',
+        'extends Node\n\nconst A := preload(r"sub\\..\\player.gd")\nconst B := "res://\\tplayer.gd"\n',
     },
     'PLAYER.gd',
   );
@@ -89779,7 +89779,7 @@ async function testARenameThatMovesItsScriptReadsBackslashesAsGodotDoes(): Promi
     await renamePlayerAndMoveItsScript(project);
     assert.equal(
       readFileSync(join(project, 'user.gd'), 'utf8'),
-      'extends Node\n\nconst A := preload("res://hero.gd")\nconst B := "res://\\tplayer.gd"\n',
+      'extends Node\n\nconst A := preload(r"hero.gd")\nconst B := "res://\\tplayer.gd"\n',
     );
   } finally {
     sweep(project);
