@@ -249,25 +249,29 @@ public static class GdharnessDesktop {
 
   // The process and everything it started that is still running. A parent is only a parent when it
   // began before its child, since Windows hands a pid to a later process once its owner has gone.
-  static Dictionary<uint, long> FamilyOf(uint root) {
-    Dictionary<uint, uint> parents = new Dictionary<uint, uint>();
+  static Dictionary<uint, ProcessEntry> Processes() {
+    Dictionary<uint, ProcessEntry> all = new Dictionary<uint, ProcessEntry>();
     IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
     if (snapshot != IntPtr.Zero && snapshot != new IntPtr(-1)) {
       ProcessEntry entry = new ProcessEntry();
       entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
       for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
-        parents[entry.processId] = entry.parentProcessId;
+        all[entry.processId] = entry;
       }
       CloseHandle(snapshot);
     }
+    return all;
+  }
+
+  static Dictionary<uint, long> FamilyOf(uint root, Dictionary<uint, ProcessEntry> processes) {
     Dictionary<uint, long> family = new Dictionary<uint, long>();
     family[root] = CreatedAt(root);
     bool grew = true;
     while (grew) {
       grew = false;
-      foreach (KeyValuePair<uint, uint> pair in parents) {
+      foreach (KeyValuePair<uint, ProcessEntry> pair in processes) {
         long parentBegan;
-        if (family.ContainsKey(pair.Key) || !family.TryGetValue(pair.Value, out parentBegan)) {
+        if (family.ContainsKey(pair.Key) || !family.TryGetValue(pair.Value.parentProcessId, out parentBegan)) {
           continue;
         }
         long began = CreatedAt(pair.Key);
@@ -280,45 +284,48 @@ public static class GdharnessDesktop {
     return family;
   }
 
-  // Whether the dialog is the common file dialog, which the engine shows on a thread of its own and
-  // closes itself, so the game keeps running behind it.
-  static bool IsAFileDialog(IntPtr dialog) {
-    bool file = false;
-    EnumChildWindows(dialog, delegate(IntPtr child, IntPtr also) {
-      string name = ClassOf(child);
-      if (name == "NamespaceTreeControl" || name == "SHELLDLL_DefView" || name == "ShellView") {
-        file = true;
-        return false;
-      }
+  // The engine's own process: the one the helper started, or the engine a console wrapper started
+  // in its place, which is the wrapper's only child.
+  static bool IsTheEngine(uint owner, uint root, Dictionary<uint, ProcessEntry> processes) {
+    ProcessEntry rootEntry;
+    ProcessEntry ownerEntry;
+    if (owner == root) {
       return true;
-    }, IntPtr.Zero);
-    return file;
-  }
-
-  static string ClassOf(IntPtr window) {
-    StringBuilder name = new StringBuilder(64);
-    GetClassNameW(window, name, name.Capacity);
-    return name.ToString();
+    }
+    return processes.TryGetValue(root, out rootEntry)
+      && processes.TryGetValue(owner, out ownerEntry)
+      && ownerEntry.parentProcessId == root
+      && rootEntry.exeFile.EndsWith("_console.exe", StringComparison.OrdinalIgnoreCase);
   }
 
   // A message box the process, or one it started, opened on the desktop, as the marker line a run
   // reads, or null, with the pid of the process that owns it. Nobody can press it here, so a box on
   // its main thread stops the process for good. A box on another thread stops that thread only, as a
   // worker's alert or a file dialog does, and the process runs on. Only a box of this family counts,
-  // since every engine a run starts shares the desktop.
+  // since every engine a run starts shares the desktop. The processes are listed only once a dialog
+  // is on the desktop, so a run with none costs next to nothing.
   static string BoxOf(IntPtr desktop, uint processId, out uint boxOwner) {
     string said = null;
     uint found = 0;
-    Dictionary<uint, long> family = FamilyOf(processId);
+    List<IntPtr> dialogs = new List<IntPtr>();
     EnumDesktopWindows(desktop, delegate(IntPtr window, IntPtr unused) {
+      if (HasClass(window, DialogClass)) {
+        dialogs.Add(window);
+      }
+      return true;
+    }, IntPtr.Zero);
+    boxOwner = 0;
+    if (dialogs.Count == 0) {
+      return null;
+    }
+    Dictionary<uint, ProcessEntry> processes = Processes();
+    Dictionary<uint, long> family = FamilyOf(processId, processes);
+    foreach (IntPtr window in dialogs) {
       uint owner;
       uint thread = GetWindowThreadProcessId(window, out owner);
       // Not asked whether it is visible: a window of a non-interactive station never reads as shown.
-      if (!family.ContainsKey(owner) || !HasClass(window, DialogClass)) {
-        return true;
-      }
-      if (IsAFileDialog(window) || thread != FirstThreadOf(owner)) {
-        return true;
+      if (!family.ContainsKey(owner) || thread != FirstThreadOf(owner)) {
+        continue;
       }
       found = owner;
       StringBuilder body = new StringBuilder();
@@ -329,17 +336,20 @@ public static class GdharnessDesktop {
         }
         return true;
       }, IntPtr.Zero);
-      said = BoxMarker + "{" + Quote("title") + ":" + Quote(TextOf(window)) + "," + Quote("text") + ":" + Quote(body.ToString()) + "," + Quote("engine") + ":" + (owner == processId ? "true" : "false") + "}";
-      return false;
-    }, IntPtr.Zero);
+      said = BoxMarker + "{" + Quote("title") + ":" + Quote(TextOf(window)) + "," + Quote("text") + ":" + Quote(body.ToString()) + "," + Quote("engine") + ":" + (IsTheEngine(owner, processId, processes) ? "true" : "false") + "}";
+      break;
+    }
     boxOwner = found;
     return said;
   }
 
+  // Written as UTF-8 whatever the console's code page is, which is how a run reads it.
   static void Say(string line) {
     try {
-      Console.Out.Write(Environment.NewLine + line + Environment.NewLine);
-      Console.Out.Flush();
+      byte[] bytes = new UTF8Encoding(false).GetBytes(Environment.NewLine + line + Environment.NewLine);
+      Stream output = Console.OpenStandardOutput();
+      output.Write(bytes, 0, bytes.Length);
+      output.Flush();
     } catch (IOException) {
     }
   }
@@ -803,14 +813,16 @@ export function childBoxNote(printed: readonly LogEntry[]): string | null {
  * marker line is the one signal that holds whichever driver failed: the engine's own lines differ
  * between ANGLE, Direct3D 12 and Vulkan. A box of a process the engine started ended that process
  * alone, which {@link childBoxNote} words. The engine's lines come from [param engineLines], which
- * is [param printed] unless the lines that printed the marker are not the engine's own.
+ * is [param printed] unless the helper is an editor's, whose marker comes with the game's own lines
+ * from elsewhere. The game an editor plays is that helper's child, so there a box of any process
+ * is the game's.
  */
 export function desktopBoxEnding(
   printed: readonly LogEntry[],
   engineLines?: readonly LogEntry[],
 ): string | null {
   const box = boxSaid(printed);
-  if (box === null || !box.engine) {
+  if (box === null || (!box.engine && engineLines === undefined)) {
     return null;
   }
   if (box.title !== VIDEO_DRIVER_TITLE) {

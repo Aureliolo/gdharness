@@ -777,7 +777,13 @@ import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { makeWhole, writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
-import { BOX_GAME_RAN_ON, boxGame } from './support/box-game.js';
+import {
+  BOX_GAME_RAN_ON,
+  BOX_GAME_TEXT,
+  BOX_GAME_TITLE,
+  boxGame,
+  boxGameConsole,
+} from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
 import { endEnginesUnder } from './support/engines.js';
@@ -19888,11 +19894,17 @@ async function testAWindowedSuiteWhoseEngineMakesNoRendererEnds(): Promise<void>
   }
   const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
   const lacking = rendererLessEngine();
+  // A suite that declares it needs a window, since an engine starts headless for one that does not.
+  const suite = 'tests/needs_window_test.gd';
+  writeFileSync(
+    join(project, suite),
+    'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n',
+  );
   try {
     const began = Date.now();
     const ran = spawnSyncHidden(
       process.execPath,
-      ['build/cli.js', 'test', project, '--slots', slots, '--import', 'tests/window_test.gd'],
+      ['build/cli.js', 'test', project, '--slots', slots, '--import', suite],
       {
         encoding: 'utf8',
         env: { ...env, GODOT_PATH: lacking, [REAL_ENGINE_VARIABLE]: engines.godotPath },
@@ -19909,7 +19921,7 @@ async function testAWindowedSuiteWhoseEngineMakesNoRendererEnds(): Promise<void>
         const asked = Date.now();
         const answer = await call(
           'project_test',
-          { projectPath: project, path: 'res://tests/window_test.gd' },
+          { projectPath: project, path: `res://${suite}` },
           4 * ENGINE_CALL_TIMEOUT_MS,
         );
         assert.match(answer, NO_RENDERER_VERDICT, `project_test names the renderer: ${answer}`);
@@ -20053,7 +20065,7 @@ async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
     const output = editorHelperOutputPath(project);
     mkdirSync(dirname(output), { recursive: true });
     const box = (title: string): string =>
-      `\n[gdharness] desktop-box ${JSON.stringify({ title, text: 'drivers' })}\n`;
+      `\n[gdharness] desktop-box ${JSON.stringify({ title, text: 'drivers', engine: false })}\n`;
     writeFileSync(
       output,
       `ERROR: Can't initialize an EGL display.${box('Unable to initialize video driver')}`,
@@ -20127,11 +20139,12 @@ async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
  * Runs the box stand-in at [param where] on the hidden desktop and answers the run. The stand-in
  * prints once it has run its five seconds out, which only a process nothing ended gets to.
  */
-async function runBoxGame(where: 'main' | 'worker' | 'child'): Promise<EngineRun> {
+async function runBoxGame(where: 'main' | 'text' | 'worker' | 'child' | 'wrapper'): Promise<EngineRun> {
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-box-game-'));
   try {
+    const program = where === 'wrapper' ? await boxGameConsole() : await boxGame();
     const run = await Promise.race([
-      runEngine(await boxGame(), [where], { desktop: { directory: scratch, scratch } }),
+      runEngine(program, [where], { desktop: { directory: scratch, scratch } }),
       delay(NO_RENDERER_END_MS * 2).then(() => null),
     ]);
     assert.ok(run !== null, `the run of the ${where} box ends`);
@@ -20192,6 +20205,80 @@ async function testAChildProcessesBoxIsEndedAndTheGamesOutcomeStands(): Promise<
   const note = run.log.all.find((entry) => entry.text.includes('a process the engine started'));
   assert.ok(note !== undefined, 'and the run notes the process that was ended');
   assert.match(note.text, /Game alert.*Hello from the game/s, 'with its box');
+}
+
+/**
+ * Godot's console build starts the engine as its child and waits for it, so the engine's own box is a
+ * child's box to the helper. The wrapper's only child is the engine, so the run ends with the verdict.
+ */
+async function testAConsoleWrappersEngineBoxEndsTheRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('console wrapper box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('wrapper');
+  assert.match(run.failure ?? '', /message box on the hidden desktop.*Game alert/s, 'the engine is ended');
+}
+
+/** A box titled and worded outside ASCII reaches the verdict as written, whatever the console's code page. */
+async function testABoxWithLettersOutsideAsciiReachesTheVerdictAsWritten(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('non-ASCII box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('text');
+  assert.ok(
+    (run.failure ?? '').includes(`"${BOX_GAME_TITLE}", ${BOX_GAME_TEXT}`),
+    `the verdict has the box as written: ${run.failure}`,
+  );
+}
+
+/** How much processor time the helper may use over ten seconds of watching a process that opens no box. */
+const QUIET_HELPER_CPU_MS = 150;
+
+/**
+ * A helper watching a process with no box lists no processes, so it costs next to nothing. It once
+ * took a snapshot of every process twice a second, which was about 5% of a core for each engine.
+ */
+async function testAHelperWatchingNoBoxUsesNoProcessorTime(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('helper cost regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-cost-'));
+  const start = spawnOnDesktop(
+    { desktop: HIDDEN_DESKTOP, directory: scratch, scratch, endsWithHelper: true },
+    process.execPath,
+    ['-e', 'setTimeout(() => undefined, 16000)'],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const cpuMs = (pid: number): number => {
+    const ran = spawnSyncHidden(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${String(pid)}).TotalProcessorTime.TotalMilliseconds`,
+      ],
+      { encoding: 'utf8' },
+    );
+    return Number(ran.stdout.trim());
+  };
+  try {
+    const helper = start.child.pid ?? 0;
+    await delay(3000);
+    const early = cpuMs(helper);
+    await delay(10_000);
+    const late = cpuMs(helper);
+    assert.ok(Number.isFinite(early) && Number.isFinite(late), 'the helper is read');
+    assert.ok(late - early < QUIET_HELPER_CPU_MS, `the helper used ${late - early} ms in ten seconds`);
+  } finally {
+    start.stop();
+    await exitedWithin(start.child, 60_000);
+    sweep(scratch);
+  }
 }
 
 /** The script a real engine runs for the box cases below: one way to open a dialog, then four seconds of running. */
@@ -20274,7 +20361,11 @@ async function testARealGameKeepsRunningBehindAFileDialogAndAWorkersAlert(): Pro
       return;
     }
     assert.equal(run.failure, null, `the ${how} box does not end the game: ${run.failure}`);
-    assert.equal(run.exitCode, 0, `the game runs to its own end after the ${how} box`);
+    // Godot 4.7.2 ends with an access violation when it quits while a native file dialog is still
+    // open, with or without the helper, so only the worker box's exit code says the game ran out.
+    if (how === 'worker') {
+      assert.equal(run.exitCode, 0, `the game runs to its own end after the ${how} box`);
+    }
     assert.ok(
       run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
       `and says so after the ${how} box`,
@@ -110865,6 +110956,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor,
   testAnEditorsGameBoxIsReadFromTheHelperOutput,
   testABoxOnTheMainThreadEndsTheGame,
+  testAConsoleWrappersEngineBoxEndsTheRun,
+  testABoxWithLettersOutsideAsciiReachesTheVerdictAsWritten,
+  testAHelperWatchingNoBoxUsesNoProcessorTime,
   testABoxOnAWorkerThreadLeavesTheGameRunning,
   testAChildProcessesBoxIsEndedAndTheGamesOutcomeStands,
   testARealGameKeepsRunningBehindAFileDialogAndAWorkersAlert,
