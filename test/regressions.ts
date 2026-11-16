@@ -90032,8 +90032,13 @@ function testAnExtensionInCapitalsIsReadAsTheEngineReadsIt(): void {
  * a move of the script's own file is.
  */
 async function testAUidSidecarInCapitalsIsReadLikeOneInLowerCase(): Promise<void> {
-  const scene = ESCN_SCENE.replace('path="res://told.gd"', 'uid="uid://toldscript"');
-  const project = renameProjectWith({ 'told.gd.UID': 'uid://toldscript\n', 'scene.tscn': scene });
+  const scene =
+    '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kidscript" id="1"]\n\n[node name="Kid" type="Node"]\nscript = ExtResource("1")\nlevel = 9\n';
+  const project = renameProjectWith({
+    'kid.gd': 'extends Told\n',
+    'kid.gd.UID': 'uid://kidscript\n',
+    'kid.tscn': scene,
+  });
   try {
     const outcome = await renameSymbol(
       {
@@ -90052,13 +90057,9 @@ async function testAUidSidecarInCapitalsIsReadLikeOneInLowerCase(): Promise<void
     );
     assert.ok(outcome.ok, JSON.stringify(outcome));
     applyRewrites(outcome.rewrites);
-    assert.equal(readFileSync(join(project, 'scene.tscn'), 'utf8'), scene.replaceAll('level = ', 'power = '));
-    const refused = planFileMove(
-      project,
-      join(project, 'told.gd.UID'),
-      join(project, 'newdir', 'told.gd.UID'),
-    );
-    assert.ok(!refused.ok && refused.reason.includes('belongs to res://told.gd'), JSON.stringify(refused));
+    assert.equal(readFileSync(join(project, 'kid.tscn'), 'utf8'), scene.replace('level = ', 'power = '));
+    const refused = planFileMove(project, join(project, 'kid.gd.UID'), join(project, 'newdir', 'kid.gd.UID'));
+    assert.ok(!refused.ok && refused.reason.includes('belongs to res://kid.gd'), JSON.stringify(refused));
   } finally {
     sweep(project);
   }
