@@ -123,7 +123,6 @@ import {
   clearEditorLog,
   editorConsole,
   editorHelperOutputPath,
-  editorHelperOutputSize,
   editorLogPath,
   readEditorLogNote,
   shapeOf,
@@ -131,6 +130,7 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import {
+  editorDesktopOf,
   editorOpenOptionsOf,
   editorQuitRequestPath,
   editorRestartTimeoutMs,
@@ -556,6 +556,7 @@ import {
   failedVerdict,
   finishedBeforeTheEnd,
   foldedScriptErrors,
+  gameTheEditorPlays,
   leftRunningNote,
   longerWaitNote,
   misshapen,
@@ -776,6 +777,7 @@ import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { makeWhole, writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
+import { BOX_GAME_RAN_ON, boxGame } from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
 import { endEnginesUnder } from './support/engines.js';
@@ -20056,21 +20058,35 @@ async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
       output,
       `ERROR: Can't initialize an EGL display.${box('Unable to initialize video driver')}`,
     );
-    const from = editorHelperOutputSize(project);
-    const play = { throughEditor: true, projectPath: project, helperOutputFrom: from, log: new GameLog() };
+    const play = gameTheEditorPlays({
+      log: new GameLog(),
+      transcript: join(project, 'transcript'),
+      projectPath: project,
+      startedAt: Date.now(),
+      seenPlaying: true,
+    });
     assert.equal(boxThatEndedTheGame(play), null, "an earlier game's box is not this game's");
     appendFileSync(
       output,
-      `ERROR: Failed to create ANGLE OpenGL window.${box('Unable to initialize video driver')}`,
+      `WARNING: res://addons/plugin.gd:12 - an editor warning.\n${box('Unable to initialize video driver')}`,
     );
+    play.log.append('stdout', Buffer.from('ERROR: Failed to create ANGLE OpenGL window.\n'));
     const verdict = boxThatEndedTheGame(play) ?? '';
     assert.match(verdict, /could not create a renderer/, 'the verdict names the renderer');
-    assert.match(verdict, /Failed to create ANGLE OpenGL window/, 'the engine line is quoted');
+    assert.match(verdict, /Failed to create ANGLE OpenGL window/, "the played game's line is quoted");
+    assert.doesNotMatch(verdict, /an editor warning/, "and the editor's own lines are not");
+    assert.equal(boxThatEndedTheGame(play), verdict, 'a second reading says the same');
     assert.ok(
       play.log.all.some((entry) => entry.text === verdict),
       'and the run has it, for editor_output',
     );
 
+    assert.deepEqual(
+      editorDesktopOf(true, project),
+      { desktop: HIDDEN_DESKTOP, output },
+      "a hidden editor hands its helper's output to a file",
+    );
+    assert.deepEqual(editorDesktopOf(false, project), { noActivate: true }, 'a shown one has no desktop');
     if (process.platform !== 'win32') {
       console.log('editor helper output regression: the launch half is Windows-only');
       return;
@@ -20081,8 +20097,8 @@ async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
     const spec = {
       command: process.execPath,
       args: ['-e', "console.log('from the editor'); setInterval(() => undefined, 1000);", '--', project],
+      ...editorDesktopOf(true, project),
       desktop: `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`,
-      output,
     };
     writeFileSync(
       launcher,
@@ -20104,6 +20120,179 @@ async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
   } finally {
     await endEnginesUnder(project);
     sweep(project);
+  }
+}
+
+/**
+ * Runs the box stand-in at [param where] on the hidden desktop and answers the run. The stand-in
+ * prints once it has run its five seconds out, which only a process nothing ended gets to.
+ */
+async function runBoxGame(where: 'main' | 'worker' | 'child'): Promise<EngineRun> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-box-game-'));
+  try {
+    const run = await Promise.race([
+      runEngine(await boxGame(), [where], { desktop: { directory: scratch, scratch } }),
+      delay(NO_RENDERER_END_MS * 2).then(() => null),
+    ]);
+    assert.ok(run !== null, `the run of the ${where} box ends`);
+    return run;
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A box on the thread a game runs on stops the whole game, which waits on it for good, so it is ended
+ * and the verdict names the box.
+ */
+async function testABoxOnTheMainThreadEndsTheGame(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('main thread box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('main');
+  assert.match(run.failure ?? '', /message box on the hidden desktop.*Game alert.*Hello from the game/s);
+  assert.equal(JSON.stringify(run.log.all.map((entry) => entry.text)).includes(BOX_GAME_RAN_ON), false);
+}
+
+/**
+ * A box on a worker thread stops that thread only, as a game's alert from a thread does, so the game
+ * runs on and nothing ends it.
+ */
+async function testABoxOnAWorkerThreadLeavesTheGameRunning(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('worker thread box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('worker');
+  assert.equal(run.failure, null, 'the game is not ended');
+  assert.equal(run.exitCode, 0, 'it runs to its own end');
+  assert.ok(
+    run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
+    'and says so',
+  );
+}
+
+/**
+ * A box in a process the game started ends that process alone. The game's own outcome stands, with a
+ * note on the child that was ended, where the run once failed with the game's exit code 0.
+ */
+async function testAChildProcessesBoxIsEndedAndTheGamesOutcomeStands(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('child process box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('child');
+  assert.equal(run.failure, null, 'the game finished by itself');
+  assert.equal(run.exitCode, 0, 'with its own exit code');
+  assert.ok(
+    run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
+    'having run on',
+  );
+  const note = run.log.all.find((entry) => entry.text.includes('a process the engine started'));
+  assert.ok(note !== undefined, 'and the run notes the process that was ended');
+  assert.match(note.text, /Game alert.*Hello from the game/s, 'with its box');
+}
+
+/** The script a real engine runs for the box cases below: one way to open a dialog, then four seconds of running. */
+const REAL_BOX_SCRIPT = [
+  'extends Node',
+  '',
+  'var _worker: Thread',
+  '',
+  'func _ready() -> void:',
+  '\tmatch OS.get_cmdline_user_args()[0]:',
+  '\t\t"file":',
+  '\t\t\tDisplayServer.file_dialog_show("Pick a file", "", "", false, DisplayServer.FILE_DIALOG_MODE_OPEN_FILE, PackedStringArray(), func(_ok, _paths, _filter, _index): pass)',
+  '\t\t"worker":',
+  '\t\t\t_worker = Thread.new()',
+  '\t\t\t_worker.start(func(): OS.alert("from a thread", "Threaded alert"))',
+  '\t\t"main":',
+  '\t\t\tOS.alert("on the main thread", "Game alert")',
+  '\t\t"dialog":',
+  '\t\t\tDisplayServer.dialog_show("Dialog", "on the main thread", ["OK"], func(_button): pass)',
+  '\tawait get_tree().create_timer(4.0).timeout',
+  `\tprint("${BOX_GAME_RAN_ON}")`,
+  '\tget_tree().quit()',
+  '',
+].join('\n');
+
+/**
+ * Runs the real engine on a game opening a dialog the way [param how] names, on the hidden desktop,
+ * and answers the run. Null where this machine does not run windowed engines.
+ */
+async function runRealBox(how: 'file' | 'worker' | 'main' | 'dialog'): Promise<EngineRun | null> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`real engine ${how} box regression skipped (Godot not found)`);
+    return null;
+  }
+  const refused = windowedRunRefused();
+  if (process.platform !== 'win32' || refused !== null) {
+    console.log(
+      `real engine ${how} box regression skipped (${refused ?? 'desktops are a Windows boundary'})`,
+    );
+    return null;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-real-box-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Box"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    writeFileSync(join(project, 'main.gd'), REAL_BOX_SCRIPT);
+    const run = await Promise.race([
+      runEngine(engine, ['--path', project, '--', how], {
+        desktop: { directory: project, scratch: project },
+        timeout: { ms: 90_000, said: 'it ran past its limit' },
+      }),
+      delay(NO_RENDERER_END_MS * 3).then(() => null),
+    ]);
+    assert.ok(run !== null, `the ${how} box run ends`);
+    return run;
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The real engine keeps running behind a native file dialog, which it shows on a thread of its own
+ * and closes itself, and behind an alert a worker thread raises. Neither stops the game, so neither
+ * is ended. Windowed, so CI's engine legs run it.
+ */
+async function testARealGameKeepsRunningBehindAFileDialogAndAWorkersAlert(): Promise<void> {
+  for (const how of ['file', 'worker'] as const) {
+    const run = await runRealBox(how);
+    if (run === null) {
+      return;
+    }
+    assert.equal(run.failure, null, `the ${how} box does not end the game: ${run.failure}`);
+    assert.equal(run.exitCode, 0, `the game runs to its own end after the ${how} box`);
+    assert.ok(
+      run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
+      `and says so after the ${how} box`,
+    );
+  }
+}
+
+/**
+ * The real engine's own alert on its main thread and its task dialog both stop the game for good, so
+ * both are ended with a verdict naming the box. Windowed, so CI's engine legs run it.
+ */
+async function testARealGamesMainThreadBoxEndsIt(): Promise<void> {
+  for (const how of ['main', 'dialog'] as const) {
+    const run = await runRealBox(how);
+    if (run === null) {
+      return;
+    }
+    assert.match(run.failure ?? '', /message box on the hidden desktop/, `the ${how} box ends the game`);
   }
 }
 
@@ -110675,6 +110864,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeeperCaseThatFailsLeavesNoRunFolder,
   testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor,
   testAnEditorsGameBoxIsReadFromTheHelperOutput,
+  testABoxOnTheMainThreadEndsTheGame,
+  testABoxOnAWorkerThreadLeavesTheGameRunning,
+  testAChildProcessesBoxIsEndedAndTheGamesOutcomeStands,
+  testARealGameKeepsRunningBehindAFileDialogAndAWorkersAlert,
+  testARealGamesMainThreadBoxEndsIt,
   testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,

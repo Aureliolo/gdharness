@@ -180,6 +180,20 @@ export interface EditorOpened {
 }
 
 /**
+ * Where an editor is started. A hidden editor is on a desktop of its own, because the games it
+ * plays are its children and land where it is, and its helper's output goes to a file a play reads
+ * its verdict from. A visible one is shown without being activated, so it takes nobody's keyboard.
+ */
+export function editorDesktopOf(
+  hidden: boolean,
+  projectPath: string,
+): { readonly desktop: string; readonly output: string } | { readonly noActivate: true } {
+  return hidden
+    ? { desktop: HIDDEN_DESKTOP, output: editorHelperOutputPath(projectPath) }
+    : { noActivate: true };
+}
+
+/**
  * Starts an editor on a project, on the ports named, through a launcher that exits once the editor
  * is up, so the editor is nobody's child here. The harness ends a server by killing its process
  * tree at every reconnect, and an editor spawned as its child went with it.
@@ -225,11 +239,7 @@ export async function openEditorProcess(
       GDHARNESS_DAP_PORT: String(ports.dap),
       [OPENED_BY_A_SERVER]: '1',
     },
-    // A hidden editor is on a desktop of its own, because the games it plays are its children and
-    // land where it is. A visible one is shown without being activated, so it takes nobody's keyboard.
-    ...(start.hidden
-      ? { desktop: HIDDEN_DESKTOP, output: editorHelperOutputPath(projectPath) }
-      : { noActivate: true }),
+    ...editorDesktopOf(start.hidden, projectPath),
   });
   if ('error' in launched) {
     return { pid: null, startedAt: null, error: launched.error, arguments: args };

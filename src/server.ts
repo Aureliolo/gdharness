@@ -105,6 +105,7 @@ import {
   helperExit,
   helperFailure,
   helperStep,
+  isBoxVerdict,
   spawnOnDesktop,
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
@@ -1833,6 +1834,29 @@ const PROFILE_SEND_MS = 5000;
 const MOST_GROUPS = 20;
 
 /**
+ * The run of a game an editor plays, with no process of its own. Its box verdict is read from the
+ * editor's helper output from where the play begins, so a box an earlier game was ended on is not
+ * this game's.
+ */
+export function gameTheEditorPlays(
+  game: Omit<
+    GodotProcess,
+    'pid' | 'readOffset' | 'exitCode' | 'exitSignal' | 'throughEditor' | 'brokeOn' | 'helperOutputFrom'
+  > & { readonly projectPath: string },
+): GodotProcess {
+  return {
+    pid: null,
+    readOffset: 0,
+    exitCode: null,
+    exitSignal: null,
+    throughEditor: true,
+    brokeOn: null,
+    helperOutputFrom: editorHelperOutputSize(game.projectPath),
+    ...game,
+  };
+}
+
+/**
  * Why the desktop helper ended [param run]'s game on a message box nobody can press, or null. A game
  * this server started prints the helper's line into its own transcript. A game an editor plays has
  * the helper of the editor, whose output is read from where this play began, and the verdict is put
@@ -1844,11 +1868,16 @@ export function boxThatEndedTheGame(
   if (run === null) {
     return null;
   }
-  const printed =
-    run.throughEditor && run.projectPath !== null
-      ? editorHelperEntries(run.projectPath, run.helperOutputFrom ?? 0)
-      : run.log.all;
-  const ending = desktopBoxEnding(printed);
+  const viaEditor = run.throughEditor && run.projectPath !== null;
+  const printed = viaEditor
+    ? editorHelperEntries(run.projectPath ?? '', run.helperOutputFrom ?? 0)
+    : run.log.all;
+  // The editor's helper output holds the editor's own console. What the game printed is the run's
+  // own log, which starts where the play did.
+  const ending = desktopBoxEnding(
+    printed,
+    viaEditor ? run.log.all.filter((entry) => !isBoxVerdict(entry.text)) : undefined,
+  );
   if (ending !== null && run.throughEditor && !run.log.all.some((entry) => entry.text === ending)) {
     run.log.record('error', ending);
   }
@@ -14337,24 +14366,17 @@ class GodotServer {
     step('transcript');
     const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const which = playOf(playAnswer);
-    const played: GodotProcess = {
-      pid: null,
+    const played = gameTheEditorPlays({
       log,
       transcript: transcript.path,
-      readOffset: 0,
       projectPath,
       startedAt,
-      exitCode: null,
-      exitSignal: null,
-      throughEditor: true,
-      brokeOn: null,
       announcedBefore: alreadyPlaying,
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
       ...(which === null ? {} : { play: which }),
       bootScene: runtimeWaitMs.scene,
-      helperOutputFrom: editorHelperOutputSize(projectPath),
       slot,
-    };
+    });
     this.activeProcess = played;
     this.noteTheLatestRun({ projectPath, pid: null, startedAt });
     step('latest run');

@@ -189,8 +189,51 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
   [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
   const uint SnapshotProcesses = 0x2;
+  const uint SnapshotThreads = 0x4;
   const uint ProcessTerminate = 0x1;
   const uint ProcessQueryLimited = 0x1000;
+  const uint ThreadQueryLimited = 0x800;
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct ThreadEntry {
+    public uint size, usage, threadId, ownerProcessId;
+    public int basePriority, deltaPriority;
+    public uint flags;
+  }
+  [DllImport("kernel32.dll")] static extern bool Thread32First(IntPtr snapshot, ref ThreadEntry entry);
+  [DllImport("kernel32.dll")] static extern bool Thread32Next(IntPtr snapshot, ref ThreadEntry entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+  [DllImport("kernel32.dll")] static extern bool GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
+
+  // The thread the process began with, which is the one Godot runs its main loop on, or 0 where none
+  // can be read. A message box blocks only the thread that opened it.
+  static uint FirstThreadOf(uint processId) {
+    uint first = 0;
+    long earliest = long.MaxValue;
+    IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotThreads, 0);
+    if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) {
+      return 0;
+    }
+    ThreadEntry entry = new ThreadEntry();
+    entry.size = (uint)Marshal.SizeOf(typeof(ThreadEntry));
+    for (bool more = Thread32First(snapshot, ref entry); more; more = Thread32Next(snapshot, ref entry)) {
+      if (entry.ownerProcessId != processId) {
+        continue;
+      }
+      IntPtr thread = OpenThread(ThreadQueryLimited, false, entry.threadId);
+      if (thread == IntPtr.Zero) {
+        continue;
+      }
+      long created, exited, kernel, user;
+      if (GetThreadTimes(thread, out created, out exited, out kernel, out user) && created < earliest) {
+        earliest = created;
+        first = entry.threadId;
+      }
+      CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    return first;
+  }
 
   // When the process began, or -1 where it cannot be read.
   static long CreatedAt(uint processId) {
@@ -237,19 +280,44 @@ public static class GdharnessDesktop {
     return family;
   }
 
+  // Whether the dialog is the common file dialog, which the engine shows on a thread of its own and
+  // closes itself, so the game keeps running behind it.
+  static bool IsAFileDialog(IntPtr dialog) {
+    bool file = false;
+    EnumChildWindows(dialog, delegate(IntPtr child, IntPtr also) {
+      string name = ClassOf(child);
+      if (name == "NamespaceTreeControl" || name == "SHELLDLL_DefView" || name == "ShellView") {
+        file = true;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return file;
+  }
+
+  static string ClassOf(IntPtr window) {
+    StringBuilder name = new StringBuilder(64);
+    GetClassNameW(window, name, name.Capacity);
+    return name.ToString();
+  }
+
   // A message box the process, or one it started, opened on the desktop, as the marker line a run
-  // reads, or null, with the pid of the process that owns it. Nobody can press it here, so its owner
-  // waits on it for good. Only a box of this family counts, since every engine a run starts shares
-  // the desktop.
+  // reads, or null, with the pid of the process that owns it. Nobody can press it here, so a box on
+  // its main thread stops the process for good. A box on another thread stops that thread only, as a
+  // worker's alert or a file dialog does, and the process runs on. Only a box of this family counts,
+  // since every engine a run starts shares the desktop.
   static string BoxOf(IntPtr desktop, uint processId, out uint boxOwner) {
     string said = null;
     uint found = 0;
     Dictionary<uint, long> family = FamilyOf(processId);
     EnumDesktopWindows(desktop, delegate(IntPtr window, IntPtr unused) {
       uint owner;
-      GetWindowThreadProcessId(window, out owner);
+      uint thread = GetWindowThreadProcessId(window, out owner);
       // Not asked whether it is visible: a window of a non-interactive station never reads as shown.
       if (!family.ContainsKey(owner) || !HasClass(window, DialogClass)) {
+        return true;
+      }
+      if (IsAFileDialog(window) || thread != FirstThreadOf(owner)) {
         return true;
       }
       found = owner;
@@ -261,7 +329,7 @@ public static class GdharnessDesktop {
         }
         return true;
       }, IntPtr.Zero);
-      said = BoxMarker + "{" + Quote("title") + ":" + Quote(TextOf(window)) + "," + Quote("text") + ":" + Quote(body.ToString()) + "}";
+      said = BoxMarker + "{" + Quote("title") + ":" + Quote(TextOf(window)) + "," + Quote("text") + ":" + Quote(body.ToString()) + "," + Quote("engine") + ":" + (owner == processId ? "true" : "false") + "}";
       return false;
     }, IntPtr.Zero);
     boxOwner = found;
@@ -689,7 +757,7 @@ const QUOTED_ERRORS = 4;
  */
 function boxSaid(
   printed: readonly LogEntry[],
-): { title: string; text: string; before: readonly LogEntry[] } | null {
+): { title: string; text: string; engine: boolean; before: readonly LogEntry[] } | null {
   const at = printed.findLastIndex((entry) => entry.text.startsWith(BOX_MARKER));
   if (at < 0) {
     return null;
@@ -703,10 +771,29 @@ function boxSaid(
   if (!isRecord(box)) {
     return null;
   }
-  const { title, text } = box;
+  const { title, text, engine } = box;
   return typeof title === 'string' && typeof text === 'string'
-    ? { title, text, before: printed.slice(0, at) }
+    ? { title, text, engine: engine !== false, before: printed.slice(0, at) }
     : null;
+}
+
+/** Whether [param text] is a verdict or note this file wrote about a box, which is no line of the engine's own. */
+export function isBoxVerdict(text: string): boolean {
+  return (
+    text.includes('on the hidden desktop, where nobody can press it') ||
+    text.includes('on the hidden desktop, so it was ended')
+  );
+}
+
+/**
+ * The note for a run whose engine went on while the helper ended a process it started on a message
+ * box, or null. The engine's own outcome stands, since the box was not its own.
+ */
+export function childBoxNote(printed: readonly LogEntry[]): string | null {
+  const box = boxSaid(printed);
+  return box === null || box.engine
+    ? null
+    : `a process the engine started opened a message box on the hidden desktop, where nobody can press it, so that process was ended: "${box.title}", ${box.text}`;
 }
 
 /**
@@ -714,11 +801,16 @@ function boxSaid(
  * message box. A box on the hidden desktop is one nobody can press, so the process would wait on it
  * for the rest of the run. Godot opens one whenever it cannot create a renderer, and the helper's
  * marker line is the one signal that holds whichever driver failed: the engine's own lines differ
- * between ANGLE, Direct3D 12 and Vulkan.
+ * between ANGLE, Direct3D 12 and Vulkan. A box of a process the engine started ended that process
+ * alone, which {@link childBoxNote} words. The engine's lines come from [param engineLines], which
+ * is [param printed] unless the lines that printed the marker are not the engine's own.
  */
-export function desktopBoxEnding(printed: readonly LogEntry[]): string | null {
+export function desktopBoxEnding(
+  printed: readonly LogEntry[],
+  engineLines?: readonly LogEntry[],
+): string | null {
   const box = boxSaid(printed);
-  if (box === null) {
+  if (box === null || !box.engine) {
     return null;
   }
   if (box.title !== VIDEO_DRIVER_TITLE) {
@@ -726,7 +818,7 @@ export function desktopBoxEnding(printed: readonly LogEntry[]): string | null {
   }
   const failures = [
     ...new Set(
-      box.before
+      (engineLines ?? box.before)
         .filter((entry) => entry.severity !== 'info')
         .map((entry) => `${entry.severity === 'error' ? 'ERROR' : 'WARNING'}: ${entry.text}`),
     ),

@@ -11,6 +11,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { callSignal } from './call-signal.js';
 import {
+  childBoxNote,
   desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
@@ -234,9 +235,15 @@ function desktopFailure(files: HelperFiles | null, log: GameLog): string | null 
     return null;
   }
   const helperSaid = helperFailure(files.error);
-  return helperSaid === null
-    ? desktopBoxEnding(log.all)
-    : `it could not be started on a desktop of its own: ${helperSaid}`;
+  if (helperSaid !== null) {
+    return `it could not be started on a desktop of its own: ${helperSaid}`;
+  }
+  const ended = desktopBoxEnding(log.all);
+  const note = ended === null ? childBoxNote(log.all) : null;
+  if (note !== null) {
+    log.record('warning', note);
+  }
+  return ended;
 }
 
 /**
