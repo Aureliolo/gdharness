@@ -40650,8 +40650,8 @@ function linksInsideAProjectAreJudged(at: {
     'netlink-in/game.exe',
   ]) {
     const judged = exportedBuild(project, spelling);
-    assert.equal(judged.ok, false, `${spelling}: ${JSON.stringify(judged)}`);
-    assert.match(judged.ok ? '' : judged.reason, /is a network share or a device/, spelling);
+    assert.ok(!judged.ok, `${spelling}: ${JSON.stringify(judged)}`);
+    assert.match(judged.reason, /is a network share or a device/, spelling);
   }
 }
 
