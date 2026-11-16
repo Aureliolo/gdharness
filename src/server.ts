@@ -2715,7 +2715,14 @@ const PLAYING_STATUS_MS = 1_000;
  */
 const SCAN_SETTLED_MS = 500;
 
+/**
+ * How many script reloads are sent to the editor before the first of them is answered. The editor
+ * runs every request it has read in one frame, so this bounds how long that frame takes.
+ */
+const RELOADS_IN_FLIGHT = 64;
+
 const rescanProbe: { start: number; marks: unknown[] } = { start: 0, marks: [] };
+const reloadProbe = { count: 0, spellUsec: 0, totalUsec: 0 };
 function probeMark(label: string, extra?: unknown): void {
   rescanProbe.marks.push([label, Date.now() - rescanProbe.start, extra]);
 }
@@ -18247,6 +18254,9 @@ class GodotServer {
     const reloaded: ScriptReload = Array.isArray(asked) ? {} : (reloads[0]?.reloaded ?? {});
 
     probeMark('reloads');
+    reloadProbe.count = 0;
+    reloadProbe.spellUsec = 0;
+    reloadProbe.totalUsec = 0;
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     probeMark('checked', checked.unseen.length);
     const unseen = checked.unseen;
@@ -18269,7 +18279,7 @@ class GodotServer {
         ? null
         : await this.reloadDependents(projectPath, broughtIn);
     const stillGone = lost.filter((name) => !restored.includes(name));
-    probeMark('dependents', dependents?.reloaded.length);
+    probeMark('dependents', { naming: dependents?.reloaded.length, ...reloadProbe });
     return this.noteTheRescan(args, {
       ...repaired,
       asked,
@@ -18574,12 +18584,25 @@ class GodotServer {
     projectPath: string,
     classes: readonly string[],
   ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[]; reloadedFirst: ReloadedFirst[] }> {
-    for (const { script, tool } of scriptsDeclaring(projectPath, classes)) {
-      if (!tool) {
-        await this.reloadOnce(script);
-      }
-    }
+    const declaring = scriptsDeclaring(projectPath, classes).filter(({ tool }) => !tool);
+    await this.reloadAllAtOnce(declaring.map(({ script }) => script));
     return await this.reloadInEditor(scriptsNaming(projectPath, classes), projectPath);
+  }
+
+  /**
+   * Reloads each of [param scripts] in the editor, in order, sending them [constant
+   * RELOADS_IN_FLIGHT] at a time rather than one after another.
+   *
+   * The editor reads its requests once a frame, so one sent after the last was answered waits for
+   * the next frame. A headless editor sleeps between frames: on Linux 401 reloads one at a time
+   * took 2.9 s, and on macOS, whose frames are longer, ten times that. Sent together, the editor
+   * runs them in the frame they arrive, in the order they were sent.
+   */
+  private async reloadAllAtOnce(scripts: readonly string[]): Promise<void> {
+    for (let from = 0; from < scripts.length; from += RELOADS_IN_FLIGHT) {
+      const chunk = scripts.slice(from, from + RELOADS_IN_FLIGHT);
+      await Promise.all(chunk.map((script) => this.reloadOnce(script)));
+    }
   }
 
   /**
@@ -18657,6 +18680,9 @@ class GodotServer {
   }> {
     try {
       const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
+      reloadProbe.count += 1;
+      reloadProbe.spellUsec += readNumber(answer, 'probeSpellUsec') ?? 0;
+      reloadProbe.totalUsec += readNumber(answer, 'probeTotalUsec') ?? 0;
       const unsaved = answer['unsavedInEditor'] === true;
       const failed = answer['failed'];
       if (typeof failed === 'number' && failed !== 0) {

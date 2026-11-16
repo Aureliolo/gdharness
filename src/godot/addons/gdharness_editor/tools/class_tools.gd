@@ -53,7 +53,9 @@ func reload_script(args: Dictionary) -> Dictionary:
 	var asked: String = str(args.get("scriptPath", ""))
 	if asked.is_empty():
 		return { "ok": false, "error": "scriptPath is required" }
+	var probe_from: int = Time.get_ticks_usec()
 	var path: String = _spelled_as_on_disk(asked, {})
+	var probe_spell: int = Time.get_ticks_usec() - probe_from
 	if not ResourceLoader.exists(path):
 		return { "ok": false, "error": "No script at " + path }
 
@@ -132,6 +134,8 @@ func reload_script(args: Dictionary) -> Dictionary:
 	answer["methods"] = _method_names(script)
 	answer["constants"] = _constant_names(script)
 	_reread_open_tabs(path, answer)
+	answer["probeSpellUsec"] = probe_spell
+	answer["probeTotalUsec"] = Time.get_ticks_usec() - probe_from
 	return answer
 
 
