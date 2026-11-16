@@ -23,28 +23,24 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	var cached: Array = _read_cache()
 	var before: Dictionary = _entries_by_class(cached)
 
-	# One entry per name. Where two scripts declare one, the engine keeps the one its scan registers
-	# last, and find_files walks in the scan's order. Two entries would leave the pick to the sort
-	# below, which is not stable.
-	var declared: Dictionary = {}
 	var skipped: Array[Dictionary] = []
+	var declarers: Dictionary = {}
 	for path: String in _files.find_files("res://", ".gd", true):
 		var entry: Dictionary = _entry_for(path, skipped)
 		if not entry.is_empty():
-			declared[str(entry["class"])] = entry
-	var entries: Array = declared.values()
+			_add_declarer(declarers, entry)
 	# Another language's classes are kept while their files are there. Only GDScript is read here
 	# and the list is written whole, so a C# project's global classes were dropped from it and
 	# answered as removed, and nothing started next could resolve them.
-	var carried: Array[String] = []
 	for entry: Variant in cached:
 		if not entry is Dictionary:
 			continue
 		var listed: Dictionary = entry
-		var language: String = str(listed.get("language", "GDScript"))
-		if language != "GDScript" and FileAccess.file_exists(str(listed.get("path", ""))):
-			entries.append(listed)
-			carried.append(str(listed.get("class", "")))
+		if _is_carried(listed):
+			_add_declarer(declarers, listed)
+	var carried: Array[String] = []
+	var twice_declared: Array[Dictionary] = []
+	var entries: Array = _kept_entries(declarers, before, carried, twice_declared)
 	# By name as text: StringName's own order is by identity, not by spelling.
 	entries.sort_custom(
 		func(a: Dictionary, b: Dictionary) -> bool: return str(a["class"]) < str(b["class"])
@@ -86,7 +82,84 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	}
 	if not carried.is_empty():
 		answer["carried"] = carried
+	# The engine refuses each of these scripts but the one kept, with "Class hides a global script
+	# class" (modules/gdscript/gdscript_analyzer.cpp).
+	if not twice_declared.is_empty():
+		answer["twiceDeclared"] = twice_declared
 	return answer
+
+
+static func _add_declarer(declarers: Dictionary, entry: Dictionary) -> void:
+	var name: String = str(entry.get("class", ""))
+	if not declarers.has(name):
+		declarers[name] = []
+	var all: Array = declarers[name]
+	all.append(entry)
+
+
+static func _is_gdscript(entry: Dictionary) -> bool:
+	return str(entry.get("language", "GDScript")) == "GDScript"
+
+
+static func _is_carried(entry: Dictionary) -> bool:
+	return not _is_gdscript(entry) and FileAccess.file_exists(str(entry.get("path", "")))
+
+
+# One entry per name, the declarer that holds it, naming in [param carried] each kept from another
+# language and in [param twice_declared] each name more than one script declares.
+static func _kept_entries(
+	declarers: Dictionary,
+	before: Dictionary,
+	carried: Array[String],
+	twice_declared: Array[Dictionary]
+) -> Array:
+	var entries: Array = []
+	for name: String in declarers:
+		var all: Array = declarers[name]
+		all.sort_custom(_scans_before)
+		var cached: Dictionary = before.get(name, {})
+		var kept: Dictionary = _kept_of(all, str(cached.get("path", "")))
+		entries.append(kept)
+		if not _is_gdscript(kept):
+			carried.append(name)
+		if all.size() > 1:
+			var scripts: Array[String] = []
+			for one: Dictionary in all:
+				scripts.append(str(one["path"]))
+			twice_declared.append({ "class": name, "scripts": scripts, "kept": str(kept["path"]) })
+	return entries
+
+
+# Which of a name's declarers, in the scan's order, holds the name.
+#
+# The cache's pick while it still declares the name. An editor started on a project it has scanned
+# before registers every declarer, then each one again whose path the list does not hold, and
+# keeps the last of those (editor/file_system/editor_file_system.cpp, _process_file_system and
+# _update_script_classes). A rebuild that moved the name would have it moved back on the editor's
+# next save, each answering it changed. With no pick to keep, the last declarer, as a first scan
+# registers them in turn and each registration replaces the path (_first_scan_process_scripts,
+# ScriptServer::add_global_class).
+static func _kept_of(all: Array, held: String) -> Dictionary:
+	for one: Dictionary in all:
+		if str(one["path"]) == held:
+			return one
+	var last: Dictionary = all.back()
+	return last
+
+
+# Whether the scan reaches [param a] before [param b]: a folder's subfolders before its own files,
+# each sorted with the engine's FileNoCaseComparator (editor_file_system.cpp, _scan_new_dir), which
+# is String.filenocasecmp_to. find_files lists by code point, as DirAccess sorts.
+static func _scans_before(a: Dictionary, b: Dictionary) -> bool:
+	var left: PackedStringArray = str(a["path"]).trim_prefix("res://").split("/")
+	var right: PackedStringArray = str(b["path"]).trim_prefix("res://").split("/")
+	var at: int = 0
+	while at < left.size() - 1 and at < right.size() - 1 and left[at] == right[at]:
+		at += 1
+	var left_is_folder: bool = at < left.size() - 1
+	if left_is_folder != (at < right.size() - 1):
+		return left_is_folder
+	return left[at].filenocasecmp_to(right[at]) < 0
 
 
 # The cache entry for one script, or empty for a script with no class_name.

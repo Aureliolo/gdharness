@@ -46,21 +46,30 @@ export function isToolScript(source: string): boolean {
 }
 
 /**
- * Every `class_name` declared under the project, with the script that declares it.
+ * Every `class_name` declared under the project, to the scripts declaring it in the engine's scan
+ * order. More than one is a project error the engine reports in every script but the one it keeps.
  *
  * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
  * inside is imported and no declaration in there is ever a global class. Counting them makes a
  * correct project look like one whose editor has gone blind, every time it is asked.
  */
-export function declaredClasses(projectPath: string): Map<string, string> {
-  const declared = new Map<string, string>();
+export function classDeclarers(projectPath: string): Map<string, string[]> {
+  const declarers = new Map<string, string[]>();
   eachScript(projectPath, (script, source) => {
     const found = declaredClassOf(source);
     if (found !== null) {
-      declared.set(found, script);
+      declarers.set(found, [...(declarers.get(found) ?? []), script]);
     }
   });
-  return declared;
+  return declarers;
+}
+
+/**
+ * Every `class_name` declared under the project, with the script a first scan gives it: the last of
+ * its declarers, since the scan registers them in turn and each registration replaces the path.
+ */
+export function declaredClasses(projectPath: string): Map<string, string> {
+  return new Map([...classDeclarers(projectPath)].map(([name, scripts]) => [name, scripts.at(-1) ?? '']));
 }
 
 /** A `class_name` a project script declares, with what it extends and whether it is abstract. */
@@ -1203,10 +1212,22 @@ export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: s
     .toSorted();
 }
 
-/** The declarations a given cache records at a different path, or does not record at all. */
+/**
+ * The declarations a given cache records at none of their scripts, or does not record at all.
+ *
+ * A name more than one script declares is current at any of them: an editor started again on the
+ * project settles on another declarer than its first scan did, and the rebuild keeps its pick. So
+ * is a script in another language the cache names, which the rebuild carries while it is there.
+ */
 export function staleAgainst(cached: Map<string, string>, projectPath: string): string[] {
-  return [...declaredClasses(projectPath)]
-    .filter(([name, path]) => cached.get(name) !== path)
+  const holds = (scripts: readonly string[], held: string | undefined): boolean =>
+    held !== undefined &&
+    (scripts.includes(held) ||
+      (held.startsWith('res://') &&
+        !held.endsWith('.gd') &&
+        existsSync(join(projectPath, held.slice('res://'.length)))));
+  return [...classDeclarers(projectPath)]
+    .filter(([name, scripts]) => !holds(scripts, cached.get(name)))
     .map(([name]) => name);
 }
 
