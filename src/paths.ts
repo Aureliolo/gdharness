@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { entriesOf } from './listed-reads.js';
 
 /**
@@ -588,72 +588,6 @@ function notAProgram(real: string, shown: string, platform: string): { reason: s
   return runs ? { file: real } : { reason: `${shown} is not a program this platform can run. Give ${kind}.` };
 }
 
-/**
- * [param path] as the plain path both a local drive and a share are compared in, or null for a
- * device form that is neither. `\\?\X:\a`, `\\.\X:\a` and `//?/X:/a` are `X:\a`, and `\\?\UNC\h\s`
- * is `\\h\s`. A `GLOBALROOT` or volume form reaches a device.
- */
-function comparable(path: string): string | null {
-  const device = /^[\\/]{2}[?.][\\/]/.exec(path);
-  if (device === null) {
-    return resolve(path);
-  }
-  const rest = path.slice(device[0].length);
-  if (/^[A-Za-z]:[\\/]/.test(rest)) {
-    return resolve(rest);
-  }
-  const unc = /^UNC[\\/]/i.exec(rest);
-  return unc === null ? null : resolve(`\\\\${rest.slice(unc[0].length)}`);
-}
-
-/**
- * Why a program cannot be read, or null. Each step is compared with the project [param root] first:
- * what lands inside it, a share root included, keeps the project's own rule. What lands outside is
- * judged by its spelling and by reading the links on the way, never by touching what they lead to,
- * since a share that does not answer holds this server for as long as the network takes to give up.
- * A share, a device and a link chain leading to either are refused, and so is a chain past
- * [const MOST_LINKS]. A drive letter is taken as it is: whether one is mapped to a share is known
- * only by asking the system, which this does not do.
- */
-function networkRefusal(path: string, root: string, hops = 0): string | null {
-  if (process.platform !== 'win32') {
-    return null;
-  }
-  const plain = comparable(path);
-  const trusted = comparable(root);
-  const inside = plain !== null && trusted !== null && relativeWithin(trusted, plain) !== null;
-  if (plain === null || (!inside && plain.startsWith('\\\\'))) {
-    return `${path} is a network share or a device, and a share that does not answer would hold this server, so no program is started from one. Give a path on a local disk.`;
-  }
-  const base = inside ? trusted : parse(plain).root;
-  const steps = relative(base, plain)
-    .split(/[\\/]+/)
-    .filter((step) => step !== '');
-  let at = base;
-  for (const [index, step] of steps.entries()) {
-    at = join(at, step);
-    const found = lstatSync(at, { throwIfNoEntry: false });
-    if (found === undefined) {
-      return null;
-    }
-    if (found.isSymbolicLink()) {
-      if (hops >= MOST_LINKS) {
-        return `${path} leads through more than ${String(MOST_LINKS)} links, so it is not followed. Give the program's own path.`;
-      }
-      const target = resolve(dirname(at), readlinkSync(at));
-      return networkRefusal(join(target, ...steps.slice(index + 1)), root, hops + 1);
-    }
-  }
-  return null;
-}
-
-/** The refusal for a path with no file at it, saying where it looked. */
-function nothingAt(shown: string, inside: boolean, platform: string): string {
-  return inside
-    ? `There is no ${shown} in the project to start: export the build first, with project_export run.`
-    : `There is no file at ${shown} to start. Give the path of ${PROGRAM_KIND[platform] ?? 'an executable file'}.`;
-}
-
 /** The refusal for a path that cannot be a program's, or null when it can be one. */
 function notAProgramPath(trimmed: string): string | null {
   if (trimmed.includes('\0')) {
@@ -668,11 +602,33 @@ function notAProgramPath(trimmed: string): string | null {
   return null;
 }
 
+/** A program outside the project, which must exist and be one the platform can run. */
+function programOutsideTheProject(at: string, platform: string): ExportedBuild {
+  // A network or device spelling is refused as it is for every other path: nothing here reads it.
+  if (/^[\\/]{2}/.test(at)) {
+    return {
+      ok: false,
+      reason: `${at} is a network or device path, which is not read here. Give a path on a local disk.`,
+    };
+  }
+  let real: string;
+  try {
+    real = realpathSync.native(at);
+  } catch {
+    const kind = PROGRAM_KIND[platform] ?? 'an executable file';
+    return { ok: false, reason: `There is no file at ${at} to start. Give the path of ${kind}.` };
+  }
+  const judged = notAProgram(real, at, platform);
+  return 'reason' in judged
+    ? { ok: false, reason: judged.reason }
+    : { ok: true, absolutePath: judged.file, shownAs: judged.file.split(sep).join('/') };
+}
+
 /**
- * An exported build to start: a program named by its absolute path, or relative to the project
- * (with or without `res://`), wherever it is. A program is what the caller chose to run, as `godot`
- * is, so the project holds no claim on where it sits, and a link out of the project is followed.
- * What an answer calls the program is its path relative to the project when it is spelt inside it.
+ * An exported build to start: a program inside the project, judged as a file inside it is, or an
+ * existing program anywhere else on a local disk, named by its absolute path or relative to the
+ * project. What the project's own rule refuses for lying outside it, a link out of it excepted, is
+ * judged as a program instead.
  */
 export function exportedBuild(
   projectPath: string,
@@ -680,37 +636,34 @@ export function exportedBuild(
   platform: string = process.platform,
 ): ExportedBuild {
   const trimmed = candidatePath.trim();
-  if (trimmed === '') {
-    return { ok: false, reason: 'Path is empty.' };
-  }
-  const refused = notAProgramPath(trimmed);
+  const refused = trimmed === '' ? 'Path is empty.' : notAProgramPath(trimmed);
   if (refused !== null) {
     return { ok: false, reason: refused };
   }
-  const root = resolve(projectPath);
-  let at = resolve(root, trimmed);
-  if (trimmed.startsWith(RESOURCE_SCHEME)) {
-    const resource = resolveWithinProject(projectPath, trimmed, { forTheEngine: true });
-    if (!resource.ok) {
-      return resource;
-    }
-    at = resource.absolutePath;
+  const found = resolveWithinProject(projectPath, trimmed);
+  const at = resolve(projectPath, trimmed);
+  const outside =
+    !found.ok &&
+    found.link === undefined &&
+    !trimmed.startsWith(RESOURCE_SCHEME) &&
+    !isWithinRoot(resolve(projectPath), at);
+  if (outside) {
+    return programOutsideTheProject(at, platform);
   }
-  const where = insideProject(root, at);
-  const inside = where === '' ? null : where;
-  const network = networkRefusal(at, root);
-  if (network !== null) {
-    return { ok: false, reason: network };
+  if (!found.ok) {
+    return found;
   }
   let real: string;
   try {
-    real = realpathSync.native(at);
+    real = realpathSync.native(found.absolutePath);
   } catch {
-    return { ok: false, reason: nothingAt(inside ?? trimmed, inside !== null, platform) };
+    return {
+      ok: false,
+      reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
+    };
   }
-  const judged = notAProgram(real, inside ?? trimmed, platform);
-  if ('reason' in judged) {
-    return { ok: false, reason: judged.reason };
-  }
-  return { ok: true, absolutePath: judged.file, shownAs: inside ?? judged.file.split(sep).join('/') };
+  const judged = notAProgram(real, found.relativePath, platform);
+  return 'reason' in judged
+    ? { ok: false, reason: judged.reason }
+    : { ok: true, absolutePath: judged.file, shownAs: found.relativePath };
 }

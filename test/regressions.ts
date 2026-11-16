@@ -40607,13 +40607,9 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
     };
     assert.match(reason('export/missing.exe'), /^There is no export\/missing\.exe in the project to start/);
     assert.match(reason('export'), /^export is not a file/);
-    // A program is judged where it is, so a link out of the project and a path climbing out of it
-    // name the program as its absolute path does.
-    assert.deepEqual(exportedBuild(project, 'linked/game.exe'), {
-      ok: true,
-      absolutePath: realpathSync.native(join(outside, 'game.exe')),
-      shownAs: 'linked/game.exe',
-    });
+    // A link inside the project that leads out of it is refused as for any file there, while a path
+    // climbing out of it names a program outside, as its absolute path does.
+    assert.match(reason('linked/game.exe'), /leads out of the project through the link res:\/\/linked\//);
     const climbing = exportedBuild(project, '../outside/game.exe');
     assert.equal(climbing.ok && climbing.absolutePath, realpathSync.native(join(outside, 'game.exe')));
   } finally {
@@ -40622,48 +40618,38 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
 }
 
 /**
- * A link inside a project is compared with the project first: one to a folder of the project is
- * inside it, even when the project is served from a share, and one to a share outside it is refused
- * however the path to it is spelt. Needs the right to make links, and the account's own admin share.
+ * A project is judged as a project wherever it is opened from, and a link inside it that leads out
+ * is refused however the program is spelt: the volume path of the project starts its export, and a
+ * link to a share is answered as a link out of the project. Needs the right to make links.
  */
-function linksInsideAProjectAreJudged(at: {
+function projectsAreJudgedWhereTheyAreOpened(at: {
   project: string;
   builds: string;
   onShare: (path: string) => string;
 }): void {
   const { project, builds, onShare } = at;
+  const volume = spawnSyncHidden('mountvol', [project.slice(0, 2), '/L'], { encoding: 'utf8' });
+  const named = /\\\\\?\\Volume\{[^}]+\}\\/.exec(volume.stdout)?.[0];
+  if (named !== undefined) {
+    const opened = exportedBuild(`${named}${project.slice(3)}`, 'export/game.exe');
+    assert.equal(opened.ok && opened.shownAs, 'export/game.exe', JSON.stringify(opened));
+  }
   try {
-    symlinkSync('export', join(project, 'export2'), 'dir');
     symlinkSync(onShare(builds), join(project, 'netlink-in'), 'dir');
   } catch {
     return;
   }
-  const ours = exportedBuild(onShare(project), 'export2/game.exe');
-  assert.equal(ours.ok && ours.shownAs, 'export2/game.exe', JSON.stringify(ours));
   const plain = join(project, 'netlink-in', 'game.exe');
-  for (const spelling of [
-    plain,
-    `\\\\?\\${plain}`,
-    `\\\\.\\${plain}`,
-    `//?/${plain.replaceAll('\\', '/')}`,
-    'res://netlink-in/game.exe',
-    'netlink-in/game.exe',
-  ]) {
+  for (const spelling of [plain, `\\\\?\\${plain}`, 'res://netlink-in/game.exe', 'netlink-in/game.exe']) {
     const judged = exportedBuild(project, spelling);
     assert.ok(!judged.ok, `${spelling}: ${JSON.stringify(judged)}`);
-    assert.match(judged.reason, /is a network share or a device/, spelling);
+    assert.match(judged.reason, /leads out of the project through the link res:\/\/netlink-in\//, spelling);
   }
 }
 
-/** Where a Windows path leads to a program, judged by its spelling and its links alone. */
-function windowsProgramPathsAreJudged(at: {
-  sandbox: string;
-  project: string;
-  builds: string;
-  there: string;
-  real: string;
-}): void {
-  const { sandbox, project, builds, there, real } = at;
+/** Where a Windows path leads to a program, judged by its spelling alone. */
+function windowsProgramPathsAreJudged(at: { project: string; builds: string; there: string }): void {
+  const { project, builds, there } = at;
   const reason = (candidate: string, folder = project): string => {
     const judged = exportedBuild(folder, candidate);
     return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
@@ -40680,11 +40666,10 @@ function windowsProgramPathsAreJudged(at: {
     `\\\\?\\GLOBALROOT\\Device\\Mup\\localhost\\${there.replace(':', '$')}`,
     `\\\\.\\GLOBALROOT\\Device\\Mup\\localhost\\${there.replace(':', '$')}`,
   ]) {
-    assert.match(reason(form), /is a network share or a device/, form);
+    assert.match(reason(form), /is a network or device path/, form);
   }
   for (const form of [`\\\\?\\${there}`, `\\\\.\\${there}`]) {
-    const local = exportedBuild(project, form);
-    assert.equal(local.ok && local.absolutePath, real, JSON.stringify(local));
+    assert.match(reason(form), /is a network or device path/, form);
   }
   for (const resource of ['res://../builds/game.exe', 'res:///scratch/game.exe', `res://${there}`]) {
     const refused = reason(resource);
@@ -40700,22 +40685,8 @@ function windowsProgramPathsAreJudged(at: {
     assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
     const resource = exportedBuild(shared, 'res://export/game.exe');
     assert.equal(resource.ok && resource.shownAs, 'export/game.exe', JSON.stringify(resource));
-    linksInsideAProjectAreJudged({ project, builds, onShare });
   }
-  try {
-    symlinkSync(onShare(builds), join(sandbox, 'netlink'), 'dir');
-  } catch {
-    return;
-  }
-  assert.match(reason(join(sandbox, 'netlink', 'game.exe')), /is a network share or a device/);
-  let previous = join(sandbox, 'netlink');
-  for (let hop = 0; hop < 42; hop += 1) {
-    const next = join(sandbox, `hop${String(hop)}`);
-    symlinkSync(previous, next, 'dir');
-    previous = next;
-  }
-  const tooMany = reason(join(previous, 'game.exe'));
-  assert.match(tooMany, /leads through more than 40 links/, tooMany);
+  projectsAreJudgedWhereTheyAreOpened({ project, builds, onShare });
 }
 
 /**
@@ -40764,7 +40735,7 @@ function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
     assert.match(reason('uid://abc'), /^Path 'uid:\/\/abc' is not a path to a program/);
 
     if (process.platform === 'win32') {
-      windowsProgramPathsAreJudged({ sandbox, project, builds, there, real });
+      windowsProgramPathsAreJudged({ project, builds, there });
     }
 
     const bundle = join(builds, 'Game.app');
