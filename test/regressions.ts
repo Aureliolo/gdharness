@@ -88993,6 +88993,14 @@ function testAMoveRewritesWhatTheFileSystemTakesForTheMovedFile(): void {
   }
 }
 
+/** That the scene at [scene] loads with [names], where an engine is there to load it. */
+function assertLoads(project: string, scene: string, names: readonly string[]): void {
+  const loaded = loadedNames(project, scene);
+  if (loaded !== null) {
+    assert.deepEqual(loaded, names, `${scene} loads after the move`);
+  }
+}
+
 /** The names of the root and the children of the scene at [scene], loaded by a headless engine. */
 function loadedNames(project: string, scene: string): string[] | null {
   const godotPath = resolveGodotPath();
@@ -89187,12 +89195,16 @@ function testAMoveLeavesAHardLinkedSecondNameAlone(): void {
 }
 
 /**
- * A string that is not written as a res:// path stays as it was, in every case: the word of a
- * label, a name, and a relative path in another case are no reference to the moved file.
+ * A relative string in another case that names no file the move touches stays as it was: a file
+ * of its own, a word that is no file and a name nothing holds.
  */
-function testAMoveLeavesARelativeStringInAnotherCase(): void {
-  const script = 'extends Node\n\nconst A := "DESK.tscn"\nconst B := "desk"\nconst C := "Desk.TSCN"\n';
-  const { project } = caseMoveProject({ 'desk.tscn': LINKED_DESK, 'use.gd': script }, 'DESK.tscn');
+function testAMoveLeavesARelativeStringNamingAFileItDoesNotMove(): void {
+  const script =
+    'extends Node\n\nconst A := "OTHER.tscn"\nconst B := "desk"\nconst C := "NOPE.tscn"\nconst D := "sub/OTHER.tscn"\n';
+  const { project } = caseMoveProject(
+    { 'desk.tscn': LINKED_DESK, 'other.tscn': LINKED_DESK, 'sub/other.tscn': LINKED_DESK, 'use.gd': script },
+    'DESK.tscn',
+  );
   try {
     movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
     assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), script);
@@ -89202,14 +89214,19 @@ function testAMoveLeavesARelativeStringInAnotherCase(): void {
 }
 
 /**
- * A relative string matches the moved file by its exact spelling, however another file spells the
- * path in full: one mis-cased res:// reference elsewhere does not turn a label, a resource name
- * or a print argument in another case into a reference.
+ * The text a scene holds is no path: a label, a tooltip, a node name and a group naming the moved
+ * file in another case stay as written, beside a code string and an absolute path that follow.
  */
-function testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne(): void {
-  const label =
-    '[gd_scene format=3]\n\n[node name="N" type="Label"]\ntext = "DESK.tscn"\ntooltip_text = "Open DESK.tscn"\n';
-  const say = 'extends Node\n\nfunc _ready() -> void:\n\tprint("DESK.tscn")\n\tvar d := {"DESK.tscn": 1}\n';
+function testAMoveLeavesASceneTextInAnotherCaseBesideCodeThatFollows(): void {
+  const label = [
+    '[gd_scene format=3]',
+    '',
+    '[node name="DESK.tscn" type="Label" groups=["DESK.tscn"]]',
+    'text = "DESK.tscn"',
+    'tooltip_text = "Open DESK.tscn"',
+    '',
+  ].join('\n');
+  const say = 'extends Node\n\nfunc _ready() -> void:\n\tprint("DESK.tscn")\n\t# "DESK.tscn"\n';
   const { project, folds } = caseMoveProject(
     {
       'desk.tscn': LINKED_DESK,
@@ -89228,10 +89245,93 @@ function testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne(): void 
       after('abs.gd'),
     );
     assert.equal(after('label.tscn'), label);
-    assert.equal(after('say.gd'), say);
     assert.equal(after('sub/inner.tscn'), label);
+    assert.equal(
+      after('say.gd'),
+      folds ? say.replace('print("DESK.tscn")', 'print("newdir/desk.tscn")') : say,
+      'a code string follows and a comment does not',
+    );
   } finally {
     sweep(project);
+  }
+}
+
+/** A scene with a root that instances each of [param paths], as nodes N1, N2 and so on. */
+function sceneInstancing(paths: readonly string[]): string {
+  const resources = paths.map(
+    (path, at) => `[ext_resource type="PackedScene" path="${path}" id="${at + 1}_s"]\n`,
+  );
+  const nodes = paths.map(
+    (_path, at) => `[node name="N${at + 1}" parent="." instance=ExtResource("${at + 1}_s")]\n`,
+  );
+  return `[gd_scene format=3]\n\n${resources.join('')}\n[node name="Root" type="Node3D"]\n${nodes.join('')}`;
+}
+
+/**
+ * A relative string in another case follows a moved file where the file system joins it, in a
+ * script and in a scene's ext_resource: `DESK.tscn`, `./DESK.tscn` and, for a file in a folder,
+ * `SUB/desk.tscn`, each to the new place in the style it was written. A load reads from the root.
+ * The scene still loads after the move.
+ */
+function testAMoveFollowsARelativePathInAnotherCase(): void {
+  const up = caseMoveProject(
+    {
+      'desk.tscn': LINKED_DESK,
+      'use.gd': 'extends Node\n\nconst A := preload("DESK.tscn")\nconst B := preload("./DESK.tscn")\n',
+      'deep/use.gd': 'extends Node\n\nconst A := preload("../DESK.tscn")\nconst B := load("DESK.tscn")\n',
+      'use.tscn': sceneInstancing(['DESK.tscn', './DESK.tscn']),
+    },
+    'DESK.tscn',
+  );
+  const down = caseMoveProject(
+    {
+      'sub/desk.tscn': LINKED_DESK,
+      'use.gd': 'extends Node\n\nconst A := preload("SUB/desk.tscn")\nconst B := preload("sub/DESK.tscn")\n',
+      'use.tscn': sceneInstancing(['SUB/desk.tscn']),
+    },
+    'SUB/desk.tscn',
+  );
+  try {
+    const read = (project: string, file: string): string => readFileSync(join(project, file), 'utf8');
+    movedIn(up.project, 'desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      read(up.project, 'use.gd'),
+      up.folds
+        ? 'extends Node\n\nconst A := preload("newdir/desk.tscn")\nconst B := preload("newdir/desk.tscn")\n'
+        : 'extends Node\n\nconst A := preload("DESK.tscn")\nconst B := preload("./DESK.tscn")\n',
+    );
+    assert.equal(
+      read(up.project, 'deep/use.gd'),
+      up.folds
+        ? 'extends Node\n\nconst A := preload("../newdir/desk.tscn")\nconst B := load("newdir/desk.tscn")\n'
+        : 'extends Node\n\nconst A := preload("../DESK.tscn")\nconst B := load("DESK.tscn")\n',
+    );
+    assert.equal(
+      read(up.project, 'use.tscn'),
+      up.folds
+        ? sceneInstancing(['newdir/desk.tscn', 'newdir/desk.tscn'])
+        : sceneInstancing(['DESK.tscn', './DESK.tscn']),
+    );
+    movedIn(down.project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      read(down.project, 'use.gd'),
+      down.folds
+        ? 'extends Node\n\nconst A := preload("newdir/desk.tscn")\nconst B := preload("newdir/desk.tscn")\n'
+        : 'extends Node\n\nconst A := preload("SUB/desk.tscn")\nconst B := preload("sub/DESK.tscn")\n',
+    );
+    assert.equal(
+      read(down.project, 'use.tscn'),
+      down.folds ? sceneInstancing(['newdir/desk.tscn']) : sceneInstancing(['SUB/desk.tscn']),
+    );
+    if (up.folds) {
+      assertLoads(up.project, 'res://use.tscn', ['Root', 'N1', 'N2']);
+    }
+    if (down.folds) {
+      assertLoads(down.project, 'res://use.tscn', ['Root', 'N1']);
+    }
+  } finally {
+    sweep(up.project);
+    sweep(down.project);
   }
 }
 
@@ -89414,6 +89514,41 @@ function testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase(): void {
 }
 
 /**
+ * Renames `Player` of player.gd to `Hero` in [param project] and moves the script to hero.gd,
+ * writing the rewrites. The words searched are those of `player.gd` and `user.gd`.
+ */
+async function renamePlayerAndMoveItsScript(project: string): Promise<void> {
+  const wordsIn = (word: string): { file: string; line: number; character: number }[] =>
+    ['player.gd', 'user.gd'].flatMap((file) =>
+      readFileSync(join(project, file), 'utf8')
+        .split('\n')
+        .flatMap((source, line) =>
+          [...source.matchAll(new RegExp(`\\b${word}\\b`, 'g'))].map((hit) => ({
+            file: join(project, file),
+            line,
+            character: hit.index,
+          })),
+        ),
+    );
+  const outcome = await renameSymbol(
+    {
+      projectPath: project,
+      scriptPath: join(project, 'player.gd'),
+      symbol: 'Player',
+      newName: 'Hero',
+      newScriptPath: join(project, 'hero.gd'),
+    },
+    {
+      namesTaken: engineSaying(),
+      references: async () => await Promise.resolve(wordsIn('Player')),
+      definitions: async () => await Promise.resolve(wordsIn('Player')),
+    },
+  );
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  applyRewrites(outcome.rewrites);
+}
+
+/**
  * A class rename that moves its script rewrites a preload of the script in another case where the
  * file system joins it, as a move of the file does, and leaves it where the disk keeps it apart.
  */
@@ -89427,37 +89562,119 @@ async function testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins(): Pr
     'PLAYER.gd',
   );
   try {
-    const wordsIn = (word: string): { file: string; line: number; character: number }[] =>
-      ['player.gd', 'user.gd'].flatMap((file) =>
-        readFileSync(join(project, file), 'utf8')
-          .split('\n')
-          .flatMap((source, line) =>
-            [...source.matchAll(new RegExp(`\\b${word}\\b`, 'g'))].map((hit) => ({
-              file: join(project, file),
-              line,
-              character: hit.index,
-            })),
-          ),
-      );
-    const outcome = await renameSymbol(
-      {
-        projectPath: project,
-        scriptPath: join(project, 'player.gd'),
-        symbol: 'Player',
-        newName: 'Hero',
-        newScriptPath: join(project, 'hero.gd'),
-      },
-      {
-        namesTaken: engineSaying(),
-        references: async () => await Promise.resolve(wordsIn('Player')),
-        definitions: async () => await Promise.resolve(wordsIn('Player')),
-      },
-    );
-    assert.ok(outcome.ok, JSON.stringify(outcome));
-    applyRewrites(outcome.rewrites);
+    await renamePlayerAndMoveItsScript(project);
     const user = readFileSync(join(project, 'user.gd'), 'utf8');
     assert.ok(user.includes('preload("res://hero.gd")'), user);
     assert.equal(user.includes('preload("res://PLAYER.gd")'), !folds, user);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class rename that moves its script follows a relative preload in another case, in the style it
+ * was written, and keeps a word in a scene's text.
+ */
+async function testARenameThatMovesItsScriptFollowsARelativePathInAnotherCase(): Promise<void> {
+  const label = '[gd_scene format=3]\n\n[node name="L" type="Label"]\ntext = "PLAYER.gd"\n';
+  const { project, folds } = caseMoveProject(
+    {
+      'player.gd': 'class_name Player\nextends Node\n',
+      'user.gd': 'extends Node\n\nconst A := preload("player.gd")\nconst B := preload("PLAYER.gd")\n',
+      'label.tscn': label,
+    },
+    'PLAYER.gd',
+  );
+  try {
+    await renamePlayerAndMoveItsScript(project);
+    assert.equal(
+      readFileSync(join(project, 'user.gd'), 'utf8'),
+      folds
+        ? 'extends Node\n\nconst A := preload("hero.gd")\nconst B := preload("hero.gd")\n'
+        : 'extends Node\n\nconst A := preload("hero.gd")\nconst B := preload("PLAYER.gd")\n',
+    );
+    assert.equal(readFileSync(join(project, 'label.tscn'), 'utf8'), label);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A folder move takes the relative strings in another case between the files it carries to the
+ * new place, never to the folder that is gone: `B.tscn` beside, and `../LIB/b.tscn` and
+ * `../lib/B.tscn` back into the folder, from a scene in it. The moved scene still loads.
+ */
+function testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles(): void {
+  const { project, folds } = caseMoveProject(
+    {
+      'lib/a.tscn': sceneInstancing(['B.tscn', '../LIB/b.tscn', '../lib/B.tscn']),
+      'lib/b.tscn': LINKED_DESK,
+    },
+    'LIB/B.tscn',
+  );
+  try {
+    movedIn(project, 'lib', 'stage');
+    assert.equal(
+      readFileSync(join(project, 'stage/a.tscn'), 'utf8'),
+      folds
+        ? sceneInstancing(['b.tscn', 'b.tscn', 'b.tscn'])
+        : sceneInstancing(['B.tscn', '../LIB/b.tscn', '../lib/B.tscn']),
+    );
+    if (folds) {
+      assertLoads(project, 'res://stage/a.tscn', ['Root', 'N1', 'N2', 'N3']);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A string GDScript reads with an escape names no file of the disk's: `levels\tutorial.tscn` is a
+ * tab inside a name, and `\tdesk.tscn` is a tab before one, though the disk takes the backslash
+ * for a separator and so reaches `tdesk.tscn`. Both stay as written.
+ */
+function testAMoveLeavesAStringReadWithAnEscape(): void {
+  const levels = 'extends Node\n\nconst A := "levels\\tutorial.tscn"\nconst B := "levels\\\\tutorial.tscn"\n';
+  const tab = 'extends Node\n\nconst A := "\\tdesk.tscn"\n';
+  const down = caseMoveProject(
+    { 'levels/tutorial.tscn': LINKED_DESK, 'use.gd': levels },
+    'LEVELS/tutorial.tscn',
+  );
+  const up = caseMoveProject({ 'tdesk.tscn': LINKED_DESK, 'use.gd': tab }, 'TDESK.tscn');
+  try {
+    movedIn(down.project, 'levels/tutorial.tscn', 'newdir/tutorial.tscn');
+    assert.equal(readFileSync(join(down.project, 'use.gd'), 'utf8'), levels);
+    movedIn(up.project, 'tdesk.tscn', 'newdir/tdesk.tscn');
+    assert.equal(readFileSync(join(up.project, 'use.gd'), 'utf8'), tab);
+  } finally {
+    sweep(down.project);
+    sweep(up.project);
+  }
+}
+
+/**
+ * A moved script's own relative strings follow it as they always have, a backslash among them: a
+ * raw string has no escapes, and where the disk reads a backslash as a separator, as Windows does,
+ * `r"sub\b.tres"` still reaches `sub/b.tres` once the script moves. Elsewhere it names no file and
+ * stays.
+ */
+function testAMovedScriptKeepsItsRawStringReaching(): void {
+  const { project } = caseMoveProject(
+    {
+      'sub/b.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      'a.gd': 'extends Node\n\nconst B := preload(r"sub\\b.tres")\n',
+    },
+    'A.gd',
+  );
+  try {
+    const separates = existsSync(join(project, 'sub\\b.tres'));
+    movedIn(project, 'a.gd', 'newdir/a.gd');
+    assert.equal(
+      readFileSync(join(project, 'newdir', 'a.gd'), 'utf8'),
+      separates
+        ? 'extends Node\n\nconst B := preload(r"../sub\\b.tres")\n'
+        : 'extends Node\n\nconst B := preload(r"sub\\b.tres")\n',
+    );
   } finally {
     sweep(project);
   }
@@ -106802,8 +107019,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFolderMoveLeavesStringsThatOnlyResolveToTheFolder,
   testAMoveLooksAtEachEntryOnce,
   testAMoveLeavesAHardLinkedSecondNameAlone,
-  testAMoveLeavesARelativeStringInAnotherCase,
-  testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne,
+  testAMoveLeavesARelativeStringNamingAFileItDoesNotMove,
+  testAMoveLeavesASceneTextInAnotherCaseBesideCodeThatFollows,
+  testAMoveFollowsARelativePathInAnotherCase,
+  testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles,
+  testAMoveLeavesAStringReadWithAnEscape,
+  testAMovedScriptKeepsItsRawStringReaching,
   testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth,
   testAPathIsSplitIntoPartsOnSlashesOnly,
@@ -106811,6 +107032,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
   testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins,
+  testARenameThatMovesItsScriptFollowsARelativePathInAnotherCase,
   testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks,
