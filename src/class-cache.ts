@@ -46,21 +46,30 @@ export function isToolScript(source: string): boolean {
 }
 
 /**
- * Every `class_name` declared under the project, with the script that declares it.
+ * Every `class_name` declared under the project, to the scripts declaring it in the engine's scan
+ * order. More than one is a project error the engine reports in every script but the one it keeps.
  *
  * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
  * inside is imported and no declaration in there is ever a global class. Counting them makes a
  * correct project look like one whose editor has gone blind, every time it is asked.
  */
-export function declaredClasses(projectPath: string): Map<string, string> {
-  const declared = new Map<string, string>();
+export function classDeclarers(projectPath: string): Map<string, string[]> {
+  const declarers = new Map<string, string[]>();
   eachScript(projectPath, (script, source) => {
     const found = declaredClassOf(source);
     if (found !== null) {
-      declared.set(found, script);
+      declarers.set(found, [...(declarers.get(found) ?? []), script]);
     }
   });
-  return declared;
+  return declarers;
+}
+
+/**
+ * Every `class_name` declared under the project, with the script a first scan gives it: the last of
+ * its declarers, since the scan registers them in turn and each registration replaces the path.
+ */
+export function declaredClasses(projectPath: string): Map<string, string> {
+  return new Map([...classDeclarers(projectPath)].map(([name, scripts]) => [name, scripts.at(-1) ?? '']));
 }
 
 /** A `class_name` a project script declares, with what it extends and whether it is abstract. */
@@ -1203,11 +1212,48 @@ export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: s
     .toSorted();
 }
 
-/** The declarations a given cache records at a different path, or does not record at all. */
+/**
+ * The declarations a given cache records at none of their scripts, or does not record at all.
+ *
+ * A name more than one script declares is current at any of them, since the rebuild keeps the
+ * cache's pick while it still declares the name. So is a script in another language the cache
+ * names, which the rebuild carries while it is there.
+ */
 export function staleAgainst(cached: Map<string, string>, projectPath: string): string[] {
-  return [...declaredClasses(projectPath)]
-    .filter(([name, path]) => cached.get(name) !== path)
+  const languages = cachedLanguages(projectPath);
+  const holds = (name: string, scripts: readonly string[]): boolean => {
+    const held = cached.get(name);
+    return (
+      held !== undefined &&
+      (scripts.includes(held) || isCarried(held, languages.get(name) ?? 'GDScript', projectPath))
+    );
+  };
+  return [...classDeclarers(projectPath)]
+    .filter(([name, scripts]) => !holds(name, scripts))
     .map(([name]) => name);
+}
+
+/**
+ * Whether the class list rebuild carries an entry of [param language] at [param path]: another
+ * language's, while its file is there, and a C# one only at a `.cs` file. The extension of a
+ * language a GDExtension adds is not known, so its entry is taken at any file, as the rebuild
+ * takes it.
+ */
+function isCarried(path: string, language: string, projectPath: string): boolean {
+  if (language === 'GDScript' || (language === 'C#' && !path.endsWith('.cs'))) {
+    return false;
+  }
+  return path.startsWith('res://') && existsSync(join(projectPath, path.slice('res://'.length)));
+}
+
+/** The language each class the cache lists is in, as its entry writes it. */
+function cachedLanguages(projectPath: string): Map<string, string> {
+  return new Map(
+    [...(cachedEntries(projectPath) ?? [])].map(([name, entry]) => [
+      name,
+      /"language":\s*&"([^"]+)"/.exec(entry)?.[1] ?? 'GDScript',
+    ]),
+  );
 }
 
 /** The declarations on disk the engine's cache does not know about. */

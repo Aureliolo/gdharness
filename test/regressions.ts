@@ -62,6 +62,7 @@ import {
   type Contradicted,
   cachedClasses,
   cacheWrittenAt,
+  classDeclarers,
   classesNamedIn,
   contradictedDiagnostics,
   declaredClasses,
@@ -75,6 +76,7 @@ import {
   type MissingMember,
   missingMemberIn,
   scriptsInside,
+  staleAgainst,
   staleAnalysisNote,
   staleClassNames,
   uncachedClassNote,
@@ -256,6 +258,7 @@ import {
 import {
   callSitesOf,
   enclosingFunction,
+  Lines,
   neverStopsOn,
   occurrencesOf,
   regionsOf,
@@ -294,6 +297,7 @@ import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/
 import {
   ASIDE,
   answerIn,
+  type HeadlessOutcome,
   judgeImport,
   librariesNotCopied,
   notImportedNote,
@@ -1374,6 +1378,41 @@ async function testTheDebuggerNamesTheErrorsItsCallsRaise(): Promise<void> {
     game.destroy();
     peer.close();
   }
+}
+
+/**
+ * An error the runtime addon's read of a `property` path made the engine report is the read's, in
+ * whichever order its line and the game's mark of it reach the transcript.
+ */
+function testAPathReadsErrorIsNotTheGames(): void {
+  const raised = "Invalid access to property or key 'gone' on a base object of type 'Node'.";
+  const printed = [`SCRIPT ERROR: ${raised}`, '   at: get (core/variant/variant.cpp:1)'];
+  const marked = raisedMark('path read', raised, 'core/variant/variant.cpp').trimEnd();
+  for (const [order, lines] of [
+    ['printed first', [...printed, marked]],
+    ['marked first', [marked, ...printed]],
+  ] as const) {
+    const log = new GameLog();
+    log.append('transcript', `${lines.join('\n')}\n`);
+    assert.deepEqual(
+      log.all.map((entry) => [entry.severity, entry.text, entry.raisedBy]),
+      [['info', raised, 'path read']],
+      order,
+    );
+    assert.equal(log.count('error'), 0, order);
+  }
+}
+
+/**
+ * A caller that has already read a script hands its regions over, and the call sites are taken from
+ * those rather than from a second reading: with none blanked, a call in a comment counts.
+ */
+function testCallSitesUseTheReadTheyAreHanded(): void {
+  const source = 'func a() -> void:\n\tb()\n\t# b()\n\n\nfunc b() -> void:\n\tpass\n';
+  const lines = (found: { line: number }[]): number[] => found.map((one) => one.line);
+  assert.deepEqual(lines(callSitesOf(source, 'b')), [2], 'read on its own, a comment is blanked');
+  const handed = { regions: [], shape: scriptShapeOf(source), lines: new Lines(source) };
+  assert.ok(lines(callSitesOf(source, 'b', false, {}, handed)).includes(3), 'the handed regions are used');
 }
 
 /**
@@ -47520,21 +47559,38 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
 
 /**
  * Why a game gave no snapshot is told from what it answered, in the order it answers.
- * - A game that answers the inspection asked right after the request, and not the request, has an
- *   engine without the snapshot, since the engine drops a message for a capture it lacks. That is
- *   known at once.
+ * - A game that answers the inspection asked right after the request, then sends its next frame
+ *   with no answer to the request, has an engine without the snapshot, since the engine drops a
+ *   message for a capture it lacks. That is known at that frame.
+ * - One whose main thread stops at a breakpoint after that answer is told to let it go on first,
+ *   since a break inside a prepare reads the same.
+ * - One that has sent no frame since it connected is refused at the answer, saying a snapshot
+ *   still being prepared reads the same and naming the call that sends frames.
+ * - One whose frames stop after that answer is refused at the end of the wait, saying so, and
+ *   naming that call as what to try if the game turned its profiler off.
  * - A game that answers neither while its frames go on has no debug features at all.
  * - A game that sends nothing more was busy. The frames it had sent before it read the request,
  *   which arrive together as the request goes out, do not count as frames past it.
  */
 async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void> {
-  type Game = 'inspects' | 'frames' | 'busy';
+  type Game = 'inspects' | 'breaks' | 'silent' | 'stops' | 'frames' | 'busy';
   const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
     const { peer, game } = await aStandInGame();
     const frame = (): boolean => game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
+    let asked = false;
+    // What each game without the snapshot sends after its answer to the inspection.
+    const afterInspection: Partial<Record<Game, () => unknown>> = {
+      inspects: frame,
+      breaks: () => game.write(framedCommand('debug_enter', [true, 'Breakpoint', true])),
+      silent: () => undefined,
+      stops: () => undefined,
+    };
     const reply = (message: string): void => {
-      if (kind === 'inspects' && message === 'scene:inspect_object') {
+      asked ||= message === 'snapshot:request_prepare_snapshot';
+      const after = afterInspection[kind];
+      if (after !== undefined && message === 'scene:inspect_object') {
         game.write(framedCommand('scene:inspect_object', []));
+        after();
       }
       // What was sent before the request was read, still on its way as the request goes out.
       if (kind === 'busy' && message === 'snapshot:request_prepare_snapshot') {
@@ -47549,8 +47605,11 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
         }
       }
     });
-    const ticking = setInterval(() => kind === 'frames' && frame(), 200);
+    const ticking = setInterval(() => (kind === 'frames' || (kind === 'stops' && !asked)) && frame(), 200);
     try {
+      if (kind === 'silent') {
+        await delay(3500);
+      }
       const began = Date.now();
       const answer = await peer.ask({ op: 'snapshot' });
       return { answer, ms: Date.now() - began };
@@ -47560,17 +47619,35 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
       peer.close();
     }
   };
-  const [inspected, frames, busy] = await Promise.all([
+  const [inspected, breaks, silent, stops, frames, busy] = await Promise.all([
     answerOf('inspects'),
+    answerOf('breaks'),
+    answerOf('silent'),
+    answerOf('stops'),
     answerOf('frames'),
     answerOf('busy'),
   ]);
-  assert.deepEqual(inspected.answer, {
+  const noSnapshot =
+    'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.';
+  const debugEngine =
+    'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot';
+  assert.deepEqual(inspected.answer, { refused: noSnapshot, next: debugEngine });
+  assert.deepEqual(breaks.answer, {
     refused:
-      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
-    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+      "The game's main thread stopped at a breakpoint as it was asked for the snapshot, and a held main thread finishes no snapshot until it goes on.",
+    next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
   });
-  assert.ok(inspected.ms < 2000, `known from the order, not the wait: ${inspected.ms} ms`);
+  assert.deepEqual(silent.answer, {
+    refused: `${noSnapshot} It has sent no performance frame since its debugger connected either, so a snapshot still being prepared cannot be told apart from a missing one.`,
+    next: 'EngineDebugger.profiler_enable("performance", true) in the game sends its performance frames again, then debug_objects snapshot asks again',
+  });
+  for (const [name, known] of Object.entries({ inspected, breaks, silent })) {
+    assert.ok(known.ms < 2000, `${name} is known from the order, not the wait: ${known.ms} ms`);
+  }
+  assert.deepEqual(stops.answer, {
+    refused: `${noSnapshot} It sent no frame in the 20 s after that answer either, which a game still preparing a snapshot that large does too.`,
+    next: 'debug_objects snapshot asks again, after EngineDebugger.profiler_enable("performance", true) in the game if it turned its performance profiler off',
+  });
   assert.match(
     String(frames.answer['refused']),
     /^The game answered neither the snapshot request nor the inspection asked after it within 20 s, while its frames went on/,
@@ -47581,6 +47658,153 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
       'The game answered no object snapshot within 20 s, and the frames a running game sends each second stopped meanwhile, so it was busy.',
     next: 'debug_objects snapshot asks again, which the game answers once its frames go on',
   });
+}
+
+/**
+ * A running game can answer the inspection asked after a snapshot request while it still prepares
+ * the snapshot: reading its objects runs their script, and every 2048 lines of script the engine
+ * reads and answers the messages waiting. Its snapshot is taken all the same:
+ * - also when it was asked while a continue was on its way, and the game left its break before
+ *   reading the request;
+ * - also after a hold of over three seconds, with no frame sent until the one the game sends as it
+ *   goes on, just before it reads the request;
+ * - also from a game whose frames come more than three seconds apart, which prepares for a while
+ *   after its answer.
+ * A main thread held at a breakpoint reads nothing during a prepare, so there an inspection
+ * answered with no snapshot before it is refused at once, with no frame to wait for.
+ */
+async function testASnapshotPreparedAfterItsInspectionIsTaken(): Promise<void> {
+  const prepared = standInSnapshot(3, 'res://mob.gd', 'node_name');
+  type Game = 'running' | 'held' | 'continued' | 'continuedLate' | 'slow';
+  const frame = framedCommand('performance:profile_frame', [[1, 2, 3]]);
+  const answerOf = async (kind: Game): Promise<{ answer: DebugAnswer; ms: number }> => {
+    const { peer, game, taken } = await aStandInGame();
+    const held = kind === 'held';
+    const goesOn = kind === 'continued' || kind === 'continuedLate';
+    let id = 0;
+    let continued = (): void => undefined;
+    const toldToGoOn = new Promise<void>((settle) => {
+      continued = settle;
+    });
+    const sizeAndFrame = (): Uint8Array[] => [
+      framedCommand('snapshot:snapshot_prepared', [id, prepared.length]),
+      frame,
+    ];
+    const replies: Record<string, (data: number[]) => void> = {
+      continue: () => {
+        continued();
+      },
+      'snapshot:request_prepare_snapshot': ([asked = 0]) => {
+        id = asked;
+        // Its break was left as the continue came, and that news reaches the keeper only now, with
+        // the frame its main loop sends before it reads the request.
+        if (goesOn) {
+          game.write(
+            Buffer.concat([framedCommand('debug_exit', []), ...(kind === 'continuedLate' ? [frame] : [])]),
+          );
+        }
+      },
+      'scene:inspect_object': () => {
+        const after = held || kind === 'slow' ? [] : sizeAndFrame();
+        game.write(Buffer.concat([framedCommand('scene:inspect_object', []), ...after]));
+        if (kind === 'slow') {
+          setTimeout(() => game.write(Buffer.concat(sizeAndFrame())), 500);
+        }
+      },
+      'snapshot:request_snapshot_chunk': ([asked = 0, begin = 0, end = 0]) => {
+        game.write(framedCommand('snapshot:snapshot_chunk', [asked, [...prepared.subarray(begin, end)]]));
+      },
+    };
+    const stream = new DebuggerStream();
+    game.on('data', (chunk: Buffer) => {
+      for (const received of stream.push(chunk)) {
+        if ('message' in received) {
+          replies[received.message]?.(received.data.map(Number));
+        }
+      }
+    });
+    try {
+      if (held || goesOn) {
+        const entered = taken('debug_enter');
+        game.write(framedCommand('debug_enter', [true, 'Breakpoint', true]));
+        await entered;
+      }
+      if (kind === 'slow') {
+        game.write(frame);
+      }
+      // Past the three seconds in which a game with its profiler on sends a frame.
+      await delay({ slow: 3500, continuedLate: 3500 }[kind as string] ?? 0);
+      const going = goesOn ? peer.ask({ op: 'resume', how: 'continue' }) : undefined;
+      if (going !== undefined) {
+        await toldToGoOn;
+      }
+      const began = Date.now();
+      const answer = await peer.ask({ op: 'snapshot' });
+      const ms = Date.now() - began;
+      assert.deepEqual(await going, going === undefined ? undefined : { continued: true }, kind);
+      return { answer, ms };
+    } finally {
+      game.destroy();
+      peer.close();
+    }
+  };
+  const [running, held, continued, continuedLate, slow] = await Promise.all([
+    answerOf('running'),
+    answerOf('held'),
+    answerOf('continued'),
+    answerOf('continuedLate'),
+    answerOf('slow'),
+  ]);
+  const counts = {
+    classes: [{ engineClass: 'Node', script: 'res://mob.gd', kind: 'Node', count: 3 }],
+    bytes: prepared.length,
+    unnamed: 0,
+    memoryBytes: 1234,
+  };
+  assert.deepEqual(running.answer, counts, 'the snapshot prepared after its inspection is taken');
+  assert.deepEqual(continued.answer, counts, 'a snapshot asked as a continue goes out is taken');
+  assert.deepEqual(continuedLate.answer, counts, 'a snapshot asked as a long hold ends is taken');
+  assert.deepEqual(slow.answer, counts, 'a snapshot of a game with seconds between frames is taken');
+  assert.deepEqual(held.answer, {
+    refused:
+      'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.',
+    next: 'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot',
+  });
+  assert.ok(held.ms < 2000, `a held main thread is known from the order: ${held.ms} ms`);
+}
+
+/**
+ * A pause asked beside a snapshot of a running game stops it inside the prepare, after it answered
+ * the inspection. The snapshot is refused for the break, with the resume that lets the prepare
+ * finish, and the pause still gets the break it asked for.
+ */
+async function testAPauseAskedBesideASnapshotGetsItsBreak(): Promise<void> {
+  const { peer, game } = await aStandInGame();
+  const replies: Record<string, () => void> = {
+    'scene:inspect_object': () => game.write(framedCommand('scene:inspect_object', [])),
+    break: () => game.write(framedCommand('debug_enter', [true, '', true])),
+    get_stack_dump: () => game.write(framedCommand('stack_dump', [1, 'res://main.gd', 8, '@tally_getter'])),
+  };
+  const stream = new DebuggerStream();
+  game.on('data', (chunk: Buffer) => {
+    for (const received of stream.push(chunk)) {
+      if ('message' in received) {
+        replies[received.message]?.();
+      }
+    }
+  });
+  try {
+    const [snapshot, pause] = await Promise.all([peer.ask({ op: 'snapshot' }), peer.ask({ op: 'pause' })]);
+    assert.deepEqual(snapshot, {
+      refused:
+        "The game's main thread stopped at a breakpoint as it was asked for the snapshot, and a held main thread finishes no snapshot until it goes on.",
+      next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
+    });
+    assert.equal(pause['paused'], true, JSON.stringify(pause));
+  } finally {
+    game.destroy();
+    peer.close();
+  }
 }
 
 /** The thread a stand-in game holds at a breakpoint. */
@@ -47710,6 +47934,7 @@ async function testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld(): P
       }
     } else if (message === 'scene:inspect_object') {
       game.write(framedCommand('scene:inspect_object', [], thread));
+      game.write(framedCommand('performance:profile_frame', [[1, 2, 3]]));
     }
   });
   try {
@@ -48042,6 +48267,9 @@ async function testTheStartASnapshotRefusalNamesIsSpawnedHere(): Promise<void> {
  * inner classes, nested ones too, are counted under their native class with a note. A fresh game's counts keep
  * RefCounted and Node apart, thousands of objects come back whole over several slices, and a
  * snapshot of an earlier run is refused for a diff.
+ *
+ * The root's getter runs more than 2048 lines each time a snapshot reads it, so the engine answers
+ * the inspection sent after every request while it still prepares that request's snapshot.
  */
 async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
   const engine = resolveGodotPath();
@@ -48078,6 +48306,12 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
       'var items: Array[Resource] = []',
       'var notes: Array[Resource] = []',
       'var inners: Array[RefCounted] = []',
+      'var tally: int:',
+      '\tget:',
+      '\t\tvar total: int = 0',
+      '\t\tfor at: int in 2100:',
+      '\t\t\ttotal += at',
+      '\t\treturn total',
       '',
       '',
       'class Inner extends RefCounted:',
@@ -79759,6 +79993,612 @@ async function testARebuiltClassListAnswersAGoneScriptsClassAsRemoved(): Promise
 }
 
 /**
+ * Class names two scripts declare, each with its declarers in the editor's scan order: a folder's
+ * subfolders before its own files, each by FileNoCaseComparator, so a leading `_` first, digits as
+ * numbers and letter case ignored. A code point sort orders Cas, Fol, FolNat, Nat, TwIcon and Und
+ * the other way. A Godot 4.7.2 editor's first scan of the project kept the second of each.
+ */
+const TWICE_DECLARED_PAIRS: readonly (readonly [name: string, first: string, last: string])[] = [
+  ['Cas', 'a.gd', 'B.gd'],
+  ['Deep', 'deep/x/y.gd', 'deep/z.gd'],
+  ['Delta', 'a/s2.gd', 's1.gd'],
+  ['Fol', 'b/k.gd', 'C/k.gd'],
+  ['FolNat', 'd9/k.gd', 'd10/k.gd'],
+  ['Nat', 's9.gd', 's10.gd'],
+  ['TwIcon', 'tw/a1.gd', 'tw/A2.gd'],
+  ['Und', '_v.gd', 'V.gd'],
+];
+
+const TWICE_DECLARED: Readonly<Record<string, string>> = {
+  'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Twice"\n',
+  'icon.svg': '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>\n',
+  ...Object.fromEntries(
+    TWICE_DECLARED_PAIRS.flatMap(([name, first, last]) => [
+      [first, `class_name ${name}\nvar x := 1\n`],
+      [last, `class_name ${name}\nvar x := 1\n`],
+    ]),
+  ),
+  'tw/a1.gd': '@icon("res://icon.svg")\nclass_name TwIcon\nextends Node\nvar x := 1\n',
+  'tw/A2.gd': '@tool\nclass_name TwIcon\nextends Node2D\nvar x := 1\n',
+};
+
+/** Each twice-declared name at its [param at] declarer. */
+function twiceDeclaredAt(at: 'first' | 'last'): Map<string, string> {
+  return new Map(
+    TWICE_DECLARED_PAIRS.map(([name, first, last]) => [name, `res://${at === 'first' ? first : last}`]),
+  );
+}
+
+/** A class list holding each twice-declared name at its first declarer, written as the editor writes one. */
+function aListAtEachFirstDeclarer(): string {
+  const entry = (name: string, path: string): string => {
+    const icon = name === 'TwIcon' ? 'res://icon.svg' : '';
+    const base = name === 'TwIcon' ? 'Node' : 'RefCounted';
+    return `{\n"base": &"${base}",\n"class": &"${name}",\n"icon": "${icon}",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "${path}"\n}`;
+  };
+  return `list=[${[...twiceDeclaredAt('first')].map(([name, path]) => entry(name, path)).join(', ')}]\n`;
+}
+
+function rebuildClassList(godotPath: string, project: string): Promise<HeadlessOutcome> {
+  return runOperation(
+    { godotPath, script: resolve('src', 'godot', 'operations', 'godot_operations.gd'), debug: false },
+    'refresh_class_cache',
+    {},
+    project,
+  );
+}
+
+/** Each class of the class list at [param project] to its path, refusing a name listed twice. */
+function listedPaths(project: string): Map<string, string> {
+  const written = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+  const names = [...written.matchAll(/"class": &"([^"]*)"/g)].map((found) => found[1]);
+  assert.equal(new Set(names).size, names.length, `each class listed once: ${names.join(', ')}`);
+  return cachedClasses(project) ?? new Map<string, string>();
+}
+
+/** What the rebuild answers of a class [param scripts] declare, where the list keeps [param kept]. */
+function twiceDeclaredAnswer(
+  name: string,
+  scripts: readonly string[],
+  kept: string,
+): Record<string, unknown> {
+  const listed = `${scripts.slice(0, -1).join(', ')} and ${scripts.at(-1) ?? ''}`;
+  return {
+    class: name,
+    scripts,
+    kept,
+    note:
+      `${name} is declared by ${listed}. Godot fails all but one of them with "Class "${name}" hides a ` +
+      `global script class". The list keeps ${kept}, and the editor may keep another at its next start. ` +
+      'Rename the class in all but one script.',
+  };
+}
+
+/**
+ * A twice-declared name goes to the declarer the editor's first scan keeps, and a cache holding
+ * any of its declarers is current, since the rebuild keeps the list's pick while it still
+ * declares the name.
+ */
+function testATwiceDeclaredClassGoesWhereTheFirstScanPutsIt(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-declared-'));
+  try {
+    writeTree(project, TWICE_DECLARED);
+    assert.deepEqual(
+      classDeclarers(project),
+      new Map(TWICE_DECLARED_PAIRS.map(([name, first, last]) => [name, [`res://${first}`, `res://${last}`]])),
+    );
+    assert.deepEqual(declaredClasses(project), twiceDeclaredAt('last'));
+    assert.deepEqual(
+      new Map([...declaredClassLines(project)].map(([name, line]) => [name, line.path])),
+      twiceDeclaredAt('last'),
+    );
+    assert.deepEqual(staleAgainst(twiceDeclaredAt('first'), project), []);
+    assert.deepEqual(staleAgainst(twiceDeclaredAt('last'), project), []);
+    assert.deepEqual(
+      staleAgainst(new Map([...twiceDeclaredAt('last'), ['Delta', 'res://gone.gd']]), project),
+      ['Delta'],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * With no list to keep a pick from, the rebuild lists each twice-declared name once at the script
+ * the editor's first scan keeps, and names the declarers, since the engine refuses the others.
+ */
+async function testARebuiltClassListHoldsATwiceDeclaredClassOnce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('twice-declared class rebuild regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-rebuilt-'));
+  try {
+    writeTree(project, TWICE_DECLARED);
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(listedPaths(project), twiceDeclaredAt('last'));
+    const twice = outcome.payload['twiceDeclared'];
+    assert.ok(Array.isArray(twice), JSON.stringify(outcome.payload));
+    assert.deepEqual(
+      twice.toSorted((a: { class: string }, b: { class: string }) => (a.class < b.class ? -1 : 1)),
+      TWICE_DECLARED_PAIRS.map(([name, first, last]) =>
+        twiceDeclaredAnswer(name, [`res://${first}`, `res://${last}`], `res://${last}`),
+      ),
+    );
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A rebuild over a list holding a declarer of each twice-declared name leaves every pick, and
+ * answers nothing changed.
+ */
+async function testARebuildKeepsTheListsPickOfATwiceDeclaredClass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log("list's twice-declared pick regression skipped (Godot not found)");
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-kept-'));
+  try {
+    writeTree(project, {
+      ...TWICE_DECLARED,
+      '.godot/global_script_class_cache.cfg': aListAtEachFirstDeclarer(),
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed } = outcome.payload;
+    assert.deepEqual({ added, removed, changed }, { added: [], removed: [], changed: [] });
+    assert.deepEqual(listedPaths(project), twiceDeclaredAt('first'));
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A C# class the list holds beside a GDScript one of the same name stays the one entry of it. */
+async function testACSharpClassBesideAGDScriptOneIsListedOnce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('C# beside GDScript class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-sharp-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Sharp"\n',
+      'sharp.gd': 'class_name Sharp\nextends Node\nvar x := 1\n',
+      'Sharp.cs': 'using Godot;\n[GlobalClass]\npublic partial class Sharp : Node {}\n',
+      '.godot/global_script_class_cache.cfg':
+        'list=[{\n"base": &"Node",\n"class": &"Sharp",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "res://Sharp.cs"\n}]\n',
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(outcome.payload['carried'], ['Sharp'], JSON.stringify(outcome.payload));
+    assert.deepEqual(outcome.payload['changed'], [], JSON.stringify(outcome.payload));
+    assert.deepEqual(outcome.payload['twiceDeclared'], [
+      twiceDeclaredAnswer('Sharp', ['res://Sharp.cs', 'res://sharp.gd'], 'res://Sharp.cs'),
+    ]);
+    assert.deepEqual(listedPaths(project), new Map([['Sharp', 'res://Sharp.cs']]));
+    assert.deepEqual(staleClassNames(project), []);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class the list names at a file of no language that owns it is stale: a GDScript entry at an
+ * .svg resolves nothing, and a script extending the class fails to parse. A C# entry counts only
+ * at a .cs file.
+ */
+function testAClassListedAtAFileItsLanguageDoesNotOwnIsStale(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-foreign-path-'));
+  const csharp = (path: string): string =>
+    `list=[{\n"base": &"Node",\n"class": &"Ex",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}]\n`;
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Foreign"\n',
+      'ex.gd': 'class_name Ex\nextends Node\n',
+      'uses.gd': 'extends Ex\n',
+      'icon.svg': '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>\n',
+      'Ex.cs': 'using Godot;\n[GlobalClass]\npublic partial class Ex : Node {}\n',
+      'Ex.txt': 'not a script\n',
+    });
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    mkdirSync(dirname(cache), { recursive: true });
+    writeFileSync(cache, godotClassList([['Ex', 'Node', 'res://icon.svg']]));
+    assert.deepEqual(staleClassNames(project), ['Ex'], 'a GDScript entry at an .svg');
+    writeFileSync(cache, csharp('res://Ex.txt'));
+    assert.deepEqual(staleClassNames(project), ['Ex'], 'a C# entry at a .txt');
+    writeFileSync(cache, csharp('res://Ex.cs'));
+    assert.deepEqual(staleClassNames(project), [], 'a C# entry at its .cs');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class whose listed declarer is gone, and which another script still declares, is answered
+ * changed: the engine's start drops the gone entry before the rebuild reads the list.
+ */
+async function testAClassMovedFromAGoneDeclarerIsAnsweredChanged(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('moved class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-moved-class-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Moved"\n',
+      'm1.gd': 'class_name Mv\nvar x := 1\n',
+      'm3.gd': 'class_name Mv\nvar x := 1\n',
+      'kept.gd': 'class_name Kept\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': godotClassList([
+        ['Kept', 'RefCounted', 'res://kept.gd'],
+        ['Mv', 'RefCounted', 'res://m2.gd'],
+      ]),
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed } = outcome.payload;
+    assert.deepEqual({ added, removed, changed }, { added: [], removed: [], changed: ['Mv'] });
+    assert.deepEqual(listedPaths(project).get('Mv'), 'res://m3.gd');
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A class list of Alpha and Beta, with Beta at [param betaAt]. */
+function alphaBetaList(betaAt: string): string {
+  return godotClassList([
+    ['Alpha', 'RefCounted', 'res://a.gd'],
+    ['Beta', 'RefCounted', betaAt],
+  ]);
+}
+
+/** A class list cut short after its last entry, which the engine reads as no list at all. */
+function cutClassList(betaAt: string): string {
+  const whole = alphaBetaList(betaAt);
+  return `${whole.slice(0, whole.lastIndexOf(']'))}\n`;
+}
+
+/** What gdharness says of a call whose engine could not read the class list. */
+const UNREADABLE_LIST_SAID =
+  "The engine could not read the class list, so this call ran knowing no class_name, and an error naming one of the project's classes comes from that.";
+const UNREADABLE_LIST_REBUILT = `${UNREADABLE_LIST_SAID} The list has been rebuilt from the scripts, so the next call knows them.`;
+const UNREADABLE_LIST_NOT_REBUILT = `${UNREADABLE_LIST_SAID} Rebuilding the list failed, and is tried again once the list file changes: `;
+
+/** A project of Alpha, Beta and a script using Alpha, with [param list] as its class list. */
+function projectOverAClassList(prefix: string, list: string): string {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="OverAList"\n',
+    'a.gd': 'class_name Alpha\nvar x := 1\n',
+    'b.gd': 'class_name Beta\nvar x := 1\n',
+    'c.gd': 'extends RefCounted\n\n\nfunc make() -> RefCounted:\n\treturn Alpha.new()\n',
+    '.godot/global_script_class_cache.cfg': list,
+  });
+  return project;
+}
+
+/**
+ * [param run] given a server on [param project] and a call of it that answers with its text. The
+ * project is swept afterwards. Skipped without Godot.
+ */
+async function withAServerOn(
+  project: string,
+  run: (
+    server: ServerProcess,
+    call: (name: string, args: OperationParams) => Promise<string>,
+  ) => Promise<void>,
+  env: Record<string, string> = {},
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    sweep(project);
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('class list server regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-over-list-rt-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      ...env,
+    },
+  });
+  const call = async (name: string, args: OperationParams): Promise<string> => {
+    const response = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    return textOf(response) ?? JSON.stringify(response);
+  };
+  try {
+    await server.initialize('over-a-list');
+    await run(server, call);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+const NODE2D_INHERITANCE = { op: 'inheritance', className: 'Node2D' } as const;
+
+/**
+ * A call whose engine could not read the class list ran knowing no class_name, though the text of
+ * the list names every class. The list is rebuilt after it, once, and the answer says so. The
+ * engine's parse error of the list is reported once, from the engine's own start.
+ */
+async function testAnOperationOnAnUnreadableClassListRebuildsIt(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-mend-', cutClassList('res://b.gd'));
+  await withAServerOn(project, async (_server, call) => {
+    assert.deepEqual(staleClassNames(project), [], 'no reading of the files tells the list is unreadable');
+    const first = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.equal(first.split('ConfigFile parse error').length - 1, 1, first);
+    assert.deepEqual(
+      listedPaths(project),
+      new Map([
+        ['Alpha', 'res://a.gd'],
+        ['Beta', 'res://b.gd'],
+      ]),
+    );
+    const second = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(!second.includes('could not read the class list'), second);
+  });
+}
+
+/**
+ * script_diagnostics builds its answer from the fields of its engines' answers, and still says that
+ * the errors of its first call come from a class list the engine could not read, which it rebuilt.
+ */
+async function testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-diag-', cutClassList('res://b.gd'));
+  await withAServerOn(project, async (_server, call) => {
+    const first = await call('script_diagnostics', { scriptPath: 'res://c.gd' });
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    const second = await call('script_diagnostics', { scriptPath: 'res://c.gd' });
+    assert.ok(!second.includes('could not read the class list'), second);
+    assert.match(second, /"clean":\s*true/);
+  });
+}
+
+/**
+ * The engine skips every entry of a list written before 4.4, which lacks is_abstract and is_tool,
+ * so it knows none of the classes such a list names. A call on it rebuilds the list and says so.
+ */
+async function testAClassListWrittenBefore44IsRebuilt(): Promise<void> {
+  const before44 = alphaBetaList('res://b.gd').replaceAll('"is_abstract": false,\n"is_tool": false,\n', '');
+  const project = projectOverAClassList('gdharness-list-43-', before44);
+  await withAServerOn(project, async (_server, call) => {
+    assert.deepEqual(staleClassNames(project), []);
+    const first = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(first.includes(UNREADABLE_LIST_REBUILT), first);
+    assert.match(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /"is_tool": false/,
+    );
+    const second = await call('editor_classes', NODE2D_INHERITANCE);
+    assert.ok(!second.includes('could not read the class list'), second);
+  });
+}
+
+/**
+ * A class list the engine cannot read and no rebuild can write is rebuilt once, not after every
+ * operation, and each answer meanwhile says the rebuild failed.
+ */
+async function testAClassListNoRebuildCanWriteIsTriedOnce(): Promise<void> {
+  const project = projectOverAClassList('gdharness-cut-locked-', cutClassList('res://b.gd'));
+  const listFile = join(project, '.godot', 'global_script_class_cache.cfg');
+  chmodSync(listFile, 0o444);
+  try {
+    await withAServerOn(
+      project,
+      async (server, call) => {
+        for (const round of [1, 2, 3]) {
+          const answer = await call('editor_classes', NODE2D_INHERITANCE);
+          assert.ok(answer.includes(UNREADABLE_LIST_NOT_REBUILT), `call ${round}: ${answer}`);
+        }
+        assert.equal(server.stderr.split('Running refresh_class_cache in').length - 1, 1, server.stderr);
+        chmodSync(listFile, 0o644);
+      },
+      { GDHARNESS_DEBUG: '1' },
+    );
+  } finally {
+    if (existsSync(listFile)) {
+      chmodSync(listFile, 0o644);
+    }
+  }
+}
+
+/**
+ * A class list the engine loads without a top-level `list` gives it no class either: a byte order
+ * mark or a stray word joins the key's name, and a section header above it moves it out of the top
+ * level. The engine skips every entry of a list written before 4.4, which lacks is_abstract and
+ * is_tool. The rebuild answers every class it writes as added, and says the list could not be read.
+ */
+async function testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('keyless class list regression skipped (Godot not found)');
+    return;
+  }
+  const whole = alphaBetaList('res://b.gd');
+  for (const [what, list] of [
+    ['a byte order mark', `﻿${whole}`],
+    ['a stray word', `junk\n${whole}`],
+    ['a section header', `[classes]\n${whole}`],
+    ['a list written before 4.4', whole.replaceAll('"is_abstract": false,\n"is_tool": false,\n', '')],
+  ] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-keyless-list-'));
+    try {
+      writeTree(project, {
+        'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Keyless"\n',
+        'a.gd': 'class_name Alpha\nvar x := 1\n',
+        'b.gd': 'class_name Beta\nvar x := 1\n',
+        '.godot/global_script_class_cache.cfg': list,
+      });
+      const outcome = await rebuildClassList(godotPath, project);
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const { added, removed, changed, unreadableList } = outcome.payload;
+      assert.deepEqual(
+        { added, removed, changed, unreadableList },
+        { added: ['Alpha', 'Beta'], removed: [], changed: [], unreadableList: true },
+        what,
+      );
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
+/**
+ * A rebuild over a cut list naming a class whose script is gone answers that class removed, as the
+ * text of the list held it, though the engine never did.
+ */
+async function testARebuildOverACutListAnswersAGoneScriptsClassRemoved(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('cut list gone class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-gone-'));
+  try {
+    const whole = godotClassList([
+      ['Alpha', 'RefCounted', 'res://a.gd'],
+      ['Beta', 'RefCounted', 'res://b.gd'],
+      ['Gamma', 'RefCounted', 'res://gone.gd'],
+    ]);
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutGone"\n',
+      'a.gd': 'class_name Alpha\nvar x := 1\n',
+      'b.gd': 'class_name Beta\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': `${whole.slice(0, whole.lastIndexOf(']'))}\n`,
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed, unreadableList } = outcome.payload;
+    assert.deepEqual(
+      { added, removed, changed, unreadableList },
+      { added: ['Alpha', 'Beta'], removed: ['Gamma'], changed: [], unreadableList: true },
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A rebuild over a class list the engine cannot read answers every class it writes as added, the
+ * one whose listed script is gone too, and says the list could not be read.
+ */
+async function testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('unreadable class list regression skipped (Godot not found)');
+    return;
+  }
+  for (const [betaFile, betaAt] of [
+    ['b.gd', 'res://b.gd'],
+    ['b2.gd', 'res://b.gd'],
+  ] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cut-rebuilt-'));
+    try {
+      writeTree(project, {
+        'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="CutRebuilt"\n',
+        'a.gd': 'class_name Alpha\nvar x := 1\n',
+        [betaFile]: 'class_name Beta\nvar x := 1\n',
+        '.godot/global_script_class_cache.cfg': cutClassList(betaAt),
+      });
+      const outcome = await rebuildClassList(godotPath, project);
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      const { added, removed, changed, unreadableList } = outcome.payload;
+      assert.deepEqual(
+        { added, removed, changed, unreadableList },
+        { added: ['Alpha', 'Beta'], removed: [], changed: [], unreadableList: true },
+        `Beta declared in ${betaFile}`,
+      );
+      assert.deepEqual(staleClassNames(project), []);
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
+/** The answer project_import refresh_classes renders names a twice-declared class and how to mend it. */
+async function testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('twice-declared answer regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-answer-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-answer-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="TwiceAnswer"\n',
+    's1.gd': 'class_name Delta\nvar x := 1\n',
+    'a/s2.gd': 'class_name Delta\nvar x := 1\n',
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  try {
+    await server.initialize('twice-answer');
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answered = parseTextContent(response);
+    assert.ok(answered !== null, textOf(response) ?? JSON.stringify(response));
+    assert.deepEqual(get(answered, 'twiceDeclared'), [
+      twiceDeclaredAnswer('Delta', ['res://a/s2.gd', 'res://s1.gd'], 'res://s1.gd'),
+    ]);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * The file an operation answers in keeps a float as it was: a tiny one was written as zero, and a
  * huge or a fractional one lost digits.
  */
@@ -86678,9 +87518,8 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
         writeFileSync(cache, cached);
       }
       if (tool === 'reload_script') {
-        const scriptPath = String(args['scriptPath']);
-        reloadsAskedFor.push(scriptPath);
-        socket.send(JSON.stringify(reloadScriptReply(scriptPath, message['id'])));
+        reloadsAskedFor.push(...reloadsNamed(args));
+        socket.send(JSON.stringify(reloadRequestReply(args, message['id'])));
         return;
       }
       // Nothing held behind its file, as the editor addon answers for scripts it compiled from disk.
@@ -86974,6 +87813,172 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
   }
 }
 
+/** A rescan that brought 130 classes in: what it answered and the reloads each request named. */
+interface BatchedRescan {
+  readonly answer: unknown;
+  readonly said: string;
+  readonly requests: string[][];
+  readonly declaring: string[];
+  readonly naming: string[];
+}
+
+/**
+ * A rescan bringing 130 classes in, more than one reload request carries, with four scripts naming
+ * the first. The fixture editor serves one request at a time, as the editor's main thread does,
+ * and spends [param costMs] on each script a reload names. [param answerWaitMs] sets the server's
+ * answer wait.
+ */
+async function aRescanBringingIn130Classes(costMs: number, answerWaitMs?: number): Promise<BatchedRescan> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+      ...(answerWaitMs === undefined ? {} : { GDHARNESS_ANSWER_WAIT_MS: String(answerWaitMs) }),
+    },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-batched-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    const names = Array.from({ length: 130 }, (_, index) => `Batched${String(index).padStart(3, '0')}`);
+    for (const name of names) {
+      writeFileSync(
+        join(project, 'kit', `${name.toLowerCase()}.gd`),
+        `class_name ${name}\nextends RefCounted\n`,
+      );
+    }
+    const naming = ['res://u0.gd', 'res://u1.gd', 'res://u2.gd', 'res://u3.gd'];
+    for (const script of naming) {
+      writeFileSync(join(project, script.slice('res://'.length)), 'extends Node\n\nvar run: Batched000\n');
+    }
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const cached = `list=[${names.map((name) => `{\n"class": &"${name}",\n"path": "res://kit/${name.toLowerCase()}.gd"\n}`).join(', ')}]\n`;
+    writeFileSync(cache, cached);
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((settle, reject) => {
+      socket.once('open', () => {
+        settle();
+      });
+      socket.once('error', reject);
+    });
+
+    let holds: string[] = [];
+    const requests: string[][] = [];
+    let serving = Promise.resolve();
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      const answer = async (): Promise<void> => {
+        let result: Record<string, unknown> = { ok: true, classes: holds };
+        if (tool === 'rescan_filesystem') {
+          if (args['statusOnly'] !== true) {
+            holds = names;
+            writeFileSync(cache, cached);
+          }
+          result = { ok: true, scanning: false, importing: false, pending: false };
+        } else if (tool === 'reload_script') {
+          const asked = reloadsNamed(args);
+          requests.push(asked);
+          await delay(costMs * asked.length);
+          result = reloadsAnswered(
+            args,
+            asked.map((script) => ({ ok: true, script, methods: [] })),
+          );
+        }
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      };
+      serving = serving.then(answer);
+    });
+    socket.send(JSON.stringify(greeting(project)));
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const declaring = names.map((name) => `res://kit/${name.toLowerCase()}.gd`);
+    const said = textOf(scanned) ?? JSON.stringify(scanned);
+    return { answer: parseTextContent(scanned), said, requests, declaring, naming };
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * A rescan bringing in more classes than one reload request carries sends every declaring script
+ * once, in order, before the scripts naming them. A build leaving out the last script of every
+ * request passed every other rescan regression, since each has a single declaring script.
+ */
+async function testARescanReloadsEveryDeclaringScriptOnceInOrder(): Promise<void> {
+  const { answer, said, requests, declaring, naming } = await aRescanBringingIn130Classes(0);
+  assert.deepEqual(requests.flat(), [...declaring, ...naming], said);
+  assert.ok(
+    requests.length > 2 && requests.every((asked) => asked.length <= 64),
+    `130 scripts in requests of at most 64: ${JSON.stringify(requests.map((asked) => asked.length))}`,
+  );
+  assert.equal(get(answer, 'ok'), true, said);
+}
+
+/**
+ * A list of reloads gets the answer wait of each script in it. Waited for as one, a list of 64
+ * scripts at 40 ms each ran past a one-second wait: the server sent the next list while the editor
+ * was still on the first, and the scripts naming the classes timed out behind them, answered as
+ * not reloaded though every one compiled.
+ */
+async function testAListOfSlowReloadsIsWaitedOut(): Promise<void> {
+  const { answer, said, naming } = await aRescanBringingIn130Classes(40, 1000);
+  assert.equal(get(answer, 'ok'), true, said);
+  assert.deepEqual(asArray(get(answer, 'dependentsReloaded') ?? []).map(String), naming, said);
+  assert.equal(get(answer, 'dependentsNotReloaded'), undefined, said);
+}
+
+/** The scripts a reload_script request names, one under scriptPath or a list under scriptPaths. */
+function reloadsNamed(args: Record<string, unknown>): string[] {
+  const listed = args['scriptPaths'];
+  return Array.isArray(listed) ? listed.map(String) : [String(args['scriptPath'])];
+}
+
+/** The result of a reload_script request from each script's own [param answers], in the form asked. */
+function reloadsAnswered(
+  args: Record<string, unknown>,
+  answers: Record<string, unknown>[],
+): Record<string, unknown> {
+  return Array.isArray(args['scriptPaths']) ? { ok: true, reloads: answers } : (answers[0] ?? {});
+}
+
+/** The fixture editor's whole reply to a reload_script request, one script or a list. */
+function reloadRequestReply(args: Record<string, unknown>, id: unknown): Record<string, unknown> {
+  const replies = reloadsNamed(args).map((scriptPath) => reloadScriptReply(scriptPath, id));
+  if (!Array.isArray(args['scriptPaths'])) {
+    return replies[0] ?? {};
+  }
+  // A script the editor refuses alone is one refused entry in a list.
+  const entries = replies.map((reply) =>
+    reply['success'] === true && isRecord(reply['result'])
+      ? reply['result']
+      : { ok: false, error: reply['error'] },
+  );
+  return { type: 'tool_result', id, success: true, result: reloadsAnswered(args, entries) };
+}
+
 /** The fixture editor's answer to reload_script: refused, uncompiled, under the spelling on disk, grown or empty. */
 function reloadScriptReply(scriptPath: string, id: unknown): Record<string, unknown> {
   const uncompiled = {
@@ -87115,7 +88120,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
         };
       }
       if (tool === 'reload_script') {
-        return answerAReload(String(args['scriptPath']));
+        return reloadsAnswered(args, reloadsNamed(args).map(answerAReload));
       }
       return { ok: true, classes: holds };
     };
@@ -87494,7 +88499,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
       }
       return () => {
         if (tool === 'reload_script') {
-          reloadsAskedFor.push(String(args['scriptPath']));
+          reloadsAskedFor.push(...reloadsNamed(args));
         }
         answer({ ok: true, methods: [] });
       };
@@ -88193,9 +89198,14 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
     writeFileSync(join(project, 'squire.gd'), 'class_name Squire\nextends Node\n');
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    // In the form an editor writes, since the engine skips an entry that lacks any of its keys.
+    const heroOnly = godotClassList([['Hero', 'Node', 'res://hero.gd']]);
     writeFileSync(
       cache,
-      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+      godotClassList([
+        ['Hero', 'Node', 'res://hero.gd'],
+        ['Squire', 'Node', 'res://squire.gd'],
+      ]),
     );
 
     await server.initialize('regression-test');
@@ -88216,7 +89226,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
       const tool = String(message['tool']);
       const args = isRecord(message['args']) ? message['args'] : {};
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+        writeFileSync(cache, heroOnly);
       }
       const result =
         tool === 'rescan_filesystem'
@@ -88260,7 +89270,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     // The editor saves, which writes the cache from the list it holds: no scan, no call here,
     // just the file getting shorter between two rebuilds. Downstream this put the same six classes
     // into classes.added on every test run of an afternoon, with nothing saying whose doing it was.
-    writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+    writeFileSync(cache, heroOnly);
     const second = await refresh();
     assert.deepEqual(
       asArray(get(second, 'added') ?? []).map(String),
@@ -108779,6 +109789,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
   testAnEvaluatesErrorIsNotTheGames,
+  testAPathReadsErrorIsNotTheGames,
+  testCallSitesUseTheReadTheyAreHanded,
   testAnErrorOfSeveralLinesIsOneEntry,
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
@@ -108845,6 +109857,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testARescanReloadsWhatNamesAClassItBroughtIn,
+  testARescanReloadsEveryDeclaringScriptOnceInOrder,
+  testAListOfSlowReloadsIsWaitedOut,
   testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt,
   testARebuildSaysWhatItsOwnEngineCouldNotKnow,
   testARescanTheEditorDidNotAnswerIsFinishedByTheNext,
@@ -109364,6 +110378,20 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheAnswerFileKeepsAFloatAsItWas,
   testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
   testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
+  testATwiceDeclaredClassGoesWhereTheFirstScanPutsIt,
+  testARebuiltClassListHoldsATwiceDeclaredClassOnce,
+  testARebuildKeepsTheListsPickOfATwiceDeclaredClass,
+  testACSharpClassBesideAGDScriptOneIsListedOnce,
+  testAClassListedAtAFileItsLanguageDoesNotOwnIsStale,
+  testAClassMovedFromAGoneDeclarerIsAnsweredChanged,
+  testAnOperationOnAnUnreadableClassListRebuildsIt,
+  testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList,
+  testAClassListWrittenBefore44IsRebuilt,
+  testAClassListNoRebuildCanWriteIsTriedOnce,
+  testARebuildOverAListTheEngineCannotReadAnswersEveryClassAdded,
+  testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded,
+  testARebuildOverACutListAnswersAGoneScriptsClassRemoved,
+  testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
@@ -109459,6 +110487,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassIsCountedUnderItsNativeClass,
   testEachSnapshotRefusalNamesItsOwnFix,
   testASnapshotTellsAnEngineWithoutItFromABusyGame,
+  testASnapshotPreparedAfterItsInspectionIsTaken,
+  testAPauseAskedBesideASnapshotGetsItsBreak,
   testASnapshotAskedOnceAsAHeldWorkerLeaves,
   testSnapshotsOfAnEngineWithoutItAreRefusedWhileAWorkerIsHeld,
   testASnapshotStalledByAHeldWorkerNamesTheResume,

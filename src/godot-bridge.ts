@@ -259,6 +259,17 @@ interface InvokeOptions {
    * answers it late, and two of them outstanding read as two calls stuck in the editor.
    */
   readonly counted?: boolean;
+  /**
+   * How many calls' work the request carries, each given the whole answer wait: a request naming
+   * 64 scripts to reload waits 64 times as long as one naming a single script. One by default.
+   */
+  readonly calls?: number;
+}
+
+/** What [method GodotBridge.invokeToolDirect] needs of a request beyond the tool and its arguments. */
+interface Asked {
+  readonly counted: boolean;
+  readonly waitMs: number;
 }
 
 interface GodotConnectionInfo {
@@ -806,14 +817,17 @@ export class GodotBridge extends EventEmitter {
     args: Record<string, unknown>,
     options: InvokeOptions = {},
   ): Promise<unknown> {
-    const counted = options.counted ?? true;
+    const asked: Asked = {
+      counted: options.counted ?? true,
+      waitMs: this.timeoutMs * Math.max(1, options.calls ?? 1),
+    };
     const resourceKey = this.getResourceKey(args);
     if (!resourceKey) {
-      return this.invokeUntilTaken(toolName, args, counted);
+      return this.invokeUntilTaken(toolName, args, asked);
     }
 
     return this.enqueueResourceRequest(resourceKey, () =>
-      this.invokeUntilTaken(toolName, args, counted, resourceKey),
+      this.invokeUntilTaken(toolName, args, asked, resourceKey),
     );
   }
 
@@ -825,7 +839,7 @@ export class GodotBridge extends EventEmitter {
   private async invokeUntilTaken(
     toolName: string,
     args: Record<string, unknown>,
-    counted: boolean,
+    asked: Asked,
     resourceKey?: string,
   ): Promise<unknown> {
     const waitMs = busyWaitMs();
@@ -840,7 +854,7 @@ export class GodotBridge extends EventEmitter {
     };
     for (;;) {
       try {
-        return await this.invokeToolDirect(toolName, args, counted, resourceKey);
+        return await this.invokeToolDirect(toolName, args, asked, resourceKey);
       } catch (error) {
         if (!(error instanceof EditorBusy)) {
           throw error;
@@ -1053,7 +1067,7 @@ export class GodotBridge extends EventEmitter {
   private invokeToolDirect(
     toolName: string,
     args: Record<string, unknown>,
-    counted: boolean,
+    { counted, waitMs }: Asked,
     resourceKey?: string,
   ): Promise<unknown> {
     if (!this.isConnected()) {
@@ -1075,8 +1089,8 @@ export class GodotBridge extends EventEmitter {
     return new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        reject(new BridgeTimeout(toolName, this.timeoutMs));
-      }, this.timeoutMs);
+        reject(new BridgeTimeout(toolName, waitMs));
+      }, waitMs);
 
       this.pendingRequests.set(requestId, {
         toolName,

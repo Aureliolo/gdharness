@@ -4391,7 +4391,8 @@ const classStep: fc.Arbitrary<ClassStep> = fc.record({
       of: fc.integer({ min: 0, max: 3 }),
     }),
   ),
-  folder: fc.constantFrom('', 'a/', 'b/c/'),
+  // Folders a code point sort orders otherwise than the editor: letter case, a leading `_`, digits.
+  folder: fc.constantFrom('', 'a/', 'b/c/', 'C/', '_d/', 'd9/', 'd10/'),
 });
 
 function classPathOf(scripts: readonly ClassScript[], slot: number): string {
@@ -4480,18 +4481,42 @@ function writeClassScripts(root: string, scripts: readonly ClassScript[]): void 
   }
 }
 
+/**
+ * The editor's order of two of the model's names: a leading `_` first, then letter case ignored and
+ * digits read as numbers, which is what FileNoCaseComparator makes of them.
+ */
+function editorNameOrder(a: string, b: string): number {
+  const key = (name: string): string =>
+    `${name.startsWith('_') ? '0' : '1'}${name.toLowerCase().replace(/\d+/g, (digits) => digits.padStart(6, '0'))}`;
+  return key(a) < key(b) ? -1 : 1;
+}
+
+/** The engine's scan order of two model paths: a folder's subfolders before its own files, each by name. */
+function scanOrder(a: string, b: string): number {
+  const left = a.split('/');
+  const right = b.split('/');
+  const at = left.findIndex((part, index) => part !== right[index]);
+  const leftIsFolder = at < left.length - 1;
+  if (leftIsFolder !== at < right.length - 1) {
+    return leftIsFolder ? -1 : 1;
+  }
+  return editorNameOrder(left[at] ?? '', right[at] ?? '');
+}
+
+/**
+ * Where two scripts declare one class_name, the engine keeps the one its scan registers last, since
+ * each registration replaces the path held for the name.
+ */
 function theScanHoldsTheClasses(root: string, scripts: readonly ClassScript[], when: string): void {
   const declared = new Map<string, string>();
   const lines = new Map<string, { path: string; extends: string }>();
-  scripts.forEach((script, slot) => {
-    if (script.exists && script.name !== null) {
-      declared.set(script.name, classPathOf(scripts, slot));
-      lines.set(script.name, {
-        path: classPathOf(scripts, slot),
-        extends: classBaseOf(scripts, slot, [slot]),
-      });
-    }
-  });
+  const named = scripts
+    .flatMap((script, slot) => (script.exists && script.name !== null ? [{ name: script.name, slot }] : []))
+    .toSorted((a, b) => scanOrder(classPathOf(scripts, a.slot), classPathOf(scripts, b.slot)));
+  for (const { name, slot } of named) {
+    declared.set(name, classPathOf(scripts, slot));
+    lines.set(name, { path: classPathOf(scripts, slot), extends: classBaseOf(scripts, slot, [slot]) });
+  }
   assert.deepEqual(declaredClasses(root), declared, `${when}: the classes and where they are`);
   assert.deepEqual(
     new Map(
