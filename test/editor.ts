@@ -1587,7 +1587,9 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   try {
     await server.initialize('editor-fixture');
 
-    await timed('the editor start', async () => await waitForTheBridge({ editor, engineOutput, invoke }));
+    await timedCase('the editor start', async () => {
+      await waitForTheBridge({ editor, engineOutput, invoke });
+    });
 
     const printed = (): string => engineOutput.join('');
     await body({
@@ -9447,7 +9449,7 @@ async function testAnEvaluateNamesAGlobalClassThatDoesNotParse({
 }
 
 /** Runs [param run] and says how long it took, so a leg nearing its limit shows which cases grew. */
-async function timed(name: string, run: () => Promise<void>): Promise<void> {
+async function timedCase(name: string, run: () => Promise<void>): Promise<void> {
   const began = performance.now();
   await run();
   console.log(`${name} took ${((performance.now() - began) / 1000).toFixed(1)}s`);
@@ -9582,13 +9584,17 @@ async function main(): Promise<void> {
   if (chosen.length > 0) {
     await withEditor(godotPath, async (editor) => {
       for (const [name, run] of chosen) {
-        await timed(name, async () => await run(editor));
+        await timedCase(name, async () => {
+          await run(editor);
+        });
       }
     });
   }
   // After the shared pair has been taken down, so only one editor is up at a time.
   for (const [name, run] of alone) {
-    await timed(name, async () => await run(godotPath));
+    await timedCase(name, async () => {
+      await run(godotPath);
+    });
   }
 
   console.log(`editor tests passed (${chosen.length + alone.length})`);
