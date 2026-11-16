@@ -20007,6 +20007,55 @@ async function sweepAKeeperCase(project: string, runtime: string): Promise<void>
 }
 
 /**
+ * A case through the keeper that fails with its game still running leaves no run folder. The game
+ * is ended and its note written before the folders are removed, where a removal first was followed
+ * by the keeper writing the note into the folder it had just lost.
+ */
+async function testAKeeperCaseThatFailsLeavesNoRunFolder(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-left-running-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-left-running-rt-'));
+  const launcher = join(project, 'launch.mjs');
+  const answer = join(project, 'answer.json');
+  const spec = {
+    command: process.execPath,
+    args: ['-e', 'setInterval(() => undefined, 1000)', '--', project],
+    run: { transcript: join(project, 'run.log'), startedAt: Date.now(), projectPath: project },
+  };
+  try {
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], {
+      encoding: 'utf8',
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+      timeout: 90_000,
+    });
+    const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+    assert.equal(typeof get(launched, 'pid'), 'number', `the game starts: ${ran.stdout}${ran.stderr}`);
+    assert.ok(alive(Number(get(launched, 'pid'))), 'and is left running, as a failed case leaves it');
+  } finally {
+    await sweepAKeeperCase(project, runtime);
+  }
+  assert.equal(
+    existsSync(runtime),
+    false,
+    'the run folder is gone, the keeper having written its note first',
+  );
+  const source = readFileSync('test/regressions.ts', 'utf8');
+  const through = source.slice(source.indexOf('async function testAStopGoesThroughTheKeeper'));
+  assert.ok(
+    through.slice(0, through.indexOf('\n}\n')).includes('sweepAKeeperCase(project, runtime)'),
+    'the case through the keeper removes its folders this way',
+  );
+}
+
+/**
  * The end of a child that has already exited is still given. Node tells an exit once, to the
  * listeners there at the time, and a keeper that listened late held an ended run for good.
  */
@@ -24737,8 +24786,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     for (const server of servers) {
       await server.stop().catch(() => undefined);
     }
-    sweep(project);
-    sweep(runtime);
+    await sweepAKeeperCase(project, runtime);
   }
 }
 
@@ -110486,6 +110534,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestEngineThatMakesNoRendererEnds,
   testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
   testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce,
+  testAKeeperCaseThatFailsLeavesNoRunFolder,
   testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
