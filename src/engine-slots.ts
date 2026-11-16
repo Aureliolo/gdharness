@@ -54,7 +54,6 @@ import {
   statSync,
   utimesSync,
   watch,
-  writeSync,
 } from 'node:fs';
 import { availableParallelism, homedir, totalmem } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
@@ -74,7 +73,7 @@ import {
 } from './process-children.js';
 import { isRecord } from './records.js';
 import { Turns } from './turns.js';
-import { readWhole, removeWhole, writeWhole } from './whole-file.js';
+import { makeWhole, readWhole, removeWhole, stagedWriterOf, writeWhole } from './whole-file.js';
 
 /**
  * The variable an engine started on a slot is given, naming that slot's lock, so a program the
@@ -636,9 +635,13 @@ export function slotsDrawnOn(
 /**
  * The file in the slots folder where the gates' queue writes how many of the gates' free slots no
  * queued gate can take now, as `{"spare", "pid", "started", "written"}`, `written` in milliseconds.
- * The queue alone knows its seats, pool and memory, so the count is read rather than worked out.
+ * The queue alone knows its seats, pool and memory, so a fresh count stands for what the seated
+ * gates are owed ({@link EngineSlots.sideShare}).
  */
 export const SPARE_FILE = 'spare.json';
+
+/** The file a measurement holding the machine's quiet window writes, `{"pid", "started", "what", "until"}`. */
+const WINDOW_FILE = 'window.json';
 
 /**
  * How old a spare count may be. Its writer writes it again every five seconds while a gate waits. A
@@ -651,20 +654,32 @@ export const SPARE_STALE_MS = 10_000;
  * malformed one, one below 1 or a stale one.
  */
 export function countSaid(content: string | null, now: number, key: string): number {
+  return countWritten(content, now, key)?.count ?? 0;
+}
+
+/**
+ * The whole number [param content] holds under [param key] at [param now] and when it was written in
+ * milliseconds, or null for none, a malformed one or a stale one. A count below 0 reads as 0.
+ */
+function countWritten(
+  content: string | null,
+  now: number,
+  key: string,
+): { count: number; written: number } | null {
   let said: unknown;
   try {
     said = JSON.parse(content ?? '');
   } catch {
-    return 0;
+    return null;
   }
   if (!isRecord(said)) {
-    return 0;
+    return null;
   }
   const { [key]: count, written } = said;
   if (typeof count !== 'number' || !Number.isInteger(count) || typeof written !== 'number') {
-    return 0;
+    return null;
   }
-  return now - written > SPARE_STALE_MS ? 0 : Math.max(0, count);
+  return now - written > SPARE_STALE_MS ? null : { count: Math.max(0, count), written };
 }
 
 /** [param queue] as a game reads it: a game holds its slot for as long as it plays, so never a spare one. */
@@ -1581,7 +1596,8 @@ export class EngineSlots {
     } catch {
       return 'none';
     }
-    let live: GateQueue = 'none';
+    let live = 0;
+    let seated = 0;
     for (const name of names) {
       const mark = join(marks, name);
       const content = readWhole(mark);
@@ -1592,16 +1608,76 @@ export class EngineSlots {
         removeWhole(mark);
         removeWhole(`${mark}${SEATED_SUFFIX}`);
       } else {
-        live = 'queued';
+        live += 1;
+        seated += existsSync(`${mark}${SEATED_SUFFIX}`) ? 1 : 0;
       }
     }
-    const spare = live === 'queued' ? await this.spare() : 0;
-    return spare > 0 ? spare : live;
+    if (live === 0) {
+      return 'none';
+    }
+    const side = await this.sideShare(seated);
+    return side > 0 ? side : 'queued';
   }
 
-  /** The spare count the gates' queue last wrote, 0 once it is stale or its writer has gone. */
-  private spare(): Promise<number> {
-    return this.countIn(join(this.directory, SPARE_FILE), 'spare');
+  /**
+   * How many of the gates' free slots side work may take now, counted from the folder as the gates'
+   * Python queue counts it: `Shares.side` (the free gate slots less those the seated gates are
+   * owed, none while a measurement holds the quiet window) and `drawn` give side work that many,
+   * named from the top.
+   *
+   * What a seated gate is owed rests on the queue's own tickets, its pool and the machine's memory,
+   * which this process cannot read. A queue process counts it and writes the result to
+   * {@link SPARE_FILE}, so a fresh count stands for the gates' share. The slots taken since it was
+   * written come off it, since each is one the count could not have given to anything else. Where no
+   * fresh count stands, no queue process is counting: a seated gate keeps every free slot, and with
+   * none seated side work takes all of them, as `shares` does for gates the queue has not seated.
+   */
+  private async sideShare(seated: number): Promise<number> {
+    if (await this.windowHeld()) {
+      return 0;
+    }
+    const gated = Math.max(1, this.count - keptSlotsOf(this.count));
+    const free = (await this.openSlots()).filter((slot) => slot < gated);
+    const path = join(this.directory, SPARE_FILE);
+    const said = countWritten(readWhole(path), Date.now(), 'spare');
+    if (said === null || (await this.free(path))) {
+      return seated > 0 ? 0 : free.length;
+    }
+    let taken = 0;
+    for (let slot = 0; slot < gated; slot += 1) {
+      if (!free.includes(slot) && this.lockedSince(slot, said.written)) {
+        taken += 1;
+      }
+    }
+    return Math.max(0, Math.min(said.count - taken, free.length));
+  }
+
+  /** Whether the lock of [param slot] was written after [param time], in milliseconds. */
+  private lockedSince(slot: number, time: number): boolean {
+    try {
+      return statSync(join(this.directory, `${String(slot)}.lock`)).mtimeMs > time;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether a measurement holds the machine's quiet window, which keeps side work off the gates' slots. */
+  private async windowHeld(): Promise<boolean> {
+    const path = join(this.directory, WINDOW_FILE);
+    const content = readWhole(path);
+    let said: unknown;
+    try {
+      said = JSON.parse(content ?? '');
+    } catch {
+      return false;
+    }
+    return (
+      isRecord(said) &&
+      holderOf(content ?? '') !== null &&
+      typeof said['until'] === 'number' &&
+      said['until'] > Date.now() / 1000 &&
+      !(await this.free(path))
+    );
   }
 
   /** The whole number under [param key] in the file at [param path], 0 once it is stale or its writer has gone. */
@@ -1674,20 +1750,12 @@ export class EngineSlots {
     return handed;
   }
 
-  /** Makes [param path] holding [param holder]. Answers false when it is there already. */
+  /**
+   * Makes [param path] holding [param holder], never readable empty. Answers false when it is there
+   * already.
+   */
   private made(path: string, holder: object = this.holder): boolean {
-    let made: number;
-    try {
-      made = openSync(path, 'wx');
-    } catch {
-      return false;
-    }
-    try {
-      writeSync(made, JSON.stringify(holder));
-    } finally {
-      closeSync(made);
-    }
-    return true;
+    return makeWhole(path, JSON.stringify(holder));
   }
 
   /**
@@ -1702,14 +1770,21 @@ export class EngineSlots {
     } catch {
       return;
     }
+    this.clearedStaged(this.directory, names);
     for (const name of names) {
       const numbered = /^(\d+)\.lock$/.exec(name)?.[1];
       if (numbered !== undefined && Number(numbered) >= this.count) {
         await this.cleared(join(this.directory, name), false);
       }
     }
-    // By the pid alone, which costs no query: a taker killed while it waited leaves its mark, and a
-    // gate reading it counts a wait that is not happening.
+    this.sweepWaits();
+  }
+
+  /**
+   * Removes the wait marks of takers that have gone. By the pid alone, which costs no query: a taker
+   * killed while it waited leaves its mark, and a gate reading it counts a wait that is not happening.
+   */
+  private sweepWaits(): void {
     const marks = join(this.directory, WAITING_FOLDER);
     let waits: string[];
     try {
@@ -1717,7 +1792,11 @@ export class EngineSlots {
     } catch {
       return;
     }
+    this.clearedStaged(marks, waits);
     for (const name of waits) {
+      if (stagedWriterOf(name) !== undefined) {
+        continue;
+      }
       let content: string | null;
       try {
         content = readWhole(join(marks, name));
@@ -1728,6 +1807,19 @@ export class EngineSlots {
       const pid = content === null ? undefined : holderOf(content)?.pid;
       if (pid !== undefined && !alive(pid)) {
         removeWhole(join(marks, name));
+      }
+    }
+  }
+
+  /**
+   * Removes the staged files among [param names] in [param folder] whose writer has gone, by the pid
+   * in the name alone. A live writer's is left, and none is ever opened.
+   */
+  private clearedStaged(folder: string, names: readonly string[]): void {
+    for (const name of names) {
+      const writer = stagedWriterOf(name);
+      if (writer !== undefined && writer !== process.pid && !alive(writer)) {
+        removeWhole(join(folder, name));
       }
     }
   }

@@ -764,7 +764,7 @@ import {
 } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
-import { writeWhole } from '../src/whole-file.js';
+import { makeWhole, writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import { withHome } from './support/cli-home.js';
@@ -65309,6 +65309,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     // the kept ones, and gate work outside a seat takes any.
     writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
     for (const seat of ['waiting for its seat', 'seated']) {
+      publishesNothingSpare(directory, started);
       if (seat === 'seated') {
         writeFileSync(join(queued, 'ticket.json.seated'), '');
       }
@@ -65331,6 +65332,14 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+/** `slots.published` with nothing spare, as a queue process counting a waiting gate writes it. */
+function publishesNothingSpare(directory: string, started: number): void {
+  writeFileSync(
+    join(directory, SPARE_FILE),
+    `{"spare": 0, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now())}}`,
+  );
 }
 
 /** What the slot checks share: the folder, the queue, the holder and three kinds of taker. */
@@ -65455,6 +65464,7 @@ async function checksASlotAlreadyHeld(rig: SlotsRig): Promise<void> {
   const held = await outside.takeFree();
   assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
   writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
+  publishesNothingSpare(rig.directory, started);
   assert.equal(
     held === null ? false : existsSync(held) && holderOf(readFileSync(held, 'utf8'))?.pid === process.pid,
     true,
@@ -65482,6 +65492,7 @@ async function checksTheSixteenSlots(
   try {
     mkdirSync(join(sixteen, QUEUED_FOLDER));
     writeFileSync(join(sixteen, QUEUED_FOLDER, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
+    publishesNothingSpare(sixteen, started);
     const sessions = new EngineSlots(sixteen, 16, holder, undefined, () => 'other');
     const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
     assert.deepEqual(
@@ -65605,7 +65616,7 @@ async function agedTakeWhileAGateIsQueued(
 async function testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsAge(): Promise<void> {
   const started = await ownStart();
   const directory = slotsWithGatesQueued(
-    { 'ticket.json': JSON.stringify({ pid: process.pid, started }) },
+    { 'ticket.json': JSON.stringify({ pid: process.pid, started }), 'ticket.json.seated': '' },
     [1, 2, 3],
     started,
   );
@@ -65673,6 +65684,259 @@ async function testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot(): P
       rmSync(join(directory, QUEUED_FOLDER, `${mark}.seated`));
       assert.ok(await cameTrue(() => taken() !== null, 5000), 'and either does once the setup has ended');
     });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Eight slots with the kept ones (6 and 7) held, as the gates' Python queue leaves them: a queued
+ * gate mark and `.seated` file as `slots.queued_mark` and `slots.seated_mark` write them
+ * (`slots.own()` for the mark), and `slots.published` for `spare.json` when [param spare] is given.
+ * Every lock older than the file, as locks held for a while are.
+ */
+function eightSlotsWithTheKeptOnesHeld(
+  started: number,
+  seated: boolean,
+  held: readonly number[],
+  spare?: string,
+): string {
+  const own = `{"pid": ${String(process.pid)}, "started": ${String(started)}}`;
+  const directory = slotsWithGatesQueued(
+    { 'gate-1.json': own, ...(seated ? { 'gate-1.json.seated': '' } : {}) },
+    [6, 7, ...held],
+    started,
+  );
+  const old = new Date(Date.now() - 3_600_000);
+  for (const slot of [6, 7, ...held]) {
+    utimesSync(join(directory, `${String(slot)}.lock`), old, old);
+  }
+  if (spare !== undefined) {
+    writeFileSync(join(directory, SPARE_FILE), spare);
+  }
+  return directory;
+}
+
+/**
+ * With `spare.json` missing, or cut short as a reader of a writer that died would find it, a gate
+ * queued and not seated owes the free slots nothing: `slots.shares` counts `owed` 0, `side` every
+ * free gate slot, and `slots.drawn` gives side work all eight, however long it waits.
+ */
+async function testSideWorkTakesTheGateSlotsOfAnUnseatedGateWithNoSpareCount(): Promise<void> {
+  const started = await ownStart();
+  const cut = `{"spare": 6, "pid": ${String(process.pid)}, `;
+  for (const [why, spare] of [
+    ['a missing count', undefined],
+    ['an unreadable one', cut],
+  ] as const) {
+    const directory = eightSlotsWithTheKeptOnesHeld(started, false, [], spare);
+    try {
+      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+      const lock = await side.takeFree();
+      assert.equal(
+        lock === null ? null : basename(lock),
+        '5.lock',
+        `side work takes a gate slot with ${why}`,
+      );
+      assert.deepEqual(side.drawn.numbers, [7, 6, 5, 4, 3, 2, 1, 0], `${why} draws every slot`);
+      side.releaseAll();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * With a gate seated and no fresh count, no queue process says what the gate is owed, so side work
+ * leaves it every free slot. A seated gate with a spare count of 1, as `slots.shares` publishes it
+ * with one free slot owed and one not, gives the first side take a gate slot and the second none.
+ */
+async function testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem(): Promise<void> {
+  const started = await ownStart();
+  const pid = String(process.pid);
+  const bare = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  const counted = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  try {
+    const alone = new EngineSlots(bare, 8, { pid: process.pid, started }, undefined, () => 'other');
+    assert.equal(await alone.takeFree(), null, 'a seated gate with no count keeps its free slots');
+    assert.equal(alone.drawn.limit, 'kept', JSON.stringify(alone.drawn));
+    writeFileSync(
+      join(counted, SPARE_FILE),
+      `{"spare": 1, "pid": ${pid}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
+    );
+    const first = new EngineSlots(counted, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const second = new EngineSlots(counted, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const one = await first.takeFree();
+    assert.equal(
+      one === null ? null : basename(one),
+      '5.lock',
+      'the first side take gets the spare gate slot',
+    );
+    assert.equal(await second.takeFree(), null, 'the second gets none, though a gate slot stands free');
+    assert.deepEqual(second.drawn.numbers, [7, 6], JSON.stringify(second.drawn));
+    first.releaseAll();
+    const again = await second.takeFree();
+    assert.equal(
+      again === null ? null : basename(again),
+      '5.lock',
+      'and one once the first has given its slot back, as the count stands',
+    );
+    second.releaseAll();
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(counted, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A file made in the slots folder is never empty to a process reading it. A reader polling the
+ * folder while 3000 locks are made reads none of them empty, and a path already there is left alone.
+ */
+async function testAFileMadeInTheSlotsFolderIsNeverReadEmpty(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-made-'));
+  const reader = [
+    "const fs = require('fs');",
+    'const dir = process.argv[1];',
+    'let empty = 0;',
+    'let reads = 0;',
+    "while (!fs.existsSync(dir + '/done')) {",
+    '  for (const name of fs.readdirSync(dir)) {',
+    "    if (!name.endsWith('.lock')) continue;",
+    "    try { if (fs.readFileSync(dir + '/' + name, 'utf8') === '') empty += 1; reads += 1; } catch {}",
+    '  }',
+    '}',
+    "console.log(empty + ' ' + reads);",
+  ].join('\n');
+  try {
+    const child = spawnHidden(process.execPath, ['-e', reader, directory], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let out = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    const ended = new Promise<void>((done) => {
+      child.once('close', () => {
+        done();
+      });
+    });
+    await delay(500);
+    const lockText = JSON.stringify({ pid: process.pid, started: 1 });
+    for (let slot = 0; slot < 3000; slot += 1) {
+      assert.ok(makeWhole(join(directory, `${String(slot)}.lock`), lockText), `lock ${String(slot)} is made`);
+    }
+    writeFileSync(join(directory, 'done'), '');
+    await ended;
+    const [empty = Number.NaN, reads = 0] = out.trim().split(' ').map(Number);
+    assert.deepEqual([empty, reads > 0], [0, true], `a reader found empty locks: ${out}`);
+    assert.equal(
+      makeWhole(join(directory, '0.lock'), 'other'),
+      false,
+      'a lock already there is not made again',
+    );
+    assert.equal(readFileSync(join(directory, '0.lock'), 'utf8'), lockText, 'and keeps its text');
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => name.endsWith('.writing')),
+      [],
+      'no staged file is left',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two processes making the same 1500 locks at once: each lock has one maker, and holds the text of
+ * that one. A rename would replace the file there on Windows, which the link into place does not.
+ */
+async function testTwoProcessesMakingTheSameLockNeverOverwriteEachOther(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-made-race-'));
+  const whole = pathToFileURL(resolve('src', 'whole-file.ts')).href;
+  const rival = [
+    `import { makeWhole } from ${JSON.stringify(whole)};`,
+    "import { existsSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    'const won = [];',
+    "while (!existsSync(join(process.argv[2], 'go'))) {}",
+    'for (let slot = 0; slot < 1500; slot += 1) {',
+    "  if (makeWhole(join(process.argv[2], slot + '.lock'), 'child')) won.push(slot);",
+    '}',
+    "console.log(won.join(' '));",
+  ].join('\n');
+  try {
+    const script = join(directory, 'rival.mjs');
+    writeFileSync(script, rival);
+    const child = spawnHidden(process.execPath, [script, directory], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    const ended = new Promise<void>((done) => {
+      child.once('close', () => {
+        done();
+      });
+    });
+    const mine = new Set<number>();
+    await delay(2000);
+    writeFileSync(join(directory, 'go'), '');
+    for (let slot = 0; slot < 1500; slot += 1) {
+      if (makeWhole(join(directory, `${String(slot)}.lock`), 'parent')) {
+        mine.add(slot);
+      }
+    }
+    await ended;
+    const theirs = new Set(out.trim() === '' ? [] : out.trim().split(' ').map(Number));
+    for (let slot = 0; slot < 1500; slot += 1) {
+      const made = readFileSync(join(directory, `${String(slot)}.lock`), 'utf8');
+      assert.equal(
+        [mine.has(slot), theirs.has(slot)].filter(Boolean).length,
+        1,
+        `lock ${String(slot)} has one maker`,
+      );
+      assert.equal(made, mine.has(slot) ? 'parent' : 'child', `lock ${String(slot)} holds its maker's text`);
+    }
+    assert.ok(
+      mine.size > 0 && theirs.size > 0,
+      `both made some: ${String(mine.size)}, ${String(theirs.size)}`,
+    );
+    assert.equal(mine.size + theirs.size, 1500, 'every lock was made');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Files staged as `.<name>.<pid>-<thread>.writing` in the slots folder and its waiting folder, by
+ * either side: a live writer's is left whatever it says inside, a dead writer's is removed whatever
+ * it says, and none reads as a mark. The names of the writers decide, since a staged file is never
+ * opened, which a rename onto its name from the other side would be refused for on Windows.
+ */
+async function testTheSlotSweepJudgesStagedFilesByTheirWritersName(): Promise<void> {
+  const started = await ownStart();
+  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
+  const live = `{"pid": ${String(process.pid)}, "started": ${String(started)}}`;
+  const dead = `{"pid": ${String(gone.pid)}, "started": ${String(started)}}`;
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-staged-'));
+  const waits = join(directory, WAITING_FOLDER);
+  mkdirSync(waits);
+  const liveName = `.${String(process.pid)}-1.json.${String(process.ppid)}-1.writing`;
+  const deadName = `.${String(process.pid)}-2.json.${String(gone.pid)}-1.writing`;
+  try {
+    writeFileSync(join(waits, liveName), dead);
+    writeFileSync(join(waits, deadName), live);
+    writeFileSync(join(directory, `.9.lock.${String(gone.pid)}-1.writing`), live);
+    writeFileSync(join(directory, `.8.lock.${String(process.ppid)}-1.writing`), dead);
+    assert.deepEqual(slotWaiters(directory), [], 'a staged file is no mark');
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
+    const lock = await slots.takeFree();
+    assert.notEqual(lock, null, 'a take beside staged files finds a slot');
+    assert.deepEqual(
+      [readdirSync(waits), readdirSync(directory).filter((name) => name.endsWith('.writing'))],
+      [[liveName], [`.8.lock.${String(process.ppid)}-1.writing`]],
+      "a dead writer's staged files go and a live writer's stay, as their names say",
+    );
+    slots.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -89568,12 +89832,16 @@ function testAMoveLeavesAHardLinkedSecondNameAlone(): void {
 }
 
 /**
- * A string that is not written as a res:// path stays as it was, in every case: the word of a
- * label, a name, and a relative path in another case are no reference to the moved file.
+ * A relative string in another case that names no file the move touches stays as it was: a file
+ * of its own, a word that is no file and a name nothing holds.
  */
-function testAMoveLeavesARelativeStringInAnotherCase(): void {
-  const script = 'extends Node\n\nconst A := "DESK.tscn"\nconst B := "desk"\nconst C := "Desk.TSCN"\n';
-  const { project } = caseMoveProject({ 'desk.tscn': LINKED_DESK, 'use.gd': script }, 'DESK.tscn');
+function testAMoveLeavesARelativeStringNamingAFileItDoesNotMove(): void {
+  const script =
+    'extends Node\n\nconst A := "OTHER.tscn"\nconst B := "desk"\nconst C := "NOPE.tscn"\nconst D := "sub/OTHER.tscn"\n';
+  const { project } = caseMoveProject(
+    { 'desk.tscn': LINKED_DESK, 'other.tscn': LINKED_DESK, 'sub/other.tscn': LINKED_DESK, 'use.gd': script },
+    'DESK.tscn',
+  );
   try {
     movedIn(project, 'desk.tscn', 'newdir/desk.tscn');
     assert.equal(readFileSync(join(project, 'use.gd'), 'utf8'), script);
@@ -89583,14 +89851,19 @@ function testAMoveLeavesARelativeStringInAnotherCase(): void {
 }
 
 /**
- * A relative string matches the moved file by its exact spelling, however another file spells the
- * path in full: one mis-cased res:// reference elsewhere does not turn a label, a resource name
- * or a print argument in another case into a reference.
+ * The text a scene holds is no path: a label, a tooltip, a node name and a group naming the moved
+ * file in another case stay as written, beside a code string and an absolute path that follow.
  */
-function testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne(): void {
-  const label =
-    '[gd_scene format=3]\n\n[node name="N" type="Label"]\ntext = "DESK.tscn"\ntooltip_text = "Open DESK.tscn"\n';
-  const say = 'extends Node\n\nfunc _ready() -> void:\n\tprint("DESK.tscn")\n\tvar d := {"DESK.tscn": 1}\n';
+function testAMoveLeavesASceneTextInAnotherCaseBesideCodeThatFollows(): void {
+  const label = [
+    '[gd_scene format=3]',
+    '',
+    '[node name="DESK.tscn" type="Label" groups=["DESK.tscn"]]',
+    'text = "DESK.tscn"',
+    'tooltip_text = "Open DESK.tscn"',
+    '',
+  ].join('\n');
+  const say = 'extends Node\n\nfunc _ready() -> void:\n\tprint("DESK.tscn")\n\t# "DESK.tscn"\n';
   const { project, folds } = caseMoveProject(
     {
       'desk.tscn': LINKED_DESK,
@@ -89609,10 +89882,93 @@ function testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne(): void 
       after('abs.gd'),
     );
     assert.equal(after('label.tscn'), label);
-    assert.equal(after('say.gd'), say);
     assert.equal(after('sub/inner.tscn'), label);
+    assert.equal(
+      after('say.gd'),
+      folds ? say.replace('print("DESK.tscn")', 'print("newdir/desk.tscn")') : say,
+      'a code string follows and a comment does not',
+    );
   } finally {
     sweep(project);
+  }
+}
+
+/** A scene with a root that instances each of [param paths], as nodes N1, N2 and so on. */
+function sceneInstancing(paths: readonly string[]): string {
+  const resources = paths.map(
+    (path, at) => `[ext_resource type="PackedScene" path="${path}" id="${at + 1}_s"]\n`,
+  );
+  const nodes = paths.map(
+    (_path, at) => `[node name="N${at + 1}" parent="." instance=ExtResource("${at + 1}_s")]\n`,
+  );
+  return `[gd_scene format=3]\n\n${resources.join('')}\n[node name="Root" type="Node3D"]\n${nodes.join('')}`;
+}
+
+/**
+ * A relative string in another case follows a moved file where the file system joins it, in a
+ * script and in a scene's ext_resource: `DESK.tscn`, `./DESK.tscn` and, for a file in a folder,
+ * `SUB/desk.tscn`, each to the new place in the style it was written. A load reads from the root.
+ * The scene still loads after the move.
+ */
+function testAMoveFollowsARelativePathInAnotherCase(): void {
+  const up = caseMoveProject(
+    {
+      'desk.tscn': LINKED_DESK,
+      'use.gd': 'extends Node\n\nconst A := preload("DESK.tscn")\nconst B := preload("./DESK.tscn")\n',
+      'deep/use.gd': 'extends Node\n\nconst A := preload("../DESK.tscn")\nconst B := load("DESK.tscn")\n',
+      'use.tscn': sceneInstancing(['DESK.tscn', './DESK.tscn']),
+    },
+    'DESK.tscn',
+  );
+  const down = caseMoveProject(
+    {
+      'sub/desk.tscn': LINKED_DESK,
+      'use.gd': 'extends Node\n\nconst A := preload("SUB/desk.tscn")\nconst B := preload("sub/DESK.tscn")\n',
+      'use.tscn': sceneInstancing(['SUB/desk.tscn']),
+    },
+    'SUB/desk.tscn',
+  );
+  try {
+    const read = (project: string, file: string): string => readFileSync(join(project, file), 'utf8');
+    movedIn(up.project, 'desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      read(up.project, 'use.gd'),
+      up.folds
+        ? 'extends Node\n\nconst A := preload("newdir/desk.tscn")\nconst B := preload("newdir/desk.tscn")\n'
+        : 'extends Node\n\nconst A := preload("DESK.tscn")\nconst B := preload("./DESK.tscn")\n',
+    );
+    assert.equal(
+      read(up.project, 'deep/use.gd'),
+      up.folds
+        ? 'extends Node\n\nconst A := preload("../newdir/desk.tscn")\nconst B := load("newdir/desk.tscn")\n'
+        : 'extends Node\n\nconst A := preload("../DESK.tscn")\nconst B := load("DESK.tscn")\n',
+    );
+    assert.equal(
+      read(up.project, 'use.tscn'),
+      up.folds
+        ? sceneInstancing(['newdir/desk.tscn', 'newdir/desk.tscn'])
+        : sceneInstancing(['DESK.tscn', './DESK.tscn']),
+    );
+    movedIn(down.project, 'sub/desk.tscn', 'newdir/desk.tscn');
+    assert.equal(
+      read(down.project, 'use.gd'),
+      down.folds
+        ? 'extends Node\n\nconst A := preload("newdir/desk.tscn")\nconst B := preload("newdir/desk.tscn")\n'
+        : 'extends Node\n\nconst A := preload("SUB/desk.tscn")\nconst B := preload("sub/DESK.tscn")\n',
+    );
+    assert.equal(
+      read(down.project, 'use.tscn'),
+      down.folds ? sceneInstancing(['newdir/desk.tscn']) : sceneInstancing(['SUB/desk.tscn']),
+    );
+    if (up.folds) {
+      assertLoads(up.project, 'res://use.tscn', ['Root', 'N1', 'N2']);
+    }
+    if (down.folds) {
+      assertLoads(down.project, 'res://use.tscn', ['Root', 'N1']);
+    }
+  } finally {
+    sweep(up.project);
+    sweep(down.project);
   }
 }
 
@@ -90410,34 +90766,7 @@ async function testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins(): Pr
     'PLAYER.gd',
   );
   try {
-    const wordsIn = (word: string): { file: string; line: number; character: number }[] =>
-      ['player.gd', 'user.gd'].flatMap((file) =>
-        readFileSync(join(project, file), 'utf8')
-          .split('\n')
-          .flatMap((source, line) =>
-            [...source.matchAll(new RegExp(`\\b${word}\\b`, 'g'))].map((hit) => ({
-              file: join(project, file),
-              line,
-              character: hit.index,
-            })),
-          ),
-      );
-    const outcome = await renameSymbol(
-      {
-        projectPath: project,
-        scriptPath: join(project, 'player.gd'),
-        symbol: 'Player',
-        newName: 'Hero',
-        newScriptPath: join(project, 'hero.gd'),
-      },
-      {
-        namesTaken: engineSaying(),
-        references: async () => await Promise.resolve(wordsIn('Player')),
-        definitions: async () => await Promise.resolve(wordsIn('Player')),
-      },
-    );
-    assert.ok(outcome.ok, JSON.stringify(outcome));
-    applyRewrites(outcome.rewrites);
+    await renamePlayerAndMoveItsScript(project);
     const user = readFileSync(join(project, 'user.gd'), 'utf8');
     assert.ok(user.includes('preload("res://hero.gd")'), user);
     assert.equal(user.includes('preload("res://PLAYER.gd")'), !folds, user);
@@ -107931,8 +108260,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFolderMoveLeavesStringsThatOnlyResolveToTheFolder,
   testAMoveLooksAtEachEntryOnce,
   testAMoveLeavesAHardLinkedSecondNameAlone,
-  testAMoveLeavesARelativeStringInAnotherCase,
-  testAMoveLeavesARelativeStringInAnotherCaseBesideAnAbsoluteOne,
+  testAMoveLeavesARelativeStringNamingAFileItDoesNotMove,
+  testAMoveLeavesASceneTextInAnotherCaseBesideCodeThatFollows,
+  testAMoveFollowsARelativePathInAnotherCase,
+  testAFolderMoveFollowsRelativePathsInAnotherCaseBetweenItsFiles,
+  testAMoveLeavesAStringReadWithAnEscape,
+  testAMovedScriptKeepsItsRawStringReaching,
   testAMoveRewritesAnyAbsoluteSpellingTheFileSystemReaches,
   testAFolderMoveLeavesAPathThroughAnotherLinkOfTheSameDepth,
   testABackslashIsASeparatorInAPathGodotReads,
@@ -107957,6 +108290,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheNativeRealpathAnswersWithTheStoredSpelling,
   testAMoveRewritesAReferenceThroughALinkSpeltInAnotherCase,
   testARenameThatMovesItsScriptRewritesWhatTheFileSystemJoins,
+  testARenameThatMovesItsScriptFollowsARelativePathInAnotherCase,
   testAScenePathInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testAFolderInAnotherCaseIsFollowedWhereTheFileSystemJoinsIt,
   testASpellingGodotJoinsToAnotherFileFollowsTheFileTheDiskPicks,
@@ -108522,6 +108856,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGatesInTheQueueKeepTheirSlots,
   testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsAge,
   testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot,
+  testSideWorkTakesTheGateSlotsOfAnUnseatedGateWithNoSpareCount,
+  testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem,
+  testAFileMadeInTheSlotsFolderIsNeverReadEmpty,
+  testTwoProcessesMakingTheSameLockNeverOverwriteEachOther,
+  testTheSlotSweepJudgesStagedFilesByTheirWritersName,
   testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,

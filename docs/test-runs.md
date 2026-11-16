@@ -743,6 +743,12 @@ A tool of a game's own that starts engines takes slots the same way, in the step
 - To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`). Write
   `{"pid": <your pid>, "started": <your process's start time>}` into it.
 - The time is in milliseconds since the epoch, as the operating system reports it.
+- gdharness and the gates' queue write the text to a file beside the lock,
+  `.<n>.lock.<pid>-<thread>.writing`, and put it in place under the lock's name without replacing a
+  lock that exists (a hard link, or a rename that Windows refuses onto a taken name). A reader then
+  never finds the lock empty, and never opens a `.writing` file or counts it as a lock or a mark. A
+  writer that has gone leaves its file, which any sweep may remove by the pid in its name.
+  Still pass over a lock that is empty, as one made by an older taker may be.
 - An optional `"by"` says what took the slot, such as the tool and its project. A run waiting for a
   slot names each holder by it, or by its pid when it is missing.
 
@@ -878,9 +884,15 @@ The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "writt
 milliseconds since the epoch. `spare` counts the gates' free slots that all engines outside a gate
 may take between them, young or aged. It is read from the queue's seats, pool and memory. A seated
 mark of a round's setup leaves it at 0. The file is written through a `.part` file and a rename, at
-every change and every five seconds while a gate waits. A missing file counts as none, as does one
-older than ten seconds or written by a holder that has gone. A game never takes a spare slot, since
-it holds one as long as it plays.
+every change and every five seconds while a gate waits.
+
+Count what side work may take from the folder as it is now. That is the free slots of the gates,
+less those the seated gates are owed, and none while a measurement holds the quiet window
+(`window.json`). The owed part is the queue's to count. Where the file is fresh, take its `spare`
+less the gates' slots whose locks were written after it, and no more than are free. Where it is
+missing, older than ten seconds, unreadable or written by a holder that has gone, take none if a gate
+is seated and every free slot of the gates if none is. A game never takes a spare slot, since it
+holds one as long as it plays.
 
 ### A gate's lanes file
 
