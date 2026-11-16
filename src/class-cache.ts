@@ -1215,20 +1215,45 @@ export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: s
 /**
  * The declarations a given cache records at none of their scripts, or does not record at all.
  *
- * A name more than one script declares is current at any of them: an editor started again on the
- * project settles on another declarer than its first scan did, and the rebuild keeps its pick. So
- * is a script in another language the cache names, which the rebuild carries while it is there.
+ * A name more than one script declares is current at any of them, since the rebuild keeps the
+ * cache's pick while it still declares the name. So is a script in another language the cache
+ * names, which the rebuild carries while it is there.
  */
 export function staleAgainst(cached: Map<string, string>, projectPath: string): string[] {
-  const holds = (scripts: readonly string[], held: string | undefined): boolean =>
-    held !== undefined &&
-    (scripts.includes(held) ||
-      (held.startsWith('res://') &&
-        !held.endsWith('.gd') &&
-        existsSync(join(projectPath, held.slice('res://'.length)))));
+  const languages = cachedLanguages(projectPath);
+  const holds = (name: string, scripts: readonly string[]): boolean => {
+    const held = cached.get(name);
+    return (
+      held !== undefined &&
+      (scripts.includes(held) || isCarried(held, languages.get(name) ?? 'GDScript', projectPath))
+    );
+  };
   return [...classDeclarers(projectPath)]
-    .filter(([name, scripts]) => !holds(scripts, cached.get(name)))
+    .filter(([name, scripts]) => !holds(name, scripts))
     .map(([name]) => name);
+}
+
+/**
+ * Whether the class list rebuild carries an entry of [param language] at [param path]: another
+ * language's, while its file is there, and a C# one only at a `.cs` file. The extension of a
+ * language a GDExtension adds is not known, so its entry is taken at any file, as the rebuild
+ * takes it.
+ */
+function isCarried(path: string, language: string, projectPath: string): boolean {
+  if (language === 'GDScript' || (language === 'C#' && !path.endsWith('.cs'))) {
+    return false;
+  }
+  return path.startsWith('res://') && existsSync(join(projectPath, path.slice('res://'.length)));
+}
+
+/** The language each class the cache lists is in, as its entry writes it. */
+function cachedLanguages(projectPath: string): Map<string, string> {
+  return new Map(
+    [...(cachedEntries(projectPath) ?? [])].map(([name, entry]) => [
+      name,
+      /"language":\s*&"([^"]+)"/.exec(entry)?.[1] ?? 'GDScript',
+    ]),
+  );
 }
 
 /** The declarations on disk the engine's cache does not know about. */

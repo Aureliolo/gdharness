@@ -101,8 +101,14 @@ static func _is_gdscript(entry: Dictionary) -> bool:
 	return str(entry.get("language", "GDScript")) == "GDScript"
 
 
+# Another language's entry is carried while its file is there, and a C# one only at a .cs file. The
+# extension of a language a GDExtension adds is not known here, so its entry is taken at any file.
 static func _is_carried(entry: Dictionary) -> bool:
-	return not _is_gdscript(entry) and FileAccess.file_exists(str(entry.get("path", "")))
+	var path: String = str(entry.get("path", ""))
+	var language: String = str(entry.get("language", "GDScript"))
+	if language == "GDScript" or (language == "C#" and path.get_extension() != "cs"):
+		return false
+	return FileAccess.file_exists(path)
 
 
 # One entry per name, the declarer that holds it, naming in [param carried] each kept from another
@@ -123,20 +129,32 @@ static func _kept_entries(
 		if not _is_gdscript(kept):
 			carried.append(name)
 		if all.size() > 1:
-			var scripts: Array[String] = []
-			for one: Dictionary in all:
-				scripts.append(str(one["path"]))
-			twice_declared.append({ "class": name, "scripts": scripts, "kept": str(kept["path"]) })
+			twice_declared.append(_twice_declared(name, all, str(kept["path"])))
 	return entries
 
 
-# Which of a name's declarers, in the scan's order, holds the name.
-#
-# The cache's pick while it still declares the name. An editor started on a project it has scanned
-# before registers every declarer, then each one again whose path the list does not hold, and
-# keeps the last of those (editor/file_system/editor_file_system.cpp, _process_file_system and
-# _update_script_classes). A rebuild that moved the name would have it moved back on the editor's
-# next save, each answering it changed. With no pick to keep, the last declarer, as a first scan
+# A class more than one script declares, which is an error in the project, not a list to repair:
+# the engine fails every declarer but the one it holds with "Class hides a global script class"
+# (modules/gdscript/gdscript_analyzer.cpp), and which one it holds can change from one editor
+# start to the next (editor/file_system/editor_file_system.cpp, _process_file_system).
+static func _twice_declared(name: String, all: Array, kept: String) -> Dictionary:
+	var scripts: Array[String] = []
+	for one: Dictionary in all:
+		scripts.append(str(one["path"]))
+	var listed: String = ", ".join(scripts.slice(0, -1)) + " and " + str(scripts.back())
+	var note: String = (
+		(
+			'%s is declared by %s. Godot fails all but one of them with "Class "%s" hides a global'
+			+ ' script class". The list keeps %s, and the editor may keep another at its next'
+			+ " start. Rename the class in all but one script."
+		)
+		% [name, listed, name, kept]
+	)
+	return { "class": name, "scripts": scripts, "kept": kept, "note": note }
+
+
+# Which of a name's declarers, in the scan's order, the list keeps: the one it holds while that
+# still declares the name, so a rebuild does not move it, and otherwise the last, as a first scan
 # registers them in turn and each registration replaces the path (_first_scan_process_scripts,
 # ScriptServer::add_global_class).
 static func _kept_of(all: Array, held: String) -> Dictionary:

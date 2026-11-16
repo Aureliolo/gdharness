@@ -506,10 +506,11 @@ export async function runOperation(
   projectPath: string,
 ): Promise<HeadlessOutcome> {
   // Read before the engine starts, since every start first drops the entries whose script is gone,
-  // and the rebuild could then not answer them as removed.
+  // and the rebuild could then answer them neither as removed nor, moved to another declarer, as
+  // changed.
   const listedBefore = operation === REFRESH_CLASS_LIST ? cachedClasses(projectPath) : null;
   const run = await operationOutcome(engine, operation, params, projectPath);
-  const outcome = listedBefore === null ? run : withEveryRemovalAnswered(run, listedBefore, projectPath);
+  const outcome = listedBefore === null ? run : answeredAgainst(run, listedBefore, projectPath);
   const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>
     EXIT_LEAK.test(entry.text),
   );
@@ -520,26 +521,46 @@ export async function runOperation(
 const REFRESH_CLASS_LIST = 'refresh_class_cache';
 
 /**
- * [param outcome] of a class list rebuild, its `removed` holding every class [param listedBefore]
- * held that the list no longer does, whether the rebuild dropped it or the start before it did.
+ * [param outcome] of a class list rebuild, answered against [param listedBefore], the list before
+ * the start dropped what names a gone script: `removed` holds every class it held that the list no
+ * longer does, and a class it held at another path is `changed`, not `added`.
  */
-function withEveryRemovalAnswered(
+function answeredAgainst(
   outcome: HeadlessOutcome,
   listedBefore: ReadonlyMap<string, string>,
   projectPath: string,
 ): HeadlessOutcome {
-  const answered = outcome.ok ? outcome.payload['removed'] : undefined;
-  if (!(outcome.ok && Array.isArray(answered))) {
+  if (!outcome.ok) {
+    return outcome;
+  }
+  const names = (key: string): string[] | null => {
+    const answered = outcome.payload[key];
+    return Array.isArray(answered)
+      ? answered.filter((name): name is string => typeof name === 'string')
+      : null;
+  };
+  const [added, removed, changed] = [names('added'), names('removed'), names('changed')];
+  if (added === null || removed === null || changed === null) {
     return outcome;
   }
   const listedAfter = cachedClasses(projectPath) ?? new Map<string, string>();
-  const removed = answered.filter((name): name is string => typeof name === 'string');
   const unanswered = [...listedBefore.keys()].filter(
     (name) => !listedAfter.has(name) && !removed.includes(name),
   );
-  return unanswered.length === 0
-    ? outcome
-    : { ...outcome, payload: { ...outcome.payload, removed: [...removed, ...unanswered] } };
+  const moved = added.filter((name) => listedBefore.has(name));
+  if (unanswered.length === 0 && moved.length === 0) {
+    return outcome;
+  }
+  const payload = {
+    ...outcome.payload,
+    added: added.filter((name) => !listedBefore.has(name)),
+    removed: [...removed, ...unanswered],
+    changed: [
+      ...changed,
+      ...moved.filter((name) => listedBefore.get(name) !== listedAfter.get(name)),
+    ].toSorted(),
+  };
+  return { ...outcome, payload };
 }
 
 async function operationOutcome(

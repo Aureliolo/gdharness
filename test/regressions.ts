@@ -78808,8 +78808,7 @@ async function testARebuiltClassListAnswersAGoneScriptsClassAsRemoved(): Promise
  * Class names two scripts declare, each with its declarers in the editor's scan order: a folder's
  * subfolders before its own files, each by FileNoCaseComparator, so a leading `_` first, digits as
  * numbers and letter case ignored. A code point sort orders Cas, Fol, FolNat, Nat, TwIcon and Und
- * the other way. A Godot 4.7.2 editor's first scan of the project kept the second of each, and every
- * later start the first.
+ * the other way. A Godot 4.7.2 editor's first scan of the project kept the second of each.
  */
 const TWICE_DECLARED_PAIRS: readonly (readonly [name: string, first: string, last: string])[] = [
   ['Cas', 'a.gd', 'B.gd'],
@@ -78842,8 +78841,8 @@ function twiceDeclaredAt(at: 'first' | 'last'): Map<string, string> {
   );
 }
 
-/** The class list a Godot 4.7.2 editor wrote for [const TWICE_DECLARED] on its second start. */
-function editorsSecondStartList(): string {
+/** A class list holding each twice-declared name at its first declarer, written as the editor writes one. */
+function aListAtEachFirstDeclarer(): string {
   const entry = (name: string, path: string): string => {
     const icon = name === 'TwIcon' ? 'res://icon.svg' : '';
     const base = name === 'TwIcon' ? 'Node' : 'RefCounted';
@@ -78869,9 +78868,28 @@ function listedPaths(project: string): Map<string, string> {
   return cachedClasses(project) ?? new Map<string, string>();
 }
 
+/** What the rebuild answers of a class [param scripts] declare, where the list keeps [param kept]. */
+function twiceDeclaredAnswer(
+  name: string,
+  scripts: readonly string[],
+  kept: string,
+): Record<string, unknown> {
+  const listed = `${scripts.slice(0, -1).join(', ')} and ${scripts.at(-1) ?? ''}`;
+  return {
+    class: name,
+    scripts,
+    kept,
+    note:
+      `${name} is declared by ${listed}. Godot fails all but one of them with "Class "${name}" hides a ` +
+      `global script class". The list keeps ${kept}, and the editor may keep another at its next start. ` +
+      'Rename the class in all but one script.',
+  };
+}
+
 /**
  * A twice-declared name goes to the declarer the editor's first scan keeps, and a cache holding
- * any of its declarers is current, since a later editor start keeps another.
+ * any of its declarers is current, since the rebuild keeps the list's pick while it still
+ * declares the name.
  */
 function testATwiceDeclaredClassGoesWhereTheFirstScanPutsIt(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-declared-'));
@@ -78920,11 +78938,9 @@ async function testARebuiltClassListHoldsATwiceDeclaredClassOnce(): Promise<void
     assert.ok(Array.isArray(twice), JSON.stringify(outcome.payload));
     assert.deepEqual(
       twice.toSorted((a: { class: string }, b: { class: string }) => (a.class < b.class ? -1 : 1)),
-      TWICE_DECLARED_PAIRS.map(([name, first, last]) => ({
-        class: name,
-        scripts: [`res://${first}`, `res://${last}`],
-        kept: `res://${last}`,
-      })),
+      TWICE_DECLARED_PAIRS.map(([name, first, last]) =>
+        twiceDeclaredAnswer(name, [`res://${first}`, `res://${last}`], `res://${last}`),
+      ),
     );
     assert.deepEqual(staleClassNames(project), []);
   } finally {
@@ -78933,23 +78949,23 @@ async function testARebuiltClassListHoldsATwiceDeclaredClassOnce(): Promise<void
 }
 
 /**
- * A rebuild over the list an editor wrote on a later start leaves its every pick: moving one would
- * have the editor move it back on its next save, and each answer it changed.
+ * A rebuild over a list holding a declarer of each twice-declared name leaves every pick, and
+ * answers nothing changed.
  */
-async function testARebuildKeepsTheEditorsPickOfATwiceDeclaredClass(): Promise<void> {
+async function testARebuildKeepsTheListsPickOfATwiceDeclaredClass(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
       throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
     }
-    console.log("editor's twice-declared pick regression skipped (Godot not found)");
+    console.log("list's twice-declared pick regression skipped (Godot not found)");
     return;
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-kept-'));
   try {
     writeTree(project, {
       ...TWICE_DECLARED,
-      '.godot/global_script_class_cache.cfg': editorsSecondStartList(),
+      '.godot/global_script_class_cache.cfg': aListAtEachFirstDeclarer(),
     });
     const outcome = await rebuildClassList(godotPath, project);
     assert.ok(outcome.ok, JSON.stringify(outcome));
@@ -78986,12 +79002,117 @@ async function testACSharpClassBesideAGDScriptOneIsListedOnce(): Promise<void> {
     assert.deepEqual(outcome.payload['carried'], ['Sharp'], JSON.stringify(outcome.payload));
     assert.deepEqual(outcome.payload['changed'], [], JSON.stringify(outcome.payload));
     assert.deepEqual(outcome.payload['twiceDeclared'], [
-      { class: 'Sharp', scripts: ['res://Sharp.cs', 'res://sharp.gd'], kept: 'res://Sharp.cs' },
+      twiceDeclaredAnswer('Sharp', ['res://Sharp.cs', 'res://sharp.gd'], 'res://Sharp.cs'),
     ]);
     assert.deepEqual(listedPaths(project), new Map([['Sharp', 'res://Sharp.cs']]));
     assert.deepEqual(staleClassNames(project), []);
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A class the list names at a file of no language that owns it is stale: a GDScript entry at an
+ * .svg resolves nothing, and a script extending the class fails to parse. A C# entry counts only
+ * at a .cs file.
+ */
+function testAClassListedAtAFileItsLanguageDoesNotOwnIsStale(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-foreign-path-'));
+  const csharp = (path: string): string =>
+    `list=[{\n"base": &"Node",\n"class": &"Ex",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}]\n`;
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Foreign"\n',
+      'ex.gd': 'class_name Ex\nextends Node\n',
+      'uses.gd': 'extends Ex\n',
+      'icon.svg': '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>\n',
+      'Ex.cs': 'using Godot;\n[GlobalClass]\npublic partial class Ex : Node {}\n',
+      'Ex.txt': 'not a script\n',
+    });
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    mkdirSync(dirname(cache), { recursive: true });
+    writeFileSync(cache, godotClassList([['Ex', 'Node', 'res://icon.svg']]));
+    assert.deepEqual(staleClassNames(project), ['Ex'], 'a GDScript entry at an .svg');
+    writeFileSync(cache, csharp('res://Ex.txt'));
+    assert.deepEqual(staleClassNames(project), ['Ex'], 'a C# entry at a .txt');
+    writeFileSync(cache, csharp('res://Ex.cs'));
+    assert.deepEqual(staleClassNames(project), [], 'a C# entry at its .cs');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A class whose listed declarer is gone, and which another script still declares, is answered
+ * changed: the engine's start drops the gone entry before the rebuild reads the list.
+ */
+async function testAClassMovedFromAGoneDeclarerIsAnsweredChanged(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('moved class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-moved-class-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Moved"\n',
+      'm1.gd': 'class_name Mv\nvar x := 1\n',
+      'm3.gd': 'class_name Mv\nvar x := 1\n',
+      'kept.gd': 'class_name Kept\nvar x := 1\n',
+      '.godot/global_script_class_cache.cfg': godotClassList([
+        ['Kept', 'RefCounted', 'res://kept.gd'],
+        ['Mv', 'RefCounted', 'res://m2.gd'],
+      ]),
+    });
+    const outcome = await rebuildClassList(godotPath, project);
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const { added, removed, changed } = outcome.payload;
+    assert.deepEqual({ added, removed, changed }, { added: [], removed: [], changed: ['Mv'] });
+    assert.deepEqual(listedPaths(project).get('Mv'), 'res://m3.gd');
+  } finally {
+    sweep(project);
+  }
+}
+
+/** The answer project_import refresh_classes renders names a twice-declared class and how to mend it. */
+async function testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('twice-declared answer regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-answer-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-twice-answer-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="TwiceAnswer"\n',
+    's1.gd': 'class_name Delta\nvar x := 1\n',
+    'a/s2.gd': 'class_name Delta\nvar x := 1\n',
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  try {
+    await server.initialize('twice-answer');
+    const response = await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answered = parseTextContent(response);
+    assert.ok(answered !== null, textOf(response) ?? JSON.stringify(response));
+    assert.deepEqual(get(answered, 'twiceDeclared'), [
+      twiceDeclaredAnswer('Delta', ['res://a/s2.gd', 'res://s1.gd'], 'res://s1.gd'),
+    ]);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
   }
 }
 
@@ -107910,8 +108031,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
   testATwiceDeclaredClassGoesWhereTheFirstScanPutsIt,
   testARebuiltClassListHoldsATwiceDeclaredClassOnce,
-  testARebuildKeepsTheEditorsPickOfATwiceDeclaredClass,
+  testARebuildKeepsTheListsPickOfATwiceDeclaredClass,
   testACSharpClassBesideAGDScriptOneIsListedOnce,
+  testAClassListedAtAFileItsLanguageDoesNotOwnIsStale,
+  testAClassMovedFromAGoneDeclarerIsAnsweredChanged,
+  testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
