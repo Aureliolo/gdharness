@@ -65906,6 +65906,27 @@ async function testTwoProcessesMakingTheSameLockNeverOverwriteEachOther(): Promi
 }
 
 /**
+ * A slot's lock is made through its staged file: with the staged name taken by a folder, which the
+ * text cannot be written to, no lock is made, where a lock opened and written in place would be.
+ */
+async function testASlotLockIsMadeThroughItsStagedFile(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-staged-lock-'));
+  try {
+    mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
+    assert.equal(await slots.takeFree(), null, 'no lock is made while its staged name is taken');
+    assert.equal(existsSync(join(directory, '0.lock')), false, 'and none is left');
+    rmSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`), { recursive: true });
+    const lock = await slots.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '0.lock', 'and the slot is taken once it is free');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * Files staged as `.<name>.<pid>-<thread>.writing` in the slots folder and its waiting folder, by
  * either side: a live writer's is left whatever it says inside, a dead writer's is removed whatever
  * it says, and none reads as a mark. The names of the writers decide, since a staged file is never
@@ -108861,6 +108882,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFileMadeInTheSlotsFolderIsNeverReadEmpty,
   testTwoProcessesMakingTheSameLockNeverOverwriteEachOther,
   testTheSlotSweepJudgesStagedFilesByTheirWritersName,
+  testASlotLockIsMadeThroughItsStagedFile,
   testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
   testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
