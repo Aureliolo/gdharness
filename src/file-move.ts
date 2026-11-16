@@ -359,7 +359,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   // The files that move on disk stay those of `moves`. A text keeps the path the walk reached it by,
   // which the engine resolves its relative paths against, and `references` says where it goes.
   const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
-  const joined = joinedByTheDisk({
+  joinedByTheDisk({
     projectPath,
     targets: literalTargets(texts, scripts),
     references,
@@ -373,7 +373,6 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       texts,
       scripts,
       moves: references,
-      joined,
       named: [from],
       exists: (path) => existsSync(join(projectPath, path.slice('res://'.length))),
     },
