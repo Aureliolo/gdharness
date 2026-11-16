@@ -256,6 +256,7 @@ import {
 import {
   callSitesOf,
   enclosingFunction,
+  Lines,
   neverStopsOn,
   occurrencesOf,
   regionsOf,
@@ -1373,6 +1374,41 @@ async function testTheDebuggerNamesTheErrorsItsCallsRaise(): Promise<void> {
     game.destroy();
     peer.close();
   }
+}
+
+/**
+ * An error the runtime addon's read of a `property` path made the engine report is the read's, in
+ * whichever order its line and the game's mark of it reach the transcript.
+ */
+function testAPathReadsErrorIsNotTheGames(): void {
+  const raised = "Invalid access to property or key 'gone' on a base object of type 'Node'.";
+  const printed = [`SCRIPT ERROR: ${raised}`, '   at: get (core/variant/variant.cpp:1)'];
+  const marked = raisedMark('path read', raised, 'core/variant/variant.cpp').trimEnd();
+  for (const [order, lines] of [
+    ['printed first', [...printed, marked]],
+    ['marked first', [marked, ...printed]],
+  ] as const) {
+    const log = new GameLog();
+    log.append('transcript', `${lines.join('\n')}\n`);
+    assert.deepEqual(
+      log.all.map((entry) => [entry.severity, entry.text, entry.raisedBy]),
+      [['info', raised, 'path read']],
+      order,
+    );
+    assert.equal(log.count('error'), 0, order);
+  }
+}
+
+/**
+ * A caller that has already read a script hands its regions over, and the call sites are taken from
+ * those rather than from a second reading: with none blanked, a call in a comment counts.
+ */
+function testCallSitesUseTheReadTheyAreHanded(): void {
+  const source = 'func a() -> void:\n\tb()\n\t# b()\n\n\nfunc b() -> void:\n\tpass\n';
+  const lines = (found: { line: number }[]): number[] => found.map((one) => one.line);
+  assert.deepEqual(lines(callSitesOf(source, 'b')), [2], 'read on its own, a comment is blanked');
+  const handed = { regions: [], shape: scriptShapeOf(source), lines: new Lines(source) };
+  assert.ok(lines(callSitesOf(source, 'b', false, {}, handed)).includes(3), 'the handed regions are used');
 }
 
 /**
@@ -107345,6 +107381,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
   testAnEvaluatesErrorIsNotTheGames,
+  testAPathReadsErrorIsNotTheGames,
+  testCallSitesUseTheReadTheyAreHanded,
   testAnErrorOfSeveralLinesIsOneEntry,
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
