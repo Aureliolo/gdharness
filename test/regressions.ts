@@ -19879,6 +19879,11 @@ async function testAWindowedSuiteWhoseEngineMakesNoRendererEnds(): Promise<void>
     console.log('no-renderer suite regression skipped (desktops are a Windows boundary)');
     return;
   }
+  const refused = windowedRunRefused();
+  if (refused !== null) {
+    console.log(`no-renderer suite regression skipped (${refused})`);
+    return;
+  }
   const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
   const lacking = rendererLessEngine();
   try {
