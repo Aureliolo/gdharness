@@ -40929,6 +40929,7 @@ async function testAnExportedBuildInsideTheProjectStartsWithNoPowerShell(): Prom
       GDHARNESS_RUNTIME_DIR: runtimeDir,
       GODOT_PATH: '',
       Path: [dirname(nodePath), system].join(delimiter),
+      PATH: [dirname(nodePath), system].join(delimiter),
     },
   });
   const met = new MetProcesses();
