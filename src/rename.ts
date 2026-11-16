@@ -1322,8 +1322,8 @@ interface Reading {
  * How the engine reads [param literal], or null where it names no file: an escape the engine
  * refuses, or a control character such as the tab of `\t`. In every platform's Godot a backslash
  * in a path is a separator: `ResourceLoader` and `ProjectSettings.localize_path` simplify the path
- * first (`resource_loader.cpp` `_validate_local_path`, `project_settings.cpp` `localize_path`),
- * and `String::simplify_path` (`ustring.cpp`) turns each into a slash before it folds `.` and
+ * first (`ResourceLoader::_validate_local_path` and `ProjectSettings::localize_path` in core), and
+ * `String::simplify_path` (`ustring.cpp`) turns each into a slash before it folds `.` and
  * `..`. Plain text no engine decodes keeps its backslashes as names.
  */
 function readingOf(literal: Literal): Reading | null {
