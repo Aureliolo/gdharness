@@ -29,10 +29,14 @@ import { leftOutsOnPath, walkProject } from './project-walk.js';
 import {
   ClassGraph,
   declaredIn,
+  entryAt,
+  joinedByTheDisk,
+  literalTargets,
   type Mention,
   mentionIgnored,
   planMove,
   type Rewrite,
+  reachedAt,
   reloadableInTheEditor,
   rewritesOf,
   scriptsOf,
@@ -355,6 +359,13 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   // The files that move on disk stay those of `moves`. A text keeps the path the walk reached it by,
   // which the engine resolves its relative paths against, and `references` says where it goes.
   const references = referencesOf(reach, moves, isDirectory ? { from, to } : null);
+  const joined = joinedByTheDisk({
+    projectPath,
+    targets: literalTargets(texts, scripts),
+    references,
+    resolve: reachedAt,
+    entry: entryAt,
+  });
   const placeOf = new Map(texts.map((file) => [file.path, file.realPath ?? file.path]));
   const movesText = (path: string): boolean => moves.has(placeOf.get(path) ?? path);
   let plan = planMove(
@@ -362,6 +373,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       texts,
       scripts,
       moves: references,
+      joined,
       named: [from],
       exists: (path) => existsSync(join(projectPath, path.slice('res://'.length))),
     },

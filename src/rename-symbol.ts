@@ -17,7 +17,10 @@ import {
   declaredIn,
   type Edit,
   type EditKind,
+  entryAt,
   fileOf,
+  joinedByTheDisk,
+  literalTargets,
   type Mention,
   mentionIgnored,
   NOT_INHERITED,
@@ -28,6 +31,7 @@ import {
   RESOLVED_ELSEWHERE,
   type Resolved,
   type Rewrite,
+  reachedAt,
   rewritesOf,
   type Script,
   scriptsOf,
@@ -519,11 +523,20 @@ function renamed(
   const { what, resolvedBy, took, overrides, declaringFiles } = step;
   let plan = step.plan;
   if (moveTo !== null) {
+    const moves = new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo]));
+    const joined = joinedByTheDisk({
+      projectPath,
+      targets: literalTargets(texts, scripts),
+      references: moves,
+      resolve: reachedAt,
+      entry: entryAt,
+    });
     plan = planMove(
       {
         texts,
         scripts,
-        moves: new Map(reach.pathsOf(declaringPath).map((path) => [path, moveTo])),
+        moves,
+        joined,
         named: [declaringPath],
         exists: (path) => existsSync(`${projectPath}/${path.slice('res://'.length)}`),
       },

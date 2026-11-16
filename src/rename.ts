@@ -13,7 +13,16 @@
  * than find it later as a test failing on a node it cannot find.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, posix } from 'node:path';
 import {
   type ClassBody,
@@ -1118,6 +1127,8 @@ interface MoveArguments {
   readonly scripts: ReadonlyMap<string, Script>;
   /** Each file that moves, by its `res://` path, to where it goes. */
   readonly moves: ReadonlyMap<string, string>;
+  /** The spellings of [field moves] the file system joined to a moved file, which a relative string never matches. */
+  readonly joined: ReadonlySet<string>;
   /**
    * The paths whose every other occurrence is answered as a mention: the file moved, or the
    * directory, whose path also opens strings that build a path inside it at run time.
@@ -1223,13 +1234,160 @@ function literalsOf(file: ProjectText, script: Script | undefined): Literal[] {
   return found;
 }
 
+/** Every path the string literals of [param texts] write in full as a res:// path, each once. */
+export function literalTargets(
+  texts: readonly ProjectText[],
+  scripts: ReadonlyMap<string, Script>,
+): Set<string> {
+  const targets = new Set<string>();
+  for (const file of texts) {
+    for (const literal of literalsOf(file, scripts.get(file.path))) {
+      const written = literal.value.startsWith('*') ? literal.value.slice(1) : literal.value;
+      if (written.startsWith('res://') && !written.includes('\n')) {
+        targets.add(resolvedPath(written, file.path));
+      }
+    }
+  }
+  return targets;
+}
+
+/** The arguments of [function joinedByTheDisk]. */
+export interface JoinArguments {
+  readonly projectPath: string;
+  /** What the string literals write as res:// paths, from [function literalTargets]. */
+  readonly targets: ReadonlySet<string>;
+  /** Every path that names a moved file, where it goes. Spellings the disk joins are added. */
+  readonly references: Map<string, string>;
+  /** Where the entry at an absolute path really is, or null where nothing is: [function reachedAt]. */
+  readonly resolve: (absolute: string) => string | null;
+  /** Which directory entry an absolute path names, a link itself rather than what it leads to: [function entryAt]. */
+  readonly entry: (absolute: string) => string | null;
+}
+
+/** The directory entry at [param absolute], a link not followed, as an id, or null where nothing is. */
+export function entryAt(absolute: string): string | null {
+  try {
+    const found = lstatSync(absolute, { bigint: true });
+    return `${found.dev}:${found.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Where the entry at [param absolute] really is, each link followed and each name as stored, or null. */
+export function reachedAt(absolute: string): string | null {
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether [param target] is [param moved] spelt another way, not a second route to the same file:
+ * each folder above the last name, and the name itself, is the same directory entry in both. A
+ * path through another link to the file reaches it too, and is a different path.
+ */
+function sameRoute(target: string, moved: string, entry: (path: string) => string | null): boolean {
+  const names = (path: string): string[] => path.slice('res://'.length).split('/').filter(Boolean);
+  const [wanted, own] = [names(target), names(moved)];
+  if (wanted.length !== own.length) {
+    return false;
+  }
+  return wanted.every((_name, at) => {
+    const last = at === wanted.length - 1;
+    const prefix = (path: string, parts: string[]): string =>
+      last ? path : `res://${parts.slice(0, at + 1).join('/')}`;
+    const there = entry(prefix(target, wanted));
+    return there !== null && there === entry(prefix(moved, own));
+  });
+}
+
+/**
+ * Adds to [param args].references each res:// spelling in [param args].targets that reaches the
+ * same directory entry as a moved file, as `res://DESK.tscn` reaches `res://desk.tscn` on Windows
+ * and macOS, or a path through a link spelt in another case. The file system answers every
+ * spelling, since no fold of the letters is its own and the disk also joins a trailing slash, a
+ * stream suffix or a short name: where it keeps two spellings apart, as Linux does, or where a name
+ * is a hard link, which reaches its own entry, nothing is added. The spelling goes where the exact
+ * path goes. Each distinct spelling is resolved once. Returns the spellings added, which only an
+ * absolute string reads as a path.
+ */
+export function joinedByTheDisk(args: JoinArguments): Set<string> {
+  const { targets, references, resolve } = args;
+  const asked = (ask: (absolute: string) => string | null): ((path: string) => string | null) => {
+    const answers = new Map<string, string | null>();
+    return (path) => {
+      if (!answers.has(path)) {
+        answers.set(path, ask(`${args.projectPath}/${path.slice('res://'.length)}`));
+      }
+      return answers.get(path) ?? null;
+    };
+  };
+  const reach = asked(resolve);
+  const entry = asked(args.entry);
+  const folderOf = (path: string): string => {
+    const parts = path.slice('res://'.length).split('/').filter(Boolean);
+    return parts.length < 2 ? 'res://' : `res://${parts.slice(0, -1).join('/')}`;
+  };
+  type Moved = { path: string; goesTo: string };
+  const group = <T>(map: Map<string, T[]>, key: string, one: T): void => {
+    const found = map.get(key);
+    if (found === undefined) {
+      map.set(key, [one]);
+    } else {
+      found.push(one);
+    }
+  };
+  // A spelling reaches a moved file only from the file's real folder, so one question per folder
+  // rules out every target elsewhere. The files of a folder are asked once a target is in it.
+  const inFolder = new Map<string, Moved[]>();
+  for (const [path, goesTo] of references) {
+    const folder = reach(folderOf(path));
+    if (folder !== null) {
+      group(inFolder, folder, { path, goesTo });
+    }
+  }
+  const movedAt = new Map<string, Map<string, Moved[]>>();
+  const movedIn = (folder: string): Map<string, Moved[]> => {
+    let moved = movedAt.get(folder);
+    if (moved === undefined) {
+      moved = new Map();
+      for (const one of inFolder.get(folder) ?? []) {
+        const at = reach(one.path);
+        if (at !== null) {
+          group(moved, at, one);
+        }
+      }
+      movedAt.set(folder, moved);
+    }
+    return moved;
+  };
+  const joined = new Set<string>();
+  for (const target of targets) {
+    const folder = references.has(target) ? null : reach(folderOf(target));
+    const at = folder === null || !inFolder.has(folder) ? null : reach(target);
+    const goesTo =
+      at === null || folder === null
+        ? undefined
+        : movedIn(folder)
+            .get(at)
+            ?.find((one) => sameRoute(target, one.path, entry))?.goesTo;
+    if (goesTo !== undefined) {
+      references.set(target, goesTo);
+      joined.add(target);
+    }
+  }
+  return joined;
+}
+
 /**
  * The edits moving files: every string naming one by path, as a res:// path or relative to the
  * file it is in, written to name the new place in the same style, and in each moved file, every
  * relative path, which names a different file once it is somewhere else.
  */
 export function planMove(args: MoveArguments, plan: Plan): Plan {
-  const { texts, scripts, moves, named, exists } = args;
+  const { texts, scripts, moves, joined, named, exists } = args;
   const edits = [...plan.edits];
   const mentions = [...plan.mentions];
   const editedAt = new Set(edits.map((one) => `${one.file}:${one.offset}`));
@@ -1243,7 +1401,7 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     const script = scripts.get(file.path);
     const goesTo = moves.get(file.path);
     for (const literal of literalsOf(file, script)) {
-      const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
+      const moved = movedLiteral(literal, file.path, goesTo, moves, joined, exists);
       if (moved !== null) {
         add(file.path, moved.offset, moved.length, moved.replacement);
       }
@@ -1290,6 +1448,7 @@ function movedLiteral(
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
+  joined: ReadonlySet<string>,
   exists: (path: string) => boolean,
 ): { offset: number; length: number; replacement: string } | null {
   const autoload = literal.value.startsWith('*') ? '*' : '';
@@ -1297,7 +1456,7 @@ function movedLiteral(
   if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
     return null;
   }
-  const replacement = movedPath(written, literal.base, from, goesTo, moves, exists);
+  const replacement = movedPath(written, literal.base, from, goesTo, moves, joined, exists);
   // A relative path between two files that moved together reads the same afterwards, and is
   // not an edit: counted as one, the answer listed files as changed that were written as they were.
   if (replacement === null || replacement === written) {
@@ -1313,6 +1472,7 @@ function movedPath(
   from: string,
   goesTo: string | undefined,
   moves: ReadonlyMap<string, string>,
+  joined: ReadonlySet<string>,
   exists: (path: string) => boolean,
 ): string | null {
   const isAbsolute = written.startsWith('res://');
@@ -1321,7 +1481,7 @@ function movedPath(
   }
   const fromRoot = base === 'root' && !isAbsolute;
   const target = resolvedPath(written, fromRoot ? 'res://_' : from);
-  const targetGoesTo = moves.get(target);
+  const targetGoesTo = isAbsolute || !joined.has(target) ? moves.get(target) : undefined;
   if (targetGoesTo !== undefined) {
     if (fromRoot) {
       return targetGoesTo.slice('res://'.length);
