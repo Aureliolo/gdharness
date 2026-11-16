@@ -19998,7 +19998,7 @@ async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Prom
   const game = rendererLessEngine();
   const editor = [
     '-e',
-    `const { spawn } = require('node:child_process'); const game = spawn(${JSON.stringify(game)}, ['--path', '.'], { stdio: 'inherit' }); game.on('exit', () => { console.log('the game ended, the editor is up'); setInterval(() => undefined, 1000); });`,
+    `${HIDDEN_SPAWN_PRELUDE} const game = spawnHidden(${JSON.stringify(game)}, ['--path', '.'], { stdio: 'inherit' }); game.on('exit', () => { console.log('the game ended, the editor is up'); setInterval(() => undefined, 1000); });`,
   ];
   const start = spawnOnDesktop(
     { desktop: HIDDEN_DESKTOP, directory: scratch, scratch, endsWithHelper: true },

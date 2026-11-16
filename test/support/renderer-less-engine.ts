@@ -24,7 +24,7 @@ if (args.some((arg) => ${JSON.stringify(NEEDS_NO_WINDOW)}.includes(arg))) {
   if (real === undefined) {
     process.exit(1);
   }
-  const ran = Bun.spawnSync([real, ...args], { stdio: ['inherit', 'inherit', 'inherit'] });
+  const ran = Bun.spawnSync([real, ...args], { stdio: ['inherit', 'inherit', 'inherit'], windowsHide: true });
   process.exit(ran.exitCode ?? 1);
 }
 process.stderr.write(${JSON.stringify(`${NO_RENDERER_LINES.join('\n')}\n`)});
