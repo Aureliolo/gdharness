@@ -237,6 +237,15 @@ const FRAMES_SENT_WITHIN_MS = 3000;
 const NO_SNAPSHOT = `The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.`;
 /** The refusal of a game that answered the inspection, then sent neither the size nor a frame. */
 const NO_SNAPSHOT_NOR_FRAME = `${NO_SNAPSHOT} It sent no frame in the ${SNAPSHOT_PREPARE_MS / 1000} s after that answer either, which a game still preparing a snapshot that large does too.`;
+/** The refusal of a running game that answered the inspection and had sent no recent frame. */
+const NO_SNAPSHOT_UNFRAMED = `${NO_SNAPSHOT} It had sent no performance frame in the ${FRAMES_SENT_WITHIN_MS / 1000} s before the request either, so a snapshot still being prepared cannot be told apart from a missing one.`;
+/**
+ * The fix for a game that sends no performance frames. The engine turns its performance profiler
+ * on as its debugger starts (remote_debugger.cpp, the `RemoteDebugger` constructor, at 4.7.2), and
+ * `EngineDebugger.profiler_enable` turns it back on after a game turned it off (core_bind.cpp).
+ */
+const FRAMES_AGAIN =
+  'EngineDebugger.profiler_enable("performance", true) in the game sends its performance frames again, then debug_objects snapshot asks again';
 /** The refusal of a game whose frames went on while it answered nothing asked of it. */
 const NO_DEBUG_FEATURES = `The game answered neither the snapshot request nor the inspection asked after it within ${SNAPSHOT_PREPARE_MS / 1000} s, while its frames went on, which is what an engine without debug features does, as a release template is.`;
 /** The refusal of a game that sent nothing at all while it was asked. */
@@ -833,14 +842,7 @@ export class GameDebugger {
     this.send('scene:inspect_object', [0], SNAPSHOT_THREAD);
     const got = await answered;
     if (got !== null && 'message' in got) {
-      if (got.message === 'debug_enter') {
-        // The break is news to whoever else waits for it, such as a pause asked beside the snapshot.
-        this.deliver(got);
-      }
-      const size = got.data[1];
-      return got.message === 'snapshot:snapshot_prepared' && typeof size === 'number'
-        ? size
-        : { refused: NO_SNAPSHOT, next: DEBUG_ENGINE };
+      return this.prepared(got, framing);
     }
     const gone = this.unreachableRefusal();
     if (gone !== null) {
@@ -859,6 +861,27 @@ export class GameDebugger {
           refused: `${SNAPSHOT_STALLED} Thread ${worker} is held at a breakpoint, and a main loop that waits on it stops too, while the main loop is what answers a snapshot.`,
           next: 'debug_control resume lets the held thread go, then debug_objects snapshot asks again',
         };
+  }
+
+  /**
+   * The size [param got] gives, or the refusal it ends a prepare with. [param framing] says whether
+   * the game had been sending performance frames as the request went out.
+   */
+  private prepared(
+    got: Extract<DebuggerMessage, { message: string }>,
+    framing: boolean,
+  ): number | DebugAnswer {
+    if (got.message === 'debug_enter') {
+      // The break is news to whoever else waits for it, such as a pause asked beside the snapshot.
+      this.deliver(got);
+    }
+    const size = got.data[1];
+    if (got.message === 'snapshot:snapshot_prepared' && typeof size === 'number') {
+      return size;
+    }
+    return got.message === 'scene:inspect_object' && !framing && this.held?.thread !== MAIN_THREAD
+      ? { refused: NO_SNAPSHOT_UNFRAMED, next: FRAMES_AGAIN }
+      : { refused: NO_SNAPSHOT, next: DEBUG_ENGINE };
   }
 
   /** The bytes of snapshot [param id] from [param from] on, or undefined when none came in time. */

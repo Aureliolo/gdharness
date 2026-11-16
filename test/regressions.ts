@@ -47523,7 +47523,8 @@ async function testEachSnapshotRefusalNamesItsOwnFix(): Promise<void> {
  *   with no answer to the request, has an engine without the snapshot, since the engine drops a
  *   message for a capture it lacks. That is known at that frame.
  * - So is one whose main thread stops at a breakpoint after that answer, at the break.
- * - So is one that sent no frame for over three seconds before the request, at the answer.
+ * - One that sent no frame for over three seconds before the request is refused at the answer,
+ *   saying a snapshot still being prepared reads the same and naming the call that sends frames.
  * - One whose frames stop after that answer is refused at the end of the wait, saying so.
  * - A game that answers neither while its frames go on has no debug features at all.
  * - A game that sends nothing more was busy. The frames it had sent before it read the request,
@@ -47588,10 +47589,15 @@ async function testASnapshotTellsAnEngineWithoutItFromABusyGame(): Promise<void>
     'The game answered a question asked after the snapshot request and not the request, so its engine has no snapshot. Only an engine built with debug features has it, as the editor and the debug export templates are.';
   const debugEngine =
     'editor_run start with godot naming an editor build or a debug export template runs a game that has the snapshot';
-  for (const [name, known] of Object.entries({ inspected, breaks, silent })) {
+  for (const [name, known] of Object.entries({ inspected, breaks })) {
     assert.deepEqual(known.answer, { refused: noSnapshot, next: debugEngine }, name);
     assert.ok(known.ms < 2000, `${name} is known from the order, not the wait: ${known.ms} ms`);
   }
+  assert.deepEqual(silent.answer, {
+    refused: `${noSnapshot} It had sent no performance frame in the 3 s before the request either, so a snapshot still being prepared cannot be told apart from a missing one.`,
+    next: 'EngineDebugger.profiler_enable("performance", true) in the game sends its performance frames again, then debug_objects snapshot asks again',
+  });
+  assert.ok(silent.ms < 2000, `a game sending no frames is answered at once: ${silent.ms} ms`);
   assert.deepEqual(stops.answer, {
     refused: `${noSnapshot} It sent no frame in the 20 s after that answer either, which a game still preparing a snapshot that large does too.`,
     next: debugEngine,
