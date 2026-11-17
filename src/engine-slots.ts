@@ -72,6 +72,7 @@ import {
   startTimesOf,
 } from './process-children.js';
 import { isRecord } from './records.js';
+import { repositoryNameOf } from './repository.js';
 import { Turns } from './turns.js';
 import { madeInPlace, makeWhole, readWhole, removeWhole, stagedWriterOf, writeWhole } from './whole-file.js';
 
@@ -313,6 +314,35 @@ const ONE_OFF_AGED_MS = 120_000;
  */
 export const SLOT_YIELD_MS = 5000;
 
+/** The class a waiting mark names for side work of a repository that {@link STORE_FILE} lists. */
+const STORE_CLASS = 'store';
+
+/** The file in the slot folder that lists the repositories whose side work has the store class. */
+const STORE_FILE = 'store.json';
+
+/**
+ * Whether side work started in [param project] has the store class: its repository's name is in the
+ * `games` array of `store.json` in [param directory]. The file is read only, and its writer replaces
+ * it whole, so a read meets the old list or the new. A missing or unreadable file, or one whose
+ * `games` is not an array of strings, gives no class.
+ */
+function storeClassOf(directory: string, project: string | undefined): boolean {
+  if (project === undefined) {
+    return false;
+  }
+  try {
+    const said: unknown = JSON.parse(readFileSync(join(directory, STORE_FILE), 'utf8'));
+    const games = isRecord(said) ? said['games'] : undefined;
+    if (!Array.isArray(games) || !games.every((one): one is string => typeof one === 'string')) {
+      return false;
+    }
+    const name = repositoryNameOf(project);
+    return name !== null && games.includes(name);
+  } catch {
+    return false;
+  }
+}
+
 /** The kind a waiting mark names for a wait for memory, which takes no slot. */
 const MEMORY_TAKER = 'memory';
 
@@ -322,7 +352,11 @@ interface SlotWaiter {
   readonly taker: SlotTaker;
   /** When it began to wait, in milliseconds since the epoch. */
   readonly since: number;
+  /** When it began to wait in seconds, as its mark gives it, which the line's order compares. */
+  readonly sinceSeconds: number;
   readonly game: boolean;
+  /** Whether its mark names the store class: {@link storeClassOf}. */
+  readonly store: boolean;
   /** How many slots it waits for at once: above 1 only for a job needing several, else 1. */
   readonly wants: number;
   /** When it last looked, in milliseconds, or when its mark was made where it never says. */
@@ -374,7 +408,7 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
     return null;
   }
   const parsed: unknown = JSON.parse(content);
-  const { taker, since, wants }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+  const { taker, since, wants, class: kind }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
   if (taker === MEMORY_TAKER) {
     return null;
   }
@@ -394,7 +428,11 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
     // made in the millisecond a take began read as made after it, and the take went first.
     since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
+    // Exact where the mark says it, since the other side of the scheme compares exact seconds and
+    // two sides rounding differently each rank the other ahead for a mark begun in one millisecond.
+    sinceSeconds: typeof since === 'number' && Number.isFinite(since) ? since : Math.floor(madeAt) / 1000,
     game: holder.game === true,
+    store: kind === STORE_CLASS,
   };
 }
 
@@ -436,38 +474,55 @@ export class SlotLine {
 
   readonly taker: SlotTaker;
   readonly game: boolean;
+  /** Whether it is a one-off of a store-class repository: {@link storeClassOf}. */
+  readonly store: boolean;
   private readonly clock: () => number;
 
-  constructor(taker: SlotTaker, game = false, clock: () => number = Date.now) {
+  constructor(taker: SlotTaker, game = false, clock: () => number = Date.now, store = false) {
     this.taker = taker;
     this.game = game;
+    this.store = taker === 'other' && store;
     this.clock = clock;
     this.since = clock();
   }
 
   /** What its waiting mark holds beside [param holder]: its kind and when it began, in seconds. */
   marked(holder: SlotHolder): object {
-    return { ...holder, ...(this.game ? { game: true } : {}), taker: this.taker, since: this.since / 1000 };
+    return {
+      ...holder,
+      ...(this.game ? { game: true } : {}),
+      ...(this.store ? { class: STORE_CLASS } : {}),
+      taker: this.taker,
+      since: this.since / 1000,
+    };
   }
 
   /**
-   * The takers of [param waiters] ahead of this one, the first first. Gate work and one-offs that
-   * have waited {@link ONE_OFF_AGED_MS} go before younger one-offs, whenever each began, and each
-   * group in the order it began to wait. A game never counts as aged.
+   * The takers of [param waiters] ahead of this one, the first first, in three groups. The first
+   * holds every taker that is no one-off and the one-offs that have waited {@link ONE_OFF_AGED_MS}.
+   * The second holds the younger one-offs of the store class, and a game past that age, which never
+   * stands with gate work. The third holds the other younger one-offs. Each group goes in the order
+   * it began to wait. The class moves a place in line only, never what a taker may take.
    */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
     const now = this.clock();
-    const young = (taker: SlotTaker, game: boolean, since: number): number =>
-      taker === 'other' && (game || now - since < ONE_OFF_AGED_MS) ? 1 : 0;
+    // The age is read from the exact seconds the order compares, as the other side of the scheme reads it.
+    const groupOf = (taker: SlotTaker, game: boolean, store: boolean, since: number): number => {
+      if (taker !== 'other') {
+        return 0;
+      }
+      const aged = now / 1000 - since >= ONE_OFF_AGED_MS / 1000;
+      return aged && !game ? 0 : store || aged ? 1 : 2;
+    };
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
     const own = {
-      group: young(this.taker, this.game, this.since),
-      since: this.since,
+      group: groupOf(this.taker, this.game, this.store, this.since / 1000),
+      since: this.since / 1000,
       mark: this.mark ?? '￿',
     };
     const placeOf = (one: SlotWaiter): typeof own => ({
-      group: young(one.taker, one.game, one.since),
-      since: one.since,
+      group: groupOf(one.taker, one.game, one.store, one.sinceSeconds),
+      since: one.sinceSeconds,
       mark: one.mark,
     });
     const before = (a: typeof own, b: typeof own): number =>
@@ -1172,6 +1227,8 @@ export class EngineSlots {
   /** What this process is as a taker, asked at every look, since a turn ends when its ticket goes. */
   private readonly taker: () => SlotTaker;
   private readonly say: ((line: string) => void) | undefined;
+  /** The Godot project this process's takes are for, which names the repository of the store class. */
+  private readonly project: string | undefined;
 
   constructor(
     directory: string,
@@ -1179,28 +1236,40 @@ export class EngineSlots {
     holder: SlotHolder,
     say?: (line: string) => void,
     taker: () => SlotTaker = () => slotTaker(),
+    project?: string,
   ) {
     this.directory = directory;
     this.count = count;
     this.holder = holder;
     this.say = say;
     this.taker = taker;
+    this.project = project;
     this.drawn = slotsDrawnOn(count, taker(), 'none');
+  }
+
+  /**
+   * A line for a take of [param taker], with the store class where a one-off's project has it. The
+   * file is read once for the take, never at a look, so a wait does not hold a tick up on it.
+   */
+  private lineFor(taker: SlotTaker, game: boolean, project: string | undefined = this.project): SlotLine {
+    return new SlotLine(taker, game, Date.now, taker === 'other' && storeClassOf(this.directory, project));
   }
 
   /**
    * Takes a slot, waiting for one to come free, and answers its lock's path. A take that finds every
    * slot held keeps a mark of its wait until it ends, however it ends, and calls [param blocked]
-   * once, as it begins waiting. [param game] is a take for a game editor_run started.
+   * once, as it begins waiting. [param game] is a take for a game editor_run started. [param project]
+   * is the Godot project the take is for, in place of the one this process's takes are for.
    */
   async take(
     signal?: AbortSignal,
     waiting?: (waitedMs: number) => void,
     blocked?: () => void,
     game = false,
+    project?: string,
   ): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
-    const line = new SlotLine(this.taker(), game);
+    const line = this.lineFor(this.taker(), game, project ?? this.project);
     const began = line.since;
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
@@ -1325,7 +1394,7 @@ export class EngineSlots {
     const tried =
       taker === 'timing'
         ? this.drawn.numbers
-        : await this.leftAfterThoseAhead(line ?? new SlotLine(taker, game), queued);
+        : await this.leftAfterThoseAhead(line ?? this.lineFor(taker, game), queued);
     const lock = await this.lockOneOf(tried, game);
     if (lock !== null && typeof look?.queue === 'number' && (await this.overTheShare(lock))) {
       this.release(lock);
@@ -2229,9 +2298,10 @@ function listed(named: readonly string[]): string {
  * stops waiting, and one whose client asked for progress is told that it is waiting and why.
  * Answers its lock, how to give it back, and how to hand it to an engine that outlives this process.
  * [param game] is a take for a game editor_run starts, which games may hold only some of: see
- * {@link gamesKeptOf}.
+ * {@link gamesKeptOf}. [param project] is the project the take is for, which gives a one-off the
+ * store class where its repository is listed.
  */
-export async function slotForCall(game = false): Promise<CallSlot> {
+export async function slotForCall(game = false, project?: string): Promise<CallSlot> {
   const slots = await processSlots();
   const progress = callProgress();
   const waits = callSlotWaits();
@@ -2253,6 +2323,7 @@ export async function slotForCall(game = false): Promise<CallSlot> {
       blockedOn = slots.drawn;
     },
     game,
+    project,
   );
   if (waits !== undefined && blockedBy !== undefined) {
     waits.ms += Date.now() - began;
@@ -2285,19 +2356,32 @@ export interface CallSlot {
 }
 
 /** The slot a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
-const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null }>();
+const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null; project?: string }>();
+
+/**
+ * Names the project the command inside {@link inOneSlot} runs for, which gives its slot the store
+ * class where the project's repository has it. Call it before the first engine step. Outside
+ * {@link inOneSlot} it does nothing.
+ */
+export function forTheProject(project: string): void {
+  const kept = keptForSteps.getStore();
+  if (kept !== undefined) {
+    kept.project = project;
+  }
+}
 
 /**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
- * and gives it back after. Inside {@link inOneSlot} it uses the slot held there.
+ * and gives it back after. Inside {@link inOneSlot} it uses the slot held there. [param project] is
+ * the project the call is for, in place of the one {@link forTheProject} named.
  */
-export async function inASlot<T>(body: (lock: string) => Promise<T>): Promise<T> {
+export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: string): Promise<T> {
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
-    kept.held ??= slotForCall();
+    kept.held ??= slotForCall(false, project ?? kept.project);
     return await body((await kept.held).lock);
   }
-  const held = await slotForCall();
+  const held = await slotForCall(false, project);
   try {
     return await body(held.lock);
   } finally {
@@ -2315,7 +2399,7 @@ export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   if (keptForSteps.getStore() !== undefined) {
     return await body();
   }
-  const kept: { held: Promise<CallSlot> | null } = { held: null };
+  const kept: { held: Promise<CallSlot> | null; project?: string } = { held: null };
   try {
     return await keptForSteps.run(kept, body);
   } finally {

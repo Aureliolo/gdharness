@@ -110,6 +110,8 @@ interface RunOptions {
    * neither shows nor takes the keyboard.
    */
   readonly desktop?: { readonly directory: string; readonly scratch: string };
+  /** The project the engine runs for, which gives its slot the store class where its repository has it. */
+  readonly project?: string;
 }
 
 /** How often an engine with a timeout is measured against it. */
@@ -141,8 +143,10 @@ export async function runEngine(
     }
   }
   try {
-    return await inASlot((lock) =>
-      startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
+    return await inASlot(
+      (lock) =>
+        startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
+      options.project,
     );
   } catch (error) {
     const said = errorMessage(error);

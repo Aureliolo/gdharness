@@ -9440,12 +9440,15 @@ class GodotServer {
     const empty = scratchDirectory('export');
     try {
       writeFileSync(join(empty, 'project.godot'), 'config_version=5\n');
-      const outcome = await runOperation(
-        { godotPath: engine.value, script: this.operationsScript, debug: DEBUG_MODE, editor: true },
-        'export_options',
-        { platform, ...standing },
-        empty,
-      );
+      // On an empty folder, for the project's sake: its slot is taken for the project.
+      const exporting = {
+        godotPath: engine.value,
+        script: this.operationsScript,
+        debug: DEBUG_MODE,
+        editor: true,
+        project: projectPath,
+      };
+      const outcome = await runOperation(exporting, 'export_options', { platform, ...standing }, empty);
       const options: unknown = outcome.ok ? outcome.payload['options'] : undefined;
       if (!Array.isArray(options)) {
         return `The ${platform} export options could not be read from the engine: ${outcome.ok ? 'it named none' : outcome.message}`;
@@ -9614,6 +9617,7 @@ class GodotServer {
       // An export of a real project is slow, so it gets five minutes rather than no limit.
       const ending = await runEngine(engine.value, exportArgs, {
         timeout: { ms: 300000, said: 'five minutes' },
+        project: project.value.path,
         ...(baking === null || !outOfSight
           ? {}
           : { desktop: { directory: project.value.path, scratch: exportLogs } }),
@@ -10100,6 +10104,7 @@ class GodotServer {
       cmdArgs,
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
+      project.value.path,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
     const keep = async (): Promise<void> => {
@@ -14411,7 +14416,7 @@ class GodotServer {
 
     // In one of the machine's engine slots, like every engine started for a call, taken before the
     // play so a full machine holds the play rather than the game.
-    const slot = await slotForCall(true);
+    const slot = await slotForCall(true, projectPath);
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
@@ -15243,10 +15248,12 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+    project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
     // In one of the machine's engine slots, taken before the engine starts and given back once its
-    // log is whole, so the caller's own limit counts the engine's time and not the wait.
-    const held = await slotForCall();
+    // log is whole, so the caller's own limit counts the engine's time and not the wait. [param
+    // project] is the project the run is of, which gives the slot its store class.
+    const held = await slotForCall(false, project);
     try {
       const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
       void run.settled.finally(held.release);
@@ -15408,7 +15415,7 @@ class GodotServer {
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
     // since the run outlives this server. So a started run leaves the lock to it, and one the keeper
     // never took over names this server, which frees it by going.
-    const slot = await slotForCall(true);
+    const slot = await slotForCall(true, projectPath);
     // From the slot rather than the call, since the wait to announce is counted from here: counted
     // from the call, a 24-minute wait for a slot spent the whole of it before the engine began.
     const startedAt = Date.now();
@@ -16316,6 +16323,8 @@ class GodotServer {
       needsItsOwnProcess(asked)
         ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
         : undefined,
+      undefined,
+      projectPath,
     );
 
     const hung = await new Promise<boolean>((resolve) => {

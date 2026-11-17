@@ -154,7 +154,7 @@ export function checkWithEngine(godotPath: string, projectPath: string): CheckSc
           '-s',
           path,
         ],
-        { timeout: { ms: 60_000, said: 'minute' } },
+        { timeout: { ms: 60_000, said: 'minute' }, project: projectPath },
       );
       const errors = ran.log
         .select({ severity: 'error', sinceLastCall: false, limit: 50 })

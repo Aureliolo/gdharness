@@ -136,6 +136,8 @@ export async function placeEmptyScriptDocs(
         ['--headless', '--path', scratch, '-s', 'res://empty.gd', '--', partial],
         {
           timeout: { ms: 120_000, said: 'it ran for two minutes' },
+          // The engine runs on the scratch folder, for the project whose editor needs the cache.
+          project: projectPath,
         },
       );
       // An engine that ends mid-save leaves a partial file, which must not become the kept cache.
