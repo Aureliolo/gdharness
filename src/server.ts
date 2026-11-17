@@ -98,12 +98,14 @@ import {
   type StoppedAt,
 } from './dap_client.js';
 import {
+  desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
   helperStep,
+  isBoxVerdict,
   spawnOnDesktop,
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
@@ -112,6 +114,8 @@ import {
   bursts,
   type EditorLogNote,
   editorConsole,
+  editorHelperEntries,
+  editorHelperOutputSize,
   editorLogPath,
   readEditorLogNote,
   theConsoleWasNotCaptured,
@@ -1829,6 +1833,87 @@ const PROFILE_SEND_MS = 5000;
  */
 const MOST_GROUPS = 20;
 
+/**
+ * The run of a game an editor plays, with no process of its own. Its box verdict is read from the
+ * editor's helper output from where the play begins, so a box an earlier game was ended on is not
+ * this game's.
+ */
+export function gameTheEditorPlays(
+  game: Omit<
+    GodotProcess,
+    'pid' | 'readOffset' | 'exitCode' | 'exitSignal' | 'throughEditor' | 'brokeOn' | 'helperOutputFrom'
+  > & { readonly projectPath: string },
+): GodotProcess {
+  return {
+    pid: null,
+    readOffset: 0,
+    exitCode: null,
+    exitSignal: null,
+    throughEditor: true,
+    brokeOn: null,
+    helperOutputFrom: editorHelperOutputSize(game.projectPath),
+    ...game,
+  };
+}
+
+/**
+ * An editor-played run picked up for [param project], reading from [param note]'s transcript when
+ * the play left one. Its box verdict is read from the editor's helper output as it stands now, so a
+ * box an earlier game was ended on is never this game's.
+ */
+export function editorPickedUpRun(
+  project: string | null,
+  note: ReturnType<typeof readEditorRunNote>,
+  play: EditorPlay | null,
+): GodotProcess {
+  return {
+    pid: null,
+    log: new GameLog(),
+    // The file the answer reads back from, which every path that reports on a run drains before
+    // it answers. What is picked up here is where to read, not the reading.
+    transcript: note?.transcript ?? null,
+    readOffset: 0,
+    projectPath: project,
+    startedAt: note?.startedAt ?? Date.now(),
+    ...(note?.startedAt === undefined ? { startedAtFound: true } : {}),
+    exitCode: null,
+    exitSignal: null,
+    throughEditor: true,
+    brokeOn: null,
+    pickedUpPlaying: true,
+    helperOutputFrom: project === null ? 0 : editorHelperOutputSize(project),
+    ...(play === null ? {} : { play }),
+  };
+}
+
+/**
+ * Why the desktop helper ended [param run]'s game on a message box nobody can press, or null. A game
+ * this server started prints the helper's line into its own transcript. A game an editor plays has
+ * the helper of the editor, whose output is read from where this play began, and the verdict is put
+ * in the run's log too, which is what editor_output answers from.
+ */
+export function boxThatEndedTheGame(
+  run: Pick<GodotProcess, 'throughEditor' | 'projectPath' | 'helperOutputFrom' | 'log'> | null,
+): string | null {
+  if (run === null) {
+    return null;
+  }
+  const viaEditor = run.throughEditor && run.projectPath !== null;
+  const printed = viaEditor
+    ? editorHelperEntries(run.projectPath ?? '', run.helperOutputFrom ?? 0)
+    : run.log.all;
+  // The editor's helper output holds the editor's own console. What the game printed is the run's
+  // own log, which starts where the play did.
+  const ending = desktopBoxEnding(
+    printed,
+    viaEditor ? run.log.all.filter((entry) => !isBoxVerdict(entry.text)) : undefined,
+  );
+  if (ending !== null && run.throughEditor && !run.log.all.some((entry) => entry.text === ending)) {
+    run.log.record('error', ending);
+  }
+  return ending;
+}
+
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
   /** Whether the addon is on disk at all, since a project without it can never announce. */
@@ -1861,6 +1946,11 @@ interface AfterWaiting {
    * looks again, and was answered as one that never announced.
    */
   readonly runtimeCameUp?: boolean;
+  /**
+   * Why the desktop's helper ended the game on a message box nobody can press, which a game that
+   * could not create a renderer opens. Nothing is coming from a game ended there.
+   */
+  readonly endedOnABox?: string;
 }
 
 /**
@@ -1923,6 +2013,9 @@ export function runtimeVerdict(
       port: endpoint.port,
       ...(endpoint.userDir === undefined ? {} : { userDir: endpoint.userDir }),
     };
+  }
+  if (after.endedOnABox !== undefined) {
+    return { listening: false, mayYetAnnounce: false, note: after.endedOnABox, heldAt: null };
   }
   if (!after.addon) {
     return {
@@ -10062,6 +10155,11 @@ class GodotServer {
         `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
       );
     }
+    const onABox = onDesktop ? desktopBoxEnding(run.log.all) : null;
+    if (onABox !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(`The tests did not finish: ${onABox}`);
+    }
     return await this.testRead({
       ...prepared,
       run,
@@ -14172,8 +14270,10 @@ class GodotServer {
     if (going !== null && !running) {
       this.drainTranscript(going);
     }
+    const endedOnABox = running ? null : boxThatEndedTheGame(going);
     const verdict = runtimeVerdict(endpoint, {
       addon: true,
+      ...(endedOnABox === null ? {} : { endedOnABox }),
       budgetMs,
       ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
       heldAt: await this.whereTheStartedGameIsHeld(going, endpoint === null && running),
@@ -14340,23 +14440,17 @@ class GodotServer {
     step('transcript');
     const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const which = playOf(playAnswer);
-    const played: GodotProcess = {
-      pid: null,
+    const played = gameTheEditorPlays({
       log,
       transcript: transcript.path,
-      readOffset: 0,
       projectPath,
       startedAt,
-      exitCode: null,
-      exitSignal: null,
-      throughEditor: true,
-      brokeOn: null,
       announcedBefore: alreadyPlaying,
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
       ...(which === null ? {} : { play: which }),
       bootScene: runtimeWaitMs.scene,
       slot,
-    };
+    });
     this.activeProcess = played;
     this.noteTheLatestRun({ projectPath, pid: null, startedAt });
     step('latest run');
@@ -15484,7 +15578,7 @@ class GodotServer {
     // way the run that started it was. Without a number `running` stayed true after the game had
     // quit for as long as the record lasted, beside a status call taking the editor's word that
     // nothing was playing.
-    this.activeProcess = this.pickedUpRun(project, note, playing.play);
+    this.activeProcess = editorPickedUpRun(project, note, playing.play);
     this.watchThePlayedConsole();
   }
 
@@ -15518,34 +15612,6 @@ class GodotServer {
     } catch (error) {
       this.logDebug(`Picked up an editor-played run without its adapter: ${errorMessage(error)}`);
     }
-  }
-
-  /**
-   * An editor-played run picked up for [param project], reading from [param note]'s transcript
-   * when the play left one.
-   */
-  private pickedUpRun(
-    project: string | null,
-    note: ReturnType<typeof readEditorRunNote>,
-    play: EditorPlay | null,
-  ): GodotProcess {
-    return {
-      pid: null,
-      log: new GameLog(),
-      // The file the answer reads back from, which every path that reports on a run drains before
-      // it answers. What is picked up here is where to read, not the reading.
-      transcript: note?.transcript ?? null,
-      readOffset: 0,
-      projectPath: project,
-      startedAt: note?.startedAt ?? Date.now(),
-      ...(note?.startedAt === undefined ? { startedAtFound: true } : {}),
-      exitCode: null,
-      exitSignal: null,
-      throughEditor: true,
-      brokeOn: null,
-      pickedUpPlaying: true,
-      ...(play === null ? {} : { play }),
-    };
   }
 
   /**

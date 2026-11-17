@@ -21,6 +21,7 @@ import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
 import {
+  desktopBoxEnding,
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperExit,
@@ -34,6 +35,7 @@ import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-
 import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
+import { GameLog } from './game-log.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { wholeFlag } from './launch.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
@@ -519,6 +521,7 @@ async function engineWatchedOnce(
     told: await exited,
     copied,
     output,
+    log,
     outcome,
     peakBytes: watch.peakBytes,
   });
@@ -861,13 +864,17 @@ interface EngineFinish {
   readonly told: { readonly code: number | null; readonly signal: NodeJS.Signals | null };
   readonly copied: Promise<void> | null;
   readonly output: number;
+  readonly log: string;
   readonly outcome: { ended: string | null };
   readonly peakBytes: number;
 }
 
+/** How much of a log is read for the helper's word on a message box: the lines before it and the one it ends on. */
+const BOX_READ_BYTES = 64 * 1024;
+
 /** How the engine ended, once its process has exited and its streams are copied into the log. */
 async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
-  const { started, told, copied, output, outcome, peakBytes } = finish;
+  const { started, told, copied, output, log, outcome, peakBytes } = finish;
   const { helper } = started;
   const code = helper === null ? told.code : helperExit(helper.exit, told.code);
   const { signal } = told;
@@ -881,6 +888,12 @@ async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
   const failed = helper === null ? null : helperFailure(helper.error);
   if (failed !== null && helper !== null) {
     outcome.ended ??= `the engine could not be started ${helper.how}: ${failed}`;
+  }
+  if (helper !== null && outcome.ended === null) {
+    const printed = new GameLog();
+    printed.append('stdout', readLog(log, BOX_READ_BYTES));
+    printed.finish();
+    outcome.ended = desktopBoxEnding(printed.all);
   }
   return {
     code,

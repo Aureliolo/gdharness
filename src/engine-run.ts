@@ -11,6 +11,8 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { callSignal } from './call-signal.js';
 import {
+  childBoxNote,
+  desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
@@ -224,6 +226,27 @@ async function killPastTimeout(
 }
 
 /**
+ * What the desktop helper says of the run's end, which the engine's own exit does not: it could not
+ * start the engine, or it ended the engine on a box nobody can press. Null for an engine started
+ * without the helper.
+ */
+function desktopFailure(files: HelperFiles | null, log: GameLog): string | null {
+  if (files === null) {
+    return null;
+  }
+  const helperSaid = helperFailure(files.error);
+  if (helperSaid !== null) {
+    return `it could not be started on a desktop of its own: ${helperSaid}`;
+  }
+  const ended = desktopBoxEnding(log.all);
+  const note = ended === null ? childBoxNote(log.all) : null;
+  if (note !== null) {
+    log.record('warning', note);
+  }
+  return ended;
+}
+
+/**
  * Settles on `close` rather than `exit`: the streams can still hold the run's last lines when
  * `exit` fires, and those are the lines a verdict is read from. Node emits `close` after a failed
  * start and after an abort as well, so it is the one place every run ends.
@@ -289,10 +312,7 @@ function runStarted(
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;
       const told = started ? whole(code) : null;
-      const helperSaid = files === null ? null : helperFailure(files.error);
-      if (helperSaid !== null) {
-        state.failure ??= `it could not be started on a desktop of its own: ${helperSaid}`;
-      }
+      state.failure ??= desktopFailure(files, log);
       resolve({
         log,
         exitCode: files === null ? told : helperExit(files.exit, told),

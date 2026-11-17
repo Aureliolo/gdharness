@@ -28,6 +28,8 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CompiledHelper, HELPER_COMPILE_MS } from './compiled-helper.js';
+import type { LogEntry } from './game-log.js';
+import { isRecord } from './records.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import { mendBeforeStart } from './uid-cache.js';
 
@@ -42,6 +44,7 @@ export const HIDDEN_DESKTOP = 'gdharness';
 const DESKTOP_VARIABLE = 'GDHARNESS_DESKTOP';
 
 const SOURCE = `using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -56,7 +59,6 @@ public static class GdharnessDesktop {
   const uint DetachedProcess = 0x00000008;
   // Every engine runs below normal, so a machine running every core leaves other work its share.
   const uint BelowNormalPriorityClass = 0x00004000;
-  const uint Infinite = 0xFFFFFFFF;
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   struct StartupInfo {
@@ -133,6 +135,225 @@ public static class GdharnessDesktop {
   const uint UnlockForeground = 2;
   const uint TimedOut = 0x102;
 
+  [DllImport("user32.dll")] static extern bool EnumDesktopWindows(IntPtr desktop, EachWindow each, IntPtr unused);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EachWindow each, IntPtr unused);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr window, StringBuilder into, int size);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, StringBuilder into, int size);
+  // The class every message box has.
+  const string DialogClass = "#32770";
+  const string BoxMarker = "[gdharness] desktop-box ";
+  const uint BoxLooks = 2;
+
+  static string TextOf(IntPtr window) {
+    StringBuilder text = new StringBuilder(4096);
+    GetWindowTextW(window, text, text.Capacity);
+    return text.ToString();
+  }
+
+  static bool HasClass(IntPtr window, string wanted) {
+    StringBuilder name = new StringBuilder(32);
+    GetClassNameW(window, name, name.Capacity);
+    return name.ToString() == wanted;
+  }
+
+  // A JSON string. Written without a backslash literal, which this source's template would eat.
+  static string Quote(string text) {
+    char slash = (char)92;
+    char quote = (char)34;
+    StringBuilder quoted = new StringBuilder();
+    quoted.Append(quote);
+    foreach (char c in text) {
+      if (c == slash || c == quote) {
+        quoted.Append(slash).Append(c);
+      } else if (c < ' ') {
+        quoted.Append(slash).Append('u').Append(((int)c).ToString("x4"));
+      } else {
+        quoted.Append(c);
+      }
+    }
+    return quoted.Append(quote).ToString();
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct ProcessEntry {
+    public uint size, usage, processId;
+    public IntPtr heap;
+    public uint module, threads, parentProcessId;
+    public int priority;
+    public uint flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string exeFile;
+  }
+  [DllImport("kernel32.dll")] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+  [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+  const uint SnapshotProcesses = 0x2;
+  const uint SnapshotThreads = 0x4;
+  const uint ProcessTerminate = 0x1;
+  const uint ProcessQueryLimited = 0x1000;
+  const uint ThreadQueryLimited = 0x800;
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct ThreadEntry {
+    public uint size, usage, threadId, ownerProcessId;
+    public int basePriority, deltaPriority;
+    public uint flags;
+  }
+  [DllImport("kernel32.dll")] static extern bool Thread32First(IntPtr snapshot, ref ThreadEntry entry);
+  [DllImport("kernel32.dll")] static extern bool Thread32Next(IntPtr snapshot, ref ThreadEntry entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+  [DllImport("kernel32.dll")] static extern bool GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
+
+  // The thread the process began with, which is the one Godot runs its main loop on, or 0 where none
+  // can be read. A message box blocks only the thread that opened it.
+  static uint FirstThreadOf(uint processId) {
+    uint first = 0;
+    long earliest = long.MaxValue;
+    IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotThreads, 0);
+    if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) {
+      return 0;
+    }
+    ThreadEntry entry = new ThreadEntry();
+    entry.size = (uint)Marshal.SizeOf(typeof(ThreadEntry));
+    for (bool more = Thread32First(snapshot, ref entry); more; more = Thread32Next(snapshot, ref entry)) {
+      if (entry.ownerProcessId != processId) {
+        continue;
+      }
+      IntPtr thread = OpenThread(ThreadQueryLimited, false, entry.threadId);
+      if (thread == IntPtr.Zero) {
+        continue;
+      }
+      long created, exited, kernel, user;
+      if (GetThreadTimes(thread, out created, out exited, out kernel, out user) && created < earliest) {
+        earliest = created;
+        first = entry.threadId;
+      }
+      CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    return first;
+  }
+
+  // When the process began, or -1 where it cannot be read.
+  static long CreatedAt(uint processId) {
+    IntPtr handle = OpenProcess(ProcessQueryLimited, false, processId);
+    if (handle == IntPtr.Zero) {
+      return -1;
+    }
+    long created, exited, kernel, user;
+    bool read = GetProcessTimes(handle, out created, out exited, out kernel, out user);
+    CloseHandle(handle);
+    return read ? created : -1;
+  }
+
+  // The process and everything it started that is still running. A parent is only a parent when it
+  // began before its child, since Windows hands a pid to a later process once its owner has gone.
+  static Dictionary<uint, ProcessEntry> Processes() {
+    Dictionary<uint, ProcessEntry> all = new Dictionary<uint, ProcessEntry>();
+    IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
+    if (snapshot != IntPtr.Zero && snapshot != new IntPtr(-1)) {
+      ProcessEntry entry = new ProcessEntry();
+      entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+      for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
+        all[entry.processId] = entry;
+      }
+      CloseHandle(snapshot);
+    }
+    return all;
+  }
+
+  static Dictionary<uint, long> FamilyOf(uint root, Dictionary<uint, ProcessEntry> processes) {
+    Dictionary<uint, long> family = new Dictionary<uint, long>();
+    family[root] = CreatedAt(root);
+    bool grew = true;
+    while (grew) {
+      grew = false;
+      foreach (KeyValuePair<uint, ProcessEntry> pair in processes) {
+        long parentBegan;
+        if (family.ContainsKey(pair.Key) || !family.TryGetValue(pair.Value.parentProcessId, out parentBegan)) {
+          continue;
+        }
+        long began = CreatedAt(pair.Key);
+        if (began >= 0 && parentBegan >= 0 && began >= parentBegan) {
+          family[pair.Key] = began;
+          grew = true;
+        }
+      }
+    }
+    return family;
+  }
+
+  // The engine's own process: the one the helper started, or the engine a console wrapper started
+  // in its place, which is the wrapper's only child.
+  static bool IsTheEngine(uint owner, uint root, Dictionary<uint, ProcessEntry> processes) {
+    ProcessEntry rootEntry;
+    ProcessEntry ownerEntry;
+    if (owner == root) {
+      return true;
+    }
+    return processes.TryGetValue(root, out rootEntry)
+      && processes.TryGetValue(owner, out ownerEntry)
+      && ownerEntry.parentProcessId == root
+      && rootEntry.exeFile.EndsWith("_console.exe", StringComparison.OrdinalIgnoreCase);
+  }
+
+  // A message box the process, or one it started, opened on the desktop, as the marker line a run
+  // reads, or null, with the pid of the process that owns it. Nobody can press it here, so a box on
+  // its main thread stops the process for good. A box on another thread stops that thread only, as a
+  // worker's alert or a file dialog does, and the process runs on. Only a box of this family counts,
+  // since every engine a run starts shares the desktop. The processes are listed only once a dialog
+  // is on the desktop, so a run with none costs next to nothing.
+  static string BoxOf(IntPtr desktop, uint processId, out uint boxOwner) {
+    string said = null;
+    uint found = 0;
+    List<IntPtr> dialogs = new List<IntPtr>();
+    EnumDesktopWindows(desktop, delegate(IntPtr window, IntPtr unused) {
+      if (HasClass(window, DialogClass)) {
+        dialogs.Add(window);
+      }
+      return true;
+    }, IntPtr.Zero);
+    boxOwner = 0;
+    if (dialogs.Count == 0) {
+      return null;
+    }
+    Dictionary<uint, ProcessEntry> processes = Processes();
+    Dictionary<uint, long> family = FamilyOf(processId, processes);
+    foreach (IntPtr window in dialogs) {
+      uint owner;
+      uint thread = GetWindowThreadProcessId(window, out owner);
+      // Not asked whether it is visible: a window of a non-interactive station never reads as shown.
+      if (!family.ContainsKey(owner) || thread != FirstThreadOf(owner)) {
+        continue;
+      }
+      found = owner;
+      StringBuilder body = new StringBuilder();
+      EnumChildWindows(window, delegate(IntPtr child, IntPtr also) {
+        string text = TextOf(child);
+        if (text.Length > 0 && HasClass(child, "Static")) {
+          body.Append(body.Length > 0 ? " " : "").Append(text);
+        }
+        return true;
+      }, IntPtr.Zero);
+      said = BoxMarker + "{" + Quote("title") + ":" + Quote(TextOf(window)) + "," + Quote("text") + ":" + Quote(body.ToString()) + "," + Quote("engine") + ":" + (IsTheEngine(owner, processId, processes) ? "true" : "false") + "}";
+      break;
+    }
+    boxOwner = found;
+    return said;
+  }
+
+  // Written as UTF-8 whatever the console's code page is, which is how a run reads it.
+  static void Say(string line) {
+    try {
+      byte[] bytes = new UTF8Encoding(false).GetBytes(Environment.NewLine + line + Environment.NewLine);
+      Stream output = Console.OpenStandardOutput();
+      output.Write(bytes, 0, bytes.Length);
+      output.Flush();
+    } catch (IOException) {
+    }
+  }
+
   static bool ShowsAWindow(int processId) {
     bool shown = false;
     EnumWindows(delegate(IntPtr window, IntPtr unused) {
@@ -189,7 +410,9 @@ public static class GdharnessDesktop {
   // is ended through the handle held here once stopFile appears, which is how a keeper ends a game
   // it did not start itself: a handle names one process, where a pid can name the next one too. The
   // process starts in directory rather than in this one's, which is a temporary directory. The spec
-  // is one field a line, each base64 of its UTF-8.
+  // is one field a line, each base64 of its UTF-8. A process that opens a message box on the desktop
+  // is ended too, with the box said on this process's output as a marker line, since nobody can
+  // press it there.
   public static int RunSpec(string specFile) {
     string[] lines = File.ReadAllLines(specFile);
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
@@ -211,6 +434,7 @@ public static class GdharnessDesktop {
   public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+    IntPtr desktopHandle = IntPtr.Zero;
     if (desktop.Length > 0) {
       Step(stepFile, "opening the session's own window station");
       IntPtr station = CreateWindowStationW(null, 0, WindowStationAllAccess, IntPtr.Zero);
@@ -239,6 +463,7 @@ public static class GdharnessDesktop {
       if (held == IntPtr.Zero) {
         throw new Win32Exception(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
       }
+      desktopHandle = held;
       startup.desktop = stationName + "\\\\" + desktop;
     }
     startup.flags = UseStdHandles;
@@ -300,14 +525,36 @@ public static class GdharnessDesktop {
         LockSetForegroundWindow(UnlockForeground);
       }
     }
-    if (stopFile.Length == 0) {
-      WaitForSingleObject(started.process, Infinite);
-    } else {
-      bool stopped = false;
-      while (WaitForSingleObject(started.process, 100) == TimedOut) {
-        if (!stopped && File.Exists(stopFile)) {
-          TerminateProcess(started.process, 1);
-          stopped = true;
+    bool stopped = false;
+    uint looks = 0;
+    uint lastOwner = 0;
+    DateTime lookAgain = DateTime.UtcNow;
+    while (WaitForSingleObject(started.process, 100) == TimedOut) {
+      if (!stopped && stopFile.Length > 0 && File.Exists(stopFile)) {
+        TerminateProcess(started.process, 1);
+        stopped = true;
+      }
+      if (!stopped && desktopHandle != IntPtr.Zero && DateTime.UtcNow >= lookAgain) {
+        lookAgain = DateTime.UtcNow.AddMilliseconds(500);
+        uint owner;
+        string box = BoxOf(desktopHandle, (uint)started.processId, out owner);
+        looks = box == null ? 0 : (owner == lastOwner ? looks + 1 : 1);
+        lastOwner = box == null ? 0 : owner;
+        if (looks >= BoxLooks) {
+          Say(box);
+          looks = 0;
+          lastOwner = 0;
+          // Only the owner of the box is ended: an editor stays up when a game it plays is stuck.
+          if (owner == (uint)started.processId) {
+            TerminateProcess(started.process, 1);
+            stopped = true;
+          } else {
+            IntPtr child = OpenProcess(ProcessTerminate, false, owner);
+            if (child != IntPtr.Zero) {
+              TerminateProcess(child, 1);
+              CloseHandle(child);
+            }
+          }
         }
       }
     }
@@ -503,6 +750,93 @@ export function throughHelper(
     'utf8',
   );
   return { command: assembly, args: [files.spec, files.error, files.step] };
+}
+
+/** The line the helper prints where it ended a process on a message box. Kept in step with `BoxMarker` in its source. */
+const BOX_MARKER = '[gdharness] desktop-box ';
+
+/** The title Godot gives the box it opens when its display server cannot start, in `DisplayServerWindows::create_func`. */
+const VIDEO_DRIVER_TITLE = 'Unable to initialize video driver';
+
+/** How many of the engine's own error lines a verdict quotes. */
+const QUOTED_ERRORS = 4;
+
+/**
+ * What the helper said of the message box it ended the process on, from [param printed], or null
+ * when the lines hold no such word.
+ */
+function boxSaid(
+  printed: readonly LogEntry[],
+): { title: string; text: string; engine: boolean; before: readonly LogEntry[] } | null {
+  const at = printed.findLastIndex((entry) => entry.text.startsWith(BOX_MARKER));
+  if (at < 0) {
+    return null;
+  }
+  let box: unknown;
+  try {
+    box = JSON.parse((printed[at]?.text ?? '').slice(BOX_MARKER.length));
+  } catch {
+    return null;
+  }
+  if (!isRecord(box)) {
+    return null;
+  }
+  const { title, text, engine } = box;
+  return typeof title === 'string' && typeof text === 'string'
+    ? { title, text, engine: engine !== false, before: printed.slice(0, at) }
+    : null;
+}
+
+/** Whether [param text] is a verdict or note this file wrote about a box, which is no line of the engine's own. */
+export function isBoxVerdict(text: string): boolean {
+  return (
+    text.includes('on the hidden desktop, where nobody can press it') ||
+    text.includes('on the hidden desktop, so it was ended')
+  );
+}
+
+/**
+ * The note for a run whose engine went on while the helper ended a process it started on a message
+ * box, or null. The engine's own outcome stands, since the box was not its own.
+ */
+export function childBoxNote(printed: readonly LogEntry[]): string | null {
+  const box = boxSaid(printed);
+  return box === null || box.engine
+    ? null
+    : `a process the engine started opened a message box on the hidden desktop, where nobody can press it, so that process was ended: "${box.title}", ${box.text}`;
+}
+
+/**
+ * Why the helper ended the process that printed [param printed], or null when it ended none on a
+ * message box. A box on the hidden desktop is one nobody can press, so the process would wait on it
+ * for the rest of the run. Godot opens one whenever it cannot create a renderer, and the helper's
+ * marker line is the one signal that holds whichever driver failed: the engine's own lines differ
+ * between ANGLE, Direct3D 12 and Vulkan. A box of a process the engine started ended that process
+ * alone, which {@link childBoxNote} words. The engine's lines come from [param engineLines], which
+ * is [param printed] unless the helper is an editor's, whose marker comes with the game's own lines
+ * from elsewhere. The game an editor plays is that helper's child, so there a box of any process
+ * is the game's.
+ */
+export function desktopBoxEnding(
+  printed: readonly LogEntry[],
+  engineLines?: readonly LogEntry[],
+): string | null {
+  const box = boxSaid(printed);
+  if (box === null || (!box.engine && engineLines === undefined)) {
+    return null;
+  }
+  if (box.title !== VIDEO_DRIVER_TITLE) {
+    return `the engine opened a message box on the hidden desktop, where nobody can press it, so it was ended: "${box.title}", ${box.text}`;
+  }
+  const failures = [
+    ...new Set(
+      (engineLines ?? box.before)
+        .filter((entry) => entry.severity !== 'info')
+        .map((entry) => `${entry.severity === 'error' ? 'ERROR' : 'WARNING'}: ${entry.text}`),
+    ),
+  ].slice(-QUOTED_ERRORS);
+  const after = failures.length === 0 ? '' : `, after printing ${failures.join(' | ')}`;
+  return `the windowed engine could not create a renderer on the hidden desktop, so it was ended: it opened a box titled "${box.title}", which nobody can press there${after}. Run the suites headless, or check the machine's graphics driver, which a lost GPU needs a reboot to recover.`;
 }
 
 /** A process started on a desktop by `spawnOnDesktop`. */

@@ -647,7 +647,8 @@ export function slotsDrawnOn(
 
 /**
  * The file in the slots folder where the gates' queue writes how many of the gates' free slots no
- * queued gate can take now, as `{"spare", "pid", "started", "written"}`, `written` in milliseconds.
+ * queued gate can take now, as `{"spare", "pid", "started", "written"}`. `written` is the moment the
+ * count began, in milliseconds by the folder's clock, with or without a fraction.
  * The queue alone knows its seats, pool and memory, so a fresh count stands for what the seated
  * gates are owed ({@link EngineSlots.sideShare}).
  */
@@ -1379,7 +1380,7 @@ export class EngineSlots {
     const holder: SlotHolder = game ? { ...this.holder, game: true } : this.holder;
     for (const slot of slots) {
       const lock = join(this.directory, `${String(slot)}.lock`);
-      if (madeInPlace(lock, JSON.stringify(holder)) || (await this.takenOver(lock, holder))) {
+      if (madeInPlace(lock, JSON.stringify(holder)) || (await this.takenOver(lock, holder, true))) {
         this.held.add(lock);
         return lock;
       }
@@ -1666,9 +1667,10 @@ export class EngineSlots {
    * which this process cannot read. A queue process counts it and writes the result to
    * {@link SPARE_FILE}. A live gate is in the queue, so side work takes none of the gates' slots
    * unless a fresh count says how many. A count is fresh when a live process wrote it within
-   * {@link SPARE_STALE_MS} and no gate was seated after it was written, since it could not have
-   * counted that seat. The slots taken since it was written come off it, since each is one the count
-   * could not have given to anything else.
+   * {@link SPARE_STALE_MS} and no gate was seated at or after the moment its count began
+   * (`written`), since it could not have counted that seat. A seat in the same clock tick may or may
+   * not be in the count, so a tie reads as stale. The slots taken at or after that moment come off
+   * it, since each is one the count could not have given to anything else. A tie there reads as taken.
    */
   private async sideShare(newestSeat: number): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
     const gated = Math.max(1, this.count - keptSlotsOf(this.count));
@@ -1678,15 +1680,25 @@ export class EngineSlots {
       return none;
     }
     const path = join(this.directory, SPARE_FILE);
-    const said = countWritten(readWhole(path), Date.now(), 'spare');
-    if (said === null || said.written < newestSeat || (await this.free(path))) {
+    const content = readWhole(path);
+    const said = countWritten(content, Date.now(), 'spare');
+    // The count's text, its time and its writer's life are read once: a file made anew between
+    // separate reads would be judged by one count and its writer by another.
+    const writtenAt = said === null ? undefined : this.writtenAt(path);
+    if (
+      said === null ||
+      content === null ||
+      writtenAt === undefined ||
+      said.written <= newestSeat ||
+      (await this.freeAsRead(content, writtenAt))
+    ) {
       return none;
     }
     const since = Array.from({ length: gated }, (_, slot) => slot)
       .filter((slot) => !free.includes(slot))
       .flatMap((slot) => {
         const at = this.writtenAt(join(this.directory, `${String(slot)}.lock`));
-        return at !== undefined && at > said.written ? [{ slot, at }] : [];
+        return at !== undefined && at >= said.written ? [{ slot, at }] : [];
       })
       .toSorted((a, b) => a.at - b.at || a.slot - b.slot)
       .map((one) => one.slot);
@@ -1866,9 +1878,14 @@ export class EngineSlots {
     }
   }
 
-  /** Takes over [param lock] for [param holder] when its holder has gone, under the steal file. */
-  private takenOver(lock: string, holder: SlotHolder): Promise<boolean> {
-    return this.cleared(lock, true, holder);
+  /**
+   * Takes over [param lock] for [param holder] when its holder has gone, under the steal file. A
+   * machine slot [param inPlace] is made as a fresh take makes it, so its time is the take's own:
+   * the spare count judges a take by it ({@link EngineSlots.sideShare}), and a lock put in place
+   * from a staged file would keep that file's older time.
+   */
+  private takenOver(lock: string, holder: SlotHolder, inPlace = false): Promise<boolean> {
+    return this.cleared(lock, true, holder, inPlace);
   }
 
   /**
@@ -1876,12 +1893,18 @@ export class EngineSlots {
    * taker has just made in its place is never removed. With [param retake] it makes it again for
    * this process, written as [param holder]. Answers whether that was done.
    */
-  private cleared(lock: string, retake: boolean, holder: SlotHolder = this.holder): Promise<boolean> {
+  private cleared(
+    lock: string,
+    retake: boolean,
+    holder: SlotHolder = this.holder,
+    inPlace = false,
+  ): Promise<boolean> {
     return takenOverUnderSteal(
       lock,
       () => this.free(lock),
       (path) => this.made(path, holder),
       retake,
+      inPlace ? (path) => madeInPlace(path, JSON.stringify(holder)) : undefined,
     );
   }
 
@@ -1895,6 +1918,11 @@ export class EngineSlots {
       // Gone since it was found there, which the next look takes.
       return false;
     }
+    return await this.freeAsRead(content, writtenAt);
+  }
+
+  /** Whether a lock that read as [param content] and was last written at [param writtenAt] is free. */
+  private async freeAsRead(content: string, writtenAt: number): Promise<boolean> {
     const pid = holderOf(content)?.pid;
     if (pid !== undefined && alive(pid)) {
       await this.readStart(pid);
@@ -1916,7 +1944,8 @@ export class EngineSlots {
 /**
  * Removes [param lock] once [param gone] says its holder has gone, under its steal file, so that a
  * lock another taker has just made in its place is never removed. [param make] makes a file for this
- * process, the steal file and with [param retake] the lock again. Answers whether that was done.
+ * process, the steal file and with [param retake] the lock again, unless [param makeLock] makes the
+ * lock. Answers whether that was done.
  * It tries the removal once and never waits, because a server calls it from its protocol and its
  * caller looks again.
  */
@@ -1925,6 +1954,7 @@ export async function takenOverUnderSteal(
   gone: () => Promise<boolean>,
   make: (path: string) => boolean,
   retake = true,
+  makeLock = make,
 ): Promise<boolean> {
   if (!(await gone())) {
     return false;
@@ -1951,7 +1981,7 @@ export async function takenOverUnderSteal(
       // holds the lock.
       return false;
     }
-    return retake ? make(lock) : true;
+    return retake ? makeLock(lock) : true;
   } finally {
     rmSync(steal, { force: true });
   }
