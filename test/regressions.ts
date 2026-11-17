@@ -69235,7 +69235,7 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
     }
     assert.throws(
       () => readFileSync(marker),
-      undefined,
+      /EPERM|EACCES/,
       'the file is made unreadable, or this proves nothing',
     );
     assert.deepEqual(worktreeCheckoutsOf(join(root, 'tree', 'game')), [], 'it answers an empty list');
