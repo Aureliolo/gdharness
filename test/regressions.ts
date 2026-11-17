@@ -59,7 +59,15 @@ import {
   readAnnouncement,
 } from '../src/bridge-announce.js';
 import { cacheHome, toolHome } from '../src/cache-home.js';
-import { callProgress, type SlotWaits, stillGoingSaid, withCallSignal } from '../src/call-signal.js';
+import {
+  type CallNotes,
+  callNotesSaid,
+  callProgress,
+  newCallNotes,
+  type SlotWaits,
+  stillGoingSaid,
+  withCallSignal,
+} from '../src/call-signal.js';
 import {
   type Contradicted,
   cachedClasses,
@@ -188,6 +196,7 @@ import {
   FollowedLanes,
   gamesKeptOf,
   giveBackSlot,
+  handSlotToGame,
   handSlotToKeeper,
   holderOf,
   inheritsSlot,
@@ -81093,9 +81102,47 @@ async function testASlotCommandIsToldAnythingElseIsAOneOff(): Promise<void> {
   assert.deepEqual(await theKindAskedUnder({}, undefined), ['--kind', 'one-off']);
 }
 
+/** A call's answer carries what its slot command said as `engineSlotNote`, and nothing where it said nothing. */
+function testACallAnswersWithWhatItsSlotCommandSaid(): void {
+  const notes = newCallNotes();
+  assert.deepEqual(callNotesSaid(notes), {});
+  notes.slotNotes.add('The command exited.');
+  notes.slotNotes.add('It printed nothing.');
+  notes.classList.add('No class list.');
+  assert.deepEqual(callNotesSaid(notes), {
+    classListNote: 'No class list.',
+    engineSlotNote: 'The command exited. It printed nothing.',
+  });
+}
+
+/**
+ * The slot of a game the editor played is handed to the game's process with its start time, or
+ * given back where that process is not there to hand it to.
+ */
+async function testASlotOfAPlayedGameIsHandedToTheGame(): Promise<void> {
+  await withASlotCommand({}, async (command) => {
+    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
+    try {
+      const slot = await slotForCall(true);
+      await handSlotToGame(slot, game.pid ?? 0, null);
+      assert.deepEqual(grantEvents(command), ['start', 'hand']);
+      assert.equal(command.entries().at(1)?.handedTo, game.pid);
+      assert.notEqual(command.entries().at(1)?.started, 0, 'with the start time the system reports');
+    } finally {
+      game.kill();
+    }
+  });
+  await withASlotCommand({}, async (command) => {
+    const slot = await slotForCall(true);
+    await handSlotToGame(slot, 2_000_000_000, null);
+    await command.untilEof();
+    assert.deepEqual(grantEvents(command), ['start', 'eof'], 'no process to hand to gives the slot back');
+  });
+}
+
 /** The notes a call's code below it makes, as the server gathers them. */
-function aCallsNotes(): { classList: Set<string>; slotNotes: Set<string> } {
-  return { classList: new Set<string>(), slotNotes: new Set<string>() };
+function aCallsNotes(): CallNotes {
+  return newCallNotes();
 }
 
 /**
@@ -116114,6 +116161,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotCommandIsToldQueueWorkIsSideWork,
   testASlotCommandIsToldAnythingElseIsAOneOff,
   testAGrantIsHandedOnThroughTheCommand,
+  testACallAnswersWithWhatItsSlotCommandSaid,
+  testASlotOfAPlayedGameIsHandedToTheGame,
   testACommandThatWillNotHandTheSlotOnFailsTheHand,
   testACommandThatExitsAfterGrantingNeverHoldsTheSlot,
   testACommandThatExitsWhileTheEngineRunsLosesTheSlotInTheAnswer,

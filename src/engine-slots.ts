@@ -2506,8 +2506,36 @@ export async function handSlotToKeeper(
   pid: number | undefined,
   projectPath: string | null,
 ): Promise<void> {
+  await handedOrReleased(
+    slot,
+    pid,
+    `the keeper of a game${projectPath === null ? '' : ` of ${projectPath}`} editor_run started`,
+  );
+}
+
+/**
+ * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending. The
+ * slot is given back when the game's start cannot be read or the lock is no longer this server's
+ * to hand.
+ */
+export async function handSlotToGame(
+  slot: Pick<CallSlot, 'handTo' | 'release'>,
+  pid: number,
+  projectPath: string | null,
+): Promise<void> {
+  await handedOrReleased(
+    slot,
+    pid,
+    `a game${projectPath === null ? '' : ` of ${projectPath}`} the editor played for editor_run`,
+  );
+}
+
+async function handedOrReleased(
+  slot: Pick<CallSlot, 'handTo' | 'release'>,
+  pid: number | undefined,
+  by: string,
+): Promise<void> {
   const started = pid === undefined ? undefined : (await startTimesOf([pid])).get(pid);
-  const by = `the keeper of a game${projectPath === null ? '' : ` of ${projectPath}`} editor_run started`;
   if (pid === undefined || started === undefined || !(await slot.handTo({ pid, started, by }))) {
     slot.release();
   }

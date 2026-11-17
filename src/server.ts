@@ -41,8 +41,10 @@ import {
   type CallNotes,
   type CallProgress,
   callNotes,
+  callNotesSaid,
   callProgress,
   callSignal,
+  newCallNotes,
   type SlotWaits,
   stillGoingSaid,
   withCallSignal,
@@ -152,7 +154,7 @@ import {
   startedUntilItRuns,
 } from './engine-run.js';
 import {
-  type CallSlot,
+  handSlotToGame,
   handSlotToKeeper,
   keeperSlotOf,
   onTheSlot,
@@ -1011,18 +1013,6 @@ function restartsOf(run: GodotProcess): RestartNamed[] | undefined {
  * this, the run was reported over with the first process's clean exit, and nothing could stop the
  * successor, which once sat on a hidden desktop for hours holding a file a later export needed.
  */
-/**
- * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending. The
- * slot is given back when the game's start cannot be read or the lock is no longer this server's
- * to hand.
- */
-async function handToTheGame(slot: CallSlot, pid: number, projectPath: string | null): Promise<void> {
-  const started = (await startTimesOf([pid])).get(pid);
-  const by = `a game${projectPath === null ? '' : ` of ${projectPath}`} the editor played for editor_run`;
-  if (started === undefined || !(await slot.handTo({ pid, started, by }))) {
-    slot.release();
-  }
-}
 
 function followTheRestart(run: GodotProcess): boolean {
   if (run.throughEditor || run.pid === null || run.projectPath === null) {
@@ -6271,7 +6261,7 @@ class GodotServer {
       const call = this.callsTaken++;
       this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
-      const notes: CallNotes = { classList: new Set(), slotNotes: new Set() };
+      const notes = newCallNotes();
       try {
         const answered = await withCallSignal(
           ctx.mcpReq.signal,
@@ -6502,10 +6492,7 @@ class GodotServer {
 
   /** [param answer] with what the code below its call noted for it in [param notes]. */
   private withCallNotes(answer: ToolResponse, notes: CallNotes): ToolResponse {
-    const said = {
-      ...(notes.classList.size === 0 ? {} : { classListNote: [...notes.classList].join(' ') }),
-      ...(notes.slotNotes.size === 0 ? {} : { engineSlotNote: [...notes.slotNotes].join(' ') }),
-    };
+    const said = callNotesSaid(notes);
     return Object.keys(said).length === 0 ? answer : this.saying(answer, said);
   }
 
@@ -16064,7 +16051,7 @@ class GodotServer {
     const slot = run.slot;
     if (slot !== undefined) {
       delete run.slot;
-      void handToTheGame(slot, endpoint.pid, run.projectPath);
+      void handSlotToGame(slot, endpoint.pid, run.projectPath);
     }
   }
 

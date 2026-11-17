@@ -36,6 +36,19 @@ export interface CallNotes {
   readonly slotNotes: Set<string>;
 }
 
+/** Notes with nothing in them, for a call that has found nothing yet. */
+export function newCallNotes(): CallNotes {
+  return { classList: new Set(), slotNotes: new Set() };
+}
+
+/** The members a call's answer carries for what its code found: none where it found nothing. */
+export function callNotesSaid(notes: CallNotes): Record<string, string> {
+  return {
+    ...(notes.classList.size === 0 ? {} : { classListNote: [...notes.classList].join(' ') }),
+    ...(notes.slotNotes.size === 0 ? {} : { engineSlotNote: [...notes.slotNotes].join(' ') }),
+  };
+}
+
 interface Call {
   readonly signal: AbortSignal | undefined;
   readonly progress: CallProgress | undefined;
