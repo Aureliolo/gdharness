@@ -55450,6 +55450,26 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://worker.gd" id="1"]\n\n' +
           '[node name="Worker" type="Node"]\nscript = ExtResource("1")\n',
       );
+      // The second shape needs the runtime to announce after the start has answered. How soon a
+      // warm engine boots against how long the launch takes decides that on its own, and a game
+      // that announced first is a runtime the call rightly reports. An autoload ahead of the
+      // runtime holds the engine's boot until the file the test writes once the call has answered,
+      // so no announcement can come earlier.
+      const release = join(project, 'release.flag');
+      if (!tiedAtStart) {
+        writeFileSync(
+          join(project, 'gate.gd'),
+          'extends Node\n\n\nfunc _init() -> void:\n' +
+            '\tvar flag := ProjectSettings.globalize_path("res://release.flag")\n' +
+            '\twhile not FileAccess.file_exists(flag):\n' +
+            '\t\tOS.delay_msec(10)\n',
+        );
+        const settings = join(project, 'project.godot');
+        const runtimeLine = 'GdharnessRuntime=';
+        const config = readFileSync(settings, 'utf8');
+        assert.ok(config.includes(runtimeLine), `${shape}: the project registers the runtime`);
+        writeFileSync(settings, config.replaceAll(runtimeLine, `Gate="*res://gate.gd"\n${runtimeLine}`));
+      }
 
       const status = async (): Promise<unknown> =>
         parseTextContent(
@@ -55474,14 +55494,23 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         ENGINE_CALL_TIMEOUT_MS,
       );
       const startAnsweredAt = Date.now();
+      writeFileSync(release, '');
       const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
       let workerPid = 0;
       let helperPid = 0;
       try {
+        const seen = readdirSync(runtimeDir)
+          .filter((entry) => /^runtime-\d+\.json$/.test(entry))
+          .map(
+            (entry) => `${entry} +${Math.round(statSync(join(runtimeDir, entry)).mtimeMs - startAskedAt)}ms`,
+          );
         assert.equal(
           get(started, 'runtime', 'listening'),
           tiedAtStart,
-          `${shape}: ${JSON.stringify(started)}`,
+          `${shape}: ${JSON.stringify(started)} asked->answered ${startAnsweredAt - startAskedAt}ms, announcements ${seen.join(', ')}; server: ${server.stderr
+            .split('\n')
+            .filter((line) => line.includes('announce wait'))
+            .join(' | ')}`,
         );
         const benchPid = asNumber(get(started, 'pid'), 'the spawned bench has a pid');
         // The worker announces on its own boot, a moment after the bench's, and the helper after
