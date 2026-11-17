@@ -1010,8 +1010,8 @@ Usage:
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
                  [--whole-tree] [--import] [--godot PATH] [--godot-version V] [--cores N]
-                 [--order reversed|named|SEED] [--print-output] [--verbose] [--result FILE]
-                 [--times FILE] [--runner]
+                 [--order reversed|named|SEED] [--print-output] [--verbose] [--engine-arg ARG ...]
+                 [--result FILE] [--times FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an
                                      engine error no case declared, a case that never finished
@@ -1023,7 +1023,9 @@ Usage:
                                      with the line, and runs nothing. --print-output
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
-                                     so a leak at exit is named. --result writes the outcome, each
+                                     so a leak at exit is named. --engine-arg gives every engine
+                                     one entry of project_test's engineArgs, so --time-scale 20
+                                     is two. --result writes the outcome, each
                                      suite's time and every problem as JSON. --times
                                      deals by and records into FILE instead of the project's own
                                      times. --runner prints the shipped runner's path.

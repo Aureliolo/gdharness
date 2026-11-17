@@ -80,6 +80,9 @@ when the command line itself is wrong.
 - `--verbose`: start every engine with Godot's `--verbose` to name a leak at exit, where the engine
   otherwise prints only two counts. The verdict counts the objects left alive by class and names
   the resources still in use, the project's own before its addons'.
+- `--engine-arg ARG`: hand every engine of the run one entry of the flags `project_test`'s
+  `engineArgs` takes, repeated for each entry, as in `--engine-arg --time-scale --engine-arg 20`.
+  A flag `project_test` refuses is refused here with the same text before any engine starts.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. [The result file](#the-result-file) lists what it holds.
 - `--runner`: print the path of the shipped runner and exit.

@@ -59,7 +59,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
-import { envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
+import { engineFlags, envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
 import { prependTo, readLog } from './log-read.js';
@@ -152,6 +152,8 @@ interface TestOptions {
   readonly printOutput: boolean;
   /** Start every engine with `--verbose`, so a leak at exit is named by what was left. */
   readonly verbose: boolean;
+  /** The engine flags every engine of the run starts with, as `--engine-arg` gives them. */
+  readonly engineArgs: readonly string[];
   /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
   readonly resultFile: string | null;
   /**
@@ -288,6 +290,19 @@ const VALUED = new Set([
   '--result',
   '--times',
 ]);
+/** The option that hands every engine of a run one entry of the flags project_test's engineArgs takes. */
+const ENGINE_ARG = '--engine-arg';
+
+/** [param given] as the engine flags every engine of a run starts with, refused as project_test refuses them. */
+function engineFlagsNamed(given: readonly string[] | undefined): readonly string[] {
+  const flags = given ?? [];
+  const checked = engineFlags(flags);
+  if (!checked.ok) {
+    throw new EngineUsageError(checked.reason);
+  }
+  return flags;
+}
+
 const SWITCHES = new Set(['--changed-only', '--whole-tree', '--import', '--print-output', '--verbose']);
 
 /** The arguments of `gdharness test` sorted into the options with values, the switches and the rest. */
@@ -295,6 +310,18 @@ interface SortedArguments {
   readonly valued: ReadonlyMap<string, readonly string[]>;
   readonly switches: ReadonlySet<string>;
   readonly positional: readonly string[];
+}
+
+/**
+ * The value of the option at [param at], refused when there is none. An `--engine-arg` entry may be
+ * a flag such as --time-scale, so only the other options refuse a value beginning with `--`.
+ */
+function valueAfter(args: readonly string[], at: number): string {
+  const value = args[at + 1];
+  if (value === undefined || value === '' || (value.startsWith('--') && args[at] !== ENGINE_ARG)) {
+    throw new EngineUsageError(`${args[at] ?? ''} needs a value.`);
+  }
+  return value;
 }
 
 /** [param args] sorted by what each is, refusing an unknown option or one missing its value. */
@@ -308,12 +335,8 @@ function sortedArguments(args: readonly string[]): SortedArguments {
       positional.push(arg);
     } else if (SWITCHES.has(arg)) {
       switches.add(arg);
-    } else if (VALUED.has(arg)) {
-      const value = args[at + 1];
-      if (value === undefined || value === '' || value.startsWith('--')) {
-        throw new EngineUsageError(`${arg} needs a value.`);
-      }
-      valued.set(arg, [...(valued.get(arg) ?? []), value]);
+    } else if (VALUED.has(arg) || arg === ENGINE_ARG) {
+      valued.set(arg, [...(valued.get(arg) ?? []), valueAfter(args, at)]);
       at += 1;
     } else {
       throw new EngineUsageError(`Unknown option ${arg} for gdharness test. Run gdharness help.`);
@@ -388,6 +411,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     order: orderNamed(last('--order'), selected),
     printOutput: switches.has('--print-output'),
     verbose: switches.has('--verbose'),
+    engineArgs: engineFlagsNamed(valued.get(ENGINE_ARG)),
     resultFile: pathNamed(last('--result'), cwd),
     timesFile: pathNamed(last('--times'), cwd),
   };
@@ -602,6 +626,7 @@ interface Launch extends EngineLaunch {
   readonly selfTyped: readonly SelfTypedExport[];
   readonly godotVersion: string | null;
   readonly verbose: boolean;
+  readonly engineArgs: readonly string[];
   readonly failsOnPushErrors: boolean;
 }
 
@@ -734,6 +759,7 @@ async function openedRun(
     godotVersion: options.godotVersion,
     cores: options.cores,
     verbose: options.verbose,
+    engineArgs: options.engineArgs,
     failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
   };
   return { launch, interrupted };
@@ -2360,7 +2386,9 @@ function displayFlags(launch: Launch, plan: EnginePlan): string[] {
   // On Windows every engine runs on the hidden desktop, so a windowed one starts with its flags.
   return [
     ...(viewport === null ? [] : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
-    ...(process.platform === 'win32' ? hiddenWindowFlags([], capsFrames(launch.projectPath)) : []),
+    ...(process.platform === 'win32'
+      ? hiddenWindowFlags(launch.engineArgs, capsFrames(launch.projectPath))
+      : []),
   ];
 }
 
@@ -2404,6 +2432,7 @@ function engineArguments(
     '--path',
     launch.projectPath,
     ...(launch.verbose ? ['--verbose'] : []),
+    ...launch.engineArgs,
     '-s',
     shippedListedRunner(),
     ...(plan.windowed ? [] : ['--ignoreHeadlessMode']),
