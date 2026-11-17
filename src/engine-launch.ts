@@ -153,9 +153,16 @@ export function homeOf(projectPath: string): string {
 export const KEPT_RUN_DIRECTORIES = 5;
 
 /**
+ * The file a passing run that kept only the logs of its slow cases leaves in its directory. A
+ * directory without it counts as a failed or cut-off run, which is all an older release left.
+ */
+export const SLOW_RUN_MARK = 'slow-run';
+
+/**
  * Removes what earlier runs left in [param runs], each a `<start>-<pid>` directory, other than a
- * run still going and the [param kept] most recent of those that have ended. Answers the directories
- * left because another process holds them, such as an engine that outlived its run.
+ * run still going and the [param kept] most recent of those that have ended. Runs marked with
+ * {@link SLOW_RUN_MARK} and the rest are counted apart, so neither kind pushes out the other. Answers
+ * the directories left because another process holds them, such as an engine that outlived its run.
  */
 export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): string[] {
   if (!existsSync(runs)) {
@@ -172,19 +179,25 @@ export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): 
       held.push(join(runs, entry));
     }
   };
-  const ended: { entry: string; started: number }[] = [];
+  const ended: { entry: string; started: number; slow: boolean }[] = [];
   for (const entry of readdirSync(runs)) {
     const named = /^(\d+)-(\d+)$/.exec(entry);
     const pid = Number(named?.[2]);
     if (!Number.isInteger(pid)) {
       remove(entry);
     } else if (!alive(pid)) {
-      ended.push({ entry, started: Number(named?.[1]) });
+      ended.push({
+        entry,
+        started: Number(named?.[1]),
+        slow: existsSync(join(runs, entry, SLOW_RUN_MARK)),
+      });
     }
   }
   ended.sort((a, b) => b.started - a.started);
-  for (const { entry } of ended.slice(kept)) {
-    remove(entry);
+  for (const slow of [false, true]) {
+    for (const { entry } of ended.filter((one) => one.slow === slow).slice(kept)) {
+      remove(entry);
+    }
   }
   return held;
 }

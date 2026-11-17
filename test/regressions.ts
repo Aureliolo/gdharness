@@ -25,7 +25,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
+import { availableParallelism, constants, homedir, setPriority, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import { text as pipedText } from 'node:stream/consumers';
@@ -150,6 +150,7 @@ import {
   resPathOf,
   roomFor,
   roomForAnother,
+  SLOW_RUN_MARK,
   sweepRunDirectories,
   versionNamed,
   versionPrinted,
@@ -71970,21 +71971,36 @@ function testTheKeepSlowerThanOptionTakesPositiveSeconds(): void {
     assert.equal(limit('--keep-slower-than', '10'), 10);
     assert.equal(limit('--keep-slower-than', '2.5'), 2.5);
     assert.equal(limit('--keep-slower-than', '1', '--keep-slower-than', '3'), 3, 'the last one stands');
-    for (const bad of ['0', '0.0', '-1', 'ten', '1e3', '', '5 s', 'Infinity', 'NaN']) {
-      let said = 'read';
+    for (const [plain, seconds] of [
+      ['.5', 0.5],
+      ['5.', 5],
+      ['0.5', 0.5],
+      ['007', 7],
+      ['0.001', 0.001],
+    ] as const) {
+      assert.equal(limit('--keep-slower-than', plain), seconds, `${plain} is a plain decimal above 0`);
+    }
+    const refusalOf = (bad: string): string => {
       try {
         testOptionsOf([project, '--keep-slower-than', bad], tmpdir());
       } catch (error) {
-        said = error instanceof EngineUsageError ? error.message : String(error);
+        return error instanceof EngineUsageError ? error.message : String(error);
       }
-      assert.match(
-        said,
-        bad === ''
-          ? /^--keep-slower-than needs a value\.$/
-          : /^--keep-slower-than takes the seconds a case may take as a number above 0, such as 10 or 2\.5, and .* is not one\.$/,
-        `${JSON.stringify(bad)} is refused: ${said}`,
+      return 'read';
+    };
+    for (const bad of ['0', '0.0', '.0', '0.', '00']) {
+      assert.equal(
+        refusalOf(bad),
+        `--keep-slower-than takes a number of seconds above 0, and ${bad} is not. Give the slowest a case may be before its log is kept, such as 10.`,
       );
     }
+    for (const bad of ['-1', '-.5', '+5', 'ten', '1e3', '10s', '5 s', ' 5', '.', '5..1', 'Infinity', 'NaN']) {
+      assert.equal(
+        refusalOf(bad),
+        `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and ${bad} is not one.`,
+      );
+    }
+    assert.equal(refusalOf(''), '--keep-slower-than needs a value.');
     assert.throws(() => testOptionsOf([project, '--keep-slower-than'], tmpdir()), /needs a value/);
   } finally {
     sweep(project);
@@ -72079,19 +72095,19 @@ function testARunKeepsOnlyTheLogsItIsToldTo(): void {
     logs.keepOnly(slow);
     assert.deepEqual(
       readdirSync(join(root, 'run'), { recursive: true, encoding: 'utf8' }).toSorted(),
-      ['engine-1', join('engine-1', 'engine.log')],
-      'the slow engine log is all that is left in the run',
+      ['engine-1', join('engine-1', 'engine.log'), SLOW_RUN_MARK],
+      'the slow engine log and the mark that says so are all that is left in the run',
     );
     assert.deepEqual(
       readdirSync(join(root, 'kept'), { recursive: true, encoding: 'utf8' }).toSorted(),
-      ['engine-1', join('engine-1', 'engine.log')],
+      ['engine-1', join('engine-1', 'engine.log'), SLOW_RUN_MARK],
       'and all that is copied beside the main checkout',
     );
     const here = new RunLogs(join(root, 'other'), null);
     here.keepOnly(new Set([join(root, 'other', 'engine-0', 'engine.log')]));
     assert.deepEqual(
       readdirSync(join(root, 'other'), { recursive: true, encoding: 'utf8' }).toSorted(),
-      ['engine-0', join('engine-0', 'engine.log')],
+      ['engine-0', join('engine-0', 'engine.log'), SLOW_RUN_MARK],
       'the same where nothing is copied',
     );
   } finally {
@@ -72108,8 +72124,65 @@ function testAnEnginesPriorityIsNamedAsItsPlatformNamesIt(): void {
   assert.equal(priorityNamed(7, 'win32'), 'priority 7', 'a value no class has');
   assert.equal(priorityNamed(10, 'linux'), 'nice 10');
   assert.equal(priorityNamed(0, 'darwin'), 'nice 0');
-  assert.equal(priorityOf(process.pid), priorityNamed(0), 'read from the process');
+  // A child set to each priority in turn, so the read does not depend on the priority this test runs at.
+  const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  try {
+    assert.ok(child.pid !== undefined, 'the child started');
+    for (const value of [constants.priority.PRIORITY_BELOW_NORMAL, constants.priority.PRIORITY_LOW]) {
+      setPriority(child.pid, value);
+      assert.equal(priorityOf(child.pid), priorityNamed(value), 'read from the process');
+    }
+  } finally {
+    child.kill();
+  }
   assert.equal(priorityOf(2 ** 22 - 1), null, 'a process that is gone has none');
+}
+
+/**
+ * A failed run's logs stay until five later runs have failed, and a run that kept only slow logs
+ * stays until five later such runs have been kept. Neither kind pushes out the other, and a
+ * directory with no mark, as an older release left, counts as a failed run.
+ */
+function testFailedAndSlowRunsAreSweptApart(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-sweep-kinds-'));
+  try {
+    const made = (start: number, slow: boolean): string => {
+      // A pid no process has, so every run here has ended.
+      const directory = join(root, `${String(start)}-${String(2 ** 22 - 1)}`);
+      writeTree(directory, { 'engine-0/engine.log': 'x\n', ...(slow ? { [SLOW_RUN_MARK]: '' } : {}) });
+      return directory;
+    };
+    const left = (): string[] => readdirSync(root).toSorted();
+    const named = (...directories: string[]): string[] => directories.map((one) => basename(one)).toSorted();
+    const failed = made(100, false);
+    const slowFirst = made(101, true);
+    const fiveSlow = [102, 103, 104, 105, 106].map((start) => made(start, true));
+    assert.deepEqual(sweepRunDirectories(root), [], 'nothing is held');
+    assert.deepEqual(left(), named(failed, ...fiveSlow), 'the oldest slow run alone went');
+    assert.equal(existsSync(failed), true, 'five slow runs leave an earlier failed run in place');
+    assert.equal(existsSync(slowFirst), false, 'the sixth slow run sweeps its own kind oldest');
+    assert.equal(
+      fiveSlow.every((one) => existsSync(one)),
+      true,
+      'and the five newest slow runs stay',
+    );
+    const fiveFailed = [107, 108, 109, 110, 111].map((start) => made(start, false));
+    sweepRunDirectories(root);
+    assert.equal(existsSync(failed), false, 'the sixth failed run sweeps the oldest failed run');
+    assert.equal(
+      fiveFailed.every((one) => existsSync(one)),
+      true,
+      'five failed runs leave the slow runs in place',
+    );
+    assert.equal(
+      fiveSlow.every((one) => existsSync(one)),
+      true,
+      'five failed runs leave an earlier slow run in place',
+    );
+    assert.equal(left().length, 10, 'five of each kind');
+  } finally {
+    sweep(root);
+  }
 }
 
 /**
@@ -72228,7 +72301,7 @@ function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): void {
     assert.equal(logFilesIn(result.logs).length, 1, `one log is all that is left: ${result.logs}`);
     assert.match(
       slow.said,
-      /^--- cases slower than 1 s, their engines' logs kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have failed or kept a slow log:$/m,
+      /^--- cases slower than 1 s, their engines' logs kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have kept a slow log:$/m,
       slow.said,
     );
     assert.match(
@@ -112813,6 +112886,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestHelpListsTheKeepSlowerThanOption,
   testASlowCaseIsReadFromGdUnitsOwnTime,
   testARunKeepsOnlyTheLogsItIsToldTo,
+  testFailedAndSlowRunsAreSweptApart,
   testAnEnginesPriorityIsNamedAsItsPlatformNamesIt,
   testAWindowedEngineIsStartedWithTheRunsEngineFlags,
   testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase,

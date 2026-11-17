@@ -91,13 +91,14 @@ when the command line itself is wrong.
   time runs ahead of the clock, so the run says that gdUnit4's timeouts and every game-time wait
   run out early.
 - `--keep-slower-than SECONDS`: keep the log of each engine that ran a case slower than `SECONDS`,
-  a number above 0 such as `10` or `2.5`, in a passing run too. The time is gdUnit4's own, printed
-  on the case's verdict line. The run names each such case with its time, the engine, the engine's
-  slot, the engine process's priority and the kept log, and the result holds the same as
-  `slowCases`. A passing run keeps only the logs of those engines. A kept log goes the way a failed
-  run's does, so it counts as one of the five runs `Every engine's output is kept under` names, and
-  a later run removes it when five newer runs have left logs. A line with no time, such as an older
-  gdUnit4 prints, never counts as slow.
+  a plain decimal above 0 such as `10`, `2.5` or `.5`, in a passing run too. The time is gdUnit4's
+  own, printed on the case's verdict line. The run names each such case with its time, the engine,
+  the engine's slot, the engine process's priority and the kept log, and the result holds the same
+  as `slowCases`. A passing run keeps only the logs of those engines, and its directory holds a
+  `slow-run` file. A later run removes a slow run's directory once five newer slow runs have kept
+  one, and a failed run's once five newer runs have failed. Neither kind counts against the other,
+  and a directory without the file, as an older release left, counts as a failed run. A line with
+  no time, such as an older gdUnit4 prints, never counts as slow.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. [The result file](#the-result-file) lists what it holds.
 - `--runner`: print the path of the shipped runner and exit.
@@ -445,7 +446,8 @@ A run over several engines says what each took beside what it was dealt. That te
 from a slow suite. A run of several suites names its five slowest. The last lines count the
 problems and name the run's directory.
 
-A run that passes leaves no logs. A failed run keeps its logs until five later runs have failed. The
+A run that passes leaves no logs, unless `--keep-slower-than` kept the logs of its slow cases. A
+failed run keeps its logs until five later runs have failed, however many slow runs follow. The
 run that tries to reproduce a crash then does not remove the log that explains it. `--print-output`
 prints every engine's output before the verdict, whether the run passed or not.
 

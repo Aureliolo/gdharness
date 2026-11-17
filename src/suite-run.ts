@@ -39,6 +39,7 @@ import {
   roomFor,
   roomForAnother,
   SILENCE_FLOOR_SECONDS,
+  SLOW_RUN_MARK,
   sweepRunDirectories,
   versionNamed,
   watchedEngine,
@@ -425,10 +426,15 @@ function slowLimitNamed(value: string | undefined): number | null {
   if (value === undefined) {
     return null;
   }
-  const seconds = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : Number.NaN;
-  if (!(seconds > 0) || !Number.isFinite(seconds)) {
+  const seconds = /^(?:\d+\.?\d*|\.\d+)$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isFinite(seconds)) {
     throw new EngineUsageError(
-      `--keep-slower-than takes the seconds a case may take as a number above 0, such as 10 or 2.5, and ${value} is not one.`,
+      `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and ${value} is not one.`,
+    );
+  }
+  if (seconds <= 0) {
+    throw new EngineUsageError(
+      `--keep-slower-than takes a number of seconds above 0, and ${value} is not. Give the slowest a case may be before its log is kept, such as 10.`,
     );
   }
   return seconds;
@@ -662,7 +668,8 @@ function slotOf(lock: string): number | null {
  * the logs with it.
  *
  * A passing run removes its logs, except those of engines that ran a case past `--keep-slower-than`.
- * Such a run leaves a directory behind, so the sweep that ages out failed runs ages it out too.
+ * Such a run leaves a directory marked with {@link SLOW_RUN_MARK}, which the sweep counts apart from
+ * failed runs.
  */
 export class RunLogs {
   readonly directory: string;
@@ -704,10 +711,16 @@ export class RunLogs {
     }
   }
 
-  /** Keeps the logs in [param only], as {@link keep} does, and removes the rest of what the run wrote. */
+  /**
+   * Keeps the logs in [param only], as {@link keep} does, removes the rest of what the run wrote and
+   * marks the run's directories as holding slow logs alone.
+   */
   keepOnly(only: ReadonlySet<string>): void {
     this.keep(only);
     removeExcept(this.directory, only);
+    for (const directory of [this.directory, ...(this.kept === null ? [] : [this.kept])]) {
+      writeFileSync(join(directory, SLOW_RUN_MARK), '');
+    }
   }
 }
 
@@ -2996,7 +3009,7 @@ function printSlowCases(slow: readonly SlowCase[], limit: number, keptUnder: str
   const where =
     keptUnder === null
       ? ''
-      : `, their engines' logs kept under ${keptUnder} until ${String(KEPT_RUN_DIRECTORIES)} later runs have failed or kept a slow log`;
+      : `, their engines' logs kept under ${keptUnder} until ${String(KEPT_RUN_DIRECTORIES)} later runs have kept a slow log`;
   printSection(
     `cases slower than ${String(limit)} s${where}:`,
     slow.map(
