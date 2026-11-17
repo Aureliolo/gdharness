@@ -191,6 +191,7 @@ import {
   holderOf,
   inheritsSlot,
   inOneSlot,
+  keeperSlotOf,
   keptSlotsOf,
   LANES_VARIABLE,
   lockIsFree,
@@ -80769,13 +80770,45 @@ async function testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait(): Promi
 
 /**
  * A game the server starts for editor_run under a command's slot gives its keeper no lock to take
- * over, since the lock is the command's, and the slot follows the game's process. Read from the
- * source, since the run needs an engine and an editor to play it.
+ * over, since the lock is the command's, and the slot follows the game's process. The record the
+ * keeper is given is asked of the function the server uses, and the server's call is read from its
+ * source, since the run itself needs an engine and an editor to play it.
  */
-function testAKeptRunUnderASlotCommandLeavesItsSlotToTheCommand(): void {
+async function testAKeptRunUnderASlotCommandLeavesItsSlotToTheCommand(): Promise<void> {
   const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  assert.match(source, /slot\.delegated\s*\?\s*\{\}\s*:\s*\{\s*slot:/, 'the keeper is given no slot');
-  assert.match(source, /slot\.leave\(launched\.pid\)/, 'and the slot follows the game');
+  assert.match(source, /\.\.\.keeperSlotOf\(slot, /, 'the server asks it for the keeper');
+  assert.match(source, /slot\.leave\(launched\.pid\)/, 'and lets the slot follow the game');
+  assert.deepEqual(keeperSlotOf({ lock: '/s/0.lock', from: 7, delegated: true }, 'a game'), {});
+  assert.deepEqual(keeperSlotOf({ lock: '/s/0.lock', from: 7, delegated: false }, 'a game'), {
+    slot: { lock: '/s/0.lock', from: 7, by: 'a game' },
+  });
+  await withASlotCommand({}, async (command) => {
+    const slot = await slotForCall(true);
+    assert.deepEqual(keeperSlotOf(slot, 'a game'), {}, 'a granted slot is not the keeper’s');
+    slot.release();
+    await command.untilEof();
+  });
+}
+
+/**
+ * An engine started after the grant never holds the command's input open: a pipe reads end of
+ * input once every handle to its write end is closed, so an engine inheriting it would keep the
+ * slot after the release for as long as the engine ran.
+ */
+async function testALiveEngineDoesNotHoldTheCommandsInputOpen(): Promise<void> {
+  await withASlotCommand({}, async (command) => {
+    const slot = await slotForCall();
+    const engine = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      slot.release();
+      await command.untilEof();
+      assert.equal(alive(engine.pid ?? 0), true, 'the engine still runs when the command has seen the end');
+    } finally {
+      engine.kill();
+    }
+  });
 }
 
 /** A command of several engines asks once and gives the slot back when it is done. */
@@ -80900,8 +80933,10 @@ async function testAKilledGdharnessLetsTheCommandSeeEndOfInput(): Promise<void> 
       assert.deepEqual(grantEvents(command), ['start'], 'held while its holder lives');
       const commandPid = command.entries()[0]?.pid ?? 0;
       holder.kill();
-      // Windows ends a process's children with it, so the command is gone at once and never reads
-      // the end of its input. Elsewhere it reads it. Either way nothing holds the slot on.
+      // On Windows libuv puts every child that is not detached in a job object that ends it when
+      // its parent goes, so the command is gone at once and never reads the end of its input.
+      // Detaching it would read the end but leaves its console children windows of their own.
+      // Elsewhere it reads the end. Either way nothing holds the slot on.
       const gone = Date.now() + 15_000;
       while (alive(commandPid) && !grantEvents(command).includes('eof')) {
         assert.ok(Date.now() < gone, 'the command still holds the slot after its gdharness was killed');
@@ -115901,6 +115936,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotCommandSeesEndOfInputWhenAServerStartLetsGo,
   testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait,
   testAKeptRunUnderASlotCommandLeavesItsSlotToTheCommand,
+  testALiveEngineDoesNotHoldTheCommandsInputOpen,
   testASlotCommandIsAskedOnceForACommandOfSeveralEngines,
   testASlotCommandServesTheSlotsOfATestRun,
   testAWaitForAGrantIsSaidToTheCallThatWaits,

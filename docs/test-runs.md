@@ -793,7 +793,9 @@ double quotes, with the quotes taken out.
   gdharness never falls back to taking a slot itself.
 - The command keeps the slot until its standard input ends. gdharness closes it once the engine has
   gone, or the take is let go for any other reason, a cancelled wait included. A gdharness that is
-  killed closes it too, and on Windows the command ends with it. gdharness waits 5 seconds for the
+  killed closes it too, except on Windows, where the system ends the command with gdharness instead
+  (every child that is not detached is in a job that ends it with its parent), so it never reads the
+  end of its input and must free the slot when it is ended. gdharness waits 5 seconds for the
   command to exit, then ends it.
 - A game that outlives the call keeps the slot until its process has gone. The slot is not handed
   to a keeper.

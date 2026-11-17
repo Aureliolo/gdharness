@@ -2472,6 +2472,18 @@ export async function slotForCall(game = false, project?: string): Promise<CallS
   };
 }
 
+/**
+ * What a run's record says of its slot for the keeper that holds the run, taken from [param slot]
+ * and named [param by]. A delegate command's slot is the command's, so the keeper has none to take
+ * over and the record carries none.
+ */
+export function keeperSlotOf(
+  slot: Pick<CallSlot, 'lock' | 'from' | 'delegated'>,
+  by: string,
+): { slot?: { lock: string; from: number; by: string } } {
+  return slot.delegated ? {} : { slot: { lock: slot.lock, from: slot.from, by } };
+}
+
 /** A slot taken for a call: see {@link slotForCall}. */
 export interface CallSlot {
   readonly lock: string;

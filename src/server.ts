@@ -151,7 +151,7 @@ import {
   runEngine,
   startedUntilItRuns,
 } from './engine-run.js';
-import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
+import { type CallSlot, keeperSlotOf, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -15585,12 +15585,7 @@ class GodotServer {
           ...this.servedBy(),
           ...this.profileOfAKeptRun(profile, engineCalls),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
-          // A command's slot is held by the command, so the keeper has none to take over.
-          ...(slot.delegated
-            ? {}
-            : {
-                slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
-              }),
+          ...keeperSlotOf(slot, `a game of ${projectPath} editor_run started`),
         },
         ...(desktop === undefined ? {} : { desktop }),
       });
