@@ -809,6 +809,13 @@ The headless operations a server runs itself start the engine as the server's ch
 child still inherits the bit. A project that wants dumps from those runs gdharness under Bun. A
 regression reads each engine's mode from outside it, under both runtimes.
 
+### Engines that die as they start
+
+Godot 4.7.2 on Windows can die with 0xC06D007F in its constructor, in a race of its input library's
+hook. gdharness starts such an engine again, up to three starts, when it printed nothing or only its
+banner. This covers only the engines gdharness starts itself that have this race, such as the official
+4.7.2 build. A game's exported build and an engine started some other way are unchanged.
+
 ### Writing the note
 
 The keeper writes the note once the game is up, and the exit into it when the game ends. It is the

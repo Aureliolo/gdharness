@@ -30,7 +30,7 @@ import {
   helperStep,
   spawnOnDesktop,
 } from './desktop.js';
-import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
+import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
 import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
@@ -44,6 +44,7 @@ import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal, priorityOf } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
+import { diedAsItStarted, printedLinesOf } from './start-race.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
 
 /** Most engines a run starts, whatever the machine has. */
@@ -410,8 +411,9 @@ export function endingWithRunner(
  *
  * [param holds] is told each reading of what the engine holds.
  *
- * An engine that dies as it starts, with a Windows exception status before printing a line, is
- * started again, as a headless call's is: a suite run failed on 0xC06D007F with every suite unrun.
+ * An engine that dies as it starts, with a Windows exception status before printing a line (or past
+ * its banner, for 0xC06D007F), is started again, as a headless call's is: a suite run failed on
+ * 0xC06D007F with every suite unrun.
  */
 export async function watchedEngine(
   launch: EngineLaunch,
@@ -430,7 +432,8 @@ export async function watchedEngine(
     return await startedUntilItRuns(
       () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds, shares),
       undefined,
-      (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
+      (end) =>
+        end.ended === null && end.signal === null && diedAsItStarted(end.code, printedLinesOf(readLog(log))),
     );
   } finally {
     await keepPipelineCache(user, launch.projectPath, launch.godotPath);

@@ -12,7 +12,7 @@
  * Both are handed their spec down stdin, never on the command line: see `SentSpec`.
  */
 
-import { appendFileSync, closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -49,6 +49,13 @@ import {
   writeProfileFile,
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
+import {
+  diedAsItStarted,
+  ENGINE_STARTS,
+  printedLinesOf,
+  START_RETRY_MS,
+  START_WINDOW_MS,
+} from './start-race.js';
 import { followSuccessor } from './successor.js';
 import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
@@ -651,6 +658,92 @@ function recordTheEnd(ended: KeptEnd): void {
   }
 }
 
+/** The size of [param file], or 0 for one not there yet. */
+function sizeOf(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** The lines [param file] holds from byte [param offset] on, without the empty ones. */
+function printedSince(file: string, offset: number): string[] {
+  try {
+    return printedLinesOf(readFileSync(file).subarray(offset).toString('utf8'));
+  } catch {
+    return [];
+  }
+}
+
+/** One start of the game, as far as the loop that starts it again needs it. */
+interface KeptStart {
+  readonly child: ChildProcess;
+  readonly pid: number;
+  readonly whole: WholeExit;
+  readonly stopFile: string;
+  readonly exitFile: string;
+  readonly own: string | null;
+  readonly spawnedAt: number;
+}
+
+/** How a start ended: its exit code, whole where the helper or the runtime knows more of it. */
+async function endOf(
+  start: KeptStart,
+  exited: ReturnType<typeof exitOf> = exitOf(start.child),
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  const told = await exited;
+  return {
+    code: start.exitFile === '' ? start.whole(told.code) : helperExit(start.exitFile, start.whole(told.code)),
+    signal: told.signal,
+  };
+}
+
+/**
+ * Starts the game again for as long as it dies as it starts, which a second start does not repeat:
+ * see {@link diedAsItStarted}. Its output is read from where this start's began, since the file
+ * keeps every start's. Returns the last start, and how its predecessors ended.
+ */
+async function startedUntilItRuns(
+  first: KeptStart,
+  firstEnd: Awaited<ReturnType<typeof endOf>>,
+  again: () => Promise<KeptStart | null>,
+  printed: () => string[] | null,
+  ender: Ender,
+  moved: (next: KeptStart, died: RestartedFrom) => void,
+): Promise<{ last: KeptStart; end: Awaited<ReturnType<typeof endOf>> }> {
+  let last = first;
+  let end = firstEnd;
+  const stopped = (): boolean => ender.stop;
+  for (let starts = 1; starts < ENGINE_STARTS && !stopped(); starts += 1) {
+    const lines = printed();
+    // The engine's own output may go to a file of its own, which leaves this one empty for a run
+    // that crashed long after its start, so the time since the start counts too.
+    if (
+      lines === null ||
+      Date.now() - last.spawnedAt > START_WINDOW_MS ||
+      !diedAsItStarted(end.code, lines)
+    ) {
+      break;
+    }
+    const died: RestartedFrom = {
+      pid: last.pid,
+      endedAt: Date.now(),
+      ...(end.code === null ? {} : { exitCode: end.code }),
+    };
+    discard(last.own);
+    await delay(START_RETRY_MS * 2 ** (starts - 1));
+    const next = stopped() ? null : await again();
+    if (next === null) {
+      break;
+    }
+    moved(next, died);
+    last = next;
+    end = await endOf(next);
+  }
+  return { last, end };
+}
+
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
@@ -659,6 +752,8 @@ async function keep(): Promise<void> {
   const debuggerPeer = await openDebuggerFor(run, profiled);
   const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
   const toStart = specToStart(spec, exitNotes, debuggerPeer);
+  const output = run === undefined ? spec.output : run.transcript;
+  let from = output === undefined ? 0 : sizeOf(output);
   const { started, own, stopFile, exitFile, keeperStarted, spawnedAt } = await startTheGame(
     spec,
     toStart,
@@ -682,11 +777,58 @@ async function keep(): Promise<void> {
   await sayPid(pid);
   const slot = run?.slot;
   await handTheSlot(slot, keeperStarted, pid);
-  const told = await exited;
-  const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
-  const exitedAt = Date.now();
-  const note: RunRecord | null =
+  const firstStart: KeptStart = { child, pid, whole, stopFile, exitFile, own, spawnedAt };
+  let kept: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
+  const { last: lastStart, end } = await startedUntilItRuns(
+    firstStart,
+    await endOf(firstStart, exited),
+    async () => {
+      from = output === undefined ? 0 : sizeOf(output);
+      const next = await startTheGame(spec, toStart, run);
+      if ('error' in next.started) {
+        discard(next.own);
+        return null;
+      }
+      const nextChild = next.started;
+      return {
+        child: nextChild.child,
+        pid: nextChild.pid,
+        whole: nextChild.whole,
+        stopFile: next.stopFile,
+        exitFile: next.exitFile,
+        own: next.own,
+        spawnedAt: next.spawnedAt,
+      };
+    },
+    // Null for a start whose output goes nowhere, which says nothing of how far it got.
+    () => (output === undefined ? null : printedSince(output, from)),
+    ender,
+    (next, died) => {
+      ender.end = endingTheGame(next.child, next.stopFile);
+      if (kept !== null) {
+        kept = {
+          ...kept,
+          pid: next.pid,
+          startedBy: Date.now(),
+          restartedFrom: [...(kept.restartedFrom ?? []), died],
+        };
+        amendNoteIfItCan(kept);
+      }
+      if (slot !== undefined) {
+        void startTimesOf([next.pid]).then((times) => {
+          const startedAt = times.get(next.pid);
+          if (startedAt !== undefined) {
+            nameSlotEngine(slot.lock, process.pid, { pid: next.pid, started: startedAt });
+          }
+        });
+      }
+    },
+  );
+  const { pid: lastPid, spawnedAt: lastSpawnedAt, own: lastOwn } = lastStart;
+  const { code, signal } = end;
+  const exitedAt = Date.now();
+  const note = kept;
   if (note !== null) {
     amendNoteIfItCan({ ...note, endingAt: exitedAt });
   }
@@ -695,14 +837,14 @@ async function keep(): Promise<void> {
   const following: Following = { command: spec.command, exitNotes, transcript: run?.transcript, slot, ender };
   // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
   // followed, and the run ends with the first process's exit.
-  const looked = note === null ? null : lookForSuccessor(following, pid, spawnedAt, exitedAt);
+  const looked = note === null ? null : lookForSuccessor(following, lastPid, lastSpawnedAt, exitedAt);
   // The profile is finished from everything the game sent, which is read after its exit is told.
   if (debuggerPeer !== null) {
     await debuggerPeer.drained(DRAIN_MS);
   }
   profiled?.finish();
   const last = await followRestarts(
-    { note, pid, code, signal: told.signal, notTold: false, exitedAt },
+    { note, pid: lastPid, code, signal, notTold: false, exitedAt },
     looked,
     following,
   );
@@ -712,7 +854,7 @@ async function keep(): Promise<void> {
   }
   debuggerPeer?.close();
   listening?.close();
-  discard(own, exitNotes);
+  discard(lastOwn, exitNotes);
   process.exit(0);
 }
 

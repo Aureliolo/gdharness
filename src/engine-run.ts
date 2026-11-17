@@ -25,8 +25,16 @@ import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
+import type { SpawnedGame } from './godot-process.js';
 import { belowNormal } from './priority.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
+import {
+  CONSOLE_CLOSED,
+  diedAsItStarted,
+  ENGINE_STARTS,
+  START_RETRY_MS,
+  START_WINDOW_MS,
+} from './start-race.js';
 import { windowsStatusOf } from './suite-judge.js';
 import { holdExit } from './whole-exit.js';
 
@@ -37,44 +45,49 @@ export interface EngineRun {
   readonly exitSignal: string | null;
   /** Why this server ended the run or could not start it, when it did either. */
   readonly failure: string | null;
-  /** How many starts before this one crashed before printing a line: see {@link crashedAtStart}. */
+  /** How many starts before this one crashed before printing past the banner: see {@link crashedAtStart}. */
   readonly crashedStarts?: number;
 }
 
-/** How many times an engine that crashes as it starts is started in all. */
-export const ENGINE_STARTS = 3;
-/** The wait before the second start, doubled before each one after it. */
-const START_RETRY_MS = 500;
-
-/** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
-export const CONSOLE_CLOSED = 0xc000013a;
-
-/**
- * The Windows statuses that end an engine for a reason a second start would meet again: its console
- * closed or Ctrl+C, and a library it needs that is not there.
- */
-const NOT_A_START_RACE = new Set([CONSOLE_CLOSED, 0xc0000135]);
+export { CONSOLE_CLOSED, ENGINE_STARTS };
 
 /**
  * Whether [param run] is an engine that died as it started: ended by a Windows exception status
- * before it printed its banner. A loaded machine makes Godot do that now and then (0xC06D007F, a
- * race in its input library's hook), and a headless call failed on it with "no output at all". It
- * never reached the project, so starting it again repeats nothing.
+ * before it printed a line, or, for the status of the race, after its banner alone. A loaded machine
+ * makes Godot do that now and then (0xC06D007F), and a headless call failed on it with "no output at
+ * all". The engine's other threads run on while Windows reports the crash, so the banner can get out
+ * first. The engine never reached the project, so starting it again repeats nothing.
  */
 export function crashedAtStart(run: EngineRun): boolean {
   return (
-    run.failure === null &&
-    run.exitSignal === null &&
-    diedAsItStarted(run.exitCode, run.log.everything().length === 0)
+    run.failure === null && run.exitSignal === null && diedAsItStarted(run.exitCode, linesOfLog(run.log))
   );
 }
 
 /**
- * Whether an engine that exited with [param code], and that nothing here ended, died as it started:
- * see {@link crashedAtStart}.
+ * Whether the engine behind [param game], a run a caller waits on that this server did not end, died
+ * as it started: within {@link START_WINDOW_MS} of its start, since its output is no proof of how
+ * far a run that lasted got.
  */
-export function diedAsItStarted(code: number | null, printedNothing: boolean): boolean {
-  return code !== null && code >>> 0 >= 0xc0000000 && !NOT_A_START_RACE.has(code >>> 0) && printedNothing;
+export function diedAtStartOf(game: SpawnedGame): boolean {
+  return (
+    game.exitSignal === null &&
+    (game.endedAt ?? Date.now()) - game.startedAt <= START_WINDOW_MS &&
+    diedAsItStarted(game.exitCode, linesOfLog(game.log))
+  );
+}
+
+/**
+ * The lines [param log] holds. It keeps a line with its severity word cut off, so one that was not
+ * info gets it back, and a line that cannot be the banner stays one that is not.
+ */
+function linesOfLog(log: GameLog): string[] {
+  return log
+    .everything()
+    .flatMap((entry) => [
+      entry.severity === 'info' ? entry.text : `${entry.severity}: ${entry.text}`,
+      ...entry.detail,
+    ]);
 }
 
 /**
@@ -355,5 +368,5 @@ export function howItEnded(
   const crashed = run.crashedStarts ?? 0;
   return crashed === 0
     ? exitCodeText(run.exitCode)
-    : `${exitCodeText(run.exitCode)}, and printed nothing on any of its ${String(crashed + 1)} starts`;
+    : `${exitCodeText(run.exitCode)}, and printed nothing past its banner on any of its ${String(crashed + 1)} starts`;
 }

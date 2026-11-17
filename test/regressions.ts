@@ -662,6 +662,7 @@ import {
   shareOf,
   spreadOptionsOf,
 } from '../src/spread-run.js';
+import { diedAsItStarted, printedLinesOf } from '../src/start-race.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import {
   EVERY_FILE,
@@ -795,6 +796,7 @@ import {
 } from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
+import { CRASHING_ENGINE_SOURCE, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
 import { endEnginesUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
@@ -42952,7 +42954,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
   assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
   assert.equal(
     howItEnded(always.ran),
-    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing past its banner on any of its 3 starts',
   );
   const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
   assert.deepEqual(
@@ -43007,7 +43009,9 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
     );
     const verdict = judgeEngine(readRun(''), { suites: [], expected: { errors: {}, warnings: {} } }, end);
     assert.ok(
-      verdict.notes.includes('It died as it started once, before printing a line, and was started again.'),
+      verdict.notes.includes(
+        'It died as it started once, before printing past its banner, and was started again.',
+      ),
       `and its run says so: ${verdict.notes.join(' | ')}`,
     );
     const printedFirst = await watchedEngine(
@@ -43031,6 +43035,343 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
     );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+const START_RACE_STATUS = 0xc06d007f;
+
+/**
+ * Godot's input library hook can make an engine die with 0xC06D007F in its constructor while its
+ * main thread goes on to print the banner. That start is started again, and only that start: a line
+ * past the banner, a status the race does not raise and a status of a closed console or a missing
+ * library are each the engine's own answer.
+ */
+function testAnEngineThatDiesAfterItsBannerIsStartedAgain(): void {
+  const esc = String.fromCharCode(0x1b);
+  const dies = (code: number | null, printed: string): boolean =>
+    diedAsItStarted(code, printedLinesOf(printed));
+  const banner = `${ENGINE_BANNER_LINE}\n`;
+  assert.deepEqual(
+    [
+      dies(START_RACE_STATUS, banner),
+      dies(START_RACE_STATUS, ENGINE_BANNER_LINE),
+      dies(START_RACE_STATUS, banner.replace('\n', '\r\n')),
+      dies(START_RACE_STATUS, `${banner}\n`),
+      dies(
+        START_RACE_STATUS,
+        `${esc}[38;5;39mGodot Engine${esc}[0m v4.7.2.stable.official.ed1daf0bf - ${esc}[4mhttps://godotengine.org${esc}[0m\n`,
+      ),
+      dies(
+        START_RACE_STATUS,
+        'Godot Engine v4.7.2.stable.official.ed1daf0bf (2026-11-06 08:00:00 UTC) - https://godotengine.org\n',
+      ),
+      dies(START_RACE_STATUS, ''),
+    ],
+    [true, true, true, true, true, true, true],
+    'the banner alone, as the engine prints it, with or without its newline, colour codes or build time',
+  );
+  assert.deepEqual(
+    [
+      dies(START_RACE_STATUS, `${banner}ERROR: no such scene\n`),
+      dies(START_RACE_STATUS, `${banner}${banner}`),
+      dies(START_RACE_STATUS, 'Godot Engine v4.7.2.stable.official\n'),
+      dies(START_RACE_STATUS, 'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://example.com\n'),
+      dies(
+        START_RACE_STATUS,
+        'a game said: Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org\n',
+      ),
+      dies(START_RACE_STATUS, 'ready\n'),
+    ],
+    [false, false, false, false, false, false],
+    'any other line makes the run its own answer, and the banner is matched whole',
+  );
+  assert.deepEqual(
+    [
+      dies(0xc0000005, banner),
+      dies(0xc0000005, ''),
+      dies(0xc000013a, ''),
+      dies(0xc0000135, ''),
+      dies(0xc000013a, banner),
+      dies(0xc0000135, banner),
+      dies(1, banner),
+      dies(0, banner),
+      dies(null, banner),
+    ],
+    [false, true, false, false, false, false, false, false, false],
+    'another exception status is started again only before its banner, since the race is the one status seen to print it first',
+  );
+  const run = (exitCode: number | null, printed: string, extra: Partial<EngineRun> = {}): EngineRun => {
+    const log = new GameLog();
+    log.append('stdout', Buffer.from(printed));
+    log.finish();
+    return { log, exitCode, exitSignal: null, failure: null, ...extra };
+  };
+  assert.deepEqual(
+    [
+      crashedAtStart(run(START_RACE_STATUS, banner)),
+      crashedAtStart(run(START_RACE_STATUS, `${banner}ERROR: x\n`)),
+      crashedAtStart(run(START_RACE_STATUS, `ERROR: ${ENGINE_BANNER_LINE}\n`)),
+      crashedAtStart(run(START_RACE_STATUS, banner, { failure: 'it ran past its ten minutes' })),
+      crashedAtStart(run(START_RACE_STATUS, banner, { exitSignal: 'SIGTERM' })),
+      crashedAtStart(run(START_RACE_STATUS, '')),
+    ],
+    [true, false, false, false, false, true],
+    'a run is read as its log keeps it, and one this server ended is never started again',
+  );
+}
+
+/** How many starts [param marker] noted whose arguments held [param part]. */
+function startsNoted(marker: string, part: string): number {
+  return existsSync(`${marker}.log`)
+    ? readFileSync(`${marker}.log`, 'utf8')
+        .split('\n')
+        .filter((line) => line.includes(part)).length
+    : 0;
+}
+
+/** A headless call's engine that dies after its banner is started again on its own slot. */
+async function testAHeadlessEngineThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-crash-'));
+  const marker = join(scratch, 'marker');
+  const before = { ...process.env };
+  Object.assign(process.env, { GDH_CRASH_MARKER: marker, GDH_CRASH_WHEN: '--headless' });
+  // The server and the command prepare this as they start. Without it Bun reports the low byte.
+  await prepareWholeExits();
+  try {
+    const ran = await runEngine(await crashingEngine(), ['--headless']);
+    assert.deepEqual(
+      [ran.exitCode, ran.crashedStarts, startsNoted(marker, '--headless')],
+      [0, 1, 2],
+      `the engine is started again after its banner and a crash: ${JSON.stringify(ran)}`,
+    );
+    const printedMore = join(scratch, 'more');
+    Object.assign(process.env, { GDH_CRASH_MARKER: printedMore, GDH_CRASH_STATUS: '3221225477' });
+    const another = await runEngine(await crashingEngine(), ['--headless']);
+    assert.deepEqual(
+      [another.exitCode, another.crashedStarts, startsNoted(printedMore, '--headless')],
+      [0xc0000005, undefined, 1],
+      "an access violation after the banner is the engine's own answer",
+    );
+  } finally {
+    for (const key of ['GDH_CRASH_MARKER', 'GDH_CRASH_WHEN', 'GDH_CRASH_STATUS']) {
+      if (before[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = before[key];
+      }
+    }
+    sweep(scratch);
+  }
+}
+
+/** A test run's engine, watched, that dies after its banner is started again. */
+async function testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-watched-'));
+  try {
+    const marker = join(scratch, 'started');
+    const directory = join(scratch, 'engine');
+    mkdirSync(join(directory, 'user'), { recursive: true });
+    const lock = join(scratch, '0.lock');
+    writeFileSync(lock, '');
+    const log = join(directory, 'engine.log');
+    const launch = {
+      godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      projectPath: scratch,
+      deadlineSeconds: 60,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(
+      launch,
+      lock,
+      [
+        '/d',
+        '/c',
+        `if exist ${marker} (echo Godot Engine & echo ready) else (type nul > ${marker} & echo ${ENGINE_BANNER_LINE}& exit /b -1066598273)`,
+      ],
+      directory,
+      log,
+      30,
+    );
+    assert.deepEqual(
+      [end.code, end.crashedStarts],
+      [0, 1],
+      `an engine that printed its banner and died is started again: ${JSON.stringify(end)}`,
+    );
+    const other = await watchedEngine(
+      launch,
+      lock,
+      ['/d', '/c', `echo ${ENGINE_BANNER_LINE}& echo ERROR: no scene& exit /b -1066598273`],
+      directory,
+      log,
+      30,
+    );
+    assert.deepEqual(
+      [other.code, other.crashedStarts],
+      [0xc06d007f, undefined],
+      'one that printed a line past its banner is its own answer',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A run a keeper holds, or an editor, that dies after its banner is started again, and the run's
+ * note follows the new process.
+ */
+async function testAKeptRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-kept-'));
+  const runtime = join(scratch, 'runtime');
+  const project = join(scratch, 'project');
+  const marker = join(scratch, 'marker');
+  const met = new MetProcesses();
+  try {
+    mkdirSync(project);
+    mkdirSync(join(runtime, 'runs'), { recursive: true });
+    const answer = join(scratch, 'launched.json');
+    const launcher = join(scratch, 'launch.mjs');
+    const spec = {
+      command: await crashingEngine(),
+      args: ['--headless', '--path', project],
+      run: { transcript: join(runtime, 'runs', 'run-1.log'), startedAt: Date.now(), projectPath: project },
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        GDHARNESS_RUNTIME_DIR: runtime,
+        GDH_CRASH_MARKER: marker,
+        GDH_CRASH_WHEN: '--headless',
+        GDH_HOLD: '1',
+      },
+    });
+    const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+    const first = get(said, 'pid');
+    assert.ok(
+      typeof first === 'number',
+      `the launch answers with a pid: ${JSON.stringify(said)} ${ran.stderr}`,
+    );
+    let current = readRunRecord(project, [runtime]);
+    for (let waited = 0; waited < 30_000 && (current?.restartedFrom ?? []).length === 0; waited += 250) {
+      await delay(250);
+      current = readRunRecord(project, [runtime]);
+    }
+    const next = current?.pid;
+    if (typeof next === 'number') {
+      await met.meet(next);
+    }
+    assert.deepEqual(
+      [
+        (current?.restartedFrom ?? []).map((one) => [one.pid, one.exitCode]),
+        startsNoted(marker, '--headless'),
+      ],
+      [[[first, START_RACE_STATUS]], 2],
+      `the run's note follows the new process: ${JSON.stringify(current)}`,
+    );
+    assert.ok(typeof next === 'number' && next !== first && isAlive(next), 'which is running');
+  } finally {
+    await met.end();
+    sweep(scratch);
+  }
+}
+
+/** An `editor_run check` boot that dies after its banner is started again. */
+async function testABootCheckThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  const real = resolveGodotPath();
+  if (process.platform !== 'win32' || real === null) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT'] && real === null) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-boot-'));
+  const project = join(scratch, 'project');
+  const marker = join(scratch, 'marker');
+  try {
+    mkdirSync(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Boot"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    const crashingStandIn = await crashingEngine();
+    await withStdioServer(
+      async (call) => {
+        const checked: unknown = JSON.parse(
+          await call('editor_run', { projectPath: project, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        assert.deepEqual(
+          [get(checked, 'booted'), get(checked, 'exitCode'), startsNoted(marker, '--quit-after')],
+          [true, 0, 2],
+          `the boot is started again after its banner and a crash: ${JSON.stringify(checked)}`,
+        );
+      },
+      {
+        GODOT_PATH: crashingStandIn,
+        GDH_REAL_ENGINE: real,
+        GDH_CRASH_MARKER: marker,
+        GDH_CRASH_WHEN: '--quit-after',
+      },
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/** A `project_test` run whose engine dies after its banner is started again. */
+async function testATestRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null || process.platform !== 'win32') {
+    return;
+  }
+  const { project, slots, checkouts } = commandTestProject(engines.godotPath, engines.gdunit);
+  const marker = join(project, 'marker');
+  try {
+    const crashingStandIn = await crashingEngine();
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: 'res://tests/ok_test.gd' } },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.deepEqual(
+          [get(answer, 'verdict'), startsNoted(marker, '--suites-in')],
+          ['passed', 2],
+          `the suites are run again after the engine's banner and a crash: ${blocks.join('\n')}`,
+        );
+      },
+      {
+        GODOT_PATH: crashingStandIn,
+        GDH_REAL_ENGINE: engines.godotPath,
+        GDH_CRASH_MARKER: marker,
+        GDH_CRASH_WHEN: '--suites-in',
+      },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
   }
 }
 
@@ -84068,6 +84409,7 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
     [
       join('src', 'desktop.ts'),
       join('src', 'spawn.ts'),
+      join('test', 'support', 'crashing-engine.ts'),
       join('test', 'support', 'hidden-spawn.ts'),
       join('test', 'support', 'renderer-less-engine.ts'),
     ],
@@ -84081,6 +84423,14 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
     standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
     [],
     'every start the stand-in engine makes passes windowsHide',
+  );
+  // The crashing stand-in is C# text, so its starts pass CreateNoWindow where Node's pass windowsHide.
+  const crashingStarts = CRASHING_ENGINE_SOURCE.split(['Process', 'Start('].join('.')).length - 1;
+  assert.ok(crashingStarts >= 1, 'the crashing stand-in starts the engine it hands a start to');
+  assert.equal(
+    CRASHING_ENGINE_SOURCE.split('CreateNoWindow = true;').length - 1,
+    crashingStarts,
+    'every start the crashing stand-in makes passes CreateNoWindow',
   );
 
   // Godot's own: `OS.create_process(path, arguments, open_console)` and
@@ -113209,6 +113559,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine,
   testAnEngineRunSaysHowItEnded,
   testAnEngineThatCrashesAsItStartsIsStartedAgain,
+  testAnEngineThatDiesAfterItsBannerIsStartedAgain,
+  testAHeadlessEngineThatDiesAfterItsBannerIsStartedAgain,
+  testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain,
+  testAKeptRunThatDiesAfterItsBannerIsStartedAgain,
+  testABootCheckThatDiesAfterItsBannerIsStartedAgain,
+  testATestRunThatDiesAfterItsBannerIsStartedAgain,
   testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,

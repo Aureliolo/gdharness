@@ -140,7 +140,15 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import { CONSOLE_CLOSED, type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
+import {
+  CONSOLE_CLOSED,
+  diedAtStartOf,
+  type EngineRun,
+  exitCodeText,
+  howItEnded,
+  runEngine,
+  startedUntilItRuns,
+} from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
@@ -10092,11 +10100,63 @@ class GodotServer {
 
   /** A test run's engine started and watched until it ends, is cut off or is stopped for an autoload. */
   private async testRunning(prepared: TestPrepared): Promise<ToolResponse> {
-    const { project, needing, windowed, engine, cmdArgs, timeoutMs, ours, userData, helperFiles } = prepared;
+    const { project, needing, windowed, ours, userData, helperFiles } = prepared;
     const onDesktop = windowed && process.platform === 'win32';
     // As gdharness test does: a drawing run starts with the shaders the last run on this engine
     // build compiled, and leaves its own for the next. Neither throws: a fault is a cold start.
-    await seedPipelineCache(userData, project.value.path, engine.value);
+    await seedPipelineCache(userData, project.value.path, prepared.engine.value);
+    const autoloaded = scriptsAutoloaded(project.value.path);
+    // An engine that died as it started never reached the project, so the run is started again.
+    const attempt = await startedUntilItRuns(
+      () => this.testEngineRan(prepared, onDesktop, autoloaded),
+      callSignal(),
+      (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
+    );
+    const { run, console, timedOut, silentForMs, saidAnything, stopped } = attempt;
+    // The helper's own failure reaches only its file, and the exit it leaves says nothing.
+    // Or its pid never came, which is a helper that hung until the run's limit ended it.
+    const helperFailed = onDesktop
+      ? (helperFailure(helperFiles.error) ??
+        (existsSync(helperFiles.pid) ? null : `it never started, and ${helperStep(helperFiles.step)}`))
+      : null;
+    if (helperFailed !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(
+        `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
+      );
+    }
+    const onABox = onDesktop ? desktopBoxEnding(run.log.all) : null;
+    if (onABox !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(`The tests did not finish: ${onABox}`);
+    }
+    return await this.testRead({
+      ...prepared,
+      run,
+      console,
+      timedOut,
+      silentForMs,
+      saidAnything,
+      autoloaded,
+      stopped,
+    });
+  }
+
+  /** One start of a test run's engine, watched until it ends, is cut off or is stopped for an autoload. */
+  private async testEngineRan(
+    prepared: TestPrepared,
+    onDesktop: boolean,
+    autoloaded: ReturnType<typeof scriptsAutoloaded>,
+  ): Promise<{
+    readonly run: SpawnedTest;
+    readonly console: Buffer[];
+    readonly timedOut: boolean;
+    readonly silentForMs: number;
+    readonly saidAnything: boolean;
+    readonly stopped: { for: { name: string; path: string } | null };
+    readonly crashedStarts?: number;
+  }> {
+    const { project, engine, cmdArgs, timeoutMs, userData, helperFiles } = prepared;
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(
@@ -10128,7 +10188,6 @@ class GodotServer {
       saidAnything = true;
     });
     const reporting = this.reportTestProgress(run.log);
-    const autoloaded = scriptsAutoloaded(project.value.path);
     let silentForMs = 0;
     const stopped: { for: { name: string; path: string } | null } = { for: null };
     const timedOut = await new Promise<boolean>((resolve) => {
@@ -10166,33 +10225,7 @@ class GodotServer {
     }
     await run.settled;
     await keeping;
-    // The helper's own failure reaches only its file, and the exit it leaves says nothing.
-    // Or its pid never came, which is a helper that hung until the run's limit ended it.
-    const helperFailed = onDesktop
-      ? (helperFailure(helperFiles.error) ??
-        (existsSync(helperFiles.pid) ? null : `it never started, and ${helperStep(helperFiles.step)}`))
-      : null;
-    if (helperFailed !== null) {
-      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
-      return this.createErrorResponse(
-        `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
-      );
-    }
-    const onABox = onDesktop ? desktopBoxEnding(run.log.all) : null;
-    if (onABox !== null) {
-      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
-      return this.createErrorResponse(`The tests did not finish: ${onABox}`);
-    }
-    return await this.testRead({
-      ...prepared,
-      run,
-      console,
-      timedOut,
-      silentForMs,
-      saidAnything,
-      autoloaded,
-      stopped,
-    });
+    return { run, console, timedOut, silentForMs, saidAnything, stopped };
   }
 
   /** A test run's report, engine log and console read once the engine has ended. */
@@ -16317,31 +16350,37 @@ class GodotServer {
       userArgs,
       engineArgs,
     });
-    const boot = await this.spawnGame(
-      godotPath,
-      cmdArgs,
-      needsItsOwnProcess(asked)
-        ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
-        : undefined,
-      undefined,
-      projectPath,
+    const env = needsItsOwnProcess(asked)
+      ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
+      : undefined;
+    // An engine that died as it started never reached the project, so the boot is started again.
+    const { boot, hung } = await startedUntilItRuns(
+      async (): Promise<{
+        readonly boot: Awaited<ReturnType<GodotServer['spawnGame']>>;
+        readonly hung: boolean;
+        readonly crashedStarts?: number;
+      }> => {
+        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, projectPath);
+        const hungUp = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            started.process.kill();
+            resolve(true);
+          }, timeoutMs);
+          started.process.once('exit', () => {
+            clearTimeout(timer);
+            resolve(false);
+          });
+          started.process.once('error', () => {
+            clearTimeout(timer);
+            resolve(false);
+          });
+        });
+        await started.settled;
+        return { boot: started, hung: hungUp };
+      },
+      callSignal(),
+      (one) => !one.hung && diedAtStartOf(one.boot),
     );
-
-    const hung = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        boot.process.kill();
-        resolve(true);
-      }, timeoutMs);
-      boot.process.once('exit', () => {
-        clearTimeout(timer);
-        resolve(false);
-      });
-      boot.process.once('error', () => {
-        clearTimeout(timer);
-        resolve(false);
-      });
-    });
-    await boot.settled;
 
     const errors = boot.log.count('error');
     const warnings = boot.log.count('warning');

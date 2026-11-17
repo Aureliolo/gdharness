@@ -657,7 +657,7 @@ export interface EngineEnd {
    * that ran out from a fault in the engine.
    */
   readonly freeBytes?: number;
-  /** How many starts before this one died before printing a line, and were started again. */
+  /** How many starts before this one died before printing past the banner, and were started again. */
   readonly crashedStarts?: number;
   /** The most bytes the engine was read holding, above 0. Absent when no reading was. */
   readonly peakBytes?: number;
@@ -1289,7 +1289,7 @@ function engineNotes(printed: RunPrinted, handed: EngineAssignment, end: EngineE
   const crashedStarts = end.crashedStarts ?? 0;
   if (crashedStarts > 0) {
     notes.push(
-      `It died as it started ${crashedStarts === 1 ? 'once' : `${String(crashedStarts)} times`}, before printing a line, and was started again.`,
+      `It died as it started ${crashedStarts === 1 ? 'once' : `${String(crashedStarts)} times`}, before printing past its banner, and was started again.`,
     );
   }
   const pushErrorsFailed =
