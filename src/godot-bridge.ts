@@ -809,6 +809,7 @@ export class GodotBridge extends EventEmitter {
       info.addonDigest,
       shippedEditorDigest(),
       project === undefined || project === '' ? undefined : installedEditorDigest(project),
+      info.openedByAServer !== true,
     );
   }
 

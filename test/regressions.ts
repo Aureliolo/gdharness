@@ -7929,6 +7929,13 @@ function testAStaleNoteKnowsWhatARestartLoads(): void {
   assert.doesNotMatch(onDiskNew ?? '', /\bupgrade\b/, String(onDiskNew));
   const noProject = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest');
   assert.match(noProject ?? '', /Restart it with editor_launch restart/, String(noProject));
+  assert.doesNotMatch(noProject ?? '', /hidden: false/, 'an editor a server opened needs no argument');
+}
+
+/** The stale note of an editor no server opened says what its restart needs, since a plain one is refused without a window. */
+function testAStaleNoteOfAnEditorOpenedElsewhereNamesHiddenFalse(): void {
+  const note = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', undefined, true);
+  assert.match(note ?? '', /editor_launch restart.*pass hidden: false to accept one\./, String(note));
 }
 
 /**
@@ -9871,9 +9878,10 @@ async function testAnEditorAServerOpenedIsNotJudgedByItsWindow(): Promise<void> 
 }
 
 /**
- * An editor another editor started, of a hidden one, is not restarted into a window either, and the
- * addon hands its hiddenness on through the environment, since Godot's restart forwards neither
- * `--headless` nor the marker after `--`.
+ * An editor another editor started, of one on a server's hidden desktop, is not restarted into a
+ * window either. Godot's restart forwards neither `--headless` nor the marker after `--`, but the new
+ * editor inherits the environment and the desktop, so the addon reads it as hidden through
+ * `GDHARNESS_DESKTOP`, which a real window would need to see.
  */
 async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
   const { answer, asked } = await restartAStandIn({ hidden: true, started_by_an_editor: true }, {});
@@ -9883,19 +9891,11 @@ async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
   const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
   assert.match(
     addon,
-    /if is_hidden\(\):\n\t\tOS\.set_environment\(HIDDEN_VARIABLE, "1"\)/,
-    'a hidden editor puts the mark into the environment the next editor inherits',
+    /static func _on_the_hidden_desktop\(\) -> bool:\n\treturn OS\.get_name\(\) == "Windows" and not OS\.get_environment\(DESKTOP_VARIABLE\)\.is_empty\(\)/,
+    'an editor on the hidden desktop reads the variable it inherits',
   );
-  assert.match(
-    addon,
-    /^const HIDDEN_VARIABLE: String = "GDHARNESS_HIDDEN_EDITOR"$/m,
-    'the variable is declared',
-  );
-  assert.match(
-    addon,
-    /or not OS\.get_environment\(HIDDEN_VARIABLE\)\.is_empty\(\)/,
-    'and an editor reads that mark as hidden',
-  );
+  assert.match(addon, /^const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"$/m, 'named as the server sets it');
+  assert.equal(addon.includes('set_environment(DESKTOP_VARIABLE'), false, 'and never cleared or replaced');
 }
 
 /** Whether a restart is refused follows the hidden editor_status reports, and no other reading. */
@@ -110383,6 +110383,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestServerTakesNoRealEditorsPort,
   testAProjectUpgradedUnderTheServerIsSaid,
   testAStaleNoteKnowsWhatARestartLoads,
+  testAStaleNoteOfAnEditorOpenedElsewhereNamesHiddenFalse,
   testEveryDispatchedNameExistsOnBothSides,
   testEveryEngineParameterCanBeSent,
   testEveryToolParameterIsRead,

@@ -56,6 +56,7 @@ export function addonMismatch(
   addonDigest: string,
   shippedDigest: string,
   onDisk?: string | null,
+  openedElsewhere = false,
 ): string | undefined {
   if (!staleAddon(addonDigest, shippedDigest)) {
     return undefined;
@@ -65,10 +66,14 @@ export function addonMismatch(
   // newer than the addons it finds, as a checkout gets when a teammate moves the pin in a committed
   // config and not the addons, was told to restart the editor, which loaded the same old code, and
   // the restart's own answer said to restart again.
-  const restart =
+  const restartAdvice =
     onDisk !== undefined && onDisk !== shippedDigest
       ? `The project's own addons are not this server's either, so a restart would load the same code again: run  ${runLine(currentRunner(), serverVersion, 'upgrade')}  in a shell in the project directory, which installs the ${serverVersion} addons, and editor_launch restart then picks them up.`
       : 'Restart it with editor_launch restart to pick this one up.';
+  // An editor no server opened restarts itself with a window, so one with none is refused without it.
+  const restart = openedElsewhere
+    ? `${restartAdvice} No server opened this editor, so that restart is refused while it has no window: pass hidden: false to accept one.`
+    : restartAdvice;
   const asked = 'so this server asks it nothing but to quit:';
   if (reported === serverVersion) {
     return `The editor is running a different build of the ${reported} addon from the one this server ships, ${asked} ${restart}`;
