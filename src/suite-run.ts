@@ -59,7 +59,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
-import { engineFlags, envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
+import { ENGINE_ARG_SPELLING, engineFlagsRefusal, envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
 import { prependTo, readLog } from './log-read.js';
@@ -293,14 +293,38 @@ const VALUED = new Set([
 /** The option that hands every engine of a run one entry of the flags project_test's engineArgs takes. */
 const ENGINE_ARG = '--engine-arg';
 
-/** [param given] as the engine flags every engine of a run starts with, refused as project_test refuses them. */
+/**
+ * [param given] as the engine flags every engine of a run starts with, judged by the rules
+ * project_test's engineArgs is held to, in this command's own words. Every engine here is headless
+ * unless its suites need a window, and a window may be shared by shards, so a movie is never written.
+ */
 function engineFlagsNamed(given: readonly string[] | undefined): readonly string[] {
   const flags = given ?? [];
-  const checked = engineFlags(flags);
-  if (!checked.ok) {
-    throw new EngineUsageError(checked.reason);
+  const refusal = engineFlagsRefusal(flags, {
+    spelling: ENGINE_ARG_SPELLING,
+    judged: true,
+    movie: (asked) =>
+      asked.includes('--write-movie')
+        ? '--write-movie needs a run that draws, and gdharness test starts its engines headless where it can: Movie Maker reads every frame back from the renderer, the engine crashed on the first frame when asked headless, and engines that run side by side would write the one file. Leave it out.'
+        : null,
+  });
+  if (refusal !== null) {
+    throw new EngineUsageError(refusal);
   }
   return flags;
+}
+
+/**
+ * What a run is told when --fixed-fps is among its flags and an engine runs headless, or none. The
+ * flag stops frames being held to the clock and a headless engine has no refresh to wait on.
+ */
+function racingSaid(engineArgs: readonly string[], plans: readonly EnginePlan[]): readonly string[] {
+  if (!engineArgs.includes('--fixed-fps') || plans.every((plan) => plan.windowed)) {
+    return [];
+  }
+  return [
+    '--fixed-fps stops a headless engine holding its frames to the clock, and it has no window refresh to wait on, so its game time races ahead of the wall clock: gdUnit4 case timeouts and every wait on game time, such as a timer or wait_until, run out early, and a case waiting on a thread or a file can time out at once. --max-fps does not hold it back. Leave --fixed-fps out for suites that wait on real work.',
+  ];
 }
 
 const SWITCHES = new Set(['--changed-only', '--whole-tree', '--import', '--print-output', '--verbose']);
@@ -782,6 +806,8 @@ async function runStages(context: RunContext): Promise<number> {
     readFileSync(shippedListedRunner(), 'utf8'),
     engineSaid(godotPath),
     ...reachedAlsoSaid(options.reachAlso),
+    // A pass holds for the flags its engine ran with, since a frame step or a speed decides it.
+    ...(launch.engineArgs.length > 0 ? [`engine flags ${JSON.stringify(launch.engineArgs)}`] : []),
   ];
   const compileKept = options.changedOnly
     ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
@@ -799,6 +825,9 @@ async function runStages(context: RunContext): Promise<number> {
     console.log(line);
   };
   announceDeal(context, suites, deal, say);
+  for (const line of racingSaid(launch.engineArgs, deal.plans)) {
+    say(line);
+  }
   const started = await takenLanes(context, deal, say);
   const memory =
     started.shared && (deal.memoryHeld || started.follows !== null)

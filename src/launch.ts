@@ -181,20 +181,55 @@ const VALUE_KIND: Readonly<Record<FlagValue, { pattern: RegExp; named: string }>
   },
 };
 
-/** The flags this server sets for a run, by the argument that sets each. */
-const SET_BY_ARGUMENT: Readonly<Record<string, string>> = Object.freeze({
-  '--headless': 'headless',
-  '--audio-driver': 'silent',
-  '--quit-after': 'frames, on editor_run check',
+/**
+ * How a caller names the way it takes engine flags, so one list and one rule read in each caller's
+ * own terms: the option, where a flag's value goes, an example, and who sets each flag it keeps.
+ */
+export interface FlagSpelling {
+  /** What the caller calls the option that takes the flags. */
+  readonly option: string;
+  /** Where a flag's value goes, as the refusal for a missing one names it. */
+  readonly valueGoes: string;
+  /** A flag with its value, written as the caller writes it. */
+  readonly example: string;
+  /** Who sets each flag the caller keeps for itself, as the refusal for passing one names it. */
+  readonly setBy: Readonly<Record<string, string>>;
+}
+
+/** The spelling of project_test's and editor_run's `engineArgs`. */
+export const ENGINE_ARGS_SPELLING: FlagSpelling = Object.freeze({
+  option: 'engineArgs',
+  valueGoes: 'the next entry',
+  example: '["--max-fps", "60"]',
+  setBy: Object.freeze({
+    '--headless': "this tool's own argument, headless",
+    '--audio-driver': "this tool's own argument, silent",
+    '--quit-after': "this tool's own argument, frames, on editor_run check",
+  }),
+});
+
+/** The spelling of `gdharness test`'s `--engine-arg`, which takes one entry each time. */
+export const ENGINE_ARG_SPELLING: FlagSpelling = Object.freeze({
+  option: '--engine-arg',
+  valueGoes: 'the next --engine-arg',
+  example: '--engine-arg --max-fps --engine-arg 60',
+  setBy: Object.freeze({
+    '--headless': 'gdharness test, which starts each engine headless unless its suites need a window',
+    '--audio-driver': 'gdharness test, which starts every engine without sound',
+    '--quit-after': 'gdharness test, which ends each engine when its suites are done',
+  }),
 });
 
 /** [param given] as the engine flags a run is handed, or why it cannot be. */
-export function engineFlags(given: readonly string[]): { ok: true } | { ok: false; reason: string } {
+export function engineFlags(
+  given: readonly string[],
+  spelling: FlagSpelling = ENGINE_ARGS_SPELLING,
+): { ok: true } | { ok: false; reason: string } {
   for (let at = 0; at < given.length; at += 1) {
     const flag = given[at] ?? '';
     const takes = Object.hasOwn(ENGINE_FLAGS, flag) ? ENGINE_FLAGS[flag] : undefined;
     if (takes === undefined) {
-      return { ok: false, reason: unknownFlagReason(flag) };
+      return { ok: false, reason: unknownFlagReason(flag, spelling) };
     }
     if (takes === 'none') {
       continue;
@@ -204,7 +239,7 @@ export function engineFlags(given: readonly string[]): { ok: true } | { ok: fals
     if (value === undefined || !kind.pattern.test(value)) {
       return {
         ok: false,
-        reason: `${flag} takes ${kind.named} as the next entry, and ${value === undefined ? 'nothing followed it' : `${JSON.stringify(value)} is not one`}.`,
+        reason: `${flag} takes ${kind.named} as ${spelling.valueGoes}, and ${value === undefined ? 'nothing followed it' : `${JSON.stringify(value)} is not one`}.`,
       };
     }
     at += 1;
@@ -212,14 +247,42 @@ export function engineFlags(given: readonly string[]): { ok: true } | { ok: fals
   return { ok: true };
 }
 
-/** Why [param flag] is not taken: this tool sets it itself, or it is not an engine flag it passes. */
-function unknownFlagReason(flag: string): string {
-  const setBy = Object.hasOwn(SET_BY_ARGUMENT, flag) ? SET_BY_ARGUMENT[flag] : undefined;
+/** Why [param flag] is not taken: the caller sets it itself, or it is not an engine flag it passes. */
+function unknownFlagReason(flag: string, spelling: FlagSpelling): string {
+  const setBy = Object.hasOwn(spelling.setBy, flag) ? spelling.setBy[flag] : undefined;
   if (setBy !== undefined) {
-    return `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`;
+    return `${flag} is set by ${setBy}, rather than through ${spelling.option}.`;
   }
   const offered = Object.keys(ENGINE_FLAGS).join(', ');
-  return `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--max-fps", "60"].`;
+  const writes =
+    spelling === ENGINE_ARGS_SPELLING
+      ? 'A value goes as the next entry'
+      : 'Each flag and each value is one entry';
+  return `${flag} is not one of the engine flags ${spelling.option} takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. ${writes}, as in ${spelling.example}.`;
+}
+
+/** What a caller's run is judged by, beside the flags it takes. */
+export interface EngineFlagRules {
+  readonly spelling: FlagSpelling;
+  /** Whether the run's verdict is read from the lines the engine prints. */
+  readonly judged: boolean;
+  /** Why the run cannot write the movie the flags ask for, or null: it depends on where it runs. */
+  readonly movie: (given: readonly string[]) => string | null;
+}
+
+/**
+ * Why [param given] cannot be handed to a run, or null. Every check on engine flags is made here,
+ * so a caller cannot take a flag another refuses.
+ */
+export function engineFlagsRefusal(given: readonly string[], rules: EngineFlagRules): string | null {
+  const checked = engineFlags(given, rules.spelling);
+  if (!checked.ok) {
+    return checked.reason;
+  }
+  if (rules.judged && given.includes('--quiet')) {
+    return '--quiet stops the engine printing the lines this run is judged by, so it would read as an engine that printed nothing and no verdict could be given. Leave it out.';
+  }
+  return rules.movie(given);
 }
 
 /**
@@ -228,7 +291,9 @@ function unknownFlagReason(flag: string): string {
  * rather than refused.
  */
 export function engineFlagsAmongGameArgs(args: readonly string[]): string[] {
-  return args.filter((one) => Object.hasOwn(ENGINE_FLAGS, one) || Object.hasOwn(SET_BY_ARGUMENT, one));
+  return args.filter(
+    (one) => Object.hasOwn(ENGINE_FLAGS, one) || Object.hasOwn(ENGINE_ARGS_SPELLING.setBy, one),
+  );
 }
 
 /**

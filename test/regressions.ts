@@ -61106,6 +61106,8 @@ async function testATestRunsFlagsAreJudgedFirst(): Promise<void> {
           engineArgs: ['--write-movie', join(movies, 'suite.avi')],
         });
         assert.match(movie, /--write-movie needs a run that draws, and this one is headless/, movie);
+        const quiet = await call('project_test', { projectPath, engineArgs: ['--quiet'] });
+        assert.match(quiet, /--quiet stops the engine printing the lines this run is judged by/, quiet);
         // And past those, the same call reaches the check that comes next, so the refusals above
         // were the flags' and not a project that could not be tested at all.
         const verbose = await call('project_test', { projectPath, engineArgs: ['--verbose'] });
@@ -71513,24 +71515,55 @@ function testTheTestCommandTakesEngineArgsAsProjectTestDoes(): void {
       }
       return 'read';
     };
-    for (const wrong of [
-      ['--headless'],
-      ['--script'],
-      ['--time-scale', 'fast'],
-      ['--time-scale'],
-      ['--rendering-driver', 'nonsense'],
-    ]) {
-      const reason = engineFlags(wrong);
-      assert.ok(!reason.ok);
-      assert.equal(
-        refusal(wrong.flatMap((entry) => ['--engine-arg', entry])),
-        reason.reason,
-        `${wrong.join(' ')} refused with project_test's own text`,
-      );
-    }
+    const each = (...entries: string[]): string[] => entries.flatMap((entry) => ['--engine-arg', entry]);
+    // The same list and rule as project_test, each refusal in this command's own words.
+    assert.equal(
+      refusal(each('--headless')),
+      '--headless is set by gdharness test, which starts each engine headless unless its suites need a window, rather than through --engine-arg.',
+    );
+    assert.match(
+      refusal(each('--script')),
+      /^--script is not one of the engine flags --engine-arg takes, .*: --verbose, .*Each flag and each value is one entry, as in --engine-arg --max-fps --engine-arg 60\.$/,
+    );
+    assert.equal(
+      refusal(each('--time-scale', 'fast')),
+      '--time-scale takes a number as the next --engine-arg, and "fast" is not one.',
+    );
+    assert.equal(
+      refusal(each('--time-scale')),
+      '--time-scale takes a number as the next --engine-arg, and nothing followed it.',
+    );
+    assert.match(refusal(each('--rendering-driver', 'nonsense')), /takes a rendering driver/);
     assert.match(refusal(['--engine-arg']), /^--engine-arg needs a value/);
-    assert.match(refusal(['--engine-arg', '--time-scale']), /--time-scale takes a number as the next entry/);
-    assert.match(refusal(['--engine-arg', '--headless']), /set by this tool's own argument, headless/);
+    for (const refused of ['--headless', '--script', '--time-scale']) {
+      assert.doesNotMatch(refusal(each(refused)), /engineArgs|JSON|\["/, `${refused} names no tool argument`);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A flag that leaves a test run unjudgeable or crashes its engine is refused before any engine
+ * starts, as project_test refuses it: `--quiet` silences the lines the verdict is read from, and
+ * `--write-movie` needs a renderer the headless engines do not have.
+ */
+function testATestRunRefusesFlagsItCannotBeJudgedUnder(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-engine-arg-judged-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    const refusal = (...entries: string[]): string => {
+      try {
+        testOptionsOf([project, ...entries.flatMap((entry) => ['--engine-arg', entry])], tmpdir());
+      } catch (error) {
+        return error instanceof EngineUsageError ? error.message : String(error);
+      }
+      return 'read';
+    };
+    assert.match(refusal('--quiet'), /^--quiet stops the engine printing the lines this run is judged by/);
+    assert.match(refusal('--write-movie', join(tmpdir(), 'm.avi')), /^--write-movie needs a run that draws/);
+    assert.match(refusal('--write-movie', join(project, 'm.avi')), /^--write-movie needs a run that draws/);
+    assert.equal(refusal('--verbose'), 'read', 'the flags beside them are still taken');
   } finally {
     sweep(project);
   }
@@ -71546,8 +71579,8 @@ function testTheTestHelpListsTheEngineArgOption(): void {
 
 /**
  * A fixed frame step reaches the engines of a test run: a case reading the step of the frame after a
- * load finds 1/60 s with `--fixed-fps 60` and the clock's own step without it. Headless engines
- * given the flag get no note, since project_test gives none either.
+ * load finds 1/60 s with `--fixed-fps 60` and the clock's own step without it. A headless engine
+ * given the flag races, so the run says so, and a run without it says nothing of the kind.
  */
 function testATestRunHoldsItsFramesToAFixedStepWhenGivenFixedFps(): void {
   const godotPath = resolveGodotPath();
@@ -71585,7 +71618,12 @@ function testATestRunHoldsItsFramesToAFixedStepWhenGivenFixedFps(): void {
     assert.equal(free.status, 1, `the clock's own step is not a sixtieth: ${free.said}`);
     const fixed = test('--engine-arg', '--fixed-fps', '--engine-arg', '60');
     assert.equal(fixed.status, 0, fixed.said);
-    assert.doesNotMatch(fixed.said, /game time races ahead/, 'no note, as project_test gives none');
+    assert.match(
+      fixed.said,
+      /^--fixed-fps stops a headless engine holding its frames to the clock.*gdUnit4 case timeouts/m,
+      fixed.said,
+    );
+    assert.doesNotMatch(free.said, /--fixed-fps stops/, 'no note without the flag');
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
@@ -71659,6 +71697,28 @@ function testATestRunStartsEveryEngineWithTheEngineArgsItIsGiven(): void {
       plain.said,
     );
 
+    // Both suites passed without the flags, which does not make them pass with them: a changed-only
+    // run under the flags runs them again, and one without the flags still leaves them out.
+    const changed = test('--changed-only', ...faster);
+    assert.equal(changed.status, 1, changed.said);
+    assert.deepEqual(
+      verdicts(),
+      ['res://tests/a_test.gd FAILED', 'res://tests/b_test.gd FAILED'],
+      changed.said,
+    );
+    const changedPlain = test('--changed-only');
+    assert.equal(changedPlain.status, 0, changedPlain.said);
+    assert.match(
+      changedPlain.said,
+      /^Passed: 2 cases in 2 suites/m,
+      'run again, the flagged failure kept no pass',
+    );
+    const unchanged = test('--changed-only');
+    assert.match(
+      unchanged.said,
+      /passed on everything (?:its|their) engines? loaded as it stands now/,
+      unchanged.said,
+    );
     const flagged = test(...faster);
     assert.equal(flagged.status, 1, flagged.said);
     assert.deepEqual(
@@ -71666,16 +71726,6 @@ function testATestRunStartsEveryEngineWithTheEngineArgsItIsGiven(): void {
       ['res://tests/a_test.gd FAILED', 'res://tests/b_test.gd FAILED'],
       flagged.said,
     );
-
-    // Both suites passed unflagged, so a changed-only run leaves them out and runs only the new one.
-    assert.equal(test().status, 0, 'the suites pass again without the flags');
-    writeTree(project, { 'tests/c_test.gd': suite });
-    const changed = test('--changed-only', ...faster);
-    assert.equal(changed.status, 1, changed.said);
-    assert.deepEqual(verdicts(), ['res://tests/c_test.gd FAILED'], changed.said);
-    const changedPlain = test('--changed-only');
-    assert.equal(changedPlain.status, 0, changedPlain.said);
-    assert.deepEqual(verdicts(), ['res://tests/c_test.gd PASSED'], changedPlain.said);
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
@@ -112050,6 +112100,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheCompileCheckAndUnattributedFaultsAreJudged,
   testTheTestCommandReadsItsOwnOptions,
   testTheTestCommandTakesEngineArgsAsProjectTestDoes,
+  testATestRunRefusesFlagsItCannotBeJudgedUnder,
   testTheTestHelpListsTheEngineArgOption,
   testATestRunStartsEveryEngineWithTheEngineArgsItIsGiven,
   testATestRunHoldsItsFramesToAFixedStepWhenGivenFixedFps,

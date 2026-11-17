@@ -211,8 +211,9 @@ import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
   EDITOR_PID_VARIABLE,
   type EditorPorts,
-  engineFlags,
+  ENGINE_ARGS_SPELLING,
   engineFlagsAmongGameArgs,
+  engineFlagsRefusal,
   environmentFor,
   envValue,
   RESERVED_VARIABLE_PREFIX,
@@ -7695,11 +7696,18 @@ class GodotServer {
    * The engine's own flags a run is to be handed, or the refusal saying why these cannot be. The
    * schema has already refused a list holding anything but strings.
    */
-  private engineArguments(args: OperationParams): Checked<readonly string[]> {
+  private engineArguments(
+    args: OperationParams,
+    run: { readonly projectPath: string; readonly headless: boolean; readonly judged: boolean },
+  ): Checked<readonly string[]> {
     const given = readStringArray(args, 'engineArgs') ?? [];
-    const checked = engineFlags(given);
-    if (!checked.ok) {
-      return { ok: false, response: this.createErrorResponse(checked.reason) };
+    const refusal = engineFlagsRefusal(given, {
+      spelling: ENGINE_ARGS_SPELLING,
+      judged: run.judged,
+      movie: (flags) => movieRefusal(flags, [run.projectPath], run.headless),
+    });
+    if (refusal !== null) {
+      return { ok: false, response: this.createErrorResponse(refusal) };
     }
     return { ok: true, value: given };
   }
@@ -9785,13 +9793,13 @@ class GodotServer {
   private async testFlagsAndPaths(base: TestBase): Promise<ToolResponse> {
     const { args, project, paths } = base;
     // Before any engine starts, the class rebuild's included: a refused flag costs nothing.
-    const flags = this.engineArguments(args);
+    const flags = this.engineArguments(args, {
+      projectPath: project.value.path,
+      headless: true,
+      judged: true,
+    });
     if (!flags.ok) {
       return flags.response;
-    }
-    const movie = movieRefusal(flags.value, [project.value.path], true);
-    if (movie !== null) {
-      return this.createErrorResponse(movie);
     }
     // An entry not there is left out of the run rather than handed to gdUnit4, which runs the rest
     // and then sums the whole run up as having found nothing. Left out, and not the reason to run
@@ -13656,18 +13664,15 @@ class GodotServer {
     }
     const own = readStringArray(args, 'args') ?? [];
     const given = suites === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites)];
-    const flags = this.engineArguments(args);
+    const flags = this.engineArguments(args, {
+      projectPath: project.value.path,
+      headless:
+        op === 'check' ||
+        resolveHeadless(args['headless'], { platform: process.platform, variables: process.env }),
+      judged: false,
+    });
     if (!flags.ok) {
       return flags.response;
-    }
-    const movie = movieRefusal(
-      flags.value,
-      [project.value.path],
-      op === 'check' ||
-        resolveHeadless(args['headless'], { platform: process.platform, variables: process.env }),
-    );
-    if (movie !== null) {
-      return this.createErrorResponse(movie);
     }
     return await this.runEnvironmentAndEngine({ ...run, engineCalls, own, given, flags: flags.value });
   }
