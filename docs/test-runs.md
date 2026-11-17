@@ -822,10 +822,21 @@ Take in the order you began to wait. At each look, read every live mark but your
 ones.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited two minutes or more. The second is everyone else, games included. The wait
-  changes only the place in line, never which slots a taker may take.
-- The first group is ahead of the second. Within each group, those whose `since` is earlier are
-  ahead of you, the earliest first.
+  and have waited two minutes or more. The second is `other` takers of the store class (below) and
+  games that have waited two minutes or more. The third is every other `other` taker. The wait and
+  the class change only the place in line, never which slots a taker may take.
+- Each group is ahead of the next. Within each group, those whose `since` is earlier are ahead of
+  you, the earliest first. A store-class taker passes another `other` taker only in that taker's
+  first two minutes, so a stream of them delays it by two minutes at most.
+- A mark may hold `class` `store`, written by an `other` taker that has the class and by no other.
+  A mark with no class, or any other, has none.
+- A taker has the class where `<directory>/store.json` lists the repository of the Godot project
+  it takes for. The file is `{"games": ["name", ...]}` with repository folder names. Its writer
+  replaces it whole. A taker only reads it, once as its take begins. A file that is missing,
+  unreadable or not that shape gives no class.
+- A project's repository is found from its folder upwards: the first folder holding `.git`. Where
+  `.git` is a file, as in a linked worktree, follow its `gitdir:` line, then the `commondir` file
+  in that folder. The repository's name is the name of the folder holding the shared `.git`.
 - A mark naming no `since` waits since its file was made, and one naming another `taker` is `other`.
 - Give each, in turn, the first free slot of those it may take now (below) not given to one before
   it. Leave those slots alone.

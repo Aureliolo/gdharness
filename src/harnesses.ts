@@ -13,7 +13,7 @@
  * documentation too: a guessed shape writes a file that silently does nothing.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
@@ -30,6 +30,7 @@ import {
 import { Refusal } from './errors.js';
 import { isGodotProject, isSameDirectory } from './paths.js';
 import { isRecord } from './records.js';
+import { gitCheckoutOf } from './repository.js';
 import { currentRunner, type Runner, spawnFor } from './runner.js';
 
 /** What gdharness is called wherever it is registered. */
@@ -901,28 +902,11 @@ export function recordedEnginePath(projectPath: string): string | null {
  * and that entry's `commondir` points at the main `.git` itself.
  */
 export function mainCheckoutOf(projectPath: string): string | null {
-  let top = resolve(projectPath);
-  while (!existsSync(join(top, '.git'))) {
-    const up = dirname(top);
-    if (up === top) {
-      return null;
-    }
-    top = up;
-  }
-  const marker = join(top, '.git');
-  if (!statSync(marker).isFile()) {
+  const found = gitCheckoutOf(projectPath);
+  if (found === null || !found.linked) {
     return null;
   }
-  const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'))?.[1]?.trim();
-  if (pointer === undefined) {
-    return null;
-  }
-  const entry = resolve(top, pointer);
-  const commonFile = join(entry, 'commondir');
-  if (!existsSync(commonFile)) {
-    return null;
-  }
-  const common = resolve(entry, readFileSync(commonFile, 'utf8').trim());
+  const { top, common } = found;
   // A bare repository has no checkout to read a config from.
   if (basename(common) !== '.git') {
     return null;
@@ -941,16 +925,13 @@ export function mainCheckoutOf(projectPath: string): string | null {
  * naming the worktree's own `.git` file, absolute or relative to that entry.
  */
 export function worktreeCheckoutsOf(projectPath: string): string[] {
-  let top = resolve(projectPath);
-  while (!existsSync(join(top, '.git'))) {
-    const up = dirname(top);
-    if (up === top) {
-      return [];
-    }
-    top = up;
+  const found = gitCheckoutOf(projectPath);
+  if (found === null || found.linked) {
+    return [];
   }
+  const { top } = found;
   const listed = join(top, '.git', 'worktrees');
-  if (!statSync(join(top, '.git')).isDirectory() || !existsSync(listed)) {
+  if (!existsSync(listed)) {
     return [];
   }
   const below = relative(top, resolve(projectPath));

@@ -865,6 +865,8 @@ async function openedRun(
     (line) => {
       console.log(line);
     },
+    undefined,
+    options.projectPath,
   );
   const running = new Set<() => void>();
   const interrupted = (): void => {

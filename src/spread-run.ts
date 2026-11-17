@@ -273,6 +273,8 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     (line) => {
       console.log(`[spread] ${line}`);
     },
+    undefined,
+    options.projectPath,
   );
   const launch: EngineLaunch = {
     godotPath,
