@@ -70245,7 +70245,8 @@ async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Prom
  */
 function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
   const source = readFileSync('src/server.ts', 'utf8');
-  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\n {4}\);/g)].map(firstGroup);
+  // A call ends at the first `)` closing a statement, so one nested in a retry ends where it does.
+  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\)\s*;/g)].map(firstGroup);
   assert.ok(calls.length >= 2, `only ${String(calls.length)} calls of spawnGame were read`);
   for (const call of calls) {
     assert.match(
