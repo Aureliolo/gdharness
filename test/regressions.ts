@@ -741,6 +741,7 @@ import {
   sharesSaid,
   silenceWhile,
   slowCasesOf,
+  slowTimeSaid,
   startsSaid,
   suiteImport,
   testOptionsOf,
@@ -72000,6 +72001,21 @@ function testTheKeepSlowerThanOptionTakesPositiveSeconds(): void {
         `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and ${bad} is not one.`,
       );
     }
+    const fix = 'Give the slowest a case may be before its log is kept, such as 10.';
+    assert.equal(
+      refusalOf('9'.repeat(309)),
+      `--keep-slower-than ${'9'.repeat(40)}... is too large to be a limit in seconds. ${fix}`,
+    );
+    assert.equal(
+      refusalOf(`0.${'0'.repeat(400)}1`),
+      `--keep-slower-than 0.${'0'.repeat(38)}... is too small to tell from 0. ${fix}`,
+    );
+    assert.equal(
+      refusalOf('1e-400'),
+      `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and 1e-400 is not one.`,
+    );
+    assert.equal(limit('--keep-slower-than', '9'.repeat(308)), Number('9'.repeat(308)), 'the largest finite');
+    assert.equal(limit('--keep-slower-than', `0.${'0'.repeat(300)}1`), 1e-301, 'a tiny limit that is not 0');
     assert.equal(refusalOf(''), '--keep-slower-than needs a value.');
     assert.throws(() => testOptionsOf([project, '--keep-slower-than'], tmpdir()), /needs a value/);
   } finally {
@@ -72057,6 +72073,14 @@ function testASlowCaseIsReadFromGdUnitsOwnTime(): void {
     'slowest first, each with the engine, slot and priority it ran in',
   );
   assert.deepEqual(slowCasesOf([engine], 100), [], 'none past a longer limit');
+  const justPast = slowCasesOf(
+    [{ ...engine, printed: readRun(cannedRun([caseLine(S_TEST, 'test_just_past', 'PASSED', '1s 3ms')])) }],
+    1,
+  );
+  assert.equal(justPast[0]?.seconds, 1.003, 'the result keeps the exact time');
+  assert.equal(slowTimeSaid(1.003), '1.003', 'and the report prints it above the 1 s limit');
+  assert.ok(Number(slowTimeSaid(1.003)) > 1, 'never rounded down to the limit');
+  assert.equal(slowTimeSaid(12.04), '12.040');
   assert.deepEqual(
     slowCasesOf([{ ...engine, printed: readRun('') }], 0.001),
     [],
@@ -72306,7 +72330,7 @@ function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): void {
     );
     assert.match(
       slow.said,
-      /^ {2}res:\/\/tests\/slow_test\.gd > test_slow \d+\.\d s, engine \d, slot \d+, priority (?:below normal|nice 10): .*engine\.log$/m,
+      /^ {2}res:\/\/tests\/slow_test\.gd > test_slow \d+\.\d{3} s, engine \d, slot \d+, priority (?:below normal|nice 10): .*engine\.log$/m,
       slow.said,
     );
     assert.match(slow.said, /^Passed: /m, slow.said);

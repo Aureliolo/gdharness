@@ -426,16 +426,24 @@ function slowLimitNamed(value: string | undefined): number | null {
   if (value === undefined) {
     return null;
   }
-  const seconds = /^(?:\d+\.?\d*|\.\d+)$/.test(value) ? Number(value) : Number.NaN;
-  if (!Number.isFinite(seconds)) {
+  if (!/^(?:\d+\.?\d*|\.\d+)$/.test(value)) {
     throw new EngineUsageError(
       `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and ${value} is not one.`,
     );
   }
-  if (seconds <= 0) {
+  const given = value.length > 40 ? `${value.slice(0, 40)}...` : value;
+  const fix = 'Give the slowest a case may be before its log is kept, such as 10.';
+  if (/^[0.]+$/.test(value)) {
     throw new EngineUsageError(
-      `--keep-slower-than takes a number of seconds above 0, and ${value} is not. Give the slowest a case may be before its log is kept, such as 10.`,
+      `--keep-slower-than takes a number of seconds above 0, and ${given} is not. ${fix}`,
     );
+  }
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) {
+    throw new EngineUsageError(`--keep-slower-than ${given} is too large to be a limit in seconds. ${fix}`);
+  }
+  if (seconds === 0) {
+    throw new EngineUsageError(`--keep-slower-than ${given} is too small to tell from 0. ${fix}`);
   }
   return seconds;
 }
@@ -2999,6 +3007,14 @@ export function slowCasesOf(
 }
 
 /**
+ * [param seconds] of a case as the report prints it: in whole milliseconds, which is what gdUnit4
+ * prints, so a case just past its limit never reads as at it.
+ */
+export function slowTimeSaid(seconds: number): string {
+  return seconds.toFixed(3);
+}
+
+/**
  * Names each of [param slow], the cases past [param limit] seconds. [param keptUnder] is where a
  * passing run keeps their engines' logs, or null for a failed run, which keeps every engine's.
  */
@@ -3014,7 +3030,7 @@ function printSlowCases(slow: readonly SlowCase[], limit: number, keptUnder: str
     `cases slower than ${String(limit)} s${where}:`,
     slow.map(
       (one) =>
-        `${one.suite} > ${one.case} ${one.seconds.toFixed(1)} s, engine ${String(one.engine)}, ${one.slot === null ? 'slot unknown' : `slot ${String(one.slot)}`}, ${one.priority === null ? 'priority not read' : `priority ${one.priority}`}: ${one.log}`,
+        `${one.suite} > ${one.case} ${slowTimeSaid(one.seconds)} s, engine ${String(one.engine)}, ${one.slot === null ? 'slot unknown' : `slot ${String(one.slot)}`}, ${one.priority === null ? 'priority not read' : `priority ${one.priority}`}: ${one.log}`,
     ),
   );
 }

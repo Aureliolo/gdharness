@@ -143,7 +143,9 @@ output can still read it there. It holds:
   printed it, `seconds`, the `engine` index, its `slot`, its `priority` and its `log`. `slot` is
   the engine slot's number, or null. `priority` is read from the engine's process while it ran: a
   Windows priority class such as `below normal`, or the nice value such as `nice 10` on Linux and
-  macOS. It is null when the engine ended before it was read. `log` is the engine's kept log.
+  macOS. It is null when the engine ended before it was read. `log` names the kept file itself,
+  which is under `engine-<n>-again/` after an out-of-memory rerun. Take the path from the field and
+  never build it. `seconds` is exact, and the report prints it to the millisecond.
 - `enginesAsked`.
 - `slotsFree`: how many of the slots its lanes take were free as it began. Fewer than the lanes
   means the engines were handed the suites a share at a time.
