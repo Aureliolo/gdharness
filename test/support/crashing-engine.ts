@@ -56,10 +56,11 @@ public static class CrashingEngine {
     }
   }
   static void Banner(string[] args, string banner) {
-    Console.Out.Write(banner + "\\n");
+    string said = Env("GDH_BLANK") != "" ? "" : banner;
+    Console.Out.Write(said + "\\n");
     Console.Out.Flush();
     string log = Arg(args, "--log-file");
-    if (log != "") { File.AppendAllText(log, banner + "\\n"); }
+    if (log != "") { File.AppendAllText(log, said + "\\n"); }
   }
   public static int Main(string[] args) {
     string banner = ${JSON.stringify(ENGINE_BANNER_LINE)};
@@ -80,7 +81,8 @@ public static class CrashingEngine {
     }
     if (Env("GDH_REAL_ENGINE") != "") { return Real(args); }
     Banner(args, banner);
-    if (Env("GDH_HOLD") != "") { Thread.Sleep(120000); }
+    // Only a start that asked to be held, so the engine runs the editor makes for itself end at once.
+    if (Env("GDH_HOLD") != "" && asked.Contains(Env("GDH_CRASH_WHEN"))) { Thread.Sleep(120000); }
     return 0;
   }
 }

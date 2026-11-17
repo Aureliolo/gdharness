@@ -32,7 +32,6 @@ import {
   CONSOLE_CLOSED,
   diedAsItStarted,
   ENGINE_STARTS,
-  START_RACE,
   START_RETRY_MS,
   START_WINDOW_MS,
 } from './start-race.js';
@@ -375,12 +374,14 @@ export function howItEnded(
   }
   // The earlier starts died as they started, by the rule that started them again. The last one is
   // read from its own output, since it can have run and printed.
-  if (run.log === undefined || !diedAsItStarted(run.exitCode, linesOfLog(run.log))) {
+  const lines = run.log === undefined ? null : linesOfLog(run.log);
+  if (lines === null || !diedAsItStarted(run.exitCode, lines)) {
     const earlier = crashed === 1 ? 'start' : `${String(crashed)} starts`;
     return `${code}, and the ${earlier} before it died as ${crashed === 1 ? 'it' : 'they'} started, printing nothing past the banner`;
   }
-  const seen = `${code}, and died as it started on each of its ${String(crashed + 1)} starts, printing nothing past its banner`;
-  return (run.exitCode ?? 0) >>> 0 === START_RACE
-    ? `${seen}. Either the engine's start race or a library the project loads causes that`
-    : seen;
+  if (lines.length === 0) {
+    return `${code}, and printed nothing on any of its ${String(crashed + 1)} starts`;
+  }
+  // One line is the banner, and only the status of the race is started again on that.
+  return `${code}, and died as it started on each of its ${String(crashed + 1)} starts, printing nothing past its banner. Either the engine's start race or a library the project loads causes that`;
 }

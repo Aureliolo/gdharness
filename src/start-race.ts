@@ -36,7 +36,7 @@ const NOT_A_START_RACE = new Set([CONSOLE_CLOSED, 0xc0000135]);
  * procedure address for a few instructions while a worker of the library, started on load, calls
  * through it. The race is in the engine's constructor, before the project is read.
  */
-export const START_RACE = 0xc06d007f;
+const START_RACE = 0xc06d007f;
 
 /**
  * The line Godot prints first, as `Main::print_header` writes it: its name, version, the build's
@@ -47,22 +47,16 @@ const ENGINE_BANNER =
   /^Godot Engine v\d+\.\d+(?:\.\d+)?\.[a-z]+\d*(?:\.[\w-]+)* (?:\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC\) )?- https:\/\/godotengine\.org$/;
 
 /**
- * The lines of [param text] as a log keeps them: without colour codes, and with the empty ones
- * dropped.
+ * The lines of an engine's output file [param text], the one reading of "printed nothing" and
+ * "the banner alone" for every start that reads a file. Colour codes are dropped and so are empty
+ * lines, but any byte at all is output: a file of blank lines alone answers one line that is no
+ * banner, since only a file with no byte is silent.
  */
-export function printedLinesOf(text: string): string[] {
-  return text
+export function linesAsPrinted(text: string): string[] {
+  const lines = text
     .replace(CONTROL_SEQUENCE, '')
     .split(/\r?\n/)
     .filter((line) => line.trim() !== '');
-}
-
-/**
- * The lines of a log file's [param text] for a reader that counts any byte as output: empty for an
- * empty file, and one line that is no banner for a file of blank lines and colour codes alone.
- */
-export function linesAsPrinted(text: string): string[] {
-  const lines = printedLinesOf(text);
   return text === '' || lines.length > 0 ? lines : [text];
 }
 

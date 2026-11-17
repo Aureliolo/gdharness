@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { diedAsItStarted, printedLinesOf } from './start-race.js';
+import { diedAsItStarted, linesAsPrinted } from './start-race.js';
 
 /**
  * How long a start is watched. The race raises its status within a millisecond, but Windows reports
@@ -24,7 +24,7 @@ const LOOK_MS = 100;
 /** What [param file] holds from byte [param from] on, as lines. Empty for a file not there. */
 function linesSince(file: string, from: number): string[] {
   try {
-    return printedLinesOf(readFileSync(file).subarray(from).toString('utf8'));
+    return linesAsPrinted(readFileSync(file).subarray(from).toString('utf8'));
   } catch {
     return [];
   }

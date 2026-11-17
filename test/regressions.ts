@@ -663,7 +663,7 @@ import {
   shareOf,
   spreadOptionsOf,
 } from '../src/spread-run.js';
-import { diedAsItStarted, linesAsPrinted, printedLinesOf } from '../src/start-race.js';
+import { diedAsItStarted, linesAsPrinted } from '../src/start-race.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import {
   EVERY_FILE,
@@ -42955,7 +42955,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
   assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
   assert.equal(
     howItEnded(always.ran),
-    "exit code 0xC06D007F, a start that failed on a missing procedure, and died as it started on each of its 3 starts, printing nothing past its banner. Either the engine's start race or a library the project loads causes that",
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
   );
   const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
   assert.deepEqual(
@@ -43050,7 +43050,7 @@ const START_RACE_STATUS = 0xc06d007f;
 function testAnEngineThatDiesAfterItsBannerIsStartedAgain(): void {
   const esc = String.fromCharCode(0x1b);
   const dies = (code: number | null, printed: string): boolean =>
-    diedAsItStarted(code, printedLinesOf(printed));
+    diedAsItStarted(code, linesAsPrinted(printed));
   const banner = `${ENGINE_BANNER_LINE}\n`;
   assert.deepEqual(
     [
@@ -43140,8 +43140,13 @@ function testTheEndOfAStartedAgainEngineSaysWhatEachStartDid(): void {
   );
   assert.equal(
     howItEnded(runThatPrinted('', 0xc0000005, 1)),
-    'exit code 0xC0000005, a crash on an access violation, and died as it started on each of its 2 starts, printing nothing past its banner',
-    'another status names no race',
+    'exit code 0xC0000005, a crash on an access violation, and printed nothing on any of its 2 starts',
+    'starts that printed nothing at all keep their plain wording, for any status',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted('', START_RACE_STATUS, 2)),
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
+    'and so does the race status with nothing printed',
   );
   assert.equal(
     howItEnded(runThatPrinted(`${banner}the operation failed\n`, 1, 1)),
@@ -43283,6 +43288,18 @@ async function testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain(): Promise
       [0xc06d007f, undefined],
       'one that printed a line past its banner is its own answer',
     );
+    // Through the real watch, so the reading of a blank-only log is the one watchedEngine uses.
+    for (const [said, status] of [
+      ['echo.& exit /b -1073741819', 0xc0000005],
+      ['echo.& exit /b -1066598273', 0xc06d007f],
+    ] as const) {
+      const blank = await watchedEngine(launch, lock, ['/d', '/c', said], directory, log, 30);
+      assert.deepEqual(
+        [blank.code, blank.crashedStarts],
+        [status, undefined],
+        `a blank line is output, so a start that printed only one is not started again: ${JSON.stringify(blank)}`,
+      );
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -43352,6 +43369,82 @@ async function testAKeptRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void>
     );
   } finally {
     await met.end();
+    await server.stop();
+    sweep(scratch);
+  }
+}
+
+/**
+ * A start that printed only a blank line and died with an access violation is its own answer, for
+ * a kept run and for a hidden editor alike: any byte is output, and only the banner alone is read
+ * as the race's.
+ */
+async function testABlankOnlyStartIsNotStartedAgainByAKeptRunOrAnEditor(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-blank-start-'));
+  const project = join(scratch, 'project');
+  const runtime = join(scratch, 'runtime');
+  const env = {
+    GDH_CRASH_STATUS: '3221225477',
+    GDH_BLANK: '1',
+    GDHARNESS_RUNTIME_DIR: runtime,
+  };
+  const before = { ...process.env };
+  mkdirSync(project);
+  mkdirSync(runtime);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Blank"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  const keptMarker = join(scratch, 'kept');
+  const server = new ServerProcess({
+    env: {
+      ...env,
+      GODOT_PATH: await crashingEngine(),
+      GDHARNESS_PROJECT: project,
+      GDH_CRASH_MARKER: keptMarker,
+      GDH_CRASH_WHEN: '--remote-debug',
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.equal(startsNoted(keptMarker, '--remote-debug'), 1, 'a kept run is not started again');
+    const editorMarker = join(scratch, 'editor');
+    Object.assign(process.env, env, {
+      GDH_CRASH_MARKER: editorMarker,
+      GDH_CRASH_WHEN: '--gdharness-hidden',
+    });
+    await prepareWholeExits();
+    const opened = await openEditorProcess(
+      await crashingEngine(),
+      project,
+      { lsp: await reservePort(), dap: await reservePort() },
+      { hidden: true, silent: true, until: null },
+    );
+    assert.deepEqual(
+      [startsNoted(editorMarker, '--gdharness-hidden'), readEditorLogNote(project)?.pid === opened.pid],
+      [1, true],
+      `a hidden editor is not started again: ${JSON.stringify(opened)}`,
+    );
+  } finally {
+    for (const key of [...Object.keys(env), 'GDH_CRASH_MARKER', 'GDH_CRASH_WHEN']) {
+      if (before[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = before[key];
+      }
+    }
     await server.stop();
     sweep(scratch);
   }
@@ -113676,6 +113769,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain,
   testAKeptRunThatDiesAfterItsBannerIsStartedAgain,
   testAHiddenEditorThatDiesAfterItsBannerIsStartedAgain,
+  testABlankOnlyStartIsNotStartedAgainByAKeptRunOrAnEditor,
   testTheEndOfAStartedAgainEngineSaysWhatEachStartDid,
   testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas,
   testABootCheckThatDiesAfterItsBannerIsStartedAgain,
