@@ -9888,6 +9888,11 @@ async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
   );
   assert.match(
     addon,
+    /^const HIDDEN_VARIABLE: String = "GDHARNESS_HIDDEN_EDITOR"$/m,
+    'the variable is declared',
+  );
+  assert.match(
+    addon,
     /or not OS\.get_environment\(HIDDEN_VARIABLE\)\.is_empty\(\)/,
     'and an editor reads that mark as hidden',
   );
@@ -9916,6 +9921,12 @@ function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
   assert.match(
     toolSpec('editor_launch')?.description ?? '',
     /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
+  );
+  assert.ok(
+    readFileSync('src/tool-definitions.ts', 'utf8').includes(
+      'One opened by hand comes back with a window, so hidden: true is refused there.',
+    ),
+    'and the hidden argument says the same of its own value',
   );
 }
 
