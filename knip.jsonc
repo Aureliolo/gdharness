@@ -3,14 +3,15 @@
   // `lint:dead` runs this with KNIP_DISABLE_RAW_TRANSFER=1. knip parses through oxc-parser, whose
   // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
-  // keep-cache.ts and keep-rounds.ts are started as processes by the fuzz properties and a
-  // regression, so nothing imports them. The same holds for slot-grant.ts and slot-holder.ts.
+  // keep-cache.ts, keep-rounds.ts, kept-launcher.ts, slot-grant.ts and slot-holder.ts are started
+  // as processes by the fuzz properties and regressions, so nothing imports them.
   "entry": [
     "src/cli.ts",
     "scripts/*.ts",
     "test/*.ts",
     "test/support/keep-cache.ts",
     "test/support/keep-rounds.ts",
+    "test/support/kept-launcher.ts",
     "test/support/slot-grant.ts",
     "test/support/slot-holder.ts"
   ],

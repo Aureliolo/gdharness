@@ -27,6 +27,7 @@ import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
 import type { SpawnedGame } from './godot-process.js';
 import { belowNormal } from './priority.js';
+import { discard, scratchDirectory } from './scratch.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import {
   CONSOLE_CLOSED,
@@ -127,6 +128,9 @@ interface RunOptions {
   readonly project?: string;
 }
 
+/** How often the pid a helper writes for its engine is looked for. */
+const ENGINE_PID_WAIT_MS = 10;
+
 /** How often an engine with a timeout is measured against it. */
 const MEASURE_MS = 1000;
 
@@ -144,14 +148,14 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
-  if (options.desktop !== undefined) {
+  if (options.desktop !== undefined || process.platform === 'win32') {
     const compiled = await ensureHelperCompiled();
     if (compiled !== null) {
       return {
         log: new GameLog(),
         exitCode: null,
         exitSignal: null,
-        failure: `it could not be started on a desktop of its own: ${compiled}`,
+        failure: `it could not be started${options.desktop === undefined ? '' : ' on a desktop of its own'}: ${compiled}`,
       };
     }
   }
@@ -180,6 +184,8 @@ export async function runEngine(
 interface Launch {
   readonly child: ChildProcess;
   readonly files: HelperFiles | null;
+  /** The folder this start made for the helper's files, to be removed once they are read. */
+  readonly scratch: string | null;
 }
 
 function launchOf(
@@ -194,22 +200,30 @@ function launchOf(
     env: onTheSlot(process.env, lock),
     ...(signal === undefined ? {} : { signal }),
   };
-  if (desktop === undefined) {
-    return { child: spawnHidden(executable, args, options), files: null };
+  if (desktop === undefined && process.platform !== 'win32') {
+    return { child: spawnHidden(executable, args, options), files: null, scratch: null };
   }
+  // On Windows every engine starts through the helper, which puts it in its named job. Without a
+  // desktop named it stays on the one in use.
+  const scratch = desktop?.scratch ?? scratchDirectory('desktop');
   const started = spawnOnDesktop(
     {
-      desktop: HIDDEN_DESKTOP,
-      directory: desktop.directory,
+      ...(desktop === undefined ? {} : { desktop: HIDDEN_DESKTOP }),
+      directory: desktop?.directory ?? process.cwd(),
       endsWithHelper: true,
-      scratch: desktop.scratch,
-      exit: join(desktop.scratch, 'exit'),
+      ...(desktop === undefined ? { separateErrors: true } : {}),
+      scratch,
+      exit: join(scratch, 'exit'),
     },
     executable,
     args,
     options,
   );
-  return { child: started.child, files: started.files };
+  return {
+    child: started.child,
+    files: started.files,
+    scratch: desktop === undefined ? scratch : null,
+  };
 }
 
 /** What the run's handlers share while it lasts. */
@@ -226,7 +240,11 @@ async function killPastTimeout(
   sample: () => Promise<Sample>,
   state: RunState,
   noticeEngine: () => void,
+  engineNoticed: Promise<void>,
 ): Promise<void> {
+  // The engine's own time is counted from the reading that has its pid, so the start through the
+  // helper is not counted against it by the clock.
+  await engineNoticed;
   const spent = new Spent(nowSeconds(), await sample(), state.pid);
   while (!state.closed) {
     await delay(MEASURE_MS);
@@ -247,13 +265,13 @@ async function killPastTimeout(
  * start the engine, or it ended the engine on a box nobody can press. Null for an engine started
  * without the helper.
  */
-function desktopFailure(files: HelperFiles | null, log: GameLog): string | null {
+function desktopFailure(files: HelperFiles | null, log: GameLog, desktop: boolean): string | null {
   if (files === null) {
     return null;
   }
   const helperSaid = helperFailure(files.error);
   if (helperSaid !== null) {
-    return `it could not be started on a desktop of its own: ${helperSaid}`;
+    return `it could not be started${desktop ? ' on a desktop of its own' : ''}: ${helperSaid}`;
   }
   const ended = desktopBoxEnding(log.all);
   const note = ended === null ? childBoxNote(log.all) : null;
@@ -277,7 +295,7 @@ function runStarted(
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
-    const { child, files } = launchOf(executable, args, lock, options.desktop, signal);
+    const { child, files, scratch } = launchOf(executable, args, lock, options.desktop, signal);
     belowNormal(child);
     const whole = holdExit(child.pid);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
@@ -312,9 +330,17 @@ function runStarted(
     if (state.pid !== undefined) {
       found(state.pid);
     }
+    // Through the helper the engine's pid is written a moment after the start, and the lock and the
+    // timeout both need it.
+    const noticed = (async (): Promise<void> => {
+      while (state.pid === undefined && !state.closed) {
+        await delay(ENGINE_PID_WAIT_MS);
+        noticeEngine();
+      }
+    })();
     const { timeout } = options;
     if (timeout !== undefined && child.pid !== undefined) {
-      void killPastTimeout(child, timeout, options.sample ?? sampled, state, noticeEngine);
+      void killPastTimeout(child, timeout, options.sample ?? sampled, state, noticeEngine, noticed);
     }
     child.on('error', (error) => {
       state.failure ??=
@@ -329,10 +355,14 @@ function runStarted(
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;
       const told = started ? whole(code) : null;
-      state.failure ??= desktopFailure(files, log);
+      state.failure ??= desktopFailure(files, log, options.desktop !== undefined);
+      // A helper that could not start the engine exits with a code of its own, which is no engine's.
+      const exitCode =
+        files === null ? told : helperFailure(files.error) === null ? helperExit(files.exit, told) : null;
+      discard(scratch);
       resolve({
         log,
-        exitCode: files === null ? told : helperExit(files.exit, told),
+        exitCode,
         exitSignal: closedBy,
         failure: state.failure,
       });

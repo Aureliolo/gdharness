@@ -33,6 +33,16 @@ import { isRecord } from './records.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import { mendBeforeStart } from './uid-cache.js';
 
+/**
+ * The name of the Windows job every engine this package starts runs in, for the engine with pid
+ * [param pid]. The job holds the engine and everything it starts, so a reader opens it with
+ * OpenJobObjectW and reads their processor time together. Kept in step with `JobNamePrefix` in the
+ * helper's source.
+ */
+export function engineJobName(pid: number): string {
+  return `gdharness-engine-${String(pid)}`;
+}
+
 /** The desktop every process started this way shares. */
 export const HIDDEN_DESKTOP = 'gdharness';
 
@@ -123,6 +133,8 @@ public static class GdharnessDesktop {
   static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
   const int ExtendedLimitInformation = 9;
   const uint KillOnJobClose = 0x2000;
+  const int ErrorAlreadyExists = 183;
+  const string JobNamePrefix = "gdharness-engine-";
   const uint FailCriticalErrors = 0x1;
   const uint NoOpenFileErrorBox = 0x8000;
 
@@ -419,19 +431,24 @@ public static class GdharnessDesktop {
     string affinity = field(7);
     string exitFile = field(8);
     bool endsWithThis = field(9) == "1";
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis);
+    bool separateErrors = lines.Length > 10 && field(10) == "1";
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, separateErrors);
   }
 
   static void Step(string stepFile, string step) {
     File.WriteAllText(stepFile, step);
   }
 
-  // With an affinity, the process starts suspended and is held to those processors before its
-  // first thread runs, so every thread it starts afterwards is held to them as well. With
-  // endsWithThis it starts suspended in a job that ends it once this process has gone, however it
-  // went. A runner's own job ends this helper with the runner, and the process breaks away from that
-  // job, so an engine of a runner that was killed ran on with no parent and held its run's folder.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis) {
+  // The process starts suspended. With an affinity it is held to those processors before its first
+  // thread runs, so every thread it starts afterwards is held to them as well. It then joins a job
+  // named after its own pid, made before it runs so that what it starts is counted in the job too,
+  // and a name already taken ends it unrun. With endsWithThis that job ends it once this process
+  // has gone, however it went. A runner's own job ends this helper with the runner, and the process
+  // breaks away from that job, so an engine of a runner that was killed ran on with no parent and
+  // held its run's folder. Without it the job only counts, so a process meant to outlive whatever
+  // started it keeps its lifetime. Nested jobs need Windows 8, and a job that forbids one fails the
+  // assignment, which ends the process unrun with the cause.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, bool separateErrors) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     IntPtr desktopHandle = IntPtr.Zero;
@@ -473,7 +490,9 @@ public static class GdharnessDesktop {
     }
     startup.input = GetStdHandle(-10);
     startup.output = GetStdHandle(-11);
-    startup.error = startup.output;
+    // Both streams on one handle keep their lines in order. A start whose reader tells the two apart
+    // keeps its own error stream.
+    startup.error = separateErrors ? GetStdHandle(-12) : startup.output;
     Started started;
     // Inherited by what it starts: without SEM_NOGPFAULTERRORBOX, Windows Error Reporting runs when
     // the target crashes and writes its dump, and with the other two no hard-error box can open.
@@ -487,8 +506,7 @@ public static class GdharnessDesktop {
     JobLimits limits = new JobLimits();
     try {
     Step(stepFile, "starting the process");
-    bool suspended = affinity != 0 || endsWithThis;
-    uint creation = DetachedProcess | BelowNormalPriorityClass | (suspended ? CreateSuspended : 0u);
+    uint creation = DetachedProcess | BelowNormalPriorityClass | CreateSuspended;
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
@@ -500,22 +518,26 @@ public static class GdharnessDesktop {
         throw new Win32Exception(error, "SetProcessAffinityMask " + affinity);
       }
     }
-    if (endsWithThis) {
-      Step(stepFile, "tying the process to this helper");
-      // The handle is never closed here: Windows closes it as this process goes, which ends the job.
-      job = CreateJobObjectW(IntPtr.Zero, null);
-      limits.flags = KillOnJobClose;
-      if (job == IntPtr.Zero
-          || !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)))
-          || !AssignProcessToJobObject(job, started.process)) {
-        int error = Marshal.GetLastWin32Error();
-        TerminateProcess(started.process, 1);
-        throw new Win32Exception(error, "a job ending the process with this helper");
-      }
+    Step(stepFile, "putting the process in its job");
+    // The handle is never closed here: the job lasts as long as this process, which is as long as
+    // the engine, and with endsWithThis Windows ends the engine if this process goes first.
+    string jobName = JobNamePrefix + started.processId;
+    job = CreateJobObjectW(IntPtr.Zero, jobName);
+    int made = Marshal.GetLastWin32Error();
+    if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
+      TerminateProcess(started.process, 1);
+      throw new Win32Exception(made, job == IntPtr.Zero
+        ? "CreateJobObjectW " + jobName
+        : "the job " + jobName + " already exists");
     }
-    if (suspended) {
-      ResumeThread(started.thread);
+    limits.flags = endsWithThis ? KillOnJobClose : 0u;
+    if ((endsWithThis && !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits))))
+        || !AssignProcessToJobObject(job, started.process)) {
+      int error = Marshal.GetLastWin32Error();
+      TerminateProcess(started.process, 1);
+      throw new Win32Exception(error, "a job for the process named " + jobName);
     }
+    ResumeThread(started.thread);
     File.WriteAllText(pidFile, started.processId.ToString());
     if (noActivate) {
       HoldTheForeground(started);
@@ -560,7 +582,7 @@ public static class GdharnessDesktop {
     }
     // The process has ended, so what it started is let run on, as without the job: only a helper
     // that was ended itself takes them with it.
-    if (job != IntPtr.Zero) {
+    if (endsWithThis) {
       limits.flags = 0;
       SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)));
     }
@@ -583,6 +605,9 @@ public static class GdharnessDesktop {
 `;
 
 const HELPER = new CompiledHelper('desktop helper', 'gdharness-desktop', SOURCE, true);
+
+/** The helper's C# source, which a test compiles with a change of its own to reach a case no real start can. */
+export const HELPER_SOURCE = SOURCE;
 
 /** Where the compiled desktop helper is kept, named after its source. */
 export function helperAssembly(directory = tmpdir()): string {
@@ -724,6 +749,8 @@ export function throughHelper(
     readonly affinity?: bigint;
     /** The process is ended once the helper has gone, as it goes with the process that spawned it. */
     readonly endsWithHelper?: boolean;
+    /** The process's error stream is the helper's own, apart from its output, for a reader that tells them apart. */
+    readonly separateErrors?: boolean;
   },
   command: string,
   args: readonly string[],
@@ -743,6 +770,7 @@ export function throughHelper(
     how.affinity === undefined ? '' : how.affinity.toString(),
     files.exit,
     how.endsWithHelper === true ? '1' : '0',
+    how.separateErrors === true ? '1' : '0',
   ];
   writeFileSync(
     files.spec,
@@ -865,6 +893,12 @@ export function spawnOnDesktop(
     readonly directory: string;
     readonly affinity?: bigint;
     readonly endsWithHelper?: boolean;
+    /**
+     * The helper outlives the process that started it, which only a start meant to outlive its
+     * starter wants, since the helper holds the job the engine's processor time is read from.
+     */
+    readonly outlivesStarter?: boolean;
+    readonly separateErrors?: boolean;
     readonly scratch: string;
     readonly stop?: string;
     readonly exit?: string;
@@ -890,6 +924,7 @@ export function spawnOnDesktop(
   const wrapper = throughHelper(how, command, args, files, assembly);
   const child = spawnHidden(wrapper.command, wrapper.args, {
     ...options,
+    ...(how.outlivesStarter === true ? { detached: true } : {}),
     ...(how.desktop === undefined
       ? {}
       : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),

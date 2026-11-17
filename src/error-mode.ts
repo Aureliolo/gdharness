@@ -9,9 +9,9 @@
  * SEM_NOOPENFILEERRORBOX keep a missing drive or file from opening a box nobody will answer.
  * CREATE_DEFAULT_ERROR_MODE on a start would drop those as well.
  *
- * Under Bun the bit is cleared in this process, which every start then inherits. Node has no way to
- * call kernel32, so there the engines a run starts go through the desktop helper, which clears it in
- * itself before it starts them; {@link crashesReported} says which of the two applies.
+ * Under Bun the bit is cleared in this process, which every start then inherits. Every engine on
+ * Windows also starts through the desktop helper, which sets the mode in itself before it starts
+ * the engine, so Node, which cannot call kernel32, gets the same result.
  */
 
 import process from 'node:process';
@@ -42,9 +42,4 @@ export async function letWindowsReportCrashes(): Promise<void> {
   } catch {
     // Left as it was, and the starts that matter go through the helper instead.
   }
-}
-
-/** Whether an engine this process starts directly gets an error mode that lets a crash be reported. */
-export function crashesReported(): boolean {
-  return cleared;
 }

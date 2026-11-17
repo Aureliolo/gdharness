@@ -96,6 +96,7 @@ import {
   withAddonClassesCounted,
 } from '../src/class-cache.js';
 import { classNotePath, readClassNote } from '../src/class-note.js';
+import { CompiledHelper } from '../src/compiled-helper.js';
 import {
   parsedYamlHas,
   removeToml,
@@ -110,7 +111,9 @@ import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from 
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
   type DesktopStart,
+  engineJobName,
   ensureHelperCompiled,
+  HELPER_SOURCE,
   HIDDEN_DESKTOP,
   helperAssembly,
   helperExit,
@@ -20660,6 +20663,191 @@ async function testADesktopStartIsOneCall(): Promise<void> {
       if (alive(pid)) {
         process.kill(pid);
       }
+    }
+    sweep(root);
+  }
+}
+
+/** A stand-in engine that starts a child, writes both pids to [param pidsFile] and waits for [param release]. */
+function jobEngineScript(pidsFile: string, release: string): string {
+  return [
+    "const fs = require('node:fs');",
+    HIDDEN_SPAWN_PRELUDE,
+    "const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore' });",
+    `fs.writeFileSync(${JSON.stringify(pidsFile)}, JSON.stringify({ engine: process.pid, child: child.pid }));`,
+    `const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) { child.kill(); clearInterval(timer); } }, 50);`,
+  ].join('\n');
+}
+
+/** The pids the stand-in engine wrote to [param file], or undefined before it has. */
+function pidsOf(file: string): { engine: number; child: number } | undefined {
+  try {
+    const written: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    const engine = get(written, 'engine');
+    const child = get(written, 'child');
+    return typeof engine === 'number' && typeof child === 'number' ? { engine, child } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every engine on Windows, headless ones included, runs in a job named for its pid, which holds what it starts. */
+async function testEveryEngineRunsInAJobNamedForItsPid(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-job-'));
+  const pidsFile = join(root, 'pids');
+  const release = join(root, 'release');
+  try {
+    const running = runEngine(process.execPath, ['-e', jobEngineScript(pidsFile, release)]);
+    const pids = await answeredWithin(() => {
+      try {
+        return pidsOf(pidsFile);
+      } catch {
+        return undefined;
+      }
+    }, 60_000);
+    assert.ok(pids !== undefined, 'the engine says its pid and its child');
+    const job = openJob(engineJobName(pids.engine));
+    assert.ok(job !== null, `the job gdharness-engine-${String(pids.engine)} exists while the engine runs`);
+    try {
+      assert.ok(job.holds(pids.engine), 'it holds the engine');
+      assert.ok(job.holds(pids.child), 'and the child the engine started');
+    } finally {
+      job.close();
+      writeFileSync(release, '');
+    }
+    const ran = await running;
+    assert.equal(ran.exitCode, 0, `the engine ends as it does outside the job: ${JSON.stringify(ran)}`);
+    assert.equal(ran.failure, null, 'with no failure');
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The pid a start through the helper names is the engine's own, not the helper's. */
+async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-pid-'));
+  const pidsFile = join(root, 'pids');
+  const release = join(root, 'release');
+  let start: DesktopStart | undefined;
+  try {
+    start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: root },
+      process.execPath,
+      ['-e', jobEngineScript(pidsFile, release)],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    const named = await answeredWithin(() => start?.pid(), 60_000);
+    const said = await answeredWithin(() => {
+      try {
+        return pidsOf(pidsFile);
+      } catch {
+        return undefined;
+      }
+    }, 60_000);
+    assert.equal(named, said?.engine, 'the pid read is the one the engine reports for itself');
+    assert.notEqual(named, start.child.pid, 'and is not the helper');
+  } finally {
+    writeFileSync(release, '');
+    if (start !== undefined) {
+      assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends with its engine');
+    }
+    sweep(root);
+  }
+}
+
+/** A job name that is taken fails the start with the cause, and the engine never runs. */
+async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { createJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-taken-'));
+  const name = `gdharness-engine-taken-${String(process.pid)}`;
+  // The helper names its job after the engine's pid, which no test can know before the start, so
+  // this copy names every job the same.
+  const fixed = HELPER_SOURCE.replace('JobNamePrefix + started.processId', JSON.stringify(name));
+  assert.notEqual(fixed, HELPER_SOURCE, 'the helper names its job in the place this test reaches');
+  const copy = new CompiledHelper('collision helper', 'gdharness-collision', fixed, true);
+  const held = createJob(name);
+  try {
+    const compiled = await copy.ensure(root);
+    assert.equal(compiled, null, 'the copy compiles');
+    const ranMarker = join(root, 'ran');
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: root },
+      process.execPath,
+      ['-e', `require('node:fs').writeFileSync(${JSON.stringify(ranMarker)}, 'ran')`],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      copy.assembly(root),
+    );
+    assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+    assert.notEqual(start.child.exitCode, 0, 'with a failure');
+    assert.match(helperFailure(start.files.error) ?? '', /already exists/, 'which names the taken job');
+    assert.match(helperFailure(start.files.error) ?? '', new RegExp(name), 'and its name');
+    assert.equal(start.pid(), undefined, 'no pid is given out');
+    await delay(1000);
+    assert.equal(existsSync(ranMarker), false, 'and the engine was ended before it ran');
+  } finally {
+    held.close();
+    sweep(root);
+  }
+}
+
+/** A crash status whole, such as the one the engine's start race gives, arrives through a headless start. */
+async function testAWholeExitCodeArrivesThroughAHeadlessStart(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const ran = await runEngine(join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'), [
+    '/d',
+    '/c',
+    'exit',
+    String(0xc06d007f - 0x1_0000_0000),
+  ]);
+  assert.equal(ran.exitCode, 0xc06d007f, `the whole code arrives: ${JSON.stringify(ran)}`);
+}
+
+/** A start meant to outlive its starter keeps running when the starter exits, and keeps its job. */
+async function testAKeptStartOutlivesItsStarterInItsJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-job-'));
+  const release = join(root, 'release');
+  let kept: number | undefined;
+  try {
+    const launcher = spawnHidden(
+      process.execPath,
+      [join(process.cwd(), 'test', 'support', 'kept-launcher.ts'), root, release],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let said = '';
+    launcher.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    assert.ok(await exitedWithin(launcher, 120_000), 'the starter exits');
+    const pid = Number(/pid (\d+)/.exec(said)?.[1]);
+    assert.ok(Number.isInteger(pid) && pid > 0, `the starter named the process: ${said}`);
+    kept = pid;
+    await delay(1000);
+    assert.ok(alive(pid), 'the process runs on after its starter exited');
+    const job = openJob(engineJobName(pid));
+    assert.ok(job !== null, 'and its job is still there');
+    assert.ok(job.holds(pid), 'holding it');
+    job.close();
+    writeFileSync(release, '');
+    assert.equal(await answeredWithin(() => (alive(pid) ? undefined : true), 30_000), true, 'until it ends');
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
     }
     sweep(root);
   }
@@ -116058,6 +116246,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
   testADesktopStartIsOneCall,
+  testEveryEngineRunsInAJobNamedForItsPid,
+  testAStartThroughTheHelperNamesTheEnginesOwnPid,
+  testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
+  testAWholeExitCodeArrivesThroughAHeadlessStart,
+  testAKeptStartOutlivesItsStarterInItsJob,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,

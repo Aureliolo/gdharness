@@ -19,7 +19,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
 import { ensureHelperCompiled, helperExit, helperFailure, helperStep, spawnOnDesktop } from './desktop.js';
 import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
-import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
+import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -96,13 +96,12 @@ async function startDirectly(
  * activation: the child is the process that waits for it and exits with its code, and the pid is
  * the target's own, read from the file that process writes once the target has started.
  *
- * Windows PowerShell started detached exits at once and runs nothing, so the helper is this
- * process's own child, hidden, and in the job object Node gives its children: it goes when this
- * process does. The job lets its members' children leave it silently, so the target is in no job
- * and outlives both. So only a keeper starts one, since it waits for as long as the target runs.
- * A launcher that exited after the pid took the helper with it, and a process it had started on a
- * desktop of its own could no longer start one of its own there, which is what an editor does when
- * it plays a game. A start without activation also needs its helper to hold the foreground.
+ * The helper is started detached, so it outlives this process and lives as long as the target. It
+ * holds the target's job, which is named and only counts, so the target's lifetime is its own. A
+ * helper that went with a launcher that had exited after the pid would also take the desktop with
+ * it, and a process the target had started on a desktop of its own could no longer start one of its
+ * own there, which is what an editor does when it plays a game. A start without activation also
+ * needs its helper to hold the foreground.
  */
 async function startThroughHelper(
   spec: SentSpec,
@@ -133,6 +132,8 @@ async function startThroughHelper(
         ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
         ...(spec.noActivate === undefined ? {} : { noActivate: spec.noActivate }),
         directory: process.cwd(),
+        // The helper holds the job the process is counted in, so it lives as long as the process.
+        outlivesStarter: true,
         scratch,
         stop: stopFile,
         exit: exitFile,
@@ -255,8 +256,7 @@ const DRAIN_MS = 2000;
 const DESKTOP_START_MS = 60_000;
 
 /**
- * Through the helper where Windows is asked for a desktop or a start without activation, which Node
- * cannot name when it starts a process, and directly otherwise. [param stopFile] is where a helper
+ * Through the helper on Windows, and directly otherwise. [param stopFile] is where a helper
  * is told to end what it started, and is empty for a start nothing will be asked to end.
  * [param exitFile] is where the helper writes the whole exit code, and is empty for none.
  */
@@ -273,18 +273,18 @@ async function startDetached(
 }
 
 /**
- * Also wherever this process could not clear the bit that keeps a crash from being reported, since
- * the helper clears it in itself before it starts anything.
+ * Every start on Windows, since the helper puts the process in the job its processor time is read
+ * from, and clears the bit that keeps a crash from being reported where this process could not.
  */
 function throughTheHelper(spec: SentSpec): boolean {
-  return needsItsHelperKept(spec) || (process.platform === 'win32' && !crashesReported());
+  return needsItsHelperKept(spec) || process.platform === 'win32';
 }
 
 /**
  * Whether [param spec] needs its helper kept for as long as it runs, which only a keeper does: one
  * on a desktop of its own, for the desktop's sake, and one started without activation, whose helper
- * holds the foreground while it starts. A helper there only for the error mode may go once the
- * target has started, which it outlives.
+ * holds the foreground while it starts. A launcher that starts neither exits once the pid is known,
+ * and the helper it started detached stays with the target.
  */
 function needsItsHelperKept(spec: SentSpec): boolean {
   return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);

@@ -101,12 +101,14 @@ import {
   type StoppedAt,
 } from './dap_client.js';
 import {
+  type DesktopStart,
   desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
+  helperPid,
   helperStep,
   isBoxVerdict,
   spawnOnDesktop,
@@ -410,7 +412,7 @@ import {
   shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
-import { spawnHidden } from './spawn.js';
+import { type SpawnOptions, spawnHidden } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
@@ -2358,6 +2360,55 @@ function scanWaitMs(): number {
 
 /** How long past its exit a run's output is waited for when something else still holds its pipes. */
 const STREAMS_GRACE_MS = 2_000;
+
+/**
+ * The engine started through the desktop helper, or null off Windows. On the hidden desktop when
+ * [param onDesktop] names it, and otherwise on the desktop in use with a scratch folder of its own,
+ * returned as `ownScratch` for the caller to remove.
+ */
+function startedByHelper(
+  godotPath: string,
+  cmdArgs: string[],
+  env: NodeJS.ProcessEnv | undefined,
+  onDesktop: { readonly directory: string; readonly files: HelperFiles } | undefined,
+): { helped: DesktopStart | null; ownScratch: string | null } {
+  const options: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'], env: env ?? process.env };
+  if (onDesktop !== undefined) {
+    const helped = spawnOnDesktop(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: onDesktop.directory,
+        scratch: dirname(onDesktop.files.spec),
+        stop: onDesktop.files.stop,
+        exit: onDesktop.files.exit,
+      },
+      godotPath,
+      cmdArgs,
+      options,
+    );
+    return { helped, ownScratch: null };
+  }
+  if (process.platform !== 'win32') {
+    return { helped: null, ownScratch: null };
+  }
+  const ownScratch = scratchDirectory('desktop');
+  const helped = spawnOnDesktop(
+    {
+      directory: process.cwd(),
+      endsWithHelper: true,
+      separateErrors: true,
+      scratch: ownScratch,
+      exit: join(ownScratch, 'exit'),
+    },
+    godotPath,
+    cmdArgs,
+    options,
+  );
+  return { helped, ownScratch };
+}
+
+/** How often the pid a helper writes for its engine is looked for. */
+const ENGINE_PID_WAIT_MS = 10;
 
 /**
  * What a start waited for before the game was launched: an editor scan and its cache write, and
@@ -15384,6 +15435,12 @@ class GodotServer {
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
     project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
+    if (onDesktop === undefined && process.platform === 'win32') {
+      const compiled = await ensureHelperCompiled();
+      if (compiled !== null) {
+        throw new Error(`the engine could not be started: ${compiled}`);
+      }
+    }
     // In one of the machine's engine slots, taken before the engine starts and given back once its
     // log is whole, so the caller's own limit counts the engine's time and not the wait. [param
     // project] is the project the run is of, which gives the slot its store class.
@@ -15391,11 +15448,39 @@ class GodotServer {
     try {
       const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
       void run.settled.finally(held.release);
-      void slotEngineNamed(held.lock, run, onDesktop?.files.pid);
+      void slotEngineNamed(held.lock, run, onDesktop?.files.pid ?? run.engineFiles?.pid);
+      // The pid callers read is the engine's, which the helper writes down once it has started it.
+      if (run.engineFiles !== undefined) {
+        await this.engineKnown(run, run.engineFiles);
+      }
       return run;
     } catch (error) {
       held.release();
       throw error;
+    }
+  }
+
+  /**
+   * Waits until the helper has written the pid of [param run]'s engine, or has ended without. Then
+   * the cause the helper gave goes into the log, since the exit code alone names nothing.
+   */
+  private async engineKnown(run: SpawnedGame, files: HelperFiles): Promise<void> {
+    while (run.exitCode === null && run.exitSignal === null) {
+      const pid = helperPid(files.pid);
+      if (pid !== undefined) {
+        run.pid = pid;
+        return;
+      }
+      await delay(ENGINE_PID_WAIT_MS);
+    }
+    const pid = helperPid(files.pid);
+    if (pid !== undefined) {
+      run.pid = pid;
+      return;
+    }
+    const said = helperFailure(files.error);
+    if (said !== null) {
+      run.log.record('error', `the engine could not be started: ${said}`);
     }
   }
 
@@ -15404,24 +15489,17 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
-  ): SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void } {
-    // Through the helper the child is PowerShell, and ending it would leave the engine running on a
-    // desktop nobody can see, so the helper is asked to end the engine instead.
-    const helped =
-      onDesktop === undefined
-        ? null
-        : spawnOnDesktop(
-            {
-              desktop: HIDDEN_DESKTOP,
-              directory: onDesktop.directory,
-              scratch: dirname(onDesktop.files.spec),
-              stop: onDesktop.files.stop,
-              exit: onDesktop.files.exit,
-            },
-            godotPath,
-            cmdArgs,
-            { stdio: ['ignore', 'pipe', 'pipe'], env: env ?? process.env },
-          );
+  ): SpawnedGame & {
+    readonly settled: Promise<void>;
+    readonly stop: () => void;
+    /** The helper's files, for an engine it started on the desktop in use. */
+    readonly engineFiles?: HelperFiles;
+  } {
+    // Through the helper the child is the helper, and ending it would leave the engine running on a
+    // desktop nobody can see, so the helper is asked to end the engine instead. On Windows an
+    // engine on the desktop in use goes through the helper too, which puts it in its named job.
+    const { helped, ownScratch } = startedByHelper(godotPath, cmdArgs, env, onDesktop);
+    const exitFile = helped?.files.exit;
     const child =
       helped === null
         ? spawnHidden(godotPath, cmdArgs, {
@@ -15481,8 +15559,7 @@ class GodotServer {
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
-      started.exitCode =
-        onDesktop === undefined ? whole(code) : helperExit(onDesktop.files.exit, whole(code));
+      started.exitCode = exitFile === undefined ? whole(code) : helperExit(exitFile, whole(code));
       started.exitSignal = code === null ? signal : null;
       started.endedAt = Date.now();
     });
@@ -15516,8 +15593,17 @@ class GodotServer {
         done();
       });
     });
+    if (ownScratch !== null) {
+      void settled.then(() => {
+        discard(ownScratch);
+      });
+    }
     // The same object the handlers above write the exit into, not a copy of it.
-    return Object.assign(started, { settled, stop });
+    return Object.assign(started, {
+      settled,
+      stop,
+      ...(ownScratch === null || helped === null ? {} : { engineFiles: helped.files }),
+    });
   }
 
   /**
