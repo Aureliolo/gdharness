@@ -122,12 +122,14 @@ its shader cache there, in `user://shader_cache`, and the Vulkan driver's pipeli
 `user://vulkan/pipelines.*.cache`. The editor's `.editor.cache` file is left out. Each engine starts
 with the caches the project's last run left, when the same engine build made them, so a drawing suite
 does not build every shader and pipeline again. The largest shader cache a run leaves is kept
-in gdharness's cache folder, one per project. Each pipeline file is kept by name, and a run's file
-replaces the kept one of that name whenever the bytes differ, since an engine that refuses a seeded
-file after a driver update writes a smaller valid one. A run with no file of that name, such as a
-headless one, leaves the kept one alone. Of two runs at once, the keep that finishes last wins each
-pipeline file it has, so pipelines only the earlier run built are built again by the next run. The
-cache of a project that is gone is removed.
+in gdharness's cache folder, one per project. Each pipeline file is kept by name, and a file the
+run's engine wrote replaces the kept one of that name whenever the bytes differ, since an engine that
+refuses a seeded file after a driver update writes a smaller valid one. A file the run was seeded
+with and its engine left alone, as in a headless run, leaves the kept one alone. Of two runs at once,
+the keep that finishes last wins each pipeline file it wrote, so pipelines only the earlier run built
+are built again by the next run. A project whose name or user folder setting changed gets no seed
+from the old cache, and its next run's cache replaces it. The cache of a project that is gone is
+removed.
 
 ## The result file
 
