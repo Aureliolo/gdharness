@@ -52423,6 +52423,8 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
         [
           'extends Node',
           '',
+          'signal go',
+          '',
           'var held: Node',
           'var count: int = 0',
           'var locked: int = 0:',
@@ -52493,6 +52495,17 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
           '',
           'func drop_later() -> void:',
           '\tget_tree().create_timer(0.5).timeout.connect($Rows/Who/Kid.queue_free)',
+          '',
+          '',
+          'func await_go() -> Node:',
+          '\tawait go',
+          '\treturn self',
+          '',
+          '',
+          'func release() -> Node:',
+          '\tpush_error("release step")',
+          '\tgo.emit()',
+          '\treturn self',
           '',
           '',
           'func add_later() -> void:',
@@ -52837,14 +52850,14 @@ async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
     const answer: unknown = JSON.parse(
       await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noisy25():fail' }),
     );
-    const errors = asArray(get(answer, 'errors')).map(text);
+    const errors = asArray(get(answer, 'errors'), `errors of ${JSON.stringify(answer)}`).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
     assert.equal(errors.length, 20);
     assert.equal(get(answer, 'errors_not_shown'), 6, 'the game raised 26 and 20 are shown');
     const read: unknown = JSON.parse(
       await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'noisy25():name' }),
     );
-    assert.equal(asArray(get(read, 'errors')).length, 20);
+    assert.equal(asArray(get(read, 'errors'), `errors of ${JSON.stringify(read)}`).length, 20);
     assert.equal(get(read, 'errors_not_shown'), 5, 'a read that raised 25 shows 20');
   });
 }
@@ -53007,6 +53020,50 @@ async function testOverlappingRequestsKeepTheirOwnErrors(): Promise<void> {
     assert.doesNotMatch(waited, /grumble getter|noisy step|odd step|Node not found/, waited);
     assert.match(ordered, /grumble getter/, ordered);
     assert.doesNotMatch(ordered, /loud getter|noisy step|odd step|Node not found/, ordered);
+    const verdict = await counted();
+    assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
+  });
+}
+
+/**
+ * Two awaiting calls that a read's step resumes, inside that read, each keep their own errors, and
+ * the read keeps its own.
+ *
+ * The step emits the signal both calls wait on, so both end and read their results inside the step.
+ * Each call's end put back the collector bound when that call began, which left the read adding
+ * its errors to a call already answered. The read's listener also heard what the calls' own reads
+ * raised.
+ */
+async function testCallsEndedInsideAReadKeepTheirOwnErrors(): Promise<void> {
+  await withAReadingGame('ended inside a read regression', async ({ ask, counted }) => {
+    const first = ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'await_go',
+      properties: ['noisy():name'],
+    });
+    await delay(300);
+    const second = ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'await_go',
+      properties: ['odd():name'],
+    });
+    await delay(300);
+    const read: unknown = JSON.parse(
+      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'release():name' }),
+    );
+    const said = JSON.stringify(read);
+    assert.deepEqual(get(read, 'errors'), ['release step'], said);
+    const [firstSaid, secondSaid] = await Promise.all([first, second]);
+    const firstAnswer: unknown = JSON.parse(firstSaid);
+    const secondAnswer: unknown = JSON.parse(secondSaid);
+    assert.deepEqual(get(firstAnswer, 'errors'), ['noisy step'], firstSaid);
+    assert.deepEqual(get(secondAnswer, 'errors'), ['odd step'], secondSaid);
+    const quiet: unknown = JSON.parse(
+      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'name' }),
+    );
+    assert.equal(get(quiet, 'errors'), undefined, JSON.stringify(quiet));
     const verdict = await counted();
     assert.deepEqual([verdict.errors, verdict.clean], [0, true]);
   });
@@ -111433,6 +111490,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPropertyWatchReportsItsReadingsErrors,
   testAnEvictedWatchStopsReading,
   testOverlappingRequestsKeepTheirOwnErrors,
+  testCallsEndedInsideAReadKeepTheirOwnErrors,
   testAPropertyStepWhoseGetterErrorsIsReported,
   testACallArgumentPathSaysWhatItsStepsReported,
   testAnObjectTargetPathSaysWhatItsStepsReported,
