@@ -9894,7 +9894,11 @@ async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
     /static func _on_the_hidden_desktop\(\) -> bool:\n\treturn OS\.get_name\(\) == "Windows" and not OS\.get_environment\(DESKTOP_VARIABLE\)\.is_empty\(\)/,
     'an editor on the hidden desktop reads the variable it inherits',
   );
-  assert.match(addon, /^const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"$/m, 'named as the server sets it');
+  assert.match(
+    addon,
+    /^const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"$/m,
+    'named as the server sets it',
+  );
   assert.equal(addon.includes('set_environment(DESKTOP_VARIABLE'), false, 'and never cleared or replaced');
 }
 
