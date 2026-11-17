@@ -13722,6 +13722,28 @@ async function testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder():
 }
 
 /**
+ * A keep that is not told what its seed put in takes every seeded file as the run's own, and an
+ * overlapping run's untouched copy then replaces a newer kept file. The callers need an engine that
+ * draws to run, so the hand-over is read from their source: each one that keeps hands over what its
+ * own seed returned.
+ */
+function testEveryKeepIsHandedWhatItsSeedPutIn(): void {
+  let callers = 0;
+  for (const file of ['src/engine-launch.ts', 'src/server.ts']) {
+    const source = readFileSync(file, 'utf8');
+    const seeds = [...source.matchAll(/const (\w+) = await seedPipelineCache\(/g)].map(firstGroup);
+    const keeps = [...source.matchAll(/await keepPipelineCache\(([^;]*?)\);/g)].map(firstGroup);
+    assert.equal(keeps.length, seeds.length, `${file} keeps once for each seed`);
+    for (const [at, keep] of keeps.entries()) {
+      const handed = keep.split(',').map((part) => part.trim())[4];
+      assert.equal(handed, seeds[at], `${file} hands its seed's files to the keep: ${keep}`);
+    }
+    callers += keeps.length;
+  }
+  assert.ok(callers >= 2, `only ${String(callers)} keeps were read`);
+}
+
+/**
  * A server killed mid-run never keeps, and leaves nothing of the seed in the temporary folder the
  * run's folder sits in, where the sweep of abandoned runs would not look.
  */
@@ -115444,6 +115466,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenamedAppIsNotSeededIntoItsOldFolder,
   testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder,
   testASeedLeavesNothingBesideTheRunsFolder,
+  testEveryKeepIsHandedWhatItsSeedPutIn,
   testASeedThatMeetsASwapWaitsForTheNewSet,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testProjectTestKeepsTheCacheAndSeedsTheNextRun,
