@@ -15585,7 +15585,12 @@ class GodotServer {
           ...this.servedBy(),
           ...this.profileOfAKeptRun(profile, engineCalls),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
-          slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
+          // A command's slot is held by the command, so the keeper has none to take over.
+          ...(slot.delegated
+            ? {}
+            : {
+                slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
+              }),
         },
         ...(desktop === undefined ? {} : { desktop }),
       });
@@ -15596,7 +15601,7 @@ class GodotServer {
     if ('error' in launched) {
       slot.release();
     } else {
-      slot.leave();
+      slot.leave(launched.pid);
     }
     if ('error' in launched) {
       return launched;

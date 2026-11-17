@@ -770,6 +770,40 @@ half the processors the machine offers, rounded down, held to the physical memor
 `--engines` for the lanes its run begins on, and names a lanes file where the run may grow. It
 passes the machine's directory and count for the slots.
 
+### A command that grants the slots
+
+Where `GODOT_ENGINE_SLOT_COMMAND` holds a command line, such as
+`/opt/venv/bin/python -m queue --grant`, a machine has one scheduler and gdharness asks it for every
+slot it would take. gdharness then makes, reads and removes nothing in the slots directory for that
+take. Unset, nothing changes. The variable is read at each take.
+
+The command is started without a shell, hidden, with `--project <absolute project path>` and
+`--kind gate|side|one-off` added. A take with no project passes no `--project`, as an engine step
+of a command that has not named its project yet does. The line is split on white space outside
+double quotes, with the quotes taken out.
+
+- `gate` is a take inside a gate. `side` is work the machine's queue runs, a timing or a tier. Every
+  other take is a `one-off`.
+- The command's first line on standard output is `held <absolute lock path>` once the slot is
+  granted, or `refused <reason>`. gdharness waits for it as long as it would wait for a slot, and
+  stops at the call's deadline or cancellation.
+- The engine starts with `GODOT_ENGINE_HELD` set to that path.
+- A refusal, an exit before the first line, a first line in neither form and a command that will
+  not start each fail the start. The answer names the command and what it printed or its exit.
+  gdharness never falls back to taking a slot itself.
+- The command keeps the slot until its standard input ends. gdharness closes it once the engine has
+  gone, or the take is let go for any other reason, a cancelled wait included. A gdharness that is
+  killed closes it too, and on Windows the command ends with it. gdharness waits 5 seconds for the
+  command to exit, then ends it.
+- A game that outlives the call keeps the slot until its process has gone. The slot is not handed
+  to a keeper.
+- A take under an inherited `GODOT_ENGINE_HELD` calls nothing, as without the command.
+
+A take cannot ask for a slot that is free now, so `gdharness test` and `spread` start every engine
+through the command. The waiting marks and the memory marks of the steps below belong to taking
+slots yourself and are not written. A lock that names this process still has the engine written
+into it.
+
 ### Taking a slot from your own tool
 
 A tool of a game's own that starts engines takes slots the same way, in the steps below.
