@@ -61106,6 +61106,8 @@ async function testATestRunsFlagsAreJudgedFirst(): Promise<void> {
           engineArgs: ['--write-movie', join(movies, 'suite.avi')],
         });
         assert.match(movie, /--write-movie needs a run that draws, and this one is headless/, movie);
+        const quiet = await call('project_test', { projectPath, engineArgs: ['--quiet'] });
+        assert.match(quiet, /--quiet stops the engine printing the lines this run is judged by/, quiet);
         // And past those, the same call reaches the check that comes next, so the refusals above
         // were the flags' and not a project that could not be tested at all.
         const verbose = await call('project_test', { projectPath, engineArgs: ['--verbose'] });
@@ -71487,6 +71489,246 @@ function testTheTestCommandReadsItsOwnOptions(): void {
     assert.ok(existsSync(runner.stdout.trim()) && runner.stdout.trim().endsWith('listed.gd'), runner.stdout);
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * `--engine-arg` gives `gdharness test` the flags project_test's engineArgs takes, judged by the same
+ * list, and each refusal reads as project_test's does.
+ */
+function testTheTestCommandTakesEngineArgsAsProjectTestDoes(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-engine-arg-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    const given = ['--time-scale', '20', '--debug-collisions', '--max-fps', '60'];
+    assert.deepEqual(
+      testOptionsOf([project, ...given.flatMap((entry) => ['--engine-arg', entry])], tmpdir()).engineArgs,
+      given,
+      'every entry, in order, a flag beginning with -- included',
+    );
+    assert.deepEqual(testOptionsOf([project], tmpdir()).engineArgs, [], 'none unless given');
+    const refusal = (args: readonly string[]): string => {
+      try {
+        testOptionsOf([project, ...args], tmpdir());
+      } catch (error) {
+        return error instanceof EngineUsageError ? error.message : String(error);
+      }
+      return 'read';
+    };
+    const each = (...entries: string[]): string[] => entries.flatMap((entry) => ['--engine-arg', entry]);
+    // The same list and rule as project_test, each refusal in this command's own words.
+    assert.equal(
+      refusal(each('--headless')),
+      '--headless is set by gdharness test, which starts each engine headless unless its suites need a window, rather than through --engine-arg.',
+    );
+    assert.match(
+      refusal(each('--script')),
+      /^--script is not one of the engine flags --engine-arg takes, .*: --verbose, .*Each flag and each value is one entry, as in --engine-arg --max-fps --engine-arg 60\.$/,
+    );
+    assert.equal(
+      refusal(each('--time-scale', 'fast')),
+      '--time-scale takes a number as the next --engine-arg, and "fast" is not one.',
+    );
+    assert.equal(
+      refusal(each('--time-scale')),
+      '--time-scale takes a number as the next --engine-arg, and nothing followed it.',
+    );
+    assert.match(refusal(each('--rendering-driver', 'nonsense')), /takes a rendering driver/);
+    assert.match(refusal(['--engine-arg']), /^--engine-arg needs a value/);
+    for (const refused of ['--headless', '--script', '--time-scale']) {
+      assert.doesNotMatch(refusal(each(refused)), /engineArgs|JSON|\["/, `${refused} names no tool argument`);
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A flag that leaves a test run unjudgeable or crashes its engine is refused before any engine
+ * starts, as project_test refuses it: `--quiet` silences the lines the verdict is read from, and
+ * `--write-movie` needs a renderer the headless engines do not have.
+ */
+function testATestRunRefusesFlagsItCannotBeJudgedUnder(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-engine-arg-judged-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    const refusal = (...entries: string[]): string => {
+      try {
+        testOptionsOf([project, ...entries.flatMap((entry) => ['--engine-arg', entry])], tmpdir());
+      } catch (error) {
+        return error instanceof EngineUsageError ? error.message : String(error);
+      }
+      return 'read';
+    };
+    assert.match(refusal('--quiet'), /^--quiet stops the engine printing the lines this run is judged by/);
+    assert.match(refusal('--write-movie', join(tmpdir(), 'm.avi')), /^--write-movie needs a run that draws/);
+    assert.match(refusal('--write-movie', join(project, 'm.avi')), /^--write-movie needs a run that draws/);
+    assert.equal(refusal('--verbose'), 'read', 'the flags beside them are still taken');
+  } finally {
+    sweep(project);
+  }
+}
+
+/** `gdharness help` lists `--engine-arg` on the test command's usage line and in its description. */
+function testTheTestHelpListsTheEngineArgOption(): void {
+  const helped = spawnSyncHidden(process.execPath, ['build/cli.js', 'help'], { encoding: 'utf8' });
+  assert.equal(helped.status, 0, helped.stderr);
+  const lines = helped.stdout.split('\n').filter((line) => line.includes('--engine-arg'));
+  assert.equal(lines.length, 2, `the usage line and its description: ${helped.stdout}`);
+}
+
+/**
+ * A fixed frame step reaches the engines of a test run: a case reading the step of the frame after a
+ * load finds 1/60 s with `--fixed-fps 60` and the clock's own step without it. A headless engine
+ * given the flag races, so the run says so, and a run without it says nothing of the kind.
+ */
+function testATestRunHoldsItsFramesToAFixedStepWhenGivenFixedFps(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test fixed-fps regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-fixed-fps-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-fixed-fps-slots-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="FixedFps"\n\n' +
+        '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
+      'tests/step_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_step_is_a_sixtieth() -> void:\n' +
+        '\tawait get_tree().process_frame\n\tawait get_tree().process_frame\n' +
+        '\tassert_float(get_process_delta_time()).is_equal_approx(1.0 / 60.0, 0.00001)\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const free = test('--import');
+    assert.equal(free.status, 1, `the clock's own step is not a sixtieth: ${free.said}`);
+    const fixed = test('--engine-arg', '--fixed-fps', '--engine-arg', '60');
+    assert.equal(fixed.status, 0, fixed.said);
+    assert.match(
+      fixed.said,
+      /^--fixed-fps stops a headless engine holding its frames to the clock.*gdUnit4 case timeouts/m,
+      fixed.said,
+    );
+    assert.doesNotMatch(free.said, /--fixed-fps stops/, 'no note without the flag');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
+ * Every engine a test run starts takes the flags it was given, and an engine given none starts as it
+ * did. A case awaiting two frames while a node acts after 0.25 s of game time fails only when the
+ * flags make a frame last longer than that.
+ */
+function testATestRunStartsEveryEngineWithTheEngineArgsItIsGiven(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test engine args regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-engine-args-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-engine-args-slots-'));
+  try {
+    const suite =
+      'extends GdUnitTestSuite\n\nfunc test_two_frames() -> void:\n' +
+      '\tvar ticker: Node = auto_free(preload("res://core/ticker.gd").new())\n' +
+      '\tadd_child(ticker)\n\tawait get_tree().process_frame\n\tawait get_tree().process_frame\n' +
+      '\tassert_bool(ticker.get("acted")).is_false()\n';
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="EngineArgs"\n\n' +
+        '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
+      'core/ticker.gd':
+        'extends Node\n\nvar acted := false\nvar _elapsed := 0.0\n\n\nfunc _process(delta: float) -> void:\n' +
+        '\t_elapsed += delta\n\tif _elapsed >= 0.25:\n\t\tacted = true\n',
+      'tests/a_test.gd': suite,
+      'tests/b_test.gd': suite,
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const resultFile = join(project, 'result.json');
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile, ...args],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    // A frame of 1/60 s at twenty times the speed is 0.33 s of game time, past the node's 0.25 s.
+    const faster = [
+      '--engine-arg',
+      '--fixed-fps',
+      '--engine-arg',
+      '60',
+      '--engine-arg',
+      '--time-scale',
+      '--engine-arg',
+      '20',
+    ];
+    const verdicts = (): string[] =>
+      readRunResult(resultFile)
+        .suites.map((one) => `${one.path} ${one.verdict}`)
+        .toSorted();
+    const plain = test('--import');
+    assert.equal(plain.status, 0, plain.said);
+    assert.deepEqual(
+      verdicts(),
+      ['res://tests/a_test.gd PASSED', 'res://tests/b_test.gd PASSED'],
+      plain.said,
+    );
+
+    // Both suites passed without the flags, which does not make them pass with them: a changed-only
+    // run under the flags runs them again, and one without the flags still leaves them out.
+    const changed = test('--changed-only', ...faster);
+    assert.equal(changed.status, 1, changed.said);
+    assert.deepEqual(
+      verdicts(),
+      ['res://tests/a_test.gd FAILED', 'res://tests/b_test.gd FAILED'],
+      changed.said,
+    );
+    const changedPlain = test('--changed-only');
+    assert.equal(changedPlain.status, 0, changedPlain.said);
+    assert.match(
+      changedPlain.said,
+      /^Passed: 2 cases in 2 suites/m,
+      'run again, the flagged failure kept no pass',
+    );
+    const unchanged = test('--changed-only');
+    assert.match(
+      unchanged.said,
+      /passed on everything (?:its|their) engines? loaded as it stands now/,
+      unchanged.said,
+    );
+    const flagged = test(...faster);
+    assert.equal(flagged.status, 1, flagged.said);
+    assert.deepEqual(
+      verdicts(),
+      ['res://tests/a_test.gd FAILED', 'res://tests/b_test.gd FAILED'],
+      flagged.said,
+    );
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+  } finally {
+    sweep(project, slots);
   }
 }
 
@@ -111857,6 +112099,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,
   testTheTestCommandReadsItsOwnOptions,
+  testTheTestCommandTakesEngineArgsAsProjectTestDoes,
+  testATestRunRefusesFlagsItCannotBeJudgedUnder,
+  testTheTestHelpListsTheEngineArgOption,
+  testATestRunStartsEveryEngineWithTheEngineArgsItIsGiven,
+  testATestRunHoldsItsFramesToAFixedStepWhenGivenFixedFps,
   testTheLspCommandFindsTheEditorsPort,
   testEveryLongCallIsHeardFrom,
   testEveryEngineWaitsForAMachineSlot,

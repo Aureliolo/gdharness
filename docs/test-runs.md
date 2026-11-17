@@ -80,6 +80,16 @@ when the command line itself is wrong.
 - `--verbose`: start every engine with Godot's `--verbose` to name a leak at exit, where the engine
   otherwise prints only two counts. The verdict counts the objects left alive by class and names
   the resources still in use, the project's own before its addons'.
+- `--engine-arg ARG`: hand every engine of the run one entry of the flags `project_test`'s
+  `engineArgs` takes, repeated for each entry. A flag and its value are two entries, so
+  `--engine-arg --fixed-fps --engine-arg 60 --engine-arg --time-scale --engine-arg 20` runs every
+  frame at 1/60 s of game time, twenty times faster. A fixed step makes the speed apply the same on
+  every run, since headless frames are otherwise timed by the wall clock. A flag `project_test`
+  refuses is refused here before any engine starts, in this option's words. That includes `--quiet`,
+  which silences the lines the verdict is read from, and `--write-movie`. A pass kept for
+  `--changed-only` counts only for the same flags. Under `--fixed-fps` a headless engine's game
+  time runs ahead of the clock, so the run says that gdUnit4's timeouts and every game-time wait
+  run out early.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. [The result file](#the-result-file) lists what it holds.
 - `--runner`: print the path of the shipped runner and exit.

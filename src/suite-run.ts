@@ -59,7 +59,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
-import { envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
+import { ENGINE_ARG_SPELLING, engineFlagsRefusal, envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
 import { prependTo, readLog } from './log-read.js';
@@ -152,6 +152,8 @@ interface TestOptions {
   readonly printOutput: boolean;
   /** Start every engine with `--verbose`, so a leak at exit is named by what was left. */
   readonly verbose: boolean;
+  /** The engine flags every engine of the run starts with, as `--engine-arg` gives them. */
+  readonly engineArgs: readonly string[];
   /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
   readonly resultFile: string | null;
   /**
@@ -288,6 +290,43 @@ const VALUED = new Set([
   '--result',
   '--times',
 ]);
+/** The option that hands every engine of a run one entry of the flags project_test's engineArgs takes. */
+const ENGINE_ARG = '--engine-arg';
+
+/**
+ * [param given] as the engine flags every engine of a run starts with, judged by the rules
+ * project_test's engineArgs is held to, in this command's own words. Every engine here is headless
+ * unless its suites need a window, and a window may be shared by shards, so a movie is never written.
+ */
+function engineFlagsNamed(given: readonly string[] | undefined): readonly string[] {
+  const flags = given ?? [];
+  const refusal = engineFlagsRefusal(flags, {
+    spelling: ENGINE_ARG_SPELLING,
+    judged: true,
+    movie: (asked) =>
+      asked.includes('--write-movie')
+        ? '--write-movie needs a run that draws, and gdharness test starts its engines headless where it can: Movie Maker reads every frame back from the renderer, the engine crashed on the first frame when asked headless, and engines that run side by side would write the one file. Leave it out.'
+        : null,
+  });
+  if (refusal !== null) {
+    throw new EngineUsageError(refusal);
+  }
+  return flags;
+}
+
+/**
+ * What a run is told when --fixed-fps is among its flags and an engine runs headless, or none. The
+ * flag stops frames being held to the clock and a headless engine has no refresh to wait on.
+ */
+function racingSaid(engineArgs: readonly string[], plans: readonly EnginePlan[]): readonly string[] {
+  if (!engineArgs.includes('--fixed-fps') || plans.every((plan) => plan.windowed)) {
+    return [];
+  }
+  return [
+    '--fixed-fps stops a headless engine holding its frames to the clock, and it has no window refresh to wait on, so its game time races ahead of the wall clock: gdUnit4 case timeouts and every wait on game time, such as a timer or wait_until, run out early, and a case waiting on a thread or a file can time out at once. --max-fps does not hold it back. Leave --fixed-fps out for suites that wait on real work.',
+  ];
+}
+
 const SWITCHES = new Set(['--changed-only', '--whole-tree', '--import', '--print-output', '--verbose']);
 
 /** The arguments of `gdharness test` sorted into the options with values, the switches and the rest. */
@@ -295,6 +334,18 @@ interface SortedArguments {
   readonly valued: ReadonlyMap<string, readonly string[]>;
   readonly switches: ReadonlySet<string>;
   readonly positional: readonly string[];
+}
+
+/**
+ * The value of the option at [param at], refused when there is none. An `--engine-arg` entry may be
+ * a flag such as --time-scale, so only the other options refuse a value beginning with `--`.
+ */
+function valueAfter(args: readonly string[], at: number): string {
+  const value = args[at + 1];
+  if (value === undefined || value === '' || (value.startsWith('--') && args[at] !== ENGINE_ARG)) {
+    throw new EngineUsageError(`${args[at] ?? ''} needs a value.`);
+  }
+  return value;
 }
 
 /** [param args] sorted by what each is, refusing an unknown option or one missing its value. */
@@ -308,12 +359,8 @@ function sortedArguments(args: readonly string[]): SortedArguments {
       positional.push(arg);
     } else if (SWITCHES.has(arg)) {
       switches.add(arg);
-    } else if (VALUED.has(arg)) {
-      const value = args[at + 1];
-      if (value === undefined || value === '' || value.startsWith('--')) {
-        throw new EngineUsageError(`${arg} needs a value.`);
-      }
-      valued.set(arg, [...(valued.get(arg) ?? []), value]);
+    } else if (VALUED.has(arg) || arg === ENGINE_ARG) {
+      valued.set(arg, [...(valued.get(arg) ?? []), valueAfter(args, at)]);
       at += 1;
     } else {
       throw new EngineUsageError(`Unknown option ${arg} for gdharness test. Run gdharness help.`);
@@ -388,6 +435,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     order: orderNamed(last('--order'), selected),
     printOutput: switches.has('--print-output'),
     verbose: switches.has('--verbose'),
+    engineArgs: engineFlagsNamed(valued.get(ENGINE_ARG)),
     resultFile: pathNamed(last('--result'), cwd),
     timesFile: pathNamed(last('--times'), cwd),
   };
@@ -602,6 +650,7 @@ interface Launch extends EngineLaunch {
   readonly selfTyped: readonly SelfTypedExport[];
   readonly godotVersion: string | null;
   readonly verbose: boolean;
+  readonly engineArgs: readonly string[];
   readonly failsOnPushErrors: boolean;
 }
 
@@ -734,6 +783,7 @@ async function openedRun(
     godotVersion: options.godotVersion,
     cores: options.cores,
     verbose: options.verbose,
+    engineArgs: options.engineArgs,
     failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
   };
   return { launch, interrupted };
@@ -756,6 +806,8 @@ async function runStages(context: RunContext): Promise<number> {
     readFileSync(shippedListedRunner(), 'utf8'),
     engineSaid(godotPath),
     ...reachedAlsoSaid(options.reachAlso),
+    // A pass holds for the flags its engine ran with, since a frame step or a speed decides it.
+    ...(launch.engineArgs.length > 0 ? [`engine flags ${JSON.stringify(launch.engineArgs)}`] : []),
   ];
   const compileKept = options.changedOnly
     ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
@@ -773,6 +825,9 @@ async function runStages(context: RunContext): Promise<number> {
     console.log(line);
   };
   announceDeal(context, suites, deal, say);
+  for (const line of racingSaid(launch.engineArgs, deal.plans)) {
+    say(line);
+  }
   const started = await takenLanes(context, deal, say);
   const memory =
     started.shared && (deal.memoryHeld || started.follows !== null)
@@ -2360,7 +2415,9 @@ function displayFlags(launch: Launch, plan: EnginePlan): string[] {
   // On Windows every engine runs on the hidden desktop, so a windowed one starts with its flags.
   return [
     ...(viewport === null ? [] : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
-    ...(process.platform === 'win32' ? hiddenWindowFlags([], capsFrames(launch.projectPath)) : []),
+    ...(process.platform === 'win32'
+      ? hiddenWindowFlags(launch.engineArgs, capsFrames(launch.projectPath))
+      : []),
   ];
 }
 
@@ -2404,6 +2461,7 @@ function engineArguments(
     '--path',
     launch.projectPath,
     ...(launch.verbose ? ['--verbose'] : []),
+    ...launch.engineArgs,
     '-s',
     shippedListedRunner(),
     ...(plan.windowed ? [] : ['--ignoreHeadlessMode']),
