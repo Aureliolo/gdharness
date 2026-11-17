@@ -118,6 +118,7 @@ import {
   placeEmptyScriptDocs,
   scriptDocCachePath,
 } from '../src/doc-cache.js';
+import { howTheEditorEnded } from '../src/editor-end.js';
 import {
   bursts,
   clearEditorLog,
@@ -18747,8 +18748,19 @@ async function callWaitsForTheEditorThatArrives(run: AwaitedEditorRun): Promise<
   assert.notEqual(
     get(answered.result, 'isError'),
     true,
-    `the call made before the editor arrived waits for it: ${textOf(answered)}`,
+    `the call made before the editor arrived waits for it: ${textOf(answered)}\nthe editor ${howTheEditorEnded(project)}; its console:\n${
+      existsSync(editorLogPath(project))
+        ? readFileSync(editorLogPath(project), 'utf8').slice(-2000)
+        : '(none)'
+    }`,
   );
+  // An editor that died as it started is opened again by the call that waits for it, and the
+  // phases after this name the one that lives.
+  const lives = readEditorLogNote(project)?.pid;
+  if (lives !== undefined && lives !== run.pid) {
+    run.pid = lives;
+    await run.met.meet(lives);
+  }
   assert.deepEqual(invoked, ['create_scene'], 'and is answered by the editor that arrived');
 
   arriving.close();
@@ -43519,6 +43531,151 @@ async function testAQuietStartAnswersAsSoonAsAChattyOne(): Promise<void> {
       `a quiet start took ${quiet.toFixed(0)}ms against ${chatty.toFixed(0)}ms for a chatty one`,
     );
   } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A hidden stand-in editor opened by the server, and a call that needs an editor, which waits for it.
+ * The editor addon is enabled so that a call waits at all.
+ */
+async function aCallWaitingOnAStandInEditor(
+  scratch: string,
+  env: Record<string, string>,
+): Promise<{
+  answer: string;
+  opened: number;
+  project: string;
+  marker: string;
+  again: () => Promise<string>;
+  stop: () => Promise<void>;
+}> {
+  const project = join(scratch, 'project');
+  const marker = join(scratch, 'marker');
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="StandIn"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: await crashingEngine(),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '4000',
+      GDH_CRASH_MARKER: marker,
+      GDH_CRASH_WHEN: '--gdharness-hidden',
+      // The editor goes while the call below waits for it.
+      GDH_CRASH_AFTER_MS: '1500',
+      ...env,
+    },
+  });
+  await server.initialize('regression-test');
+  const opened = parseTextContent(
+    await server.request('tools/call', {
+      name: 'editor_launch',
+      arguments: { op: 'open', projectPath: project, hidden: true },
+    }),
+  );
+  // A rebind needs the editor and waits for the one this server opened, as a call to the bridge does.
+  const rebind = async (): Promise<string> =>
+    textOf(
+      await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'rebind' } }, 60_000),
+    ) ?? '';
+  return {
+    answer: await rebind(),
+    opened: asNumber(get(opened, 'pid'), 'pid'),
+    project,
+    marker,
+    again: rebind,
+    stop: async () => {
+      await server.stop();
+    },
+  };
+}
+
+/**
+ * The refusal for an editor that exited before it connected names its exit status and what it
+ * printed: nothing, its banner alone, or more with the last line.
+ */
+async function testTheRefusalForAnEditorThatWentNamesItsStatusAndOutput(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const cases: ReadonlyArray<readonly [Record<string, string>, RegExp]> = [
+    [
+      { GDH_SILENT: '1', GDH_CRASH_STATUS: '3' },
+      /exited without reaching the bridge: exit code 3, and it printed nothing\./,
+    ],
+    [
+      { GDH_CRASH_STATUS: '3221225477' },
+      /exited without reaching the bridge: exit code 0xC0000005, .*, and it printed only its banner\./,
+    ],
+    [
+      { GDH_CHATTY: '1' },
+      /exited without reaching the bridge: exit code 0xC06D007F, .*, and it printed 2 lines, the last "ready"\./,
+    ],
+  ];
+  for (const [env, expected] of cases) {
+    const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-end-'));
+    try {
+      const waited = await aCallWaitingOnAStandInEditor(scratch, env);
+      try {
+        assert.match(waited.answer, expected, `${JSON.stringify(env)}: ${waited.answer}`);
+        assert.equal(
+          startsNoted(waited.marker, '--gdharness-hidden'),
+          1,
+          'it died some other way than the race',
+        );
+        // Asked again once the editor has gone, the generic refusal says how it went as well.
+        const later = await waited.again();
+        assert.match(
+          later,
+          /^Editor not connected: no Godot editor .* The editor this server opened on .*, pid \d+, exited before it connected: exit code /,
+          later,
+        );
+      } finally {
+        await waited.stop();
+      }
+    } finally {
+      sweep(scratch);
+    }
+  }
+}
+
+/**
+ * An opened editor that dies after its banner with the start race's status, while a call waits for
+ * it, is opened again whole by that call. The call then waits for the editor that lives, and names it.
+ */
+async function testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-again-'));
+  const met = new MetProcesses();
+  try {
+    const waited = await aCallWaitingOnAStandInEditor(scratch, { GDH_HOLD: '1' });
+    try {
+      const lives = readEditorLogNote(waited.project)?.pid;
+      assert.ok(lives !== undefined, 'the second editor is the one the console names');
+      await met.meet(lives);
+      assert.deepEqual(
+        [lives === waited.opened, startsNoted(waited.marker, '--gdharness-hidden')],
+        [false, 2],
+        waited.answer,
+      );
+      assert.ok(
+        waited.answer.startsWith(
+          `Editor not connected: the editor this server opened on ${waited.project}, pid ${lives}, is still running`,
+        ),
+        `the call waited for the editor that lives and named it: ${waited.answer}`,
+      );
+    } finally {
+      await waited.stop();
+    }
+  } finally {
+    await met.end();
     sweep(scratch);
   }
 }
@@ -113822,6 +113979,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptRunThatDiesAfterItsBannerIsStartedAgain,
   testABlankOnlyStartIsNotStartedAgainByAKeptRun,
   testAQuietStartAnswersAsSoonAsAChattyOne,
+  testTheRefusalForAnEditorThatWentNamesItsStatusAndOutput,
+  testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain,
   testTheEndOfAStartedAgainEngineSaysWhatEachStartDid,
   testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas,
   testABootCheckThatDiesAfterItsBannerIsStartedAgain,

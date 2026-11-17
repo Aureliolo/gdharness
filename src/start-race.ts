@@ -38,7 +38,7 @@ const START_RACE = 0xc06d007f;
  * time when it has one, and its address. The colour codes of the rich form are stripped before this
  * is matched.
  */
-const ENGINE_BANNER =
+export const ENGINE_BANNER =
   /^Godot Engine v\d+\.\d+(?:\.\d+)?\.[a-z]+\d*(?:\.[\w-]+)* (?:\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC\) )?- https:\/\/godotengine\.org$/;
 
 /**

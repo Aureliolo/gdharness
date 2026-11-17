@@ -56,6 +56,7 @@ public static class CrashingEngine {
     }
   }
   static void Banner(string[] args, string banner) {
+    if (Env("GDH_SILENT") != "") { return; }
     string said = Env("GDH_BLANK") != "" ? "" : banner;
     Console.Out.Write(said + "\\n");
     Console.Out.Flush();
@@ -81,6 +82,7 @@ public static class CrashingEngine {
     if (marker != "" && debug.StartsWith("tcp://") && Env("GDH_REAL_ENGINE") == "") { Dial(marker, debug.Substring(6)); }
     if (marker != "" && asked.Contains(Env("GDH_CRASH_WHEN")) && !File.Exists(marker)) {
       File.WriteAllText(marker, "");
+      if (Env("GDH_CRASH_AFTER_MS") != "") { Thread.Sleep(int.Parse(Env("GDH_CRASH_AFTER_MS"))); }
       Banner(args, banner);
       return unchecked((int)UInt32.Parse(Env("GDH_CRASH_STATUS") == "" ? "3228369023" : Env("GDH_CRASH_STATUS")));
     }
@@ -103,7 +105,7 @@ let built: string | null = null;
  * hold GDH_CRASH_WHEN prints the banner and exits with GDH_CRASH_STATUS, which defaults to
  * 0xC06D007F. Every start is noted in GDH_CRASH_MARKER's log. Any other start hands its arguments to
  * GDH_REAL_ENGINE where that is set, or prints the banner and ends, or with GDH_HOLD stays up. With
- * GDH_CHATTY it prints a line past the banner.
+ * GDH_CRASH_AFTER_MS the crash comes that many milliseconds in, and with GDH_CHATTY it prints a line past the banner, and with GDH_SILENT it prints nothing.
  * `--version` is the real engine's answer, or a Godot version.
  */
 export async function crashingEngine(): Promise<string> {

@@ -818,8 +818,12 @@ banner. This covers only the engines gdharness starts itself that have this race
 
 `editor_run start` starts a kept game again only when it dies inside the wait it already makes for the
 runtime. A start that dies after the call has answered is not started again, and its run note and
-`editor_output` say how it ended. An editor opened by `editor_launch` is never started again, since
-that call does not wait for the editor.
+`editor_output` say how it ended.
+
+An editor opened by `editor_launch` is started again only by a call that waits for it, and only when
+it died inside that wait. The open itself returns at once and never starts it again. The keeper notes
+the editor's exit status beside its console, and every refusal that says the editor went names that
+status and what it printed.
 
 ### Writing the note
 

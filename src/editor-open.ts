@@ -10,7 +10,13 @@ import { alive } from './alive.js';
 import { DEFAULT_DAP_PORT } from './dap_client.js';
 import { HIDDEN_DESKTOP } from './desktop.js';
 import { placeEmptyScriptDocs } from './doc-cache.js';
-import { clearEditorLog, editorHelperOutputPath, editorLogPath, writeEditorLogNote } from './editor-log.js';
+import {
+  clearEditorLog,
+  editorExitPath,
+  editorHelperOutputPath,
+  editorLogPath,
+  writeEditorLogNote,
+} from './editor-log.js';
 import { EngineUsageError } from './errors.js';
 import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -239,6 +245,7 @@ export async function openEditorProcess(
       GDHARNESS_DAP_PORT: String(ports.dap),
       [OPENED_BY_A_SERVER]: '1',
     },
+    exitNote: editorExitPath(projectPath),
     ...editorDesktopOf(start.hidden, projectPath),
   });
   if ('error' in launched) {

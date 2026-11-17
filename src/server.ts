@@ -111,6 +111,7 @@ import {
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
+import { howTheEditorEnded, readEditorExit } from './editor-end.js';
 import {
   bursts,
   type EditorLogNote,
@@ -565,6 +566,9 @@ const PARENT_ASKED_AFTER_MS = 5_000;
  * greeted. The two came up within a few seconds of each other downstream, in either order.
  */
 const EDITOR_SERVERS_START_MS = 20_000;
+
+/** How long a call waits for the keeper to note the exit of an editor that has gone. */
+const EDITOR_EXIT_WAIT_MS = 3000;
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
@@ -5560,6 +5564,8 @@ class GodotServer {
     readonly projectPath: string;
     /** What it was started with, which a restart answers with as an open does. */
     readonly arguments: readonly string[];
+    /** How it was started, so a start that died as it started can be made again the same way. */
+    readonly start: EditorStart;
   } | null = null;
 
   /**
@@ -12384,6 +12390,12 @@ class GodotServer {
       // minutes, and the pid is the thing they can watch.
       awaitingLaunchedEditor:
         status.connected || !launchedIsUp ? undefined : (this.launchedEditor?.pid ?? undefined),
+      // Why the editor this server opened is gone, when it went before it connected: the exit
+      // status and what it printed, which the console alone does not say.
+      launchedEditorEnded:
+        status.connected || launchedIsUp || this.launchedEditor === null
+          ? undefined
+          : `pid ${String(this.launchedEditor.pid)}: ${howTheEditorEnded(this.launchedEditor.projectPath)}`,
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer. An open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
@@ -13571,6 +13583,7 @@ class GodotServer {
       startedAt: opened.startedAt,
       projectPath,
       arguments: opened.arguments,
+      start,
     };
     this.closedHere = null;
     return opened;
@@ -17228,7 +17241,9 @@ class GodotServer {
   ): Promise<Record<string, unknown>> {
     const launched = this.launchedEditor?.pid === editorPid ? this.launchedEditor : null;
     if (launched !== null && !this.greetedEditors.has(editorPid)) {
-      return (await this.launchedEditorIsUp()) ? { stillConnecting: true } : { exitedBeforeConnecting: true };
+      return (await this.launchedEditorIsUp())
+        ? { stillConnecting: true }
+        : { exitedBeforeConnecting: true, endedWith: howTheEditorEnded(launched.projectPath) };
     }
     const startedAt = launched?.startedAt ?? noted?.processStartedAt ?? null;
     const now = alive(editorPid) ? (await startTimesOf([editorPid])).get(editorPid) : undefined;
@@ -20651,7 +20666,11 @@ class GodotServer {
       );
     }
     return this.createErrorResponse(
-      'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+      `Editor not connected: no Godot editor with the gdharness editor addon has reached this server.${
+        launched === null
+          ? ''
+          : ` The editor this server opened on ${launched.projectPath}, pid ${launched.pid}, exited before it connected: ${howTheEditorEnded(launched.projectPath)}.`
+      }`,
       [
         ...instead,
         'Open the project in the editor with editor_launch, or by hand',
@@ -20667,16 +20686,25 @@ class GodotServer {
    * saying whether it is still coming up or has gone.
    */
   private async waitForTheLaunchedEditor(
-    launched: { pid: number; projectPath: string },
+    first: { pid: number; projectPath: string },
     instead: readonly string[],
   ): Promise<ToolResponse | null> {
     const began = Date.now();
-    await this.waitForBridge(
-      () => this.godotBridge.isConnected() || !alive(launched.pid),
-      began + editorRestartTimeoutMs(),
-    );
-    if (this.godotBridge.isConnected()) {
-      return null;
+    const deadline = began + editorRestartTimeoutMs();
+    let launched = first;
+    for (let starts = 1; ; starts += 1) {
+      await this.waitForBridge(() => this.godotBridge.isConnected() || !alive(launched.pid), deadline);
+      if (this.godotBridge.isConnected()) {
+        return null;
+      }
+      const next =
+        alive(launched.pid) || starts >= ENGINE_STARTS
+          ? null
+          : await this.startedAfterAnEditorDied(launched, deadline, starts);
+      if (next === null) {
+        break;
+      }
+      launched = next;
     }
     const opened = `the editor this server opened on ${launched.projectPath}, pid ${launched.pid}`;
     if (alive(launched.pid)) {
@@ -20690,11 +20718,80 @@ class GodotServer {
         ],
       );
     }
-    return this.createErrorResponse(`Editor not connected: ${opened}, exited without reaching the bridge.`, [
-      ...instead,
-      'editor_output op editor shows what it printed before it went',
-      'editor_launch open starts another',
-    ]);
+    // The keeper notes the exit just after the process goes.
+    await this.waitForBridge(
+      () => readEditorExit(launched.projectPath) !== null,
+      Date.now() + EDITOR_EXIT_WAIT_MS,
+    );
+    return this.createErrorResponse(
+      `Editor not connected: ${opened}, exited without reaching the bridge: ${howTheEditorEnded(launched.projectPath)}.`,
+      [
+        ...instead,
+        'editor_output op editor shows what it printed before it went',
+        'editor_launch open starts another',
+      ],
+    );
+  }
+
+  /**
+   * The editor opened again whole, when the one a call was waiting for [param dead] died as it
+   * started: a Windows exception status with nothing printed, or the banner alone for the status of
+   * the engine's start race. Null when it died some other way or the wait is over. Opened in its
+   * turn, as the idle reopen is, and only if this server's record still names the dead editor,
+   * so two calls waiting on one death open one editor between them. The editor log, the log note
+   * and the launched-editor record all come from the new open.
+   */
+  private async startedAfterAnEditorDied(
+    dead: { pid: number; projectPath: string },
+    deadline: number,
+    starts: number,
+  ): Promise<{ pid: number; projectPath: string } | null> {
+    const record = this.launchedEditor;
+    if (record !== null && record.pid !== dead.pid) {
+      // Another call's wait has opened it again already.
+      return record;
+    }
+    if (
+      record === null ||
+      process.platform !== 'win32' ||
+      !(await endedAsItStarted({
+        pid: dead.pid,
+        output: editorLogPath(dead.projectPath),
+        until: Math.min(deadline, Date.now() + EDITOR_EXIT_WAIT_MS),
+        exitCode: () => readEditorExit(dead.projectPath),
+      }))
+    ) {
+      return null;
+    }
+    await delay(START_RETRY_MS * 2 ** (starts - 1));
+    return await inTurnToOpen(dead.projectPath, async () => {
+      const now = this.launchedEditor;
+      if (now?.pid !== dead.pid || this.godotBridge.isConnected()) {
+        return now;
+      }
+      const arriving = await this.editorsNotYetConnected(dead.projectPath);
+      if (
+        (arriving ?? []).some((one) => one.pid !== dead.pid) ||
+        this.anEditorThatCannotConnect(dead.projectPath) !== null
+      ) {
+        return null;
+      }
+      const engine = await this.engine(dead.projectPath);
+      if (!engine.ok) {
+        return null;
+      }
+      const opened = await this.openAnEditor(
+        engine.value,
+        dead.projectPath,
+        portsIn(now.arguments) ?? (await portsForAnEditor()),
+        now.start,
+      );
+      if (opened.error !== null) {
+        return null;
+      }
+      restartSettled(dead.projectPath);
+      return this.launchedEditor;
+    });
   }
 
   /**
