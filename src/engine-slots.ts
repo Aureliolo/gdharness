@@ -2422,7 +2422,7 @@ export async function slotForCall(game = false, project?: string): Promise<CallS
   const progress = callProgress();
   const waits = callSlotWaits();
   const began = Date.now();
-  // The slots folder is the built-in taker's, so a command's grant has no holders to name in it.
+  // A command's grant leaves nothing in the slots folder, so there are no holders to name.
   const command = slotCommandOf();
   let blockedBy: readonly SlotHolder[] | undefined;
   let blockedOn: SlotsDrawn | undefined;
@@ -2439,7 +2439,7 @@ export async function slotForCall(game = false, project?: string): Promise<CallS
           );
         },
     () => {
-      blockedBy = command === undefined ? slots.holders() : [];
+      blockedBy = slots.holders();
       blockedOn = slots.drawn;
     },
     game,
