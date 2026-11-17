@@ -11,12 +11,13 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cacheHome } from './cache-home.js';
 import { ownStart } from './engine-slots.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
+import { parseProjectGodot } from './resources.js';
 import { tryTake } from './write-turns.js';
 
 /**
@@ -27,6 +28,30 @@ import { tryTake } from './write-turns.js';
  * starts. Copied in and out rather than shared, since runs go side by side.
  */
 const NAME = 'shader_cache';
+
+/**
+ * The Vulkan driver keeps its own pipeline cache beside the shader cache, in
+ * user://vulkan/pipelines.<rendering method>.<device>.cache. Building them cold costs a first draw
+ * two to nine seconds per run, so these files travel with the shader cache. The
+ * editor's file, which ends in `.editor.cache`, is not a game's. The engine judges a file's
+ * validity itself, against the device and driver, and builds cold when it refuses one.
+ */
+const PIPELINES = 'vulkan';
+
+const PIPELINE_FILE = /^pipelines\..+\.cache$/;
+
+const EDITOR_PIPELINE_SUFFIX = '.editor.cache';
+
+/** The pipeline cache files in [param folder], as their names. */
+function pipelineFilesIn(folder: string): string[] {
+  try {
+    return readdirSync(folder, { withFileTypes: true })
+      .filter((e) => e.isFile() && PIPELINE_FILE.test(e.name) && !e.name.endsWith(EDITOR_PIPELINE_SUFFIX))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
 
 /** How deep under a run's user folder the cache is looked for: Godot/app_userdata/<name>/. */
 const DEPTH = 4;
@@ -104,6 +129,39 @@ interface Kept {
   readonly engine: string;
   readonly where: string;
   readonly bytes: number;
+  /** The settings that name the run's user folder, as the project had them when this was kept. */
+  readonly layout: string;
+}
+
+/**
+ * The project's settings that decide which folder under the user data its engine reads, as the
+ * project file spells them, and a hash of `override.cfg`, which the engine reads over it. A cache
+ * kept under another name is in a folder the engine no longer reads.
+ */
+function layoutOf(projectPath: string): string {
+  try {
+    const application =
+      parseProjectGodot(readFileSync(join(projectPath, 'project.godot'), 'utf8'))['application'] ?? {};
+    return JSON.stringify([
+      application['config/name'],
+      application['config/use_custom_user_dir'],
+      application['config/custom_user_dir_name'],
+      overrideOf(projectPath),
+    ]);
+  } catch {
+    return '';
+  }
+}
+
+/** A hash of the project's `override.cfg`, empty when there is none. */
+function overrideOf(projectPath: string): string {
+  try {
+    return createHash('sha256')
+      .update(readFileSync(join(projectPath, 'override.cfg')))
+      .digest('hex');
+  } catch {
+    return '';
+  }
 }
 
 function keptRecord(kept: string): Kept | null {
@@ -112,7 +170,7 @@ function keptRecord(kept: string): Kept | null {
     if (!isRecord(record)) {
       return null;
     }
-    const { project, engine, where, bytes } = record;
+    const { project, engine, where, bytes, layout } = record;
     if (
       typeof project !== 'string' ||
       typeof engine !== 'string' ||
@@ -121,7 +179,7 @@ function keptRecord(kept: string): Kept | null {
     ) {
       return null;
     }
-    return { project, engine, where, bytes };
+    return { project, engine, where, bytes, layout: typeof layout === 'string' ? layout : '' };
   } catch {
     return null;
   }
@@ -139,35 +197,83 @@ export async function seedPipelineCache(
   projectPath: string,
   godotPath: string,
   home: string = cacheHome(),
-): Promise<void> {
+  copy: CopyFile = cpSync,
+): Promise<SeededFiles> {
+  const seeded: Record<string, Stamp> = {};
   const kept = keptFor(projectPath, home);
-  if (keptRecord(kept) === null) {
-    return;
+  const lock = `${kept}.lock`;
+  // A swap removes the kept folder for a moment, under the lock, so a lock file also means a cache.
+  if (!existsSync(kept) && !existsSync(lock)) {
+    return seeded;
   }
   try {
-    await underLock(`${kept}.lock`, () => {
+    await underLock(lock, () => {
       const record = keptRecord(kept);
-      if (record === null || record.engine !== engineBuild(godotPath) || !existsSync(join(kept, NAME))) {
+      if (
+        record === null ||
+        record.engine !== engineBuild(godotPath) ||
+        record.layout !== layoutOf(projectPath) ||
+        !existsSync(join(kept, NAME))
+      ) {
         return;
       }
-      cpSync(join(kept, NAME), join(user, record.where), { recursive: true });
+      const shaders = join(user, record.where);
+      cpSync(join(kept, NAME), shaders, { recursive: true });
+      const into = join(dirname(shaders), PIPELINES);
+      for (const file of pipelineFilesIn(join(kept, PIPELINES))) {
+        // Renamed into place, so the engine never reads a file that is half copied.
+        mkdirSync(into, { recursive: true });
+        const partial = join(into, `${file}.seeding`);
+        try {
+          copy(join(kept, PIPELINES, file), partial);
+          renameSync(partial, join(into, file));
+        } finally {
+          rmSync(partial, { force: true });
+        }
+        const stamp = stampOf(join(into, file));
+        if (stamp !== null) {
+          seeded[file] = stamp;
+        }
+      }
     });
   } catch {
     // A partial copy is a cache with fewer pipelines in it, which the engine fills in.
   }
+  return seeded;
+}
+
+type CopyFile = (from: string, to: string) => void;
+
+/** A file's size and modification time, which the engine changes whenever it writes the file. */
+type Stamp = readonly [number, number];
+
+function stampOf(path: string): Stamp | null {
+  try {
+    const { size, mtimeMs } = statSync(path);
+    return [size, mtimeMs];
+  } catch {
+    return null;
+  }
 }
 
 /**
+ * The pipeline files a seed put in a run's folder and how they stood, by name. The caller hands them
+ * to the run's keep, which tells a file the run's engine wrote from the seeded copy it left alone.
+ */
+export type SeededFiles = Readonly<Record<string, Stamp>>;
+
+/**
  * Keeps the pipeline cache a run left in [param user] for the next run of [param projectPath]. It
- * replaces the kept one when another engine build made that, or when it holds more: a headless run
- * builds none, and a run of one suite fewer than a run of all of them. The caches of projects no
- * longer on disk go at the same time, as test projects do.
+ * replaces the kept one when another engine build made that, and otherwise as [function settled]
+ * says. The caches of projects no longer on disk go at the same time, as test projects do.
  */
 export async function keepPipelineCache(
   user: string,
   projectPath: string,
   godotPath: string,
   home: string = cacheHome(),
+  seeded: SeededFiles = {},
+  copy: CopyFile = cpSync,
 ): Promise<void> {
   const engine = engineBuild(godotPath);
   const where = cacheUnder(user);
@@ -177,21 +283,46 @@ export async function keepPipelineCache(
   const kept = keptFor(projectPath, home);
   const left = join(user, where);
   try {
+    const vulkan = join(dirname(left), PIPELINES);
+    const all = pipelineFilesIn(vulkan);
+    // A seeded file the engine left alone is the kept one, or an older one if the kept one has
+    // moved on since: it says nothing about the pipelines this run built.
+    const files = all.filter((file) => {
+      const was = seeded[file];
+      const now = stampOf(join(vulkan, file));
+      return was === undefined || now === null || was[0] !== now[0] || was[1] !== now[1];
+    });
     const bytes = bytesIn(left);
-    if (bytes === 0 || keptHolds(kept, engine, bytes)) {
+    if (bytes === 0 && all.length === 0) {
+      return;
+    }
+    const made: Kept = {
+      project: resolve(projectPath),
+      engine,
+      where: where.split(sep).join('/'),
+      bytes,
+      layout: layoutOf(projectPath),
+    };
+    // Decided before anything is copied or locked, since most runs are seeded and add nothing.
+    const verdict = judge(kept, made, files, vulkan);
+    if (!verdict.whole && !verdict.shaders && !verdict.changed) {
       return;
     }
     // Built beside the kept one and swapped in whole, so a run seeding from it meanwhile copies
     // the old cache or the new one and never half of each.
     const building = `${kept}.${process.pid}.${Date.now()}`;
     mkdirSync(building, { recursive: true });
-    cpSync(left, join(building, NAME), { recursive: true });
-    const made: Kept = { project: resolve(projectPath), engine, where: where.split(sep).join('/'), bytes };
-    writeFileSync(join(building, RECORD), JSON.stringify(made));
-    // The copy takes a while and runs go side by side, so the kept one is read again under the lock
-    // the swap holds: a smaller cache that finished last would otherwise replace a larger one.
+    if (verdict.shaders) {
+      cpSync(left, join(building, NAME), { recursive: true });
+    }
+    for (const file of files) {
+      mkdirSync(join(building, PIPELINES), { recursive: true });
+      copy(join(vulkan, file), join(building, PIPELINES, file));
+    }
+    // The copy takes a while and runs go side by side, so the kept one is judged again under the lock
+    // the swap holds: a smaller shader cache that finished last would otherwise replace a larger one.
     const swapped = await underLock(`${kept}.lock`, () => {
-      if (keptHolds(kept, engine, bytes)) {
+      if (!settled(kept, building, made, { files, all, left, vulkan, copy })) {
         return false;
       }
       rmSync(kept, { recursive: true, force: true });
@@ -211,10 +342,91 @@ export async function keepPipelineCache(
   }
 }
 
-/** Whether the cache kept in [param kept] is from [param engine] and holds at least [param bytes]. */
-function keptHolds(kept: string, engine: string, bytes: number): boolean {
+function sameFile(a: string, b: string): boolean {
+  try {
+    return statSync(a).size === statSync(b).size && readFileSync(a).equals(readFileSync(b));
+  } catch {
+    return false;
+  }
+}
+
+interface Verdict {
+  /** The kept set is another engine build's, or under another folder name, or gone: replace it. */
+  readonly whole: boolean;
+  /** The run's shader cache is larger than the kept one. */
+  readonly shaders: boolean;
+  /** A pipeline file the run's engine wrote differs from the kept one of its name. */
+  readonly changed: boolean;
+}
+
+/**
+ * What a run adds to the set kept in [param kept]. Of the same engine build's set, the shader cache
+ * is the run's only when it is larger, since a run of one suite builds fewer than a run of all of
+ * them. Each pipeline file the run's engine wrote is the run's when it differs from the kept one of
+ * its name, whatever its size, since an engine that refuses a seeded file writes a smaller valid one.
+ */
+function judge(kept: string, made: Kept, files: readonly string[], vulkan: string): Verdict {
   const record = keptRecord(kept);
-  return record?.engine === engine && bytes <= record.bytes;
+  if (
+    record === null ||
+    record.engine !== made.engine ||
+    record.layout !== made.layout ||
+    !existsSync(join(kept, NAME))
+  ) {
+    return { whole: true, shaders: true, changed: true };
+  }
+  return {
+    whole: false,
+    shaders: made.bytes > record.bytes,
+    changed: files.some((file) => !sameFile(join(kept, PIPELINES, file), join(vulkan, file))),
+  };
+}
+
+interface Run {
+  /** The pipeline files the run's engine wrote, which the building folder holds copies of. */
+  readonly files: readonly string[];
+  /** Every pipeline file in the run's folder. */
+  readonly all: readonly string[];
+  readonly left: string;
+  readonly vulkan: string;
+  readonly copy: CopyFile;
+}
+
+/**
+ * Judges again with the lock held and makes [param building] what replaces [param kept]. Answers
+ * false when the kept set needs no change. A pipeline file the run's engine did not write stays as
+ * kept. A set replaced whole takes the run's files, written or not.
+ */
+function settled(kept: string, building: string, made: Kept, run: Run): boolean {
+  const verdict = judge(kept, made, run.files, run.vulkan);
+  if (!verdict.whole && !verdict.shaders && !verdict.changed) {
+    return false;
+  }
+  if (verdict.shaders && !existsSync(join(building, NAME))) {
+    cpSync(run.left, join(building, NAME), { recursive: true });
+  }
+  if (verdict.whole) {
+    for (const file of run.all.filter((name) => !run.files.includes(name))) {
+      mkdirSync(join(building, PIPELINES), { recursive: true });
+      run.copy(join(run.vulkan, file), join(building, PIPELINES, file));
+    }
+    writeFileSync(join(building, RECORD), JSON.stringify(made));
+    return true;
+  }
+  if (!verdict.shaders) {
+    rmSync(join(building, NAME), { recursive: true, force: true });
+    renameSync(join(kept, NAME), join(building, NAME));
+  }
+  for (const file of pipelineFilesIn(join(kept, PIPELINES))) {
+    if (!run.files.includes(file)) {
+      mkdirSync(join(building, PIPELINES), { recursive: true });
+      renameSync(join(kept, PIPELINES, file), join(building, PIPELINES, file));
+    }
+  }
+  const record = keptRecord(kept);
+  const { where, bytes } = verdict.shaders || record === null ? made : record;
+  writeFileSync(join(building, RECORD), JSON.stringify({ ...made, where, bytes }));
+  return true;
 }
 
 /** How long a keep waits for another's swap, which takes milliseconds, before leaving its copy unkept. */
