@@ -135,7 +135,6 @@ import {
   editorQuitRequestPath,
   editorRestartTimeoutMs,
   inTurnToOpen,
-  openEditorProcess,
   openTheEditor,
 } from '../src/editor-open.js';
 import {
@@ -43056,7 +43055,7 @@ function testAnEngineThatDiesAfterItsBannerIsStartedAgain(): void {
     [
       dies(START_RACE_STATUS, banner),
       dies(START_RACE_STATUS, ENGINE_BANNER_LINE),
-      dies(START_RACE_STATUS, banner.replace('\n', '\r\n')),
+      dies(START_RACE_STATUS, `${ENGINE_BANNER_LINE}\r\n`),
       dies(START_RACE_STATUS, `${banner}\n`),
       dies(
         START_RACE_STATUS,
@@ -43355,6 +43354,8 @@ async function testAKeptRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void>
     'config_version=5\n\n[application]\nconfig/name="Kept"\nrun/main_scene="res://main.tscn"\n',
   );
   writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+  writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
   const server = new ServerProcess({
     env: {
       GODOT_PATH: await crashingEngine(),
@@ -43367,12 +43368,14 @@ async function testAKeptRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void>
   });
   try {
     await server.initialize('regression-test');
+    // The death comes inside the wait the call makes for the runtime, which is the only wait a
+    // start has to start again in.
     const answer = parseTextContent(
       await server.request(
         'tools/call',
         {
           name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 2000 },
         },
         ENGINE_CALL_TIMEOUT_MS,
       ),
@@ -43403,38 +43406,40 @@ async function testAKeptRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void>
   }
 }
 
+/** A kept project the stand-in engine starts, with the runtime addon's script so a start waits for it. */
+function projectOfAKeptStandIn(scratch: string, name: string): string {
+  const project = join(scratch, 'project');
+  mkdirSync(project);
+  writeFileSync(
+    join(project, 'project.godot'),
+    `config_version=5\n\n[application]\nconfig/name="${name}"\nrun/main_scene="res://main.tscn"\n`,
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+  writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+  return project;
+}
+
 /**
- * A start that printed only a blank line and died with an access violation is its own answer, for
- * a kept run and for a hidden editor alike: any byte is output, and only the banner alone is read
- * as the race's.
+ * A start that printed only a blank line and died with an access violation is its own answer, even
+ * inside the wait for the runtime: any byte is output, and only the banner alone is read as the
+ * race's.
  */
-async function testABlankOnlyStartIsNotStartedAgainByAKeptRunOrAnEditor(): Promise<void> {
+async function testABlankOnlyStartIsNotStartedAgainByAKeptRun(): Promise<void> {
   if (process.platform !== 'win32') {
     return;
   }
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-blank-start-'));
-  const project = join(scratch, 'project');
-  const runtime = join(scratch, 'runtime');
-  const env = {
-    GDH_CRASH_STATUS: '3221225477',
-    GDH_BLANK: '1',
-    GDHARNESS_RUNTIME_DIR: runtime,
-  };
-  const before = { ...process.env };
-  mkdirSync(project);
-  mkdirSync(runtime);
-  writeFileSync(
-    join(project, 'project.godot'),
-    'config_version=5\n\n[application]\nconfig/name="Blank"\nrun/main_scene="res://main.tscn"\n',
-  );
-  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-  const keptMarker = join(scratch, 'kept');
+  const project = projectOfAKeptStandIn(scratch, 'Blank');
+  const marker = join(scratch, 'kept');
   const server = new ServerProcess({
     env: {
-      ...env,
       GODOT_PATH: await crashingEngine(),
       GDHARNESS_PROJECT: project,
-      GDH_CRASH_MARKER: keptMarker,
+      GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
+      GDH_CRASH_STATUS: '3221225477',
+      GDH_BLANK: '1',
+      GDH_CRASH_MARKER: marker,
       GDH_CRASH_WHEN: '--remote-debug',
     },
   });
@@ -43444,87 +43449,76 @@ async function testABlankOnlyStartIsNotStartedAgainByAKeptRunOrAnEditor(): Promi
       'tools/call',
       {
         name: 'editor_run',
-        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 2000 },
       },
       ENGINE_CALL_TIMEOUT_MS,
     );
-    assert.equal(startsNoted(keptMarker, '--remote-debug'), 1, 'a kept run is not started again');
-    const editorMarker = join(scratch, 'editor');
-    Object.assign(process.env, env, {
-      GDH_CRASH_MARKER: editorMarker,
-      GDH_CRASH_WHEN: '--gdharness-hidden',
-    });
-    await prepareWholeExits();
-    const opened = await openEditorProcess(
-      await crashingEngine(),
-      project,
-      { lsp: await reservePort(), dap: await reservePort() },
-      { hidden: true, silent: true, until: null },
-    );
-    assert.deepEqual(
-      [startsNoted(editorMarker, '--gdharness-hidden'), readEditorLogNote(project)?.pid === opened.pid],
-      [1, true],
-      `a hidden editor is not started again: ${JSON.stringify(opened)}`,
-    );
+    assert.equal(startsNoted(marker, '--remote-debug'), 1, 'a kept run is not started again');
   } finally {
-    for (const key of [...Object.keys(env), 'GDH_CRASH_MARKER', 'GDH_CRASH_WHEN']) {
-      if (before[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = before[key];
-      }
-    }
     await server.stop();
     sweep(scratch);
   }
 }
 
 /**
- * A hidden editor whose first start dies after its banner is started again whole. What it hands
- * back and the note of its console name the editor that lives.
+ * A start waits for nothing it was not asked to wait for. With runtimeWaitMs of 1 the call answers
+ * as soon as the engine is started, whether the engine prints past its banner or stays quiet, so a
+ * quiet headless game is not held back to see whether it died as it started.
  */
-async function testAHiddenEditorThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+async function testAQuietStartAnswersAsSoonAsAChattyOne(): Promise<void> {
   if (process.platform !== 'win32') {
     return;
   }
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-editor-'));
-  const project = join(scratch, 'project');
-  const marker = join(scratch, 'marker');
-  const met = new MetProcesses();
-  const before = { ...process.env };
-  mkdirSync(project);
-  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Editor"\n');
-  Object.assign(process.env, {
-    GDH_CRASH_MARKER: marker,
-    GDH_CRASH_WHEN: '--gdharness-hidden',
-    GDH_HOLD: '1',
-    GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
-  });
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-quiet-start-'));
+  const project = projectOfAKeptStandIn(scratch, 'Quiet');
+  const runtime = join(scratch, 'runtime');
+  const standIn = await crashingEngine();
+  const timeOfAStart = async (chatty: boolean): Promise<number> => {
+    const server = new ServerProcess({
+      env: {
+        GODOT_PATH: standIn,
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_RUNTIME_DIR: runtime,
+        GDH_HOLD: '1',
+        ...(chatty ? { GDH_CHATTY: '1' } : {}),
+      },
+    });
+    try {
+      await server.initialize('regression-test');
+      const began = performance.now();
+      const answer = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 1 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      const took = performance.now() - began;
+      assert.equal(get(answer, 'started'), true, `the start answers: ${JSON.stringify(answer)}`);
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      return took;
+    } finally {
+      await server.stop();
+    }
+  };
   try {
-    await prepareWholeExits();
-    const opened = await openEditorProcess(
-      await crashingEngine(),
-      project,
-      { lsp: await reservePort(), dap: await reservePort() },
-      { hidden: true, silent: true, until: null },
-    );
-    const pid = opened.pid;
-    assert.ok(pid !== null, `the editor opens: ${JSON.stringify(opened)}`);
-    await met.meet(pid);
-    assert.deepEqual(
-      [isAlive(pid), readEditorLogNote(project)?.pid, startsNoted(marker, '--gdharness-hidden')],
-      [true, pid, 2],
-      `the answer and the console's note name the editor that lives: ${JSON.stringify(opened)}`,
+    // The wall time of calls that start processes. The better of two each, so a stall is not held
+    // against either.
+    const chatty = Math.min(await timeOfAStart(true), await timeOfAStart(true));
+    const quiet = Math.min(await timeOfAStart(false), await timeOfAStart(false));
+    console.log(`quiet start ${quiet.toFixed(0)}ms, chatty start ${chatty.toFixed(0)}ms`);
+    assert.ok(
+      quiet < chatty + 1500,
+      `a quiet start took ${quiet.toFixed(0)}ms against ${chatty.toFixed(0)}ms for a chatty one`,
     );
   } finally {
-    for (const key of ['GDH_CRASH_MARKER', 'GDH_CRASH_WHEN', 'GDH_HOLD', 'GDHARNESS_RUNTIME_DIR']) {
-      if (before[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = before[key];
-      }
-    }
-    await met.end();
     sweep(scratch);
   }
 }
@@ -113797,8 +113791,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessEngineThatDiesAfterItsBannerIsStartedAgain,
   testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain,
   testAKeptRunThatDiesAfterItsBannerIsStartedAgain,
-  testAHiddenEditorThatDiesAfterItsBannerIsStartedAgain,
-  testABlankOnlyStartIsNotStartedAgainByAKeptRunOrAnEditor,
+  testABlankOnlyStartIsNotStartedAgainByAKeptRun,
+  testAQuietStartAnswersAsSoonAsAChattyOne,
   testTheEndOfAStartedAgainEngineSaysWhatEachStartDid,
   testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas,
   testABootCheckThatDiesAfterItsBannerIsStartedAgain,

@@ -49,7 +49,6 @@ import {
   writeProfileFile,
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
-import { exitFileOf } from './start-race.js';
 import { followSuccessor } from './successor.js';
 import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
@@ -652,18 +651,6 @@ function recordTheEnd(ended: KeptEnd): void {
   }
 }
 
-/** An editor has no run note, and the server that opened it reads its exit from beside its output. */
-function noteTheEditorsExit(output: string | undefined, code: number | null): void {
-  if (output === undefined || code === null) {
-    return;
-  }
-  try {
-    writeFileSync(exitFileOf(output), String(code >>> 0));
-  } catch {
-    // The server then cannot tell how a start that died ended, and does not start it again.
-  }
-}
-
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
@@ -698,9 +685,6 @@ async function keep(): Promise<void> {
   const told = await exited;
   const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
   const exitedAt = Date.now();
-  if (run === undefined) {
-    noteTheEditorsExit(spec.output, code);
-  }
   const note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
   if (note !== null) {

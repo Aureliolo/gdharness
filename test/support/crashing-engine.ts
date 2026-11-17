@@ -61,6 +61,11 @@ public static class CrashingEngine {
     Console.Out.Flush();
     string log = Arg(args, "--log-file");
     if (log != "") { File.AppendAllText(log, said + "\\n"); }
+    if (Env("GDH_CHATTY") != "") {
+      Console.Out.Write("ready\\n");
+      Console.Out.Flush();
+      if (log != "") { File.AppendAllText(log, "ready\\n"); }
+    }
   }
   public static int Main(string[] args) {
     string banner = ${JSON.stringify(ENGINE_BANNER_LINE)};
@@ -97,7 +102,8 @@ let built: string | null = null;
  * A program standing in for the engine, started in place of it. The first start whose arguments
  * hold GDH_CRASH_WHEN prints the banner and exits with GDH_CRASH_STATUS, which defaults to
  * 0xC06D007F. Every start is noted in GDH_CRASH_MARKER's log. Any other start hands its arguments to
- * GDH_REAL_ENGINE where that is set, or prints the banner and ends, or with GDH_HOLD stays up.
+ * GDH_REAL_ENGINE where that is set, or prints the banner and ends, or with GDH_HOLD stays up. With
+ * GDH_CHATTY it prints a line past the banner.
  * `--version` is the real engine's answer, or a Godot version.
  */
 export async function crashingEngine(): Promise<string> {

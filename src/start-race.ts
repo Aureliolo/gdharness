@@ -1,6 +1,6 @@
 /**
  * Which engine deaths are a start that a second start would not repeat. Apart from `engine-run.ts`
- * because the keeper reads the same rule, and loads little else.
+ * because every start path reads the same rule, and it loads little else.
  */
 
 import { CONTROL_SEQUENCE } from './game-log.js';
@@ -16,11 +16,6 @@ export const START_RETRY_MS = 500;
  * project.
  */
 export const START_WINDOW_MS = 30_000;
-
-/** Where the keeper of a start with an output file writes how that start exited. */
-export function exitFileOf(output: string): string {
-  return `${output}.exit`;
-}
 
 /** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
 export const CONSOLE_CLOSED = 0xc000013a;

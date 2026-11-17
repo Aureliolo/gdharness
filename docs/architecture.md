@@ -816,6 +816,11 @@ hook. gdharness starts such an engine again, up to three starts, when it printed
 banner. This covers only the engines gdharness starts itself that have this race, such as the official
 4.7.2 build. A game's exported build and an engine started some other way are unchanged.
 
+`editor_run start` starts a kept game again only when it dies inside the wait it already makes for the
+runtime. A start that dies after the call has answered is not started again, and its run note and
+`editor_output` say how it ended. An editor opened by `editor_launch` is never started again, since
+that call does not wait for the editor.
+
 ### Writing the note
 
 The keeper writes the note once the game is up, and the exit into it when the game ends. It is the

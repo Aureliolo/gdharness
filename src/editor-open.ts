@@ -3,7 +3,7 @@
  * editor opened from the command line is the one the server would have opened: on the same ports,
  * with its console paired to its pid, and under the same turn, so two opens at once make one editor.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
@@ -32,8 +32,6 @@ import {
   shippedEditorDigest,
   shippedRuntimeDigest,
 } from './setup.js';
-import { ENGINE_STARTS, exitFileOf, START_RETRY_MS } from './start-race.js';
-import { diedAtLaunch } from './start-watch.js';
 import { isNewer } from './update-check.js';
 import { inTurnFor } from './write-turns.js';
 
@@ -206,55 +204,6 @@ export function editorDesktopOf(
  * can write them again, which decides who may restart the editor.
  */
 export async function openEditorProcess(
-  engine: string,
-  projectPath: string,
-  ports: EditorPorts,
-  start: EditorStart,
-): Promise<EditorOpened> {
-  for (let starts = 1; ; starts += 1) {
-    const opened = await openEditorOnce(engine, projectPath, ports, start);
-    if (
-      opened.pid === null ||
-      starts >= ENGINE_STARTS ||
-      !(await diedAsItStartedOnWindows(opened.pid, projectPath, start))
-    ) {
-      return opened;
-    }
-    // A whole new start, so the pid, the log note and the ports all come from the editor that lives.
-    await delay(START_RETRY_MS * 2 ** (starts - 1));
-  }
-}
-
-/**
- * Whether the editor started as [param pid] died as it started, which only a hidden one can be told:
- * its keeper writes the exit beside the file its helper prints into, and the editor's own console is
- * its log file. The engine start race is Windows's.
- */
-async function diedAsItStartedOnWindows(
-  pid: number,
-  projectPath: string,
-  start: EditorStart,
-): Promise<boolean> {
-  if (process.platform !== 'win32' || !start.hidden) {
-    return false;
-  }
-  const exitFile = exitFileOf(editorHelperOutputPath(projectPath));
-  return await diedAtLaunch({
-    pid,
-    output: editorLogPath(projectPath),
-    from: 0,
-    exitCode: () => {
-      try {
-        const said = Number(readFileSync(exitFile, 'utf8').trim());
-        return Number.isFinite(said) ? said : null;
-      } catch {
-        return null;
-      }
-    },
-  });
-}
-
-async function openEditorOnce(
   engine: string,
   projectPath: string,
   ports: EditorPorts,

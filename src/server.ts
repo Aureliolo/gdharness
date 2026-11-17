@@ -401,7 +401,7 @@ import {
 } from './setup.js';
 import { spawnHidden } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
-import { diedAtLaunch } from './start-watch.js';
+import { endedAsItStarted } from './start-watch.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -13965,36 +13965,111 @@ class GodotServer {
         : {}),
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const started = await this.launchKeptGame(
-      engine.value,
-      cmdArgs,
-      project.value.path,
-      needsItsOwnProcess(asked)
-        ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
-        : undefined,
-      // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
-      // unless the caller asked to see it. A headless run has no window to put anywhere.
-      onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
-      profiled,
-      exported === null,
-      engineCalls,
-    );
+    const launch = async (): Promise<GodotProcess | { error: string }> =>
+      await this.launchKeptGame(
+        engine.value,
+        cmdArgs,
+        project.value.path,
+        needsItsOwnProcess(asked)
+          ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
+          : undefined,
+        // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
+        // unless the caller asked to see it. A headless run has no window to put anywhere.
+        onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
+        profiled,
+        exported === null,
+        engineCalls,
+      );
+    const started = await launch();
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
         'editor_status says which Godot this server runs and whether it answers',
       ]);
     }
+    this.holdTheStart(started, run);
+    return await this.spawnedStartAnswer(run, started, cmdArgs, launch);
+  }
+
+  /** Makes [param started] the run this server holds for a start spawned here. */
+  private holdTheStart(started: GodotProcess, run: RunPlayed): void {
     // For a game that announces after the start's wait under a number the run's does not have,
     // which the Windows console build does: the tie then falls to freshness, as a played run's.
-    started.announcedBefore = alreadyPlaying;
-    started.bootScene = runtimeWaitMs.scene;
+    started.announcedBefore = run.alreadyPlaying;
+    started.bootScene = run.runtimeWaitMs.scene;
     // Kept after it exits rather than dropped, because a run that quits on its own is the whole
     // point of a headless one: a bench, a report, a tool scene. Dropping the reference on exit
     // threw its output away before anybody could read it, and left editor_output answering "no
     // game is running" about a run that had just printed its answer. Whether a run is *active* is
     // exitCode === null, which is what the callers below now ask.
     this.activeProcess = started;
-    return await this.spawnedStartAnswer(run, started, cmdArgs);
+  }
+
+  /**
+   * A whole new start, when [param dead] died as it started within the wait the call was making
+   * anyway, or null. A start still running, or one that ends after the call has answered, is left
+   * as it is: the run note and editor_output say how it ended. The dead one's transcript and profile
+   * go, since its run note is replaced by the new start's.
+   */
+  private async startedAfterADeath(
+    dead: GodotProcess,
+    run: RunPlayed,
+    launch: () => Promise<GodotProcess | { error: string }>,
+    starts: number,
+  ): Promise<GodotProcess | null> {
+    if (
+      starts >= ENGINE_STARTS ||
+      process.platform !== 'win32' ||
+      dead.transcript === null ||
+      dead.pid === null ||
+      !(await endedAsItStarted({
+        pid: dead.pid,
+        output: dead.transcript,
+        until: dead.startedAt + run.runtimeWaitMs.ms,
+        exitCode: () => {
+          const note = readRunRecord(run.project.value.path);
+          return note?.pid === dead.pid && note.startedAt === dead.startedAt ? (note.exitCode ?? null) : null;
+        },
+      }))
+    ) {
+      return null;
+    }
+    rmSync(dead.transcript, { force: true });
+    if (dead.profile !== undefined) {
+      rmSync(dead.profile, { force: true });
+    }
+    await delay(START_RETRY_MS * 2 ** (starts - 1));
+    const next = await launch();
+    if ('error' in next) {
+      return null;
+    }
+    this.holdTheStart(next, run);
+    return next;
+  }
+
+  /**
+   * The runtime of a start spawned here, waited for as long as the call waits. A start that died as
+   * it started inside that wait is started again whole and waited for in turn, so the answer names
+   * the start that lives.
+   */
+  private async runtimeOfTheStart(
+    run: RunPlayed,
+    first: GodotProcess,
+    launch: () => Promise<GodotProcess | { error: string }>,
+  ): Promise<{ started: GodotProcess; runtime: Record<string, unknown> }> {
+    let started = first;
+    for (let starts = 1; ; starts += 1) {
+      const runtime = await this.runtimeUp(
+        run.project.value.path,
+        run.alreadyPlaying,
+        run.runtimeWaitMs,
+        run.given.length > 0,
+      );
+      const next = await this.startedAfterADeath(started, run, launch, starts);
+      if (next === null) {
+        return { started, runtime };
+      }
+      started = next;
+    }
   }
 
   /** Whether the editor itself can play this start, with nothing it cannot be handed. */
@@ -14048,13 +14123,13 @@ class GodotServer {
   /** The answer of a start spawned here: the process, its command line and what was ended and left. */
   private async spawnedStartAnswer(
     run: RunPlayed,
-    started: GodotProcess,
+    first: GodotProcess,
     cmdArgs: readonly string[],
+    launch: () => Promise<GodotProcess | { error: string }>,
   ): Promise<ToolResponse> {
     const {
       project,
       exported,
-      given,
       own,
       flags,
       asked,
@@ -14064,11 +14139,15 @@ class GodotServer {
       scanned,
       ended,
       wereHereFirst,
-      alreadyPlaying,
-      runtimeWaitMs,
       headless,
       profiled,
     } = run;
+    // Not waited for: a release export ships without the runtime addon, and one that keeps it
+    // announces the folder it runs from rather than this project.
+    const { started, runtime } =
+      exported !== null
+        ? { started: first, runtime: undefined }
+        : await this.runtimeOfTheStart(run, first, launch);
     const spawnedInstead = this.spawnedInsteadNote(run);
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
@@ -14122,12 +14201,7 @@ class GodotServer {
       endedPreviousRun: endedPreviousRun(ended),
       previousRunLeft: previousRunLeft(ended),
       ...previousRunHow(ended),
-      // Not waited for: a release export ships without the runtime addon, and one that keeps it
-      // announces the folder it runs from rather than this project.
-      runtime:
-        exported !== null
-          ? undefined
-          : await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs, given.length > 0),
+      runtime,
       message: `Use editor_output for what it prints and editor_run stop to end it.${started.keeper !== undefined && handed.length > 0 ? ' It stops at the lines under breakpoints, and debug_state stack reads where it is held.' : ''}${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
@@ -15438,58 +15512,6 @@ class GodotServer {
    * what leaves the bytes there for the next server to read.
    */
   private async launchKeptGame(
-    godotPath: string,
-    cmdArgs: string[],
-    projectPath: string,
-    env: NodeJS.ProcessEnv | undefined,
-    desktop: string | undefined,
-    profiled: boolean,
-    debugged: boolean,
-    engineCalls: boolean,
-  ): Promise<GodotProcess | { error: string }> {
-    // A start that died as it started is started again whole, so its pid, note, transcript and
-    // debugger connection all come from the start that lives. What the dead one left is its
-    // transcript and profile, removed here, and its run note, which the next start replaces.
-    for (let starts = 1; ; starts += 1) {
-      const launched = await this.launchKeptGameOnce(
-        godotPath,
-        cmdArgs,
-        projectPath,
-        env,
-        desktop,
-        profiled,
-        debugged,
-        engineCalls,
-      );
-      if (
-        'error' in launched ||
-        starts >= ENGINE_STARTS ||
-        process.platform !== 'win32' ||
-        launched.transcript === null ||
-        launched.pid === null ||
-        !(await diedAtLaunch({
-          pid: launched.pid,
-          output: launched.transcript,
-          from: 0,
-          exitCode: () => {
-            const note = readRunRecord(projectPath);
-            return note?.pid === launched.pid && note.startedAt === launched.startedAt
-              ? (note.exitCode ?? null)
-              : null;
-          },
-        }))
-      ) {
-        return launched;
-      }
-      rmSync(launched.transcript, { force: true });
-      if (launched.profile !== undefined) {
-        rmSync(launched.profile, { force: true });
-      }
-      await delay(START_RETRY_MS * 2 ** (starts - 1));
-    }
-  }
-
-  private async launchKeptGameOnce(
     godotPath: string,
     cmdArgs: string[],
     projectPath: string,

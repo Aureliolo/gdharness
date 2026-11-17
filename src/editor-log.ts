@@ -34,7 +34,6 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CONTROL_SEQUENCE, GameLog, type LogEntry, type Severity } from './game-log.js';
-import { exitFileOf } from './start-race.js';
 import { asParams, readNumber } from './tool-args.js';
 
 /** Where the editor of [param projectPath] writes its console, beside the other notes gdharness keeps. */
@@ -133,7 +132,6 @@ export function clearEditorLog(projectPath: string): void {
     mkdirSync(dirname(path), { recursive: true });
     rmSync(path, { force: true });
     rmSync(editorHelperOutputPath(projectPath), { force: true });
-    rmSync(exitFileOf(editorHelperOutputPath(projectPath)), { force: true });
     rmSync(editorLogNotePath(projectPath), { force: true });
   } catch {
     // A project that cannot be written into gets the refusal for an uncaptured console, which is
