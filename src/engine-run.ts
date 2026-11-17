@@ -32,6 +32,7 @@ import {
   CONSOLE_CLOSED,
   diedAsItStarted,
   ENGINE_STARTS,
+  START_RACE,
   START_RETRY_MS,
   START_WINDOW_MS,
 } from './start-race.js';
@@ -357,7 +358,9 @@ export function exitCodeText(code: number | null): string {
 
 /** How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason. */
 export function howItEnded(
-  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts'>,
+  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts'> & {
+    readonly log?: GameLog;
+  },
 ): string {
   if (run.failure !== null) {
     return run.exitSignal === null ? run.failure : `ended by ${run.exitSignal}, because ${run.failure}`;
@@ -366,7 +369,18 @@ export function howItEnded(
     return `ended by ${run.exitSignal}`;
   }
   const crashed = run.crashedStarts ?? 0;
-  return crashed === 0
-    ? exitCodeText(run.exitCode)
-    : `${exitCodeText(run.exitCode)}, and printed nothing past its banner on any of its ${String(crashed + 1)} starts`;
+  const code = exitCodeText(run.exitCode);
+  if (crashed === 0) {
+    return code;
+  }
+  // The earlier starts died as they started, by the rule that started them again. The last one is
+  // read from its own output, since it can have run and printed.
+  if (run.log === undefined || !diedAsItStarted(run.exitCode, linesOfLog(run.log))) {
+    const earlier = crashed === 1 ? 'start' : `${String(crashed)} starts`;
+    return `${code}, and the ${earlier} before it died as ${crashed === 1 ? 'it' : 'they'} started, printing nothing past the banner`;
+  }
+  const seen = `${code}, and died as it started on each of its ${String(crashed + 1)} starts, printing nothing past its banner`;
+  return (run.exitCode ?? 0) >>> 0 === START_RACE
+    ? `${seen}. Either the engine's start race or a library the project loads causes that`
+    : seen;
 }

@@ -44,7 +44,7 @@ import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal, priorityOf } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
-import { diedAsItStarted, printedLinesOf } from './start-race.js';
+import { diedAsItStarted, linesAsPrinted } from './start-race.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
 
 /** Most engines a run starts, whatever the machine has. */
@@ -433,7 +433,7 @@ export async function watchedEngine(
       () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds, shares),
       undefined,
       (end) =>
-        end.ended === null && end.signal === null && diedAsItStarted(end.code, printedLinesOf(readLog(log))),
+        end.ended === null && end.signal === null && diedAsItStarted(end.code, linesAsPrinted(readLog(log))),
     );
   } finally {
     await keepPipelineCache(user, launch.projectPath, launch.godotPath);

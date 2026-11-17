@@ -23,6 +23,7 @@ import {
   readFileSync,
   readSync,
   rmdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -399,6 +400,8 @@ import {
   shippedRuntimeDigest,
 } from './setup.js';
 import { spawnHidden } from './spawn.js';
+import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
+import { diedAtLaunch } from './start-watch.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -15435,6 +15438,58 @@ class GodotServer {
    * what leaves the bytes there for the next server to read.
    */
   private async launchKeptGame(
+    godotPath: string,
+    cmdArgs: string[],
+    projectPath: string,
+    env: NodeJS.ProcessEnv | undefined,
+    desktop: string | undefined,
+    profiled: boolean,
+    debugged: boolean,
+    engineCalls: boolean,
+  ): Promise<GodotProcess | { error: string }> {
+    // A start that died as it started is started again whole, so its pid, note, transcript and
+    // debugger connection all come from the start that lives. What the dead one left is its
+    // transcript and profile, removed here, and its run note, which the next start replaces.
+    for (let starts = 1; ; starts += 1) {
+      const launched = await this.launchKeptGameOnce(
+        godotPath,
+        cmdArgs,
+        projectPath,
+        env,
+        desktop,
+        profiled,
+        debugged,
+        engineCalls,
+      );
+      if (
+        'error' in launched ||
+        starts >= ENGINE_STARTS ||
+        process.platform !== 'win32' ||
+        launched.transcript === null ||
+        launched.pid === null ||
+        !(await diedAtLaunch({
+          pid: launched.pid,
+          output: launched.transcript,
+          from: 0,
+          exitCode: () => {
+            const note = readRunRecord(projectPath);
+            return note?.pid === launched.pid && note.startedAt === launched.startedAt
+              ? (note.exitCode ?? null)
+              : null;
+          },
+        }))
+      ) {
+        return launched;
+      }
+      rmSync(launched.transcript, { force: true });
+      if (launched.profile !== undefined) {
+        rmSync(launched.profile, { force: true });
+      }
+      await delay(START_RETRY_MS * 2 ** (starts - 1));
+    }
+  }
+
+  private async launchKeptGameOnce(
     godotPath: string,
     cmdArgs: string[],
     projectPath: string,

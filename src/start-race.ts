@@ -17,6 +17,11 @@ export const START_RETRY_MS = 500;
  */
 export const START_WINDOW_MS = 30_000;
 
+/** Where the keeper of a start with an output file writes how that start exited. */
+export function exitFileOf(output: string): string {
+  return `${output}.exit`;
+}
+
 /** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
 export const CONSOLE_CLOSED = 0xc000013a;
 
@@ -31,7 +36,7 @@ const NOT_A_START_RACE = new Set([CONSOLE_CLOSED, 0xc0000135]);
  * procedure address for a few instructions while a worker of the library, started on load, calls
  * through it. The race is in the engine's constructor, before the project is read.
  */
-const START_RACE = 0xc06d007f;
+export const START_RACE = 0xc06d007f;
 
 /**
  * The line Godot prints first, as `Main::print_header` writes it: its name, version, the build's
@@ -50,6 +55,15 @@ export function printedLinesOf(text: string): string[] {
     .replace(CONTROL_SEQUENCE, '')
     .split(/\r?\n/)
     .filter((line) => line.trim() !== '');
+}
+
+/**
+ * The lines of a log file's [param text] for a reader that counts any byte as output: empty for an
+ * empty file, and one line that is no banner for a file of blank lines and colour codes alone.
+ */
+export function linesAsPrinted(text: string): string[] {
+  const lines = printedLinesOf(text);
+  return text === '' || lines.length > 0 ? lines : [text];
 }
 
 /**
