@@ -1857,6 +1857,36 @@ export function gameTheEditorPlays(
 }
 
 /**
+ * An editor-played run picked up for [param project], reading from [param note]'s transcript when
+ * the play left one. Its box verdict is read from the editor's helper output as it stands now, so a
+ * box an earlier game was ended on is never this game's.
+ */
+export function editorPickedUpRun(
+  project: string | null,
+  note: ReturnType<typeof readEditorRunNote>,
+  play: EditorPlay | null,
+): GodotProcess {
+  return {
+    pid: null,
+    log: new GameLog(),
+    // The file the answer reads back from, which every path that reports on a run drains before
+    // it answers. What is picked up here is where to read, not the reading.
+    transcript: note?.transcript ?? null,
+    readOffset: 0,
+    projectPath: project,
+    startedAt: note?.startedAt ?? Date.now(),
+    ...(note?.startedAt === undefined ? { startedAtFound: true } : {}),
+    exitCode: null,
+    exitSignal: null,
+    throughEditor: true,
+    brokeOn: null,
+    pickedUpPlaying: true,
+    helperOutputFrom: project === null ? 0 : editorHelperOutputSize(project),
+    ...(play === null ? {} : { play }),
+  };
+}
+
+/**
  * Why the desktop helper ended [param run]'s game on a message box nobody can press, or null. A game
  * this server started prints the helper's line into its own transcript. A game an editor plays has
  * the helper of the editor, whose output is read from where this play began, and the verdict is put
@@ -15504,7 +15534,7 @@ class GodotServer {
     // way the run that started it was. Without a number `running` stayed true after the game had
     // quit for as long as the record lasted, beside a status call taking the editor's word that
     // nothing was playing.
-    this.activeProcess = this.pickedUpRun(project, note, playing.play);
+    this.activeProcess = editorPickedUpRun(project, note, playing.play);
     this.watchThePlayedConsole();
   }
 
@@ -15538,34 +15568,6 @@ class GodotServer {
     } catch (error) {
       this.logDebug(`Picked up an editor-played run without its adapter: ${errorMessage(error)}`);
     }
-  }
-
-  /**
-   * An editor-played run picked up for [param project], reading from [param note]'s transcript
-   * when the play left one.
-   */
-  private pickedUpRun(
-    project: string | null,
-    note: ReturnType<typeof readEditorRunNote>,
-    play: EditorPlay | null,
-  ): GodotProcess {
-    return {
-      pid: null,
-      log: new GameLog(),
-      // The file the answer reads back from, which every path that reports on a run drains before
-      // it answers. What is picked up here is where to read, not the reading.
-      transcript: note?.transcript ?? null,
-      readOffset: 0,
-      projectPath: project,
-      startedAt: note?.startedAt ?? Date.now(),
-      ...(note?.startedAt === undefined ? { startedAtFound: true } : {}),
-      exitCode: null,
-      exitSignal: null,
-      throughEditor: true,
-      brokeOn: null,
-      pickedUpPlaying: true,
-      ...(play === null ? {} : { play }),
-    };
   }
 
   /**

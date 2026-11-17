@@ -545,6 +545,7 @@ import {
   CRASH_EXIT_GRACE_MS,
   captureDestinationRefusal,
   captureDetail,
+  editorPickedUpRun,
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
@@ -20131,6 +20132,26 @@ async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
     assert.equal(carried, true, 'what the editor prints reaches the helper output file');
   } finally {
     await endEnginesUnder(project);
+    sweep(project);
+  }
+}
+
+/**
+ * A play the editor was already running when this server picked it up reads its box verdict from the
+ * helper output as it stands then, so the box an earlier game was ended on is not this game's.
+ */
+function testAPickedUpEditorRunDoesNotTakeAnEarlierGamesBox(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-picked-up-box-'));
+  try {
+    const output = editorHelperOutputPath(project);
+    mkdirSync(dirname(output), { recursive: true });
+    const box = `\n[gdharness] desktop-box ${JSON.stringify({ title: 'Unable to initialize video driver', text: 'drivers', engine: false })}\n`;
+    writeFileSync(output, box);
+    const run = editorPickedUpRun(project, null, null);
+    assert.equal(boxThatEndedTheGame(run), null, "an earlier game's box is not the picked-up run's");
+    appendFileSync(output, box);
+    assert.match(boxThatEndedTheGame(run) ?? '', /could not create a renderer/, 'a box after the pickup is');
+  } finally {
     sweep(project);
   }
 }
@@ -110955,6 +110976,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeeperCaseThatFailsLeavesNoRunFolder,
   testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor,
   testAnEditorsGameBoxIsReadFromTheHelperOutput,
+  testAPickedUpEditorRunDoesNotTakeAnEarlierGamesBox,
   testABoxOnTheMainThreadEndsTheGame,
   testAConsoleWrappersEngineBoxEndsTheRun,
   testABoxWithLettersOutsideAsciiReachesTheVerdictAsWritten,
