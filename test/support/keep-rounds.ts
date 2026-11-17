@@ -28,5 +28,8 @@ for (let round = 0; round < Number(rounds); round++) {
   for (let file = 0; file < 100 + round; file++) {
     writeFileSync(join(cache, `${String(file)}.bin`), `${String(round)}:`.padEnd(FILE_BYTES, 'x'));
   }
+  const vulkan = join(user, 'Godot', 'app_userdata', 'Game', 'vulkan');
+  mkdirSync(vulkan, { recursive: true });
+  writeFileSync(join(vulkan, 'pipelines.forward.gpu.cache'), `${String(round)}:`.padEnd(FILE_BYTES, 'y'));
   await keepPipelineCache(user, project, godot, home);
 }

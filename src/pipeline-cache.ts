@@ -11,7 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cacheHome } from './cache-home.js';
 import { ownStart } from './engine-slots.js';
@@ -27,6 +27,30 @@ import { tryTake } from './write-turns.js';
  * starts. Copied in and out rather than shared, since runs go side by side.
  */
 const NAME = 'shader_cache';
+
+/**
+ * The Vulkan driver keeps its own pipeline cache beside the shader cache, in
+ * user://vulkan/pipelines.<rendering method>.<device>.cache. Building them cold costs a first draw
+ * two to nine seconds per run, so these files travel with the shader cache. The
+ * editor's file, which ends in `.editor.cache`, is not a game's. The engine judges a file's
+ * validity itself, against the device and driver, and builds cold when it refuses one.
+ */
+const PIPELINES = 'vulkan';
+
+const PIPELINE_FILE = /^pipelines\..+\.cache$/;
+
+const EDITOR_PIPELINE_SUFFIX = '.editor.cache';
+
+/** The pipeline cache files in [param folder], as their names. */
+function pipelineFilesIn(folder: string): string[] {
+  try {
+    return readdirSync(folder, { withFileTypes: true })
+      .filter((e) => e.isFile() && PIPELINE_FILE.test(e.name) && !e.name.endsWith(EDITOR_PIPELINE_SUFFIX))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
 
 /** How deep under a run's user folder the cache is looked for: Godot/app_userdata/<name>/. */
 const DEPTH = 4;
@@ -150,7 +174,20 @@ export async function seedPipelineCache(
       if (record === null || record.engine !== engineBuild(godotPath) || !existsSync(join(kept, NAME))) {
         return;
       }
-      cpSync(join(kept, NAME), join(user, record.where), { recursive: true });
+      const shaders = join(user, record.where);
+      cpSync(join(kept, NAME), shaders, { recursive: true });
+      const into = join(dirname(shaders), PIPELINES);
+      for (const file of pipelineFilesIn(join(kept, PIPELINES))) {
+        // Renamed into place, so the engine never reads a file that is half copied.
+        mkdirSync(into, { recursive: true });
+        const partial = join(into, `${file}.seeding`);
+        try {
+          cpSync(join(kept, PIPELINES, file), partial);
+          renameSync(partial, join(into, file));
+        } finally {
+          rmSync(partial, { force: true });
+        }
+      }
     });
   } catch {
     // A partial copy is a cache with fewer pipelines in it, which the engine fills in.
@@ -177,7 +214,9 @@ export async function keepPipelineCache(
   const kept = keptFor(projectPath, home);
   const left = join(user, where);
   try {
-    const bytes = bytesIn(left);
+    const vulkan = join(dirname(left), PIPELINES);
+    const files = pipelineFilesIn(vulkan);
+    const bytes = bytesIn(left) + files.reduce((sum, file) => sum + statSync(join(vulkan, file)).size, 0);
     if (bytes === 0 || keptHolds(kept, engine, bytes)) {
       return;
     }
@@ -186,6 +225,10 @@ export async function keepPipelineCache(
     const building = `${kept}.${process.pid}.${Date.now()}`;
     mkdirSync(building, { recursive: true });
     cpSync(left, join(building, NAME), { recursive: true });
+    for (const file of files) {
+      mkdirSync(join(building, PIPELINES), { recursive: true });
+      cpSync(join(vulkan, file), join(building, PIPELINES, file));
+    }
     const made: Kept = { project: resolve(projectPath), engine, where: where.split(sep).join('/'), bytes };
     writeFileSync(join(building, RECORD), JSON.stringify(made));
     // The copy takes a while and runs go side by side, so the kept one is read again under the lock

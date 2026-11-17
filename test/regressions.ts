@@ -13182,6 +13182,157 @@ async function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): Promise<
   }
 }
 
+/** A run's user folder with a shader cache and, for [param pipelines], the Vulkan driver's files. */
+function pipelineRunIn(
+  folder: string,
+  shaderBytes: number,
+  pipelines: Readonly<Record<string, Buffer>> | null,
+): string {
+  const data = join(folder, 'user', 'Godot', 'app_userdata', 'Game');
+  mkdirSync(join(data, 'shader_cache'), { recursive: true });
+  writeFileSync(join(data, 'shader_cache', 'a.bin'), 'x'.repeat(shaderBytes));
+  if (pipelines !== null) {
+    mkdirSync(join(data, 'vulkan'), { recursive: true });
+    for (const [name, bytes] of Object.entries(pipelines)) {
+      writeFileSync(join(data, 'vulkan', name), bytes);
+    }
+  }
+  return join(folder, 'user');
+}
+
+function pipelineFilesOf(user: string): Record<string, Buffer> {
+  const vulkan = join(user, 'Godot', 'app_userdata', 'Game', 'vulkan');
+  if (!existsSync(vulkan)) {
+    return {};
+  }
+  return Object.fromEntries(readdirSync(vulkan).map((name) => [name, readFileSync(join(vulkan, name))]));
+}
+
+/**
+ * The Vulkan driver's pipeline cache files are kept and seeded with the shader cache, byte for
+ * byte, a torn one included since the engine judges it. The editor's file is left out, and another
+ * engine build is handed none.
+ */
+async function testAVulkanPipelineCacheFileIsKeptAndSeededByteForByte(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    const other = join(scratch, 'other.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    writeFileSync(other, 'another engine');
+    const whole = Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 31) % 256));
+    const torn = whole.subarray(0, 1234);
+    const run = pipelineRunIn(join(scratch, 'run'), 10, {
+      'pipelines.forward_plus.NVIDIA GeForce RTX 4090.cache': whole,
+      'pipelines.mobile.Other GPU.cache': torn,
+      'pipelines.forward_plus.NVIDIA GeForce RTX 4090.editor.cache': Buffer.from('editor'),
+      'notes.txt': Buffer.from('not a pipeline cache'),
+    });
+    await keepPipelineCache(run, project, godot, home);
+
+    const next = join(scratch, 'next', 'user');
+    await seedPipelineCache(next, project, godot, home);
+    const seeded = pipelineFilesOf(next);
+    assert.deepEqual(Object.keys(seeded).toSorted(), [
+      'pipelines.forward_plus.NVIDIA GeForce RTX 4090.cache',
+      'pipelines.mobile.Other GPU.cache',
+    ]);
+    assert.ok(seeded['pipelines.forward_plus.NVIDIA GeForce RTX 4090.cache']?.equals(whole), 'byte for byte');
+    assert.ok(seeded['pipelines.mobile.Other GPU.cache']?.equals(torn), 'a torn file is copied as it is');
+    assert.ok(
+      existsSync(join(next, 'Godot', 'app_userdata', 'Game', 'shader_cache', 'a.bin')),
+      'the shader cache comes with them',
+    );
+
+    const elsewhere = join(scratch, 'elsewhere', 'user');
+    await seedPipelineCache(elsewhere, project, other, home);
+    assert.deepEqual(pipelineFilesOf(elsewhere), {}, 'another engine build is handed no pipeline file');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** A run with no `vulkan` folder keeps and seeds the shader cache alone, and makes no such folder. */
+async function testARunWithNoVulkanFolderKeepsTheShaderCacheAlone(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    await keepPipelineCache(pipelineRunIn(join(scratch, 'run'), 10, null), project, godot, home);
+    const next = join(scratch, 'next', 'user');
+    await seedPipelineCache(next, project, godot, home);
+    const data = join(next, 'Godot', 'app_userdata', 'Game');
+    assert.equal(readFileSync(join(data, 'shader_cache', 'a.bin'), 'utf8'), 'x'.repeat(10));
+    assert.equal(existsSync(join(data, 'vulkan')), false, 'no vulkan folder is made');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A run whose engine kept no pipeline file leaves the kept one alone while its shader cache is no
+ * larger than the kept set. A larger shader cache replaces the set whole, as it always has.
+ */
+async function testARunWithoutAPipelineFileLeavesTheKeptOneUnlessItIsLarger(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    const file = 'pipelines.forward_plus.GPU.cache';
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'first'), 10, { [file]: Buffer.from('p'.repeat(100)) }),
+      project,
+      godot,
+      home,
+    );
+    await keepPipelineCache(pipelineRunIn(join(scratch, 'headless'), 50, null), project, godot, home);
+    const kept = join(scratch, 'kept', 'user');
+    await seedPipelineCache(kept, project, godot, home);
+    assert.equal(pipelineFilesOf(kept)[file]?.length, 100, 'a headless run leaves the kept file');
+
+    await keepPipelineCache(pipelineRunIn(join(scratch, 'larger'), 500, null), project, godot, home);
+    const replaced = join(scratch, 'replaced', 'user');
+    await seedPipelineCache(replaced, project, godot, home);
+    assert.deepEqual(pipelineFilesOf(replaced), {}, 'a larger shader cache replaces the set whole');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** The pipeline file counts toward the size that decides whether a run's set replaces the kept one. */
+async function testThePipelineFileCountsTowardTheKeptSize(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    const file = 'pipelines.forward_plus.GPU.cache';
+    await keepPipelineCache(pipelineRunIn(join(scratch, 'first'), 100, null), project, godot, home);
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'second'), 10, { [file]: Buffer.from('p'.repeat(200)) }),
+      project,
+      godot,
+      home,
+    );
+    const next = join(scratch, 'next', 'user');
+    await seedPipelineCache(next, project, godot, home);
+    assert.equal(pipelineFilesOf(next)[file]?.length, 200, 'a set with a larger pipeline file replaces');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 /**
  * A test run's engine starts with the pipeline cache the last run's engine left in its user://. A
  * stand-in shell writes a cache into the user folder its environment names, and the next run's
@@ -13577,6 +13728,18 @@ async function testASeedNeverTakesPartOfACacheBeingSwapped(): Promise<void> {
         const round = Number([...rounds][0]);
         if (rounds.size !== 1 || names.length !== 100 + round) {
           partial.push(`${String(names.length)} files from rounds ${[...rounds].join(',')}`);
+        }
+        const pipelines = join(
+          user,
+          'Godot',
+          'app_userdata',
+          'Game',
+          'vulkan',
+          'pipelines.forward.gpu.cache',
+        );
+        const pipelineRound = existsSync(pipelines) ? readFileSync(pipelines, 'utf8').split(':')[0] : null;
+        if (pipelineRound !== String(round)) {
+          partial.push(`pipeline file from round ${String(pipelineRound)} beside shaders of round ${round}`);
         }
       }
       rmSync(user, { recursive: true, force: true });
@@ -114821,6 +114984,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryArgumentNamesOpsItsToolHas,
   testAPipelineCacheIsCarriedToTheNextRun,
   testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
+  testAVulkanPipelineCacheFileIsKeptAndSeededByteForByte,
+  testARunWithNoVulkanFolderKeepsTheShaderCacheAlone,
+  testARunWithoutAPipelineFileLeavesTheKeptOneUnlessItIsLarger,
+  testThePipelineFileCountsTowardTheKeptSize,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testProjectTestKeepsTheCacheAndSeedsTheNextRun,
   testProjectTestHeadlessLeavesTheKeptCacheAlone,

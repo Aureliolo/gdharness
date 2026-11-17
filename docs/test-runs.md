@@ -118,10 +118,14 @@ longer holds. That is when one of these holds:
 ## The pipeline cache
 
 Each engine gets a `user://` of its own, so a game's saves stay apart from the player's. Godot keeps
-its pipeline cache there, in `user://shader_cache`. Each engine starts with the cache the project's
-last run left, when the same engine build made it, so a drawing suite does not build every pipeline
-again. The largest cache a run leaves is kept in gdharness's cache folder, one per project. The
-cache of a project that is gone is removed.
+its shader cache there, in `user://shader_cache`, and the Vulkan driver's pipeline cache in
+`user://vulkan/pipelines.*.cache`. The editor's `.editor.cache` file is left out. Each engine starts
+with the caches the project's last run left, when the same engine build made them, so a drawing suite
+does not build every shader and pipeline again. The largest set a run leaves, counting both, is kept
+in gdharness's cache folder, one per project. A run whose engine wrote no pipeline file, such as a
+headless one, leaves the kept set alone unless its shader cache is larger, which replaces the set
+whole. Of two runs at once, the larger set wins whole and the other run's new pipelines are built
+again by the next run. The cache of a project that is gone is removed.
 
 ## The result file
 
