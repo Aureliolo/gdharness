@@ -196,9 +196,8 @@ export async function seedPipelineCache(
 
 /**
  * Keeps the pipeline cache a run left in [param user] for the next run of [param projectPath]. It
- * replaces the kept one when another engine build made that, or when it holds more: a headless run
- * builds none, and a run of one suite fewer than a run of all of them. The caches of projects no
- * longer on disk go at the same time, as test projects do.
+ * replaces the kept one when another engine build made that, and otherwise as [function settled]
+ * says. The caches of projects no longer on disk go at the same time, as test projects do.
  */
 export async function keepPipelineCache(
   user: string,
@@ -216,8 +215,8 @@ export async function keepPipelineCache(
   try {
     const vulkan = join(dirname(left), PIPELINES);
     const files = pipelineFilesIn(vulkan);
-    const bytes = bytesIn(left) + files.reduce((sum, file) => sum + statSync(join(vulkan, file)).size, 0);
-    if (bytes === 0 || keptHolds(kept, engine, bytes)) {
+    const bytes = bytesIn(left);
+    if (bytes === 0 && files.length === 0) {
       return;
     }
     // Built beside the kept one and swapped in whole, so a run seeding from it meanwhile copies
@@ -232,9 +231,9 @@ export async function keepPipelineCache(
     const made: Kept = { project: resolve(projectPath), engine, where: where.split(sep).join('/'), bytes };
     writeFileSync(join(building, RECORD), JSON.stringify(made));
     // The copy takes a while and runs go side by side, so the kept one is read again under the lock
-    // the swap holds: a smaller cache that finished last would otherwise replace a larger one.
+    // the swap holds: a smaller shader cache that finished last would otherwise replace a larger one.
     const swapped = await underLock(`${kept}.lock`, () => {
-      if (keptHolds(kept, engine, bytes)) {
+      if (!settled(kept, building, made, files)) {
         return false;
       }
       rmSync(kept, { recursive: true, force: true });
@@ -254,10 +253,47 @@ export async function keepPipelineCache(
   }
 }
 
-/** Whether the cache kept in [param kept] is from [param engine] and holds at least [param bytes]. */
-function keptHolds(kept: string, engine: string, bytes: number): boolean {
+function sameFile(a: string, b: string): boolean {
+  try {
+    return statSync(a).size === statSync(b).size && readFileSync(a).equals(readFileSync(b));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decides, with the lock held, what [param building] holds once it replaces [param kept], and makes
+ * it so. Answers false when the kept set needs no change. Of the same engine build's set, the shader
+ * cache is the run's only when it is larger, since a run of one suite builds fewer than a run of all
+ * of them. Each pipeline file is the run's when it differs from the kept one of its name, whatever
+ * its size, since an engine that refuses a seeded file writes a smaller valid one. A pipeline file
+ * the run has none of stays as kept. Another engine build's set is replaced whole.
+ */
+function settled(kept: string, building: string, made: Kept, files: readonly string[]): boolean {
   const record = keptRecord(kept);
-  return record?.engine === engine && bytes <= record.bytes;
+  if (record === null || record.engine !== made.engine || !existsSync(join(kept, NAME))) {
+    return true;
+  }
+  const shadersWin = made.bytes > record.bytes;
+  const changed = files.some(
+    (file) => !sameFile(join(kept, PIPELINES, file), join(building, PIPELINES, file)),
+  );
+  if (!shadersWin && !changed) {
+    return false;
+  }
+  if (!shadersWin) {
+    rmSync(join(building, NAME), { recursive: true, force: true });
+    renameSync(join(kept, NAME), join(building, NAME));
+  }
+  for (const file of pipelineFilesIn(join(kept, PIPELINES))) {
+    if (!files.includes(file)) {
+      mkdirSync(join(building, PIPELINES), { recursive: true });
+      renameSync(join(kept, PIPELINES, file), join(building, PIPELINES, file));
+    }
+  }
+  const { where, bytes } = shadersWin ? made : record;
+  writeFileSync(join(building, RECORD), JSON.stringify({ ...made, where, bytes }));
+  return true;
 }
 
 /** How long a keep waits for another's swap, which takes milliseconds, before leaving its copy unkept. */

@@ -13276,10 +13276,10 @@ async function testARunWithNoVulkanFolderKeepsTheShaderCacheAlone(): Promise<voi
 }
 
 /**
- * A run whose engine kept no pipeline file leaves the kept one alone while its shader cache is no
- * larger than the kept set. A larger shader cache replaces the set whole, as it always has.
+ * A run whose engine kept no pipeline file leaves the kept one alone, whether its shader cache is
+ * smaller than the kept one or larger and replaces it.
  */
-async function testARunWithoutAPipelineFileLeavesTheKeptOneUnlessItIsLarger(): Promise<void> {
+async function testARunWithoutAPipelineFileLeavesTheKeptOne(): Promise<void> {
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
   try {
     const home = join(scratch, 'home');
@@ -13300,16 +13300,24 @@ async function testARunWithoutAPipelineFileLeavesTheKeptOneUnlessItIsLarger(): P
     assert.equal(pipelineFilesOf(kept)[file]?.length, 100, 'a headless run leaves the kept file');
 
     await keepPipelineCache(pipelineRunIn(join(scratch, 'larger'), 500, null), project, godot, home);
-    const replaced = join(scratch, 'replaced', 'user');
-    await seedPipelineCache(replaced, project, godot, home);
-    assert.deepEqual(pipelineFilesOf(replaced), {}, 'a larger shader cache replaces the set whole');
+    const grown = join(scratch, 'grown', 'user');
+    await seedPipelineCache(grown, project, godot, home);
+    assert.equal(pipelineFilesOf(grown)[file]?.length, 100, 'a larger shader cache leaves the kept file');
+    assert.equal(
+      readFileSync(join(grown, 'Godot', 'app_userdata', 'Game', 'shader_cache', 'a.bin'), 'utf8').length,
+      500,
+      'and is kept itself',
+    );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
 }
 
-/** The pipeline file counts toward the size that decides whether a run's set replaces the kept one. */
-async function testThePipelineFileCountsTowardTheKeptSize(): Promise<void> {
+/**
+ * A grown shader cache is kept as it is, whatever the pipeline file weighs, and the pipeline file
+ * it was seeded with stays beside it.
+ */
+async function testAGrownShaderCacheIsKeptBesideAnUnchangedPipelineFile(): Promise<void> {
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
   try {
     const home = join(scratch, 'home');
@@ -13318,16 +13326,173 @@ async function testThePipelineFileCountsTowardTheKeptSize(): Promise<void> {
     mkdirSync(project);
     writeFileSync(godot, 'engine');
     const file = 'pipelines.forward_plus.GPU.cache';
-    await keepPipelineCache(pipelineRunIn(join(scratch, 'first'), 100, null), project, godot, home);
+    const old = Buffer.from('p'.repeat(200));
     await keepPipelineCache(
-      pipelineRunIn(join(scratch, 'second'), 10, { [file]: Buffer.from('p'.repeat(200)) }),
+      pipelineRunIn(join(scratch, 'first'), 100, { [file]: old }),
+      project,
+      godot,
+      home,
+    );
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'second'), 150, { [file]: old }),
       project,
       godot,
       home,
     );
     const next = join(scratch, 'next', 'user');
     await seedPipelineCache(next, project, godot, home);
-    assert.equal(pipelineFilesOf(next)[file]?.length, 200, 'a set with a larger pipeline file replaces');
+    assert.equal(
+      readFileSync(join(next, 'Godot', 'app_userdata', 'Game', 'shader_cache', 'a.bin'), 'utf8').length,
+      150,
+      'the grown shader cache is kept',
+    );
+    assert.ok(pipelineFilesOf(next)[file]?.equals(old), 'the pipeline file is kept with it');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A pipeline file that differs from the kept one of its name replaces it whatever its size, since an
+ * engine that refuses a seeded file after a driver update writes a smaller valid one. The shader
+ * cache, smaller in that run, stays as kept.
+ */
+async function testASmallerDifferingPipelineFileReplacesTheKeptOne(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    const file = 'pipelines.forward_plus.GPU.cache';
+    const other = 'pipelines.mobile.GPU.cache';
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'first'), 100, {
+        [file]: Buffer.from('OLD:'.padEnd(200, 'p')),
+        [other]: Buffer.from('mobile'),
+      }),
+      project,
+      godot,
+      home,
+    );
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'second'), 40, { [file]: Buffer.from('NEW:'.padEnd(150, 'p')) }),
+      project,
+      godot,
+      home,
+    );
+    const next = join(scratch, 'next', 'user');
+    await seedPipelineCache(next, project, godot, home);
+    const seeded = pipelineFilesOf(next);
+    assert.equal(seeded[file]?.toString('utf8', 0, 4), 'NEW:', 'the smaller differing file replaces');
+    assert.equal(seeded[file].length, 150);
+    assert.equal(seeded[other]?.toString(), 'mobile', 'a file the run has none of stays');
+    assert.equal(
+      readFileSync(join(next, 'Godot', 'app_userdata', 'Game', 'shader_cache', 'a.bin'), 'utf8').length,
+      100,
+      'the smaller shader cache does not replace the kept one',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Takes the lock a project's keep and seed share, as a live process would, and answers its release. */
+async function holdTheKeptLock(home: string): Promise<() => void> {
+  const kept = join(home, 'pipeline-caches');
+  const [key] = readdirSync(kept).filter((name) => /^[0-9a-f]{16}$/.test(name));
+  assert.ok(key !== undefined, 'something is kept to take the lock of');
+  const lock = join(kept, `${key}.lock`);
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+  return () => {
+    rmSync(lock, { force: true });
+  };
+}
+
+/** Every file in the kept folder of the one project, as its path from there and its content. */
+function keptFilesOf(home: string): Record<string, string> {
+  const kept = join(home, 'pipeline-caches');
+  const files: Record<string, string> = {};
+  for (const entry of readdirSync(kept, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile() && /^[0-9a-f]{16}$/.test(relative(kept, entry.parentPath).split(sep)[0] ?? '')) {
+      const path = join(entry.parentPath, entry.name);
+      files[relative(kept, path)] = readFileSync(path, 'latin1');
+    }
+  }
+  return files;
+}
+
+/**
+ * A seed puts nothing into the run's user folder while another process holds the lock, the pipeline
+ * files included, and puts the whole set there once it lets go.
+ */
+async function testASeedWaitsForTheLockBeforeCopyingAnything(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    const file = 'pipelines.forward_plus.GPU.cache';
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'run'), 10, { [file]: Buffer.from('pp') }),
+      project,
+      godot,
+      home,
+    );
+    const release = await holdTheKeptLock(home);
+    const user = join(scratch, 'next', 'user');
+    const seeding = seedPipelineCache(user, project, godot, home);
+    await delay(400);
+    assert.equal(existsSync(user), false, 'nothing is copied while the lock is held');
+    release();
+    await seeding;
+    assert.equal(
+      readFileSync(join(user, 'Godot', 'app_userdata', 'Game', 'shader_cache', 'a.bin'), 'utf8').length,
+      10,
+    );
+    assert.equal(pipelineFilesOf(user)[file]?.toString(), 'pp', 'the whole set arrives once it is let go');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A keep changes nothing under the kept folder while another process holds the lock, the pipeline
+ * files included, and puts the new set there once it lets go.
+ */
+async function testAKeepChangesNothingKeptWhileAnotherHoldsTheLock(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-vulkan-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    const file = 'pipelines.forward_plus.GPU.cache';
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'first'), 10, { [file]: Buffer.from('old') }),
+      project,
+      godot,
+      home,
+    );
+    const before = keptFilesOf(home);
+    const release = await holdTheKeptLock(home);
+    const keeping = keepPipelineCache(
+      pipelineRunIn(join(scratch, 'second'), 20, { [file]: Buffer.from('new!') }),
+      project,
+      godot,
+      home,
+    );
+    await delay(400);
+    assert.deepEqual(keptFilesOf(home), before, 'the kept set is untouched while the lock is held');
+    release();
+    await keeping;
+    const next = join(scratch, 'next', 'user');
+    await seedPipelineCache(next, project, godot, home);
+    assert.equal(pipelineFilesOf(next)[file]?.toString(), 'new!', 'the new set is kept once it is let go');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -114986,8 +115151,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
   testAVulkanPipelineCacheFileIsKeptAndSeededByteForByte,
   testARunWithNoVulkanFolderKeepsTheShaderCacheAlone,
-  testARunWithoutAPipelineFileLeavesTheKeptOneUnlessItIsLarger,
-  testThePipelineFileCountsTowardTheKeptSize,
+  testARunWithoutAPipelineFileLeavesTheKeptOne,
+  testAGrownShaderCacheIsKeptBesideAnUnchangedPipelineFile,
+  testASmallerDifferingPipelineFileReplacesTheKeptOne,
+  testASeedWaitsForTheLockBeforeCopyingAnything,
+  testAKeepChangesNothingKeptWhileAnotherHoldsTheLock,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testProjectTestKeepsTheCacheAndSeedsTheNextRun,
   testProjectTestHeadlessLeavesTheKeptCacheAlone,
