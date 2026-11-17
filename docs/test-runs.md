@@ -90,6 +90,14 @@ when the command line itself is wrong.
   `--changed-only` counts only for the same flags. Under `--fixed-fps` a headless engine's game
   time runs ahead of the clock, so the run says that gdUnit4's timeouts and every game-time wait
   run out early.
+- `--keep-slower-than SECONDS`: keep the log of each engine that ran a case slower than `SECONDS`,
+  a number above 0 such as `10` or `2.5`, in a passing run too. The time is gdUnit4's own, printed
+  on the case's verdict line. The run names each such case with its time, the engine, the engine's
+  slot, the engine process's priority and the kept log, and the result holds the same as
+  `slowCases`. A passing run keeps only the logs of those engines. A kept log goes the way a failed
+  run's does, so it counts as one of the five runs `Every engine's output is kept under` names, and
+  a later run removes it when five newer runs have left logs. A line with no time, such as an older
+  gdUnit4 prints, never counts as slow.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. [The result file](#the-result-file) lists what it holds.
 - `--runner`: print the path of the shipped runner and exit.
@@ -129,6 +137,12 @@ output can still read it there. It holds:
   `before()`. Both are null when none of its cases began.
 - `engines`: each engine, with the fields below.
 - `logs`: the directory every engine's output is kept under.
+- `slowCases`: present when `--keep-slower-than` was given and engines ran, empty when no case was
+  slow. Each case slower than the limit, slowest first, has the `suite`, the `case` as gdUnit4
+  printed it, `seconds`, the `engine` index, its `slot`, its `priority` and its `log`. `slot` is
+  the engine slot's number, or null. `priority` is read from the engine's process while it ran: a
+  Windows priority class such as `below normal`, or the nice value such as `nice 10` on Linux and
+  macOS. It is null when the engine ended before it was read. `log` is the engine's kept log.
 - `enginesAsked`.
 - `slotsFree`: how many of the slots its lanes take were free as it began. Fewer than the lanes
   means the engines were handed the suites a share at a time.
@@ -147,8 +161,9 @@ output can still read it there. It holds:
 - `peakBytes`: the most memory it was read holding, or null when it was never read.
 - `log`: the file its output is kept in.
 
-`log` and `logs` are null once a passing run has removed them. A run that failed its import, or had
-nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
+`log` and `logs` are null once a passing run has removed them, except for the engines of
+`slowCases`. A run that failed its import, or had nothing left to run under `--changed-only`,
+writes empty `suites` and `engines`.
 
 ### Refused runs and unwritten results
 
