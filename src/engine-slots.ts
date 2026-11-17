@@ -2350,19 +2350,32 @@ export interface CallSlot {
 }
 
 /** The slot a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
-const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null }>();
+const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null; project?: string }>();
+
+/**
+ * Names the project the command inside {@link inOneSlot} runs for, which gives its slot the store
+ * class where the project's repository has it. Call it before the first engine step. Outside
+ * {@link inOneSlot} it does nothing.
+ */
+export function forTheProject(project: string): void {
+  const kept = keptForSteps.getStore();
+  if (kept !== undefined) {
+    kept.project = project;
+  }
+}
 
 /**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
- * and gives it back after. Inside {@link inOneSlot} it uses the slot held there.
+ * and gives it back after. Inside {@link inOneSlot} it uses the slot held there. [param project] is
+ * the project the call is for, in place of the one {@link forTheProject} named.
  */
-export async function inASlot<T>(body: (lock: string) => Promise<T>): Promise<T> {
+export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: string): Promise<T> {
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
-    kept.held ??= slotForCall();
+    kept.held ??= slotForCall(false, project ?? kept.project);
     return await body((await kept.held).lock);
   }
-  const held = await slotForCall();
+  const held = await slotForCall(false, project);
   try {
     return await body(held.lock);
   } finally {
@@ -2380,7 +2393,7 @@ export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   if (keptForSteps.getStore() !== undefined) {
     return await body();
   }
-  const kept: { held: Promise<CallSlot> | null } = { held: null };
+  const kept: { held: Promise<CallSlot> | null; project?: string } = { held: null };
   try {
     return await keptForSteps.run(kept, body);
   } finally {

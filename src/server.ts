@@ -9614,6 +9614,7 @@ class GodotServer {
       // An export of a real project is slow, so it gets five minutes rather than no limit.
       const ending = await runEngine(engine.value, exportArgs, {
         timeout: { ms: 300000, said: 'five minutes' },
+        project: project.value.path,
         ...(baking === null || !outOfSight
           ? {}
           : { desktop: { directory: project.value.path, scratch: exportLogs } }),
@@ -10100,6 +10101,7 @@ class GodotServer {
       cmdArgs,
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
+      project.value.path,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
     const keep = async (): Promise<void> => {
@@ -15243,10 +15245,12 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+    project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
     // In one of the machine's engine slots, taken before the engine starts and given back once its
-    // log is whole, so the caller's own limit counts the engine's time and not the wait.
-    const held = await slotForCall();
+    // log is whole, so the caller's own limit counts the engine's time and not the wait. [param
+    // project] is the project the run is of, which gives the slot its store class.
+    const held = await slotForCall(false, project);
     try {
       const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
       void run.settled.finally(held.release);
@@ -16316,6 +16320,8 @@ class GodotServer {
       needsItsOwnProcess(asked)
         ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
         : undefined,
+      undefined,
+      projectPath,
     );
 
     const hung = await new Promise<boolean>((resolve) => {

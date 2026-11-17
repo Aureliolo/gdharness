@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
 import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
-import { inOneSlot, nameSlotTaker, sayWaitsTo } from './engine-slots.js';
+import { forTheProject, inOneSlot, nameSlotTaker, sayWaitsTo } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { EngineUsageError, Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -92,6 +92,8 @@ function projectArgument(at: number): string {
   if (refused !== null) {
     throw new UsageError(refused);
   }
+  // The engine steps of the command that follows run for this project.
+  forTheProject(projectPath);
   return projectPath;
 }
 

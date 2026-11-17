@@ -405,7 +405,7 @@ export async function runImport(
     readonly engine?: ImportEngine;
   } = {},
 ): Promise<ImportOutcome> {
-  const engine = options.engine ?? defaultImportEngine(godotPath);
+  const engine = options.engine ?? defaultImportEngine(godotPath, projectPath);
   const caches = editorCacheDirectory(godotPath);
   let listed: readonly string[] | undefined;
   const pass = async (): Promise<ImportOutcome> => {
@@ -462,16 +462,20 @@ const BLENDER_STOPPED =
 export type ImportEngine = (args: readonly string[]) => Promise<EngineRun>;
 
 /** The server's start: its own engine with a scratch log file, since the project's log would be rotated. */
-function defaultImportEngine(godotPath: string): ImportEngine {
+function defaultImportEngine(godotPath: string, projectPath: string): ImportEngine {
   return async (args) => {
     const logDir = scratchDirectory('import');
     try {
-      return await runEngine(godotPath, [
-        '--headless',
-        '--log-file',
-        join(logDir, 'engine.log'),
-        ...args.filter((arg) => arg !== '--headless'),
-      ]);
+      return await runEngine(
+        godotPath,
+        [
+          '--headless',
+          '--log-file',
+          join(logDir, 'engine.log'),
+          ...args.filter((arg) => arg !== '--headless'),
+        ],
+        { project: projectPath },
+      );
     } finally {
       discard(logDir);
     }
@@ -614,6 +618,7 @@ async function operationOutcome(
     // answered spun for nearly four hours with nothing to end it.
     ran = await runEngine(engine.godotPath, args, {
       timeout: engine.ceiling ?? OPERATION_CEILING,
+      project: projectPath,
       ...(engine.sample === undefined ? {} : { sample: engine.sample }),
     });
     answer = answerIn(answerFile);

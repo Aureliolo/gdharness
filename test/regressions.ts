@@ -202,6 +202,7 @@ import {
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
+  SLOT_COUNT_VARIABLE,
   SLOT_YIELD_MS,
   SLOTS_VARIABLE,
   type SlotHolder,
@@ -69014,6 +69015,134 @@ async function testAStoreFileThatCannotBeReadGivesNoClass(): Promise<void> {
   }
 }
 
+/**
+ * What a program that takes a slot the way the server and the commands do leaves as its waiting
+ * mark. [param body] is the program's text after its import of the slot functions as `slots`.
+ * Its one slot is held, in a folder of its own, so the take waits.
+ */
+async function storeClassOfAProgramsTake(
+  project: string,
+  body: string,
+  store: string,
+): Promise<boolean | null> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-program-'));
+  const directory = join(root, 'slots');
+  mkdirSync(directory);
+  writeFileSync(join(directory, 'store.json'), store);
+  const script = join(root, 'take.ts');
+  writeFileSync(
+    script,
+    [
+      `import * as slots from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-slots.ts')).href)};`,
+      `const project = ${JSON.stringify(project)};`,
+      body,
+    ].join('\n'),
+  );
+  const me = { pid: process.pid, started: await ownStart() };
+  const holder = new EngineSlots(directory, 1, me, undefined, () => 'tier');
+  const env = { ...process.env };
+  for (const name of SLOT_VARIABLES) {
+    delete env[name];
+  }
+  env[SLOTS_VARIABLE] = directory;
+  env[SLOT_COUNT_VARIABLE] = '1';
+  let child: ReturnType<typeof spawnHidden> | undefined;
+  try {
+    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
+    child = spawnHidden(process.execPath, [script], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let said = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    const until = Date.now() + 15_000;
+    while (slotWaiters(directory).length === 0 && Date.now() < until) {
+      await delay(50);
+    }
+    const waiter = slotWaiters(directory)[0];
+    assert.ok(waiter !== undefined, `the program's take made no mark: ${said}`);
+    return waiter.store;
+  } finally {
+    child?.kill();
+    holder.releaseAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The takes the server and the commands make for a project carry the project's class: a call's slot
+ * (a game a tool starts), an engine run for a call, and the one slot of a command's steps. A take
+ * with no project carries none.
+ */
+async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-projects-'));
+  try {
+    const listed = join(root, 'listed-game');
+    mkdirSync(join(listed, '.git'), { recursive: true });
+    const names = '{"games": ["listed-game"]}';
+    const held = 'new Promise(() => undefined)';
+    assert.equal(
+      await storeClassOfAProgramsTake(listed, `slots.slotForCall(false, project); await ${held};`, names),
+      true,
+      "a call's slot for a listed project carries the class",
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(listed, `slots.slotForCall(false); await ${held};`, names),
+      false,
+      'and one with no project carries none',
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(listed, `slots.inASlot(() => ${held}, project); await ${held};`, names),
+      true,
+      'an engine run for a project carries it',
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(listed, `slots.inASlot(() => ${held}); await ${held};`, names),
+      false,
+      'and one for none carries none',
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(
+        listed,
+        `slots.inOneSlot(() => { slots.forTheProject(project); return slots.inASlot(() => ${held}); }); await ${held};`,
+        names,
+      ),
+      true,
+      "a command's one slot carries the class of the project it names",
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(
+        listed,
+        `slots.inOneSlot(() => slots.inASlot(() => ${held})); await ${held};`,
+        names,
+      ),
+      false,
+      'and a command that names none gets none',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A game the server starts for a project, a test run among them, takes its slot for that project,
+ * so its wait carries the project's store class. The server's start needs an engine to run, so the
+ * hand-over is read from its source: every call names the project, and the slot take receives it.
+ */
+function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
+  const source = readFileSync('src/server.ts', 'utf8');
+  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\n {4}\);/g)].map(firstGroup);
+  assert.ok(calls.length >= 2, `only ${String(calls.length)} calls of spawnGame were read`);
+  for (const call of calls) {
+    assert.match(
+      call,
+      /(?:project\.value\.path|projectPath),?\s*$/,
+      `a spawnGame call names no project: ${call}`,
+    );
+  }
+  const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project\);/;
+  assert.match(source, taken, 'spawnGame takes its slot for the project it is given');
+}
+
 /** A look made with no line of its own still ranks the project's class: the one free slot is its. */
 async function testALookWithNoLineOfItsOwnHasTheProjectsStoreClass(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-look-'));
@@ -113237,6 +113366,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoreFileThatCannotBeReadGivesNoClass,
   testTheStoreFileIsOnlyRead,
   testALookWithNoLineOfItsOwnHasTheProjectsStoreClass,
+  testATakeForAProjectCarriesItsStoreClassWhateverTakesIt,
+  testEveryGameTheServerStartsTakesItsSlotForItsProject,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
   testATakerHeldBackByAClaimDoesNotSayItLooks,
