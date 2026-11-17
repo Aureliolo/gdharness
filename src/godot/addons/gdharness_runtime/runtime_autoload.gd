@@ -894,11 +894,22 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 		var _seen: Variant = waits.call(&"saw_call", command, params)
 	# The errors the request's reads make are gathered while the handler runs up to its first
 	# await, and a handler that reads after an await binds the collector again. They go into the
-	# answer whatever it is, so no route that reads can leave them out.
+	# answer whatever it is, so no route that reads can leave them out. The bind is undone where
+	# the handler first gives control back. Its end can come inside another request's read, which
+	# a bind undone there would take its collector from.
 	var errors: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
 	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(errors)
-	var answer: Variant = await handler.call(params)
+	# Through the object's callv: the engine refuses a Callable's call of a function that awaits
+	# when the call is not awaited where it is made.
+	var module: Object = handler.get_object()
+	var answer: Variant = module.callv(handler.get_method(), [params])
 	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
+	# A handler that awaits hands back its state at the first await, and its answer only once it
+	# ends.
+	if answer is Object:
+		var state: Object = answer
+		if state != null and state.get_class() == "GDScriptFunctionState":
+			answer = await Signal(state, &"completed")
 	var result: Dictionary = answer
 	GdhCallErrors.attach(result, errors)
 	return result
