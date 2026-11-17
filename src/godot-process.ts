@@ -64,6 +64,11 @@ export interface GodotProcess {
   /** The scene a start of this server ran, which its boot is noted and read under. See `MAIN_SCENE`. */
   bootScene?: string;
   /**
+   * For a game the editor plays: how long its helper's output was when the play began, so what the
+   * helper says of this game is told from what it said of an earlier one.
+   */
+  helperOutputFrom?: number;
+  /**
    * How this server ended the run, when it did: by asking the game to close, through the keeper
    * holding it, by a signal to its pid, or by asking the editor playing it. Said in the stop's
    * answer, because a caller checking a stop looks there and not in the run's log.

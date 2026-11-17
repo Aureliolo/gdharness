@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   cpSync,
@@ -121,6 +122,7 @@ import {
   bursts,
   clearEditorLog,
   editorConsole,
+  editorHelperOutputPath,
   editorLogPath,
   readEditorLogNote,
   shapeOf,
@@ -128,6 +130,7 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import {
+  editorDesktopOf,
   editorOpenOptionsOf,
   editorQuitRequestPath,
   editorRestartTimeoutMs,
@@ -538,9 +541,11 @@ import {
   autoloadNotCompiledNote,
   bakingRenderer,
   beganBy,
+  boxThatEndedTheGame,
   CRASH_EXIT_GRACE_MS,
   captureDestinationRefusal,
   captureDetail,
+  editorPickedUpRun,
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
@@ -552,6 +557,7 @@ import {
   failedVerdict,
   finishedBeforeTheEnd,
   foldedScriptErrors,
+  gameTheEditorPlays,
   leftRunningNote,
   longerWaitNote,
   misshapen,
@@ -772,6 +778,13 @@ import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { makeWhole, writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
+import {
+  BOX_GAME_RAN_ON,
+  BOX_GAME_TEXT,
+  BOX_GAME_TITLE,
+  boxGame,
+  boxGameConsole,
+} from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
 import { endEnginesUnder } from './support/engines.js';
@@ -790,6 +803,7 @@ import {
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, readPng, solidPng } from './support/png.js';
+import { REAL_ENGINE_VARIABLE, rendererLessEngine } from './support/renderer-less-engine.js';
 import {
   bandWalk,
   listenOnAReservedPort,
@@ -19973,6 +19987,680 @@ async function quitsAtOnceOnItsOwnDesktop(project: string, runtime: string): Pro
   );
 }
 
+/** What a run reads when the engine on the hidden desktop could not create a renderer, lines included. */
+const NO_RENDERER_VERDICT =
+  /the windowed engine could not create a renderer on the hidden desktop.*Can't initialize an EGL display.*Failed to create ANGLE OpenGL window.*headless/s;
+
+/** How long a run on a lost renderer is given to end, against the minutes a hung box took. */
+const NO_RENDERER_END_MS = 60_000;
+
+/**
+ * An engine that cannot create a renderer on the hidden desktop opens a box nobody can press, and
+ * waited on it until the caller's limit. An engine run for an export ends at once now, and names
+ * the renderer in its failure with the engine's own lines. The engine is a stand-in printing what
+ * Godot prints and opening the box Godot opens.
+ */
+async function testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('no-renderer run regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-run-'));
+  try {
+    const began = Date.now();
+    const run = await Promise.race([
+      runEngine(rendererLessEngine(), ['--path', scratch], { desktop: { directory: scratch, scratch } }),
+      delay(NO_RENDERER_END_MS * 2).then(() => null),
+    ]);
+    assert.ok(run !== null, 'the run ends rather than waiting on the box');
+    assert.match(run.failure ?? '', NO_RENDERER_VERDICT, `the failure names the renderer: ${run.failure}`);
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it ends at once');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * The same engine under the watch every suite run uses, which names the end it gave the engine.
+ */
+async function testATestEngineThatMakesNoRendererEnds(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('no-renderer watch regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-watch-'));
+  try {
+    const directory = join(scratch, 'engine');
+    mkdirSync(directory);
+    const began = Date.now();
+    const end = await watchedEngine(
+      {
+        godotPath: rendererLessEngine(),
+        projectPath: scratch,
+        deadlineSeconds: 300,
+        running: new Set<() => void>(),
+        cores: null,
+      },
+      join(scratch, '0.lock'),
+      ['--path', scratch],
+      directory,
+      join(directory, 'engine.log'),
+      300,
+    );
+    assert.match(end.ended ?? '', NO_RENDERER_VERDICT, `the end names the renderer: ${end.ended}`);
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it comes at once');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A windowed suite run on a machine whose engine makes no renderer ends with a verdict naming it,
+ * through project_test and through the test command. Windows opens the box the engine shows on a
+ * desktop nobody can press on, and both runs waited on it until their limit. The engine hands
+ * every start that needs no window to the real one, so the import and the listing work.
+ */
+async function testAWindowedSuiteWhoseEngineMakesNoRendererEnds(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('no-renderer suite regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const refused = windowedRunRefused();
+  if (refused !== null) {
+    console.log(`no-renderer suite regression skipped (${refused})`);
+    return;
+  }
+  const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
+  const lacking = rendererLessEngine();
+  // A suite that declares it needs a window, since an engine starts headless for one that does not.
+  const suite = 'tests/needs_window_test.gd';
+  writeFileSync(
+    join(project, suite),
+    'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n',
+  );
+  try {
+    const began = Date.now();
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--import', suite],
+      {
+        encoding: 'utf8',
+        env: { ...env, GODOT_PATH: lacking, [REAL_ENGINE_VARIABLE]: engines.godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.notEqual(ran.status, 0, `the run fails: ${said}`);
+    assert.match(said, NO_RENDERER_VERDICT, `the test command names the renderer: ${said}`);
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS * 3, 'and ends before its limit');
+
+    await withStdioServer(
+      async (call) => {
+        const asked = Date.now();
+        const answer = await call(
+          'project_test',
+          { projectPath: project, path: `res://${suite}` },
+          4 * ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.match(answer, NO_RENDERER_VERDICT, `project_test names the renderer: ${answer}`);
+        assert.ok(Date.now() - asked < NO_RENDERER_END_MS * 3, 'and ends before its limit');
+      },
+      { GODOT_PATH: lacking, [REAL_ENGINE_VARIABLE]: engines.godotPath },
+    );
+  } finally {
+    await endEnginesUnder(project);
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A game started windowed on a machine whose engine makes no renderer is answered as one that will
+ * not announce, with the renderer named, rather than as one that may yet announce. Its box is one
+ * nobody can press, and the start waited out its whole budget for a game that could never come up.
+ * Then the case's own folders go, the run's note included, which the keeper writes last.
+ */
+async function testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('no-renderer start regression skipped (Godot not found)');
+    return;
+  }
+  if (process.platform !== 'win32') {
+    console.log('no-renderer start regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-start-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-no-renderer-start-rt-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: rendererLessEngine(),
+      [REAL_ENGINE_VARIABLE]: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtime,
+    },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="No renderer"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const began = Date.now();
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    const announced = get(parseTextContent(started), 'runtime');
+    assert.equal(get(announced, 'listening'), false, `nothing listens: ${textOf(started)}`);
+    assert.equal(get(announced, 'mayYetAnnounce'), false, `and nothing is coming: ${textOf(started)}`);
+    assert.match(
+      String(get(announced, 'note')),
+      NO_RENDERER_VERDICT,
+      `the note says why: ${textOf(started)}`,
+    );
+    assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and the start answers at once');
+  } finally {
+    await server.stop().catch(() => undefined);
+    await sweepAKeeperCase(project, runtime);
+  }
+  assert.equal(existsSync(runtime), false, 'the run folder goes with the case');
+}
+
+/**
+ * A game an editor plays is a child of the process the helper started, and its box is ended alone:
+ * the editor stays up. The stand-in game is started by a parent that outlives it, as an editor
+ * outlives the game it plays.
+ */
+async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('played no-renderer regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-no-renderer-'));
+  const game = rendererLessEngine();
+  const editor = [
+    '-e',
+    `${HIDDEN_SPAWN_PRELUDE} const game = spawnHidden(${JSON.stringify(game)}, ['--path', '.'], { stdio: 'inherit' }); game.on('exit', () => { console.log('the game ended, the editor is up'); setInterval(() => undefined, 1000); });`,
+  ];
+  const start = spawnOnDesktop(
+    { desktop: HIDDEN_DESKTOP, directory: scratch, scratch, endsWithHelper: true },
+    process.execPath,
+    editor,
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let said = '';
+  for (const stream of [start.child.stdout, start.child.stderr]) {
+    stream?.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+  }
+  try {
+    const seen = await answeredWithin(
+      () => (said.includes('the game ended, the editor is up') ? true : undefined),
+      NO_RENDERER_END_MS,
+    );
+    assert.equal(seen, true, `the game ends and its parent says so: ${said}`);
+    assert.match(said, /desktop-box .*Unable to initialize video driver/, `the box is named: ${said}`);
+    const editorPid = start.pid();
+    assert.ok(editorPid !== undefined && alive(editorPid), 'and the process the helper started is still up');
+  } finally {
+    start.stop();
+    await exitedWithin(start.child, 60_000);
+    sweep(scratch);
+  }
+}
+
+/**
+ * What the desktop helper of a hidden editor says of a game the editor plays reaches the run: the
+ * helper's output is a file the keeper opens for it, and the verdict is read from where the play
+ * began, so a box an earlier game was ended on is not this game's. It lands in the run's log, which
+ * editor_output answers from. The full play needs an editor whose game cannot create a renderer,
+ * and an editor plays its game from its own executable, which no stand-in replaces, so this covers
+ * both halves the play joins: the output carried from an editor launch, and its reading.
+ */
+async function testAnEditorsGameBoxIsReadFromTheHelperOutput(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-box-'));
+  try {
+    const output = editorHelperOutputPath(project);
+    mkdirSync(dirname(output), { recursive: true });
+    const box = (title: string): string =>
+      `\n[gdharness] desktop-box ${JSON.stringify({ title, text: 'drivers', engine: false })}\n`;
+    writeFileSync(
+      output,
+      `ERROR: Can't initialize an EGL display.${box('Unable to initialize video driver')}`,
+    );
+    const play = gameTheEditorPlays({
+      log: new GameLog(),
+      transcript: join(project, 'transcript'),
+      projectPath: project,
+      startedAt: Date.now(),
+      seenPlaying: true,
+    });
+    assert.equal(boxThatEndedTheGame(play), null, "an earlier game's box is not this game's");
+    appendFileSync(
+      output,
+      `WARNING: res://addons/plugin.gd:12 - an editor warning.\n${box('Unable to initialize video driver')}`,
+    );
+    play.log.append('stdout', Buffer.from('ERROR: Failed to create ANGLE OpenGL window.\n'));
+    const verdict = boxThatEndedTheGame(play) ?? '';
+    assert.match(verdict, /could not create a renderer/, 'the verdict names the renderer');
+    assert.match(verdict, /Failed to create ANGLE OpenGL window/, "the played game's line is quoted");
+    assert.doesNotMatch(verdict, /an editor warning/, "and the editor's own lines are not");
+    assert.equal(boxThatEndedTheGame(play), verdict, 'a second reading says the same');
+    assert.ok(
+      play.log.all.some((entry) => entry.text === verdict),
+      'and the run has it, for editor_output',
+    );
+
+    assert.deepEqual(
+      editorDesktopOf(true, project),
+      { desktop: HIDDEN_DESKTOP, output },
+      "a hidden editor hands its helper's output to a file",
+    );
+    assert.deepEqual(editorDesktopOf(false, project), { noActivate: true }, 'a shown one has no desktop');
+    if (process.platform !== 'win32') {
+      console.log('editor helper output regression: the launch half is Windows-only');
+      return;
+    }
+    rmSync(output, { force: true });
+    const launcher = join(project, 'launch.mjs');
+    const answer = join(project, 'answer.json');
+    const spec = {
+      command: process.execPath,
+      args: ['-e', "console.log('from the editor'); setInterval(() => undefined, 1000);", '--', project],
+      ...editorDesktopOf(true, project),
+      desktop: `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`,
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], { encoding: 'utf8', timeout: 90_000 });
+    assert.ok(existsSync(answer), `the editor launches: ${ran.stdout}${ran.stderr}`);
+    const carried = await answeredWithin(
+      () =>
+        existsSync(output) && readFileSync(output, 'utf8').includes('from the editor') ? true : undefined,
+      30_000,
+    );
+    assert.equal(carried, true, 'what the editor prints reaches the helper output file');
+  } finally {
+    await endEnginesUnder(project);
+    sweep(project);
+  }
+}
+
+/**
+ * A play the editor was already running when this server picked it up reads its box verdict from the
+ * helper output as it stands then, so the box an earlier game was ended on is not this game's.
+ */
+function testAPickedUpEditorRunDoesNotTakeAnEarlierGamesBox(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-picked-up-box-'));
+  try {
+    const output = editorHelperOutputPath(project);
+    mkdirSync(dirname(output), { recursive: true });
+    const box = `\n[gdharness] desktop-box ${JSON.stringify({ title: 'Unable to initialize video driver', text: 'drivers', engine: false })}\n`;
+    writeFileSync(output, box);
+    const run = editorPickedUpRun(project, null, null);
+    assert.equal(boxThatEndedTheGame(run), null, "an earlier game's box is not the picked-up run's");
+    appendFileSync(output, box);
+    assert.match(boxThatEndedTheGame(run) ?? '', /could not create a renderer/, 'a box after the pickup is');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Runs the box stand-in at [param where] on the hidden desktop and answers the run. The stand-in
+ * prints once it has run its five seconds out, which only a process nothing ended gets to.
+ */
+async function runBoxGame(where: 'main' | 'text' | 'worker' | 'child' | 'wrapper'): Promise<EngineRun> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-box-game-'));
+  try {
+    const program = where === 'wrapper' ? await boxGameConsole() : await boxGame();
+    const run = await Promise.race([
+      runEngine(program, [where], { desktop: { directory: scratch, scratch } }),
+      delay(NO_RENDERER_END_MS * 2).then(() => null),
+    ]);
+    assert.ok(run !== null, `the run of the ${where} box ends`);
+    return run;
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A box on the thread a game runs on stops the whole game, which waits on it for good, so it is ended
+ * and the verdict names the box.
+ */
+async function testABoxOnTheMainThreadEndsTheGame(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('main thread box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('main');
+  assert.match(run.failure ?? '', /message box on the hidden desktop.*Game alert.*Hello from the game/s);
+  assert.equal(JSON.stringify(run.log.all.map((entry) => entry.text)).includes(BOX_GAME_RAN_ON), false);
+}
+
+/**
+ * A box on a worker thread stops that thread only, as a game's alert from a thread does, so the game
+ * runs on and nothing ends it.
+ */
+async function testABoxOnAWorkerThreadLeavesTheGameRunning(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('worker thread box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('worker');
+  assert.equal(run.failure, null, 'the game is not ended');
+  assert.equal(run.exitCode, 0, 'it runs to its own end');
+  assert.ok(
+    run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
+    'and says so',
+  );
+}
+
+/**
+ * A box in a process the game started ends that process alone. The game's own outcome stands, with a
+ * note on the child that was ended, where the run once failed with the game's exit code 0.
+ */
+async function testAChildProcessesBoxIsEndedAndTheGamesOutcomeStands(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('child process box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('child');
+  assert.equal(run.failure, null, 'the game finished by itself');
+  assert.equal(run.exitCode, 0, 'with its own exit code');
+  assert.ok(
+    run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
+    'having run on',
+  );
+  const note = run.log.all.find((entry) => entry.text.includes('a process the engine started'));
+  assert.ok(note !== undefined, 'and the run notes the process that was ended');
+  assert.match(note.text, /Game alert.*Hello from the game/s, 'with its box');
+}
+
+/**
+ * Godot's console build starts the engine as its child and waits for it, so the engine's own box is a
+ * child's box to the helper. The wrapper's only child is the engine, so the run ends with the verdict.
+ */
+async function testAConsoleWrappersEngineBoxEndsTheRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('console wrapper box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('wrapper');
+  assert.match(run.failure ?? '', /message box on the hidden desktop.*Game alert/s, 'the engine is ended');
+}
+
+/** A box titled and worded outside ASCII reaches the verdict as written, whatever the console's code page. */
+async function testABoxWithLettersOutsideAsciiReachesTheVerdictAsWritten(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('non-ASCII box regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const run = await runBoxGame('text');
+  assert.ok(
+    (run.failure ?? '').includes(`"${BOX_GAME_TITLE}", ${BOX_GAME_TEXT}`),
+    `the verdict has the box as written: ${run.failure}`,
+  );
+}
+
+/** How much processor time the helper may use over ten seconds of watching a process that opens no box. */
+const QUIET_HELPER_CPU_MS = 150;
+
+/**
+ * A helper watching a process with no box lists no processes, so it costs next to nothing. It once
+ * took a snapshot of every process twice a second, which was about 5% of a core for each engine.
+ */
+async function testAHelperWatchingNoBoxUsesNoProcessorTime(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('helper cost regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-cost-'));
+  const start = spawnOnDesktop(
+    { desktop: HIDDEN_DESKTOP, directory: scratch, scratch, endsWithHelper: true },
+    process.execPath,
+    ['-e', 'setTimeout(() => undefined, 16000)'],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const cpuMs = (pid: number): number => {
+    const ran = spawnSyncHidden(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${String(pid)}).TotalProcessorTime.TotalMilliseconds`,
+      ],
+      { encoding: 'utf8' },
+    );
+    return Number(ran.stdout.trim());
+  };
+  try {
+    const helper = start.child.pid ?? 0;
+    await delay(3000);
+    const early = cpuMs(helper);
+    await delay(10_000);
+    const late = cpuMs(helper);
+    assert.ok(Number.isFinite(early) && Number.isFinite(late), 'the helper is read');
+    assert.ok(late - early < QUIET_HELPER_CPU_MS, `the helper used ${late - early} ms in ten seconds`);
+  } finally {
+    start.stop();
+    await exitedWithin(start.child, 60_000);
+    sweep(scratch);
+  }
+}
+
+/** The script a real engine runs for the box cases below: one way to open a dialog, then four seconds of running. */
+const REAL_BOX_SCRIPT = [
+  'extends Node',
+  '',
+  'var _worker: Thread',
+  '',
+  'func _ready() -> void:',
+  '\tmatch OS.get_cmdline_user_args()[0]:',
+  '\t\t"file":',
+  '\t\t\tDisplayServer.file_dialog_show("Pick a file", "", "", false, DisplayServer.FILE_DIALOG_MODE_OPEN_FILE, PackedStringArray(), func(_ok, _paths, _filter, _index): pass)',
+  '\t\t"worker":',
+  '\t\t\t_worker = Thread.new()',
+  '\t\t\t_worker.start(func(): OS.alert("from a thread", "Threaded alert"))',
+  '\t\t"main":',
+  '\t\t\tOS.alert("on the main thread", "Game alert")',
+  '\t\t"dialog":',
+  '\t\t\tDisplayServer.dialog_show("Dialog", "on the main thread", ["OK"], func(_button): pass)',
+  '\tawait get_tree().create_timer(4.0).timeout',
+  `\tprint("${BOX_GAME_RAN_ON}")`,
+  '\tget_tree().quit()',
+  '',
+].join('\n');
+
+/**
+ * Runs the real engine on a game opening a dialog the way [param how] names, on the hidden desktop,
+ * and answers the run. Null where this machine does not run windowed engines.
+ */
+async function runRealBox(how: 'file' | 'worker' | 'main' | 'dialog'): Promise<EngineRun | null> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`real engine ${how} box regression skipped (Godot not found)`);
+    return null;
+  }
+  const refused = windowedRunRefused();
+  if (process.platform !== 'win32' || refused !== null) {
+    console.log(
+      `real engine ${how} box regression skipped (${refused ?? 'desktops are a Windows boundary'})`,
+    );
+    return null;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-real-box-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Box"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    writeFileSync(join(project, 'main.gd'), REAL_BOX_SCRIPT);
+    const run = await Promise.race([
+      runEngine(engine, ['--path', project, '--', how], {
+        desktop: { directory: project, scratch: project },
+        timeout: { ms: 90_000, said: 'it ran past its limit' },
+      }),
+      delay(NO_RENDERER_END_MS * 3).then(() => null),
+    ]);
+    assert.ok(run !== null, `the ${how} box run ends`);
+    return run;
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The real engine keeps running behind a native file dialog, which it shows on a thread of its own
+ * and closes itself, and behind an alert a worker thread raises. Neither stops the game, so neither
+ * is ended. Windowed, so CI's engine legs run it.
+ */
+async function testARealGameKeepsRunningBehindAFileDialogAndAWorkersAlert(): Promise<void> {
+  for (const how of ['file', 'worker'] as const) {
+    const run = await runRealBox(how);
+    if (run === null) {
+      return;
+    }
+    assert.equal(run.failure, null, `the ${how} box does not end the game: ${run.failure}`);
+    // Godot 4.7.2 ends with an access violation when it quits while a native file dialog is still
+    // open, with or without the helper, so only the worker box's exit code says the game ran out.
+    if (how === 'worker') {
+      assert.equal(run.exitCode, 0, `the game runs to its own end after the ${how} box`);
+    }
+    assert.ok(
+      run.log.all.some((entry) => entry.text === BOX_GAME_RAN_ON),
+      `and says so after the ${how} box`,
+    );
+  }
+}
+
+/**
+ * The real engine's own alert on its main thread and its task dialog both stop the game for good, so
+ * both are ended with a verdict naming the box. Windowed, so CI's engine legs run it.
+ */
+async function testARealGamesMainThreadBoxEndsIt(): Promise<void> {
+  for (const how of ['main', 'dialog'] as const) {
+    const run = await runRealBox(how);
+    if (run === null) {
+      return;
+    }
+    assert.match(run.failure ?? '', /message box on the hidden desktop/, `the ${how} box ends the game`);
+  }
+}
+
+/**
+ * Ends what a case that went through the keeper left running, waits for the run's note to hold its
+ * end, and only then removes the case's folders. A keeper writes the note as the game it holds ends,
+ * and one written after the removal put the folder back.
+ */
+async function sweepAKeeperCase(project: string, runtime: string): Promise<void> {
+  await endEnginesUnder(project);
+  const note = runRecordPath(project, runtime);
+  for (let waited = 0; waited < 15_000 && existsSync(note); waited += 100) {
+    let record: unknown = null;
+    try {
+      record = JSON.parse(readFileSync(note, 'utf8'));
+    } catch {
+      // Being written, so it is read again.
+    }
+    if (get(record, 'exitCode') !== undefined || get(record, 'endedAt') !== undefined) {
+      break;
+    }
+    await delay(100);
+  }
+  sweep(project, runtime);
+}
+
+/**
+ * A case through the keeper that fails with its game still running leaves no run folder. The game
+ * is ended and its note written before the folders are removed, where a removal first was followed
+ * by the keeper writing the note into the folder it had just lost.
+ */
+async function testAKeeperCaseThatFailsLeavesNoRunFolder(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-left-running-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-left-running-rt-'));
+  const launcher = join(project, 'launch.mjs');
+  const answer = join(project, 'answer.json');
+  const spec = {
+    command: process.execPath,
+    args: ['-e', 'setInterval(() => undefined, 1000)', '--', project],
+    run: { transcript: join(project, 'run.log'), startedAt: Date.now(), projectPath: project },
+  };
+  try {
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], {
+      encoding: 'utf8',
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+      timeout: 90_000,
+    });
+    const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+    assert.equal(typeof get(launched, 'pid'), 'number', `the game starts: ${ran.stdout}${ran.stderr}`);
+    assert.ok(alive(Number(get(launched, 'pid'))), 'and is left running, as a failed case leaves it');
+  } finally {
+    await sweepAKeeperCase(project, runtime);
+  }
+  assert.equal(
+    existsSync(runtime),
+    false,
+    'the run folder is gone, the keeper having written its note first',
+  );
+  const source = readFileSync('test/regressions.ts', 'utf8');
+  const through = source.slice(source.indexOf('async function testAStopGoesThroughTheKeeper'));
+  assert.ok(
+    through.slice(0, through.indexOf('\n}\n')).includes('sweepAKeeperCase(project, runtime)'),
+    'the case through the keeper removes its folders this way',
+  );
+}
+
 /**
  * The end of a child that has already exited is still given. Node tells an exit once, to the
  * listeners there at the time, and a keeper that listened late held an ended run for good.
@@ -24704,8 +25392,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     for (const server of servers) {
       await server.stop().catch(() => undefined);
     }
-    sweep(project);
-    sweep(runtime);
+    await sweepAKeeperCase(project, runtime);
   }
 }
 
@@ -81372,10 +82059,24 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   assert.deepEqual(
     starting,
     // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
-    // spawn.ts cannot do. The helper itself is started through spawnHidden.
-    [join('src', 'desktop.ts'), join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
+    // spawn.ts cannot do. The helper itself is started through spawnHidden. The stand-in engine is a
+    // compiled program that cannot import spawn.ts, so each start in its source is checked below.
+    [
+      join('src', 'desktop.ts'),
+      join('src', 'spawn.ts'),
+      join('test', 'support', 'hidden-spawn.ts'),
+      join('test', 'support', 'renderer-less-engine.ts'),
+    ],
     'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
       'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
+  );
+  const standIn = readFileSync(join('test', 'support', 'renderer-less-engine.ts'), 'utf8');
+  const standInStarts = standIn.split(['Bun', 'spawn'].join('.')).slice(1);
+  assert.ok(standInStarts.length >= 1, 'the stand-in engine starts the engine it hands a start to');
+  assert.deepEqual(
+    standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
+    [],
+    'every start the stand-in engine makes passes windowsHide',
   );
 
   // Godot's own: `OS.create_process(path, arguments, open_console)` and
@@ -110450,6 +111151,22 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
+  testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds,
+  testATestEngineThatMakesNoRendererEnds,
+  testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
+  testAStartedGameWhoseEngineMakesNoRendererWillNotAnnounce,
+  testAKeeperCaseThatFailsLeavesNoRunFolder,
+  testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor,
+  testAnEditorsGameBoxIsReadFromTheHelperOutput,
+  testAPickedUpEditorRunDoesNotTakeAnEarlierGamesBox,
+  testABoxOnTheMainThreadEndsTheGame,
+  testAConsoleWrappersEngineBoxEndsTheRun,
+  testABoxWithLettersOutsideAsciiReachesTheVerdictAsWritten,
+  testAHelperWatchingNoBoxUsesNoProcessorTime,
+  testABoxOnAWorkerThreadLeavesTheGameRunning,
+  testAChildProcessesBoxIsEndedAndTheGamesOutcomeStands,
+  testARealGameKeepsRunningBehindAFileDialogAndAWorkersAlert,
+  testARealGamesMainThreadBoxEndsIt,
   testAnExitAlreadyToldIsStillSeen,
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,

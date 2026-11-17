@@ -60,6 +60,11 @@ interface OutsideSpec {
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;
+  /**
+   * A file the desktop helper's output is appended to where there is no run: what the helper says
+   * of a game its process started, such as the box it ended, which nothing else carries.
+   */
+  readonly output?: string;
   /** Windows: show its first window without activating it, so it takes nobody's keyboard. */
   readonly noActivate?: boolean;
 }
@@ -79,6 +84,7 @@ export interface SentSpec {
   readonly envChanges: Readonly<Record<string, string | null>>;
   readonly run?: OutsideSpec['run'];
   readonly desktop?: string;
+  readonly output?: string;
   readonly noActivate?: boolean;
 }
 
@@ -221,7 +227,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { command, args, envChanges, run, desktop, noActivate } = value;
+  const { command, args, envChanges, run, desktop, noActivate, output } = value;
   const changes = envChangesOf(envChanges);
   const ran = run === undefined ? undefined : runOf(run);
   if (
@@ -230,6 +236,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
     changes === null ||
     ran === null ||
     (desktop !== undefined && typeof desktop !== 'string') ||
+    (output !== undefined && typeof output !== 'string') ||
     (noActivate !== undefined && typeof noActivate !== 'boolean')
   ) {
     return null;
@@ -240,6 +247,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
     envChanges: changes,
     ...(ran === undefined ? {} : { run: ran }),
     ...(desktop === undefined ? {} : { desktop }),
+    ...(output === undefined ? {} : { output }),
     ...(noActivate === undefined ? {} : { noActivate }),
   };
 }
@@ -285,6 +293,7 @@ export async function launchOutsideTheTree(
       envChanges: changesFrom(spec.env, process.env),
       ...(spec.run === undefined ? {} : { run: spec.run }),
       ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
+      ...(spec.output === undefined ? {} : { output: spec.output }),
       ...(spec.noActivate === true ? { noActivate: true } : {}),
     });
     let printed = '';
