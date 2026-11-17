@@ -778,12 +778,12 @@ slot it would take. gdharness then makes, reads and removes nothing in the slots
 take. Unset, nothing changes. The variable is read at each take.
 
 The command is started without a shell, hidden, with `--project <absolute project path>` and
-`--kind gate|side|one-off` added. A take with no project passes no `--project`, as an engine step
+`--kind gate|side|one-off|game` added. A take with no project passes no `--project`, as an engine step
 of a command that has not named its project yet does. The line is split on white space outside
 double quotes, with the quotes taken out.
 
 - `gate` is a take inside a gate. `side` is work the machine's queue runs, a timing or a tier. Every
-  other take is a `one-off`.
+  other take is a `one-off`. A game that `editor_run` starts is a `game`, played or kept.
 - The command's first line on standard output is `held <absolute lock path>` once the slot is
   granted, or `refused <reason>`. gdharness waits for it as long as it would wait for a slot, and
   stops at the call's deadline or cancellation.
@@ -797,13 +797,23 @@ double quotes, with the quotes taken out.
   (every child that is not detached is in a job that ends it with its parent), so it never reads the
   end of its input and must free the slot when it is ended. gdharness waits 5 seconds for the
   command to exit, then ends it.
-- A game that outlives the call keeps the slot until its process has gone. The slot is not handed
-  to a keeper.
+- A command that exits after printing `held` no longer holds the slot. Before the engine starts,
+  the start fails and the answer names the command, its exit and what it printed. While the engine
+  runs, the engine is left running and the call's answer carries an `engineSlotNote` with the same
+  facts.
+- A game that outlives the call is handed on. gdharness writes `hand <pid> <start>` to the command
+  and waits for the line `handed` and an exit with code 0. `<pid>` is the keeper that holds a kept
+  game, or the game's process where the editor played it, and `<start>` is that process's start time
+  in milliseconds since the epoch. The command keeps the slot until that process has gone, and
+  gdharness does not close its input as a release afterwards. A command that answers otherwise, or
+  does not exit within 5 seconds, fails the hand. The slot is then given back and the answer carries
+  an `engineSlotNote` naming what the command printed and its exit.
 - A take under an inherited `GODOT_ENGINE_HELD` calls nothing, as without the command.
 
-A take cannot ask for a slot that is free now, so `gdharness test` and `spread` start every engine
-through the command. The waiting marks and the memory marks of the steps below belong to taking
-slots yourself and are not written. A lock that names this process still has the engine written
+A take cannot ask for a slot that is free now, so `gdharness test` and `spread` ask the command for
+one slot per engine, as the scheduler gives them, and deal shares as they do without a command.
+The waiting marks and the memory marks of the steps below belong to taking slots yourself and are
+not written. A lock that names this process still has the engine written
 into it.
 
 ### Taking a slot from your own tool

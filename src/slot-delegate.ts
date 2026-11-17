@@ -4,22 +4,24 @@
  * reads and removes nothing in the slot folder for it.
  *
  * The command is started without a shell, hidden, with `--project <absolute path>` where the take
- * has a project and `--kind gate|side|one-off` appended. Its first line on standard output is
+ * has a project and `--kind gate|side|one-off|game` appended. Its first line on standard output is
  * `held <absolute lock path>` once the slot is granted, or `refused <reason>`. The command keeps the
  * slot for as long as its standard input is open and gives it back at end of input, so a gdharness
- * that is killed frees it too.
+ * that is killed frees it too. A slot for a process that outlives gdharness is handed on with the
+ * line `hand <pid> <start ms>` on its standard input: the command rewrites the lock to that holder,
+ * prints `handed` and exits 0 without releasing, and the scheduler frees the slot once that process
+ * has gone.
  */
 
 import { isAbsolute, resolve } from 'node:path';
-import { alive } from './alive.js';
 import { commandLineWords } from './launch.js';
 import { type ChildProcess, spawnHidden } from './spawn.js';
 
 /** The variable naming the command that grants every engine slot, as a full command line. */
 export const SLOT_COMMAND_VARIABLE = 'GODOT_ENGINE_SLOT_COMMAND';
 
-/** How the command classes a take: gdharness's own taker draws the same three lines. */
-export type SlotKind = 'gate' | 'side' | 'one-off';
+/** How a take is classed for the command: the three lines gdharness's own taker draws, and a game's. */
+export type SlotKind = 'gate' | 'side' | 'one-off' | 'game';
 
 /**
  * How long a command that was told to give its slot back has to exit, past which it is ended. A
@@ -27,8 +29,8 @@ export type SlotKind = 'gate' | 'side' | 'one-off';
  */
 const EXIT_WAIT_MS = 5000;
 
-/** How often a slot handed to a process that outlives the take is checked for that process. */
-const FOLLOW_MS = 1000;
+/** How long after `held` a command that exits is still counted as never having held the slot. */
+const GRANT_SETTLE_MS = 100;
 
 /** How much of what a command printed an error repeats. */
 const PRINTED_KEPT = 300;
@@ -64,45 +66,78 @@ function closed(child: ChildProcess, exited: Promise<void>): void {
   });
 }
 
-/** A slot the command granted, held until it is released or the command's input ends. */
+/** A slot the command granted, held until it is released, handed on or the command's input ends. */
 export class SlotGrant {
   readonly lock: string;
   /** Settles once the command has exited, which is within {@link EXIT_WAIT_MS} of its release. */
   readonly gone: Promise<void>;
   private readonly child: ChildProcess;
+  private readonly answers: CommandAnswers;
+  private readonly command: string;
   private ended = false;
-  private following = false;
+  private handing = false;
+  private handed = false;
+  private lostWith: string | null = null;
 
-  constructor(lock: string, child: ChildProcess, gone: Promise<void>) {
+  /** [param onLost] is told when the command exits while it still holds the slot. */
+  constructor(
+    lock: string,
+    child: ChildProcess,
+    answers: CommandAnswers,
+    command: string,
+    onLost: (said: string) => void,
+  ) {
     this.lock = lock;
     this.child = child;
-    this.gone = gone;
+    this.answers = answers;
+    this.command = command;
+    this.gone = answers.gone;
+    void answers.gone.then(() => {
+      if (!this.ended && !this.handing && !this.handed) {
+        this.lostWith = `The engine slot command \`${command}\` exited while it held ${lock}, so the slot is no longer held.${answers.describe()}`;
+        onLost(this.lostWith);
+      }
+    });
   }
 
-  /** Gives the slot back: the command sees end of input and exits. */
+  /** What the command's exit while it held the slot says, or null while it holds it. */
+  lostSaid(): string | null {
+    return this.lostWith;
+  }
+
+  /** Gives the slot back: the command sees end of input and exits. A handed slot is not given back. */
   release(): void {
     if (!this.ended) {
       this.ended = true;
-      closed(this.child, this.gone);
+      if (!this.handed) {
+        closed(this.child, this.gone);
+      }
     }
   }
 
   /**
-   * Gives the slot back once the process [param pid] has gone, for an engine that outlives the call
-   * that took the slot. A gdharness that ends first gives it back too, by its input closing.
+   * Hands the slot to the process [param pid], started at [param started] in milliseconds, which
+   * keeps it until it has gone: the command is sent `hand <pid> <started>`, rewrites the lock and
+   * answers `handed` and exits 0 without releasing. Answers null once it has, or why it has not.
    */
-  releaseAfter(pid: number): void {
-    if (this.ended || this.following) {
-      return;
+  async hand(pid: number, started: number): Promise<string | null> {
+    if (this.ended || this.handed || this.lostWith !== null) {
+      return this.lostWith ?? `The engine slot command \`${this.command}\` no longer holds ${this.lock}.`;
     }
-    this.following = true;
-    const look = setInterval(() => {
-      if (!alive(pid)) {
-        clearInterval(look);
-        this.release();
-      }
-    }, FOLLOW_MS);
-    look.unref();
+    this.handing = true;
+    this.child.stdin?.write(`hand ${String(pid)} ${String(started)}\n`);
+    const waiting = setTimeout(() => {
+      this.child.kill();
+    }, EXIT_WAIT_MS);
+    await this.gone;
+    clearTimeout(waiting);
+    if (this.answers.exitedCleanly() && this.answers.linesAfterTheFirst()[0] === 'handed') {
+      this.handed = true;
+      return null;
+    }
+    this.handing = false;
+    this.ended = true;
+    return `The engine slot command \`${this.command}\` did not hand ${this.lock} to process ${String(pid)}, which needs \`handed\` and an exit with code 0.${this.answers.describe()}`;
   }
 }
 
@@ -117,6 +152,8 @@ export interface SlotRequest {
   readonly firstNoteMs: number;
   readonly noteEveryMs: number;
   readonly note: (waitedMs: number) => void;
+  /** Told when the command exits while it still holds a slot that was granted. */
+  readonly onLost: (said: string) => void;
 }
 
 function printedSaid(text: string): string {
@@ -125,7 +162,7 @@ function printedSaid(text: string): string {
 }
 
 /** What a started command has said and how it ended, read once its first line or its end is in. */
-class CommandAnswers {
+export class CommandAnswers {
   readonly gone: Promise<void>;
   /** The command's first line of output, or null when it ended without one. */
   readonly firstLine: Promise<string | null>;
@@ -155,12 +192,9 @@ class CommandAnswers {
       let lined = false;
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk: string) => {
-        if (lined) {
-          return;
-        }
-        this.printed += chunk;
+        this.printed = `${this.printed}${chunk}`.slice(0, PRINTED_KEPT * 4);
         const end = this.printed.indexOf('\n');
-        if (end !== -1) {
+        if (!lined && end !== -1) {
           lined = true;
           resolveLine(this.printed.slice(0, end).replace(/\r$/, ''));
         }
@@ -171,24 +205,55 @@ class CommandAnswers {
     });
   }
 
+  /** How the command ended, as a sentence, or nothing while it runs. */
+  exitSaid(): string {
+    if (this.exit === undefined) {
+      return '';
+    }
+    return this.exit.signal === null
+      ? ` It exited with code ${String(this.exit.code)}.`
+      : ` It was ended by ${this.exit.signal}.`;
+  }
+
+  private printedSaid(): string {
+    return this.printed.trim() === '' ? '' : ` It printed ${JSON.stringify(printedSaid(this.printed))}.`;
+  }
+
+  private writtenSaid(): string {
+    return this.written.trim() === ''
+      ? ''
+      : ` Its error output was ${JSON.stringify(printedSaid(this.written))}.`;
+  }
+
+  /** What the command printed and how it ended, as the tail of an error. */
+  describe(): string {
+    return `${this.exitSaid()}${this.printedSaid()}${this.writtenSaid()}`;
+  }
+
+  /** Whether the command has exited with code 0. */
+  exitedCleanly(): boolean {
+    return this.exit?.code === 0 && this.exit.signal === null;
+  }
+
+  /** The lines the command printed after its first. */
+  linesAfterTheFirst(): string[] {
+    return this.printed
+      .split('\n')
+      .slice(1)
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+  }
+
   /** The error for [param first], the command's first line or null for none, which gave no grant. */
   failureOf(command: string, first: string | null): Error {
     const said = (what: string): string => `The engine slot command \`${command}\` ${what}`;
-    const exited =
-      this.exit === undefined
-        ? ''
-        : this.exit.signal === null
-          ? ` It exited with code ${String(this.exit.code)}.`
-          : ` It was ended by ${this.exit.signal}.`;
-    const printed =
-      this.printed.trim() === '' ? '' : ` It printed ${JSON.stringify(printedSaid(this.printed))}.`;
-    const written =
-      this.written.trim() === '' ? '' : ` Its error output was ${JSON.stringify(printedSaid(this.written))}.`;
+    const exited = this.exitSaid();
+    const written = this.writtenSaid();
     if (first === null) {
       return new Error(
         said(
           this.startError === undefined
-            ? `exited before it answered.${exited}${printed}${written}`
+            ? `exited before it answered.${this.describe()}`
             : `could not be started: ${this.startError.message}`,
         ),
       );
@@ -280,7 +345,20 @@ export async function askForSlot(request: SlotRequest): Promise<SlotGrant> {
   const first = await firstLineOf(request, child, answers);
   const lock = first === null ? undefined : /^held (.+)$/.exec(first)?.[1]?.trim();
   if (lock !== undefined && isAbsolute(lock)) {
-    return new SlotGrant(lock, child, answers.gone);
+    let started = false;
+    const grant = new SlotGrant(lock, child, answers, command, (said) => {
+      if (started) {
+        request.onLost(said);
+      }
+    });
+    // A command that prints `held` and exits holds nothing, and says so within a moment of it.
+    await Promise.race([answers.gone, new Promise((settled) => setTimeout(settled, GRANT_SETTLE_MS))]);
+    const lost = grant.lostSaid();
+    if (lost !== null) {
+      throw new Error(lost);
+    }
+    started = true;
+    return grant;
   }
   closed(child, answers.gone);
   await answers.gone;

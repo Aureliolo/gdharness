@@ -151,7 +151,14 @@ import {
   runEngine,
   startedUntilItRuns,
 } from './engine-run.js';
-import { type CallSlot, keeperSlotOf, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
+import {
+  type CallSlot,
+  handSlotToKeeper,
+  keeperSlotOf,
+  onTheSlot,
+  slotEngineNamed,
+  slotForCall,
+} from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -1012,7 +1019,7 @@ function restartsOf(run: GodotProcess): RestartNamed[] | undefined {
 async function handToTheGame(slot: CallSlot, pid: number, projectPath: string | null): Promise<void> {
   const started = (await startTimesOf([pid])).get(pid);
   const by = `a game${projectPath === null ? '' : ` of ${projectPath}`} the editor played for editor_run`;
-  if (started === undefined || !slot.handTo({ pid, started, by })) {
+  if (started === undefined || !(await slot.handTo({ pid, started, by }))) {
     slot.release();
   }
 }
@@ -6264,7 +6271,7 @@ class GodotServer {
       const call = this.callsTaken++;
       this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
-      const notes: CallNotes = { classList: new Set() };
+      const notes: CallNotes = { classList: new Set(), slotNotes: new Set() };
       try {
         const answered = await withCallSignal(
           ctx.mcpReq.signal,
@@ -6495,9 +6502,11 @@ class GodotServer {
 
   /** [param answer] with what the code below its call noted for it in [param notes]. */
   private withCallNotes(answer: ToolResponse, notes: CallNotes): ToolResponse {
-    return notes.classList.size === 0
-      ? answer
-      : this.saying(answer, { classListNote: [...notes.classList].join(' ') });
+    const said = {
+      ...(notes.classList.size === 0 ? {} : { classListNote: [...notes.classList].join(' ') }),
+      ...(notes.slotNotes.size === 0 ? {} : { engineSlotNote: [...notes.slotNotes].join(' ') }),
+    };
+    return Object.keys(said).length === 0 ? answer : this.saying(answer, said);
   }
 
   /**
@@ -15595,8 +15604,11 @@ class GodotServer {
     }
     if ('error' in launched) {
       slot.release();
+    } else if (slot.delegated) {
+      // The keeper outlives the game's first process and follows its restarts, so it holds the slot.
+      await handSlotToKeeper(slot, launched.keeperPid, projectPath);
     } else {
-      slot.leave(launched.pid);
+      slot.leave();
     }
     if ('error' in launched) {
       return launched;

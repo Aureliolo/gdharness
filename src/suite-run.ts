@@ -67,6 +67,7 @@ import { prependTo, readLog } from './log-read.js';
 import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { isRecord, isStringList } from './records.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
+import { slotCommandOf } from './slot-delegate.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
   type EngineAssignment,
@@ -1283,6 +1284,25 @@ export function followedAt(file: string, ceiling: number, dealtLanes: number): S
   return ceiling > dealtLanes || dealtLanes > 1 ? { file, ceiling: Math.max(ceiling, dealtLanes) } : null;
 }
 
+/**
+ * Whether a run deals its suites to its engines a share at a time: where a lanes file is followed,
+ * and where lanes beyond the first have less than they need, memory or slots. With a slot command
+ * ([param asked]) the slots taken up front say nothing, since each engine is granted its own.
+ */
+export function runIsShared(look: {
+  readonly followed: boolean;
+  readonly ordered: boolean;
+  readonly lanes: number;
+  readonly memoryHeld: boolean;
+  readonly taken: number;
+  readonly asked: boolean;
+}): boolean {
+  return (
+    look.followed ||
+    (!look.ordered && look.lanes > 1 && (look.memoryHeld || (!look.asked && look.taken < look.lanes)))
+  );
+}
+
 /** Takes a slot for each lane where one is free now, and says what that leaves for the rest. */
 async function takenLanes(
   context: RunContext,
@@ -1310,10 +1330,18 @@ async function takenLanes(
     say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
   }
   const follows = followedFile(context, deal, lanes.length);
-  const shared =
-    follows !== null ||
-    (options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length));
-  if (shared && taken.length < startable) {
+  // A command grants a slot for each engine as the scheduler gives them, and has no free-now
+  // answer, so the slots taken up front say nothing of how many engines may run at once.
+  const asked = slotCommandOf() !== undefined;
+  const shared = runIsShared({
+    followed: follows !== null,
+    ordered: options.order !== null,
+    lanes: lanes.length,
+    memoryHeld,
+    taken: taken.length,
+    asked,
+  });
+  if (shared && !asked && taken.length < startable) {
     say(sharesSaid(taken.length, startable));
   }
   return { lanes, taken, shared, follows };

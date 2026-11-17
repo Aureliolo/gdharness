@@ -6,7 +6,9 @@
  * It answers as the test asks, through the environment: `GRANT_SAY` is the first line it prints
  * (`held <lock>` where unset, nothing where empty), after `GRANT_DELAY_MS`, and `GRANT_EXIT` is
  * the code it exits with straight after printing, for a command that does not wait for its input.
- * `GRANT_DEAF` makes it stay up past the end of its input.
+ * `GRANT_DEAF` makes it stay up past the end of its input. A line `hand <pid> <start>` is logged as
+ * `hand`, answered `handed` and ended with code 0 (`GRANT_HAND=refuse` answers `cannot` and code 2
+ * instead), and `GRANT_EXIT_AFTER_MS` makes it exit with code 3 that long after it started.
  */
 import { appendFileSync } from 'node:fs';
 import process from 'node:process';
@@ -32,7 +34,31 @@ process.stdin.on('end', () => {
   }
   setInterval(() => undefined, 1000);
 });
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk: string) => {
+  const hand = /^hand (\d+) (\d+)$/m.exec(chunk);
+  if (hand === null) {
+    return;
+  }
+  note({ event: 'hand', handedTo: Number(hand[1]), started: Number(hand[2]) });
+  // `GRANT_HAND` set to `refuse` answers as a command that cannot hand the slot on.
+  if (process.env['GRANT_HAND'] === 'refuse') {
+    process.stdout.write('cannot\n', () => {
+      process.exit(2);
+    });
+    return;
+  }
+  process.stdout.write('handed\n', () => {
+    process.exit(0);
+  });
+});
 process.stdin.resume();
+const exitAfter = process.env['GRANT_EXIT_AFTER_MS'];
+if (exitAfter !== undefined) {
+  setTimeout(() => {
+    process.exit(3);
+  }, Number(exitAfter));
+}
 
 if (wait > 0) {
   await delay(wait);

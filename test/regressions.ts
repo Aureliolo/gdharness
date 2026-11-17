@@ -188,6 +188,7 @@ import {
   FollowedLanes,
   gamesKeptOf,
   giveBackSlot,
+  handSlotToKeeper,
   holderOf,
   inheritsSlot,
   inOneSlot,
@@ -198,6 +199,7 @@ import {
   machineSlots,
   markBegan,
   nameSlotEngine,
+  onTheSlot,
   ownStart,
   poolCount,
   QUEUED_FOLDER,
@@ -390,7 +392,14 @@ import {
   SPAWNING_START,
   snapshotAnswer,
 } from '../src/object-snapshot.js';
-import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
+import {
+  launchOutsideTheTree,
+  readLaunched,
+  receivedSpec,
+  type SentSpec,
+  sendSpec,
+  withChanges,
+} from '../src/outside.js';
 import {
   commandProjectRefusal,
   exportedBuild,
@@ -752,6 +761,7 @@ import {
   reachedAlsoSaid,
   reportsFault,
   roomSaid,
+  runIsShared,
   runShares,
   type ShareReuse,
   sharesSaid,
@@ -80540,6 +80550,23 @@ interface GrantEntry {
   readonly event: string;
   readonly argv?: string[];
   readonly pid?: number;
+  readonly handedTo?: number;
+  readonly started?: number;
+}
+
+/** The members of [param record] named in [param keys] that are numbers. */
+function numbersOf<K extends string>(
+  record: Record<string, unknown>,
+  keys: readonly K[],
+): Partial<Record<K, number>> {
+  const found: Partial<Record<K, number>> = {};
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number') {
+      found[key] = value;
+    }
+  }
+  return found;
 }
 
 /** What the stand-in slot command is asked to do: see test/support/slot-grant.ts. */
@@ -80549,6 +80576,10 @@ interface GrantAnswer {
   readonly exit?: number;
   /** Stays up past the end of its input. */
   readonly deaf?: boolean;
+  /** Answers a `hand` line with `cannot` and exit code 2. */
+  readonly handRefuse?: boolean;
+  /** Exits with code 3 this long after it started. */
+  readonly exitAfterMs?: number;
   /** A command line in place of the stand-in's. */
   readonly command?: string;
 }
@@ -80579,6 +80610,8 @@ async function withASlotCommand<T>(
     GRANT_DELAY_MS: answer.delayMs === undefined ? undefined : String(answer.delayMs),
     GRANT_EXIT: answer.exit === undefined ? undefined : String(answer.exit),
     GRANT_DEAF: answer.deaf === true ? '1' : undefined,
+    GRANT_HAND: answer.handRefuse === true ? 'refuse' : undefined,
+    GRANT_EXIT_AFTER_MS: answer.exitAfterMs === undefined ? undefined : String(answer.exitAfterMs),
   };
   const restore = settingEnvironment(set);
   const entries = (): GrantEntry[] =>
@@ -80592,7 +80625,7 @@ async function withASlotCommand<T>(
             return {
               event: said['event'],
               ...(Array.isArray(said['argv']) ? { argv: said['argv'].map(String) } : {}),
-              ...(typeof said['pid'] === 'number' ? { pid: said['pid'] } : {}),
+              ...numbersOf(said, ['pid', 'handedTo', 'started']),
             };
           })
       : [];
@@ -80774,10 +80807,42 @@ async function testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait(): Promi
  * keeper is given is asked of the function the server uses, and the server's call is read from its
  * source, since the run itself needs an engine and an editor to play it.
  */
-async function testAKeptRunUnderASlotCommandLeavesItsSlotToTheCommand(): Promise<void> {
+async function testAKeptRunUnderASlotCommandIsHandedToItsKeeper(): Promise<void> {
   const source = readFileSync(join('src', 'server.ts'), 'utf8');
   assert.match(source, /\.\.\.keeperSlotOf\(slot, /, 'the server asks it for the keeper');
-  assert.match(source, /slot\.leave\(launched\.pid\)/, 'and lets the slot follow the game');
+  assert.match(source, /handSlotToKeeper\(slot, launched\.keeperPid/, 'and hands the slot to the keeper');
+  await withASlotCommand({}, async (command) => {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-grant-'));
+    try {
+      const slot = await slotForCall(true, project);
+      const launched = await launchOutsideTheTree(
+        {
+          command: process.execPath,
+          args: ['-e', 'setTimeout(() => {}, 3000)'],
+          env: onTheSlot(process.env, slot.lock),
+          run: {
+            transcript: join(project, 'transcript.log'),
+            startedAt: Date.now(),
+            projectPath: project,
+            debugged: false,
+            ...keeperSlotOf(slot, 'a game'),
+          },
+        },
+        process.execPath,
+        resolve('build', 'keeper.js'),
+      );
+      assert.ok('pid' in launched, JSON.stringify(launched));
+      const keeper = launched.keeperPid;
+      assert.notEqual(keeper, undefined, 'the keeper names itself');
+      await handSlotToKeeper(slot, keeper, project);
+      assert.deepEqual(grantEvents(command), ['start', 'hand']);
+      assert.equal(command.entries()[1]?.handedTo, keeper, 'the slot is the keeper’s, not the game’s');
+      assert.equal(alive(keeper ?? 0), true, 'and the keeper holds on while the game runs');
+    } finally {
+      await delay(500);
+      sweep(project);
+    }
+  });
   assert.deepEqual(keeperSlotOf({ lock: '/s/0.lock', from: 7, delegated: true }, 'a game'), {});
   assert.deepEqual(keeperSlotOf({ lock: '/s/0.lock', from: 7, delegated: false }, 'a game'), {
     slot: { lock: '/s/0.lock', from: 7, by: 'a game' },
@@ -81028,39 +81093,140 @@ async function testASlotCommandIsToldAnythingElseIsAOneOff(): Promise<void> {
   assert.deepEqual(await theKindAskedUnder({}, undefined), ['--kind', 'one-off']);
 }
 
+/** The notes a call's code below it makes, as the server gathers them. */
+function aCallsNotes(): { classList: Set<string>; slotNotes: Set<string> } {
+  return { classList: new Set<string>(), slotNotes: new Set<string>() };
+}
+
 /**
- * An engine started on a slot the command granted is left to its holder. The keeper of a game an
- * editor_run starts has no slot to take over, and the grant is given back when the game's process
- * has gone, with no file of the slot folder made or read.
+ * A slot the command granted for a game that outlives the call is handed on through the command:
+ * it is sent `hand <pid> <start>`, answers `handed` and exits 0, and gdharness neither closes its
+ * input as a release nor counts its exit as a lost slot. Releasing afterwards does nothing more.
  */
-async function testAGrantHandedToAGameIsGivenBackWhenTheGameHasGone(): Promise<void> {
+async function testAGrantIsHandedOnThroughTheCommand(): Promise<void> {
   await withASlotCommand({}, async (command) => {
-    const slot = await slotForCall(true);
-    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
-    try {
-      assert.equal(slot.handTo({ pid: game.pid ?? 0, started: 0 }), true);
-      await delay(1500);
-      assert.deepEqual(grantEvents(command), ['start'], 'held while the game runs');
-      game.kill();
-      await command.untilEof();
-    } finally {
-      game.kill();
-    }
+    const notes = aCallsNotes();
+    await withCallSignal(
+      undefined,
+      async () => {
+        const taken = await slotForCall(true);
+        assert.equal(await taken.handTo({ pid: 4242, started: 1_700_000_000_000 }), true);
+        taken.release();
+        await taken.settled();
+        await delay(300);
+      },
+      undefined,
+      undefined,
+      undefined,
+      notes,
+    );
+    assert.deepEqual(grantEvents(command), ['start', 'hand'], 'no end of input after the hand');
+    const handed = command.entries().at(1);
+    assert.equal(handed?.handedTo, 4242);
+    assert.equal(handed.started, 1_700_000_000_000);
+    assert.equal(notes.slotNotes.size, 0, 'and the command leaving is no lost slot');
   });
-  // A run a keeper holds is left, not handed: the slot follows the game's process all the same.
+}
+
+/** A command that will not hand the slot on fails the hand, and the answer says what it printed and its exit. */
+async function testACommandThatWillNotHandTheSlotOnFailsTheHand(): Promise<void> {
+  await withASlotCommand({ handRefuse: true }, async () => {
+    const notes = aCallsNotes();
+    const handed = await withCallSignal(
+      undefined,
+      async () => await (await slotForCall(true)).handTo({ pid: 4242, started: 1 }),
+      undefined,
+      undefined,
+      undefined,
+      notes,
+    );
+    assert.equal(handed, false);
+    const said = [...notes.slotNotes].join(' ');
+    assert.match(said, /did not hand .* to process 4242/);
+    assert.match(said, /It exited with code 2\./);
+    assert.match(said, /cannot/);
+  });
+}
+
+/** A command that prints `held` and exits holds nothing, so the start fails and names the cause. */
+async function testACommandThatExitsAfterGrantingNeverHoldsTheSlot(): Promise<void> {
+  await withASlotCommand({ exit: 7 }, async (command) => {
+    const marker = join(command.directory, 'engine-ran');
+    const ran = await runEngine(process.execPath, [
+      '-e',
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`,
+    ]);
+    assert.match(ran.failure ?? '', /exited while it held .*granted\.lock.* It exited with code 7\./);
+    assert.equal(existsSync(marker), false, 'no engine started on a slot nobody holds');
+  });
+}
+
+/** A command that exits while the engine runs is told in the answer, and the engine is left running. */
+async function testACommandThatExitsWhileTheEngineRunsLosesTheSlotInTheAnswer(): Promise<void> {
+  await withASlotCommand({ exitAfterMs: 1500 }, async () => {
+    const notes = aCallsNotes();
+    const ran = await withCallSignal(
+      undefined,
+      async () =>
+        await runEngine(process.execPath, ['-e', 'setTimeout(() => console.log("engine finished"), 3500)']),
+      undefined,
+      undefined,
+      undefined,
+      notes,
+    );
+    assert.equal(ran.failure, null, howItEnded(ran));
+    assert.match(
+      ran.log
+        .everything()
+        .map((entry) => entry.text)
+        .join('\n'),
+      /engine finished/,
+      'the engine was not killed',
+    );
+    const said = [...notes.slotNotes].join(' ');
+    assert.match(said, /exited while it held .*granted\.lock.*It exited with code 3\./);
+  });
+}
+
+/** A take for a game editor_run starts is a `game` to the command, whatever else it is. */
+async function testASlotCommandIsToldAGameIsAGame(): Promise<void> {
+  const project = join(realpathSync(tmpdir()), 'gdharness-grant-project');
   await withASlotCommand({}, async (command) => {
-    const slot = await slotForCall(true);
-    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
-    try {
-      slot.leave(game.pid);
-      await delay(1500);
-      assert.deepEqual(grantEvents(command), ['start'], 'held while the game runs');
-      game.kill();
-      await command.untilEof();
-    } finally {
-      game.kill();
-    }
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    slots.release(await slots.take(undefined, undefined, undefined, true, project));
+    await command.untilEof();
+    assert.deepEqual(command.entries()[0]?.argv, ['--project', project, '--kind', 'game']);
   });
+}
+
+/**
+ * A run under a slot command asks for one grant per engine as the scheduler gives them, so it is
+ * never dealt shares for want of slots free at its start, as a run on the slots folder is.
+ */
+function testARunUnderASlotCommandIsNeverDealtSharesForWantOfAFreeSlot(): void {
+  const look = {
+    followed: false,
+    ordered: false,
+    lanes: 2,
+    memoryHeld: false,
+    taken: 0,
+    asked: false,
+  };
+  assert.equal(runIsShared(look), true, 'on the slots folder, no free slot deals shares');
+  assert.equal(runIsShared({ ...look, asked: true }), false, 'under a command it does not');
+  assert.equal(runIsShared({ ...look, taken: 2 }), false, 'and slots taken deal none');
+  assert.equal(runIsShared({ ...look, asked: true, memoryHeld: true }), true, 'memory still does');
+  assert.equal(runIsShared({ ...look, asked: true, followed: true }), true, 'and so does a lanes file');
+  assert.equal(runIsShared({ ...look, ordered: true }), false, 'an ordered run never does');
+}
+
+/** The keeper tells its launcher its own pid beside the game's, which a delegate's slot is handed to. */
+function testALauncherAnswersWithTheKeepersPidToo(): void {
+  assert.deepEqual(readLaunched('pid 12 keeper 99\n'), { pid: 12, keeperPid: 99 });
+  assert.deepEqual(readLaunched('pid 12\n'), { pid: 12 });
 }
 
 /**
@@ -115935,7 +116101,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotCommandThatDoesNotAnswerFailsTheStartWithTheCause,
   testASlotCommandSeesEndOfInputWhenAServerStartLetsGo,
   testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait,
-  testAKeptRunUnderASlotCommandLeavesItsSlotToTheCommand,
+  testAKeptRunUnderASlotCommandIsHandedToItsKeeper,
   testALiveEngineDoesNotHoldTheCommandsInputOpen,
   testASlotCommandIsAskedOnceForACommandOfSeveralEngines,
   testASlotCommandServesTheSlotsOfATestRun,
@@ -115947,7 +116113,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotCommandIsToldAGatesTakeIsAGate,
   testASlotCommandIsToldQueueWorkIsSideWork,
   testASlotCommandIsToldAnythingElseIsAOneOff,
-  testAGrantHandedToAGameIsGivenBackWhenTheGameHasGone,
+  testAGrantIsHandedOnThroughTheCommand,
+  testACommandThatWillNotHandTheSlotOnFailsTheHand,
+  testACommandThatExitsAfterGrantingNeverHoldsTheSlot,
+  testACommandThatExitsWhileTheEngineRunsLosesTheSlotInTheAnswer,
+  testASlotCommandIsToldAGameIsAGame,
+  testARunUnderASlotCommandIsNeverDealtSharesForWantOfAFreeSlot,
+  testALauncherAnswersWithTheKeepersPidToo,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,

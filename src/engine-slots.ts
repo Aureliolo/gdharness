@@ -64,7 +64,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
-import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
+import { callNotes, callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { helperPid } from './desktop.js';
 import { wholeFlag } from './launch.js';
 import {
@@ -1284,7 +1284,7 @@ export class EngineSlots {
     const delegate = slotCommandOf();
     return delegate === undefined
       ? await this.takenFromFolder(signal, waiting, blocked, game, project)
-      : await this.takenFromCommand(delegate, signal, waiting, blocked, project ?? this.project);
+      : await this.takenFromCommand(delegate, signal, waiting, blocked, game, project ?? this.project);
   }
 
   private async takenFromFolder(
@@ -1341,14 +1341,15 @@ export class EngineSlots {
    * The slot [param command] grants, in place of a take from the slots folder, which this touches
    * nowhere: the slot's inheritance is read as for any take, and the engine's own lock is the one
    * the command names. The take's kind is the line it draws: a gate's, side work (a timing's or a
-   * tier's, which the machine's queue runs) or a one-off. [param blocked] is called when the grant
-   * took as long as a wait is first said.
+   * tier's, which the machine's queue runs) or a one-off, and a [param game] editor_run starts is
+   * one of its own. [param blocked] is called when the grant took as long as a wait is first said.
    */
   private async takenFromCommand(
     command: string,
     signal: AbortSignal | undefined,
     waiting: ((waitedMs: number) => void) | undefined,
     blocked: (() => void) | undefined,
+    game: boolean,
     project: string | undefined,
   ): Promise<string> {
     signal?.throwIfAborted();
@@ -1357,8 +1358,9 @@ export class EngineSlots {
       return inherited;
     }
     const taker = this.taker();
-    const kind: SlotKind = taker === 'gate' ? 'gate' : taker === 'other' ? 'one-off' : 'side';
+    const kind: SlotKind = game ? 'game' : taker === 'gate' ? 'gate' : taker === 'other' ? 'one-off' : 'side';
     const began = Date.now();
+    const notes = callNotes();
     const grant = await askForSlot({
       command,
       kind,
@@ -1366,6 +1368,13 @@ export class EngineSlots {
       signal,
       firstNoteMs: COMMAND_WAIT_SAID_MS,
       noteEveryMs: WAIT_SAID_MS,
+      onLost: (said) => {
+        if (notes === undefined) {
+          this.say?.(said);
+        } else {
+          notes.slotNotes.add(said);
+        }
+      },
       note: (waitedMs) => {
         if (waiting !== undefined) {
           waiting(waitedMs);
@@ -1958,29 +1967,31 @@ export class EngineSlots {
 
   /**
    * Stops counting the slot at [param lock] as this process's without giving it back, for a lock
-   * another process takes over in its own time: see {@link handSlot}. A slot a command granted
-   * is given back when [param pid], the engine that outlives the call, has gone, or with this process.
+   * another process takes over in its own time: see {@link handSlot}.
    */
-  forget(lock: string, pid?: number): void {
-    const grant = this.delegated.get(lock);
-    if (grant !== undefined) {
-      if (pid !== undefined) {
-        grant.releaseAfter(pid);
-      }
-      return;
-    }
+  forget(lock: string): void {
     this.held.delete(lock);
   }
 
   /**
    * Hands the slot at [param lock] to [param to], answering whether it did: see {@link handSlot}. A
-   * slot a command granted stays its own and is given back once [param to]'s process has gone.
+   * slot a command granted is handed through the command ({@link SlotGrant.hand}), which keeps no
+   * hold on it after, and a hand it will not make is told in the call's answer.
    */
-  hand(lock: string, to: SlotHolder): boolean {
+  async hand(lock: string, to: SlotHolder): Promise<boolean> {
     const grant = this.delegated.get(lock);
     if (grant !== undefined) {
-      grant.releaseAfter(to.pid);
-      return true;
+      const notes = callNotes();
+      const failed = await grant.hand(to.pid, to.started);
+      this.delegated.delete(lock);
+      if (failed !== null) {
+        if (notes === undefined) {
+          this.say?.(failed);
+        } else {
+          notes.slotNotes.add(failed);
+        }
+      }
+      return failed === null;
     }
     const handed = handSlot(lock, this.holder.pid, to);
     if (handed) {
@@ -2465,23 +2476,41 @@ export async function slotForCall(game = false, project?: string): Promise<CallS
     settled: async () => {
       await grant?.gone;
     },
-    handTo: (holder) => slots.hand(lock, holder),
-    leave: (pid) => {
-      slots.forget(lock, pid);
+    handTo: async (holder) => await slots.hand(lock, holder),
+    leave: () => {
+      slots.forget(lock);
     },
   };
 }
 
 /**
  * What a run's record says of its slot for the keeper that holds the run, taken from [param slot]
- * and named [param by]. A delegate command's slot is the command's, so the keeper has none to take
- * over and the record carries none.
+ * and named [param by]. A delegate command's slot is handed to the keeper through the command, so the
+ * keeper has no lock file of its own to take over and the record carries none.
  */
 export function keeperSlotOf(
   slot: Pick<CallSlot, 'lock' | 'from' | 'delegated'>,
   by: string,
 ): { slot?: { lock: string; from: number; by: string } } {
   return slot.delegated ? {} : { slot: { lock: slot.lock, from: slot.from, by } };
+}
+
+/**
+ * Hands [param slot], a delegate command's, to the keeper [param pid] that holds a game for
+ * editor_run, which keeps it until the keeper has gone. The keeper outlives the game's first
+ * process and follows its restarts. The slot is given back when the keeper is not known, its start
+ * cannot be read or the command will not hand it on.
+ */
+export async function handSlotToKeeper(
+  slot: Pick<CallSlot, 'handTo' | 'release'>,
+  pid: number | undefined,
+  projectPath: string | null,
+): Promise<void> {
+  const started = pid === undefined ? undefined : (await startTimesOf([pid])).get(pid);
+  const by = `the keeper of a game${projectPath === null ? '' : ` of ${projectPath}`} editor_run started`;
+  if (pid === undefined || started === undefined || !(await slot.handTo({ pid, started, by }))) {
+    slot.release();
+  }
 }
 
 /** A slot taken for a call: see {@link slotForCall}. */
@@ -2494,12 +2523,10 @@ export interface CallSlot {
   readonly release: () => void;
   /** Settles once what {@link release} gave back has gone: the delegate command's exit, at most a few seconds on. */
   readonly settled: () => Promise<void>;
-  readonly handTo: (holder: SlotHolder) => boolean;
-  /**
-   * Leaves the lock for another process to take over. It names this one until it does. A delegate's
-   * slot stays held until [param pid], the engine that outlives the call, has gone.
-   */
-  readonly leave: (pid?: number) => void;
+  /** Hands the slot to [param holder], which keeps it until it has gone, and answers whether it did. */
+  readonly handTo: (holder: SlotHolder) => Promise<boolean>;
+  /** Leaves the lock for another process to take over. It names this one until it does. */
+  readonly leave: () => void;
 }
 
 /** The slot a command of several engine steps holds for all of them, inside {@link inOneSlot}. */

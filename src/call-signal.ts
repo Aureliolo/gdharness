@@ -32,6 +32,8 @@ export interface SlotWaits {
  */
 export interface CallNotes {
   readonly classList: Set<string>;
+  /** What the slot command said of a slot it lost or would not hand on. */
+  readonly slotNotes: Set<string>;
 }
 
 interface Call {
