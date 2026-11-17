@@ -20859,6 +20859,37 @@ async function startedKept(
   return { launcher, pid, release };
 }
 
+/**
+ * A parent job with a UI limit is no reason for Windows to refuse the engine's own job: the engine
+ * still runs, with no failure.
+ */
+async function testAnEngineStartedUnderAUiLimitedParentJobStillRuns(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ui-job-'));
+  try {
+    const nested = spawnHidden(
+      process.execPath,
+      [join(process.cwd(), 'test', 'support', 'nested-job.ts'), root, 'ui'],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let said = '';
+    nested.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    assert.ok(await exitedWithin(nested, 180_000), 'the nested process ends');
+    const answer: unknown = JSON.parse(said.trim().split('\n').at(-1) ?? '{}');
+    assert.deepEqual(
+      [get(answer, 'uiSet'), get(answer, 'joined'), get(answer, 'failure'), get(answer, 'ran')],
+      [true, true, null, true],
+      `the engine ran under the limited parent: ${said}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
 /** A start meant to outlive its starter keeps running when the starter exits, and keeps its job. */
 async function testAKeptStartOutlivesItsStarterInItsJob(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -26535,6 +26566,51 @@ async function testTheKeepersListenerAnswersTheFirstLineOnly(): Promise<void> {
     );
   } finally {
     symbolic.close();
+  }
+}
+
+/**
+ * A process the real launcher starts with no run to keep, which is the keeper's launcher exiting
+ * once the pid is known, runs on after the launcher has gone and is still in its named job.
+ */
+async function testAProcessTheLauncherStartsOutlivesItAndKeepsItsJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-outlives-'));
+  const release = join(scratch, 'release');
+  let kept: number | undefined;
+  try {
+    const spec = {
+      command: process.execPath,
+      args: [
+        '-e',
+        `const t = setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(release)})) { clearInterval(t); } }, 50);`,
+      ],
+      envChanges: {},
+    };
+    const ran = spawnSyncHidden(process.execPath, [resolve('build', 'keeper.js'), 'launch'], {
+      encoding: 'utf8',
+      input: JSON.stringify(spec),
+      timeout: 120_000,
+    });
+    const pid = Number(/^pid (\d+)/m.exec(ran.stdout)?.[1]);
+    assert.ok(Number.isInteger(pid) && pid > 0, `the launcher names the process: ${ran.stdout}`);
+    kept = pid;
+    await delay(1000);
+    assert.ok(alive(pid), 'the process runs on after the launcher has exited');
+    const job = openJob(engineJobName(pid));
+    assert.ok(job !== null, 'and is in the job named for its pid');
+    assert.ok(job.holds(pid), 'which holds it');
+    job.close();
+    writeFileSync(release, '');
+    assert.equal(await answeredWithin(() => (alive(pid) ? undefined : true), 30_000), true, 'until it ends');
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
+    }
+    sweep(scratch);
   }
 }
 
@@ -44999,6 +45075,64 @@ async function testABootCheckThatDiesAfterItsBannerIsStartedAgain(): Promise<voi
         GDH_CRASH_MARKER: marker,
         GDH_CRASH_WHEN: '--quit-after',
       },
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A boot check the server runs for a caller, on the desktop in use, has its engine in the named job
+ * while it runs, and its being cut off at the timeout ends the engine.
+ */
+async function testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut(): Promise<void> {
+  const real = resolveGodotPath();
+  if (process.platform !== 'win32' || real === null) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT'] && real === null) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-boot-job-'));
+  const project = join(scratch, 'project');
+  try {
+    mkdirSync(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="BootJob"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    await withStdioServer(
+      async (call) => {
+        const cut = call(
+          'editor_run',
+          { projectPath: project, op: 'check', frames: 1_000_000_000, timeoutMs: 20_000 },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        let engine: number | undefined;
+        for (let look = 0; engine === undefined && look < 15; look += 1) {
+          engine = (await pidsWithCommandLine('Godot', project))[0];
+        }
+        assert.ok(engine !== undefined, 'the engine is running');
+        const job = openJob(engineJobName(engine));
+        assert.ok(job !== null, `the job gdharness-engine-${String(engine)} exists while the engine runs`);
+        assert.ok(job.holds(engine), 'and holds the engine');
+        job.close();
+        const checked: unknown = JSON.parse(await cut);
+        assert.equal(
+          get(checked, 'booted'),
+          false,
+          `the cut-off boot is not a boot: ${JSON.stringify(checked)}`,
+        );
+        assert.equal(
+          await answeredWithin(() => (alive(engine) ? undefined : true), 30_000),
+          true,
+          'and the engine is gone once the check is cut off',
+        );
+      },
+      { GODOT_PATH: real },
     );
   } finally {
     sweep(scratch);
@@ -76877,6 +77011,23 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
       return ran.said;
     };
     const none = broken('none');
+    // Each worker's folder names the lane it ran in and its engine's pid.
+    const kept = join(project, '.godot', 'gdharness', 'spread-runs');
+    const workers = readdirSync(kept).flatMap((run) =>
+      readdirSync(join(kept, run))
+        .filter((name) => name.startsWith('worker-'))
+        .map((name) => laneFileOf(join(kept, run, name))),
+    );
+    assert.deepEqual(
+      workers.map((worker) => worker?.lane ?? -1).toSorted((a, b) => a - b),
+      [0, 1, 2],
+      `three workers ran in three lanes: ${JSON.stringify(workers)}`,
+    );
+    assert.equal(
+      new Set(workers.map((worker) => worker?.pid)).size,
+      3,
+      `each with an engine pid of its own: ${JSON.stringify(workers)}`,
+    );
     assert.match(
       none,
       /^Failed, so nothing was gathered:\n {2}worker 1 played no arm: the scene never asked GdhShare\.outcomes for one, or quit before it did$/m,
@@ -116509,7 +116660,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,
+  testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut,
   testAnEngineStartedInsideAParentJobStillGetsItsJob,
+  testAnEngineStartedUnderAUiLimitedParentJobStillRuns,
   testAKeptStartAndItsConsoleChildOpenNoWindow,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
@@ -116828,6 +116981,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheKeeperAnswersAStop,
   testTheKeepersListenerAnswersTheFirstLineOnly,
   testTheLauncherSaysWhyARunDidNotStart,
+  testAProcessTheLauncherStartsOutlivesItAndKeepsItsJob,
   testTheKeeperAnswersItsDebuggersQuestions,
   testADebugRequestIsCheckedAgainstItsTable,
   testAKeptGamesStackAndValuesRead,

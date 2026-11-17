@@ -2,7 +2,7 @@
  * Runs as a process that puts itself in a job of its own that ends its members when it closes and
  * allows no breakaway, as a CI runner or a gate's queue may run its children, and then starts an
  * engine stand-in and a kept stand-in the way the server does. Prints one line of JSON.
- * Argument: the scratch folder.
+ * Arguments: the scratch folder, then "ui" for a parent job that also sets a UI limit.
  */
 import { dlopen, FFIType, ptr } from 'bun:ffi';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -12,7 +12,7 @@ import { engineJobName, ensureHelperCompiled, helperPid, spawnOnDesktop } from '
 import { runEngine } from '../../src/engine-run.js';
 import { openJob } from './job-objects.js';
 
-const [root] = process.argv.slice(2);
+const [root, mode] = process.argv.slice(2);
 if (root === undefined) {
   throw new Error('the scratch folder is the argument');
 }
@@ -31,7 +31,26 @@ const limits = new BigUint64Array(18);
 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE is set, so there is no breakaway.
 new DataView(limits.buffer).setUint32(16, 0x2000, true);
 const limited = kernel32.symbols.SetInformationJobObject(parent, 9, ptr(limits), 144);
+// With "ui" the parent job also sets a UI limit, the one case where Windows refuses to nest a job
+// under it.
+let uiSet = false;
+if (mode === 'ui') {
+  // JobObjectBasicUIRestrictions, JOB_OBJECT_UILIMIT_DESKTOP.
+  uiSet = kernel32.symbols.SetInformationJobObject(parent, 4, ptr(new Uint32Array([0x40])), 4);
+}
 const joined = kernel32.symbols.AssignProcessToJobObject(parent, kernel32.symbols.GetCurrentProcess());
+if (mode === 'ui') {
+  const marker = join(root, 'ran');
+  const refused = await runEngine(process.execPath, [
+    '-e',
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+  ]);
+  await delay(1000);
+  process.stdout.write(
+    `${JSON.stringify({ uiSet, joined, failure: refused.failure, exitCode: refused.exitCode, ran: existsSync(marker) })}\n`,
+  );
+  process.exit(0);
+}
 
 const pids = join(root, 'pids');
 const release = join(root, 'release');
