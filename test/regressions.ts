@@ -72244,7 +72244,7 @@ function testAWindowedEngineIsStartedWithTheRunsEngineFlags(): void {
  * A failing run keeps every engine's as before, a run with no slow case or no option keeps none, and
  * the kept run's directory is one the sweep ages out like a failed run's.
  */
-function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): void {
+async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -72375,6 +72375,63 @@ function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): void {
       failing.said,
     );
     assert.match(failing.said, /^--- cases slower than 1 s:$/m, 'a failed run keeps them anyway');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+
+    // With slot 0 held by another process, one engine takes slot 1 and is handed the suites a share
+    // at a time, so a slow case in each share still carries the slot and priority that engine had.
+    const slowSuite = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc ${name}() -> void:\n\tawait get_tree().create_timer(1.3).timeout\n\tassert_bool(true).is_true()\n`;
+    const names = ['test_slow_a', 'test_slow_b', 'test_slow_c'];
+    const suiteOf = (name: string): string => `tests/${name.replace('test_', '')}_test.gd`;
+    // Suites recorded at 40 s each are dealt a share apiece.
+    const dealtTimes = join(project, 'dealt-times.json');
+    writeTree(project, {
+      ...Object.fromEntries(names.map((name) => [suiteOf(name), slowSuite(name)])),
+      'dealt-times.json': JSON.stringify(
+        Object.fromEntries(
+          names.map((name) => [`res://${suiteOf(name)}`, { seconds: 40, cases: { [name]: 40 } }]),
+        ),
+      ),
+    });
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 600_000);
+    let shared: { said: string; status: number | null };
+    try {
+      shared = test(
+        ...names.map(suiteOf),
+        '--times',
+        dealtTimes,
+        '--slot-count',
+        '2',
+        '--keep-slower-than',
+        '1',
+      );
+    } finally {
+      holder.kill();
+      rmSync(join(slots, '0.lock'), { force: true });
+    }
+    assert.equal(shared.status, 0, shared.said);
+    assert.match(shared.said, /a share at a time/, `the run was shared: ${shared.said}`);
+    const sharedResult = readRunResult(resultFile);
+    assert.equal(sharedResult.engines.length, 3, `a share for each suite: ${shared.said}`);
+    const sharedCases = sharedResult.slowCases ?? [];
+    assert.deepEqual(
+      sharedCases.map((named) => named.case).toSorted(),
+      names,
+      `every slow case is named: ${shared.said}`,
+    );
+    for (const sharedCase of sharedCases) {
+      assert.equal(
+        sharedCase.slot,
+        1,
+        `the number of the one slot left, whose lock is ${slots}${sep}1.lock: ${sharedCase.case}`,
+      );
+      assert.match(
+        sharedCase.priority ?? '',
+        process.platform === 'win32' ? /^below normal$/ : /^nice -?\d+$/,
+        `the priority its engine had: ${sharedCase.case}`,
+      );
+      assert.ok(existsSync(sharedCase.log), `${sharedCase.case}'s log is kept`);
+    }
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
     sweep(project, slots);
