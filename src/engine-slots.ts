@@ -352,6 +352,8 @@ interface SlotWaiter {
   readonly taker: SlotTaker;
   /** When it began to wait, in milliseconds since the epoch. */
   readonly since: number;
+  /** When it began to wait in seconds, as its mark gives it, which the line's order compares. */
+  readonly sinceSeconds: number;
   readonly game: boolean;
   /** Whether its mark names the store class: {@link storeClassOf}. */
   readonly store: boolean;
@@ -426,6 +428,9 @@ function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
     // made in the millisecond a take began read as made after it, and the take went first.
     since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
+    // Exact where the mark says it, since the other side of the scheme compares exact seconds and
+    // two sides rounding differently each rank the other ahead for a mark begun in one millisecond.
+    sinceSeconds: typeof since === 'number' && Number.isFinite(since) ? since : Math.floor(madeAt) / 1000,
     game: holder.game === true,
     store: kind === STORE_CLASS,
   };
@@ -511,12 +516,12 @@ export class SlotLine {
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
     const own = {
       group: groupOf(this.taker, this.game, this.store, this.since),
-      since: this.since,
+      since: this.since / 1000,
       mark: this.mark ?? '￿',
     };
     const placeOf = (one: SlotWaiter): typeof own => ({
       group: groupOf(one.taker, one.game, one.store, one.since),
-      since: one.since,
+      since: one.sinceSeconds,
       mark: one.mark,
     });
     const before = (a: typeof own, b: typeof own): number =>

@@ -34,6 +34,11 @@ export interface HeadlessEngine {
   readonly debug: boolean;
   /** Start the engine as an editor, which is the only engine that can make an exporter. */
   readonly editor?: boolean;
+  /**
+   * The project the run is for where its engine runs on another folder, which gives its slot that
+   * project's store class. The folder the operation names when not given.
+   */
+  readonly project?: string;
   /** How long an operation's engine may run before it is ended. Ten minutes when not given. */
   readonly ceiling?: { readonly ms: number; readonly said: string };
   /** Reads the machine for the ceiling, for a test. */
@@ -618,7 +623,7 @@ async function operationOutcome(
     // answered spun for nearly four hours with nothing to end it.
     ran = await runEngine(engine.godotPath, args, {
       timeout: engine.ceiling ?? OPERATION_CEILING,
-      project: projectPath,
+      project: engine.project ?? projectPath,
       ...(engine.sample === undefined ? {} : { sample: engine.sample }),
     });
     answer = answerIn(answerFile);

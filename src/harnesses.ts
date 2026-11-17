@@ -13,7 +13,7 @@
  * documentation too: a guessed shape writes a file that silently does nothing.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
@@ -30,7 +30,7 @@ import {
 import { Refusal } from './errors.js';
 import { isGodotProject, isSameDirectory } from './paths.js';
 import { isRecord } from './records.js';
-import { gitCheckoutOf } from './repository.js';
+import { gitCheckoutOf, gitTopOf } from './repository.js';
 import { currentRunner, type Runner, spawnFor } from './runner.js';
 
 /** What gdharness is called wherever it is registered. */
@@ -925,13 +925,13 @@ export function mainCheckoutOf(projectPath: string): string | null {
  * naming the worktree's own `.git` file, absolute or relative to that entry.
  */
 export function worktreeCheckoutsOf(projectPath: string): string[] {
-  const found = gitCheckoutOf(projectPath);
-  if (found === null || found.linked) {
+  const top = gitTopOf(projectPath);
+  if (top === null) {
     return [];
   }
-  const { top } = found;
+  // Only whether `.git` is a folder is asked, so a linked worktree's unreadable `.git` file answers none.
   const listed = join(top, '.git', 'worktrees');
-  if (!existsSync(listed)) {
+  if (!statSync(join(top, '.git')).isDirectory() || !existsSync(listed)) {
     return [];
   }
   const below = relative(top, resolve(projectPath));

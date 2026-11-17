@@ -68601,6 +68601,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       mark: '1-1.json',
       taker: 'other',
       since: began,
+      sinceSeconds: began / 1000,
       game: false,
       store: false,
       wants: 1,
@@ -68619,6 +68620,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       mark: 'a.json',
       taker: 'other',
       since: began - 10_000,
+      sinceSeconds: (began - 10_000) / 1000,
       game: false,
       store: false,
       wants: 1,
@@ -68628,6 +68630,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       mark: 'b.json',
       taker: 'tier',
       since: began,
+      sinceSeconds: began / 1000,
       game: false,
       store: false,
       wants: 1,
@@ -68637,6 +68640,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       mark: 'c.json',
       taker: 'other',
       since: began - 121_000,
+      sinceSeconds: (began - 121_000) / 1000,
       game: false,
       store: false,
       wants: 1,
@@ -68646,6 +68650,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       mark: 'd.json',
       taker: 'other',
       since: began - 1_200_000,
+      sinceSeconds: (began - 1_200_000) / 1000,
       game: true,
       store: false,
       wants: 1,
@@ -68754,6 +68759,7 @@ function lineWaiter(
     mark,
     taker,
     since: now - waited,
+    sinceSeconds: (now - waited) / 1000,
     game: options.game === true,
     store: options.store === true,
     wants: 1,
@@ -69132,8 +69138,145 @@ async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promis
       false,
       'and one given no project carries none',
     );
+    // Steps that run their engine on a folder of their own, for the project's sake: the export
+    // options of a preset edit, and the empty script reference the project's hidden editor needs.
+    const headless = pathToFileURL(resolve('src', 'headless.ts')).href;
+    const docs = pathToFileURL(resolve('src', 'doc-cache.ts')).href;
+    assert.equal(
+      await storeClassOfAProgramsTake(
+        listed,
+        [
+          `import { runOperation } from ${JSON.stringify(headless)};`,
+          `import { mkdtempSync } from 'node:fs';`,
+          `import { tmpdir } from 'node:os';`,
+          `const scratch = mkdtempSync(tmpdir() + '/export-');`,
+          `void runOperation({ godotPath: process.execPath, script: 'none', debug: false, editor: true, project }, 'export_options', {}, scratch);`,
+          `await ${held};`,
+        ].join('\n'),
+        names,
+      ),
+      true,
+      "the export options step, which runs on an empty folder, takes its slot for the preset's project",
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(
+        listed,
+        [
+          `import { placeEmptyScriptDocs } from ${JSON.stringify(docs)};`,
+          `import { mkdtempSync } from 'node:fs';`,
+          `import { tmpdir } from 'node:os';`,
+          `void placeEmptyScriptDocs(process.execPath, project, mkdtempSync(tmpdir() + '/docs-'));`,
+          `await ${held};`,
+        ].join('\n'),
+        names,
+      ),
+      true,
+      "the empty script reference of a hidden editor takes its slot for the editor's project",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** The shapes of checkout the repository finder reads, and what each name is. */
+function testARepositoryIsNamedFromItsRealPathAndNeverForABareOne(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-repository-real-'));
+  try {
+    const plain = join(root, 'plain-game');
+    mkdirSync(join(plain, '.git'), { recursive: true });
+    mkdirSync(join(plain, 'game'), { recursive: true });
+    const linked = join(root, 'linked');
+    symlinkSync(plain, linked, 'junction');
+    assert.equal(repositoryNameOf(join(linked, 'game')), 'plain-game', 'a link is followed to the real name');
+    if (process.platform === 'win32') {
+      assert.equal(
+        repositoryNameOf(join(plain, 'game').toUpperCase()),
+        'plain-game',
+        'and another letter case of the path reaches the same name',
+      );
+    }
+
+    // A worktree of a bare repository has no checkout of its own to name.
+    const bare = join(root, 'bare.git');
+    const entry = join(bare, 'worktrees', 'branch');
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, 'commondir'), '../..\n');
+    const tree = join(root, 'bare-tree');
+    mkdirSync(join(tree, 'game'), { recursive: true });
+    writeFileSync(join(tree, '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
+    assert.equal(repositoryNameOf(join(tree, 'game')), null, 'a bare repository names none');
+    const layout = join(root, 'layout');
+    const hidden = join(layout, '.bare', 'worktrees', 'main');
+    mkdirSync(hidden, { recursive: true });
+    writeFileSync(join(hidden, 'commondir'), '../..\n');
+    mkdirSync(join(layout, 'main', 'game'), { recursive: true });
+    writeFileSync(join(layout, 'main', '.git'), 'gitdir: ../.bare/worktrees/main\n');
+    assert.equal(repositoryNameOf(join(layout, 'main', 'game')), null, 'nor does the .bare layout');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A linked worktree whose `.git` file cannot be read has no worktrees to list, and no name. */
+function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-repository-unreadable-'));
+  const marker = join(root, 'tree', '.git');
+  const denied = process.platform === 'win32' ? [`${process.env['USERNAME'] ?? ''}:(R)`] : [];
+  try {
+    const entry = join(root, 'main-game', '.git', 'worktrees', 'branch');
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, 'commondir'), '../..\n');
+    mkdirSync(join(root, 'tree', 'game'), { recursive: true });
+    writeFileSync(marker, `gitdir: ${entry.replaceAll('\\', '/')}\n`);
+    if (process.platform === 'win32') {
+      spawnSyncHidden('icacls', [marker, '/deny', ...denied]);
+    } else {
+      chmodSync(marker, 0);
+    }
+    try {
+      readFileSync(marker);
+      // Unreadable by no means here, as when running as the superuser: nothing to prove.
+      return;
+    } catch {
+      // Unreadable, as intended.
+    }
+    assert.deepEqual(worktreeCheckoutsOf(join(root, 'tree', 'game')), [], 'it answers an empty list');
+    assert.equal(repositoryNameOf(join(root, 'tree', 'game')), null, 'and names no repository');
+  } finally {
+    if (process.platform === 'win32') {
+      spawnSyncHidden('icacls', [marker, '/remove:d', ...denied.map((one) => one.split(':')[0] ?? '')]);
+    } else {
+      chmodSync(marker, 0o644);
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** Two marks begun in one millisecond are ranked the way the other side of the scheme ranks them. */
+async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-tie-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    const began = Date.now() - 1000;
+    const own = new SlotLine('other', false, () => began);
+    own.mark = 'z-own.json';
+    writeFileSync(
+      join(marks, 'a-later.json'),
+      JSON.stringify({ ...me, taker: 'other', since: (began + 0.4) / 1000 }),
+    );
+    writeFileSync(
+      join(marks, 'a-earlier.json'),
+      JSON.stringify({ ...me, taker: 'other', since: (began - 0.4) / 1000 }),
+    );
+    assert.deepEqual(
+      own.ahead(slotWaiters(directory)).map((one) => one.mark),
+      ['a-earlier.json'],
+      'a mark begun a fraction of a millisecond later is behind it, whatever its name, and an earlier one ahead',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -113392,6 +113535,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALookWithNoLineOfItsOwnHasTheProjectsStoreClass,
   testATakeForAProjectCarriesItsStoreClassWhateverTakesIt,
   testEveryGameTheServerStartsTakesItsSlotForItsProject,
+  testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
+  testAnUnreadableWorktreeGitFileListsNoWorktrees,
+  testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
   testATakerHeldBackByAClaimDoesNotSayItLooks,

@@ -9440,12 +9440,15 @@ class GodotServer {
     const empty = scratchDirectory('export');
     try {
       writeFileSync(join(empty, 'project.godot'), 'config_version=5\n');
-      const outcome = await runOperation(
-        { godotPath: engine.value, script: this.operationsScript, debug: DEBUG_MODE, editor: true },
-        'export_options',
-        { platform, ...standing },
-        empty,
-      );
+      // On an empty folder, for the project's sake: its slot is taken for the project.
+      const exporting = {
+        godotPath: engine.value,
+        script: this.operationsScript,
+        debug: DEBUG_MODE,
+        editor: true,
+        project: projectPath,
+      };
+      const outcome = await runOperation(exporting, 'export_options', { platform, ...standing }, empty);
       const options: unknown = outcome.ok ? outcome.payload['options'] : undefined;
       if (!Array.isArray(options)) {
         return `The ${platform} export options could not be read from the engine: ${outcome.ok ? 'it named none' : outcome.message}`;

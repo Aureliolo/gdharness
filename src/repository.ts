@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { realAsFarAsItExists } from './paths.js';
 
 /** The checkout holding a folder, and the `.git` it shares with every other checkout of its repository. */
 export interface GitCheckout {
@@ -11,14 +12,8 @@ export interface GitCheckout {
   readonly linked: boolean;
 }
 
-/**
- * The checkout that holds [param start], or null when none does or its `.git` cannot be followed.
- *
- * A linked worktree's `.git` is a file pointing at its entry under the main repository's `.git`
- * (`gitdir:`, absolute or relative to the worktree), and that entry's `commondir` points at the main
- * `.git` itself.
- */
-export function gitCheckoutOf(start: string): GitCheckout | null {
+/** The first folder at or above [param start] that holds `.git`, or null when none does. */
+export function gitTopOf(start: string): string | null {
   let top = resolve(start);
   while (!existsSync(join(top, '.git'))) {
     const up = dirname(top);
@@ -26,6 +21,21 @@ export function gitCheckoutOf(start: string): GitCheckout | null {
       return null;
     }
     top = up;
+  }
+  return top;
+}
+
+/**
+ * The checkout that holds [param start], or null when none does or its `.git` cannot be followed.
+ *
+ * A linked worktree's `.git` is a file pointing at its entry under the main repository's `.git`
+ * (`gitdir:`, absolute or relative to the worktree), and that entry's `commondir` points at the main
+ * `.git` itself. A `.git` file that cannot be read throws.
+ */
+export function gitCheckoutOf(start: string): GitCheckout | null {
+  const top = gitTopOf(start);
+  if (top === null) {
+    return null;
   }
   const marker = join(top, '.git');
   if (statSync(marker).isDirectory()) {
@@ -45,12 +55,18 @@ export function gitCheckoutOf(start: string): GitCheckout | null {
 
 /**
  * The name of the repository that holds [param start]: the folder holding the shared `.git`, so a
- * worktree has its repository's name. Null where none holds it or its `.git` cannot be read.
+ * worktree has its repository's name. The path is resolved first, as the machine's other tools
+ * resolve it, so another spelling or a link reaches the same name. Null where none holds it, the
+ * shared folder is no `.git` (a bare repository has no checkout of its own) or it cannot be read.
  */
 export function repositoryNameOf(start: string): string | null {
   try {
-    const found = gitCheckoutOf(start);
-    return found === null ? null : basename(dirname(found.common));
+    const found = gitCheckoutOf(realAsFarAsItExists(resolve(start)));
+    if (found === null) {
+      return null;
+    }
+    const common = realAsFarAsItExists(found.common);
+    return basename(common) === '.git' ? basename(dirname(common)) : null;
   } catch {
     return null;
   }
