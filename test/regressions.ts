@@ -43170,8 +43170,49 @@ function testTheEndOfAStartedAgainEngineSaysWhatEachStartDid(): void {
   );
 }
 
+/** [param said] run by cmd.exe as a watched engine in [param scratch]. */
+async function watchedCmd(scratch: string, said: string): ReturnType<typeof watchedEngine> {
+  const directory = join(scratch, 'engine');
+  mkdirSync(join(directory, 'user'), { recursive: true });
+  const lock = join(scratch, '0.lock');
+  writeFileSync(lock, '');
+  return await watchedEngine(
+    {
+      godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      projectPath: scratch,
+      deadlineSeconds: 60,
+      running: new Set<() => void>(),
+      cores: null,
+    },
+    lock,
+    ['/d', '/c', said],
+    directory,
+    join(directory, 'engine.log'),
+    30,
+  );
+}
+
 /** A blank-only log is output to a watched engine for every status, as it was, and the banner alone is the race's. */
-function testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas(): void {
+async function testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas(): Promise<void> {
+  if (process.platform === 'win32') {
+    // Through the real watch, so the reading of a blank-only log is the one watchedEngine uses.
+    const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-blank-watched-'));
+    try {
+      for (const [said, status] of [
+        ['echo.& exit /b -1073741819', 0xc0000005],
+        ['echo.& exit /b -1066598273', 0xc06d007f],
+      ] as const) {
+        const blank = await watchedCmd(scratch, said);
+        assert.deepEqual(
+          [blank.code, blank.crashedStarts],
+          [status, undefined],
+          `a blank line is output, so a start that printed only one is not started again: ${JSON.stringify(blank)}`,
+        );
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
   const asLogged = (status: number, printed: string): boolean =>
     diedAsItStarted(status, linesAsPrinted(printed));
   const banner = `${ENGINE_BANNER_LINE}\n`;
@@ -43288,18 +43329,6 @@ async function testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain(): Promise
       [0xc06d007f, undefined],
       'one that printed a line past its banner is its own answer',
     );
-    // Through the real watch, so the reading of a blank-only log is the one watchedEngine uses.
-    for (const [said, status] of [
-      ['echo.& exit /b -1073741819', 0xc0000005],
-      ['echo.& exit /b -1066598273', 0xc06d007f],
-    ] as const) {
-      const blank = await watchedEngine(launch, lock, ['/d', '/c', said], directory, log, 30);
-      assert.deepEqual(
-        [blank.code, blank.crashedStarts],
-        [status, undefined],
-        `a blank line is output, so a start that printed only one is not started again: ${JSON.stringify(blank)}`,
-      );
-    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
