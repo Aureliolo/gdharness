@@ -72271,7 +72271,25 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
     const env = { ...process.env, GODOT_PATH: godotPath };
     const resultFile = join(project, 'result.json');
     const testRuns = join(project, '.godot', 'gdharness', 'test-runs');
+    // Every suite recorded at 40 s, written again before each run since a run records what it took.
+    // Each suite is then dealt an engine's share whatever memory a machine has free: a machine with
+    // room for one engine at once hands the suites out a share at a time, and still starts one
+    // engine for each.
+    const pinned = join(project, 'pinned-times.json');
+    const pinnedTimes = JSON.stringify(
+      Object.fromEntries(
+        [
+          ['slow', 'test_slow'],
+          ['quick', 'test_quick'],
+          ['failing', 'test_fails'],
+        ].map(([suite, name]) => [
+          `res://tests/${suite}_test.gd`,
+          { seconds: 40, cases: { [name ?? '']: 40 } },
+        ]),
+      ),
+    );
     const test = (...args: string[]): { said: string; status: number | null } => {
+      writeFileSync(pinned, pinnedTimes);
       const ran = spawnSyncHidden(
         process.execPath,
         [
@@ -72282,6 +72300,8 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
           slots,
           '--engines',
           '2',
+          '--times',
+          pinned,
           '--result',
           resultFile,
           ...args,
