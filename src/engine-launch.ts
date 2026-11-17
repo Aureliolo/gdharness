@@ -41,7 +41,7 @@ import { wholeFlag } from './launch.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
-import { belowNormal } from './priority.js';
+import { belowNormal, priorityOf } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
@@ -153,9 +153,16 @@ export function homeOf(projectPath: string): string {
 export const KEPT_RUN_DIRECTORIES = 5;
 
 /**
+ * The file a passing run that kept only the logs of its slow cases leaves in its directory. A
+ * directory without it counts as a failed or cut-off run, which is all an older release left.
+ */
+export const SLOW_RUN_MARK = 'slow-run';
+
+/**
  * Removes what earlier runs left in [param runs], each a `<start>-<pid>` directory, other than a
- * run still going and the [param kept] most recent of those that have ended. Answers the directories
- * left because another process holds them, such as an engine that outlived its run.
+ * run still going and the [param kept] most recent of those that have ended. Runs marked with
+ * {@link SLOW_RUN_MARK} and the rest are counted apart, so neither kind pushes out the other. Answers
+ * the directories left because another process holds them, such as an engine that outlived its run.
  */
 export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): string[] {
   if (!existsSync(runs)) {
@@ -172,19 +179,25 @@ export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): 
       held.push(join(runs, entry));
     }
   };
-  const ended: { entry: string; started: number }[] = [];
+  const ended: { entry: string; started: number; slow: boolean }[] = [];
   for (const entry of readdirSync(runs)) {
     const named = /^(\d+)-(\d+)$/.exec(entry);
     const pid = Number(named?.[2]);
     if (!Number.isInteger(pid)) {
       remove(entry);
     } else if (!alive(pid)) {
-      ended.push({ entry, started: Number(named?.[1]) });
+      ended.push({
+        entry,
+        started: Number(named?.[1]),
+        slow: existsSync(join(runs, entry, SLOW_RUN_MARK)),
+      });
     }
   }
   ended.sort((a, b) => b.started - a.started);
-  for (const { entry } of ended.slice(kept)) {
-    remove(entry);
+  for (const slow of [false, true]) {
+    for (const { entry } of ended.filter((one) => one.slow === slow).slice(kept)) {
+      remove(entry);
+    }
   }
   return held;
 }
@@ -484,6 +497,7 @@ async function engineWatchedOnce(
       quiet: new Spent(nowSeconds(), first, engine),
       pid: engine,
       peakBytes: 0,
+      priority: undefined,
       size: 0,
       // The end of what was scanned, so a marker split between two reads is still found.
       carried: '',
@@ -524,6 +538,7 @@ async function engineWatchedOnce(
     log,
     outcome,
     peakBytes: watch.peakBytes,
+    priority: watch.priority,
   });
 }
 
@@ -675,6 +690,8 @@ interface Watch {
   readonly quiet: Spent;
   pid: number | undefined;
   peakBytes: number;
+  /** The engine's priority as last read while it ran, which a log kept for a slow case records. */
+  priority: string | undefined;
   size: number;
   carried: string;
   allowed: { size: number; seconds: number };
@@ -699,6 +716,9 @@ async function lookAtTheEngine(watch: Watch): Promise<void> {
     if (watch.pid !== undefined) {
       foundEngine(watch.lock, watch.pid);
     }
+  }
+  if (watch.pid !== undefined) {
+    watch.priority = priorityOf(watch.pid) ?? watch.priority;
   }
   const taken = await watch.sample();
   const holding = watch.pid === undefined ? undefined : taken.held?.get(watch.pid);
@@ -808,6 +828,7 @@ function handedTheNext(watch: Watch, to: number, code: number): void {
     signal: null,
     ended: null,
     ...(watch.peakBytes > 0 ? { peakBytes: watch.peakBytes } : {}),
+    ...(watch.priority === undefined ? {} : { priority: watch.priority }),
   };
   const from = watch.shareFrom;
   watch.deciding = shares
@@ -867,6 +888,7 @@ interface EngineFinish {
   readonly log: string;
   readonly outcome: { ended: string | null };
   readonly peakBytes: number;
+  readonly priority: string | undefined;
 }
 
 /** How much of a log is read for the helper's word on a message box: the lines before it and the one it ends on. */
@@ -874,7 +896,7 @@ const BOX_READ_BYTES = 64 * 1024;
 
 /** How the engine ended, once its process has exited and its streams are copied into the log. */
 async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
-  const { started, told, copied, output, log, outcome, peakBytes } = finish;
+  const { started, told, copied, output, log, outcome, peakBytes, priority } = finish;
   const { helper } = started;
   const code = helper === null ? told.code : helperExit(helper.exit, told.code);
   const { signal } = told;
@@ -901,6 +923,7 @@ async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
     ended: outcome.ended,
     ...(freeBytes === undefined ? {} : { freeBytes }),
     ...(peakBytes > 0 ? { peakBytes } : {}),
+    ...(priority === undefined ? {} : { priority }),
   };
 }
 

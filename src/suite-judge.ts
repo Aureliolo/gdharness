@@ -661,6 +661,8 @@ export interface EngineEnd {
   readonly crashedStarts?: number;
   /** The most bytes the engine was read holding, above 0. Absent when no reading was. */
   readonly peakBytes?: number;
+  /** The priority the engine's process was last read with while it ran, named as its platform names it. */
+  readonly priority?: string;
 }
 
 export interface EngineVerdict {

@@ -39,6 +39,7 @@ import {
   roomFor,
   roomForAnother,
   SILENCE_FLOOR_SECONDS,
+  SLOW_RUN_MARK,
   sweepRunDirectories,
   versionNamed,
   watchedEngine,
@@ -154,6 +155,11 @@ interface TestOptions {
   readonly verbose: boolean;
   /** The engine flags every engine of the run starts with, as `--engine-arg` gives them. */
   readonly engineArgs: readonly string[];
+  /**
+   * The seconds a case may take before the log of the engine that ran it is kept, even in a passing
+   * run, or null to keep logs of failed runs alone.
+   */
+  readonly keepSlowerThanSeconds: number | null;
   /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
   readonly resultFile: string | null;
   /**
@@ -214,6 +220,11 @@ export interface RunResult {
   /** The directory every engine's output is kept under, or null when the run removed it. */
   readonly logs: string | null;
   /**
+   * Each case slower than `--keep-slower-than` gave, slowest first, or absent when the option was
+   * not given or the run started no engine. The log of its engine is kept, in a passing run too.
+   */
+  readonly slowCases?: readonly SlowCase[] | undefined;
+  /**
    * The engines asked for, before the room on the machine and the slots held the run to fewer. A
    * gate's lanes file may raise the run above it.
    */
@@ -222,6 +233,25 @@ export interface RunResult {
   readonly slotsFree: number;
   /** What the run printed of its deal: the engines, what it split, and what held it. */
   readonly dealing: readonly string[];
+}
+
+/** A case that took longer than `--keep-slower-than` allows, and the engine and log it ran in. */
+export interface SlowCase {
+  readonly suite: string;
+  /** The case as gdUnit4 printed it: the function, or `test_params:0 (1)` for one row of a parameterised case. */
+  readonly case: string;
+  /** gdUnit4's time for it, from its `before_test()` to its `after_test()`. */
+  readonly seconds: number;
+  readonly engine: number;
+  /** The engine slot it held, or null when its lock names none. */
+  readonly slot: number | null;
+  /**
+   * The priority its process was read with while it ran: a Windows priority class such as
+   * `below normal`, or `nice 10` on Linux and macOS. Null when it ended before it was read.
+   */
+  readonly priority: string | null;
+  /** The engine's log, kept beside the run's other logs. */
+  readonly log: string;
 }
 
 /**
@@ -240,6 +270,7 @@ interface ResultTargets {
   readonly dealing: readonly string[];
   readonly engines: number;
   readonly slotsFree: number;
+  readonly keepSlowerThanSeconds: number | null;
 }
 
 /** How many of the slowest suites the run names at its end. */
@@ -289,6 +320,7 @@ const VALUED = new Set([
   '--order',
   '--result',
   '--times',
+  '--keep-slower-than',
 ]);
 /** The option that hands every engine of a run one entry of the flags project_test's engineArgs takes. */
 const ENGINE_ARG = '--engine-arg';
@@ -389,6 +421,33 @@ function projectOfRun(
   return { projectPath, projectNamed };
 }
 
+/** The seconds `--keep-slower-than` gives, or null where it was not given. Refused unless above 0. */
+function slowLimitNamed(value: string | undefined): number | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (!/^(?:\d+\.?\d*|\.\d+)$/.test(value)) {
+    throw new EngineUsageError(
+      `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and ${value} is not one.`,
+    );
+  }
+  const given = value.length > 40 ? `${value.slice(0, 40)}...` : value;
+  const fix = 'Give the slowest a case may be before its log is kept, such as 10.';
+  if (/^[0.]+$/.test(value)) {
+    throw new EngineUsageError(
+      `--keep-slower-than takes a number of seconds above 0, and ${given} is not. ${fix}`,
+    );
+  }
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) {
+    throw new EngineUsageError(`--keep-slower-than ${given} is too large to be a limit in seconds. ${fix}`);
+  }
+  if (seconds === 0) {
+    throw new EngineUsageError(`--keep-slower-than ${given} is too small to tell from 0. ${fix}`);
+  }
+  return seconds;
+}
+
 /** [param value] read from [param cwd], or null where the option was not given. */
 function pathNamed(value: string | undefined, cwd: string): string | null {
   return value === undefined ? null : resolve(cwd, value);
@@ -436,6 +495,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     printOutput: switches.has('--print-output'),
     verbose: switches.has('--verbose'),
     engineArgs: engineFlagsNamed(valued.get(ENGINE_ARG)),
+    keepSlowerThanSeconds: slowLimitNamed(last('--keep-slower-than')),
     resultFile: pathNamed(last('--result'), cwd),
     timesFile: pathNamed(last('--times'), cwd),
   };
@@ -596,6 +656,16 @@ interface EngineRan {
   readonly reached: string;
   /** The most bytes the engine was read holding, when it was read at all. */
   readonly peakBytes?: number;
+  /** The engine slot it held, or null when its lock names none. */
+  readonly slot: number | null;
+  /** Its process's priority as it was last read while it ran, or null when it never was. */
+  readonly priority: string | null;
+}
+
+/** The number of the engine slot [param lock] is, from its `<n>.lock` name, or null for any other. */
+function slotOf(lock: string): number | null {
+  const number = /(\d+)\.lock$/.exec(lock)?.[1];
+  return number === undefined ? null : Number(number);
 }
 
 /**
@@ -604,8 +674,12 @@ interface EngineRan {
  * A project that is a worktree of another checkout also gets a copy of a failed run's logs beside
  * the main checkout: a gate running in a worktree of the commit removes it once the run ends, and
  * the logs with it.
+ *
+ * A passing run removes its logs, except those of engines that ran a case past `--keep-slower-than`.
+ * Such a run leaves a directory marked with {@link SLOW_RUN_MARK}, which the sweep counts apart from
+ * failed runs.
  */
-class RunLogs {
+export class RunLogs {
   readonly directory: string;
   private readonly kept: string | null;
 
@@ -626,17 +700,49 @@ class RunLogs {
 
   /**
    * Copies the logs beside the main checkout, once they are complete, when they go there: each
-   * engine's own, one folder down, and not what the engine wrote in its user folder below that.
+   * engine's own, one folder down, and not what the engine wrote in its user folder below that. Only
+   * the files in [param only] when it is given.
    */
-  keep(): void {
+  keep(only?: ReadonlySet<string>): void {
     if (this.kept === null) {
       return;
     }
     for (const file of readdirSync(this.directory, { recursive: true, encoding: 'utf8' })) {
-      if (file.endsWith('.log') && file.split(sep).length === 2) {
+      if (
+        file.endsWith('.log') &&
+        file.split(sep).length === 2 &&
+        (only === undefined || only.has(join(this.directory, file)))
+      ) {
         mkdirSync(dirname(join(this.kept, file)), { recursive: true });
         copyFileSync(join(this.directory, file), join(this.kept, file));
       }
+    }
+  }
+
+  /**
+   * Keeps the logs in [param only], as {@link keep} does, removes the rest of what the run wrote and
+   * marks the run's directories as holding slow logs alone.
+   */
+  keepOnly(only: ReadonlySet<string>): void {
+    this.keep(only);
+    removeExcept(this.directory, only);
+    for (const directory of [this.directory, ...(this.kept === null ? [] : [this.kept])]) {
+      writeFileSync(join(directory, SLOW_RUN_MARK), '');
+    }
+  }
+}
+
+/** Removes everything under [param directory] except the files in [param kept] and the folders they are in. */
+function removeExcept(directory: string, kept: ReadonlySet<string>): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (kept.has(path)) {
+      continue;
+    }
+    if (entry.isDirectory() && [...kept].some((file) => file.startsWith(`${path}${sep}`))) {
+      removeExcept(path, kept);
+    } else {
+      rmSync(path, { recursive: true, force: true });
     }
   }
 }
@@ -876,6 +982,7 @@ async function runStages(context: RunContext): Promise<number> {
       dealing,
       engines: options.engines,
       slotsFree: started.taken.length,
+      keepSlowerThanSeconds: options.keepSlowerThanSeconds,
     },
   );
 }
@@ -2407,7 +2514,11 @@ function writtenEngineFiles(plan: EnginePlan, directory: string): EngineFiles {
 }
 
 /** The flags that start an engine headless, or windowed at the project's own size. */
-function displayFlags(launch: Launch, plan: EnginePlan): string[] {
+export function displayFlags(
+  launch: Pick<Launch, 'projectPath' | 'engineArgs'>,
+  plan: Pick<EnginePlan, 'windowed'>,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   if (!plan.windowed) {
     return ['--headless'];
   }
@@ -2415,9 +2526,7 @@ function displayFlags(launch: Launch, plan: EnginePlan): string[] {
   // On Windows every engine runs on the hidden desktop, so a windowed one starts with its flags.
   return [
     ...(viewport === null ? [] : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
-    ...(process.platform === 'win32'
-      ? hiddenWindowFlags(launch.engineArgs, capsFrames(launch.projectPath))
-      : []),
+    ...(platform === 'win32' ? hiddenWindowFlags(launch.engineArgs, capsFrames(launch.projectPath)) : []),
   ];
 }
 
@@ -2514,6 +2623,7 @@ async function runEngine(
       reportsBefore: new Map<string, string>(),
       began: Date.now(),
       from: 0,
+      slot: slotOf(lock),
     },
   };
   let end: EngineEnd;
@@ -2556,6 +2666,8 @@ interface ShareRun {
   readonly began: number;
   /** The byte of the engine's log its lines begin at. */
   readonly from: number;
+  /** The slot the engine holds, the same for every share it runs. */
+  readonly slot: number | null;
 }
 
 /** The share a lane draws for an engine that has finished one. */
@@ -2601,6 +2713,7 @@ async function handedOn(
     reportsBefore: reportFiles(running.share.reports),
     began: Date.now(),
     from: ended.to,
+    slot: running.share.slot,
   };
   return { args: shareArguments(drawn.plan, files) };
 }
@@ -2643,6 +2756,8 @@ function judgedShare(
     again: again !== '',
     reached: share.files.reached,
     ...(end.peakBytes === undefined ? {} : { peakBytes: end.peakBytes }),
+    slot: share.slot,
+    priority: end.priority ?? null,
   };
 }
 
@@ -2682,6 +2797,39 @@ export function reportsFault(reports: string, known: ReadonlyMap<string, string>
   return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off. Report it to gdharness with gdUnit4's version`;
 }
 
+/**
+ * Prints the slow cases of a run that gave [param limit], and answers them with their logs named as
+ * the run is read once it is over, and the engine logs they keep. Answers none for a run with no limit.
+ */
+function slowCasesSaid(
+  ran: readonly EngineRan[],
+  logs: RunLogs,
+  limit: number | null,
+  passed: boolean,
+): { readonly named: readonly SlowCase[] | undefined; readonly logs: ReadonlySet<string> } {
+  if (limit === null) {
+    return { named: undefined, logs: new Set() };
+  }
+  const slow = slowCasesOf(ran, limit);
+  const kept = slow.map((one) => ({ ...one, log: logs.named(one.log) }));
+  printSlowCases(kept, limit, passed ? logs.shown : null);
+  return { named: kept, logs: new Set(slow.map((one) => one.log)) };
+}
+
+/**
+ * Leaves the logs of a run as it ends: every engine's when it failed, otherwise only those in
+ * [param slow], and none when that is empty.
+ */
+function settleLogs(logs: RunLogs, passed: boolean, slow: ReadonlySet<string>): void {
+  if (!passed) {
+    logs.keep();
+  } else if (slow.size > 0) {
+    logs.keepOnly(slow);
+  } else {
+    rmSync(logs.directory, { recursive: true, force: true });
+  }
+}
+
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
 function report(
   ran: readonly EngineRan[],
@@ -2708,15 +2856,12 @@ function report(
   const took = (Date.now() - startedAt) / 1000;
   const closed = closedSuitesOf(ran);
   printTimings(ran, closed);
-  const totals = totalsSaid(ran, took);
-  console.log('');
   const outside = [...across, ...uncollected, ...unkept];
   const passed = failed.length === 0 && compiled.faults.length === 0 && outside.length === 0;
-  if (passed) {
-    rmSync(logs.directory, { recursive: true, force: true });
-  } else {
-    logs.keep();
-  }
+  const slow = slowCasesSaid(ran, logs, targets.keepSlowerThanSeconds, passed);
+  const totals = totalsSaid(ran, took);
+  console.log('');
+  settleLogs(logs, passed, slow.logs);
   const unwritten = writeResult(targets, {
     passed,
     seconds: took,
@@ -2728,8 +2873,9 @@ function report(
       ...outside,
     ],
     suites: closed,
-    engines: engineRecordsOf(ran, startedAt, passed ? null : logs),
-    logs: passed ? null : logs.shown,
+    engines: engineRecordsOf(ran, startedAt, logs, passed ? slow.logs : null),
+    logs: passed && slow.logs.size === 0 ? null : logs.shown,
+    ...(slow.named === undefined ? {} : { slowCases: slow.named }),
     enginesAsked: targets.engines,
     slotsFree: targets.slotsFree,
     dealing: targets.dealing,
@@ -2832,6 +2978,63 @@ function closedSuitesOf(ran: readonly EngineRan[]) {
     .toSorted((a, b) => b.seconds - a.seconds);
 }
 
+/**
+ * The cases of [param ran] that took longer than [param limit] seconds by gdUnit4's own time, which
+ * the engine prints on each case's verdict line, slowest first. A line with no time, as an older
+ * gdUnit4 or a case cut off by a crash prints it, reads as 0 s and is never slow.
+ */
+export function slowCasesOf(
+  ran: readonly Pick<EngineRan, 'index' | 'printed' | 'slot' | 'priority' | 'log'>[],
+  limit: number,
+): SlowCase[] {
+  return ran
+    .flatMap((engine) =>
+      [...engine.printed.suites.values()].flatMap((suite) =>
+        suite.cases
+          .filter((one) => one.seconds > limit)
+          .map((slow) => ({
+            suite: suite.path,
+            case: slow.name,
+            seconds: slow.seconds,
+            engine: engine.index,
+            slot: engine.slot,
+            priority: engine.priority,
+            log: engine.log,
+          })),
+      ),
+    )
+    .toSorted((a, b) => b.seconds - a.seconds);
+}
+
+/**
+ * [param seconds] of a case as the report prints it: in whole milliseconds, which is what gdUnit4
+ * prints, so a case just past its limit never reads as at it.
+ */
+export function slowTimeSaid(seconds: number): string {
+  return seconds.toFixed(3);
+}
+
+/**
+ * Names each of [param slow], the cases past [param limit] seconds. [param keptUnder] is where a
+ * passing run keeps their engines' logs, or null for a failed run, which keeps every engine's.
+ */
+function printSlowCases(slow: readonly SlowCase[], limit: number, keptUnder: string | null): void {
+  if (slow.length === 0) {
+    return;
+  }
+  const where =
+    keptUnder === null
+      ? ''
+      : `, their engines' logs kept under ${keptUnder} until ${String(KEPT_RUN_DIRECTORIES)} later runs have kept a slow log`;
+  printSection(
+    `cases slower than ${String(limit)} s${where}:`,
+    slow.map(
+      (one) =>
+        `${one.suite} > ${one.case} ${slowTimeSaid(one.seconds)} s, engine ${String(one.engine)}, ${one.slot === null ? 'slot unknown' : `slot ${String(one.slot)}`}, ${one.priority === null ? 'priority not read' : `priority ${one.priority}`}: ${one.log}`,
+    ),
+  );
+}
+
 /** Prints what each engine took beside what it was dealt, how they started and the slowest suites. */
 function printTimings(ran: readonly EngineRan[], closed: ReturnType<typeof closedSuitesOf>): void {
   // What each engine took beside what it was dealt, so an uneven deal is told from a slow suite.
@@ -2864,8 +3067,16 @@ function totalsSaid(ran: readonly EngineRan[], took: number): string {
   return `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
 }
 
-/** What the result file records of each engine, with the log a failed run keeps, named through [param logs]. */
-function engineRecordsOf(ran: readonly EngineRan[], startedAt: number, logs: RunLogs | null) {
+/**
+ * What the result file records of each engine, with the log it keeps named through [param logs]: every
+ * engine's in a failed run, where [param kept] is null, and in a passing run only those in it.
+ */
+function engineRecordsOf(
+  ran: readonly EngineRan[],
+  startedAt: number,
+  logs: RunLogs,
+  kept: ReadonlySet<string> | null,
+) {
   return ran.map((engine) => ({
     index: engine.index,
     lane: engine.plan.lane,
@@ -2878,7 +3089,7 @@ function engineRecordsOf(ran: readonly EngineRan[], startedAt: number, logs: Run
     windowed: engine.plan.windowed,
     suites: engine.plan.suites.map((suite) => suite.path),
     peakBytes: engine.peakBytes ?? null,
-    log: logs === null ? null : logs.named(engine.log),
+    log: kept === null || kept.has(engine.log) ? logs.named(engine.log) : null,
   }));
 }
 

@@ -25,7 +25,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
+import { availableParallelism, constants, homedir, setPriority, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import { text as pipedText } from 'node:stream/consumers';
@@ -150,6 +150,7 @@ import {
   resPathOf,
   roomFor,
   roomForAnother,
+  SLOW_RUN_MARK,
   sweepRunDirectories,
   versionNamed,
   versionPrinted,
@@ -402,6 +403,7 @@ import {
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
+import { priorityNamed, priorityOf } from '../src/priority.js';
 import {
   ancestorsIn,
   descendantsIn,
@@ -715,6 +717,7 @@ import {
   type Admitted,
   acrossSaid,
   compileUnlessUnchanged,
+  displayFlags,
   engineSaid,
   enginesCutFor,
   followedAt,
@@ -728,6 +731,7 @@ import {
   memorySaid,
   outOfMemorySaid,
   RESERVED_WAIT_MS,
+  RunLogs,
   type RunResult,
   reachedAlsoSaid,
   reportsFault,
@@ -736,6 +740,8 @@ import {
   type ShareReuse,
   sharesSaid,
   silenceWhile,
+  slowCasesOf,
+  slowTimeSaid,
   startsSaid,
   suiteImport,
   testOptionsOf,
@@ -71955,6 +71961,503 @@ function testTheTestHelpListsTheEngineArgOption(): void {
   assert.equal(lines.length, 2, `the usage line and its description: ${helped.stdout}`);
 }
 
+/** `--keep-slower-than` takes seconds above 0 and is refused otherwise, before any engine starts. */
+function testTheKeepSlowerThanOptionTakesPositiveSeconds(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-keep-slower-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    const limit = (...args: string[]): number | null =>
+      testOptionsOf([project, ...args], tmpdir()).keepSlowerThanSeconds;
+    assert.equal(limit(), null, 'no limit unless given');
+    assert.equal(limit('--keep-slower-than', '10'), 10);
+    assert.equal(limit('--keep-slower-than', '2.5'), 2.5);
+    assert.equal(limit('--keep-slower-than', '1', '--keep-slower-than', '3'), 3, 'the last one stands');
+    for (const [plain, seconds] of [
+      ['.5', 0.5],
+      ['5.', 5],
+      ['0.5', 0.5],
+      ['007', 7],
+      ['0.001', 0.001],
+    ] as const) {
+      assert.equal(limit('--keep-slower-than', plain), seconds, `${plain} is a plain decimal above 0`);
+    }
+    const refusalOf = (bad: string): string => {
+      try {
+        testOptionsOf([project, '--keep-slower-than', bad], tmpdir());
+      } catch (error) {
+        return error instanceof EngineUsageError ? error.message : String(error);
+      }
+      return 'read';
+    };
+    for (const bad of ['0', '0.0', '.0', '0.', '00']) {
+      assert.equal(
+        refusalOf(bad),
+        `--keep-slower-than takes a number of seconds above 0, and ${bad} is not. Give the slowest a case may be before its log is kept, such as 10.`,
+      );
+    }
+    for (const bad of ['-1', '-.5', '+5', 'ten', '1e3', '10s', '5 s', ' 5', '.', '5..1', 'Infinity', 'NaN']) {
+      assert.equal(
+        refusalOf(bad),
+        `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and ${bad} is not one.`,
+      );
+    }
+    const fix = 'Give the slowest a case may be before its log is kept, such as 10.';
+    assert.equal(
+      refusalOf('9'.repeat(309)),
+      `--keep-slower-than ${'9'.repeat(40)}... is too large to be a limit in seconds. ${fix}`,
+    );
+    assert.equal(
+      refusalOf(`0.${'0'.repeat(400)}1`),
+      `--keep-slower-than 0.${'0'.repeat(38)}... is too small to tell from 0. ${fix}`,
+    );
+    assert.equal(
+      refusalOf('1e-400'),
+      `--keep-slower-than takes the seconds a case may take as a plain decimal such as 10, 2.5 or .5, with no sign, exponent or unit, and 1e-400 is not one.`,
+    );
+    assert.equal(limit('--keep-slower-than', '9'.repeat(308)), Number('9'.repeat(308)), 'the largest finite');
+    assert.equal(limit('--keep-slower-than', `0.${'0'.repeat(300)}1`), 1e-301, 'a tiny limit that is not 0');
+    assert.equal(refusalOf(''), '--keep-slower-than needs a value.');
+    assert.throws(() => testOptionsOf([project, '--keep-slower-than'], tmpdir()), /needs a value/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** `gdharness help` lists `--keep-slower-than` on the test command's usage line and in its description. */
+function testTheTestHelpListsTheKeepSlowerThanOption(): void {
+  const helped = spawnSyncHidden(process.execPath, ['build/cli.js', 'help'], { encoding: 'utf8' });
+  assert.equal(helped.status, 0, helped.stderr);
+  const lines = helped.stdout.split('\n').filter((line) => line.includes('--keep-slower-than'));
+  assert.equal(lines.length, 2, `the usage line and its description: ${helped.stdout}`);
+}
+
+/**
+ * A slow case is read from the time gdUnit4 prints on its verdict line, a row of a parameterised case
+ * by its own time. A line with no time, as an older gdUnit4 or a cut run leaves, is never slow, and a
+ * case exactly at the limit is not past it.
+ */
+function testASlowCaseIsReadFromGdUnitsOwnTime(): void {
+  const printed = readRun(
+    cannedRun([
+      caseLine(S_TEST, 'test_fast', 'PASSED', '6ms'),
+      caseLine(S_TEST, 'test_edge', 'PASSED', '10s 0ms'),
+      caseLine(S_TEST, 'test_slow', 'PASSED', '12s 40ms'),
+      caseLine(S_TEST, 'test_rows:1 (3)', 'PASSED', '1min 2s 0ms'),
+      caseLine(S_TEST, 'test_untimed', 'PASSED'),
+      caseLine(S_TEST, 'test_started', 'STARTED'),
+    ]),
+  );
+  const engine = { index: 2, printed, slot: 3, priority: 'below normal', log: 'engine-2/engine.log' };
+  assert.deepEqual(
+    slowCasesOf([engine], 10),
+    [
+      {
+        suite: S_TEST,
+        case: 'test_rows:1 (3)',
+        seconds: 62,
+        engine: 2,
+        slot: 3,
+        priority: 'below normal',
+        log: engine.log,
+      },
+      {
+        suite: S_TEST,
+        case: 'test_slow',
+        seconds: 12.04,
+        engine: 2,
+        slot: 3,
+        priority: 'below normal',
+        log: engine.log,
+      },
+    ],
+    'slowest first, each with the engine, slot and priority it ran in',
+  );
+  assert.deepEqual(slowCasesOf([engine], 100), [], 'none past a longer limit');
+  const justPast = slowCasesOf(
+    [{ ...engine, printed: readRun(cannedRun([caseLine(S_TEST, 'test_just_past', 'PASSED', '1s 3ms')])) }],
+    1,
+  );
+  assert.equal(justPast[0]?.seconds, 1.003, 'the result keeps the exact time');
+  assert.equal(slowTimeSaid(1.003), '1.003', 'and the report prints it above the 1 s limit');
+  assert.ok(Number(slowTimeSaid(1.003)) > 1, 'never rounded down to the limit');
+  assert.equal(slowTimeSaid(12.04), '12.040');
+  assert.deepEqual(
+    slowCasesOf([{ ...engine, printed: readRun('') }], 0.001),
+    [],
+    'a run that printed no case',
+  );
+  assert.deepEqual(
+    slowCasesOf(
+      [{ ...engine, printed: readRun(cannedRun([caseLine(S_TEST, 'test_untimed', 'PASSED')])) }],
+      0.001,
+    ),
+    [],
+    'a case line with no time says nothing',
+  );
+}
+
+/**
+ * A passing run's logs go but those of the engines that ran a slow case, the rest of what an engine
+ * wrote with them. Beside a main checkout the kept logs are copied there too, and no others.
+ */
+function testARunKeepsOnlyTheLogsItIsToldTo(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-run-logs-'));
+  try {
+    const made = (name: string): void => {
+      writeTree(join(root, name), {
+        'engine-0/engine.log': 'zero\n',
+        'engine-0/user/save.dat': 'x\n',
+        'engine-0/reports/report.xml': 'x\n',
+        'engine-1/engine.log': 'one\n',
+        'engine-1/user/save.dat': 'x\n',
+      });
+    };
+    made('run');
+    made('other');
+    const logs = new RunLogs(join(root, 'run'), join(root, 'kept'));
+    const slow = new Set([join(root, 'run', 'engine-1', 'engine.log')]);
+    logs.keepOnly(slow);
+    assert.deepEqual(
+      readdirSync(join(root, 'run'), { recursive: true, encoding: 'utf8' }).toSorted(),
+      ['engine-1', join('engine-1', 'engine.log'), SLOW_RUN_MARK],
+      'the slow engine log and the mark that says so are all that is left in the run',
+    );
+    assert.deepEqual(
+      readdirSync(join(root, 'kept'), { recursive: true, encoding: 'utf8' }).toSorted(),
+      ['engine-1', join('engine-1', 'engine.log'), SLOW_RUN_MARK],
+      'and all that is copied beside the main checkout',
+    );
+    const here = new RunLogs(join(root, 'other'), null);
+    here.keepOnly(new Set([join(root, 'other', 'engine-0', 'engine.log')]));
+    assert.deepEqual(
+      readdirSync(join(root, 'other'), { recursive: true, encoding: 'utf8' }).toSorted(),
+      ['engine-0', join('engine-0', 'engine.log'), SLOW_RUN_MARK],
+      'the same where nothing is copied',
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/** A priority is named as its platform names it: a class on Windows, a nice value elsewhere. */
+function testAnEnginesPriorityIsNamedAsItsPlatformNamesIt(): void {
+  assert.equal(priorityNamed(10, 'win32'), 'below normal');
+  assert.equal(priorityNamed(0, 'win32'), 'normal');
+  assert.equal(priorityNamed(19, 'win32'), 'idle');
+  assert.equal(priorityNamed(-14, 'win32'), 'high');
+  assert.equal(priorityNamed(7, 'win32'), 'priority 7', 'a value no class has');
+  assert.equal(priorityNamed(10, 'linux'), 'nice 10');
+  assert.equal(priorityNamed(0, 'darwin'), 'nice 0');
+  // A child set to each priority in turn, so the read does not depend on the priority this test runs at.
+  const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  try {
+    assert.ok(child.pid !== undefined, 'the child started');
+    for (const value of [constants.priority.PRIORITY_BELOW_NORMAL, constants.priority.PRIORITY_LOW]) {
+      setPriority(child.pid, value);
+      assert.equal(priorityOf(child.pid), priorityNamed(value), 'read from the process');
+    }
+  } finally {
+    child.kill();
+  }
+  assert.equal(priorityOf(2 ** 22 - 1), null, 'a process that is gone has none');
+}
+
+/**
+ * A failed run's logs stay until five later runs have failed, and a run that kept only slow logs
+ * stays until five later such runs have been kept. Neither kind pushes out the other, and a
+ * directory with no mark, as an older release left, counts as a failed run.
+ */
+function testFailedAndSlowRunsAreSweptApart(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-sweep-kinds-'));
+  try {
+    const made = (start: number, slow: boolean): string => {
+      // A pid no process has, so every run here has ended.
+      const directory = join(root, `${String(start)}-${String(2 ** 22 - 1)}`);
+      writeTree(directory, { 'engine-0/engine.log': 'x\n', ...(slow ? { [SLOW_RUN_MARK]: '' } : {}) });
+      return directory;
+    };
+    const left = (): string[] => readdirSync(root).toSorted();
+    const named = (...directories: string[]): string[] => directories.map((one) => basename(one)).toSorted();
+    const failed = made(100, false);
+    const slowFirst = made(101, true);
+    const fiveSlow = [102, 103, 104, 105, 106].map((start) => made(start, true));
+    assert.deepEqual(sweepRunDirectories(root), [], 'nothing is held');
+    assert.deepEqual(left(), named(failed, ...fiveSlow), 'the oldest slow run alone went');
+    assert.equal(existsSync(failed), true, 'five slow runs leave an earlier failed run in place');
+    assert.equal(existsSync(slowFirst), false, 'the sixth slow run sweeps its own kind oldest');
+    assert.equal(
+      fiveSlow.every((one) => existsSync(one)),
+      true,
+      'and the five newest slow runs stay',
+    );
+    const fiveFailed = [107, 108, 109, 110, 111].map((start) => made(start, false));
+    sweepRunDirectories(root);
+    assert.equal(existsSync(failed), false, 'the sixth failed run sweeps the oldest failed run');
+    assert.equal(
+      fiveFailed.every((one) => existsSync(one)),
+      true,
+      'five failed runs leave the slow runs in place',
+    );
+    assert.equal(
+      fiveSlow.every((one) => existsSync(one)),
+      true,
+      'five failed runs leave an earlier slow run in place',
+    );
+    assert.equal(left().length, 10, 'five of each kind');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A windowed engine on Windows is started with the flags the run gives it: a frame cap of its own
+ * stops the 60 a second the hidden desktop would otherwise hold it to, and the other platforms add
+ * none of them.
+ */
+function testAWindowedEngineIsStartedWithTheRunsEngineFlags(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-display-flags-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    const windowed = { windowed: true };
+    assert.deepEqual(
+      displayFlags({ projectPath: project, engineArgs: [] }, windowed, 'win32'),
+      ['--disable-vsync', '--max-fps', '60'],
+      'capped at 60 when nothing else caps it',
+    );
+    assert.deepEqual(
+      displayFlags({ projectPath: project, engineArgs: ['--max-fps', '120'] }, windowed, 'win32'),
+      ['--disable-vsync'],
+      'the cap the run was given is the engine flags, not a second one',
+    );
+    assert.deepEqual(displayFlags({ projectPath: project, engineArgs: [] }, windowed, 'linux'), []);
+    assert.deepEqual(displayFlags({ projectPath: project, engineArgs: [] }, { windowed: false }, 'win32'), [
+      '--headless',
+    ]);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A passing run keeps the log of each engine that ran a case past `--keep-slower-than`, and no other,
+ * and names the case, its time, the engine's slot and priority and the log in its report and result.
+ * A failing run keeps every engine's as before, a run with no slow case or no option keeps none, and
+ * the kept run's directory is one the sweep ages out like a failed run's.
+ */
+async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test slow logs regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slow-logs-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slow-logs-slots-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="SlowLogs"\n\n' +
+        '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
+      'tests/slow_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_slow() -> void:\n' +
+        '\tawait get_tree().create_timer(1.3).timeout\n\tassert_bool(true).is_true()\n',
+      'tests/quick_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_quick() -> void:\n\tassert_bool(true).is_true()\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const resultFile = join(project, 'result.json');
+    const testRuns = join(project, '.godot', 'gdharness', 'test-runs');
+    // Every suite recorded at 40 s, written again before each run since a run records what it took.
+    // Each suite is then dealt an engine's share whatever memory a machine has free: a machine with
+    // room for one engine at once hands the suites out a share at a time, and still starts one
+    // engine for each.
+    const pinned = join(project, 'pinned-times.json');
+    const pinnedTimes = JSON.stringify(
+      Object.fromEntries(
+        [
+          ['slow', 'test_slow'],
+          ['quick', 'test_quick'],
+          ['failing', 'test_fails'],
+        ].map(([suite, name]) => [
+          `res://tests/${suite}_test.gd`,
+          { seconds: 40, cases: { [name ?? '']: 40 } },
+        ]),
+      ),
+    );
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      writeFileSync(pinned, pinnedTimes);
+      const ran = spawnSyncHidden(
+        process.execPath,
+        [
+          'build/cli.js',
+          'test',
+          project,
+          '--slots',
+          slots,
+          '--engines',
+          '2',
+          '--times',
+          pinned,
+          '--result',
+          resultFile,
+          ...args,
+        ],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const logFilesIn = (directory: string | null): string[] =>
+      directory === null || !existsSync(directory)
+        ? []
+        : readdirSync(directory, { recursive: true, encoding: 'utf8' })
+            .filter((file) => file.endsWith('.log'))
+            .toSorted();
+
+    const slow = test('--import', '--keep-slower-than', '1');
+    assert.equal(slow.status, 0, slow.said);
+    const result = readRunResult(resultFile);
+    assert.equal(result.engines.length, 2, `two engines, one for each suite: ${slow.said}`);
+    const slowCases = result.slowCases ?? [];
+    assert.equal(slowCases.length, 1, `one slow case: ${JSON.stringify(result.slowCases)}`);
+    const one = slowCases.at(0);
+    assert.ok(one !== undefined, 'a slow case');
+    assert.equal(one.suite, 'res://tests/slow_test.gd');
+    assert.equal(one.case, 'test_slow');
+    assert.ok(one.seconds > 1, `gdUnit4's time for it: ${String(one.seconds)}`);
+    assert.ok(Number.isInteger(one.slot), `the slot it held: ${String(one.slot)}`);
+    assert.equal(
+      one.priority,
+      process.platform === 'win32' ? 'below normal' : 'nice 10',
+      'the priority its process had while it ran',
+    );
+    assert.match(one.log, /test-runs[\\/]\d+-\d+[\\/]engine-\d[\\/]engine\.log$/);
+    assert.match(readFileSync(one.log, 'utf8'), /test_slow/, 'the slow engine ran the slow suite');
+    assert.deepEqual(
+      result.engines.filter((engine) => engine.log !== null).map((engine) => engine.log),
+      [one.log],
+      'the engine with no slow case is not kept',
+    );
+    assert.equal(result.logs === null, false, 'the directory the log is kept under');
+    assert.equal(logFilesIn(result.logs).length, 1, `one log is all that is left: ${result.logs}`);
+    assert.match(
+      slow.said,
+      /^--- cases slower than 1 s, their engines' logs kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have kept a slow log:$/m,
+      slow.said,
+    );
+    assert.match(
+      slow.said,
+      /^ {2}res:\/\/tests\/slow_test\.gd > test_slow \d+\.\d{3} s, engine \d, slot \d+, priority (?:below normal|nice 10): .*engine\.log$/m,
+      slow.said,
+    );
+    assert.match(slow.said, /^Passed: /m, slow.said);
+    // The run's directory is an ordinary one for the sweep, which keeps it among the five most
+    // recent and removes it once more have been left.
+    assert.deepEqual(sweepRunDirectories(testRuns), [], 'a sweep keeps it');
+    assert.ok(existsSync(one.log), 'among the five most recent');
+    assert.deepEqual(sweepRunDirectories(testRuns, 0), [], 'and removes it by the same rule');
+    assert.equal(existsSync(one.log), false, 'past them');
+
+    const past = test('--keep-slower-than', '60');
+    assert.equal(past.status, 0, past.said);
+    const pastResult = readRunResult(resultFile);
+    assert.deepEqual(pastResult.slowCases, [], 'no case past the limit');
+    assert.equal(pastResult.logs, null, 'so nothing is kept');
+    assert.deepEqual(logFilesIn(testRuns), [], 'and nothing is left');
+    assert.doesNotMatch(past.said, /cases slower than/, past.said);
+
+    const plain = test();
+    assert.equal(plain.status, 0, plain.said);
+    const plainResult = readRunResult(resultFile);
+    assert.equal(Object.hasOwn(plainResult, 'slowCases'), false, 'no field without the option');
+    assert.equal(plainResult.logs, null, 'and a passing run keeps nothing');
+    assert.doesNotMatch(plain.said, /cases slower than/, plain.said);
+
+    writeTree(project, {
+      'tests/failing_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_fails() -> void:\n\tassert_bool(false).is_true()\n',
+    });
+    const failing = test('--engines', '3', '--keep-slower-than', '1');
+    assert.equal(failing.status, 1, failing.said);
+    const failed = readRunResult(resultFile);
+    assert.ok(failed.engines.length > 1, `engines: ${failed.engines.length}`);
+    assert.ok(
+      failed.engines.every((engine) => engine.log !== null && existsSync(engine.log)),
+      'every engine kept',
+    );
+    assert.equal(failed.slowCases?.length, 1, 'and the slow case is still named');
+    assert.match(
+      failing.said,
+      /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have failed\.$/m,
+      failing.said,
+    );
+    assert.match(failing.said, /^--- cases slower than 1 s:$/m, 'a failed run keeps them anyway');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+
+    // With slot 0 held by another process, one engine takes slot 1 and is handed the suites a share
+    // at a time, so a slow case in each share still carries the slot and priority that engine had.
+    const slowSuite = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc ${name}() -> void:\n\tawait get_tree().create_timer(1.3).timeout\n\tassert_bool(true).is_true()\n`;
+    const names = ['test_slow_a', 'test_slow_b', 'test_slow_c'];
+    const suiteOf = (name: string): string => `tests/${name.replace('test_', '')}_test.gd`;
+    // Suites recorded at 40 s each are dealt a share apiece.
+    const dealtTimes = join(project, 'dealt-times.json');
+    writeTree(project, {
+      ...Object.fromEntries(names.map((name) => [suiteOf(name), slowSuite(name)])),
+      'dealt-times.json': JSON.stringify(
+        Object.fromEntries(
+          names.map((name) => [`res://${suiteOf(name)}`, { seconds: 40, cases: { [name]: 40 } }]),
+        ),
+      ),
+    });
+    const holder = await slotHeldElsewhere(join(slots, '0.lock'), 600_000);
+    let shared: { said: string; status: number | null };
+    try {
+      shared = test(
+        ...names.map(suiteOf),
+        '--times',
+        dealtTimes,
+        '--slot-count',
+        '2',
+        '--keep-slower-than',
+        '1',
+      );
+    } finally {
+      holder.kill();
+      rmSync(join(slots, '0.lock'), { force: true });
+    }
+    assert.equal(shared.status, 0, shared.said);
+    assert.match(shared.said, /a share at a time/, `the run was shared: ${shared.said}`);
+    const sharedResult = readRunResult(resultFile);
+    assert.equal(sharedResult.engines.length, 3, `a share for each suite: ${shared.said}`);
+    const sharedCases = sharedResult.slowCases ?? [];
+    assert.deepEqual(
+      sharedCases.map((named) => named.case).toSorted(),
+      names,
+      `every slow case is named: ${shared.said}`,
+    );
+    for (const sharedCase of sharedCases) {
+      assert.equal(
+        sharedCase.slot,
+        1,
+        `the number of the one slot left, whose lock is ${slots}${sep}1.lock: ${sharedCase.case}`,
+      );
+      assert.match(
+        sharedCase.priority ?? '',
+        process.platform === 'win32' ? /^below normal$/ : /^nice -?\d+$/,
+        `the priority its engine had: ${sharedCase.case}`,
+      );
+      assert.ok(existsSync(sharedCase.log), `${sharedCase.case}'s log is kept`);
+    }
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+  } finally {
+    sweep(project, slots);
+  }
+}
+
 /**
  * A fixed frame step reaches the engines of a test run: a case reading the step of the frame after a
  * load finds 1/60 s with `--fixed-fps 60` and the clock's own step without it. A headless engine
@@ -112480,6 +112983,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestCommandTakesEngineArgsAsProjectTestDoes,
   testATestRunRefusesFlagsItCannotBeJudgedUnder,
   testTheTestHelpListsTheEngineArgOption,
+  testTheKeepSlowerThanOptionTakesPositiveSeconds,
+  testTheTestHelpListsTheKeepSlowerThanOption,
+  testASlowCaseIsReadFromGdUnitsOwnTime,
+  testARunKeepsOnlyTheLogsItIsToldTo,
+  testFailedAndSlowRunsAreSweptApart,
+  testAnEnginesPriorityIsNamedAsItsPlatformNamesIt,
+  testAWindowedEngineIsStartedWithTheRunsEngineFlags,
+  testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase,
   testATestRunStartsEveryEngineWithTheEngineArgsItIsGiven,
   testATestRunHoldsItsFramesToAFixedStepWhenGivenFixedFps,
   testTheLspCommandFindsTheEditorsPort,
