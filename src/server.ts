@@ -270,7 +270,7 @@ import {
   relativeWithin,
   resolveWithinProject,
 } from './paths.js';
-import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
+import { keepPipelineCache, type SeededFiles, seedPipelineCache } from './pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { portFromEnvOrNull } from './ports.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
@@ -10128,11 +10128,12 @@ class GodotServer {
     const onDesktop = windowed && process.platform === 'win32';
     // As gdharness test does: a drawing run starts with the shaders the last run on this engine
     // build compiled, and leaves its own for the next. Neither throws: a fault is a cold start.
-    await seedPipelineCache(userData, project.value.path, prepared.engine.value);
+    const seeded = await seedPipelineCache(userData, project.value.path, prepared.engine.value);
     const autoloaded = scriptsAutoloaded(project.value.path);
     // An engine that died as it started never reached the project, so the run is started again.
+    // Every start keeps against the one seed: a start that died wrote nothing over it.
     const attempt = await startedUntilItRuns(
-      () => this.testEngineRan(prepared, onDesktop, autoloaded),
+      () => this.testEngineRan(prepared, onDesktop, autoloaded, seeded),
       callSignal(),
       (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
     );
@@ -10171,6 +10172,7 @@ class GodotServer {
     prepared: TestPrepared,
     onDesktop: boolean,
     autoloaded: ReturnType<typeof scriptsAutoloaded>,
+    seeded: SeededFiles,
   ): Promise<{
     readonly run: SpawnedTest;
     readonly console: Buffer[];
@@ -10192,7 +10194,7 @@ class GodotServer {
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
     const keep = async (): Promise<void> => {
-      await keepPipelineCache(userData, project.value.path, engine.value);
+      await keepPipelineCache(userData, project.value.path, engine.value, undefined, seeded);
     };
     const keeping = run.settled.then(keep, keep);
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4

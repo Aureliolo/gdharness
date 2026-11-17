@@ -135,7 +135,8 @@ interface Kept {
 
 /**
  * The project's settings that decide which folder under the user data its engine reads, as the
- * project file spells them. A cache kept under another name is in a folder the engine no longer reads.
+ * project file spells them, and a hash of `override.cfg`, which the engine reads over it. A cache
+ * kept under another name is in a folder the engine no longer reads.
  */
 function layoutOf(projectPath: string): string {
   try {
@@ -145,7 +146,19 @@ function layoutOf(projectPath: string): string {
       application['config/name'],
       application['config/use_custom_user_dir'],
       application['config/custom_user_dir_name'],
+      overrideOf(projectPath),
     ]);
+  } catch {
+    return '';
+  }
+}
+
+/** A hash of the project's `override.cfg`, empty when there is none. */
+function overrideOf(projectPath: string): string {
+  try {
+    return createHash('sha256')
+      .update(readFileSync(join(projectPath, 'override.cfg')))
+      .digest('hex');
   } catch {
     return '';
   }
@@ -185,12 +198,13 @@ export async function seedPipelineCache(
   godotPath: string,
   home: string = cacheHome(),
   copy: CopyFile = cpSync,
-): Promise<void> {
+): Promise<SeededFiles> {
+  const seeded: Record<string, Stamp> = {};
   const kept = keptFor(projectPath, home);
   const lock = `${kept}.lock`;
   // A swap removes the kept folder for a moment, under the lock, so a lock file also means a cache.
   if (!existsSync(kept) && !existsSync(lock)) {
-    return;
+    return seeded;
   }
   try {
     await underLock(lock, () => {
@@ -206,7 +220,6 @@ export async function seedPipelineCache(
       const shaders = join(user, record.where);
       cpSync(join(kept, NAME), shaders, { recursive: true });
       const into = join(dirname(shaders), PIPELINES);
-      const seeded: Record<string, Stamp> = {};
       for (const file of pipelineFilesIn(join(kept, PIPELINES))) {
         // Renamed into place, so the engine never reads a file that is half copied.
         mkdirSync(into, { recursive: true });
@@ -222,12 +235,11 @@ export async function seedPipelineCache(
           seeded[file] = stamp;
         }
       }
-      mkdirSync(dirname(seededNote(user)), { recursive: true });
-      writeFileSync(seededNote(user), JSON.stringify(seeded));
     });
   } catch {
     // A partial copy is a cache with fewer pipelines in it, which the engine fills in.
   }
+  return seeded;
 }
 
 type CopyFile = (from: string, to: string) => void;
@@ -245,32 +257,10 @@ function stampOf(path: string): Stamp | null {
 }
 
 /**
- * Where a seed notes the pipeline files it put in [param user] and how they stood. It is a file
- * beside the folder, which the engine never reads, so a keep can tell a file the run's engine wrote
- * from the seeded copy it left alone.
+ * The pipeline files a seed put in a run's folder and how they stood, by name. The caller hands them
+ * to the run's keep, which tells a file the run's engine wrote from the seeded copy it left alone.
  */
-function seededNote(user: string): string {
-  return `${resolve(user)}.pipeline-seeded.json`;
-}
-
-/** The files of [param note], read and removed, as their names and stamps. */
-function takeSeededNote(user: string): Record<string, Stamp> {
-  const path = seededNote(user);
-  try {
-    const note: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    const stamps: Record<string, Stamp> = {};
-    for (const [file, stamp] of Object.entries(isRecord(note) ? note : {})) {
-      if (Array.isArray(stamp) && typeof stamp[0] === 'number' && typeof stamp[1] === 'number') {
-        stamps[file] = [stamp[0], stamp[1]];
-      }
-    }
-    return stamps;
-  } catch {
-    return {};
-  } finally {
-    rmSync(path, { force: true });
-  }
-}
+export type SeededFiles = Readonly<Record<string, Stamp>>;
 
 /**
  * Keeps the pipeline cache a run left in [param user] for the next run of [param projectPath]. It
@@ -282,9 +272,9 @@ export async function keepPipelineCache(
   projectPath: string,
   godotPath: string,
   home: string = cacheHome(),
+  seeded: SeededFiles = {},
   copy: CopyFile = cpSync,
 ): Promise<void> {
-  const seeded = takeSeededNote(user);
   const engine = engineBuild(godotPath);
   const where = cacheUnder(user);
   if (engine === null || where === null) {

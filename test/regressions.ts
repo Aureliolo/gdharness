@@ -13523,11 +13523,11 @@ async function testAKeepThatChangesNothingCopiesNothingAndTakesNoLock(): Promise
       home,
     );
     const seeded = join(scratch, 'second', 'user');
-    await seedPipelineCache(seeded, project, godot, home);
+    const stamps = await seedPipelineCache(seeded, project, godot, home);
     const before = readdirSync(join(home, 'pipeline-caches')).toSorted();
     const release = await holdTheKeptLock(home);
     const outcome = await Promise.race([
-      keepPipelineCache(seeded, project, godot, home).then(() => 'returned'),
+      keepPipelineCache(seeded, project, godot, home, stamps).then(() => 'returned'),
       delay(2500).then(() => 'waited for the lock'),
     ]);
     release();
@@ -13557,12 +13557,12 @@ async function testASeededRunThatLeftThePipelineFileAloneDoesNotPutBackTheOlderO
     );
     const windowed = join(scratch, 'windowed', 'user');
     const headless = join(scratch, 'headless', 'user');
-    await seedPipelineCache(windowed, project, godot, home);
-    await seedPipelineCache(headless, project, godot, home);
+    const windowedStamps = await seedPipelineCache(windowed, project, godot, home);
+    const headlessStamps = await seedPipelineCache(headless, project, godot, home);
     const written = join(windowed, 'Godot', 'app_userdata', 'Game', 'vulkan', PIPELINE_FILE_NAME);
     writeFileSync(written, 'w'.repeat(5003));
-    await keepPipelineCache(windowed, project, godot, home);
-    await keepPipelineCache(headless, project, godot, home);
+    await keepPipelineCache(windowed, project, godot, home, windowedStamps);
+    await keepPipelineCache(headless, project, godot, home, headlessStamps);
     const next = join(scratch, 'next', 'user');
     await seedPipelineCache(next, project, godot, home);
     assert.equal(pipelineFilesOf(next)[PIPELINE_FILE_NAME]?.length, 5003, 'the newer file stays kept');
@@ -13627,6 +13627,7 @@ async function testAKeepWritesTheKeptFolderOnlyWhileHoldingTheLock(): Promise<vo
       project,
       godot,
       home,
+      {},
       (from, to) => {
         copies.push(to);
         if (to.startsWith(inKept) && !existsSync(lock)) {
@@ -13688,6 +13689,56 @@ async function testARenamedAppIsNotSeededIntoItsOldFolder(): Promise<void> {
       'qq',
       'seeded under the new name',
     );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A name changed in `override.cfg`, which the engine reads over the project file, moves the user
+ * folder as much as one in the project file, so the seed leaves the old folder alone.
+ */
+async function testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder(): Promise<void> {
+  const { scratch, home, project, godot } = pipelineScratch();
+  try {
+    writeFileSync(join(project, 'project.godot'), '[application]\nconfig/name="Game"\n');
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'first'), 100, { [PIPELINE_FILE_NAME]: Buffer.from('pp') }),
+      project,
+      godot,
+      home,
+    );
+    const same = join(scratch, 'same', 'user');
+    await seedPipelineCache(same, project, godot, home);
+    assert.equal(pipelineFilesOf(same)[PIPELINE_FILE_NAME]?.toString(), 'pp', 'seeded with no override');
+
+    writeFileSync(join(project, 'override.cfg'), '[application]\nconfig/name="Other"\n');
+    const renamed = join(scratch, 'renamed', 'user');
+    await seedPipelineCache(renamed, project, godot, home);
+    assert.equal(existsSync(join(renamed, 'Godot')), false, 'nothing is seeded into the old name folder');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A server killed mid-run never keeps, and leaves nothing of the seed in the temporary folder the
+ * run's folder sits in, where the sweep of abandoned runs would not look.
+ */
+async function testASeedLeavesNothingBesideTheRunsFolder(): Promise<void> {
+  const { scratch, home, project, godot } = pipelineScratch();
+  try {
+    await keepPipelineCache(
+      pipelineRunIn(join(scratch, 'first'), 100, { [PIPELINE_FILE_NAME]: Buffer.from('pp') }),
+      project,
+      godot,
+      home,
+    );
+    const temporary = join(scratch, 'temporary');
+    const run = join(temporary, 'gdharness-tests-99999999-abcdef');
+    const stamps = await seedPipelineCache(run, project, godot, home);
+    assert.ok(Object.keys(stamps).length > 0, 'the seed put a pipeline file in');
+    assert.deepEqual(readdirSync(temporary), ['gdharness-tests-99999999-abcdef']);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -115391,6 +115442,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASeedCopiesPipelineFilesOnlyWhileHoldingTheLock,
   testAKeepWritesTheKeptFolderOnlyWhileHoldingTheLock,
   testARenamedAppIsNotSeededIntoItsOldFolder,
+  testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder,
+  testASeedLeavesNothingBesideTheRunsFolder,
   testASeedThatMeetsASwapWaitsForTheNewSet,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testProjectTestKeepsTheCacheAndSeedsTheNextRun,

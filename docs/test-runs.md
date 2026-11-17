@@ -127,9 +127,9 @@ run's engine wrote replaces the kept one of that name whenever the bytes differ,
 refuses a seeded file after a driver update writes a smaller valid one. A file the run was seeded
 with and its engine left alone, as in a headless run, leaves the kept one alone. Of two runs at once,
 the keep that finishes last wins each pipeline file it wrote, so pipelines only the earlier run built
-are built again by the next run. A project whose name or user folder setting changed gets no seed
-from the old cache, and its next run's cache replaces it. The cache of a project that is gone is
-removed.
+are built again by the next run. A project whose name or user folder setting changed, in
+`project.godot` or `override.cfg`, gets no seed from the old cache, and its next run's cache replaces
+it. The cache of a project that is gone is removed.
 
 ## The result file
 

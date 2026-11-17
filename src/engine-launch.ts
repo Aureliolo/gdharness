@@ -427,7 +427,7 @@ export async function watchedEngine(
   shares?: ShareHandoff,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
-  await seedPipelineCache(user, launch.projectPath, launch.godotPath);
+  const seeded = await seedPipelineCache(user, launch.projectPath, launch.godotPath);
   try {
     return await startedUntilItRuns(
       () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds, shares),
@@ -436,7 +436,7 @@ export async function watchedEngine(
         end.ended === null && end.signal === null && diedAsItStarted(end.code, linesAsPrinted(readLog(log))),
     );
   } finally {
-    await keepPipelineCache(user, launch.projectPath, launch.godotPath);
+    await keepPipelineCache(user, launch.projectPath, launch.godotPath, undefined, seeded);
   }
 }
 
