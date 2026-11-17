@@ -746,9 +746,10 @@ A tool of a game's own that starts engines takes slots the same way, in the step
 - A lock may be read empty for a moment, between its creation and its text. Hold an empty lock as
   held, whatever decides on it: a take, a steal, a sweep or a removal. Never read it as free or as
   garbage. One still empty 10 seconds after it was made belongs to a taker that died, and is free.
-- gdharness and the gates' queue create a lock this way, since a taker that stages its text first
-  loses almost every race to one that only creates the name.
-- The marks, the steal files and a lock put back under its steal file are written whole. The text
+- gdharness and the gates' queue create every slot lock this way, a take over of a gone holder's
+  lock included, since a taker that stages its text first loses almost every race to one that only
+  creates the name. A reader that finds one empty, as gdharness does, holds the slot.
+- The marks and the steal files are written whole. The text
   goes to a file beside, `.<name>.<pid>-<thread>.writing`, and is put in place under the name without
   replacing a file that exists (a hard link, or a rename that Windows refuses onto a taken name). A
   reader never finds these empty, and never opens a `.writing` file or counts it as a lock or a mark.
@@ -884,11 +885,13 @@ by the rule a lock is freed by.
 
 ### Spare slots of the gates
 
-The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`, `written` in
-milliseconds since the epoch. `spare` counts the gates' free slots that all engines outside a gate
-may take between them, young or aged. It is read from the queue's seats, pool and memory. A seated
-mark of a round's setup leaves it at 0. The file is written through a `.part` file and a rename, at
-every change and every five seconds while a gate waits.
+The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`. `written` is
+the moment the count began, in milliseconds since the epoch by the folder's clock, with a fraction
+of a millisecond (an older writer's is whole). `spare` counts the gates' free slots that all engines
+outside a gate may take between them, young or aged. It is read from the queue's seats, pool and
+memory. A seated mark of a round's setup leaves it at 0. The file is written through a `.part` file
+and a rename, at every change, whenever a gate is seated and every five seconds while a gate waits.
+`counts/` in the directory is the queue's own and is not read.
 
 Count what side work may take from the folder as it is now. That is the free slots of the gates,
 less those the seated gates are owed, and none while a measurement holds the quiet window
@@ -897,9 +900,10 @@ name the slots from that one read. By the state of the queue:
 
 - No gate mark is live: take every free slot of the gates, whatever the file says.
 - A gate mark is live and the file is fresh: take its `spare` less the gates' slots whose locks were
-  written after it, and no more than are free. A file is fresh when it is under ten seconds old,
-  readable and written by a holder that is alive, and no `.seated` file is newer than its `written`,
-  since it could not have counted that seat.
+  written at or after its `written`, and no more than are free. A file is fresh when it is under ten
+  seconds old, readable and written by a holder that is alive, and no `.seated` file is as new as
+  its `written` or newer, since it could not have counted that seat. A tie in time is read as the
+  later one. The file is read once for the text, its time and its writer.
 - A gate mark is live and the file is not fresh, seated gate or not: take none of the gates' slots.
   Its ticker writes a fresh file within five seconds.
 
