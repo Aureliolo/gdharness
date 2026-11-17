@@ -67459,6 +67459,157 @@ async function testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack(): Pro
 }
 
 /**
+ * Eight slots with a gate seated and slots 0 to 3 held (4 and 5 free), and the time the seat file
+ * carries as the clock reports it.
+ */
+function aSeatedGateWithTwoGateSlotsFree(started: number): { directory: string; seatedAt: number } {
+  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
+  const at = new Date(Date.now() - 1000);
+  utimesSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated'), at, at);
+  return { directory, seatedAt: statSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated')).mtimeMs };
+}
+
+/** A count of [param spare] written at [param written], by this live process. */
+function countOf(spare: number, started: number, written: number): string {
+  return `{"spare": ${String(spare)}, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(written)}}`;
+}
+
+/**
+ * A count that began in the very tick a gate was seated may or may not hold that seat, since the
+ * queue stamps its count by the folder's clock. It reads as stale, as one from before the seat does,
+ * and a count from after the seat is fresh.
+ */
+async function testACountBegunInTheTickOfASeatIsStaleForSideWork(): Promise<void> {
+  const started = await ownStart();
+  const { directory, seatedAt } = aSeatedGateWithTwoGateSlotsFree(started);
+  try {
+    const taken = async (delta: number): Promise<string | null> => {
+      writeFileSync(join(directory, SPARE_FILE), countOf(2, started, seatedAt + delta));
+      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+      const lock = await side.takeFree();
+      side.releaseAll();
+      return lock === null ? null : basename(lock);
+    };
+    assert.equal(await taken(-0.5), null, 'a count from just before the seat is stale');
+    assert.equal(await taken(0), null, 'and one stamped with the seat time is');
+    assert.equal(await taken(0.5), '5.lock', 'one just after the seat is fresh');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A gate slot taken in the tick the count began is one the count may not have seen, so it comes off
+ * the count as one taken later does, and one taken before the count does not.
+ */
+async function testATakeInTheTickOfTheCountComesOffIt(): Promise<void> {
+  const started = await ownStart();
+  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3, 4]);
+  try {
+    const at = new Date(Date.now() - 1000);
+    utimesSync(join(directory, '4.lock'), at, at);
+    const lockedAt = statSync(join(directory, '4.lock')).mtimeMs;
+    const taken = async (delta: number): Promise<string | null> => {
+      writeFileSync(join(directory, SPARE_FILE), countOf(1, started, lockedAt + delta));
+      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+      const lock = await side.takeFree();
+      side.releaseAll();
+      return lock === null ? null : basename(lock);
+    };
+    assert.equal(await taken(-5), null, 'a take after the count comes off it');
+    assert.equal(await taken(0), null, 'and one in the count tick does');
+    assert.equal(await taken(5), '5.lock', 'one before the count does not, so the free slot is spare');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A slot taken over from a holder that has gone is made as a fresh take makes it, so its time is
+ * the take's own and the spare count sees it. With a staged name taken by a folder, a lock put
+ * back through a staged file is lost and one made in place is kept. A file beside the slots (a
+ * lanes mark) is taken over through a staged file as before.
+ */
+async function testASlotTakenOverIsMadeInPlace(): Promise<void> {
+  const started = await ownStart();
+  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
+  const dead = JSON.stringify({ pid: gone.pid, started });
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takeover-'));
+  try {
+    writeFileSync(join(directory, '0.lock'), dead);
+    mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
+    const lock = await slots.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken over');
+    assert.equal(
+      readFileSync(join(directory, '0.lock'), 'utf8'),
+      JSON.stringify({ pid: process.pid, started }),
+      'and holds its new holder',
+    );
+    slots.releaseAll();
+    writeFileSync(join(directory, 'mark.json'), dead);
+    mkdirSync(join(directory, `.mark.json.${String(process.pid)}-0.writing`));
+    assert.equal(
+      await slots.takeFile(join(directory, 'mark.json')),
+      false,
+      'a mark taken over is still put back through a staged file, which the folder stops',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A take reads the count once, for its text, its time and its writer's life. A count file made
+ * anew by a writer that has since gone, in the moment after it was read, does not turn the count
+ * it read into a gone writer's.
+ */
+async function testATakeJudgesTheCountItReadOnce(): Promise<void> {
+  const started = await ownStart();
+  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
+  const { directory } = aSeatedGateWithTwoGateSlotsFree(started);
+  try {
+    writeFileSync(join(directory, SPARE_FILE), countOf(1, started, Date.now() - 500));
+    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const free: unknown = Reflect.get(side, 'free');
+    if (typeof free !== 'function') {
+      throw new TypeError('the lock rule is there to watch');
+    }
+    Reflect.set(side, 'free', (lock: string): unknown => {
+      if (basename(lock) === SPARE_FILE) {
+        writeFileSync(lock, countOf(1, started, Date.now()).replace(String(process.pid), String(gone.pid)));
+      }
+      const judged: unknown = Reflect.apply(free, side, [lock]);
+      return judged;
+    });
+    const lock = await side.takeFree();
+    assert.equal(lock === null ? null : basename(lock), '5.lock', 'the count it read stands');
+    side.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A count with a whole-millisecond `written` (an older writer's) and one with a fraction both read as fresh. */
+async function testACountWrittenWholeOrWithAFractionIsRead(): Promise<void> {
+  const started = await ownStart();
+  const { directory } = aSeatedGateWithTwoGateSlotsFree(started);
+  try {
+    for (const written of [Math.floor(Date.now() - 500), Date.now() - 500.25]) {
+      writeFileSync(join(directory, SPARE_FILE), countOf(1, started, written));
+      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+      const lock = await side.takeFree();
+      assert.equal(lock === null ? null : basename(lock), '5.lock', `a count written at ${String(written)}`);
+      side.releaseAll();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * With a gate seated and no fresh count, no queue process says what the gate is owed, so side work
  * leaves it every free slot. A seated gate with a spare count of 1, as `slots.shares` publishes it
  * with one free slot owed and one not, gives the first side take a gate slot and the second none.
@@ -111578,6 +111729,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots,
   testASideTakeReadsTheFreeSlotsOnce,
   testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack,
+  testACountBegunInTheTickOfASeatIsStaleForSideWork,
+  testATakeInTheTickOfTheCountComesOffIt,
+  testASlotTakenOverIsMadeInPlace,
+  testATakeJudgesTheCountItReadOnce,
+  testACountWrittenWholeOrWithAFractionIsRead,
   testAFileMadeInTheSlotsFolderIsNeverReadEmpty,
   testTwoProcessesMakingTheSameLockNeverOverwriteEachOther,
   testTheSlotSweepJudgesStagedFilesByTheirWritersName,
