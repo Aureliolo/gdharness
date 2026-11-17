@@ -69233,13 +69233,11 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
     } else {
       chmodSync(marker, 0);
     }
-    try {
-      readFileSync(marker);
-      // Unreadable by no means here, as when running as the superuser: nothing to prove.
-      return;
-    } catch {
-      // Unreadable, as intended.
-    }
+    assert.throws(
+      () => readFileSync(marker),
+      undefined,
+      'the file is made unreadable, or this proves nothing',
+    );
     assert.deepEqual(worktreeCheckoutsOf(join(root, 'tree', 'game')), [], 'it answers an empty list');
     assert.equal(repositoryNameOf(join(root, 'tree', 'game')), null, 'and names no repository');
   } finally {
@@ -69307,6 +69305,11 @@ function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
     source,
     /runEngine\(engine\.value, exportArgs, \{\s*timeout: [^\n]*\n\s*project: project\.value\.path,/,
     'an export names its project',
+  );
+  assert.match(
+    source,
+    /editor: true,\s*project: projectPath,\s*\};\s*const outcome = await runOperation\(exporting, 'export_options'/,
+    "the export options step, which runs on an empty folder, names the preset's project",
   );
 }
 
