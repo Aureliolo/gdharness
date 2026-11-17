@@ -292,7 +292,7 @@ function needsItsHelperKept(spec: SentSpec): boolean {
 
 async function launch(): Promise<void> {
   const spec = await receivedSpec();
-  if (spec.run === undefined && !needsItsHelperKept(spec)) {
+  if (spec.run === undefined && !needsItsHelperKept(spec) && spec.exitNote === undefined) {
     const started = await startDetached(spec, 'ignore', true);
     if ('error' in started) {
       process.stdout.write(`error ${started.error}\n`);
@@ -651,6 +651,19 @@ function recordTheEnd(ended: KeptEnd): void {
   }
 }
 
+/** Writes how the process exited into [param file], for a reader of a process that has no run note. */
+function noteTheExit(file: string | undefined, pid: number, code: number | null): void {
+  if (file === undefined || code === null) {
+    return;
+  }
+  try {
+    // With the pid, so a reader never takes the note of an editor before for this one's.
+    writeFileSync(file, `${String(pid)} ${String(code >>> 0)}`);
+  } catch {
+    // The reader then says the exit was not recorded.
+  }
+}
+
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
@@ -685,6 +698,7 @@ async function keep(): Promise<void> {
   const told = await exited;
   const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
   const exitedAt = Date.now();
+  noteTheExit(spec.exitNote, pid, code);
   const note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
   if (note !== null) {

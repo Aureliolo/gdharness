@@ -118,10 +118,12 @@ import {
   placeEmptyScriptDocs,
   scriptDocCachePath,
 } from '../src/doc-cache.js';
+import { howTheEditorEnded } from '../src/editor-end.js';
 import {
   bursts,
   clearEditorLog,
   editorConsole,
+  editorExitPath,
   editorHelperOutputPath,
   editorLogPath,
   readEditorLogNote,
@@ -170,6 +172,7 @@ import {
   crashedAtStart,
   ENGINE_STARTS,
   type EngineRun,
+  exitCodeText,
   howItEnded,
   runEngine,
   startedUntilItRuns,
@@ -662,6 +665,7 @@ import {
   shareOf,
   spreadOptionsOf,
 } from '../src/spread-run.js';
+import { diedAsItStarted, linesAsPrinted } from '../src/start-race.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import {
   EVERY_FILE,
@@ -795,6 +799,7 @@ import {
 } from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
+import { CRASHING_ENGINE_SOURCE, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
 import { endEnginesUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
@@ -18745,8 +18750,19 @@ async function callWaitsForTheEditorThatArrives(run: AwaitedEditorRun): Promise<
   assert.notEqual(
     get(answered.result, 'isError'),
     true,
-    `the call made before the editor arrived waits for it: ${textOf(answered)}`,
+    `the call made before the editor arrived waits for it: ${textOf(answered)}\nthe editor ${howTheEditorEnded(project, readEditorLogNote(project)?.pid ?? run.pid)}; its console:\n${
+      existsSync(editorLogPath(project))
+        ? readFileSync(editorLogPath(project), 'utf8').slice(-2000)
+        : '(none)'
+    }`,
   );
+  // An editor that died as it started is opened again by the call that waits for it, and the
+  // phases after this name the one that lives.
+  const lives = readEditorLogNote(project)?.pid;
+  if (lives !== undefined && lives !== run.pid) {
+    run.pid = lives;
+    await run.met.meet(lives);
+  }
   assert.deepEqual(invoked, ['create_scene'], 'and is answered by the editor that arrived');
 
   arriving.close();
@@ -43007,7 +43023,9 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
     );
     const verdict = judgeEngine(readRun(''), { suites: [], expected: { errors: {}, warnings: {} } }, end);
     assert.ok(
-      verdict.notes.includes('It died as it started once, before printing a line, and was started again.'),
+      verdict.notes.includes(
+        'It died as it started once, before printing past its banner, and was started again.',
+      ),
       `and its run says so: ${verdict.notes.join(' | ')}`,
     );
     const printedFirst = await watchedEngine(
@@ -43031,6 +43049,878 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
     );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+const START_RACE_STATUS = 0xc06d007f;
+
+/**
+ * Godot's input library hook can make an engine die with 0xC06D007F in its constructor while its
+ * main thread goes on to print the banner. That start is started again, and only that start: a line
+ * past the banner, a status the race does not raise and a status of a closed console or a missing
+ * library are each the engine's own answer.
+ */
+function testAnEngineThatDiesAfterItsBannerIsStartedAgain(): void {
+  const esc = String.fromCharCode(0x1b);
+  const dies = (code: number | null, printed: string): boolean =>
+    diedAsItStarted(code, linesAsPrinted(printed));
+  const banner = `${ENGINE_BANNER_LINE}\n`;
+  assert.deepEqual(
+    [
+      dies(START_RACE_STATUS, banner),
+      dies(START_RACE_STATUS, ENGINE_BANNER_LINE),
+      dies(START_RACE_STATUS, `${ENGINE_BANNER_LINE}\r\n`),
+      dies(START_RACE_STATUS, `${banner}\n`),
+      dies(
+        START_RACE_STATUS,
+        `${esc}[38;5;39mGodot Engine${esc}[0m v4.7.2.stable.official.ed1daf0bf - ${esc}[4mhttps://godotengine.org${esc}[0m\n`,
+      ),
+      dies(
+        START_RACE_STATUS,
+        'Godot Engine v4.7.2.stable.official.ed1daf0bf (2026-11-06 08:00:00 UTC) - https://godotengine.org\n',
+      ),
+      dies(START_RACE_STATUS, ''),
+    ],
+    [true, true, true, true, true, true, true],
+    'the banner alone, as the engine prints it, with or without its newline, colour codes or build time',
+  );
+  assert.deepEqual(
+    [
+      dies(START_RACE_STATUS, `${banner}ERROR: no such scene\n`),
+      dies(START_RACE_STATUS, `${banner}${banner}`),
+      dies(START_RACE_STATUS, 'Godot Engine v4.7.2.stable.official\n'),
+      dies(START_RACE_STATUS, 'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://example.com\n'),
+      dies(
+        START_RACE_STATUS,
+        'a game said: Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org\n',
+      ),
+      dies(START_RACE_STATUS, 'ready\n'),
+    ],
+    [false, false, false, false, false, false],
+    'any other line makes the run its own answer, and the banner is matched whole',
+  );
+  assert.deepEqual(
+    [
+      dies(0xc0000005, banner),
+      dies(0xc0000005, ''),
+      dies(0xc000013a, ''),
+      dies(0xc0000135, ''),
+      dies(0xc000013a, banner),
+      dies(0xc0000135, banner),
+      dies(1, banner),
+      dies(0, banner),
+      dies(null, banner),
+    ],
+    [false, true, false, false, false, false, false, false, false],
+    'another exception status is started again only before its banner, since the race is the one status seen to print it first',
+  );
+  const run = (exitCode: number | null, printed: string, extra: Partial<EngineRun> = {}): EngineRun => {
+    const log = new GameLog();
+    log.append('stdout', Buffer.from(printed));
+    log.finish();
+    return { log, exitCode, exitSignal: null, failure: null, ...extra };
+  };
+  assert.deepEqual(
+    [
+      crashedAtStart(run(START_RACE_STATUS, banner)),
+      crashedAtStart(run(START_RACE_STATUS, `${banner}ERROR: x\n`)),
+      crashedAtStart(run(START_RACE_STATUS, `ERROR: ${ENGINE_BANNER_LINE}\n`)),
+      crashedAtStart(run(START_RACE_STATUS, banner, { failure: 'it ran past its ten minutes' })),
+      crashedAtStart(run(START_RACE_STATUS, banner, { exitSignal: 'SIGTERM' })),
+      crashedAtStart(run(START_RACE_STATUS, '')),
+    ],
+    [true, false, false, false, false, true],
+    'a run is read as its log keeps it, and one this server ended is never started again',
+  );
+}
+
+/** A run whose log holds [param printed], ended with [param exitCode] after [param crashedStarts] earlier starts. */
+function runThatPrinted(printed: string, exitCode: number, crashedStarts: number): EngineRun {
+  const log = new GameLog();
+  log.append('stdout', Buffer.from(printed));
+  log.finish();
+  return { log, exitCode, exitSignal: null, failure: null, crashedStarts };
+}
+
+/** What an engine started again says of its starts is true of the last one too. */
+function testTheEndOfAStartedAgainEngineSaysWhatEachStartDid(): void {
+  const banner = `${ENGINE_BANNER_LINE}\n`;
+  const raced = howItEnded(runThatPrinted(banner, START_RACE_STATUS, 2));
+  assert.equal(
+    raced,
+    "exit code 0xC06D007F, a start that failed on a missing procedure, and died as it started on each of its 3 starts, printing nothing past its banner. Either the engine's start race or a library the project loads causes that",
+    'every start died with the banner alone: both causes are named',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted('', 0xc0000005, 1)),
+    'exit code 0xC0000005, a crash on an access violation, and printed nothing on any of its 2 starts',
+    'starts that printed nothing at all keep their plain wording, for any status',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted('', START_RACE_STATUS, 2)),
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
+    'and so does the race status with nothing printed',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted(`${banner}the operation failed\n`, 1, 1)),
+    'exit code 1, and the start before it died as it started, printing nothing past the banner',
+    'the last start printed, so only the one before it is described',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted(`${banner}more\n`, 1, 2)),
+    'exit code 1, and the 2 starts before it died as they started, printing nothing past the banner',
+    'the earlier starts are counted',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted(`${banner}more\n`, START_RACE_STATUS, 1)),
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and the start before it died as it started, printing nothing past the banner',
+    'a last start that died past its banner is not called a banner-alone death',
+  );
+  assert.equal(
+    howItEnded(runThatPrinted(banner, 1, 0)),
+    'exit code 1',
+    'a run started once says nothing of starts',
+  );
+}
+
+/** [param said] run by cmd.exe as a watched engine in [param scratch]. */
+async function watchedCmd(scratch: string, said: string): ReturnType<typeof watchedEngine> {
+  const directory = join(scratch, 'engine');
+  mkdirSync(join(directory, 'user'), { recursive: true });
+  const lock = join(scratch, '0.lock');
+  writeFileSync(lock, '');
+  return await watchedEngine(
+    {
+      godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      projectPath: scratch,
+      deadlineSeconds: 60,
+      running: new Set<() => void>(),
+      cores: null,
+    },
+    lock,
+    ['/d', '/c', said],
+    directory,
+    join(directory, 'engine.log'),
+    30,
+  );
+}
+
+/** A blank-only log is output to a watched engine for every status, as it was, and the banner alone is the race's. */
+async function testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas(): Promise<void> {
+  if (process.platform === 'win32') {
+    // Through the real watch, so the reading of a blank-only log is the one watchedEngine uses.
+    const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-blank-watched-'));
+    try {
+      for (const [said, status] of [
+        ['echo.& exit /b -1073741819', 0xc0000005],
+        ['echo.& exit /b -1066598273', 0xc06d007f],
+      ] as const) {
+        const blank = await watchedCmd(scratch, said);
+        assert.deepEqual(
+          [blank.code, blank.crashedStarts],
+          [status, undefined],
+          `a blank line is output, so a start that printed only one is not started again: ${JSON.stringify(blank)}`,
+        );
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+  const asLogged = (status: number, printed: string): boolean =>
+    diedAsItStarted(status, linesAsPrinted(printed));
+  const banner = `${ENGINE_BANNER_LINE}\n`;
+  assert.deepEqual(
+    [
+      asLogged(0xc0000005, '\n'),
+      asLogged(0xc06d007f, '\n'),
+      asLogged(0xc0000005, `${String.fromCharCode(0x1b)}[0m`),
+      asLogged(0xc0000005, ''),
+      asLogged(0xc06d007f, ''),
+      asLogged(0xc06d007f, banner),
+      asLogged(0xc06d007f, `${banner}\n`),
+      asLogged(0xc0000005, banner),
+    ],
+    [false, false, false, true, true, true, true, false],
+    'any byte of output stops a start again, except the race status with the banner alone',
+  );
+}
+
+/** How many starts [param marker] noted whose arguments held [param part]. */
+function startsNoted(marker: string, part: string): number {
+  return existsSync(`${marker}.log`)
+    ? readFileSync(`${marker}.log`, 'utf8')
+        .split('\n')
+        .filter((line) => line.includes(part)).length
+    : 0;
+}
+
+/** A headless call's engine that dies after its banner is started again on its own slot. */
+async function testAHeadlessEngineThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-crash-'));
+  const marker = join(scratch, 'marker');
+  const before = { ...process.env };
+  Object.assign(process.env, { GDH_CRASH_MARKER: marker, GDH_CRASH_WHEN: '--headless' });
+  // The server and the command prepare this as they start. Without it Bun reports the low byte.
+  await prepareWholeExits();
+  try {
+    const ran = await runEngine(await crashingEngine(), ['--headless']);
+    assert.deepEqual(
+      [ran.exitCode, ran.crashedStarts, startsNoted(marker, '--headless')],
+      [0, 1, 2],
+      `the engine is started again after its banner and a crash: ${JSON.stringify(ran)}`,
+    );
+    const printedMore = join(scratch, 'more');
+    Object.assign(process.env, { GDH_CRASH_MARKER: printedMore, GDH_CRASH_STATUS: '3221225477' });
+    const another = await runEngine(await crashingEngine(), ['--headless']);
+    assert.deepEqual(
+      [another.exitCode, another.crashedStarts, startsNoted(printedMore, '--headless')],
+      [0xc0000005, undefined, 1],
+      "an access violation after the banner is the engine's own answer",
+    );
+  } finally {
+    for (const key of ['GDH_CRASH_MARKER', 'GDH_CRASH_WHEN', 'GDH_CRASH_STATUS']) {
+      if (before[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = before[key];
+      }
+    }
+    sweep(scratch);
+  }
+}
+
+/** A test run's engine, watched, that dies after its banner is started again. */
+async function testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-watched-'));
+  try {
+    const marker = join(scratch, 'started');
+    const directory = join(scratch, 'engine');
+    mkdirSync(join(directory, 'user'), { recursive: true });
+    const lock = join(scratch, '0.lock');
+    writeFileSync(lock, '');
+    const log = join(directory, 'engine.log');
+    const launch = {
+      godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      projectPath: scratch,
+      deadlineSeconds: 60,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(
+      launch,
+      lock,
+      [
+        '/d',
+        '/c',
+        `if exist ${marker} (echo Godot Engine & echo ready) else (type nul > ${marker} & echo ${ENGINE_BANNER_LINE}& exit /b -1066598273)`,
+      ],
+      directory,
+      log,
+      30,
+    );
+    assert.deepEqual(
+      [end.code, end.crashedStarts],
+      [0, 1],
+      `an engine that printed its banner and died is started again: ${JSON.stringify(end)}`,
+    );
+    const other = await watchedEngine(
+      launch,
+      lock,
+      ['/d', '/c', `echo ${ENGINE_BANNER_LINE}& echo ERROR: no scene& exit /b -1066598273`],
+      directory,
+      log,
+      30,
+    );
+    assert.deepEqual(
+      [other.code, other.crashedStarts],
+      [0xc06d007f, undefined],
+      'one that printed a line past its banner is its own answer',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A kept run whose first start dies after its banner is started again whole, from the call that
+ * asked for it. The answer names the start that lives, its note holds no restart, and its debugger
+ * connection is made: the dead start had dialled the first keeper's port before its banner.
+ */
+async function testAKeptRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-kept-'));
+  const runtime = join(scratch, 'runtime');
+  const project = join(scratch, 'project');
+  const marker = join(scratch, 'marker');
+  const met = new MetProcesses();
+  mkdirSync(project);
+  mkdirSync(runtime);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Kept"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+  writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: await crashingEngine(),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtime,
+      GDH_CRASH_MARKER: marker,
+      GDH_CRASH_WHEN: '--remote-debug',
+      GDH_HOLD: '1',
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    // The death comes inside the wait the call makes for the runtime, which is the only wait a
+    // start has to start again in.
+    const answer = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 2000 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    const pid = asNumber(get(answer, 'pid'));
+    await met.meet(pid);
+    const note = readRunRecord(project, [runtime]);
+    assert.deepEqual(
+      [
+        isAlive(pid),
+        note?.pid,
+        note?.restartedFrom,
+        startsNoted(marker, '--remote-debug'),
+        existsSync(`${marker}.debug`) ? readFileSync(`${marker}.debug`, 'utf8').trim().split('\n') : [],
+      ],
+      [true, pid, undefined, 2, ['connected', 'connected']],
+      `the answer names the start that lives, with a note of its own and a debugger: ${JSON.stringify([answer, note])}`,
+    );
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  } finally {
+    await met.end();
+    await server.stop();
+    sweep(scratch);
+  }
+}
+
+/** A kept project the stand-in engine starts, with the runtime addon's script so a start waits for it. */
+function projectOfAKeptStandIn(scratch: string, name: string): string {
+  const project = join(scratch, 'project');
+  mkdirSync(project);
+  writeFileSync(
+    join(project, 'project.godot'),
+    `config_version=5\n\n[application]\nconfig/name="${name}"\nrun/main_scene="res://main.tscn"\n`,
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+  writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+  return project;
+}
+
+/**
+ * A start that printed only a blank line and died with an access violation is its own answer, even
+ * inside the wait for the runtime: any byte is output, and only the banner alone is read as the
+ * race's.
+ */
+async function testABlankOnlyStartIsNotStartedAgainByAKeptRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-blank-start-'));
+  const project = projectOfAKeptStandIn(scratch, 'Blank');
+  const marker = join(scratch, 'kept');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: await crashingEngine(),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
+      GDH_CRASH_STATUS: '3221225477',
+      GDH_BLANK: '1',
+      GDH_CRASH_MARKER: marker,
+      GDH_CRASH_WHEN: '--remote-debug',
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 2000 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.equal(startsNoted(marker, '--remote-debug'), 1, 'a kept run is not started again');
+  } finally {
+    await server.stop();
+    sweep(scratch);
+  }
+}
+
+/**
+ * A start waits for nothing it was not asked to wait for. With runtimeWaitMs of 1 the call answers
+ * as soon as the engine is started, whether the engine prints past its banner or stays quiet, so a
+ * quiet headless game is not held back to see whether it died as it started.
+ */
+async function testAQuietStartAnswersAsSoonAsAChattyOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-quiet-start-'));
+  const project = projectOfAKeptStandIn(scratch, 'Quiet');
+  const runtime = join(scratch, 'runtime');
+  const standIn = await crashingEngine();
+  const timeOfAStart = async (chatty: boolean): Promise<number> => {
+    const server = new ServerProcess({
+      env: {
+        GODOT_PATH: standIn,
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_RUNTIME_DIR: runtime,
+        GDH_HOLD: '1',
+        ...(chatty ? { GDH_CHATTY: '1' } : {}),
+      },
+    });
+    try {
+      await server.initialize('regression-test');
+      const began = performance.now();
+      const answer = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 1 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      const took = performance.now() - began;
+      assert.equal(get(answer, 'started'), true, `the start answers: ${JSON.stringify(answer)}`);
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      return took;
+    } finally {
+      await server.stop();
+    }
+  };
+  try {
+    // The wall time of calls that start processes. The better of two each, so a stall is not held
+    // against either.
+    const chatty = Math.min(await timeOfAStart(true), await timeOfAStart(true));
+    const quiet = Math.min(await timeOfAStart(false), await timeOfAStart(false));
+    console.log(`quiet start ${quiet.toFixed(0)}ms, chatty start ${chatty.toFixed(0)}ms`);
+    assert.ok(
+      quiet < chatty + 1500,
+      `a quiet start took ${quiet.toFixed(0)}ms against ${chatty.toFixed(0)}ms for a chatty one`,
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A hidden stand-in editor opened by the server, and a call that needs an editor, which waits for it.
+ * The editor addon is enabled so that a call waits at all.
+ */
+async function aCallWaitingOnAStandInEditor(
+  scratch: string,
+  env: Record<string, string>,
+  asked = true,
+): Promise<{
+  answer: string;
+  /** How long the first call took, in milliseconds. */
+  tookMs: number;
+  opened: number;
+  project: string;
+  marker: string;
+  port: number;
+  server: ServerProcess;
+  again: () => Promise<string>;
+  stop: () => Promise<void>;
+}> {
+  const port = await reservePort();
+  const project = join(scratch, 'project');
+  const marker = join(scratch, 'marker');
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="StandIn"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: await crashingEngine(),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '4000',
+      GDH_CRASH_MARKER: marker,
+      GDH_CRASH_WHEN: '--gdharness-hidden',
+      // The editor goes while the call below waits for it.
+      GDH_CRASH_AFTER_MS: '1500',
+      ...env,
+    },
+  });
+  await server.initialize('regression-test');
+  const opened = parseTextContent(
+    await server.request('tools/call', {
+      name: 'editor_launch',
+      arguments: { op: 'open', projectPath: project, hidden: true },
+    }),
+  );
+  // A rebind needs the editor and waits for the one this server opened, as a call to the bridge does.
+  const rebind = async (): Promise<string> =>
+    textOf(
+      await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'rebind' } }, 60_000),
+    ) ?? '';
+  const began = performance.now();
+  const answer = asked ? await rebind() : '';
+  return {
+    answer,
+    tookMs: performance.now() - began,
+    opened: asNumber(get(opened, 'pid'), 'pid'),
+    project,
+    marker,
+    port,
+    server,
+    again: rebind,
+    stop: async () => {
+      await server.stop();
+    },
+  };
+}
+
+/**
+ * The refusal for an editor that exited before it connected names its exit status and what it
+ * printed: nothing, its banner alone, or more with the last line.
+ */
+async function testTheRefusalForAnEditorThatWentNamesItsStatusAndOutput(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const cases: ReadonlyArray<readonly [Record<string, string>, RegExp]> = [
+    [
+      { GDH_SILENT: '1', GDH_CRASH_STATUS: '3' },
+      /exited without reaching the bridge: exit code 3, and it printed nothing\./,
+    ],
+    [
+      { GDH_CRASH_STATUS: '3221225477' },
+      /exited without reaching the bridge: exit code 0xC0000005, .*, and it printed only its banner\./,
+    ],
+    [
+      { GDH_CHATTY: '1' },
+      /exited without reaching the bridge: exit code 0xC06D007F, .*, and it printed 2 lines, the last "ready"\./,
+    ],
+  ];
+  for (const [env, expected] of cases) {
+    const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-end-'));
+    try {
+      const waited = await aCallWaitingOnAStandInEditor(scratch, env);
+      try {
+        assert.match(waited.answer, expected, `${JSON.stringify(env)}: ${waited.answer}`);
+        assert.equal(
+          startsNoted(waited.marker, '--gdharness-hidden'),
+          1,
+          'it died some other way than the race',
+        );
+        // Asked again once the editor has gone, the generic refusal says how it went as well.
+        const later = await waited.again();
+        assert.match(
+          later,
+          /^Editor not connected: no Godot editor .* The editor this server opened on .*, pid \d+, exited before it connected: exit code /,
+          later,
+        );
+      } finally {
+        await waited.stop();
+      }
+    } finally {
+      sweep(scratch);
+    }
+  }
+}
+
+/**
+ * An opened editor that dies after its banner with the start race's status, while a call waits for
+ * it, is opened again whole by that call. The call then waits for the editor that lives, and names it.
+ */
+async function testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-again-'));
+  const met = new MetProcesses();
+  try {
+    // A deadline with room for the wait, the backoff and the open the retry needs.
+    const waited = await aCallWaitingOnAStandInEditor(scratch, {
+      GDH_HOLD: '1',
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '8000',
+    });
+    try {
+      const lives = readEditorLogNote(waited.project)?.pid;
+      assert.ok(lives !== undefined, 'the second editor is the one the console names');
+      await met.meet(lives);
+      assert.deepEqual(
+        [lives === waited.opened, startsNoted(waited.marker, '--gdharness-hidden')],
+        [false, 2],
+        waited.answer,
+      );
+      assert.ok(
+        waited.answer.startsWith(
+          `Editor not connected: the editor this server opened on ${waited.project}, pid ${lives}, is still running`,
+        ),
+        `the call waited for the editor that lives and named it: ${waited.answer}`,
+      );
+    } finally {
+      await waited.stop();
+    }
+  } finally {
+    await met.end();
+    sweep(scratch);
+  }
+}
+
+/**
+ * An editor that connected and then went is not said to have exited before it connected: the
+ * refusal says it connected and has since exited, with its status.
+ */
+async function testAnEditorThatConnectedAndWentIsNotSaidToHaveGoneBeforeConnecting(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-connected-'));
+  // The stand-in holds a start whose marker exists, so it stays up until it is ended here.
+  writeFileSync(join(scratch, 'marker'), '');
+  const met = new MetProcesses();
+  let socket: WebSocket | null = null;
+  try {
+    const waited = await aCallWaitingOnAStandInEditor(scratch, { GDH_HOLD: '1' }, false);
+    try {
+      await met.meet(waited.opened);
+      socket = new WebSocket(`ws://127.0.0.1:${waited.port}/godot`);
+      const dialled = socket;
+      await new Promise<void>((settle, reject) => {
+        dialled.once('open', () => {
+          settle();
+        });
+        dialled.once('error', reject);
+      });
+      socket.send(JSON.stringify(greeting(waited.project, { editor_pid: waited.opened })));
+      const connected = async (): Promise<unknown> =>
+        get(
+          parseTextContent(
+            await waited.server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          ),
+          'editor',
+          'connected',
+        );
+      for (let waits = 0; waits < 100 && (await connected()) !== true; waits += 1) {
+        await delay(100);
+      }
+      assert.equal(await connected(), true, 'the editor connected');
+      process.kill(waited.opened);
+      socket.close();
+      for (let waits = 0; waits < 100 && (await connected()) !== false; waits += 1) {
+        await delay(100);
+      }
+      const refused = await waited.again();
+      assert.match(
+        refused,
+        /^Editor not connected: no Godot editor .* has reached this server\. The editor this server opened on .*, pid \d+, connected and has since exited: exit code /,
+        refused,
+      );
+      assert.doesNotMatch(refused, /before it connected/, refused);
+    } finally {
+      socket?.close();
+      await waited.stop();
+    }
+  } finally {
+    await met.end();
+    sweep(scratch);
+  }
+}
+
+/**
+ * A call that waits for an editor never runs past its deadline by more than the slack. A start race
+ * death with too little time left for a fresh open gets the refusal with the status, at the deadline.
+ *
+ * The slack is 1500 ms: the call reads the process table before its wait begins, which takes a few
+ * hundred milliseconds on Windows, then one 250 ms poll for the exit note, and the machine is loaded.
+ */
+async function testAWaitingCallIsNotHeldPastItsDeadlineByARetry(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const deadlineMs = 2500;
+  const slackMs = 1500;
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-deadline-'));
+  try {
+    const waited = await aCallWaitingOnAStandInEditor(scratch, {
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: String(deadlineMs),
+      GDH_CRASH_AFTER_MS: '2000',
+      GDH_HOLD: '1',
+    });
+    try {
+      assert.match(
+        waited.answer,
+        /exited without reaching the bridge: exit code 0xC06D007F, .*, and it printed only its banner\./,
+        'too little time was left to open it again, so the refusal names the status',
+      );
+      assert.equal(startsNoted(waited.marker, '--gdharness-hidden'), 1, 'and it was not opened again');
+      assert.ok(
+        waited.tookMs < deadlineMs + slackMs,
+        `the call took ${Math.round(waited.tookMs)}ms against a deadline of ${deadlineMs}ms`,
+      );
+    } finally {
+      await waited.stop();
+    }
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * The words for an editor's console agree with the rule that starts it again, and an exit note is
+ * read only for the pid it names.
+ */
+function testTheWordsForAnEditorsEndAgreeWithTheRuleAndTheNoteNamesItsPid(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-words-'));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    const status = 0xc0000005;
+    const settle = (console: string | null, pid: number, noted: string | null): [string, boolean] => {
+      rmSync(editorLogPath(project), { force: true });
+      rmSync(editorExitPath(project), { force: true });
+      if (console !== null) {
+        writeFileSync(editorLogPath(project), console);
+      }
+      if (noted !== null) {
+        writeFileSync(editorExitPath(project), noted);
+      }
+      const printed = console === null ? [] : linesAsPrinted(console);
+      return [howTheEditorEnded(project, pid), diedAsItStarted(status, printed)];
+    };
+    assert.deepEqual(
+      [settle('\n\n', 7, `7 ${status}`), settle('', 7, `7 ${status}`), settle(null, 7, `7 ${status}`)],
+      [
+        [`${exitCodeText(status)}, and it printed only blank lines`, false],
+        [`${exitCodeText(status)}, and it printed nothing`, true],
+        [`${exitCodeText(status)}, and it wrote no console`, true],
+      ],
+      'blank lines are output to the rule and to the words, and an empty console is neither',
+    );
+    assert.deepEqual(
+      [
+        settle(ENGINE_BANNER_LINE, 8, '9 3')[0],
+        settle(ENGINE_BANNER_LINE, 8, '8 3')[0],
+        settle(ENGINE_BANNER_LINE, 8, null)[0],
+      ],
+      [
+        'its exit status was not recorded, and it printed only its banner',
+        'exit code 3, and it printed only its banner',
+        'its exit status was not recorded, and it printed only its banner',
+      ],
+      'a note left by another pid is not this editor’s',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** An `editor_run check` boot that dies after its banner is started again. */
+async function testABootCheckThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  const real = resolveGodotPath();
+  if (process.platform !== 'win32' || real === null) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT'] && real === null) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-banner-boot-'));
+  const project = join(scratch, 'project');
+  const marker = join(scratch, 'marker');
+  try {
+    mkdirSync(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Boot"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    const crashingStandIn = await crashingEngine();
+    await withStdioServer(
+      async (call) => {
+        const checked: unknown = JSON.parse(
+          await call('editor_run', { projectPath: project, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        assert.deepEqual(
+          [get(checked, 'booted'), get(checked, 'exitCode'), startsNoted(marker, '--quit-after')],
+          [true, 0, 2],
+          `the boot is started again after its banner and a crash: ${JSON.stringify(checked)}`,
+        );
+      },
+      {
+        GODOT_PATH: crashingStandIn,
+        GDH_REAL_ENGINE: real,
+        GDH_CRASH_MARKER: marker,
+        GDH_CRASH_WHEN: '--quit-after',
+      },
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/** A `project_test` run whose engine dies after its banner is started again. */
+async function testATestRunThatDiesAfterItsBannerIsStartedAgain(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null || process.platform !== 'win32') {
+    return;
+  }
+  const { project, slots, checkouts } = commandTestProject(engines.godotPath, engines.gdunit);
+  const marker = join(project, 'marker');
+  try {
+    const crashingStandIn = await crashingEngine();
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: 'res://tests/ok_test.gd' } },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.deepEqual(
+          [get(answer, 'verdict'), startsNoted(marker, '--suites-in')],
+          ['passed', 2],
+          `the suites are run again after the engine's banner and a crash: ${blocks.join('\n')}`,
+        );
+      },
+      {
+        GODOT_PATH: crashingStandIn,
+        GDH_REAL_ENGINE: engines.godotPath,
+        GDH_CRASH_MARKER: marker,
+        GDH_CRASH_WHEN: '--suites-in',
+      },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
   }
 }
 
@@ -54881,6 +55771,26 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://worker.gd" id="1"]\n\n' +
           '[node name="Worker" type="Node"]\nscript = ExtResource("1")\n',
       );
+      // The second shape needs the runtime to announce after the start has answered. How soon a
+      // warm engine boots against how long the launch takes decides that on its own, and a game
+      // that announced first is a runtime the call rightly reports. An autoload ahead of the
+      // runtime holds the engine's boot until the file the test writes once the call has answered,
+      // so no announcement can come earlier.
+      const release = join(project, 'release.flag');
+      if (!tiedAtStart) {
+        writeFileSync(
+          join(project, 'gate.gd'),
+          'extends Node\n\n\nfunc _init() -> void:\n' +
+            '\tvar flag := ProjectSettings.globalize_path("res://release.flag")\n' +
+            '\twhile not FileAccess.file_exists(flag):\n' +
+            '\t\tOS.delay_msec(10)\n',
+        );
+        const settings = join(project, 'project.godot');
+        const runtimeLine = 'GdharnessRuntime=';
+        const config = readFileSync(settings, 'utf8');
+        assert.ok(config.includes(runtimeLine), `${shape}: the project registers the runtime`);
+        writeFileSync(settings, config.replaceAll(runtimeLine, `Gate="*res://gate.gd"\n${runtimeLine}`));
+      }
 
       const status = async (): Promise<unknown> =>
         parseTextContent(
@@ -54905,14 +55815,23 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         ENGINE_CALL_TIMEOUT_MS,
       );
       const startAnsweredAt = Date.now();
+      writeFileSync(release, '');
       const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
       let workerPid = 0;
       let helperPid = 0;
       try {
+        const seen = readdirSync(runtimeDir)
+          .filter((entry) => /^runtime-\d+\.json$/.test(entry))
+          .map(
+            (entry) => `${entry} +${Math.round(statSync(join(runtimeDir, entry)).mtimeMs - startAskedAt)}ms`,
+          );
         assert.equal(
           get(started, 'runtime', 'listening'),
           tiedAtStart,
-          `${shape}: ${JSON.stringify(started)}`,
+          `${shape}: ${JSON.stringify(started)} asked->answered ${startAnsweredAt - startAskedAt}ms, announcements ${seen.join(', ')}; server: ${server.stderr
+            .split('\n')
+            .filter((line) => line.includes('announce wait'))
+            .join(' | ')}`,
         );
         const benchPid = asNumber(get(started, 'pid'), 'the spawned bench has a pid');
         // The worker announces on its own boot, a moment after the bench's, and the helper after
@@ -69326,7 +70245,8 @@ async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Prom
  */
 function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
   const source = readFileSync('src/server.ts', 'utf8');
-  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\n {4}\);/g)].map(firstGroup);
+  // A call ends at the first `)` closing a statement, so one nested in a retry ends where it does.
+  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\)\s*;/g)].map(firstGroup);
   assert.ok(calls.length >= 2, `only ${String(calls.length)} calls of spawnGame were read`);
   for (const call of calls) {
     assert.match(
@@ -84068,6 +84988,7 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
     [
       join('src', 'desktop.ts'),
       join('src', 'spawn.ts'),
+      join('test', 'support', 'crashing-engine.ts'),
       join('test', 'support', 'hidden-spawn.ts'),
       join('test', 'support', 'renderer-less-engine.ts'),
     ],
@@ -84081,6 +85002,14 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
     standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
     [],
     'every start the stand-in engine makes passes windowsHide',
+  );
+  // The crashing stand-in is C# text, so its starts pass CreateNoWindow where Node's pass windowsHide.
+  const crashingStarts = CRASHING_ENGINE_SOURCE.split(['Process', 'Start('].join('.')).length - 1;
+  assert.ok(crashingStarts >= 1, 'the crashing stand-in starts the engine it hands a start to');
+  assert.equal(
+    CRASHING_ENGINE_SOURCE.split('CreateNoWindow = true;').length - 1,
+    crashingStarts,
+    'every start the crashing stand-in makes passes CreateNoWindow',
   );
 
   // Godot's own: `OS.create_process(path, arguments, open_console)` and
@@ -113209,6 +114138,21 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine,
   testAnEngineRunSaysHowItEnded,
   testAnEngineThatCrashesAsItStartsIsStartedAgain,
+  testAnEngineThatDiesAfterItsBannerIsStartedAgain,
+  testAHeadlessEngineThatDiesAfterItsBannerIsStartedAgain,
+  testAWatchedEngineThatDiesAfterItsBannerIsStartedAgain,
+  testAKeptRunThatDiesAfterItsBannerIsStartedAgain,
+  testABlankOnlyStartIsNotStartedAgainByAKeptRun,
+  testAQuietStartAnswersAsSoonAsAChattyOne,
+  testTheRefusalForAnEditorThatWentNamesItsStatusAndOutput,
+  testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain,
+  testAnEditorThatConnectedAndWentIsNotSaidToHaveGoneBeforeConnecting,
+  testAWaitingCallIsNotHeldPastItsDeadlineByARetry,
+  testTheWordsForAnEditorsEndAgreeWithTheRuleAndTheNoteNamesItsPid,
+  testTheEndOfAStartedAgainEngineSaysWhatEachStartDid,
+  testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas,
+  testABootCheckThatDiesAfterItsBannerIsStartedAgain,
+  testATestRunThatDiesAfterItsBannerIsStartedAgain,
   testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,

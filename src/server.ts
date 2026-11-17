@@ -23,6 +23,7 @@ import {
   readFileSync,
   readSync,
   rmdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -110,6 +111,7 @@ import {
 } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
+import { howTheEditorEnded, readEditorExit } from './editor-end.js';
 import {
   bursts,
   type EditorLogNote,
@@ -140,7 +142,15 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import { CONSOLE_CLOSED, type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
+import {
+  CONSOLE_CLOSED,
+  diedAtStartOf,
+  type EngineRun,
+  exitCodeText,
+  howItEnded,
+  runEngine,
+  startedUntilItRuns,
+} from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
@@ -391,6 +401,8 @@ import {
   shippedRuntimeDigest,
 } from './setup.js';
 import { spawnHidden } from './spawn.js';
+import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
+import { endedAsItStarted } from './start-watch.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -554,6 +566,24 @@ const PARENT_ASKED_AFTER_MS = 5_000;
  * greeted. The two came up within a few seconds of each other downstream, in either order.
  */
 const EDITOR_SERVERS_START_MS = 20_000;
+
+/** How long a call waits for the keeper to note the exit of an editor that has gone. */
+const EDITOR_EXIT_WAIT_MS = 3000;
+
+/**
+ * How far past a call's deadline the note of an exit is waited for. The keeper writes it within
+ * about 25 ms of the editor going, so one poll of the wait covers it.
+ */
+const EDITOR_EXIT_GRACE_MS = 250;
+
+/** The time an editor opened again needs before the deadline, or the call answers with the status instead. */
+const FRESH_EDITOR_OPEN_MS = 2000;
+
+/** The moment the exit note of an editor is waited for until, bounded by a call's [param deadline]. */
+function exitNoteWaitEnd(deadline: number): number {
+  const now = Date.now();
+  return Math.min(now + EDITOR_EXIT_WAIT_MS, Math.max(deadline, now + EDITOR_EXIT_GRACE_MS));
+}
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
@@ -5549,6 +5579,8 @@ class GodotServer {
     readonly projectPath: string;
     /** What it was started with, which a restart answers with as an open does. */
     readonly arguments: readonly string[];
+    /** How it was started, so a start that died as it started can be made again the same way. */
+    readonly start: EditorStart;
   } | null = null;
 
   /**
@@ -10092,11 +10124,63 @@ class GodotServer {
 
   /** A test run's engine started and watched until it ends, is cut off or is stopped for an autoload. */
   private async testRunning(prepared: TestPrepared): Promise<ToolResponse> {
-    const { project, needing, windowed, engine, cmdArgs, timeoutMs, ours, userData, helperFiles } = prepared;
+    const { project, needing, windowed, ours, userData, helperFiles } = prepared;
     const onDesktop = windowed && process.platform === 'win32';
     // As gdharness test does: a drawing run starts with the shaders the last run on this engine
     // build compiled, and leaves its own for the next. Neither throws: a fault is a cold start.
-    await seedPipelineCache(userData, project.value.path, engine.value);
+    await seedPipelineCache(userData, project.value.path, prepared.engine.value);
+    const autoloaded = scriptsAutoloaded(project.value.path);
+    // An engine that died as it started never reached the project, so the run is started again.
+    const attempt = await startedUntilItRuns(
+      () => this.testEngineRan(prepared, onDesktop, autoloaded),
+      callSignal(),
+      (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
+    );
+    const { run, console, timedOut, silentForMs, saidAnything, stopped } = attempt;
+    // The helper's own failure reaches only its file, and the exit it leaves says nothing.
+    // Or its pid never came, which is a helper that hung until the run's limit ended it.
+    const helperFailed = onDesktop
+      ? (helperFailure(helperFiles.error) ??
+        (existsSync(helperFiles.pid) ? null : `it never started, and ${helperStep(helperFiles.step)}`))
+      : null;
+    if (helperFailed !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(
+        `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
+      );
+    }
+    const onABox = onDesktop ? desktopBoxEnding(run.log.all) : null;
+    if (onABox !== null) {
+      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
+      return this.createErrorResponse(`The tests did not finish: ${onABox}`);
+    }
+    return await this.testRead({
+      ...prepared,
+      run,
+      console,
+      timedOut,
+      silentForMs,
+      saidAnything,
+      autoloaded,
+      stopped,
+    });
+  }
+
+  /** One start of a test run's engine, watched until it ends, is cut off or is stopped for an autoload. */
+  private async testEngineRan(
+    prepared: TestPrepared,
+    onDesktop: boolean,
+    autoloaded: ReturnType<typeof scriptsAutoloaded>,
+  ): Promise<{
+    readonly run: SpawnedTest;
+    readonly console: Buffer[];
+    readonly timedOut: boolean;
+    readonly silentForMs: number;
+    readonly saidAnything: boolean;
+    readonly stopped: { for: { name: string; path: string } | null };
+    readonly crashedStarts?: number;
+  }> {
+    const { project, engine, cmdArgs, timeoutMs, userData, helperFiles } = prepared;
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(
@@ -10128,7 +10212,6 @@ class GodotServer {
       saidAnything = true;
     });
     const reporting = this.reportTestProgress(run.log);
-    const autoloaded = scriptsAutoloaded(project.value.path);
     let silentForMs = 0;
     const stopped: { for: { name: string; path: string } | null } = { for: null };
     const timedOut = await new Promise<boolean>((resolve) => {
@@ -10166,33 +10249,7 @@ class GodotServer {
     }
     await run.settled;
     await keeping;
-    // The helper's own failure reaches only its file, and the exit it leaves says nothing.
-    // Or its pid never came, which is a helper that hung until the run's limit ended it.
-    const helperFailed = onDesktop
-      ? (helperFailure(helperFiles.error) ??
-        (existsSync(helperFiles.pid) ? null : `it never started, and ${helperStep(helperFiles.step)}`))
-      : null;
-    if (helperFailed !== null) {
-      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
-      return this.createErrorResponse(
-        `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
-      );
-    }
-    const onABox = onDesktop ? desktopBoxEnding(run.log.all) : null;
-    if (onABox !== null) {
-      discard(join(project.value.path, '.godot', ...ours.split('/')), userData);
-      return this.createErrorResponse(`The tests did not finish: ${onABox}`);
-    }
-    return await this.testRead({
-      ...prepared,
-      run,
-      console,
-      timedOut,
-      silentForMs,
-      saidAnything,
-      autoloaded,
-      stopped,
-    });
+    return { run, console, timedOut, silentForMs, saidAnything, stopped };
   }
 
   /** A test run's report, engine log and console read once the engine has ended. */
@@ -12348,6 +12405,12 @@ class GodotServer {
       // minutes, and the pid is the thing they can watch.
       awaitingLaunchedEditor:
         status.connected || !launchedIsUp ? undefined : (this.launchedEditor?.pid ?? undefined),
+      // How the editor this server opened ended, once it has gone: the exit status and what it
+      // printed, which the console alone does not say.
+      launchedEditorEnded:
+        status.connected || launchedIsUp || this.launchedEditor === null
+          ? undefined
+          : `pid ${String(this.launchedEditor.pid)}: ${howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)}`,
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer. An open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
@@ -13535,6 +13598,7 @@ class GodotServer {
       startedAt: opened.startedAt,
       projectPath,
       arguments: opened.arguments,
+      start,
     };
     this.closedHere = null;
     return opened;
@@ -13929,36 +13993,111 @@ class GodotServer {
         : {}),
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const started = await this.launchKeptGame(
-      engine.value,
-      cmdArgs,
-      project.value.path,
-      needsItsOwnProcess(asked)
-        ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
-        : undefined,
-      // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
-      // unless the caller asked to see it. A headless run has no window to put anywhere.
-      onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
-      profiled,
-      exported === null,
-      engineCalls,
-    );
+    const launch = async (): Promise<GodotProcess | { error: string }> =>
+      await this.launchKeptGame(
+        engine.value,
+        cmdArgs,
+        project.value.path,
+        needsItsOwnProcess(asked)
+          ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
+          : undefined,
+        // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
+        // unless the caller asked to see it. A headless run has no window to put anywhere.
+        onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
+        profiled,
+        exported === null,
+        engineCalls,
+      );
+    const started = await launch();
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
         'editor_status says which Godot this server runs and whether it answers',
       ]);
     }
+    this.holdTheStart(started, run);
+    return await this.spawnedStartAnswer(run, started, cmdArgs, launch);
+  }
+
+  /** Makes [param started] the run this server holds for a start spawned here. */
+  private holdTheStart(started: GodotProcess, run: RunPlayed): void {
     // For a game that announces after the start's wait under a number the run's does not have,
     // which the Windows console build does: the tie then falls to freshness, as a played run's.
-    started.announcedBefore = alreadyPlaying;
-    started.bootScene = runtimeWaitMs.scene;
+    started.announcedBefore = run.alreadyPlaying;
+    started.bootScene = run.runtimeWaitMs.scene;
     // Kept after it exits rather than dropped, because a run that quits on its own is the whole
     // point of a headless one: a bench, a report, a tool scene. Dropping the reference on exit
     // threw its output away before anybody could read it, and left editor_output answering "no
     // game is running" about a run that had just printed its answer. Whether a run is *active* is
     // exitCode === null, which is what the callers below now ask.
     this.activeProcess = started;
-    return await this.spawnedStartAnswer(run, started, cmdArgs);
+  }
+
+  /**
+   * A whole new start, when [param dead] died as it started within the wait the call was making
+   * anyway, or null. A start still running, or one that ends after the call has answered, is left
+   * as it is: the run note and editor_output say how it ended. The dead one's transcript and profile
+   * go, since its run note is replaced by the new start's.
+   */
+  private async startedAfterADeath(
+    dead: GodotProcess,
+    run: RunPlayed,
+    launch: () => Promise<GodotProcess | { error: string }>,
+    starts: number,
+  ): Promise<GodotProcess | null> {
+    if (
+      starts >= ENGINE_STARTS ||
+      process.platform !== 'win32' ||
+      dead.transcript === null ||
+      dead.pid === null ||
+      !(await endedAsItStarted({
+        pid: dead.pid,
+        output: dead.transcript,
+        until: dead.startedAt + run.runtimeWaitMs.ms,
+        exitCode: () => {
+          const note = readRunRecord(run.project.value.path);
+          return note?.pid === dead.pid && note.startedAt === dead.startedAt ? (note.exitCode ?? null) : null;
+        },
+      }))
+    ) {
+      return null;
+    }
+    rmSync(dead.transcript, { force: true });
+    if (dead.profile !== undefined) {
+      rmSync(dead.profile, { force: true });
+    }
+    await delay(START_RETRY_MS * 2 ** (starts - 1));
+    const next = await launch();
+    if ('error' in next) {
+      return null;
+    }
+    this.holdTheStart(next, run);
+    return next;
+  }
+
+  /**
+   * The runtime of a start spawned here, waited for as long as the call waits. A start that died as
+   * it started inside that wait is started again whole and waited for in turn, so the answer names
+   * the start that lives.
+   */
+  private async runtimeOfTheStart(
+    run: RunPlayed,
+    first: GodotProcess,
+    launch: () => Promise<GodotProcess | { error: string }>,
+  ): Promise<{ started: GodotProcess; runtime: Record<string, unknown> }> {
+    let started = first;
+    for (let starts = 1; ; starts += 1) {
+      const runtime = await this.runtimeUp(
+        run.project.value.path,
+        run.alreadyPlaying,
+        run.runtimeWaitMs,
+        run.given.length > 0,
+      );
+      const next = await this.startedAfterADeath(started, run, launch, starts);
+      if (next === null) {
+        return { started, runtime };
+      }
+      started = next;
+    }
   }
 
   /** Whether the editor itself can play this start, with nothing it cannot be handed. */
@@ -14012,13 +14151,13 @@ class GodotServer {
   /** The answer of a start spawned here: the process, its command line and what was ended and left. */
   private async spawnedStartAnswer(
     run: RunPlayed,
-    started: GodotProcess,
+    first: GodotProcess,
     cmdArgs: readonly string[],
+    launch: () => Promise<GodotProcess | { error: string }>,
   ): Promise<ToolResponse> {
     const {
       project,
       exported,
-      given,
       own,
       flags,
       asked,
@@ -14028,11 +14167,15 @@ class GodotServer {
       scanned,
       ended,
       wereHereFirst,
-      alreadyPlaying,
-      runtimeWaitMs,
       headless,
       profiled,
     } = run;
+    // Not waited for: a release export ships without the runtime addon, and one that keeps it
+    // announces the folder it runs from rather than this project.
+    const { started, runtime } =
+      exported !== null
+        ? { started: first, runtime: undefined }
+        : await this.runtimeOfTheStart(run, first, launch);
     const spawnedInstead = this.spawnedInsteadNote(run);
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
@@ -14086,12 +14229,7 @@ class GodotServer {
       endedPreviousRun: endedPreviousRun(ended),
       previousRunLeft: previousRunLeft(ended),
       ...previousRunHow(ended),
-      // Not waited for: a release export ships without the runtime addon, and one that keeps it
-      // announces the folder it runs from rather than this project.
-      runtime:
-        exported !== null
-          ? undefined
-          : await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs, given.length > 0),
+      runtime,
       message: `Use editor_output for what it prints and editor_run stop to end it.${started.keeper !== undefined && handed.length > 0 ? ' It stops at the lines under breakpoints, and debug_state stack reads where it is held.' : ''}${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
@@ -16317,31 +16455,37 @@ class GodotServer {
       userArgs,
       engineArgs,
     });
-    const boot = await this.spawnGame(
-      godotPath,
-      cmdArgs,
-      needsItsOwnProcess(asked)
-        ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
-        : undefined,
-      undefined,
-      projectPath,
+    const env = needsItsOwnProcess(asked)
+      ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
+      : undefined;
+    // An engine that died as it started never reached the project, so the boot is started again.
+    const { boot, hung } = await startedUntilItRuns(
+      async (): Promise<{
+        readonly boot: Awaited<ReturnType<GodotServer['spawnGame']>>;
+        readonly hung: boolean;
+        readonly crashedStarts?: number;
+      }> => {
+        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, projectPath);
+        const hungUp = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            started.process.kill();
+            resolve(true);
+          }, timeoutMs);
+          started.process.once('exit', () => {
+            clearTimeout(timer);
+            resolve(false);
+          });
+          started.process.once('error', () => {
+            clearTimeout(timer);
+            resolve(false);
+          });
+        });
+        await started.settled;
+        return { boot: started, hung: hungUp };
+      },
+      callSignal(),
+      (one) => !one.hung && diedAtStartOf(one.boot),
     );
-
-    const hung = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        boot.process.kill();
-        resolve(true);
-      }, timeoutMs);
-      boot.process.once('exit', () => {
-        clearTimeout(timer);
-        resolve(false);
-      });
-      boot.process.once('error', () => {
-        clearTimeout(timer);
-        resolve(false);
-      });
-    });
-    await boot.settled;
 
     const errors = boot.log.count('error');
     const warnings = boot.log.count('warning');
@@ -17112,7 +17256,9 @@ class GodotServer {
   ): Promise<Record<string, unknown>> {
     const launched = this.launchedEditor?.pid === editorPid ? this.launchedEditor : null;
     if (launched !== null && !this.greetedEditors.has(editorPid)) {
-      return (await this.launchedEditorIsUp()) ? { stillConnecting: true } : { exitedBeforeConnecting: true };
+      return (await this.launchedEditorIsUp())
+        ? { stillConnecting: true }
+        : { exitedBeforeConnecting: true, endedWith: howTheEditorEnded(launched.projectPath, launched.pid) };
     }
     const startedAt = launched?.startedAt ?? noted?.processStartedAt ?? null;
     const now = alive(editorPid) ? (await startTimesOf([editorPid])).get(editorPid) : undefined;
@@ -20535,7 +20681,7 @@ class GodotServer {
       );
     }
     return this.createErrorResponse(
-      'Editor not connected: no Godot editor with the gdharness editor addon has reached this server.',
+      `Editor not connected: no Godot editor with the gdharness editor addon has reached this server.${this.howTheOpenedEditorWent(launched)}`,
       [
         ...instead,
         'Open the project in the editor with editor_launch, or by hand',
@@ -20546,21 +20692,41 @@ class GodotServer {
     );
   }
 
+  /** A sentence on how the editor this server opened went, with a space before it. Empty for none. */
+  private howTheOpenedEditorWent(launched: { pid: number; projectPath: string } | null): string {
+    if (launched === null) {
+      return '';
+    }
+    const went = this.greetedEditors.has(launched.pid)
+      ? 'connected and has since exited'
+      : 'exited before it connected';
+    return ` The editor this server opened on ${launched.projectPath}, pid ${launched.pid}, ${went}: ${howTheEditorEnded(launched.projectPath, launched.pid)}.`;
+  }
+
   /**
    * Waits for the editor this server opened to reach the bridge. Null once it has, else the refusal
    * saying whether it is still coming up or has gone.
    */
   private async waitForTheLaunchedEditor(
-    launched: { pid: number; projectPath: string },
+    first: { pid: number; projectPath: string },
     instead: readonly string[],
   ): Promise<ToolResponse | null> {
     const began = Date.now();
-    await this.waitForBridge(
-      () => this.godotBridge.isConnected() || !alive(launched.pid),
-      began + editorRestartTimeoutMs(),
-    );
-    if (this.godotBridge.isConnected()) {
-      return null;
+    const deadline = began + editorRestartTimeoutMs();
+    let launched = first;
+    for (let starts = 1; ; starts += 1) {
+      await this.waitForBridge(() => this.godotBridge.isConnected() || !alive(launched.pid), deadline);
+      if (this.godotBridge.isConnected()) {
+        return null;
+      }
+      const next =
+        alive(launched.pid) || starts >= ENGINE_STARTS
+          ? null
+          : await this.startedAfterAnEditorDied(launched, deadline, starts);
+      if (next === null) {
+        break;
+      }
+      launched = next;
     }
     const opened = `the editor this server opened on ${launched.projectPath}, pid ${launched.pid}`;
     if (alive(launched.pid)) {
@@ -20574,11 +20740,89 @@ class GodotServer {
         ],
       );
     }
-    return this.createErrorResponse(`Editor not connected: ${opened}, exited without reaching the bridge.`, [
-      ...instead,
-      'editor_output op editor shows what it printed before it went',
-      'editor_launch open starts another',
-    ]);
+    // The keeper notes the exit just after the process goes.
+    await this.waitForBridge(
+      () => readEditorExit(launched.projectPath, launched.pid) !== null,
+      exitNoteWaitEnd(deadline),
+    );
+    return this.createErrorResponse(
+      `Editor not connected: ${opened}, exited without reaching the bridge: ${howTheEditorEnded(launched.projectPath, launched.pid)}.`,
+      [
+        ...instead,
+        'editor_output op editor shows what it printed before it went',
+        'editor_launch open starts another',
+      ],
+    );
+  }
+
+  /**
+   * The editor opened again whole, when the one a call was waiting for [param dead] died as it
+   * started: a Windows exception status with nothing printed, or the banner alone for the status of
+   * the engine's start race. Null when it died some other way or the wait is over. Opened in its
+   * turn, as the idle reopen is, and only if this server's record still names the dead editor,
+   * so two calls waiting on one death open one editor between them. The editor log, the log note
+   * and the launched-editor record all come from the new open.
+   */
+  private async startedAfterAnEditorDied(
+    dead: { pid: number; projectPath: string },
+    deadline: number,
+    starts: number,
+  ): Promise<{ pid: number; projectPath: string } | null> {
+    const record = this.launchedEditor;
+    if (record !== null && record.pid !== dead.pid) {
+      // Another call's wait has opened it again already.
+      return record;
+    }
+    if (
+      record === null ||
+      process.platform !== 'win32' ||
+      !(await endedAsItStarted({
+        pid: dead.pid,
+        output: editorLogPath(dead.projectPath),
+        until: exitNoteWaitEnd(deadline),
+        exitCode: () => readEditorExit(dead.projectPath, dead.pid),
+      }))
+    ) {
+      return null;
+    }
+    // Too little time left for the wait and an open is the call's answer, with the status.
+    const backoff = START_RETRY_MS * 2 ** (starts - 1);
+    if (Date.now() + backoff + FRESH_EDITOR_OPEN_MS > deadline) {
+      return null;
+    }
+    await delay(backoff);
+    return await inTurnToOpen(dead.projectPath, async () => {
+      const now = this.launchedEditor;
+      if (now?.pid !== dead.pid || this.godotBridge.isConnected()) {
+        return now;
+      }
+      // A turn that came after the deadline opens nothing the call would wait for.
+      if (Date.now() + FRESH_EDITOR_OPEN_MS > deadline) {
+        return null;
+      }
+      const arriving = await this.editorsNotYetConnected(dead.projectPath);
+      if (
+        (arriving ?? []).some((one) => one.pid !== dead.pid) ||
+        this.anEditorThatCannotConnect(dead.projectPath) !== null
+      ) {
+        return null;
+      }
+      const engine = await this.engine(dead.projectPath);
+      if (!engine.ok) {
+        return null;
+      }
+      const opened = await this.openAnEditor(
+        engine.value,
+        dead.projectPath,
+        portsIn(now.arguments) ?? (await portsForAnEditor()),
+        now.start,
+      );
+      if (opened.error !== null) {
+        return null;
+      }
+      restartSettled(dead.projectPath);
+      return this.launchedEditor;
+    });
   }
 
   /**

@@ -49,6 +49,11 @@ export function editorHelperOutputPath(projectPath: string): string {
   return join(projectPath, '.godot', 'gdharness-editor-helper.log');
 }
 
+/** Where the keeper of the editor of [param projectPath] writes how that editor exited. */
+export function editorExitPath(projectPath: string): string {
+  return join(projectPath, '.godot', 'gdharness-editor-exit');
+}
+
 /** How many bytes of the helper's output are read for a verdict, from the end. */
 const HELPER_OUTPUT_READ_BYTES = 256 * 1024;
 
@@ -132,6 +137,7 @@ export function clearEditorLog(projectPath: string): void {
     mkdirSync(dirname(path), { recursive: true });
     rmSync(path, { force: true });
     rmSync(editorHelperOutputPath(projectPath), { force: true });
+    rmSync(editorExitPath(projectPath), { force: true });
     rmSync(editorLogNotePath(projectPath), { force: true });
   } catch {
     // A project that cannot be written into gets the refusal for an uncaptured console, which is

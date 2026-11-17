@@ -809,6 +809,22 @@ The headless operations a server runs itself start the engine as the server's ch
 child still inherits the bit. A project that wants dumps from those runs gdharness under Bun. A
 regression reads each engine's mode from outside it, under both runtimes.
 
+### Engines that die as they start
+
+Godot 4.7.2 on Windows can die with 0xC06D007F in its constructor, in a race of its input library's
+hook. gdharness starts such an engine again, up to three starts, when it printed nothing or only its
+banner. This covers only the engines gdharness starts itself that have this race, such as the official
+4.7.2 build. A game's exported build and an engine started some other way are unchanged.
+
+`editor_run start` starts a kept game again only when it dies inside the wait it already makes for the
+runtime. A start that dies after the call has answered is not started again, and its run note and
+`editor_output` say how it ended.
+
+An editor opened by `editor_launch` is started again only by a call that waits for it, and only when
+it died inside that wait. The open itself returns at once and never starts it again. The keeper notes
+the editor's exit status beside its console, and every refusal that says the editor went names that
+status and what it printed.
+
 ### Writing the note
 
 The keeper writes the note once the game is up, and the exit into it when the game ends. It is the

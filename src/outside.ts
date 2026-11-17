@@ -65,6 +65,11 @@ interface OutsideSpec {
    * of a game its process started, such as the box it ended, which nothing else carries.
    */
   readonly output?: string;
+  /**
+   * A file the keeper writes the process's exit status into once it has ended, as a whole number,
+   * where there is no run. A run's note carries its exit, and an editor has none.
+   */
+  readonly exitNote?: string;
   /** Windows: show its first window without activating it, so it takes nobody's keyboard. */
   readonly noActivate?: boolean;
 }
@@ -85,6 +90,7 @@ export interface SentSpec {
   readonly run?: OutsideSpec['run'];
   readonly desktop?: string;
   readonly output?: string;
+  readonly exitNote?: string;
   readonly noActivate?: boolean;
 }
 
@@ -227,7 +233,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { command, args, envChanges, run, desktop, noActivate, output } = value;
+  const { command, args, envChanges, run, desktop, noActivate, output, exitNote } = value;
   const changes = envChangesOf(envChanges);
   const ran = run === undefined ? undefined : runOf(run);
   if (
@@ -237,6 +243,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
     ran === null ||
     (desktop !== undefined && typeof desktop !== 'string') ||
     (output !== undefined && typeof output !== 'string') ||
+    (exitNote !== undefined && typeof exitNote !== 'string') ||
     (noActivate !== undefined && typeof noActivate !== 'boolean')
   ) {
     return null;
@@ -248,6 +255,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
     ...(ran === undefined ? {} : { run: ran }),
     ...(desktop === undefined ? {} : { desktop }),
     ...(output === undefined ? {} : { output }),
+    ...(exitNote === undefined ? {} : { exitNote }),
     ...(noActivate === undefined ? {} : { noActivate }),
   };
 }
@@ -294,6 +302,7 @@ export async function launchOutsideTheTree(
       ...(spec.run === undefined ? {} : { run: spec.run }),
       ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
       ...(spec.output === undefined ? {} : { output: spec.output }),
+      ...(spec.exitNote === undefined ? {} : { exitNote: spec.exitNote }),
       ...(spec.noActivate === true ? { noActivate: true } : {}),
     });
     let printed = '';
