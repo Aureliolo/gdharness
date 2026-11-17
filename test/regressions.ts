@@ -69118,6 +69118,20 @@ async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promis
       false,
       'and a command that names none gets none',
     );
+    const run = `import { runEngine } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-run.ts')).href)};`;
+    const idle = `[process.execPath, ['-e', 'setTimeout(() => undefined, 60000)']] as const`;
+    const engine = (options: string): string =>
+      `${run}\nconst [exe, args] = ${idle};\nvoid runEngine(exe, args, ${options});\nawait ${held};`;
+    assert.equal(
+      await storeClassOfAProgramsTake(listed, engine('{ project }'), names),
+      true,
+      'an engine run for a project, through runEngine, carries it',
+    );
+    assert.equal(
+      await storeClassOfAProgramsTake(listed, engine('{}'), names),
+      false,
+      'and one given no project carries none',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -69141,6 +69155,16 @@ function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
   }
   const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project\);/;
   assert.match(source, taken, 'spawnGame takes its slot for the project it is given');
+  assert.equal(
+    source.match(/slotForCall\(true, projectPath\)/g)?.length,
+    2,
+    'both takes for a game editor_run starts name the project',
+  );
+  assert.match(
+    source,
+    /runEngine\(engine\.value, exportArgs, \{\s*timeout: [^\n]*\n\s*project: project\.value\.path,/,
+    'an export names its project',
+  );
 }
 
 /** A look made with no line of its own still ranks the project's class: the one free slot is its. */
