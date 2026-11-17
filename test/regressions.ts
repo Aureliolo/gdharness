@@ -69014,6 +69014,32 @@ async function testAStoreFileThatCannotBeReadGivesNoClass(): Promise<void> {
   }
 }
 
+/** A look made with no line of its own still ranks the project's class: the one free slot is its. */
+async function testALookWithNoLineOfItsOwnHasTheProjectsStoreClass(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-look-'));
+  try {
+    const listed = join(root, 'listed-game');
+    mkdirSync(join(listed, '.git'), { recursive: true });
+    const unlisted = join(root, 'unlisted-game');
+    mkdirSync(join(unlisted, '.git'), { recursive: true });
+    const directory = join(root, 'slots');
+    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
+    writeFileSync(join(directory, 'store.json'), '{"games": ["listed-game"]}');
+    const me = { pid: process.pid, started: await ownStart() };
+    writeFileSync(
+      join(directory, WAITING_FOLDER, '1-1.json'),
+      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 30_000) / 1000 }),
+    );
+    const plain = new EngineSlots(directory, 1, me, undefined, () => 'other', unlisted);
+    assert.equal(await plain.takeFree(), null, 'an unlisted project leaves the slot to the earlier waiter');
+    const store = new EngineSlots(directory, 1, me, undefined, () => 'other', listed);
+    assert.equal(await store.takeFree(), join(directory, '0.lock'), 'a listed one goes before it');
+    store.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 /** The slot folder's `store.json` is read and never written, whatever it holds. */
 async function testTheStoreFileIsOnlyRead(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-read-'));
@@ -113210,6 +113236,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakeForAListedRepositoryMarksItsWaitWithTheStoreClass,
   testAStoreFileThatCannotBeReadGivesNoClass,
   testTheStoreFileIsOnlyRead,
+  testALookWithNoLineOfItsOwnHasTheProjectsStoreClass,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testAStarvedMeasurementHoldsSideEngines,
   testATakerHeldBackByAClaimDoesNotSayItLooks,
