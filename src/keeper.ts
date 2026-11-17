@@ -652,12 +652,13 @@ function recordTheEnd(ended: KeptEnd): void {
 }
 
 /** Writes how the process exited into [param file], for a reader of a process that has no run note. */
-function noteTheExit(file: string | undefined, code: number | null): void {
+function noteTheExit(file: string | undefined, pid: number, code: number | null): void {
   if (file === undefined || code === null) {
     return;
   }
   try {
-    writeFileSync(file, String(code >>> 0));
+    // With the pid, so a reader never takes the note of an editor before for this one's.
+    writeFileSync(file, `${String(pid)} ${String(code >>> 0)}`);
   } catch {
     // The reader then says the exit was not recorded.
   }
@@ -697,7 +698,7 @@ async function keep(): Promise<void> {
   const told = await exited;
   const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
   const exitedAt = Date.now();
-  noteTheExit(spec.exitNote, code);
+  noteTheExit(spec.exitNote, pid, code);
   const note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
   if (note !== null) {

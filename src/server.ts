@@ -571,6 +571,21 @@ const EDITOR_SERVERS_START_MS = 20_000;
 const EDITOR_EXIT_WAIT_MS = 3000;
 
 /**
+ * How far past a call's deadline the note of an exit is waited for. The keeper writes it within
+ * about 25 ms of the editor going, so one poll of the wait covers it.
+ */
+const EDITOR_EXIT_GRACE_MS = 250;
+
+/** The time an editor opened again needs before the deadline, or the call answers with the status instead. */
+const FRESH_EDITOR_OPEN_MS = 2000;
+
+/** The moment the exit note of an editor is waited for until, bounded by a call's [param deadline]. */
+function exitNoteWaitEnd(deadline: number): number {
+  const now = Date.now();
+  return Math.min(now + EDITOR_EXIT_WAIT_MS, Math.max(deadline, now + EDITOR_EXIT_GRACE_MS));
+}
+
+/**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
  * seconds cover an editor that is busy. One still silent after that is stuck, and the caller is
  * told rather than held. GDHARNESS_GREETING_WAIT_MS sets another.
@@ -12390,12 +12405,12 @@ class GodotServer {
       // minutes, and the pid is the thing they can watch.
       awaitingLaunchedEditor:
         status.connected || !launchedIsUp ? undefined : (this.launchedEditor?.pid ?? undefined),
-      // Why the editor this server opened is gone, when it went before it connected: the exit
-      // status and what it printed, which the console alone does not say.
+      // How the editor this server opened ended, once it has gone: the exit status and what it
+      // printed, which the console alone does not say.
       launchedEditorEnded:
         status.connected || launchedIsUp || this.launchedEditor === null
           ? undefined
-          : `pid ${String(this.launchedEditor.pid)}: ${howTheEditorEnded(this.launchedEditor.projectPath)}`,
+          : `pid ${String(this.launchedEditor.pid)}: ${howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)}`,
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer. An open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
@@ -17243,7 +17258,7 @@ class GodotServer {
     if (launched !== null && !this.greetedEditors.has(editorPid)) {
       return (await this.launchedEditorIsUp())
         ? { stillConnecting: true }
-        : { exitedBeforeConnecting: true, endedWith: howTheEditorEnded(launched.projectPath) };
+        : { exitedBeforeConnecting: true, endedWith: howTheEditorEnded(launched.projectPath, launched.pid) };
     }
     const startedAt = launched?.startedAt ?? noted?.processStartedAt ?? null;
     const now = alive(editorPid) ? (await startTimesOf([editorPid])).get(editorPid) : undefined;
@@ -20666,11 +20681,7 @@ class GodotServer {
       );
     }
     return this.createErrorResponse(
-      `Editor not connected: no Godot editor with the gdharness editor addon has reached this server.${
-        launched === null
-          ? ''
-          : ` The editor this server opened on ${launched.projectPath}, pid ${launched.pid}, exited before it connected: ${howTheEditorEnded(launched.projectPath)}.`
-      }`,
+      `Editor not connected: no Godot editor with the gdharness editor addon has reached this server.${this.howTheOpenedEditorWent(launched)}`,
       [
         ...instead,
         'Open the project in the editor with editor_launch, or by hand',
@@ -20679,6 +20690,17 @@ class GodotServer {
         'editor_status says whether the bridge is up and what it is listening on',
       ],
     );
+  }
+
+  /** A sentence on how the editor this server opened went, with a space before it. Empty for none. */
+  private howTheOpenedEditorWent(launched: { pid: number; projectPath: string } | null): string {
+    if (launched === null) {
+      return '';
+    }
+    const went = this.greetedEditors.has(launched.pid)
+      ? 'connected and has since exited'
+      : 'exited before it connected';
+    return ` The editor this server opened on ${launched.projectPath}, pid ${launched.pid}, ${went}: ${howTheEditorEnded(launched.projectPath, launched.pid)}.`;
   }
 
   /**
@@ -20720,11 +20742,11 @@ class GodotServer {
     }
     // The keeper notes the exit just after the process goes.
     await this.waitForBridge(
-      () => readEditorExit(launched.projectPath) !== null,
-      Date.now() + EDITOR_EXIT_WAIT_MS,
+      () => readEditorExit(launched.projectPath, launched.pid) !== null,
+      exitNoteWaitEnd(deadline),
     );
     return this.createErrorResponse(
-      `Editor not connected: ${opened}, exited without reaching the bridge: ${howTheEditorEnded(launched.projectPath)}.`,
+      `Editor not connected: ${opened}, exited without reaching the bridge: ${howTheEditorEnded(launched.projectPath, launched.pid)}.`,
       [
         ...instead,
         'editor_output op editor shows what it printed before it went',
@@ -20757,17 +20779,26 @@ class GodotServer {
       !(await endedAsItStarted({
         pid: dead.pid,
         output: editorLogPath(dead.projectPath),
-        until: Math.min(deadline, Date.now() + EDITOR_EXIT_WAIT_MS),
-        exitCode: () => readEditorExit(dead.projectPath),
+        until: exitNoteWaitEnd(deadline),
+        exitCode: () => readEditorExit(dead.projectPath, dead.pid),
       }))
     ) {
       return null;
     }
-    await delay(START_RETRY_MS * 2 ** (starts - 1));
+    // Too little time left for the wait and an open is the call's answer, with the status.
+    const backoff = START_RETRY_MS * 2 ** (starts - 1);
+    if (Date.now() + backoff + FRESH_EDITOR_OPEN_MS > deadline) {
+      return null;
+    }
+    await delay(backoff);
     return await inTurnToOpen(dead.projectPath, async () => {
       const now = this.launchedEditor;
       if (now?.pid !== dead.pid || this.godotBridge.isConnected()) {
         return now;
+      }
+      // A turn that came after the deadline opens nothing the call would wait for.
+      if (Date.now() + FRESH_EDITOR_OPEN_MS > deadline) {
+        return null;
       }
       const arriving = await this.editorsNotYetConnected(dead.projectPath);
       if (

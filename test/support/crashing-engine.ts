@@ -56,11 +56,14 @@ public static class CrashingEngine {
     }
   }
   static void Banner(string[] args, string banner) {
-    if (Env("GDH_SILENT") != "") { return; }
+    string log = Arg(args, "--log-file");
+    if (Env("GDH_SILENT") != "") {
+      if (log != "") { File.WriteAllText(log, ""); }
+      return;
+    }
     string said = Env("GDH_BLANK") != "" ? "" : banner;
     Console.Out.Write(said + "\\n");
     Console.Out.Flush();
-    string log = Arg(args, "--log-file");
     if (log != "") { File.AppendAllText(log, said + "\\n"); }
     if (Env("GDH_CHATTY") != "") {
       Console.Out.Write("ready\\n");

@@ -123,6 +123,7 @@ import {
   bursts,
   clearEditorLog,
   editorConsole,
+  editorExitPath,
   editorHelperOutputPath,
   editorLogPath,
   readEditorLogNote,
@@ -171,6 +172,7 @@ import {
   crashedAtStart,
   ENGINE_STARTS,
   type EngineRun,
+  exitCodeText,
   howItEnded,
   runEngine,
   startedUntilItRuns,
@@ -18748,7 +18750,7 @@ async function callWaitsForTheEditorThatArrives(run: AwaitedEditorRun): Promise<
   assert.notEqual(
     get(answered.result, 'isError'),
     true,
-    `the call made before the editor arrived waits for it: ${textOf(answered)}\nthe editor ${howTheEditorEnded(project)}; its console:\n${
+    `the call made before the editor arrived waits for it: ${textOf(answered)}\nthe editor ${howTheEditorEnded(project, readEditorLogNote(project)?.pid ?? run.pid)}; its console:\n${
       existsSync(editorLogPath(project))
         ? readFileSync(editorLogPath(project), 'utf8').slice(-2000)
         : '(none)'
@@ -43542,14 +43544,20 @@ async function testAQuietStartAnswersAsSoonAsAChattyOne(): Promise<void> {
 async function aCallWaitingOnAStandInEditor(
   scratch: string,
   env: Record<string, string>,
+  asked = true,
 ): Promise<{
   answer: string;
+  /** How long the first call took, in milliseconds. */
+  tookMs: number;
   opened: number;
   project: string;
   marker: string;
+  port: number;
+  server: ServerProcess;
   again: () => Promise<string>;
   stop: () => Promise<void>;
 }> {
+  const port = await reservePort();
   const project = join(scratch, 'project');
   const marker = join(scratch, 'marker');
   mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
@@ -43561,7 +43569,7 @@ async function aCallWaitingOnAStandInEditor(
     env: {
       GODOT_PATH: await crashingEngine(),
       GDHARNESS_PROJECT: project,
-      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
       GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '4000',
       GDH_CRASH_MARKER: marker,
@@ -43583,11 +43591,16 @@ async function aCallWaitingOnAStandInEditor(
     textOf(
       await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'rebind' } }, 60_000),
     ) ?? '';
+  const began = performance.now();
+  const answer = asked ? await rebind() : '';
   return {
-    answer: await rebind(),
+    answer,
+    tookMs: performance.now() - began,
     opened: asNumber(get(opened, 'pid'), 'pid'),
     project,
     marker,
+    port,
+    server,
     again: rebind,
     stop: async () => {
       await server.stop();
@@ -43655,7 +43668,11 @@ async function testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain(): 
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-again-'));
   const met = new MetProcesses();
   try {
-    const waited = await aCallWaitingOnAStandInEditor(scratch, { GDH_HOLD: '1' });
+    // A deadline with room for the wait, the backoff and the open the retry needs.
+    const waited = await aCallWaitingOnAStandInEditor(scratch, {
+      GDH_HOLD: '1',
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '8000',
+    });
     try {
       const lives = readEditorLogNote(waited.project)?.pid;
       assert.ok(lives !== undefined, 'the second editor is the one the console names');
@@ -43677,6 +43694,153 @@ async function testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain(): 
   } finally {
     await met.end();
     sweep(scratch);
+  }
+}
+
+/**
+ * An editor that connected and then went is not said to have exited before it connected: the
+ * refusal says it connected and has since exited, with its status.
+ */
+async function testAnEditorThatConnectedAndWentIsNotSaidToHaveGoneBeforeConnecting(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-connected-'));
+  // The stand-in holds a start whose marker exists, so it stays up until it is ended here.
+  writeFileSync(join(scratch, 'marker'), '');
+  const met = new MetProcesses();
+  let socket: WebSocket | null = null;
+  try {
+    const waited = await aCallWaitingOnAStandInEditor(scratch, { GDH_HOLD: '1' }, false);
+    try {
+      await met.meet(waited.opened);
+      socket = new WebSocket(`ws://127.0.0.1:${waited.port}/godot`);
+      const dialled = socket;
+      await new Promise<void>((settle, reject) => {
+        dialled.once('open', () => {
+          settle();
+        });
+        dialled.once('error', reject);
+      });
+      socket.send(JSON.stringify(greeting(waited.project, { editor_pid: waited.opened })));
+      const connected = async (): Promise<unknown> =>
+        get(
+          parseTextContent(
+            await waited.server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          ),
+          'editor',
+          'connected',
+        );
+      for (let waits = 0; waits < 100 && (await connected()) !== true; waits += 1) {
+        await delay(100);
+      }
+      assert.equal(await connected(), true, 'the editor connected');
+      process.kill(waited.opened);
+      socket.close();
+      for (let waits = 0; waits < 100 && (await connected()) !== false; waits += 1) {
+        await delay(100);
+      }
+      const refused = await waited.again();
+      assert.match(
+        refused,
+        /^Editor not connected: no Godot editor .* has reached this server\. The editor this server opened on .*, pid \d+, connected and has since exited: exit code /,
+        refused,
+      );
+      assert.doesNotMatch(refused, /before it connected/, refused);
+    } finally {
+      socket?.close();
+      await waited.stop();
+    }
+  } finally {
+    await met.end();
+    sweep(scratch);
+  }
+}
+
+/**
+ * A call that waits for an editor never runs past its deadline by more than the slack. A start race
+ * death with too little time left for a fresh open gets the refusal with the status, at the deadline.
+ *
+ * The slack is 1500 ms: the call reads the process table before its wait begins, which takes a few
+ * hundred milliseconds on Windows, then one 250 ms poll for the exit note, and the machine is loaded.
+ */
+async function testAWaitingCallIsNotHeldPastItsDeadlineByARetry(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const deadlineMs = 2500;
+  const slackMs = 1500;
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-deadline-'));
+  try {
+    const waited = await aCallWaitingOnAStandInEditor(scratch, {
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: String(deadlineMs),
+      GDH_CRASH_AFTER_MS: '2000',
+      GDH_HOLD: '1',
+    });
+    try {
+      assert.match(
+        waited.answer,
+        /exited without reaching the bridge: exit code 0xC06D007F, .*, and it printed only its banner\./,
+        'too little time was left to open it again, so the refusal names the status',
+      );
+      assert.equal(startsNoted(waited.marker, '--gdharness-hidden'), 1, 'and it was not opened again');
+      assert.ok(
+        waited.tookMs < deadlineMs + slackMs,
+        `the call took ${Math.round(waited.tookMs)}ms against a deadline of ${deadlineMs}ms`,
+      );
+    } finally {
+      await waited.stop();
+    }
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * The words for an editor's console agree with the rule that starts it again, and an exit note is
+ * read only for the pid it names.
+ */
+function testTheWordsForAnEditorsEndAgreeWithTheRuleAndTheNoteNamesItsPid(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-words-'));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    const status = 0xc0000005;
+    const settle = (console: string | null, pid: number, noted: string | null): [string, boolean] => {
+      rmSync(editorLogPath(project), { force: true });
+      rmSync(editorExitPath(project), { force: true });
+      if (console !== null) {
+        writeFileSync(editorLogPath(project), console);
+      }
+      if (noted !== null) {
+        writeFileSync(editorExitPath(project), noted);
+      }
+      const printed = console === null ? [] : linesAsPrinted(console);
+      return [howTheEditorEnded(project, pid), diedAsItStarted(status, printed)];
+    };
+    assert.deepEqual(
+      [settle('\n\n', 7, `7 ${status}`), settle('', 7, `7 ${status}`), settle(null, 7, `7 ${status}`)],
+      [
+        [`${exitCodeText(status)}, and it printed only blank lines`, false],
+        [`${exitCodeText(status)}, and it printed nothing`, true],
+        [`${exitCodeText(status)}, and it wrote no console`, true],
+      ],
+      'blank lines are output to the rule and to the words, and an empty console is neither',
+    );
+    assert.deepEqual(
+      [
+        settle(ENGINE_BANNER_LINE, 8, '9 3')[0],
+        settle(ENGINE_BANNER_LINE, 8, '8 3')[0],
+        settle(ENGINE_BANNER_LINE, 8, null)[0],
+      ],
+      [
+        'its exit status was not recorded, and it printed only its banner',
+        'exit code 3, and it printed only its banner',
+        'its exit status was not recorded, and it printed only its banner',
+      ],
+      'a note left by another pid is not this editor’s',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -113981,6 +114145,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAQuietStartAnswersAsSoonAsAChattyOne,
   testTheRefusalForAnEditorThatWentNamesItsStatusAndOutput,
   testACallWaitingForAnEditorThatDiesAfterItsBannerOpensItAgain,
+  testAnEditorThatConnectedAndWentIsNotSaidToHaveGoneBeforeConnecting,
+  testAWaitingCallIsNotHeldPastItsDeadlineByARetry,
+  testTheWordsForAnEditorsEndAgreeWithTheRuleAndTheNoteNamesItsPid,
   testTheEndOfAStartedAgainEngineSaysWhatEachStartDid,
   testAnEngineStartedAgainOnlyOnTheStatusAndOutputItWas,
   testABootCheckThatDiesAfterItsBannerIsStartedAgain,
