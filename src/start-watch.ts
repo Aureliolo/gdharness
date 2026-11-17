@@ -11,9 +11,10 @@ import { diedAsItStarted, printedLinesOf } from './start-race.js';
 /**
  * How long a start is watched. The race raises its status within a millisecond, but Windows reports
  * the crash for seconds while the engine's main thread goes on to print its banner. A start that
- * printed past its banner is let go at once, so only a silent start waits this long.
+ * printed past its banner is let go at once, so only a start with nothing or the banner alone waits
+ * this long. It is short because every kept start with that output pays it.
  */
-const START_WATCH_MS = 5000;
+const START_WATCH_MS = 2500;
 
 /** How long the exit is waited for once the process has gone, since the keeper writes it after. */
 const EXIT_WAIT_MS = 10_000;

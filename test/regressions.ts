@@ -43374,7 +43374,7 @@ async function testAHiddenEditorThatDiesAfterItsBannerIsStartedAgain(): Promise<
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Editor"\n');
   Object.assign(process.env, {
     GDH_CRASH_MARKER: marker,
-    GDH_CRASH_WHEN: '--editor',
+    GDH_CRASH_WHEN: '--gdharness-hidden',
     GDH_HOLD: '1',
     GDHARNESS_RUNTIME_DIR: join(scratch, 'runtime'),
   });
@@ -43390,7 +43390,7 @@ async function testAHiddenEditorThatDiesAfterItsBannerIsStartedAgain(): Promise<
     assert.ok(pid !== null, `the editor opens: ${JSON.stringify(opened)}`);
     await met.meet(pid);
     assert.deepEqual(
-      [isAlive(pid), readEditorLogNote(project)?.pid, startsNoted(marker, '--editor')],
+      [isAlive(pid), readEditorLogNote(project)?.pid, startsNoted(marker, '--gdharness-hidden')],
       [true, pid, 2],
       `the answer and the console's note name the editor that lives: ${JSON.stringify(opened)}`,
     );
