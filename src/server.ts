@@ -12739,10 +12739,55 @@ class GodotServer {
       );
     }
     const mine = before.openedByAServer === true && before.projectPath !== undefined;
-    // An editor opened by hand restarts itself and comes back as it was, so hidden was accepted and
-    // the window came back. Not taken over and started here instead: whoever opened it chose the
-    // engine and the arguments, and this server knows neither.
-    if (!mine && args['hidden'] === true) {
+    const refused = mine ? null : this.refuseARestartThatWouldShowAWindow(args, before);
+    if (refused !== null) {
+      return refused;
+    }
+
+    return await this.restartWithTheStartItHad(args, before, mine);
+  }
+
+  /**
+   * The refusal for a restart of an editor this server did not open that would not come back as it
+   * is, or null when the restart may go ahead.
+   *
+   * Such an editor restarts itself, and Godot starts the new one with a few forwarded arguments
+   * only: neither `--headless` nor anything after `--` is among them. So an editor with no window
+   * comes back with one on the desktop of somebody working. Not taken over and started here
+   * instead, because whoever opened it chose the engine and the arguments and this server knows
+   * neither. Whether it has a window is what the editor said in its greeting, the same reading
+   * editor_status reports. Asked for a window with `hidden: false`, the restart goes ahead.
+   */
+  private refuseARestartThatWouldShowAWindow(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+  ): ToolResponse | null {
+    if (args['hidden'] === false) {
+      return null;
+    }
+    const noWindow = before.hidden;
+    const useHidden = 'editor_launch open with hidden: true starts a hidden one this server can restart';
+    if (noWindow === undefined) {
+      return this.createErrorResponse(
+        'This editor was not opened by this server and did not say whether it has a window, so a restart could put one on the desktop. It was left running.',
+        [
+          'hidden: false restarts it and accepts a window',
+          `Close it with editor_launch close, then ${useHidden}`,
+        ],
+      );
+    }
+    if (noWindow) {
+      return this.createErrorResponse(
+        args['hidden'] === true
+          ? 'This editor runs headless or hidden and was not opened by this server. It restarts itself with a window, so it cannot come back hidden.'
+          : 'This editor runs headless or hidden and was not opened by this server. It restarts itself with a window, so the restart would put one on the desktop. It was left running.',
+        [
+          `Close it with editor_launch close, then ${useHidden}`,
+          'hidden: false restarts it and accepts a window',
+        ],
+      );
+    }
+    if (args['hidden'] === true) {
       return this.createErrorResponse(
         'This editor was opened by hand, and restarts itself as it was, so it cannot come back hidden.',
         [
@@ -12751,8 +12796,7 @@ class GodotServer {
         ],
       );
     }
-
-    return await this.restartWithTheStartItHad(args, before, mine);
+    return null;
   }
 
   /** A restart once an editor is connected: how it was started is read first, and a restart that cannot say is refused. */
