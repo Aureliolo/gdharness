@@ -53,6 +53,8 @@ type Containment =
       readonly link?: string;
       /** Whether anything is there through that link, which a link whose target is gone lacks. */
       readonly reached?: boolean;
+      /** Set when the only fault is that the path lies outside the project, which no other refusal sets. */
+      readonly outside?: true;
     };
 
 /**
@@ -506,7 +508,7 @@ export function resolveWithinProject(
   // Refused here rather than left to the containment check below, which would accept a leading
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
-    return { ok: false, reason: absolutePathReason(trimmed, withoutScheme, root) };
+    return { ok: false, reason: absolutePathReason(trimmed, withoutScheme, root), outside: true };
   }
 
   const colonReason = colonRefusal(trimmed, withoutScheme);
@@ -517,7 +519,7 @@ export function resolveWithinProject(
   const absolutePath = resolve(root, withoutScheme);
 
   if (!isWithinRoot(root, absolutePath)) {
-    return { ok: false, reason: `Path '${trimmed}' resolves outside the project directory.` };
+    return { ok: false, reason: `Path '${trimmed}' resolves outside the project directory.`, outside: true };
   }
 
   const relativePath = relative(root, absolutePath).split(sep).join('/');
@@ -541,13 +543,55 @@ export function resolveWithinProject(
   return { ok: true, absolutePath, relativePath };
 }
 
+/** An exported build judged for a start: the file to run and how an answer names it. */
+export type ExportedBuild =
+  | { readonly ok: true; readonly absolutePath: string; readonly shownAs: string }
+  | { readonly ok: false; readonly reason: string };
+
+/** A file outside the project, which must exist. A network or device spelling is refused, as for any path. */
+function fileOutsideTheProject(at: string, given: string): ExportedBuild {
+  if (/^[\\/]{2}/.test(at)) {
+    return {
+      ok: false,
+      reason: `${at} is a network or device path, which is not read here. Give a path on a local disk.`,
+    };
+  }
+  // Windows reads a colon after the drive as a stream or a drive-relative name, never as a file. Elsewhere it is an ordinary character.
+  if (process.platform === 'win32' && at.replace(/^[A-Za-z]:/, '').includes(':')) {
+    return {
+      ok: false,
+      reason: `Path '${given}' contains ':', which Windows reads as a stream or a drive-relative name, not a file to start.`,
+    };
+  }
+  let real: string;
+  try {
+    real = realpathSync.native(at);
+  } catch {
+    return { ok: false, reason: `There is no file at ${at} to start. Give the absolute path of the build.` };
+  }
+  return statSync(real).isFile()
+    ? { ok: true, absolutePath: real, shownAs: real.split(sep).join('/') }
+    : { ok: false, reason: `${at} is not a file, so there is nothing to start.` };
+}
+
 /**
- * An exported build to start, which must already be a file inside the project. The gate has
- * refused a link out of the project, so a link inside it pointing at any program on the machine is
- * never started as the game.
+ * An exported build to start: a file inside the project, judged as every file inside it is, or an
+ * existing file anywhere else, named by its absolute path or relative to the project. A path the
+ * project's own rule refuses only for lying outside the project is taken when the file is there.
  */
-export function exportedBuild(projectPath: string, candidatePath: string): Containment {
-  const found = resolveWithinProject(projectPath, candidatePath);
+export function exportedBuild(projectPath: string, candidatePath: string): ExportedBuild {
+  const trimmed = candidatePath.trim();
+  const found = resolveWithinProject(projectPath, trimmed);
+  const at = resolve(projectPath, trimmed);
+  const outside =
+    !found.ok &&
+    found.outside === true &&
+    !trimmed.startsWith(RESOURCE_SCHEME) &&
+    !isWithinRoot(resolve(projectPath), at) &&
+    !(process.platform === 'win32' && /^[\\/](?![\\/])/.test(trimmed));
+  if (outside) {
+    return fileOutsideTheProject(at, trimmed);
+  }
   if (!found.ok) {
     return found;
   }
@@ -560,8 +604,7 @@ export function exportedBuild(projectPath: string, candidatePath: string): Conta
       reason: `There is no ${found.relativePath} in the project to start: export the build first, with project_export run.`,
     };
   }
-  if (!statSync(real).isFile()) {
-    return { ok: false, reason: `${found.relativePath} is not a file, so there is nothing to start.` };
-  }
-  return { ok: true, absolutePath: real, relativePath: found.relativePath };
+  return statSync(real).isFile()
+    ? { ok: true, absolutePath: real, shownAs: found.relativePath }
+    : { ok: false, reason: `${found.relativePath} is not a file, so there is nothing to start.` };
 }

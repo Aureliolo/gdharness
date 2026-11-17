@@ -40591,25 +40591,452 @@ function testAnExportedBuildIsFoundInsideTheProject(): void {
   try {
     mkdirSync(join(project, 'export'), { recursive: true });
     mkdirSync(outside);
-    writeFileSync(join(project, 'export', 'game.exe'), 'a build');
-    writeFileSync(join(outside, 'game.exe'), 'another program');
+    writeFileSync(join(project, 'export', 'game.exe'), 'a build', { mode: 0o755 });
+    writeFileSync(join(outside, 'game.exe'), 'another program', { mode: 0o755 });
     symlinkSync(outside, join(project, 'linked'), 'junction');
 
     const found = exportedBuild(project, 'export/game.exe');
     assert.deepEqual(found, {
       ok: true,
       absolutePath: realpathSync.native(join(project, 'export', 'game.exe')),
-      relativePath: 'export/game.exe',
+      shownAs: 'export/game.exe',
     });
     const reason = (candidate: string): string => {
       const judged = exportedBuild(project, candidate);
       return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
     };
-    assert.match(reason('linked/game.exe'), /leads out of the project through the link res:\/\/linked\//);
     assert.match(reason('export/missing.exe'), /^There is no export\/missing\.exe in the project to start/);
     assert.match(reason('export'), /^export is not a file/);
-    assert.match(reason('../outside/game.exe'), /resolves outside the project directory/);
+    // A link inside the project that leads out of it is refused as for any file there, while a path
+    // climbing out of it names a program outside, as its absolute path does.
+    assert.match(reason('linked/game.exe'), /leads out of the project through the link res:\/\/linked\//);
+    const climbing = exportedBuild(project, '../outside/game.exe');
+    assert.equal(climbing.ok && climbing.absolutePath, realpathSync.native(join(outside, 'game.exe')));
   } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A project is judged as a project wherever it is opened from, and a link inside it that leads out
+ * is refused however the program is spelt: the volume path of the project starts its export, and a
+ * link to a share is answered as a link out of the project. Needs the right to make links.
+ */
+function projectsAreJudgedWhereTheyAreOpened(at: {
+  project: string;
+  builds: string;
+  onShare: (path: string) => string;
+}): void {
+  const { project, builds, onShare } = at;
+  const volume = spawnSyncHidden('mountvol', [project.slice(0, 2), '/L'], { encoding: 'utf8' });
+  const named = /\\\\\?\\Volume\{[^}]+\}\\/.exec(volume.stdout)?.[0];
+  if (named !== undefined) {
+    const opened = exportedBuild(`${named}${project.slice(3)}`, 'export/game.exe');
+    assert.equal(opened.ok && opened.shownAs, 'export/game.exe', JSON.stringify(opened));
+  }
+  try {
+    symlinkSync(onShare(builds), join(project, 'netlink-in'), 'dir');
+  } catch {
+    return;
+  }
+  const plain = join(project, 'netlink-in', 'game.exe');
+  for (const spelling of [plain, `\\\\?\\${plain}`, 'res://netlink-in/game.exe', 'netlink-in/game.exe']) {
+    const judged = exportedBuild(project, spelling);
+    assert.ok(!judged.ok, `${spelling}: ${JSON.stringify(judged)}`);
+    assert.match(judged.reason, /leads out of the project through the link res:\/\/netlink-in\//, spelling);
+  }
+}
+
+/** How a Windows path is judged by its spelling alone. */
+function windowsProgramPathsAreJudged(at: { project: string; builds: string; there: string }): void {
+  const { project, builds, there } = at;
+  const reason = (candidate: string, folder = project): string => {
+    const judged = exportedBuild(folder, candidate);
+    return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
+  };
+  // A rooted path with no drive is the project's when it lands inside it, and is refused with the
+  // project's own suggestion when it does not, never looked up on the server's current drive.
+  const rooted = reason('/export/game.exe');
+  assert.match(rooted, /^Path '\/export\/game\.exe' is absolute and outside the project/, rooted);
+  assert.match(rooted, /such as 'export\/game\.exe'/, rooted);
+  assert.match(reason('\\export\\game.exe'), /such as 'export\/game\.exe'/);
+  // A path with no drive resolves on the drive of the working directory, so this runs from the
+  // project's own drive.
+  const startedIn = process.cwd();
+  process.chdir(project);
+  try {
+    for (const inside of [project.slice(2).replaceAll('\\', '/'), project.slice(2)]) {
+      const own = exportedBuild(project, `${inside}/export/game.exe`);
+      assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
+    }
+  } finally {
+    process.chdir(startedIn);
+  }
+  assert.match(reason(`${there}:inner.exe`), /contains ':'/);
+  const onShare = (path: string): string => `\\\\localhost\\${path.replace(':', '$')}`;
+  for (const form of [
+    onShare(there),
+    `\\\\?\\UNC\\localhost\\${there.replace(':', '$')}`,
+    `\\\\.\\UNC\\localhost\\${there.replace(':', '$')}`,
+    `\\\\?\\GLOBALROOT\\Device\\Mup\\localhost\\${there.replace(':', '$')}`,
+    `\\\\.\\GLOBALROOT\\Device\\Mup\\localhost\\${there.replace(':', '$')}`,
+  ]) {
+    assert.match(reason(form), /is a network or device path/, form);
+  }
+  for (const form of [`\\\\?\\${there}`, `\\\\.\\${there}`]) {
+    assert.match(reason(form), /is a network or device path/, form);
+  }
+  for (const resource of ['res://../builds/game.exe', 'res:///scratch/game.exe', `res://${there}`]) {
+    const refused = reason(resource);
+    assert.match(
+      refused,
+      /^Path 'res:\/\/[^']*' (resolves outside|is absolute and outside|contains ':')/,
+      refused,
+    );
+  }
+  const shared = onShare(project);
+  if (existsSync(shared)) {
+    const own = exportedBuild(shared, 'export/game.exe');
+    assert.equal(own.ok && own.shownAs, 'export/game.exe', JSON.stringify(own));
+    const resource = exportedBuild(shared, 'res://export/game.exe');
+    assert.equal(resource.ok && resource.shownAs, 'export/game.exe', JSON.stringify(resource));
+  }
+  projectsAreJudgedWhereTheyAreOpened({ project, builds, onShare });
+}
+
+/**
+ * An executable names a program to run, so one kept outside the project is taken, as one inside is.
+ * A path that is not there, a folder and a file the platform cannot run are refused by what is
+ * wrong with them, never by the rule for files inside the project.
+ */
+function testAnExecutableOutsideTheProjectIsJudgedAsAProgram(): void {
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-outside-'));
+  const project = join(sandbox, 'project');
+  const builds = join(sandbox, 'builds');
+  try {
+    mkdirSync(join(project, 'export'), { recursive: true });
+    mkdirSync(join(builds, 'folder'), { recursive: true });
+    const program = process.platform === 'win32' ? 'game.exe' : 'game';
+    const there = join(builds, program);
+    writeFileSync(there, 'a build', { mode: 0o755 });
+    writeFileSync(join(project, 'export', program), 'a build', { mode: 0o755 });
+    writeFileSync(join(builds, 'notes.txt'), 'text', { mode: 0o644 });
+    writeFileSync(join(project, 'export', `${program}.bin`), 'data', { mode: 0o644 });
+
+    const real = realpathSync.native(there);
+    assert.deepEqual(exportedBuild(project, there), {
+      ok: true,
+      absolutePath: real,
+      shownAs: real.split(sep).join('/'),
+    });
+    assert.deepEqual(exportedBuild(project, `export/${program}`), {
+      ok: true,
+      absolutePath: realpathSync.native(join(project, 'export', program)),
+      shownAs: `export/${program}`,
+    });
+    const reason = (candidate: string): string => {
+      const judged = exportedBuild(project, candidate);
+      return judged.ok ? `accepted ${judged.absolutePath}` : judged.reason;
+    };
+    const missing = reason(join(builds, 'missing', program));
+    assert.match(missing, /^There is no file at .* to start\./, missing);
+    const folder = reason(join(builds, 'folder'));
+    assert.match(folder, /is not a file, so there is nothing to start\./, folder);
+    for (const refused of [missing, folder]) {
+      assert.doesNotMatch(refused, /outside the project/, refused);
+    }
+    // Any existing file is a build to start, inside the project or outside it: whether it can run
+    // is the start's to report.
+    const notes = exportedBuild(project, join(builds, 'notes.txt'));
+    assert.equal(notes.ok && notes.absolutePath, realpathSync.native(join(builds, 'notes.txt')));
+    const climbing = exportedBuild(project, `../builds/${program}`);
+    assert.equal(climbing.ok && climbing.absolutePath, real, JSON.stringify(climbing));
+    assert.match(reason('../builds/missing'), /^There is no file at .*builds[\\/]missing to start/);
+    // Each guard of "outside": a res:// path is the project's even when it climbs, and the project's
+    // own directory and its named streams are answered as the project answers them.
+    assert.match(
+      reason('res://../../builds/game.exe'),
+      /^Path 'res:\/\/\.\.\/\.\.\/builds\/game\.exe' resolves outside/,
+    );
+    assert.match(reason('.'), /is the project directory itself/);
+    assert.equal(exportedBuild(project, join(project, 'export', `${program}.bin`)).ok, true);
+    assert.match(reason(`${join(project, 'export', program)}:inner.exe`), /contains ':'/);
+    // Only the refusal for lying outside is lifted. Every other one keeps the project's text and cause.
+    for (const spelling of [
+      'uid://abc',
+      'user://save.dat',
+      'http://example.com/game.exe',
+      'file:///builds/game.exe',
+      'RES://export/game.exe',
+      'res:/../../builds/game.exe',
+      'export/game.exe:stream/../..',
+      'X:../builds',
+      'C:Windows\\System32\\whoami.exe',
+      'C:game.exe',
+      'C:',
+      'export/game\0.exe',
+    ]) {
+      const refusal = resolveWithinProject(project, spelling);
+      assert.ok(!refusal.ok, spelling);
+      assert.equal(reason(spelling), refusal.reason, spelling);
+    }
+    if (process.platform === 'win32') {
+      // Windows opens a colon a ".." step cancels as the folder it leaves, so it names no stream.
+      const cancelled = exportedBuild(project, `${builds}\\x:y\\..\\${program}`);
+      assert.equal(cancelled.ok && cancelled.absolutePath, real, JSON.stringify(cancelled));
+    } else {
+      // A colon is an ordinary character elsewhere, and a backslash is part of a relative name.
+      mkdirSync(join(builds, 'night:ly'));
+      writeFileSync(join(builds, 'night:ly', program), 'a build', { mode: 0o755 });
+      const colonDir = exportedBuild(project, join(builds, 'night:ly', program));
+      assert.equal(
+        colonDir.ok && colonDir.absolutePath,
+        realpathSync.native(join(builds, 'night:ly', program)),
+      );
+      const backslashed = resolveWithinProject(project, '\\export\\missing');
+      assert.ok(!backslashed.ok);
+      assert.equal(reason('\\export\\missing'), backslashed.reason);
+    }
+    assert.match(reason('C:game.exe'), /contains ':'/);
+    assert.match(reason('export/game\0.exe'), /null byte/);
+
+    if (process.platform === 'win32') {
+      windowsProgramPathsAreJudged({ project, builds, there });
+    }
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * An exported build kept in a folder beside the project is started and stopped as one inside it is.
+ * It is a copy of Node, which starts no window and writes where it is told.
+ */
+async function testAnExportedBuildOutsideTheProjectIsStarted(): Promise<void> {
+  const node = spawnSyncHidden('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
+  const nodePath = node.status === 0 ? node.stdout.trim() : '';
+  if (nodePath === '' || process.platform !== 'win32') {
+    console.log('outside exported build regression skipped (needs a copy of node as a Windows build)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-beside-'));
+  const project = join(sandbox, 'project');
+  const builds = join(sandbox, 'builds');
+  const runtimeDir = join(sandbox, 'runtime');
+  mkdirSync(project);
+  mkdirSync(builds);
+  mkdirSync(runtimeDir);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Beside"\n');
+  const build = join(builds, 'game.exe');
+  cpSync(nodePath, build);
+  const script = join(builds, 'game-stand-in.js');
+  writeFileSync(script, 'setInterval(() => {}, 1000);\n');
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir, GODOT_PATH: '' },
+  });
+  const met = new MetProcesses();
+  try {
+    await server.initialize('regression-test');
+    const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, ...args } },
+        60_000,
+      );
+    const refused = textOf(await call({ op: 'start', executable: join(builds, 'missing.exe') })) ?? '';
+    assert.match(refused, /^There is no file at .* to start\./, refused);
+    assert.doesNotMatch(refused, /scenes\/main\.tscn|Point projectPath/, refused);
+    const answered = await call({
+      op: 'start',
+      executable: build,
+      headless: false,
+      silent: false,
+      visible: true,
+      args: [script],
+    });
+    const started = parseTextContent(answered);
+    const shown = textOf(answered) ?? JSON.stringify(answered);
+    const pid = asNumber(get(started, 'pid'), shown);
+    await met.meet(pid);
+    assert.equal(get(started, 'executable'), realpathSync.native(build).split(sep).join('/'), shown);
+    assert.ok(alive(pid), 'it runs until stopped');
+    const stopped = parseTextContent(await call({ op: 'stop' }));
+    assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+    assert.equal(await met.gone(pid, 15_000), true, `stop ended it: ${JSON.stringify(stopped)}`);
+  } finally {
+    await met.end();
+    await server.stop();
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A build kept outside the project, started by a server that has since gone, is still its run to the
+ * server that took the project over: it reads as running, and a stop ends it. An export runs with no
+ * `--path`, so the run is told by its absolute path and its start, not by the project.
+ */
+async function testAnOutsideBuildStartedByAnEarlierServerIsStoppedByTheNext(): Promise<void> {
+  await anOutsideBuildAcrossAReconnect('next');
+}
+
+/**
+ * The same with the keeper gone too, so the stop has only the process to go on: it ends the build by
+ * signal, once the run's note, its absolute path and its start show the process to be the build.
+ * Asked of the server that started it as well, whose own record of the run says the same.
+ */
+async function testAnOutsideBuildWhoseKeeperIsGoneIsStoppedBySignal(): Promise<void> {
+  await anOutsideBuildAcrossAReconnect('keeperGone');
+  await anOutsideBuildAcrossAReconnect('sameServer');
+}
+
+/** Starts an outside build from one server and stops it through the next or the same, with or without its keeper. */
+async function anOutsideBuildAcrossAReconnect(mode: 'next' | 'keeperGone' | 'sameServer'): Promise<void> {
+  const node = spawnSyncHidden('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
+  const nodePath = node.status === 0 ? node.stdout.trim() : '';
+  if (nodePath === '' || process.platform !== 'win32') {
+    console.log(
+      'outside exported build reconnect regression skipped (needs a copy of node as a Windows build)',
+    );
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-reconnect-'));
+  const project = join(sandbox, 'project');
+  const builds = join(sandbox, 'builds');
+  const runtimeDir = join(sandbox, 'runtime');
+  mkdirSync(project);
+  mkdirSync(builds);
+  mkdirSync(runtimeDir);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Beside"\n');
+  const build = join(builds, 'game.exe');
+  cpSync(nodePath, build);
+  const script = join(builds, 'game-stand-in.js');
+  writeFileSync(script, 'setInterval(() => {}, 1000);\n');
+  const env = { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir, GODOT_PATH: '' };
+  const callOn =
+    (server: ServerProcess) =>
+    async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+      await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 60_000);
+  const met = new MetProcesses();
+  let pid = 0;
+  const first = new ServerProcess({ env });
+  let next: ServerProcess | null = null;
+  try {
+    await first.initialize('regression-test');
+    const started = parseTextContent(
+      await callOn(first)('editor_run', {
+        op: 'start',
+        executable: build,
+        headless: false,
+        silent: false,
+        visible: true,
+        args: [script],
+      }),
+    );
+    pid = asNumber(get(started, 'pid'), JSON.stringify(started));
+    await met.meet(pid);
+    if (mode !== 'sameServer') {
+      await first.stop();
+    }
+    assert.ok(alive(pid), 'the build outlives the server that started it');
+    if (mode !== 'next') {
+      const keeperPid = readRunRecord(project, [runtimeDir])?.keeperPid ?? 0;
+      assert.ok(keeperPid > 0 && alive(keeperPid), 'the run has a keeper to end');
+      process.kill(keeperPid);
+      for (let waited = 0; waited < 15_000 && alive(keeperPid); waited += 100) {
+        await delay(100);
+      }
+      assert.ok(!alive(keeperPid), 'the keeper is gone');
+      assert.ok(alive(pid), 'and the build is still going');
+    }
+
+    next = mode === 'sameServer' ? first : new ServerProcess({ env });
+    if (mode !== 'sameServer') {
+      await next.initialize('regression-test');
+    }
+    const output = parseTextContent(await callOn(next)('editor_output', {}));
+    assert.equal(
+      get(output, 'running'),
+      true,
+      `the next server finds the build running: ${JSON.stringify(output)}`,
+    );
+    const stopped = parseTextContent(await callOn(next)('editor_run', { op: 'stop' }));
+    assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
+    assert.equal(
+      get(stopped, 'endedThrough'),
+      mode === 'next' ? 'keeper' : 'signal',
+      JSON.stringify(stopped),
+    );
+    assert.equal(await met.gone(pid, 15_000), true, `the stop ended it: ${JSON.stringify(stopped)}`);
+  } finally {
+    await met.end();
+    await first.stop();
+    await next?.stop();
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A build inside the project starts on a machine where no process can be asked about its path:
+ * PowerShell is not on the server's PATH, and nothing is spawned to judge the path.
+ */
+async function testAnExportedBuildInsideTheProjectStartsWithNoPowerShell(): Promise<void> {
+  const node = spawnSyncHidden('node', ['-p', 'process.execPath'], { encoding: 'utf8' });
+  const nodePath = node.status === 0 ? node.stdout.trim() : '';
+  if (nodePath === '' || process.platform !== 'win32') {
+    console.log('no-PowerShell regression skipped (needs a copy of node as a Windows build)');
+    return;
+  }
+  const sandbox = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exported-nops-'));
+  const project = join(sandbox, 'project');
+  const runtimeDir = join(sandbox, 'runtime');
+  mkdirSync(join(project, 'export'), { recursive: true });
+  mkdirSync(runtimeDir);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Inside"\n');
+  cpSync(nodePath, join(project, 'export', 'game.exe'));
+  writeFileSync(join(project, 'export', 'game-stand-in.js'), 'setInterval(() => {}, 1000);\n');
+  const system = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32');
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GODOT_PATH: '',
+      Path: [dirname(nodePath), system].join(delimiter),
+      PATH: [dirname(nodePath), system].join(delimiter),
+    },
+  });
+  const met = new MetProcesses();
+  try {
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: {
+            projectPath: project,
+            op: 'start',
+            executable: 'export/game.exe',
+            headless: false,
+            silent: false,
+            visible: true,
+            args: [join(project, 'export', 'game-stand-in.js')],
+          },
+        },
+        60_000,
+      ),
+    );
+    const pid = asNumber(get(started, 'pid'), JSON.stringify(started));
+    await met.meet(pid);
+    assert.equal(get(started, 'executable'), 'export/game.exe', JSON.stringify(started));
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { projectPath: project, op: 'stop' } },
+      60_000,
+    );
+    assert.equal(await met.gone(pid, 15_000), true, 'stop ended it');
+  } finally {
+    await met.end();
+    await server.stop();
     sweep(sandbox);
   }
 }
@@ -109893,6 +110320,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAServerAnswersBeforeItsEngineDoes,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
+  testAnExecutableOutsideTheProjectIsJudgedAsAProgram,
+  testAnExportedBuildOutsideTheProjectIsStarted,
+  testAnOutsideBuildStartedByAnEarlierServerIsStoppedByTheNext,
+  testAnOutsideBuildWhoseKeeperIsGoneIsStoppedBySignal,
+  testAnExportedBuildInsideTheProjectStartsWithNoPowerShell,
   testLibraryCopiesAreMovedAsideAndSwept,
   testAHeldLibraryCopyIsSetAsideAndSweptLater,
   testNotRunIsPutDownToFailFastOnlyWhenSet,

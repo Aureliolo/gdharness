@@ -79,6 +79,11 @@ export interface RunRecord {
    * is the game's debugger and outlives the server, so any later server reads the profile from here.
    */
   readonly profile?: string;
+  /**
+   * True for an exported build. It runs with no `--path`, so the project is not on its command line
+   * and the run is told by its absolute `command` and its start instead.
+   */
+  readonly exported?: true;
   readonly arguments: readonly string[];
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
@@ -479,8 +484,9 @@ function recordAt(path: string): RunRecord | null {
 /** The fields of a note that say who served the run, each present only when it holds something. */
 function namedFields(
   fields: Record<string, unknown>,
-): Pick<RunRecord, 'servedBy' | 'keeper' | 'keeperPid' | 'profile'> {
+): Pick<RunRecord, 'servedBy' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
   return {
+    ...(fields['exported'] === true ? { exported: true as const } : {}),
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
       : {}),
@@ -872,9 +878,28 @@ export function whyNotTheRun(
       ? null
       : `the operating system named only its executable and not its command line (${running.unread ?? 'no reason given'}), which is not enough to signal it on`;
   }
-  return namesTheProject(running.text, record.projectPath)
+  return namesTheRun(running.text, record)
     ? null
     : `that process's command line does not name ${record.projectPath}`;
+}
+
+/** Whether [param commandLine] names the project the record was started for, or is the build it was started with. */
+function namesTheRun(commandLine: string, record: RunRecord): boolean {
+  return namesTheProject(commandLine, record.projectPath) || isTheRecordedBuild(commandLine, record);
+}
+
+/**
+ * Whether [param commandLine] is the exported build the record was started with. An export runs
+ * with no `--path`, so the project is no part of its command line, and an engine run always has
+ * one. The build is told by its absolute path, which the start time compared before this ties to
+ * the one run.
+ */
+function isTheRecordedBuild(commandLine: string, record: RunRecord): boolean {
+  return (
+    record.exported === true &&
+    readCommandLine(commandLine).projectPath === null &&
+    spelt(commandLine).includes(spelt(record.command))
+  );
 }
 
 /** [param path] with forward slashes, no trailing slash, and lower case where the file system ignores case. */
