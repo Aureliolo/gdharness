@@ -10,8 +10,11 @@ import {
   fstatSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
+  renameSync,
   rmSync,
+  writeFileSync,
   writeSync,
 } from 'node:fs';
 import { availableParallelism, freemem, totalmem } from 'node:os';
@@ -329,22 +332,50 @@ export async function macMemoryLevel(): Promise<number | null> {
   }
 }
 
-/** [param run] over every one of [param items], [param at] at most at a time, answered in their order. */
+/**
+ * [param run] over every one of [param items], [param at] at most at a time, answered in their
+ * order. It is given its own lane's number, counting from 0.
+ */
 export async function inTurns<T, R>(
   items: readonly T[],
   at: number,
-  run: (item: T, index: number) => Promise<R>,
+  run: (item: T, index: number, lane: number) => Promise<R>,
 ): Promise<R[]> {
   const answers: R[] = [];
   // One iterator for every lane, so each item is taken by whichever lane is free first, and once.
   const queue = items.entries();
-  const lane = async (): Promise<void> => {
+  const lane = async (_: unknown, number: number): Promise<void> => {
     for (const [index, item] of queue) {
-      answers[index] = await run(item, index);
+      answers[index] = await run(item, index, number);
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(at, items.length)) }, lane));
   return answers;
+}
+
+/** The file in an engine's run folder that names its lane and its own pid, which is its job's number too. */
+export const LANE_FILE = 'lane.json';
+
+/**
+ * Writes [param lane] and [param pid] to the lane file in [param directory], under a temporary name
+ * and then renamed, so a reader never sees half of it.
+ */
+export function writeLaneFile(directory: string, lane: number, pid: number): void {
+  const file = join(directory, LANE_FILE);
+  const temporary = `${file}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ lane, pid })}\n`);
+  renameSync(temporary, file);
+}
+
+/**
+ * Gives [param to] the lane file of [param from], for the folder of a further share an engine is
+ * handed: the engine and its lane are the same one, so the file says the same.
+ */
+export function carryLaneFile(from: string, to: string): void {
+  const said = readFileSync(join(from, LANE_FILE), 'utf8');
+  const temporary = join(to, `${LANE_FILE}.tmp`);
+  writeFileSync(temporary, said);
+  renameSync(temporary, join(to, LANE_FILE));
 }
 
 /** What starting an engine needs, the same for every engine of a run. */
@@ -359,6 +390,8 @@ export interface EngineLaunch {
   readonly cores: number | null;
   /** Where readings of the machine and the engines come from, for a machine held free or crowded. */
   readonly sample?: () => Promise<Sample>;
+  /** The lane the engine runs in, counting from 0, which its `lane.json` names. Lane 0 where unset. */
+  readonly lane?: number;
 }
 
 /**
@@ -411,6 +444,9 @@ export function endingWithRunner(
  *
  * [param holds] is told each reading of what the engine holds.
  *
+ * The lane the engine runs in is [code]launch.lane[/code], written with its pid to `lane.json` in
+ * [param directory] before the engine runs.
+ *
  * An engine that dies as it starts, with a Windows exception status before printing a line (or past
  * its banner, for 0xC06D007F), is started again, as a headless call's is: a suite run failed on
  * 0xC06D007F with every suite unrun.
@@ -454,9 +490,15 @@ async function engineWatchedOnce(
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
   const output = openSync(log, 'w');
-  const started = await startEngine({ launch, args, directory, output, env });
+  const lane = launch.lane ?? 0;
+  const started = await startEngine({ launch, args, directory, lane, output, env });
   if (started.kind === 'refused') {
     return started.end;
+  }
+  // Windows has the helper write it before the engine runs. Elsewhere the pid is known as soon as
+  // the start returns.
+  if (process.platform !== 'win32' && started.child.pid !== undefined) {
+    writeLaneFile(directory, lane, started.child.pid);
   }
   const { child, stop, piped } = started;
   launch.running.add(stop);
@@ -571,6 +613,7 @@ interface EngineStart {
   readonly launch: EngineLaunch;
   readonly args: readonly string[];
   readonly directory: string;
+  readonly lane: number;
   readonly output: number;
   readonly env: NodeJS.ProcessEnv;
 }
@@ -593,7 +636,7 @@ async function startEngine(start: EngineStart): Promise<Started> {
 
 /** The engine started through the helper, on a desktop of its own. */
 async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
-  const { launch, args, directory, env } = start;
+  const { launch, args, directory, lane, env } = start;
   const where = 'on a desktop of its own';
   const compiled = await ensureHelperCompiled();
   if (compiled !== null) {
@@ -609,6 +652,7 @@ async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
     scratch: directory,
     stop: join(directory, 'stop'),
     exit: join(directory, 'exit'),
+    lane: { file: join(directory, LANE_FILE), number: lane },
     ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
   };
   // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it

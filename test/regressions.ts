@@ -152,6 +152,7 @@ import {
   openTheEditor,
 } from '../src/editor-open.js';
 import {
+  carryLaneFile,
   endingWithRunner,
   heldRunSaid,
   heldToCores,
@@ -170,6 +171,7 @@ import {
   versionPrinted,
   watchedEngine,
   windowsCommitLeft,
+  writeLaneFile,
 } from '../src/engine-launch.js';
 import {
   projectSelfTypedExports,
@@ -76930,6 +76932,116 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
   }
 }
 
+/** The lane file of an engine's folder, or null where there is none. */
+function laneFileOf(directory: string): { lane: number; pid: number } | null {
+  try {
+    const said: unknown = JSON.parse(readFileSync(join(directory, 'lane.json'), 'utf8'));
+    const lane = get(said, 'lane');
+    const pid = get(said, 'pid');
+    return typeof lane === 'number' && typeof pid === 'number' ? { lane, pid } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A run of two engines gives each engine's folder a lane file naming its lane and its own pid. */
+function testEachEnginesFolderNamesItsLaneAndPid(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('lane file regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-lanes-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-lane-slots-'));
+  try {
+    // Failing suites, since a run that passes removes its logs.
+    const failing = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(2)\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="LaneFiles"\n',
+      'tests/a_test.gd': failing('a'),
+      'tests/b_test.gd': failing('b'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--engines', '2', '--slot-count', '4'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const runs = join(project, '.godot', 'gdharness', 'test-runs');
+    const run = readdirSync(runs).toSorted().at(-1) ?? '';
+    const engines = readdirSync(join(runs, run)).filter((name) => /^engine-\d+$/.test(name));
+    const lanes = engines.map((name) => laneFileOf(join(runs, run, name)));
+    assert.equal(engines.length, 2, `two engines ran: ${engines.join(' ')}`);
+    assert.deepEqual(
+      lanes.map((lane) => lane?.lane ?? -1).toSorted((a, b) => a - b),
+      [0, 1],
+      `each engine's folder names its own lane: ${JSON.stringify(lanes)}`,
+    );
+    const pids = lanes.map((lane) => lane?.pid);
+    assert.ok(
+      pids.every((pid) => typeof pid === 'number' && pid > 0) && pids[0] !== pids[1],
+      `and an engine pid of its own: ${JSON.stringify(lanes)}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
+/** An engine handed a further share keeps its lane there, and a kept log takes its lane file along. */
+function testAHandedShareKeepsItsEnginesLane(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-share-'));
+  try {
+    const first = join(root, 'run', 'engine-0');
+    const share = join(root, 'run', 'engine-3');
+    mkdirSync(first, { recursive: true });
+    mkdirSync(share, { recursive: true });
+    writeLaneFile(first, 1, 4242);
+    assert.deepEqual(laneFileOf(first), { lane: 1, pid: 4242 }, 'the lane and pid are written');
+    assert.equal(existsSync(join(first, 'lane.json.tmp')), false, 'by a rename, leaving no temporary file');
+    carryLaneFile(first, share);
+    assert.deepEqual(
+      laneFileOf(share),
+      { lane: 1, pid: 4242 },
+      "the share's folder names the same lane and engine",
+    );
+    writeFileSync(join(share, 'engine.log'), 'x\n');
+    new RunLogs(join(root, 'run'), join(root, 'kept')).keepOnly(new Set([join(share, 'engine.log')]));
+    assert.deepEqual(
+      laneFileOf(join(root, 'kept', 'engine-3')),
+      { lane: 1, pid: 4242 },
+      'and a log kept beside the main checkout has it too',
+    );
+    assert.deepEqual(laneFileOf(join(root, 'run', 'engine-3')), { lane: 1, pid: 4242 }, 'and in the run');
+    assert.equal(laneFileOf(first), null, 'while a folder whose log was not kept is gone');
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The lane an engine runs in is the one [function inTurns] gave it. */
+async function testInTurnsNamesEachItemsLane(): Promise<void> {
+  const seen: number[] = [];
+  await inTurns([0, 1, 2, 3], 2, async (_item, _index, lane) => {
+    seen.push(lane);
+    await delay(20);
+  });
+  assert.deepEqual(
+    seen.toSorted((a, b) => a - b),
+    [0, 0, 1, 1],
+    'two lanes took two items each',
+  );
+}
+
 /**
  * A run given `--times` deals by that file and records into it, leaving the project's own alone, so a
  * gate keeping times of its own runs never deals by a hand run's.
@@ -116944,6 +117056,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
+  testEachEnginesFolderNamesItsLaneAndPid,
+  testAHandedShareKeepsItsEnginesLane,
+  testInTurnsNamesEachItemsLane,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,

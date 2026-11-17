@@ -19,11 +19,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
+  carryLaneFile,
   coresNamed,
   type EngineLaunch,
   gigabytes,
@@ -31,6 +32,7 @@ import {
   heldRunSaid,
   homeOf,
   KEPT_RUN_DIRECTORIES,
+  LANE_FILE,
   MEMORY_PER_ENGINE,
   MOST_ENGINES,
   memoryAvailable,
@@ -709,11 +711,12 @@ export class RunLogs {
     if (this.kept === null) {
       return;
     }
+    const kept = only === undefined ? undefined : withLaneFiles(only);
     for (const file of readdirSync(this.directory, { recursive: true, encoding: 'utf8' })) {
       if (
-        file.endsWith('.log') &&
+        (file.endsWith('.log') || basename(file) === LANE_FILE) &&
         file.split(sep).length === 2 &&
-        (only === undefined || only.has(join(this.directory, file)))
+        (kept === undefined || kept.has(join(this.directory, file)))
       ) {
         mkdirSync(dirname(join(this.kept, file)), { recursive: true });
         copyFileSync(join(this.directory, file), join(this.kept, file));
@@ -727,11 +730,16 @@ export class RunLogs {
    */
   keepOnly(only: ReadonlySet<string>): void {
     this.keep(only);
-    removeExcept(this.directory, only);
+    removeExcept(this.directory, withLaneFiles(only));
     for (const directory of [this.directory, ...(this.kept === null ? [] : [this.kept])]) {
       writeFileSync(join(directory, SLOW_RUN_MARK), '');
     }
   }
+}
+
+/** [param logs] plus a lane file beside each one, which names the lane and pid that wrote it. */
+function withLaneFiles(logs: ReadonlySet<string>): Set<string> {
+  return new Set([...logs, ...[...logs].map((log) => join(dirname(log), LANE_FILE))]);
 }
 
 /** Removes everything under [param directory] except the files in [param kept] and the folders they are in. */
@@ -2667,7 +2675,7 @@ async function runEngine(
   let end: EngineEnd;
   try {
     end = await watchedEngine(
-      launch,
+      { ...launch, lane: plan.lane },
       lock,
       args,
       directory,
@@ -2741,6 +2749,7 @@ async function handedOn(
   reuse.done(judgedShare(launch, running.share, log, ended.end, '', ended.to));
   const directory = join(launch.runDirectory, `engine-${String(drawn.index)}`);
   mkdirSync(directory, { recursive: true });
+  carryLaneFile(running.share.directory, directory);
   const files = writtenEngineFiles(drawn.plan, directory);
   running.share = {
     plan: drawn.plan,

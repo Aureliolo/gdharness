@@ -109,6 +109,9 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool MoveFileExW(string from, string to, uint flags);
+  const uint ReplaceExisting = 0x1;
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle, uint code);
   [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessAffinityMask(IntPtr process, UIntPtr mask);
@@ -433,7 +436,18 @@ public static class GdharnessDesktop {
     string exitFile = field(8);
     bool endsWithThis = field(9) == "1";
     bool separateErrors = lines.Length > 10 && field(10) == "1";
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, separateErrors);
+    string laneFile = lines.Length > 12 ? field(11) : "";
+    string lane = lines.Length > 12 ? field(12) : "";
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, separateErrors, laneFile, lane);
+  }
+
+  // Written under a temporary name and renamed, so a reader never sees half of it.
+  static void WriteLane(string laneFile, string lane, int processId) {
+    string temporary = laneFile + ".tmp";
+    File.WriteAllText(temporary, "{\\"lane\\": " + lane + ", \\"pid\\": " + processId + "}\\n");
+    if (!MoveFileExW(temporary, laneFile, ReplaceExisting)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "MoveFileExW " + laneFile);
+    }
   }
 
   static void Step(string stepFile, string step) {
@@ -449,7 +463,7 @@ public static class GdharnessDesktop {
   // held its run's folder. Without it the job only counts, so a process meant to outlive whatever
   // started it keeps its lifetime. Nested jobs need Windows 8, and a job that forbids one fails the
   // assignment, which ends the process unrun with the cause.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, bool separateErrors) {
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, bool separateErrors, string laneFile, string lane) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     IntPtr desktopHandle = IntPtr.Zero;
@@ -540,6 +554,14 @@ public static class GdharnessDesktop {
       int error = Marshal.GetLastWin32Error();
       TerminateProcess(started.process, 1);
       throw new Win32Exception(error, "a job for the process named " + jobName);
+    }
+    if (laneFile.Length > 0) {
+      try {
+        WriteLane(laneFile, lane, started.processId);
+      } catch (Exception) {
+        TerminateProcess(started.process, 1);
+        throw;
+      }
     }
     ResumeThread(started.thread);
     File.WriteAllText(pidFile, started.processId.ToString());
@@ -755,6 +777,8 @@ export function throughHelper(
     readonly endsWithHelper?: boolean;
     /** The process's error stream is the helper's own, apart from its output, for a reader that tells them apart. */
     readonly separateErrors?: boolean;
+    /** Where the helper writes the engine's lane and pid before it runs, and the lane's number. */
+    readonly lane?: { readonly file: string; readonly number: number };
   },
   command: string,
   args: readonly string[],
@@ -775,6 +799,8 @@ export function throughHelper(
     files.exit,
     how.endsWithHelper === true ? '1' : '0',
     how.separateErrors === true ? '1' : '0',
+    how.lane?.file ?? '',
+    how.lane === undefined ? '' : String(how.lane.number),
   ];
   writeFileSync(
     files.spec,
@@ -903,6 +929,7 @@ export function spawnOnDesktop(
      */
     readonly outlivesStarter?: boolean;
     readonly separateErrors?: boolean;
+    readonly lane?: { readonly file: string; readonly number: number };
     readonly scratch: string;
     readonly stop?: string;
     readonly exit?: string;
