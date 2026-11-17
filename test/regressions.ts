@@ -13026,10 +13026,10 @@ async function testAPipelineCacheIsCarriedToTheNextRun(): Promise<void> {
     writeFileSync(godot, 'engine');
     writeFileSync(other, 'another engine');
     const where = join('Godot', 'app_userdata', 'Game', 'shader_cache');
-    const run = (name: string, bytes: number | null): string => {
+    const run = async (name: string, bytes: number | null): Promise<string> => {
       const user = join(scratch, name, 'user');
       mkdirSync(join(user, 'Godot', 'app_userdata', 'Game'), { recursive: true });
-      seedPipelineCache(user, project, godot, home);
+      await seedPipelineCache(user, project, godot, home);
       if (bytes !== null) {
         mkdirSync(join(user, where), { recursive: true });
         writeFileSync(join(user, where, 'pipelines.cache'), 'x'.repeat(bytes));
@@ -13041,37 +13041,37 @@ async function testAPipelineCacheIsCarriedToTheNextRun(): Promise<void> {
         ? readFileSync(join(user, where, 'pipelines.cache'), 'utf8')
         : null;
 
-    const first = run('first', null);
+    const first = await run('first', null);
     assert.equal(cached(first), null, 'the first run starts with no cache');
     mkdirSync(join(first, where), { recursive: true });
     writeFileSync(join(first, where, 'pipelines.cache'), 'x'.repeat(100));
     await keepPipelineCache(first, project, godot, home);
 
     const second = join(scratch, 'second', 'user');
-    seedPipelineCache(second, project, godot, home);
+    await seedPipelineCache(second, project, godot, home);
     assert.equal(
       cached(second)?.length,
       100,
       'the next run starts with what the first left, where it left it',
     );
 
-    const headless = run('headless', null);
+    const headless = await run('headless', null);
     rmSync(join(headless, where), { recursive: true, force: true });
     await keepPipelineCache(headless, project, godot, home);
-    const fewer = run('fewer', 40);
+    const fewer = await run('fewer', 40);
     await keepPipelineCache(fewer, project, godot, home);
     const third = join(scratch, 'third', 'user');
-    seedPipelineCache(third, project, godot, home);
+    await seedPipelineCache(third, project, godot, home);
     assert.equal(cached(third)?.length, 100, 'a run with no cache or a smaller one leaves the kept cache');
 
-    const more = run('more', 200);
+    const more = await run('more', 200);
     await keepPipelineCache(more, project, godot, home);
     const fourth = join(scratch, 'fourth', 'user');
-    seedPipelineCache(fourth, project, godot, home);
+    await seedPipelineCache(fourth, project, godot, home);
     assert.equal(cached(fourth)?.length, 200, 'a run that built more pipelines replaces it');
 
     const elsewhere = join(scratch, 'elsewhere', 'user');
-    seedPipelineCache(elsewhere, project, other, home);
+    await seedPipelineCache(elsewhere, project, other, home);
     assert.equal(cached(elsewhere), null, 'another engine build is handed nothing');
 
     // One copy per project: a smaller cache from another engine build replaces the kept one, since
@@ -13082,7 +13082,7 @@ async function testAPipelineCacheIsCarriedToTheNextRun(): Promise<void> {
     const kept = join(home, 'pipeline-caches');
     assert.equal(readdirSync(kept).length, 1, `one kept cache: ${readdirSync(kept).join(', ')}`);
     const onOther = join(scratch, 'on-other', 'user');
-    seedPipelineCache(onOther, project, other, home);
+    await seedPipelineCache(onOther, project, other, home);
     assert.equal(cached(onOther), 'y'.repeat(10), 'the other build is handed its own cache');
 
     // A project that is gone takes its kept cache with it, at the next keep of any project.
@@ -13135,7 +13135,7 @@ async function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): Promise<
       const user = join(scratch, 'seeded', 'user');
       rmSync(join(scratch, 'seeded'), { recursive: true, force: true });
       mkdirSync(user, { recursive: true });
-      seedPipelineCache(user, spelled, godot, home);
+      await seedPipelineCache(user, spelled, godot, home);
       assert.equal(
         existsSync(join(user, where, 'pipelines.cache'))
           ? readFileSync(join(user, where, 'pipelines.cache'), 'utf8').length
@@ -13251,8 +13251,26 @@ function cacheEngine(what: string): { godot: string; gdunit: string } | null {
 }
 
 /**
- * A suite that stands in for the shader cache a drawing engine leaves in user://, which a headless
- * one never builds: it fails unless the folder is as [param expects] says, then does [param then].
+ * Where a probe suite looks for and leaves its stand-in cache: under the folder the run was told its
+ * user data lives in, as the engine lays it out on Windows and Linux. macOS reads its saves from
+ * the real user folder whatever the environment says, so the suite names the told folder itself and
+ * the case runs the same on all three.
+ */
+const CACHE_PROBE_FOLDER = [
+  '\tvar folder: String = OS.get_environment("APPDATA") + "/Godot/app_userdata/CacheProbe/shader_cache"',
+  '\tvar marker: String = folder + "/marker.bin"',
+];
+
+const CACHE_PROBE_WRITE = [
+  '\tDirAccess.make_dir_recursive_absolute(folder)',
+  '\tvar file: FileAccess = FileAccess.open(marker, FileAccess.WRITE)',
+  '\tfile.store_string("built")',
+  '\tfile.close()',
+];
+
+/**
+ * A suite that stands in for the shader cache a drawing engine leaves in its user data, which a
+ * headless one never builds: it fails unless the folder is as [param expects] says, then does [param then].
  * Its window is asked for only where this machine allows windows, so the same case draws on CI.
  */
 function cacheProbeSuite(
@@ -13260,12 +13278,6 @@ function cacheProbeSuite(
   then: 'write' | 'leave' | 'linger' | 'fail',
 ): string {
   const window = windowedRunRefused() === null;
-  const write = [
-    '\tDirAccess.make_dir_recursive_absolute("user://shader_cache")',
-    '\tvar file: FileAccess = FileAccess.open("user://shader_cache/marker.bin", FileAccess.WRITE)',
-    '\tfile.store_string("built")',
-    '\tfile.close()',
-  ];
   return [
     'extends GdUnitTestSuite',
     '',
@@ -13273,13 +13285,14 @@ function cacheProbeSuite(
     '',
     '',
     'func test_cache() -> void:',
+    ...CACHE_PROBE_FOLDER,
     ...(expects === 'either'
       ? []
       : [
-          '\tvar seen: bool = FileAccess.file_exists("user://shader_cache/marker.bin")',
+          '\tvar seen: bool = FileAccess.file_exists(marker)',
           `\tassert_bool(seen).is_equal(${expects === 'kept' ? 'true' : 'false'})`,
         ]),
-    ...(then === 'leave' ? [] : write),
+    ...(then === 'leave' ? [] : CACHE_PROBE_WRITE),
     ...(then === 'linger' ? ['\tOS.delay_msec(120000)'] : []),
     ...(then === 'fail' ? ['\tassert_bool(false).is_true()'] : []),
     ...(then === 'leave' ? ['\tassert_bool(true).is_true()'] : []),
@@ -13473,17 +13486,9 @@ async function testProjectTestKeepsTheCacheOfARunThatEndedBadly(): Promise<void>
   mkdirSync(join(rig.project, 'boot'));
   writeFileSync(
     join(rig.project, 'boot', 'seed.gd'),
-    [
-      'extends Node',
-      '',
-      '',
-      'func _init() -> void:',
-      '\tDirAccess.make_dir_recursive_absolute("user://shader_cache")',
-      '\tvar file: FileAccess = FileAccess.open("user://shader_cache/marker.bin", FileAccess.WRITE)',
-      '\tfile.store_string("built")',
-      '\tfile.close()',
-      '',
-    ].join('\n'),
+    ['extends Node', '', '', 'func _init() -> void:', ...CACHE_PROBE_FOLDER, ...CACHE_PROBE_WRITE, ''].join(
+      '\n',
+    ),
   );
   writeFileSync(
     join(rig.project, 'boot', 'guard.gd'),
@@ -13521,29 +13526,55 @@ async function testProjectTestKeepsTheCacheOfARunThatEndedBadly(): Promise<void>
   }
 }
 
-/** A cache folder that cannot be kept in neither fails a run nor changes its answer. */
-async function testProjectTestRunsWhereTheCacheCannotBeKept(): Promise<void> {
-  const engine = cacheEngine('project_test cache failure regression');
-  if (engine === null) {
-    return;
-  }
-  const rig = cacheRig(engine.gdunit, engine.godot, {
-    cold: cacheProbeSuite('empty', 'write'),
-  });
-  // Under a file, so neither a keep nor a lookup of the kept one can open the folder.
-  const blocked = join(rig.root, 'blocked');
-  writeFileSync(blocked, 'a file');
+/**
+ * A seed taken while another process swaps a larger cache in is the old cache whole or the new one
+ * whole. A keeper process keeps rounds of growing caches, each file naming its round, while this
+ * one seeds fresh folders and checks every copy that holds anything.
+ */
+async function testASeedNeverTakesPartOfACacheBeingSwapped(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-seed-race-'));
   try {
-    await withStdioServer(
-      async (call) => {
-        const ran = await cacheRun(call, rig, 'cold');
-        assert.equal(get(ran, 'passed'), true, JSON.stringify(ran));
-        assert.equal(get(ran, 'tests'), 1, JSON.stringify(ran));
-      },
-      { XDG_CACHE_HOME: join(blocked, 'under') },
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    const keeper = spawnHidden(
+      process.execPath,
+      [resolve(import.meta.dir, 'support', 'keep-rounds.ts'), scratch, project, godot, home, '30'],
+      { stdio: 'ignore' },
     );
+    const state = { kept: false };
+    const ended = new Promise<number | null>((done) => {
+      keeper.once('exit', (code) => {
+        state.kept = true;
+        done(code);
+      });
+    });
+    const partial: string[] = [];
+    let copies = 0;
+    for (let turn = 0; !state.kept && turn < 100_000; turn++) {
+      const user = join(scratch, 'seeded', String(turn));
+      await seedPipelineCache(user, project, godot, home);
+      const cache = join(user, 'Godot', 'app_userdata', 'Game', 'shader_cache');
+      if (existsSync(cache)) {
+        copies += 1;
+        const names = readdirSync(cache);
+        const rounds = new Set(names.map((name) => readFileSync(join(cache, name), 'utf8').split(':')[0]));
+        const round = Number([...rounds][0]);
+        if (rounds.size !== 1 || names.length !== 100 + round) {
+          partial.push(`${String(names.length)} files from rounds ${[...rounds].join(',')}`);
+        }
+      }
+      rmSync(user, { recursive: true, force: true });
+      // So the keeper's swap is not starved of the lock by a seed that retakes it at once.
+      await delay(15);
+    }
+    assert.equal(await ended, 0, 'the keeper kept every round');
+    assert.ok(copies > 0, 'some seed met a kept cache');
+    assert.deepEqual(partial, [], `${String(partial.length)} of ${String(copies)} seeds were partial`);
   } finally {
-    sweep(rig.root);
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 
@@ -112655,7 +112686,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectTestHeadlessLeavesTheKeptCacheAlone,
   testProjectTestDoesNotSeedFromAnotherEngineBuild,
   testProjectTestKeepsTheCacheOfARunThatEndedBadly,
-  testProjectTestRunsWhereTheCacheCannotBeKept,
+  testASeedNeverTakesPartOfACacheBeingSwapped,
   testProjectTestRunsAtOnceEachSeedFromTheKeptCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,

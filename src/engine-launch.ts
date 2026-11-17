@@ -412,7 +412,7 @@ export async function watchedEngine(
   shares?: ShareHandoff,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
-  seedPipelineCache(user, launch.projectPath, launch.godotPath);
+  await seedPipelineCache(user, launch.projectPath, launch.godotPath);
   try {
     return await startedUntilItRuns(
       () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds, shares),

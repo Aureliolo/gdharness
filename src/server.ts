@@ -10092,7 +10092,7 @@ class GodotServer {
     const onDesktop = windowed && process.platform === 'win32';
     // As gdharness test does: a drawing run starts with the shaders the last run on this engine
     // build compiled, and leaves its own for the next. Neither throws: a fault is a cold start.
-    seedPipelineCache(userData, project.value.path, engine.value);
+    await seedPipelineCache(userData, project.value.path, engine.value);
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(

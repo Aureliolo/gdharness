@@ -3,8 +3,15 @@
   // `lint:dead` runs this with KNIP_DISABLE_RAW_TRANSFER=1. knip parses through oxc-parser, whose
   // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
-  // keep-cache.ts is started as a process by the fuzz properties, so nothing imports it.
-  "entry": ["src/cli.ts", "scripts/*.ts", "test/*.ts", "test/support/keep-cache.ts"],
+  // keep-cache.ts and keep-rounds.ts are started as processes by the fuzz properties and a
+  // regression, so nothing imports them.
+  "entry": [
+    "src/cli.ts",
+    "scripts/*.ts",
+    "test/*.ts",
+    "test/support/keep-cache.ts",
+    "test/support/keep-rounds.ts"
+  ],
   "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
   // uv is no npm package. It comes from `.github/actions/install-uv` in CI and from the setup in
   // CONTRIBUTING.md elsewhere, and its tools are pinned in uv.lock.
