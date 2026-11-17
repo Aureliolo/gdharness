@@ -806,15 +806,19 @@ double quotes, with the quotes taken out.
   game, or the game's process where the editor played it, and `<start>` is that process's start time
   in milliseconds since the epoch. The command keeps the slot until that process has gone, and
   gdharness does not close its input as a release afterwards. A command that answers otherwise, or
-  does not exit within 5 seconds, fails the hand. The slot is then given back and the answer carries
-  an `engineSlotNote` naming what the command printed and its exit.
+  does not exit within 5 seconds, fails the hand. The slot is then given back by closing the
+  command's input, and nothing else. The answer of the call, an `editor_run` that played the game
+  included, carries an `engineSlotNote` naming what the command printed and its exit. gdharness never
+  makes, rewrites or removes a lock file of the command's.
 - A take under an inherited `GODOT_ENGINE_HELD` calls nothing, as without the command.
 
-A take cannot ask for a slot that is free now, so `gdharness test` and `spread` ask the command for
-one slot per engine, as the scheduler gives them, and deal shares as they do without a command.
-The waiting marks and the memory marks of the steps below belong to taking slots yourself and are
-not written. A lock that names this process still has the engine written
-into it.
+A take cannot ask for a slot that is free now. `gdharness test` and `spread` therefore ask the
+command for the slot of every lane at once, and count the grants that come within a second of the
+first as free. With all of them, each lane runs what it was dealt. With fewer, the suites are handed
+out a share at a time to whichever engine is granted and free, as with busy slots, and a grant that
+comes once the work is done is given back unused. The waiting marks and the memory marks of the
+steps below belong to taking slots yourself and are not written. A lock that names this process
+still has the engine written into it.
 
 ### Taking a slot from your own tool
 

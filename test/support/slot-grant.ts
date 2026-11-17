@@ -9,8 +9,9 @@
  * `GRANT_DEAF` makes it stay up past the end of its input. A line `hand <pid> <start>` is logged as
  * `hand`, answered `handed` and ended with code 0 (`GRANT_HAND=refuse` answers `cannot` and code 2
  * instead), and `GRANT_EXIT_AFTER_MS` makes it exit with code 3 that long after it started.
+ * `GRANT_LATE_MS` delays every start but the first by that long.
  */
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, closeSync, openSync } from 'node:fs';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -23,8 +24,23 @@ const note = (entry: object): void => {
 
 note({ event: 'start', argv: process.argv.slice(2), pid: process.pid });
 const exitWith = process.env['GRANT_EXIT'];
-const said = process.env['GRANT_SAY'] ?? `held ${process.env['GRANT_LOCK'] ?? ''}`;
-const wait = Number(process.env['GRANT_DELAY_MS'] ?? '0');
+// `GRANT_LATE_MS` delays every start but the first, as a busy machine does a later grant, and a
+// lock named for the process keeps the locks of concurrent starts apart.
+const claimedFirst = (): boolean => {
+  try {
+    closeSync(openSync(`${log ?? ''}.first`, 'wx'));
+    return true;
+  } catch {
+    return false;
+  }
+};
+const perStart = process.env['GRANT_LATE_MS'] !== undefined;
+const first = !perStart || claimedFirst();
+const said =
+  process.env['GRANT_SAY'] ??
+  `held ${process.env['GRANT_LOCK'] ?? ''}${perStart ? `.${String(process.pid)}` : ''}`;
+const wait =
+  Number(process.env['GRANT_DELAY_MS'] ?? '0') + (first ? 0 : Number(process.env['GRANT_LATE_MS']));
 
 process.stdin.on('end', () => {
   note({ event: 'eof' });

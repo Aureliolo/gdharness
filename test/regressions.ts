@@ -63,6 +63,7 @@ import {
   type CallNotes,
   callNotesSaid,
   callProgress,
+  callSignal,
   newCallNotes,
   type SlotWaits,
   stillGoingSaid,
@@ -227,6 +228,7 @@ import {
   SPARE_STALE_MS,
   START_TOLERANCE_MS,
   STARVED_FILE,
+  settledRunSlot,
   slotEngineNamed,
   slotForCall,
   slotsClaimed,
@@ -770,7 +772,6 @@ import {
   reachedAlsoSaid,
   reportsFault,
   roomSaid,
-  runIsShared,
   runShares,
   type ShareReuse,
   sharesSaid,
@@ -779,6 +780,7 @@ import {
   slowTimeSaid,
   startsSaid,
   suiteImport,
+  takenLanes,
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
@@ -69181,7 +69183,11 @@ async function checksTheSixteenSlots(
     }
     // A game's slot handed to its keeper stays a game's.
     const first = games[0] ?? '';
-    assert.ok(sessions.hand(first, { pid: process.ppid, started: 1, by: 'a keeper' }), 'handed over');
+    assert.equal(
+      await sessions.hand(first, { pid: process.ppid, started: 1, by: 'a keeper' }),
+      true,
+      'handed over',
+    );
     assert.deepEqual(
       holderOf(readFileSync(first, 'utf8')),
       { pid: process.ppid, started: 1, by: 'a keeper', game: true },
@@ -80589,6 +80595,8 @@ interface GrantAnswer {
   readonly handRefuse?: boolean;
   /** Exits with code 3 this long after it started. */
   readonly exitAfterMs?: number;
+  /** Delays every start but the first by this long, on a lock named for each process. */
+  readonly lateMs?: number;
   /** A command line in place of the stand-in's. */
   readonly command?: string;
 }
@@ -80621,6 +80629,7 @@ async function withASlotCommand<T>(
     GRANT_DEAF: answer.deaf === true ? '1' : undefined,
     GRANT_HAND: answer.handRefuse === true ? 'refuse' : undefined,
     GRANT_EXIT_AFTER_MS: answer.exitAfterMs === undefined ? undefined : String(answer.exitAfterMs),
+    GRANT_LATE_MS: answer.lateMs === undefined ? undefined : String(answer.lateMs),
   };
   const restore = settingEnvironment(set);
   const entries = (): GrantEntry[] =>
@@ -81140,6 +81149,59 @@ async function testASlotOfAPlayedGameIsHandedToTheGame(): Promise<void> {
   });
 }
 
+/** A hand the command refuses gives the slot back through the command alone: its own lock file stays. */
+async function testAFailedHandLeavesTheCommandsLockFile(): Promise<void> {
+  await withASlotCommand({ handRefuse: true }, async (command) => {
+    // The command writes the lock in the form gdharness itself writes, naming the asking process.
+    writeFileSync(command.lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
+    try {
+      const slot = await slotForCall(true);
+      await handSlotToGame(slot, game.pid ?? 0, null);
+      await slot.settled();
+      assert.equal(existsSync(command.lock), true, 'the command’s lock file is left to the command');
+      assert.deepEqual(grantEvents(command), ['start', 'hand']);
+    } finally {
+      game.kill();
+    }
+  });
+}
+
+/**
+ * A played game's slot is handed while the start is still answering, and the answer waits for it so
+ * a hand the command refuses is in that answer, within the call's own deadline.
+ */
+async function testAPlayedGamesFailedHandIsInTheAnswerOfTheStart(): Promise<void> {
+  await withASlotCommand({ handRefuse: true }, async () => {
+    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
+    const notes = newCallNotes();
+    try {
+      const noted = await withCallSignal(
+        undefined,
+        async () => {
+          const slot = await slotForCall(true);
+          const run: { slot?: typeof slot; slotHanded?: Promise<void> } = {
+            slotHanded: handSlotToGame(slot, game.pid ?? 0, null),
+          };
+          await settledRunSlot(run, callSignal());
+          return callNotesSaid(notes);
+        },
+        undefined,
+        undefined,
+        undefined,
+        notes,
+      );
+      assert.match(noted['engineSlotNote'] ?? '', /did not hand .* to process \d+/);
+    } finally {
+      game.kill();
+    }
+  });
+  const gone = new AbortController();
+  const waited = settledRunSlot({ slotHanded: new Promise<void>(() => undefined) }, gone.signal);
+  gone.abort();
+  await waited;
+}
+
 /** The notes a call's code below it makes, as the server gathers them. */
 function aCallsNotes(): CallNotes {
   return newCallNotes();
@@ -81249,25 +81311,95 @@ async function testASlotCommandIsToldAGameIsAGame(): Promise<void> {
   });
 }
 
-/**
- * A run under a slot command asks for one grant per engine as the scheduler gives them, so it is
- * never dealt shares for want of slots free at its start, as a run on the slots folder is.
- */
-function testARunUnderASlotCommandIsNeverDealtSharesForWantOfAFreeSlot(): void {
-  const look = {
-    followed: false,
+/** Waits until the stand-in has logged [param event] [param count] times. */
+async function untilCount(command: GrantingCommand, event: string, count: number): Promise<void> {
+  const until = Date.now() + 15_000;
+  while (grantEvents(command).filter((one) => one === event).length < count) {
+    assert.ok(Date.now() < until, `the stand-in logged ${grantEvents(command).join(', ')}`);
+    await delay(50);
+  }
+}
+
+/** What `takenLanes` is given for a run of two lanes on [param slots]. */
+function twoLanesOn(slots: EngineSlots): Parameters<typeof takenLanes<{ lane: number }>>[0] {
+  return {
+    slots,
     ordered: false,
-    lanes: 2,
+    plans: [{ lane: 0 }, { lane: 1 }],
     memoryHeld: false,
-    taken: 0,
-    asked: false,
+    byMemory: { engines: 2 },
+    followed: () => null,
   };
-  assert.equal(runIsShared(look), true, 'on the slots folder, no free slot deals shares');
-  assert.equal(runIsShared({ ...look, asked: true }), false, 'under a command it does not');
-  assert.equal(runIsShared({ ...look, taken: 2 }), false, 'and slots taken deal none');
-  assert.equal(runIsShared({ ...look, asked: true, memoryHeld: true }), true, 'memory still does');
-  assert.equal(runIsShared({ ...look, asked: true, followed: true }), true, 'and so does a lanes file');
-  assert.equal(runIsShared({ ...look, ordered: true }), false, 'an ordered run never does');
+}
+
+/**
+ * A run under a slot command asks for the slot of every lane at once. Grants that come together
+ * stand for slots free now, so each lane starts on its own and no shares are dealt, as on the
+ * slots folder with both slots free. Nothing is made in the slots folder.
+ */
+async function testARunUnderASlotCommandStartsOnTheGrantsThatCameAtOnce(): Promise<void> {
+  await withASlotCommand({ lateMs: 0 }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    const said: string[] = [];
+    const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
+    assert.equal(started.taken.length, 2, 'a grant for each lane');
+    assert.equal(started.shared, false, 'so the lanes keep what they were dealt');
+    assert.deepEqual(said, []);
+    for (const lock of started.taken) {
+      slots.release(lock);
+    }
+    started.granted?.end();
+    await untilCount(command, 'eof', 2);
+    assert.equal(existsSync(join(command.directory, 'slots')), false, 'nothing in the slots folder');
+  });
+}
+
+/**
+ * A grant that comes later than the others does not hold the run up. The run starts on the grants
+ * it has and deals shares as a slots folder with one slot busy does. A lane that waits is handed the
+ * late grant when it comes, and one that came after the work was done is given back unused.
+ */
+async function testALateGrantDoesNotHoldARunUp(): Promise<void> {
+  await withASlotCommand({ lateMs: 5000 }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    const said: string[] = [];
+    const began = Date.now();
+    const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
+    assert.ok(
+      Date.now() - began < 4500,
+      `the run did not wait for the late grant: ${String(Date.now() - began)} ms`,
+    );
+    assert.equal(started.taken.length, 1, 'one grant at once');
+    assert.equal(started.shared, true, 'so the suites go to whichever engine is granted');
+    assert.deepEqual(said, [sharesSaid(1, 2)]);
+    const granted = started.granted;
+    assert.notEqual(granted, undefined);
+    // The work is done before the late grant: it is given back unused, and the command sees the end.
+    granted?.end();
+    await untilCount(command, 'eof', 1);
+    slots.release(started.taken[0] ?? '');
+    await untilCount(command, 'eof', 2);
+  });
+  await withASlotCommand({ lateMs: 3000 }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    const started = await takenLanes(twoLanesOn(slots), () => undefined);
+    const late = await started.granted?.slots.take();
+    assert.notEqual(late, undefined, 'a lane that waits is given the late grant');
+    assert.notEqual(late, started.taken[0]);
+    slots.release(late ?? '');
+    slots.release(started.taken[0] ?? '');
+    started.granted?.end();
+    await untilCount(command, 'eof', 2);
+  });
 }
 
 /** The keeper tells its launcher its own pid beside the game's, which a delegate's slot is handed to. */
@@ -116167,7 +116299,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandThatExitsAfterGrantingNeverHoldsTheSlot,
   testACommandThatExitsWhileTheEngineRunsLosesTheSlotInTheAnswer,
   testASlotCommandIsToldAGameIsAGame,
-  testARunUnderASlotCommandIsNeverDealtSharesForWantOfAFreeSlot,
+  testARunUnderASlotCommandStartsOnTheGrantsThatCameAtOnce,
+  testALateGrantDoesNotHoldARunUp,
+  testAFailedHandLeavesTheCommandsLockFile,
+  testAPlayedGamesFailedHandIsInTheAnswerOfTheStart,
   testALauncherAnswersWithTheKeepersPidToo,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,

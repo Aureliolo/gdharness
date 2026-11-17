@@ -158,6 +158,7 @@ import {
   handSlotToKeeper,
   keeperSlotOf,
   onTheSlot,
+  settledRunSlot,
   slotEngineNamed,
   slotForCall,
 } from './engine-slots.js';
@@ -14628,10 +14629,7 @@ class GodotServer {
     // A game that did not announce inside the wait is tied later or never, and nothing ends a lock
     // naming this server until it goes, so the slot is given back rather than held for a run it
     // cannot see end.
-    if (played.slot !== undefined) {
-      played.slot.release();
-      delete played.slot;
-    }
+    await settledRunSlot(played, callSignal());
     return this.jsonTextResponse({
       started: true,
       through: 'editor',
@@ -16051,7 +16049,7 @@ class GodotServer {
     const slot = run.slot;
     if (slot !== undefined) {
       delete run.slot;
-      void handSlotToGame(slot, endpoint.pid, run.projectPath);
+      run.slotHanded = handSlotToGame(slot, endpoint.pid, run.projectPath);
     }
   }
 

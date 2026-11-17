@@ -60,6 +60,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
+import { type AskedLanes, askedLanes } from './lane-grants.js';
 import { ENGINE_ARG_SPELLING, engineFlagsRefusal, envValue, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
@@ -937,7 +938,17 @@ async function runStages(context: RunContext): Promise<number> {
   for (const line of racingSaid(launch.engineArgs, deal.plans)) {
     say(line);
   }
-  const started = await takenLanes(context, deal, say);
+  const started = await takenLanes(
+    {
+      slots: launch.slots,
+      ordered: options.order !== null,
+      plans: deal.plans,
+      memoryHeld: deal.memoryHeld,
+      byMemory: deal.byMemory,
+      followed: (dealtLanes) => followedFile(context, deal, dealtLanes),
+    },
+    say,
+  );
   const memory =
     started.shared && (deal.memoryHeld || started.follows !== null)
       ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes, undefined, {
@@ -1249,9 +1260,11 @@ function sayWhatWasCutUp(deal: Deal, say: (line: string) => void): void {
  * The lanes of a deal, each engine with its place in the deal, the slots taken for them, and the
  * lanes file a run that can grow follows.
  */
-interface StartedLanes {
-  readonly lanes: ReadonlyArray<ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>>;
+interface StartedLanes<P = EnginePlan> {
+  readonly lanes: ReadonlyArray<ReadonlyArray<{ readonly plan: P; readonly index: number }>>;
   readonly taken: readonly string[];
+  /** Under a slot command, the slots it was asked for up front, whose late grants the lanes take. */
+  readonly granted?: AskedLanes;
   /** Whether the engines are handed shares as slots come free, rather than one lane to a slot. */
   readonly shared: boolean;
   /** The lanes file to follow and the most lanes to rise to, or null for a run that cannot grow. */
@@ -1284,33 +1297,37 @@ export function followedAt(file: string, ceiling: number, dealtLanes: number): S
   return ceiling > dealtLanes || dealtLanes > 1 ? { file, ceiling: Math.max(ceiling, dealtLanes) } : null;
 }
 
-/**
- * Whether a run deals its suites to its engines a share at a time: where a lanes file is followed,
- * and where lanes beyond the first have less than they need, memory or slots. With a slot command
- * ([param asked]) the slots taken up front say nothing, since each engine is granted its own.
- */
-export function runIsShared(look: {
-  readonly followed: boolean;
-  readonly ordered: boolean;
-  readonly lanes: number;
-  readonly memoryHeld: boolean;
-  readonly taken: number;
-  readonly asked: boolean;
-}): boolean {
-  return (
-    look.followed ||
-    (!look.ordered && look.lanes > 1 && (look.memoryHeld || (!look.asked && look.taken < look.lanes)))
-  );
+/** Takes the slots free now, up to [param most]. */
+async function slotsFreeNow(slots: Pick<EngineSlots, 'takeFree'>, most: number): Promise<string[]> {
+  const taken: string[] = [];
+  while (taken.length < most) {
+    const lock = await slots.takeFree();
+    if (lock === null) {
+      break;
+    }
+    taken.push(lock);
+  }
+  return taken;
 }
 
-/** Takes a slot for each lane where one is free now, and says what that leaves for the rest. */
-async function takenLanes(
-  context: RunContext,
-  deal: Deal,
+/**
+ * Takes a slot for each lane where one is free now, and says what that leaves for the rest. Under a
+ * slot command, which has no answer for a slot free now, every lane's slot is asked at once and the
+ * ones granted within a moment count as free: the lanes left over wait for their grants as shares
+ * are handed out, and a grant that comes once the work is done is given back.
+ */
+export async function takenLanes<P extends { readonly lane: number }>(
+  run: {
+    readonly slots: Pick<EngineSlots, 'takeFree' | 'take' | 'release'>;
+    readonly ordered: boolean;
+    readonly plans: readonly P[];
+    readonly memoryHeld: boolean;
+    readonly byMemory: { readonly engines: number; readonly held?: string | undefined };
+    readonly followed: (lanes: number) => StartedLanes['follows'];
+  },
   say: (line: string) => void,
-): Promise<StartedLanes> {
-  const { options, launch } = context;
-  const { plans, memoryHeld, byMemory } = deal;
+): Promise<StartedLanes<P>> {
+  const { plans, memoryHeld, byMemory } = run;
   const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
     plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
   );
@@ -1318,33 +1335,21 @@ async function takenLanes(
   // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
   // The rest take theirs in the slots' queue, then wait for memory holding them.
   const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
-  const taken: string[] = [];
-  while (taken.length < startable) {
-    const lock = await launch.slots.takeFree();
-    if (lock === null) {
-      break;
-    }
-    taken.push(lock);
-  }
+  const granted =
+    slotCommandOf() !== undefined && !run.ordered && lanes.length > 1
+      ? await askedLanes(run.slots, startable)
+      : null;
+  const taken: string[] = granted?.taken ?? (await slotsFreeNow(run.slots, startable));
   if (memoryHeld) {
     say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
   }
-  const follows = followedFile(context, deal, lanes.length);
-  // A command grants a slot for each engine as the scheduler gives them, and has no free-now
-  // answer, so the slots taken up front say nothing of how many engines may run at once.
-  const asked = slotCommandOf() !== undefined;
-  const shared = runIsShared({
-    followed: follows !== null,
-    ordered: options.order !== null,
-    lanes: lanes.length,
-    memoryHeld,
-    taken: taken.length,
-    asked,
-  });
-  if (shared && !asked && taken.length < startable) {
+  const follows = run.followed(lanes.length);
+  const shared =
+    follows !== null || (!run.ordered && lanes.length > 1 && (memoryHeld || taken.length < lanes.length));
+  if (shared && taken.length < startable) {
     say(sharesSaid(taken.length, startable));
   }
-  return { lanes, taken, shared, follows };
+  return { lanes, taken, shared, follows, ...(granted === null ? {} : { granted }) };
 }
 
 /** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
@@ -1373,7 +1378,7 @@ async function ranEngines(
   try {
     ran = shared
       ? await runShares(
-          launch.slots,
+          started.granted?.slots ?? launch.slots,
           units,
           declared,
           lanes.length,
@@ -1400,6 +1405,8 @@ async function ranEngines(
           .toSorted((a, b) => a.index - b.index);
   } finally {
     follower?.end();
+    // A grant that came once the work was done goes back unused.
+    started.granted?.end();
   }
   return await rerunAfterStarving(ran, say, (engine) =>
     runEngine(launch, engine.plan, engine.index, times, 'again'),

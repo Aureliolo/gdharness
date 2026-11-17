@@ -135,6 +135,27 @@ function risingOnly(progress: CallProgress): CallProgress {
   };
 }
 
+/** Waits for [param work], or until [param signal] aborts, whichever comes first. */
+export async function waitedUnlessAborted(
+  work: Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) {
+    await work;
+    return;
+  }
+  let onAbort: () => void = () => undefined;
+  const aborted = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([work, aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /** The signal of the call being answered, or undefined outside one. */
 export function callSignal(): AbortSignal | undefined {
   return current.getStore()?.signal;

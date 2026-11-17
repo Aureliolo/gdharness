@@ -64,7 +64,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
-import { callNotes, callProgress, callSignal, callSlotWaits } from './call-signal.js';
+import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
 import { wholeFlag } from './launch.js';
 import {
@@ -1982,8 +1982,9 @@ export class EngineSlots {
     const grant = this.delegated.get(lock);
     if (grant !== undefined) {
       const notes = callNotes();
+      // The grant stays until the caller releases it, so that a failed hand ends in the command's
+      // own release and a lock file the command wrote is never touched.
       const failed = await grant.hand(to.pid, to.started);
-      this.delegated.delete(lock);
       if (failed !== null) {
         if (notes === undefined) {
           this.say?.(failed);
@@ -2538,6 +2539,26 @@ async function handedOrReleased(
   const started = pid === undefined ? undefined : (await startTimesOf([pid])).get(pid);
   if (pid === undefined || started === undefined || !(await slot.handTo({ pid, started, by }))) {
     slot.release();
+  }
+}
+
+/**
+ * Ends what a start did with the slot of the run it played: a game that did not announce inside
+ * the wait is tied later or never, and nothing ends a lock naming this server until it goes, so the
+ * slot is given back rather than held for a run it cannot see end. A hand to the game that did
+ * announce is waited for, until [param signal] aborts, so that a command that will not take it says
+ * so in the answer of the call that started the run.
+ */
+export async function settledRunSlot(
+  run: { slot?: CallSlot; slotHanded?: Promise<void> },
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (run.slot !== undefined) {
+    run.slot.release();
+    delete run.slot;
+  }
+  if (run.slotHanded !== undefined) {
+    await waitedUnlessAborted(run.slotHanded, signal);
   }
 }
 
