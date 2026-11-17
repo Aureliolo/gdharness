@@ -20,8 +20,8 @@ import { isRecord } from './records.js';
 import { tryTake } from './write-turns.js';
 
 /**
- * A test run's engine gets a user:// of its own, and Godot keeps its pipeline cache there, in
- * user://shader_cache. A drawing engine started cold rebuilt every pipeline: one game's windowed
+ * A test run's engine gets a user:// of its own, and Godot keeps its shader cache there, in
+ * user://shader_cache. A drawing engine started cold compiled every shader again: one game's windowed
  * suite spent five to seven seconds of a case building the pipelines of one screen. So the cache a
  * run leaves is kept per project, and handed to the next run on the same engine build before it
  * starts. Copied in and out rather than shared, since runs go side by side.
@@ -130,22 +130,28 @@ function keptRecord(kept: string): Kept | null {
 /**
  * Puts the pipeline cache kept for [param projectPath] into [param user], the user folder a run is
  * about to start with, where the last run's engine kept it, when the same engine build made it.
- * A run is never held up by the cache: any failure leaves it to build its pipelines as it would
- * have.
+ * The copy holds the lock a keep's swap holds, so it takes the old cache whole or the new one whole,
+ * never what is left of the old one while it is removed. A run is never held up by the cache: any
+ * failure, or a lock not had in time, leaves it to build its pipelines as it would have.
  */
-export function seedPipelineCache(
+export async function seedPipelineCache(
   user: string,
   projectPath: string,
   godotPath: string,
   home: string = cacheHome(),
-): void {
+): Promise<void> {
   const kept = keptFor(projectPath, home);
-  const record = keptRecord(kept);
-  if (record === null || record.engine !== engineBuild(godotPath) || !existsSync(join(kept, NAME))) {
+  if (keptRecord(kept) === null) {
     return;
   }
   try {
-    cpSync(join(kept, NAME), join(user, record.where), { recursive: true });
+    await underLock(`${kept}.lock`, () => {
+      const record = keptRecord(kept);
+      if (record === null || record.engine !== engineBuild(godotPath) || !existsSync(join(kept, NAME))) {
+        return;
+      }
+      cpSync(join(kept, NAME), join(user, record.where), { recursive: true });
+    });
   } catch {
     // A partial copy is a cache with fewer pipelines in it, which the engine fills in.
   }
