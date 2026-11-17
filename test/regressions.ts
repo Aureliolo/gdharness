@@ -20737,6 +20737,7 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
   const release = join(root, 'release');
   let start: DesktopStart | undefined;
   try {
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
     start = spawnOnDesktop(
       { directory: root, endsWithHelper: true, scratch: root },
       process.execPath,
@@ -20814,6 +20815,48 @@ async function testAWholeExitCodeArrivesThroughAHeadlessStart(): Promise<void> {
   assert.equal(ran.exitCode, 0xc06d007f, `the whole code arrives: ${JSON.stringify(ran)}`);
 }
 
+/**
+ * A kept stand-in started by a launcher that then ends, by exiting or by being killed. The kept
+ * process runs until [code]release[/code] exists, and starts a console child of its own as an
+ * engine's tool would. Hands back what a test needs to look at it.
+ */
+async function startedKept(
+  root: string,
+  after: 'exit' | 'stay',
+  tool: string[],
+): Promise<{ launcher: ReturnType<typeof spawnHidden>; pid: number; release: string }> {
+  const release = join(root, 'release');
+  const waits = [
+    `const fs = require('node:fs');`,
+    HIDDEN_SPAWN_PRELUDE,
+    `const tool = ${JSON.stringify(tool)};`,
+    // Not hidden, as an engine's own child may not be: the point is that none of it shows.
+    `if (tool.length > 0) { require(${JSON.stringify(`node:${['child', 'process'].join('_')}`)}).spawn(tool[0], tool.slice(1), { stdio: 'ignore' }); }`,
+    `const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(t); } }, 50);`,
+  ].join('\n');
+  const launcher = spawnHidden(
+    process.execPath,
+    [
+      join(process.cwd(), 'test', 'support', 'kept-launcher.ts'),
+      root,
+      process.execPath,
+      JSON.stringify(['-e', waits]),
+      after,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let said = '';
+  launcher.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString();
+  });
+  const pid = await answeredWithin(() => {
+    const named = /pid (\d+) helper/.exec(said)?.[1];
+    return named === undefined ? undefined : Number(named);
+  }, 120_000);
+  assert.ok(pid !== undefined, `the starter named the process: ${said}`);
+  return { launcher, pid, release };
+}
+
 /** A start meant to outlive its starter keeps running when the starter exits, and keeps its job. */
 async function testAKeptStartOutlivesItsStarterInItsJob(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -20821,31 +20864,133 @@ async function testAKeptStartOutlivesItsStarterInItsJob(): Promise<void> {
   }
   const { openJob } = await import('./support/job-objects.js');
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-job-'));
-  const release = join(root, 'release');
   let kept: number | undefined;
   try {
-    const launcher = spawnHidden(
+    const started = await startedKept(root, 'exit', []);
+    kept = started.pid;
+    assert.ok(await exitedWithin(started.launcher, 120_000), 'the starter exits');
+    await delay(1000);
+    assert.ok(alive(started.pid), 'the process runs on after its starter exited');
+    const job = openJob(engineJobName(started.pid));
+    assert.ok(job !== null, 'and its job is still there');
+    assert.ok(job.holds(started.pid), 'holding it');
+    job.close();
+    writeFileSync(started.release, '');
+    assert.equal(
+      await answeredWithin(() => (alive(started.pid) ? undefined : true), 30_000),
+      true,
+      'until it ends',
+    );
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * A server inside a job that ends its members and allows no breakaway, as a CI runner's or a gate
+ * queue's may be, still gives an engine its named job, and still starts a kept process.
+ */
+async function testAnEngineStartedInsideAParentJobStillGetsItsJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-nested-job-'));
+  mkdirSync(join(root, 'kept'));
+  try {
+    const nested = spawnHidden(
       process.execPath,
-      [join(process.cwd(), 'test', 'support', 'kept-launcher.ts'), root, release],
+      [join(process.cwd(), 'test', 'support', 'nested-job.ts'), root],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let said = '';
-    launcher.stdout.on('data', (chunk: Buffer) => {
+    nested.stdout.on('data', (chunk: Buffer) => {
       said += chunk.toString();
     });
-    assert.ok(await exitedWithin(launcher, 120_000), 'the starter exits');
-    const pid = Number(/pid (\d+)/.exec(said)?.[1]);
-    assert.ok(Number.isInteger(pid) && pid > 0, `the starter named the process: ${said}`);
-    kept = pid;
-    await delay(1000);
-    assert.ok(alive(pid), 'the process runs on after its starter exited');
-    const job = openJob(engineJobName(pid));
-    assert.ok(job !== null, 'and its job is still there');
-    assert.ok(job.holds(pid), 'holding it');
-    job.close();
-    writeFileSync(release, '');
-    assert.equal(await answeredWithin(() => (alive(pid) ? undefined : true), 30_000), true, 'until it ends');
+    assert.ok(await exitedWithin(nested, 180_000), 'the nested process ends');
+    const answer: unknown = JSON.parse(said.trim().split('\n').at(-1) ?? '{}');
+    assert.deepEqual(
+      [get(answer, 'limited'), get(answer, 'joined')],
+      [true, true],
+      `the parent job was made and joined: ${said}`,
+    );
+    assert.deepEqual(
+      [get(answer, 'named'), get(answer, 'holds'), get(answer, 'exitCode'), get(answer, 'failure')],
+      [true, true, 0, null],
+      `the engine has its named job under the parent: ${said}`,
+    );
+    assert.equal(get(answer, 'keptNamed'), true, `and so does a kept start: ${said}`);
   } finally {
+    sweep(root);
+  }
+}
+
+/** A kept start whose starter is killed outright runs on, and its job is still there. */
+async function testAKeptStartOutlivesAKilledStarter(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-killed-'));
+  let kept: number | undefined;
+  try {
+    const started = await startedKept(root, 'stay', []);
+    kept = started.pid;
+    started.launcher.kill();
+    assert.ok(await exitedWithin(started.launcher, 60_000), 'the starter is killed');
+    await delay(1000);
+    assert.ok(alive(started.pid), 'the process runs on after its starter was killed');
+    const job = openJob(engineJobName(started.pid));
+    assert.ok(job !== null, 'and its job is still there');
+    assert.ok(job.holds(started.pid), 'holding it');
+    job.close();
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * A kept start opens no window, and neither does a console program it starts. Windows are listed
+ * by owning process before and after.
+ */
+async function testAKeptStartAndItsConsoleChildOpenNoWindow(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { processTreeOf, visibleWindows } = await import('./support/windows.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-window-'));
+  const before = new Set(visibleWindows().map((window) => window.handle));
+  let kept: number | undefined;
+  try {
+    const system = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32');
+    const started = await startedKept(root, 'exit', [join(system, 'PING.EXE'), '-n', '12', '127.0.0.1']);
+    kept = started.pid;
+    assert.ok(await exitedWithin(started.launcher, 120_000), 'the starter exits');
+    const seen = new Set<number>();
+    for (let look = 0; look < 8; look += 1) {
+      await delay(500);
+      const tree = await processTreeOf(started.pid);
+      for (const pid of tree) {
+        seen.add(pid);
+      }
+      const opened = visibleWindows().filter((window) => !before.has(window.handle) && tree.has(window.pid));
+      assert.deepEqual(
+        opened,
+        [],
+        `no window of the kept process or its children is visible: ${JSON.stringify(opened, (_key, value: unknown) => (typeof value === 'bigint' ? String(value) : value))}`,
+      );
+    }
+    assert.ok(
+      seen.size >= 2,
+      `the console child was running beside the kept process: ${[...seen].join(' ')}`,
+    );
+  } finally {
+    writeFileSync(join(root, 'release'), '');
     if (kept !== undefined && alive(kept)) {
       process.kill(kept);
     }
@@ -116251,6 +116396,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
+  testAKeptStartOutlivesAKilledStarter,
+  testAnEngineStartedInsideAParentJobStillGetsItsJob,
+  testAKeptStartAndItsConsoleChildOpenNoWindow,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,

@@ -67,6 +67,7 @@ public static class GdharnessDesktop {
   const short ShowNoActivate = 4;
   // No console at all, rather than a hidden one: a console's host would sit on the desktop too.
   const uint DetachedProcess = 0x00000008;
+  const uint CreateNoWindow = 0x08000000;
   // Every engine runs below normal, so a machine running every core leaves other work its share.
   const uint BelowNormalPriorityClass = 0x00004000;
 
@@ -506,7 +507,10 @@ public static class GdharnessDesktop {
     JobLimits limits = new JobLimits();
     try {
     Step(stepFile, "starting the process");
-    uint creation = DetachedProcess | BelowNormalPriorityClass | CreateSuspended;
+    // On the desktop in use the process gets a console that is never shown, so a console program it
+    // starts joins that one and opens no window of its own, where a process with no console at all
+    // would give each such child a window. On a desktop of its own nothing shows, so it has none.
+    uint creation = (desktop.Length > 0 ? DetachedProcess : CreateNoWindow) | BelowNormalPriorityClass | CreateSuspended;
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
