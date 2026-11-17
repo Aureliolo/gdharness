@@ -51982,14 +51982,14 @@ async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
     const answer: unknown = JSON.parse(
       await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noisy25():fail' }),
     );
-    const errors = asArray(get(answer, 'errors')).map(text);
+    const errors = asArray(get(answer, 'errors'), `errors of ${JSON.stringify(answer)}`).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
     assert.equal(errors.length, 20);
     assert.equal(get(answer, 'errors_not_shown'), 6, 'the game raised 26 and 20 are shown');
     const read: unknown = JSON.parse(
       await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'noisy25():name' }),
     );
-    assert.equal(asArray(get(read, 'errors')).length, 20);
+    assert.equal(asArray(get(read, 'errors'), `errors of ${JSON.stringify(read)}`).length, 20);
     assert.equal(get(read, 'errors_not_shown'), 5, 'a read that raised 25 shows 20');
   });
 }
