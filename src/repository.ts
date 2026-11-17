@@ -10,6 +10,11 @@ export interface GitCheckout {
   readonly common: string;
   /** Whether the checkout is a linked worktree, whose `.git` is a file. */
   readonly linked: boolean;
+  /**
+   * Whether `.git` is a file pointing at a git folder of the checkout's own, made with
+   * `--separate-git-dir`, which has no `commondir`: [member common] is that folder.
+   */
+  readonly separate?: true;
 }
 
 /** The first folder at or above [param start] that holds `.git`, or null when none does. */
@@ -48,7 +53,7 @@ export function gitCheckoutOf(start: string): GitCheckout | null {
   const entry = resolve(top, pointer);
   const commonFile = join(entry, 'commondir');
   if (!existsSync(commonFile)) {
-    return null;
+    return { top, common: entry, linked: true, separate: true };
   }
   return { top, common: resolve(entry, readFileSync(commonFile, 'utf8').trim()), linked: true };
 }

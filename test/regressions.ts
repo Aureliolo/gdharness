@@ -69212,6 +69212,27 @@ function testARepositoryIsNamedFromItsRealPathAndNeverForABareOne(): void {
     mkdirSync(join(layout, 'main', 'game'), { recursive: true });
     writeFileSync(join(layout, 'main', '.git'), 'gitdir: ../.bare/worktrees/main\n');
     assert.equal(repositoryNameOf(join(layout, 'main', 'game')), null, 'nor does the .bare layout');
+
+    // A checkout made with --separate-git-dir: its git folder has no commondir and is its own.
+    const separate = join(root, 'Sep', '.git');
+    mkdirSync(separate, { recursive: true });
+    mkdirSync(join(root, 'sep-checkout', 'game'), { recursive: true });
+    writeFileSync(join(root, 'sep-checkout', '.git'), `gitdir: ${separate.replaceAll('\\', '/')}\n`);
+    assert.equal(
+      repositoryNameOf(join(root, 'sep-checkout', 'game')),
+      'Sep',
+      'a separate git folder named .git names the folder holding it',
+    );
+    assert.equal(
+      mainCheckoutOf(join(root, 'sep-checkout', 'game')),
+      null,
+      'and is no worktree of a main checkout',
+    );
+    const other = join(root, 'Other.git');
+    mkdirSync(other, { recursive: true });
+    mkdirSync(join(root, 'other-checkout'), { recursive: true });
+    writeFileSync(join(root, 'other-checkout', '.git'), `gitdir: ${other.replaceAll('\\', '/')}\n`);
+    assert.equal(repositoryNameOf(join(root, 'other-checkout')), null, 'one not named .git names none');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -69272,6 +69293,26 @@ async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Prom
       own.ahead(slotWaiters(directory)).map((one) => one.mark),
       ['a-earlier.json'],
       'a mark begun a fraction of a millisecond later is behind it, whatever its name, and an earlier one ahead',
+    );
+    // The 120 s age reads the exact seconds too: a mark half a millisecond short of it is young
+    // and stands behind a store-class take, and one half a millisecond past it is ahead of it.
+    rmSync(join(marks, 'a-later.json'));
+    rmSync(join(marks, 'a-earlier.json'));
+    const store = new SlotLine('other', false, () => began, true);
+    store.mark = 'z-store.json';
+    writeFileSync(
+      join(marks, 'short.json'),
+      JSON.stringify({ ...me, taker: 'other', since: (began - 119_999.5) / 1000 }),
+    );
+    assert.deepEqual(store.ahead(slotWaiters(directory)), [], 'half a millisecond short of 120 s is young');
+    writeFileSync(
+      join(marks, 'short.json'),
+      JSON.stringify({ ...me, taker: 'other', since: (began - 120_000.5) / 1000 }),
+    );
+    assert.deepEqual(
+      store.ahead(slotWaiters(directory)).map((one) => one.mark),
+      ['short.json'],
+      'and half a millisecond past it is aged',
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });

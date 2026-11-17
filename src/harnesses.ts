@@ -903,7 +903,7 @@ export function recordedEnginePath(projectPath: string): string | null {
  */
 export function mainCheckoutOf(projectPath: string): string | null {
   const found = gitCheckoutOf(projectPath);
-  if (found === null || !found.linked) {
+  if (found === null || !found.linked || found.separate === true) {
     return null;
   }
   const { top, common } = found;

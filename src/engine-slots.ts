@@ -506,21 +506,22 @@ export class SlotLine {
    */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
     const now = this.clock();
+    // The age is read from the exact seconds the order compares, as the other side of the scheme reads it.
     const groupOf = (taker: SlotTaker, game: boolean, store: boolean, since: number): number => {
       if (taker !== 'other') {
         return 0;
       }
-      const aged = now - since >= ONE_OFF_AGED_MS;
+      const aged = now / 1000 - since >= ONE_OFF_AGED_MS / 1000;
       return aged && !game ? 0 : store || aged ? 1 : 2;
     };
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
     const own = {
-      group: groupOf(this.taker, this.game, this.store, this.since),
+      group: groupOf(this.taker, this.game, this.store, this.since / 1000),
       since: this.since / 1000,
       mark: this.mark ?? '￿',
     };
     const placeOf = (one: SlotWaiter): typeof own => ({
-      group: groupOf(one.taker, one.game, one.store, one.since),
+      group: groupOf(one.taker, one.game, one.store, one.sinceSeconds),
       since: one.sinceSeconds,
       mark: one.mark,
     });
