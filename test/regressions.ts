@@ -9915,7 +9915,7 @@ async function testAnEditorThatNeverSaidItHasNoWindowIsNotRestarted(): Promise<v
 function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
   assert.match(
     toolSpec('editor_launch')?.description ?? '',
-    /One opened by hand restarts itself and comes back with a window.*one that has no window is refused unless hidden: false accepts one\./s,
+    /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
   );
 }
 
