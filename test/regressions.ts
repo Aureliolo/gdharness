@@ -13228,6 +13228,353 @@ async function testATestRunsEngineStartsWithTheLastRunsPipelineCache(): Promise<
   }
 }
 
+interface CacheRig {
+  readonly root: string;
+  readonly project: string;
+  readonly home: string;
+  readonly env: Record<string, string>;
+  readonly godot: string;
+}
+
+/** The engine and gdUnit4 a cache case needs, or null where they are missing and the case skips. */
+function cacheEngine(what: string): { godot: string; gdunit: string } | null {
+  const godot = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (godot && gdunit && existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    return { godot, gdunit };
+  }
+  if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+    throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+  }
+  console.log(`${what} skipped (Godot or gdUnit4 not found)`);
+  return null;
+}
+
+/**
+ * A suite that stands in for the shader cache a drawing engine leaves in user://, which a headless
+ * one never builds: it fails unless the folder is as [param expects] says, then does [param then].
+ * Its window is asked for only where this machine allows windows, so the same case draws on CI.
+ */
+function cacheProbeSuite(
+  expects: 'empty' | 'kept' | 'either',
+  then: 'write' | 'leave' | 'linger' | 'fail',
+): string {
+  const window = windowedRunRefused() === null;
+  const write = [
+    '\tDirAccess.make_dir_recursive_absolute("user://shader_cache")',
+    '\tvar file: FileAccess = FileAccess.open("user://shader_cache/marker.bin", FileAccess.WRITE)',
+    '\tfile.store_string("built")',
+    '\tfile.close()',
+  ];
+  return [
+    'extends GdUnitTestSuite',
+    '',
+    `const GDHARNESS_NEEDS_WINDOW: bool = ${window ? 'true' : 'false'}`,
+    '',
+    '',
+    'func test_cache() -> void:',
+    ...(expects === 'either'
+      ? []
+      : [
+          '\tvar seen: bool = FileAccess.file_exists("user://shader_cache/marker.bin")',
+          `\tassert_bool(seen).is_equal(${expects === 'kept' ? 'true' : 'false'})`,
+        ]),
+    ...(then === 'leave' ? [] : write),
+    ...(then === 'linger' ? ['\tOS.delay_msec(120000)'] : []),
+    ...(then === 'fail' ? ['\tassert_bool(false).is_true()'] : []),
+    ...(then === 'leave' ? ['\tassert_bool(true).is_true()'] : []),
+    '',
+  ].join('\n');
+}
+
+/** A project with one probe suite per entry of [param suites], under `<name>/<name>_test.gd`, and a cache home of its own. */
+function cacheRig(
+  gdunit: string,
+  godot: string,
+  suites: Readonly<Record<string, string>>,
+  autoloads = '',
+): CacheRig {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-project-test-cache-'));
+  const project = join(root, 'game');
+  mkdirSync(project);
+  writeFileSync(
+    join(project, 'project.godot'),
+    `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CacheProbe"\n\n${autoloads}[debug]\n\nfile_logging/enable_file_logging=false\n\n[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n`,
+  );
+  cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+  for (const [name, source] of Object.entries(suites)) {
+    mkdirSync(join(project, name), { recursive: true });
+    writeFileSync(join(project, name, `${name}_test.gd`), source);
+  }
+  const home = join(root, 'cache');
+  return { root, project, home, env: { XDG_CACHE_HOME: home }, godot };
+}
+
+/** What the project's kept cache records, or null where none is kept. */
+function keptCache(rig: CacheRig): { engine: unknown; bytes: unknown; marker: string | null } | null {
+  const kept = join(rig.home, 'gdharness', 'pipeline-caches');
+  const folders = existsSync(kept) ? readdirSync(kept).filter((name) => /^[0-9a-f]{16}$/.test(name)) : [];
+  const folder = folders[0];
+  if (folder === undefined) {
+    return null;
+  }
+  const record: unknown = JSON.parse(readFileSync(join(kept, folder, 'kept.json'), 'utf8'));
+  const marker = join(kept, folder, 'shader_cache', 'marker.bin');
+  return {
+    engine: get(record, 'engine'),
+    bytes: get(record, 'bytes'),
+    marker: existsSync(marker) ? readFileSync(marker, 'utf8') : null,
+  };
+}
+
+/** One project_test call on [param path] of [param rig]'s project, parsed. */
+async function cacheRun(
+  call: ToolCall,
+  rig: CacheRig,
+  path: string,
+  extra: Record<string, unknown> = {},
+): Promise<unknown> {
+  const said = await call(
+    'project_test',
+    { projectPath: rig.project, path, ...extra },
+    ENGINE_CALL_TIMEOUT_MS * 3,
+  );
+  // A refusal puts a sentence before the JSON.
+  return jsonOf(said.slice(Math.max(0, said.indexOf('{\n'))), path);
+}
+
+/**
+ * Two project_test runs in a row: the first keeps the shader cache it leaves under the project's
+ * kept folder, and the second starts with it in its user folder. The suites stand in for the cache,
+ * the first failing if one is already there and the second if none is.
+ */
+async function testProjectTestKeepsTheCacheAndSeedsTheNextRun(): Promise<void> {
+  const engine = cacheEngine('project_test cache regression');
+  if (engine === null) {
+    return;
+  }
+  const rig = cacheRig(engine.gdunit, engine.godot, {
+    cold: cacheProbeSuite('empty', 'write'),
+    warm: cacheProbeSuite('kept', 'write'),
+  });
+  try {
+    await withStdioServer(async (call) => {
+      const first = await cacheRun(call, rig, 'cold');
+      assert.equal(get(first, 'passed'), true, `the first run starts cold: ${JSON.stringify(first)}`);
+      assert.equal(
+        keptCache(rig)?.marker,
+        'built',
+        'the first run keeps what it left, whole, under the project',
+      );
+      const second = await cacheRun(call, rig, 'warm');
+      assert.equal(
+        get(second, 'passed'),
+        true,
+        `the second run's user folder held the kept cache before its engine started: ${JSON.stringify(second)}`,
+      );
+    }, rig.env);
+  } finally {
+    sweep(rig.root);
+  }
+}
+
+/**
+ * A headless run builds no cache, so it keeps none where nothing is kept, and leaves the kept one
+ * as it was where one is: the seeded copy it ends with is the kept one's size.
+ */
+async function testProjectTestHeadlessLeavesTheKeptCacheAlone(): Promise<void> {
+  const engine = cacheEngine('project_test headless cache regression');
+  if (engine === null) {
+    return;
+  }
+  const rig = cacheRig(engine.gdunit, engine.godot, {
+    quiet: cacheProbeSuite('either', 'leave').replace('= true', '= false'),
+    cold: cacheProbeSuite('empty', 'write'),
+  });
+  try {
+    await withStdioServer(async (call) => {
+      const bare = await cacheRun(call, rig, 'quiet');
+      assert.equal(get(bare, 'passed'), true, JSON.stringify(bare));
+      assert.equal(keptCache(rig), null, 'a run that built no cache keeps none');
+      const first = await cacheRun(call, rig, 'cold');
+      assert.equal(get(first, 'passed'), true, JSON.stringify(first));
+      const before = keptCache(rig);
+      assert.equal(before?.marker, 'built', 'a cache is kept to be left alone');
+      const again = await cacheRun(call, rig, 'quiet');
+      assert.equal(get(again, 'passed'), true, JSON.stringify(again));
+      assert.deepEqual(keptCache(rig), before, 'the kept cache is as it was after a headless run');
+    }, rig.env);
+  } finally {
+    sweep(rig.root);
+  }
+}
+
+/** A run on another engine build starts without the kept cache, and replaces it with its own. */
+async function testProjectTestDoesNotSeedFromAnotherEngineBuild(): Promise<void> {
+  const engine = cacheEngine('project_test cache engine regression');
+  if (engine === null) {
+    return;
+  }
+  const rig = cacheRig(engine.gdunit, engine.godot, {
+    first: cacheProbeSuite('empty', 'write'),
+    other: cacheProbeSuite('empty', 'write'),
+  });
+  const copy = join(rig.root, `other-${basename(engine.godot)}`);
+  try {
+    linkSync(engine.godot, copy);
+  } catch {
+    cpSync(engine.godot, copy);
+  }
+  try {
+    await withStdioServer(async (call) => {
+      const first = await cacheRun(call, rig, 'first');
+      assert.equal(get(first, 'passed'), true, JSON.stringify(first));
+      const before = keptCache(rig);
+      assert.equal(before?.marker, 'built', 'the first engine keeps its cache');
+      await withStdioServer(
+        async (elsewhere) => {
+          const other = await cacheRun(elsewhere, rig, 'other');
+          assert.equal(
+            get(other, 'passed'),
+            true,
+            `another engine build starts cold: ${JSON.stringify(other)}`,
+          );
+        },
+        { ...rig.env, GODOT_PATH: copy },
+      );
+      const after = keptCache(rig);
+      assert.equal(after?.marker, 'built', 'the other build keeps its own');
+      assert.notEqual(after.engine, before.engine, 'and it replaced the first build');
+    }, rig.env);
+  } finally {
+    sweep(rig.root);
+  }
+}
+
+/**
+ * A run the limit cuts off, one stopped for an autoload that did not compile and one that fails each
+ * keep what the engine left, as a suite run does.
+ */
+async function testProjectTestKeepsTheCacheOfARunThatEndedBadly(): Promise<void> {
+  const engine = cacheEngine('project_test cache ending regression');
+  if (engine === null) {
+    return;
+  }
+  const rig = cacheRig(
+    engine.gdunit,
+    engine.godot,
+    {
+      slow: cacheProbeSuite('either', 'linger'),
+      failing: cacheProbeSuite('either', 'fail'),
+      steady: cacheProbeSuite('either', 'leave'),
+    },
+    '[autoload]\n\nSeed="*res://boot/seed.gd"\nGuard="*res://boot/guard.gd"\n\n',
+  );
+  mkdirSync(join(rig.project, 'boot'));
+  writeFileSync(
+    join(rig.project, 'boot', 'seed.gd'),
+    [
+      'extends Node',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tDirAccess.make_dir_recursive_absolute("user://shader_cache")',
+      '\tvar file: FileAccess = FileAccess.open("user://shader_cache/marker.bin", FileAccess.WRITE)',
+      '\tfile.store_string("built")',
+      '\tfile.close()',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(rig.project, 'boot', 'guard.gd'),
+    'extends Node\n\n\nfunc greet() -> String:\n\treturn elsewhere\n',
+  );
+  const forgetKept = (): void => {
+    rmSync(join(rig.home, 'gdharness'), { recursive: true, force: true });
+  };
+  try {
+    await withStdioServer(async (call) => {
+      const stopped = await cacheRun(call, rig, 'steady');
+      assert.match(
+        text(get(stopped, 'verdict')),
+        /the autoload Guard .* did not compile/,
+        `the run was stopped for the autoload: ${JSON.stringify(stopped)}`,
+      );
+      assert.equal(keptCache(rig)?.marker, 'built', 'a run stopped for an autoload keeps its cache');
+
+      writeFileSync(
+        join(rig.project, 'project.godot'),
+        readFileSync(join(rig.project, 'project.godot'), 'utf8').replace(/\[autoload\][\s\S]*?\n\n/, ''),
+      );
+      forgetKept();
+      const failed = await cacheRun(call, rig, 'failing');
+      assert.equal(get(failed, 'passed'), false, JSON.stringify(failed));
+      assert.equal(keptCache(rig)?.marker, 'built', 'a run that failed keeps its cache');
+
+      forgetKept();
+      const cut = await cacheRun(call, rig, 'slow', { timeoutMs: 20_000 });
+      assert.equal(get(cut, 'timedOut'), true, `the limit cut the run off: ${JSON.stringify(cut)}`);
+      assert.equal(keptCache(rig)?.marker, 'built', 'a run the limit cut off keeps its cache');
+    }, rig.env);
+  } finally {
+    sweep(rig.root);
+  }
+}
+
+/** A cache folder that cannot be kept in neither fails a run nor changes its answer. */
+async function testProjectTestRunsWhereTheCacheCannotBeKept(): Promise<void> {
+  const engine = cacheEngine('project_test cache failure regression');
+  if (engine === null) {
+    return;
+  }
+  const rig = cacheRig(engine.gdunit, engine.godot, {
+    cold: cacheProbeSuite('empty', 'write'),
+  });
+  // Under a file, so neither a keep nor a lookup of the kept one can open the folder.
+  const blocked = join(rig.root, 'blocked');
+  writeFileSync(blocked, 'a file');
+  try {
+    await withStdioServer(
+      async (call) => {
+        const ran = await cacheRun(call, rig, 'cold');
+        assert.equal(get(ran, 'passed'), true, JSON.stringify(ran));
+        assert.equal(get(ran, 'tests'), 1, JSON.stringify(ran));
+      },
+      { XDG_CACHE_HOME: join(blocked, 'under') },
+    );
+  } finally {
+    sweep(rig.root);
+  }
+}
+
+/** Two project_test runs at once on one project each start with their own copy of the kept cache. */
+async function testProjectTestRunsAtOnceEachSeedFromTheKeptCache(): Promise<void> {
+  const engine = cacheEngine('project_test cache concurrent regression');
+  if (engine === null) {
+    return;
+  }
+  const rig = cacheRig(engine.gdunit, engine.godot, {
+    cold: cacheProbeSuite('empty', 'write'),
+    left: cacheProbeSuite('kept', 'write'),
+    right: cacheProbeSuite('kept', 'write'),
+  });
+  try {
+    await withStdioServer(async (call) => {
+      const first = await cacheRun(call, rig, 'cold');
+      assert.equal(get(first, 'passed'), true, JSON.stringify(first));
+      const [left, right] = await Promise.all([cacheRun(call, rig, 'left'), cacheRun(call, rig, 'right')]);
+      assert.deepEqual(
+        [get(left, 'passed'), get(right, 'passed')],
+        [true, true],
+        `both started with the kept cache: ${JSON.stringify(left)} ${JSON.stringify(right)}`,
+      );
+      assert.equal(keptCache(rig)?.marker, 'built', 'and it is still whole');
+    }, rig.env);
+  } finally {
+    sweep(rig.root);
+  }
+}
+
 function testAnArgumentScopedInWordsIsScopedInItsSchema(): void {
   let read = 0;
   for (const spec of TOOL_SPECS) {
@@ -112304,6 +112651,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPipelineCacheIsCarriedToTheNextRun,
   testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
+  testProjectTestKeepsTheCacheAndSeedsTheNextRun,
+  testProjectTestHeadlessLeavesTheKeptCacheAlone,
+  testProjectTestDoesNotSeedFromAnotherEngineBuild,
+  testProjectTestKeepsTheCacheOfARunThatEndedBadly,
+  testProjectTestRunsWhereTheCacheCannotBeKept,
+  testProjectTestRunsAtOnceEachSeedFromTheKeptCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,

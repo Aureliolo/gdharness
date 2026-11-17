@@ -260,6 +260,7 @@ import {
   relativeWithin,
   resolveWithinProject,
 } from './paths.js';
+import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { portFromEnvOrNull } from './ports.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
@@ -10089,6 +10090,9 @@ class GodotServer {
   private async testRunning(prepared: TestPrepared): Promise<ToolResponse> {
     const { project, needing, windowed, engine, cmdArgs, timeoutMs, ours, userData, helperFiles } = prepared;
     const onDesktop = windowed && process.platform === 'win32';
+    // As gdharness test does: a drawing run starts with the shaders the last run on this engine
+    // build compiled, and leaves its own for the next. Neither throws: a fault is a cold start.
+    seedPipelineCache(userData, project.value.path, engine.value);
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(
@@ -10097,6 +10101,11 @@ class GodotServer {
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
     );
+    // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
+    const keep = async (): Promise<void> => {
+      await keepPipelineCache(userData, project.value.path, engine.value);
+    };
+    const keeping = run.settled.then(keep, keep);
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
     const console: Buffer[] = [];
@@ -10151,6 +10160,7 @@ class GodotServer {
       await untilGone([run.process.pid]);
     }
     await run.settled;
+    await keeping;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
     // Or its pid never came, which is a helper that hung until the run's limit ended it.
     const helperFailed = onDesktop

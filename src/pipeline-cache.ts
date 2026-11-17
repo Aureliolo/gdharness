@@ -20,8 +20,8 @@ import { isRecord } from './records.js';
 import { tryTake } from './write-turns.js';
 
 /**
- * A test run's engine gets a user:// of its own, and Godot keeps its pipeline cache there, in
- * user://shader_cache. A drawing engine started cold rebuilt every pipeline: one game's windowed
+ * A test run's engine gets a user:// of its own, and Godot keeps its shader cache there, in
+ * user://shader_cache. A drawing engine started cold compiled every shader again: one game's windowed
  * suite spent five to seven seconds of a case building the pipelines of one screen. So the cache a
  * run leaves is kept per project, and handed to the next run on the same engine build before it
  * starts. Copied in and out rather than shared, since runs go side by side.
