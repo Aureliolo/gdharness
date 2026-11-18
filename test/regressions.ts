@@ -22161,6 +22161,17 @@ async function testAnExitAlreadyToldIsStillSeen(): Promise<void> {
 }
 
 /**
+ * The game's parent, or on Windows its grandparent, since the desktop helper starts the game.
+ */
+function keeperAbove(
+  tree: NonNullable<Awaited<ReturnType<typeof processTree>>>,
+  game: number,
+): { command: string } | undefined {
+  const parent = tree.get(tree.get(game)?.parent ?? 0);
+  return parent?.command.includes('keeper.js') === true ? parent : tree.get(parent?.parent ?? 0);
+}
+
+/**
  * The environment a run is started with goes to it without passing through any command line.
  *
  * The launcher and the keeper were handed their spec as a command-line argument, base64 JSON, and
@@ -22244,9 +22255,9 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
       tree !== undefined,
       `the platform should list its processes for this to prove anything: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
     );
-    // The keeper holding this run, which is the game's parent: other keepers on the machine belong
-    // to other sessions' runs, and one from an older version is exactly what this is about.
-    const keeper = tree.get(tree.get(game)?.parent ?? 0);
+    // The keeper holding this run: other keepers on the machine belong to other sessions' runs, and
+    // one from an older version is exactly what this is about.
+    const keeper = keeperAbove(tree, game);
     assert.ok(
       keeper?.command.includes('keeper.js') === true,
       `the keeper holding the run should be listed as the game's parent, or nothing was looked at: ${keeper?.command ?? 'none'}`,
@@ -77388,9 +77399,35 @@ function testEachEnginesFolderNamesItsLaneAndPid(): void {
       'tests/b_test.gd': failing('b'),
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    // A tiny measured peak for each suite, so a machine short of memory cannot hold the run to one
+    // engine.
+    const times = join(project, 'times.json');
+    writeFileSync(
+      times,
+      JSON.stringify(
+        Object.fromEntries(
+          ['a', 'b'].map((name) => [
+            `res://tests/${name}_test.gd`,
+            { seconds: 100, cases: { [`test_${name}`]: 100 }, peak: 1 },
+          ]),
+        ),
+      ),
+    );
     spawnSyncHidden(
       process.execPath,
-      ['build/cli.js', 'test', project, '--slots', slots, '--engines', '2', '--slot-count', '4'],
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--engines',
+        '2',
+        '--slot-count',
+        '4',
+        '--times',
+        times,
+      ],
       {
         encoding: 'utf8',
         env: { ...process.env, GODOT_PATH: godotPath },
@@ -80678,9 +80715,11 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
       assert.match(keptLog, /nobody said this/, 'and holds what the engine printed');
       assert.deepEqual(
-        readdirSync(join(keptUnder ?? '', 'engine-0')).filter((name) => !name.endsWith('.log')),
+        readdirSync(join(keptUnder ?? '', 'engine-0')).filter(
+          (name) => !name.endsWith('.log') && name !== 'lane.json',
+        ),
         [],
-        'only the logs are copied, not the engine user folder or the reports',
+        'only the logs and lane.json are copied, not the engine user folder or the reports',
       );
 
       // A run held up by a slot someone else holds says so once, whatever its engines.
@@ -84248,8 +84287,8 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         `${what}: and no box can open (mode 0x${mode.toString(16)})`,
       );
     };
-    // Bun clears the bit in gdharness's own process and Node routes the start through the desktop
-    // helper, so each is held by its own route rather than by the other's.
+    // Every Windows start goes through the desktop helper, which sets the error mode itself, so a kept
+    // run under either runtime is the helper's child.
     const assertStartedBy = async (pid: number, parent: RegExp, what: string): Promise<void> => {
       const tree = await processTree();
       const parentPid = tree?.get(pid)?.parent;
@@ -84355,11 +84394,7 @@ async function checksAnEngineLaunchedWithAndWithoutAKeeper(
     assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
     assertReportable(pid, what);
     if (kept) {
-      await assertStartedBy(
-        pid,
-        runtimeName === 'Bun' ? /keeper\.js"? keep/ : /gdharness-desktop-[0-9a-f]{16}\.exe/i,
-        what,
-      );
+      await assertStartedBy(pid, /gdharness-desktop-[0-9a-f]{16}\.exe/i, what);
     }
   };
   for (const kept of [true, false]) {
