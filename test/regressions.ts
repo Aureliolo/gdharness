@@ -26650,9 +26650,9 @@ function testTheLauncherSaysWhyARunDidNotStart(): void {
       `and the system's reason: ${missing}`,
     );
     if (process.platform === 'win32') {
-      const text = join(scratch, 'not a program.exe');
-      writeFileSync(text, 'this is text');
-      const notRun = launched(text, join(scratch, 'text.log'));
+      const notAProgram = join(scratch, 'not a program.exe');
+      writeFileSync(notAProgram, 'this is text');
+      const notRun = launched(notAProgram, join(scratch, 'text.log'));
       assert.match(
         notRun,
         /^error [^\r\n]*not a program\.exe[^\r\n]*: (%1 is not a valid Win32 application|This version of %1 is not compatible)[^\r\n]*\r?\n$/iu,
@@ -77163,6 +77163,94 @@ function testEachEnginesFolderNamesItsLaneAndPid(): void {
   }
 }
 
+/**
+ * With one slot for two lanes the engine that holds it is handed each further share while it runs,
+ * and every share's folder names that engine's lane and pid. The kept times make each suite cost
+ * 100 s, so every suite is a share of its own, and give each engine a tiny peak, so memory never
+ * holds the run and turns the reuse off.
+ */
+function testEveryShareAnEngineIsHandedNamesItsLaneAndPid(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('handed share lane regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-handed-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-handed-slots-'));
+  try {
+    const names = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const failing = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(2)\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="HandedShares"\n',
+      ...Object.fromEntries(names.map((name) => [`tests/${name}_test.gd`, failing(name)])),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const times = join(project, 'times.json');
+    writeFileSync(
+      times,
+      JSON.stringify(
+        Object.fromEntries(
+          names.map((name) => [
+            `res://tests/${name}_test.gd`,
+            { seconds: 100, cases: { [`test_${name}`]: 100 }, peak: 1 },
+          ]),
+        ),
+      ),
+    );
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--engines',
+        '2',
+        '--slot-count',
+        '1',
+        '--times',
+        times,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const runs = join(project, '.godot', 'gdharness', 'test-runs');
+    const run = readdirSync(runs).toSorted().at(-1) ?? '';
+    const shares = readdirSync(join(runs, run)).filter((name) => /^engine-\d+$/.test(name));
+    const named = shares.map((name) => laneFileOf(join(runs, run, name)));
+    assert.ok(shares.length >= 3, `the suites were dealt as shares: ${shares.join(' ')}\n${ran.stdout}`);
+    assert.ok(
+      named.every((lane) => lane !== null),
+      `every share's folder names a lane and an engine: ${JSON.stringify(named)}`,
+    );
+    const engines = new Set(named.map((lane) => lane.pid));
+    assert.ok(
+      engines.size < shares.length,
+      `an engine ran more than one share: ${JSON.stringify(named)}\n${ran.stdout}`,
+    );
+    for (const pid of engines) {
+      const ofEngine: number[] = named.flatMap((share) => (share.pid === pid ? [share.lane] : []));
+      assert.equal(
+        new Set(ofEngine).size,
+        1,
+        `the shares of engine ${String(pid)} name one lane: ${JSON.stringify(named)}`,
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
 /** An engine handed a further share keeps its lane there, and a kept log takes its lane file along. */
 function testAHandedShareKeepsItsEnginesLane(): void {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-share-'));
@@ -117226,6 +117314,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testEachEnginesFolderNamesItsLaneAndPid,
+  testEveryShareAnEngineIsHandedNamesItsLaneAndPid,
   testAHandedShareKeepsItsEnginesLane,
   testInTurnsNamesEachItemsLane,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
