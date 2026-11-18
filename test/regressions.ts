@@ -26644,6 +26644,21 @@ function testTheLauncherSaysWhyARunDidNotStart(): void {
       /^error [^\r\n]*no-such-program[^\r\n]*\r?\n$/u,
       `a command that is not there: ${missing}`,
     );
+    assert.match(
+      missing,
+      process.platform === 'win32' ? /cannot find the (file|path) specified/iu : /ENOENT/u,
+      `and the system's reason: ${missing}`,
+    );
+    if (process.platform === 'win32') {
+      const text = join(scratch, 'not a program.exe');
+      writeFileSync(text, 'this is text');
+      const notRun = launched(text, join(scratch, 'text.log'));
+      assert.match(
+        notRun,
+        /^error [^\r\n]*not a program\.exe[^\r\n]*: (%1 is not a valid Win32 application|This version of %1 is not compatible)[^\r\n]*\r?\n$/iu,
+        `a file that is not a program names the reason: ${notRun}`,
+      );
+    }
     const cut = launched(process.execPath, join(scratch, 'no-such-folder', 'run.log'));
     assert.match(
       cut,

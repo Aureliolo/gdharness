@@ -441,12 +441,18 @@ public static class GdharnessDesktop {
     return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, separateErrors, laneFile, lane);
   }
 
+  // The call and what it was given, then the system's own reason for the code. The exception's
+  // message is the given text alone, so the reason is added here.
+  static Exception Failure(int code, string what) {
+    return new Win32Exception(code, what + ": " + new Win32Exception(code).Message);
+  }
+
   // Written under a temporary name and renamed, so a reader never sees half of it.
   static void WriteLane(string laneFile, string lane, int processId) {
     string temporary = laneFile + ".tmp";
     File.WriteAllText(temporary, "{\\"lane\\": " + lane + ", \\"pid\\": " + processId + "}\\n");
     if (!MoveFileExW(temporary, laneFile, ReplaceExisting)) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "MoveFileExW " + laneFile);
+      throw Failure(Marshal.GetLastWin32Error(), "MoveFileExW " + laneFile);
     }
   }
 
@@ -471,17 +477,17 @@ public static class GdharnessDesktop {
       Step(stepFile, "opening the session's own window station");
       IntPtr station = CreateWindowStationW(null, 0, WindowStationAllAccess, IntPtr.Zero);
       if (station == IntPtr.Zero) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateWindowStationW");
+        throw Failure(Marshal.GetLastWin32Error(), "CreateWindowStationW");
       }
       StringBuilder stationName = new StringBuilder(256);
       int needed;
       if (!GetUserObjectInformationW(station, ObjectName, stationName, stationName.Capacity * 2, out needed)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
+        throw Failure(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
       }
       // A desktop is made in the calling process's station, so this one is the caller's while it is.
       IntPtr own = GetProcessWindowStation();
       if (!SetProcessWindowStation(station)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
+        throw Failure(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
       }
       IntPtr held;
       int made;
@@ -493,7 +499,7 @@ public static class GdharnessDesktop {
         SetProcessWindowStation(own);
       }
       if (held == IntPtr.Zero) {
-        throw new Win32Exception(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
+        throw Failure(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
       }
       desktopHandle = held;
       startup.desktop = stationName + "\\\\" + desktop;
@@ -526,14 +532,14 @@ public static class GdharnessDesktop {
     // would give each such child a window. On a desktop of its own nothing shows, so it has none.
     uint creation = (desktop.Length > 0 ? DetachedProcess : CreateNoWindow) | BelowNormalPriorityClass | CreateSuspended;
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
+      throw Failure(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
     if (affinity != 0) {
       Step(stepFile, "holding the process to its processors");
       if (!SetProcessAffinityMask(started.process, new UIntPtr(affinity))) {
         int error = Marshal.GetLastWin32Error();
         TerminateProcess(started.process, 1);
-        throw new Win32Exception(error, "SetProcessAffinityMask " + affinity);
+        throw Failure(error, "SetProcessAffinityMask " + affinity);
       }
     }
     Step(stepFile, "putting the process in its job");
@@ -544,7 +550,7 @@ public static class GdharnessDesktop {
     int made = Marshal.GetLastWin32Error();
     if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
       TerminateProcess(started.process, 1);
-      throw new Win32Exception(made, job == IntPtr.Zero
+      throw Failure(made, job == IntPtr.Zero
         ? "CreateJobObjectW " + jobName
         : "the job " + jobName + " already exists");
     }
@@ -553,7 +559,7 @@ public static class GdharnessDesktop {
         || !AssignProcessToJobObject(job, started.process)) {
       int error = Marshal.GetLastWin32Error();
       TerminateProcess(started.process, 1);
-      throw new Win32Exception(error, "a job for the process named " + jobName);
+      throw Failure(error, "a job for the process named " + jobName);
     }
     if (laneFile.Length > 0) {
       try {
