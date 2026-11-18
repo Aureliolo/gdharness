@@ -116515,6 +116515,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAParkedLaneEndsWhenTheRunFails,
   testAMarkNotTakenStillLetsTheRunFallToTheLanesTold,
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
+  testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
   testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
@@ -117040,6 +117041,22 @@ function saidOfAFailure(error: unknown): string | undefined {
       : String(error);
 }
 
+/** The step's limit ends a command that will not end, and passes the exit code of one that does. */
+function testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes(): void {
+  const limited = (minutes: string, script: string) =>
+    spawnSyncHidden(process.execPath, ['scripts/run-limited.ts', minutes, process.execPath, '-e', script], {
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+  const began = Date.now();
+  const stuck = limited('0.03', 'setInterval(() => {}, 1000)');
+  assert.equal(stuck.status, 124, `a command past its limit is ended: ${stuck.stderr}`);
+  assert.ok(Date.now() - began < 30_000, 'and ended near the limit');
+  assert.match(stuck.stderr, /still running after 0\.03 minutes/);
+  assert.equal(limited('1', 'process.exit(7)').status, 7, 'a command that ends keeps its own code');
+  assert.equal(limited('1', '0').status, 0);
+}
+
 /** A timer a test leaves running is named at the end of the run, with the test that set it. */
 async function testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt(): Promise<void> {
   const mine = 'testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt';
@@ -117074,8 +117091,9 @@ async function testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt():
   const mine = 'testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt';
   const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   try {
-    // The listing leaves out what started in the second before it asked.
-    await delay(1_500);
+    // The listing leaves out what started in the second before it asked, and POSIX dates a start
+    // to the whole second.
+    await delay(2_500);
     const listed = (await openChildren()).filter((open) => open.what.startsWith(`process ${child.pid} `));
     assert.equal(listed.length, 1, 'the process left running is listed');
     assert.equal(listed[0]?.during, mine);

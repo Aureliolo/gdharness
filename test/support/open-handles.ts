@@ -1,4 +1,10 @@
-import { descendantsIn, processTree } from '../../src/process-children.js';
+import {
+  descendantsIn,
+  type ProcessTree,
+  parseProcessTable,
+  processTree,
+} from '../../src/process-children.js';
+import { runHidden } from '../../src/spawn.js';
 import { fixtureNow } from './sweep.js';
 
 /**
@@ -132,10 +138,36 @@ const LISTING_SKEW_MS = 1_000;
 const SHARED_POWERSHELL =
   /^powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand /i;
 
+/**
+ * The process table on POSIX with each process's start, which `processTree` does not list there.
+ * `etime` is `[[dd-]hh:]mm:ss`, so a start is known to the second, which the skew allows for.
+ */
+async function posixTableWithStarts(): Promise<ProcessTree | undefined> {
+  try {
+    const { stdout } = await runHidden('ps', ['-e', '-o', 'pid=,ppid=,etime=,args='], {
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const now = Date.now();
+    const lines: string[] = [];
+    for (const line of stdout.split('\n')) {
+      const fields = /^\s*(\d+)\s+(\d+)\s+(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s+(.*)$/.exec(line);
+      if (fields !== null) {
+        const [, pid, parent, days, hours, minutes, seconds, command] = fields;
+        const elapsed =
+          ((Number(days ?? 0) * 24 + Number(hours ?? 0)) * 60 + Number(minutes)) * 60 + Number(seconds);
+        lines.push(`${pid} ${parent} ${now - elapsed * 1000} ${command}`);
+      }
+    }
+    return parseProcessTable(lines.join('\n'), true);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The processes still running under this one, other than the listing that found them. */
 export async function openChildren(): Promise<OpenHandle[]> {
   const asked = Date.now();
-  const tree = await processTree();
+  const tree = process.platform === 'win32' ? await processTree() : await posixTableWithStarts();
   if (tree === undefined) {
     return [];
   }
