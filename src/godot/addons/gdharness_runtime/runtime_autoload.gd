@@ -349,7 +349,8 @@ func _compiled(file: String) -> GDScript:
 	if not _in_flight.is_empty():
 		var _taken: Resource = ResourceLoader.load_threaded_get(_in_flight)
 		_in_flight = ""
-	_queued.erase(path)
+	else:
+		_queued.erase(path)
 	return _loaded(file)
 
 
