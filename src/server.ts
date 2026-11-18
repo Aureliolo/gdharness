@@ -2407,6 +2407,20 @@ function startedByHelper(
   return { helped, ownScratch };
 }
 
+/**
+ * Calls [param then] once [param run] has ended, at once when it already has. A start the helper
+ * could not make has ended by the time the run is handed back, so a listener attached then would
+ * never hear it.
+ */
+function whenEnded(run: SpawnedGame, then: () => void): void {
+  if (run.exitCode !== null || run.exitSignal !== null) {
+    then();
+    return;
+  }
+  run.process.once('exit', then);
+  run.process.once('error', then);
+}
+
 /** How often the pid a helper writes for its engine is looked for. */
 const ENGINE_PID_WAIT_MS = 10;
 
@@ -10288,8 +10302,7 @@ class GodotServer {
         clearTimeout(timer);
         resolve(false);
       };
-      run.process.once('exit', ended);
-      run.process.once('error', ended);
+      whenEnded(run, ended);
     });
     clearInterval(reporting);
     // A signal is not an exit: the engine still holds its log in the user data directory while it
@@ -15460,10 +15473,7 @@ class GodotServer {
     }
   }
 
-  /**
-   * Waits until the helper has written the pid of [param run]'s engine, or has ended without. Then
-   * the cause the helper gave goes into the log, since the exit code alone names nothing.
-   */
+  /** Waits until the helper has written the pid of [param run]'s engine, or has ended without. */
   private async engineKnown(run: SpawnedGame, files: HelperFiles): Promise<void> {
     while (run.exitCode === null && run.exitSignal === null) {
       const pid = helperPid(files.pid);
@@ -15476,11 +15486,6 @@ class GodotServer {
     const pid = helperPid(files.pid);
     if (pid !== undefined) {
       run.pid = pid;
-      return;
-    }
-    const said = helperFailure(files.error);
-    if (said !== null) {
-      run.log.record('error', `the engine could not be started: ${said}`);
     }
   }
 
@@ -15562,6 +15567,14 @@ class GodotServer {
       started.exitCode = exitFile === undefined ? whole(code) : helperExit(exitFile, whole(code));
       started.exitSignal = code === null ? signal : null;
       started.endedAt = Date.now();
+      // Read here, as the exit is seen: under Bun both streams close before it, and the folder the
+      // helper wrote its cause in is removed once they have. The exit code alone names nothing.
+      if (helped !== null && helperPid(helped.files.pid) === undefined) {
+        const said = helperFailure(helped.files.error);
+        if (said !== null) {
+          log.record('error', `the engine could not be started: ${said}`);
+        }
+      }
     });
     child.on('error', (err: Error) => {
       console.error('Failed to start Godot process:', err);
@@ -15594,7 +15607,15 @@ class GodotServer {
       });
     });
     if (ownScratch !== null) {
-      void settled.then(() => {
+      const ended = new Promise<void>((resolve) => {
+        child.once('exit', () => {
+          resolve();
+        });
+        child.once('error', () => {
+          resolve();
+        });
+      });
+      void Promise.all([settled, ended]).then(() => {
         discard(ownScratch);
       });
     }
@@ -16552,11 +16573,7 @@ class GodotServer {
             started.process.kill();
             resolve(true);
           }, timeoutMs);
-          started.process.once('exit', () => {
-            clearTimeout(timer);
-            resolve(false);
-          });
-          started.process.once('error', () => {
+          whenEnded(started, () => {
             clearTimeout(timer);
             resolve(false);
           });

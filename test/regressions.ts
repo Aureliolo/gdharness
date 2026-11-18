@@ -20793,6 +20793,11 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
     assert.notEqual(start.child.exitCode, 0, 'with a failure');
     assert.match(helperFailure(start.files.error) ?? '', /already exists/, 'which names the taken job');
+    assert.doesNotMatch(
+      helperFailure(start.files.error) ?? '',
+      /already exists.*already exists|file/isu,
+      'once, and without the system text about a file',
+    );
     assert.match(helperFailure(start.files.error) ?? '', new RegExp(name), 'and its name');
     assert.equal(start.pid(), undefined, 'no pid is given out');
     await delay(1000);
@@ -26655,9 +26660,10 @@ function testTheLauncherSaysWhyARunDidNotStart(): void {
       const notRun = launched(notAProgram, join(scratch, 'text.log'));
       assert.match(
         notRun,
-        /^error [^\r\n]*not a program\.exe[^\r\n]*: (%1 is not a valid Win32 application|This version of %1 is not compatible)[^\r\n]*\r?\n$/iu,
-        `a file that is not a program names the reason: ${notRun}`,
+        /^error [^\r\n]*: (This version of [^\r\n]*not a program\.exe is not compatible|[^\r\n]*not a program\.exe is not a valid Win32 application)[^\r\n]*\r?\n$/iu,
+        `a file that is not a program names the reason, with the program's name filled in: ${notRun}`,
       );
+      assert.doesNotMatch(notRun, /%1/u, 'and no placeholder is left');
     }
     const cut = launched(process.execPath, join(scratch, 'no-such-folder', 'run.log'));
     assert.match(
@@ -45092,6 +45098,88 @@ async function testABootCheckThatDiesAfterItsBannerIsStartedAgain(): Promise<voi
       },
     );
   } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * An engine the helper cannot start, after it answered `--version`, is answered at once with the
+ * helper's reason, by a boot check and by a test run, and not after the call's whole limit.
+ */
+async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-failure-'));
+  const engine = join(scratch, 'engine dir', 'godot engine.exe');
+  const user = process.env['USERNAME'] ?? '';
+  try {
+    mkdirSync(dirname(engine));
+    cpSync(await crashingEngine(), engine);
+    const project = join(scratch, 'project');
+    writeTree(project, {
+      'project.godot':
+        'config_version=5\n\n[application]\nconfig/name="Failure"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+      'tests/a_test.gd': 'extends GdUnitTestSuite\n\nfunc test_a() -> void:\n\tpass\n',
+      'addons/gdUnit4/plugin.cfg': '[plugin]\nname="gdUnit4"\nversion="6.0.0"\n',
+      'addons/gdUnit4/bin/GdUnitCmdTool.gd': 'extends SceneTree\n',
+      'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends RefCounted\n',
+    });
+    await withStdioServer(
+      async (call) => {
+        const check = async (): Promise<{ said: unknown; ms: number }> => {
+          const began = Date.now();
+          const said: unknown = JSON.parse(
+            await call(
+              'editor_run',
+              { projectPath: project, op: 'check', frames: 10, timeoutMs: 60_000 },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          return { said, ms: Date.now() - began };
+        };
+        const first = await check();
+        assert.equal(
+          get(first.said, 'booted'),
+          true,
+          `the engine boots before it is denied: ${JSON.stringify(first.said)}`,
+        );
+        const acl = spawnSyncHidden('icacls', [engine, '/deny', `${user}:(X)`], { encoding: 'utf8' });
+        assert.equal(acl.status, 0, `the engine is made unstartable: ${acl.stdout}${acl.stderr}`);
+        const failed = await check();
+        const answer = JSON.stringify(failed.said);
+        assert.ok(
+          failed.ms < 30_000,
+          `the boot check answers at once, not at its limit: ${String(failed.ms)} ms`,
+        );
+        assert.equal(get(failed.said, 'hung'), false, `and does not call it a hang: ${answer}`);
+        assert.match(
+          answer,
+          /could not be started: CreateProcessW .*Access is denied/u,
+          `and says why: ${answer}`,
+        );
+        const began = Date.now();
+        const tested = await call(
+          'project_test',
+          { projectPath: project, timeoutMs: 60_000 },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.ok(
+          Date.now() - began < 30_000,
+          `a test run answers at once too: ${String(Date.now() - began)} ms`,
+        );
+        assert.match(
+          tested,
+          /could not be started: CreateProcessW .*Access is denied/u,
+          `and says why: ${tested}`,
+        );
+      },
+      { GODOT_PATH: engine },
+    );
+  } finally {
+    // Harmless where nothing was denied.
+    spawnSyncHidden('icacls', [engine, '/remove:d', user], { encoding: 'utf8' });
     sweep(scratch);
   }
 }
@@ -116764,6 +116852,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,
   testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut,
+  testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart,
   testAnEngineStartedInsideAParentJobStillGetsItsJob,
   testAnEngineStartedUnderAUiLimitedParentJobStillRuns,
   testAKeptStartAndItsConsoleChildOpenNoWindow,

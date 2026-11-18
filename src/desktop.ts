@@ -442,9 +442,24 @@ public static class GdharnessDesktop {
   }
 
   // The call and what it was given, then the system's own reason for the code. The exception's
-  // message is the given text alone, so the reason is added here.
+  // message is the given text alone, so the reason is added here. The system leaves the program's
+  // name out of a reason that has a place for it (%1), so it is put there.
+  static Exception Failure(int code, string what, string program) {
+    return new Win32Exception(code, what + ": " + new Win32Exception(code).Message.Replace("%1", program));
+  }
+
   static Exception Failure(int code, string what) {
-    return new Win32Exception(code, what + ": " + new Win32Exception(code).Message);
+    return Failure(code, what, "");
+  }
+
+  // The program a command line names: what is inside the first quotes, or up to the first space.
+  static string ProgramOf(string commandLine) {
+    if (commandLine.StartsWith("\\"")) {
+      int end = commandLine.IndexOf('"', 1);
+      return end < 0 ? commandLine.Substring(1) : commandLine.Substring(1, end - 1);
+    }
+    int space = commandLine.IndexOf(' ');
+    return space < 0 ? commandLine : commandLine.Substring(0, space);
   }
 
   // Written under a temporary name and renamed, so a reader never sees half of it.
@@ -532,7 +547,7 @@ public static class GdharnessDesktop {
     // would give each such child a window. On a desktop of its own nothing shows, so it has none.
     uint creation = (desktop.Length > 0 ? DetachedProcess : CreateNoWindow) | BelowNormalPriorityClass | CreateSuspended;
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
-      throw Failure(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
+      throw Failure(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine, ProgramOf(commandLine));
     }
     if (affinity != 0) {
       Step(stepFile, "holding the process to its processors");
@@ -550,9 +565,10 @@ public static class GdharnessDesktop {
     int made = Marshal.GetLastWin32Error();
     if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
       TerminateProcess(started.process, 1);
-      throw Failure(made, job == IntPtr.Zero
-        ? "CreateJobObjectW " + jobName
-        : "the job " + jobName + " already exists");
+      // A name already taken says it all itself: the system's text for that code speaks of a file.
+      throw job == IntPtr.Zero
+        ? Failure(made, "CreateJobObjectW " + jobName)
+        : new Win32Exception(made, "the job " + jobName + " already exists");
     }
     limits.flags = endsWithThis ? KillOnJobClose : 0u;
     if ((endsWithThis && !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits))))
