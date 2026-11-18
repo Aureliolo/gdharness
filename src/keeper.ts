@@ -558,10 +558,9 @@ async function handTheSlot(
 }
 
 /**
- * The look for a successor of [param pid], unless the game said it does not restart. A game that said
- * it does has its successor taken as the newest engine it started, whatever the time between. The
- * successor is dated against [param watch]'s kernel exit time where there is one, since the sighting
- * [param exitedAt] comes late on a loaded machine.
+ * The look for a successor of [param pid], unless the game said it does not restart. It is dated
+ * against [param watch]'s kernel exit time where there is one, since the sighting [param exitedAt]
+ * comes late on a loaded machine.
  */
 function lookForSuccessor(
   following: Following,
@@ -570,21 +569,9 @@ function lookForSuccessor(
   exitedAt: number,
   watch?: ExitWatch,
 ): Promise<Followed | null> | null {
-  const said = restartSaid(following.exitNotes, pid);
-  if (said === false) {
-    return null;
-  }
-  return (async () => {
-    const endedAt = watch === undefined ? exitedAt : await watch.endedBy(exitedAt);
-    return await followSuccessor(
-      pid,
-      following.command,
-      notBefore,
-      endedAt,
-      following.transcript,
-      said === true,
-    );
-  })();
+  return restartSaid(following.exitNotes, pid) === false
+    ? null
+    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript, watch);
 }
 
 /** One process in a chain of restarts, from the game's first to the one it restarted into. */
@@ -740,7 +727,6 @@ async function keep(): Promise<void> {
     following,
   );
   recordTheEnd(last);
-  watch?.stop();
   if (slot !== undefined) {
     giveBackSlot(slot.lock, process.pid);
   }
