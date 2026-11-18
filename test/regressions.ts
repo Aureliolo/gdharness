@@ -36516,12 +36516,16 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
     const importNote = text(get(imported, 'docCacheNote'));
     const shownImport = JSON.stringify(importedRaw);
     assert.deepEqual(get(imported, 'uidsCreated'), ['second.gd'], shownImport);
+    // Whether the engine crashes as it quits after rebuilding the cache is a race inside it, so
+    // either end is right: a crash is run again and says so, and a clean exit says nothing.
     assert.ok(
-      importNote.startsWith('The first import ended badly (') &&
-        importNote.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
-      `the import over a stale cache crashed, was run again, and says so: ${shownImport}`,
+      importNote === ''
+        ? get(imported, 'docCacheNote') === undefined
+        : importNote.startsWith('The first import ended badly (') &&
+            importNote.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
+      `the import over a stale cache ran again with a note, or ran once cleanly: ${shownImport}`,
     );
-    assert.ok(statSync(docCacheFile()).mtimeMs > staleAt, 'and the crashing run left a fresh cache');
+    assert.ok(statSync(docCacheFile()).mtimeMs > staleAt, 'and the run left a fresh cache');
 
     const added = parseTextContent(
       await call('project_export', {
@@ -36531,7 +36535,7 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
         outputPath: 'res://build/game.x86_64',
       }),
     );
-    await makeStale();
+    const staleAtExport = await makeStale();
     const exported = await call('project_export', {
       op: 'run',
       preset: 'Penguin',
@@ -36547,19 +36551,100 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
         }
       })
       .find((parsed) => get(parsed, 'exported') !== undefined);
+    const exportNote = get(verdict, 'docCacheNote');
     assert.ok(
-      text(get(verdict, 'docCacheNote')).startsWith('The first export ended badly ('),
-      `the export over a stale cache crashed, was run again, and says so: ${shownExport}`,
+      exportNote === undefined || text(exportNote).startsWith('The first export ended badly ('),
+      `the export over a stale cache ran again with a note, or ran once cleanly: ${shownExport}`,
     );
-    // Exported with templates and refused without them, the second run ends in 0 or 1, where the
-    // first ended in a crash.
-    assert.ok(
-      [0, 1].includes(Number(get(verdict, 'exitCode'))),
-      `the answer is the second run's: ${shownExport}`,
-    );
+    assert.ok(statSync(docCacheFile()).mtimeMs > staleAtExport, 'and the run left a fresh cache');
+    // Exported with templates and refused without them, the answer's run ends in 0 or 1.
+    assert.ok([0, 1].includes(Number(get(verdict, 'exitCode'))), `the answer's exit code: ${shownExport}`);
     if (get(added, 'templates_installed') === true) {
       assert.equal(get(verdict, 'exported'), true, `and its export is made: ${shownExport}`);
     }
+    await server.stop();
+
+    // The crash itself is forced, so the second run is covered whatever the engine's timing. The
+    // stand-in runs the real engine to its end, which rewrites the cache, and then reports a crash.
+    const standIn = await crashingEngine();
+    const crashed = async (
+      when: string,
+      call_: (
+        call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>,
+      ) => Promise<void>,
+    ): Promise<void> => {
+      const forced = new ServerProcess({
+        env: {
+          GODOT_PATH: standIn,
+          GDH_REAL_ENGINE: godotPath,
+          GDH_CRASH_AFTER_REAL: '1',
+          GDH_CRASH_WHEN: when,
+          GDH_CRASH_STATUS: '3221225477',
+          GDH_CRASH_MARKER: join(root, `crash${when}`),
+          GDHARNESS_PROJECT: project,
+          GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+          GDHARNESS_LSP_PORT: String(await reservePort()),
+          GDHARNESS_RUNTIME_DIR: join(root, 'runtime-forced'),
+          ...cacheEnv,
+        },
+      });
+      try {
+        await forced.initialize('stale-doc-cache-forced');
+        await call_(
+          async (name, args) =>
+            await forced.request(
+              'tools/call',
+              { name, arguments: { projectPath: project, ...args } },
+              300_000,
+            ),
+        );
+      } finally {
+        await forced.stop();
+      }
+    };
+    const staleForImport = await makeStale();
+    writeFileSync(join(project, 'third.gd'), 'extends Node\n');
+    await crashed('--import', async (forcedCall) => {
+      const raw = await forcedCall('project_import', { op: 'refresh_uids' });
+      const answer = parseTextContent(raw);
+      const note = text(get(answer, 'docCacheNote'));
+      assert.deepEqual(get(answer, 'uidsCreated'), ['third.gd'], JSON.stringify(raw));
+      assert.ok(
+        note.startsWith('The first import ended badly (exit code 0xC0000005') &&
+          note.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
+        `a crashed import is run again and says so: ${JSON.stringify(raw)}`,
+      );
+      assert.ok(statSync(docCacheFile()).mtimeMs > staleForImport, 'and the crashed run left a fresh cache');
+    });
+    const staleForExport = await makeStale();
+    await crashed('--export', async (forcedCall) => {
+      const raw = await forcedCall('project_export', {
+        op: 'run',
+        preset: 'Penguin',
+        outputPath: 'build/game.x86_64',
+      });
+      const answer = (contentOf(raw) ?? [])
+        .map((block) => {
+          try {
+            return JSON.parse(block.text ?? '') as unknown;
+          } catch {
+            return undefined;
+          }
+        })
+        .find((parsed) => get(parsed, 'exported') !== undefined);
+      assert.ok(
+        text(get(answer, 'docCacheNote')).startsWith('The first export ended badly (exit code 0xC0000005'),
+        `a crashed export is run again and says so: ${JSON.stringify(raw)}`,
+      );
+      assert.ok(
+        [0, 1].includes(Number(get(answer, 'exitCode'))),
+        `the answer is the second run's: ${JSON.stringify(raw)}`,
+      );
+      if (get(added, 'templates_installed') === true) {
+        assert.equal(get(answer, 'exported'), true, `and its export is made: ${JSON.stringify(raw)}`);
+      }
+      assert.ok(statSync(docCacheFile()).mtimeMs > staleForExport, 'and the crashed run left a fresh cache');
+    });
   } finally {
     await server.stop();
     sweep(root);

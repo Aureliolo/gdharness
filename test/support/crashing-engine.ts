@@ -95,6 +95,10 @@ public static class CrashingEngine {
     if (marker != "" && debug.StartsWith("tcp://") && Env("GDH_REAL_ENGINE") == "") { Dial(marker, debug.Substring(6)); }
     if (marker != "" && asked.Contains(Env("GDH_CRASH_WHEN")) && !File.Exists(marker)) {
       File.WriteAllText(marker, "");
+      if (Env("GDH_CRASH_AFTER_REAL") != "" && Env("GDH_REAL_ENGINE") != "") {
+        Real(args);
+        return unchecked((int)UInt32.Parse(Env("GDH_CRASH_STATUS") == "" ? "3228369023" : Env("GDH_CRASH_STATUS")));
+      }
       if (Env("GDH_CRASH_AFTER_MS") != "") { Thread.Sleep(int.Parse(Env("GDH_CRASH_AFTER_MS"))); }
       Banner(args, banner);
       return unchecked((int)UInt32.Parse(Env("GDH_CRASH_STATUS") == "" ? "3228369023" : Env("GDH_CRASH_STATUS")));
@@ -120,6 +124,8 @@ let built: string | null = null;
  * GDH_REAL_ENGINE where that is set, or prints the banner and ends, or with GDH_HOLD stays up. With
  * GDH_DENY_AFTER=n the start that is the n-th noted denies every later start of the program to its
  * user. With GDH_CRASH_AFTER_MS the crash comes that many milliseconds in, and with GDH_CHATTY it prints a line past the banner, and with GDH_SILENT it prints nothing.
+ * With GDH_CRASH_AFTER_REAL and GDH_REAL_ENGINE the crashing start runs the real engine to its end
+ * first, so its work and its doc cache are written, and then exits with the status.
  * `--version` is the real engine's answer, or a Godot version.
  */
 export async function crashingEngine(): Promise<string> {
