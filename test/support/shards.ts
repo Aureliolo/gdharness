@@ -271,6 +271,8 @@ export const REGRESSION_SECONDS: Readonly<
     testAMarkSetBesideALaterOneAnswersWhatBecameOfIt: 5,
     testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared: 5,
     testANoteNoCallWaitsOnKeepsNoEntry: 5,
+    testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay: 5,
+    testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt: 5,
     testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier: 1,
     testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess: 33,
     testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess: 33,

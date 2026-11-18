@@ -216,6 +216,7 @@ import {
   gamesKeptOf,
   giveBackSlot,
   handedRunSlot,
+  handSlot,
   handSlotToGame,
   handSlotToKeeper,
   holderOf,
@@ -66928,6 +66929,64 @@ async function testANoteNoCallWaitsOnKeepsNoEntry(): Promise<void> {
 }
 
 /**
+ * Two updates of the class note made under two spellings of the project, the first waiting on a
+ * reader: the second reads what the first wrote, so both stay. An update that makes nothing leaves
+ * the note.
+ */
+async function testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('respelled class note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-Class-Note-'));
+  try {
+    const note = classNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, JSON.stringify({ rebuiltWith: ['Old'] }));
+    const adding = (name: string) => (held: ReturnType<typeof readClassNote>) => ({
+      rebuiltWith: [...(held?.rebuiltWith ?? []), name],
+    });
+    await withAHeldNote(note, 500, async (pause) => {
+      const first = updateClassNote(project, adding('First'));
+      await pause();
+      const second = updateClassNote(project.toLowerCase().replaceAll('\\', '/'), adding('Second'));
+      await Promise.all([first, second, updateClassNote(project, () => null)]);
+    });
+    assert.deepEqual(readClassNote(project)?.rebuiltWith, ['Old', 'First', 'Second']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A slot handed on while an engine is being named in it waits for the naming and is handed once: a
+ * second hand from the same holder finds the slot no longer its own.
+ */
+async function testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held slot hand regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-handed-'));
+  try {
+    const lock = join(directory, '0.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    let answers: boolean[] = [];
+    await withAHeldNote(lock, 500, async (pause) => {
+      const named = nameSlotEngine(lock, process.pid, { pid: 4242, started: 1 });
+      await pause();
+      const handed = handSlot(lock, process.pid, { pid: 4343, started: 2 });
+      const handedAgain = handSlot(lock, process.pid, { pid: 4444, started: 3 });
+      answers = await Promise.all([named, handed, handedAgain]);
+    });
+    assert.deepEqual(answers, [true, true, false]);
+    assert.equal(holderOf(readFileSync(lock, 'utf8'))?.pid, 4343);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * The class note changes only through the update that reads it when it runs. A write of a copy read
  * before an await puts back what a call made meanwhile took out. The server's source is read, since
  * its calls need an engine and an editor.
@@ -117995,6 +118054,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMarkSetBesideALaterOneAnswersWhatBecameOfIt,
   testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared,
   testANoteNoCallWaitsOnKeepsNoEntry,
+  testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay,
+  testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt,
   testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
