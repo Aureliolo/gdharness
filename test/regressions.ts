@@ -514,7 +514,7 @@ import {
 } from '../src/rename-symbol.js';
 import { repositoryNameOf } from '../src/repository.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
-import { noteRestartBegun, restartNotePath, restartOwed } from '../src/restart-note.js';
+import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
   amendRunRecord,
   clearRunRecord,
@@ -844,7 +844,7 @@ import {
 } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
-import { makeWhole, writeWhole, writeWholeAsync } from '../src/whole-file.js';
+import { makeWhole, removeWholeAsync, writeWhole, writeWholeAsync } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import {
@@ -66790,6 +66790,81 @@ async function testTwoWritesOfOneNoteAtOnceBothLandInOrder(): Promise<void> {
   }
 }
 
+/**
+ * A removal waiting on a reader, then a write made in the moment the reader lets go: the removal's
+ * next try must not take the write away. The loop is stalled after the let-go, so the removal's
+ * timer cannot fire before the write is made.
+ */
+async function testAWriteMadeAfterARemovalWaitsIsNotRemovedByIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held removal regression ran on Windows alone: elsewhere no removal is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-removal-'));
+  try {
+    const note = join(directory, 'note.json');
+    writeFileSync(note, 'old');
+    const reader = await heldOpenByAReader(note, 'Read');
+    try {
+      const removed = removeWholeAsync(note);
+      await new Promise((settle) => setTimeout(settle, 100));
+      const letGo = reader.letGo();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      const written = writeWholeAsync(note, 'later');
+      await Promise.all([letGo, removed, written]);
+    } finally {
+      await reader.letGo();
+    }
+    assert.equal(existsSync(note), true, 'the write made after the removal began is not removed by it');
+    assert.equal(readFileSync(note, 'utf8'), 'later');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A restart settled while the note of its beginning waits on a reader leaves no note behind. */
+async function testARestartSettledWhileTheNoteWaitsStaysSettled(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held restart note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-settled-'));
+  try {
+    const note = restartNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, '{}\n');
+    await withAHeldNote(note, 500, async (pause) => {
+      const begun = noteRestartBegun({
+        projectPath: project,
+        editorPid: 1,
+        ports: { lsp: 6005, dap: 6006 },
+        quitAt: '2026-10-08T11:42:49.000Z',
+        byPid: 1,
+      });
+      await pause();
+      restartSettled(project);
+      await begun;
+    });
+    assert.equal(
+      existsSync(note),
+      false,
+      'the note settled stays settled once the earlier write is let through',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The class note changes only through the update that reads it when it runs. A write of a copy read
+ * before an await puts back what a call made meanwhile took out. The server's source is read, since
+ * its calls need an engine and an editor.
+ */
+function testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier(): void {
+  const source = readFileSync(join('src', 'server.ts'), 'utf8');
+  assert.equal(/\bwriteClassNote\(/.test(source), false, 'the server updates the note, never writes one');
+}
+
 /** The cut run a reader holds shut is waited on without stopping the process. */
 async function testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
   await aNoteHeldShutLeavesTheLoopRunning(
@@ -117843,6 +117918,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack,
   testABreakpointClearedWhileAnEarlierWriteWaitsStaysCleared,
   testTwoWritesOfOneNoteAtOnceBothLandInOrder,
+  testAWriteMadeAfterARemovalWaitsIsNotRemovedByIt,
+  testARestartSettledWhileTheNoteWaitsStaysSettled,
+  testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess,

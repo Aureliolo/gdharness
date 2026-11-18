@@ -353,10 +353,16 @@ export function removeWhole(path: string): boolean {
   return waitedOutSync(() => removeAttempt(path));
 }
 
-/** {@link removeWhole} for a caller on the event loop: the wait between tries is a timer. */
+/**
+ * {@link removeWhole} for a caller on the event loop: the wait between tries is a timer.
+ *
+ * A removal that a later write or removal of this process has overtaken while it waited is dropped
+ * and answers true, as {@link writeWholeAsync} does. Otherwise a write that landed in the moment
+ * the reader let go was removed by the earlier removal's next try.
+ */
 export async function removeWholeAsync(path: string): Promise<boolean> {
-  touched(path);
-  return await waitedOut(() => removeAttempt(path));
+  const mine = touched(path);
+  return await waitedOut(() => (lastTouchOf(path) === mine ? removeAttempt(path) : { done: true }));
 }
 
 function removeAttempt(path: string): Attempt<boolean> {

@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import type { EditorPorts } from './launch.js';
 import { isRecord } from './records.js';
-import { writeWholeAsync } from './whole-file.js';
+import { removeWhole, writeWholeAsync } from './whole-file.js';
 
 /**
  * A restart of an editor this server opened is two acts with a gap between them: the editor is
@@ -93,7 +93,11 @@ export function restartOwed(projectPath: string): RestartNote | null {
  */
 export function restartSettled(projectPath: string): void {
   try {
-    rmSync(restartNotePath(projectPath), { force: true });
+    // Through the whole-file removal, which a write of the note still waiting on a reader yields
+    // to: a plain removal finds nothing to take down, and the note then lands after it.
+    if (!removeWhole(restartNotePath(projectPath))) {
+      console.error('[SERVER] Could not clear the restart note: a reader holds it.');
+    }
   } catch (error) {
     console.error(`[SERVER] Could not clear the restart note: ${errorMessage(error)}`);
   }

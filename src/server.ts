@@ -91,7 +91,7 @@ import {
   withAddonClassesCounted,
   withAddonPathsCounted,
 } from './class-cache.js';
-import { readClassNote, updateClassNote, writeClassNote } from './class-note.js';
+import { readClassNote, updateClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
 import {
   type CutTestRun,
@@ -19429,11 +19429,14 @@ class GodotServer {
     const cameBack = writtenBefore === null ? [] : declaredSince(projectPath, after, lost, writtenBefore);
     const droppedByTheEditor = lost.filter((name) => !cameBack.includes(name));
     const seenLosing = droppedByTheEditor.length > 0 && this.godotBridge.isConnected();
-    await writeClassNote(projectPath, {
-      ...noted,
+    // The note as it stands now, not as it was read before the rebuild: a call that wrote it
+    // meanwhile keeps its change.
+    const editorPid = this.godotBridge.getStatus().editorPid ?? null;
+    await updateClassNote(projectPath, (current) => ({
+      ...current,
       rebuiltWith: [...after.keys()].toSorted(),
-      ...(seenLosing ? { shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null } : {}),
-    });
+      ...(seenLosing ? { shortListEditorPid: editorPid } : {}),
+    }));
     const notes = [
       ...(seenLosing ? [this.shortListNote(droppedByTheEditor)] : []),
       ...(cameBack.length > 0 ? [this.cameBackNote(cameBack)] : []),

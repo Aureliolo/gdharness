@@ -1650,7 +1650,10 @@ export class EngineSlots {
    * take first are left to them. It records the slots it left for them in the draw.
    */
   private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateLook>): Promise<number[]> {
-    const drawnBefore = this.drawn.numbers;
+    // The draw of this take, held across the awaits below: another take of the process may record
+    // its own in the field meanwhile.
+    const drawn = this.drawn;
+    const drawnBefore = drawn.numbers;
     const now = Date.now();
     const waiting = await slotWaitersAsync(this.directory);
     for (const mark of this.passedOver.keys()) {
@@ -1668,9 +1671,9 @@ export class EngineSlots {
       }
     }
     const tried = placed.admitted(drawnBefore, new Set(claims.keys()));
-    const left = placed.leaves().filter((slot) => this.drawn.numbers.includes(slot) && !tried.includes(slot));
-    if (left.length > 0) {
-      this.drawn = { ...this.drawn, left };
+    const left = placed.leaves().filter((slot) => drawnBefore.includes(slot) && !tried.includes(slot));
+    if (left.length > 0 && this.drawn === drawn) {
+      this.drawn = { ...drawn, left };
     }
     return tried;
   }
