@@ -667,7 +667,13 @@ import {
   spreadOptionsOf,
 } from '../src/spread-run.js';
 import { diedAsItStarted, linesAsPrinted } from '../src/start-race.js';
-import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
+import {
+  exitDateOf,
+  followSuccessor,
+  RESTARTED_WITHIN_MS,
+  successorAmong,
+  watchExit,
+} from '../src/successor.js';
 import {
   EVERY_FILE,
   EVERY_NAME,
@@ -22788,6 +22794,108 @@ async function testASuccessorIsTheEngineStartedAsTheGameExited(): Promise<void> 
     }
     closeSync(output);
     rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A game's exit is dated by the kernel, so a sighting that comes late does not lose its successor.
+ *
+ * The keeper saw an exit up to a second or two after the successor started, and under load seconds
+ * more, so a window measured back from the sighting refused the one candidate. The stand-ins here
+ * are the game, a worker it started earlier, and the process it restarted into, and the sighting is
+ * given as nine seconds late. A worker started beside the successor is still a second candidate.
+ */
+async function testALateSightingOfAnExitDoesNotLoseTheSuccessor(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('exit time regression skipped (the kernel dates an exit only on Windows)');
+    return;
+  }
+  const standIns: ChildProcess[] = [];
+  const standIn = (): ChildProcess => {
+    const child = spawnHidden(process.execPath, ['--eval', 'setInterval(() => undefined, 1000)'], {
+      stdio: 'ignore',
+    });
+    standIns.push(child);
+    assert.ok(typeof child.pid === 'number', 'the stand-in started');
+    return child;
+  };
+  try {
+    const spawnedAt = Date.now();
+    const game = standIn();
+    const watch = watchExit(game.pid ?? 0, spawnedAt);
+    const worker = standIn();
+    await delay(RESTARTED_WITHIN_MS + 1500);
+    const successor = standIn();
+    await delay(300);
+    game.kill();
+    const seenAt = Date.now() + 9000;
+    const endedAt = await watch.endedBy(seenAt);
+    assert.ok(
+      endedAt < seenAt - 8000,
+      `dated by the kernel: ${String(seenAt - endedAt)} ms before the sighting`,
+    );
+    const follow = (): ReturnType<typeof followSuccessor> =>
+      followSuccessor(process.pid, process.execPath, spawnedAt - 1000, seenAt, undefined, watch);
+    const followed = await follow();
+    assert.notEqual(followed?.successor.pid, worker.pid, 'the worker is not followed');
+    assert.equal(
+      followed?.successor.pid,
+      successor.pid,
+      'the successor is, nine seconds before the sighting',
+    );
+    successor.kill();
+    await new Promise<void>((over) => {
+      successor.once('exit', () => {
+        over();
+      });
+    });
+    assert.equal(await follow(), null, 'a worker started seconds before is not taken for a restart');
+    standIn();
+    standIn();
+    assert.equal(await follow(), null, 'two engines started beside each other are not chosen between');
+  } finally {
+    for (const child of standIns) {
+      child.kill();
+    }
+  }
+}
+
+/**
+ * The kernel's exit time is taken only where it can be this game's: told in time, and between the
+ * start and the sighting. Anything else is another process under a number handed on, or a sighting
+ * that came before the exit, and the sighting stands.
+ */
+async function testAnExitTimeIsTakenOnlyWhereItCanBeTheGames(): Promise<void> {
+  const told = (at: number | null): Promise<number | null> => Promise.resolve(at);
+  assert.equal(await exitDateOf(told(5000), 1000, 9000), 5000, 'an exit time between the two is taken');
+  assert.equal(await exitDateOf(told(900), 1000, 9000), 9000, 'one before the start is not');
+  assert.equal(await exitDateOf(told(9100), 1000, 9000), 9000, 'nor one after the sighting');
+  assert.equal(await exitDateOf(told(null), 1000, 9000), 9000, 'nor none');
+  const started = Date.now();
+  assert.equal(
+    await exitDateOf(new Promise<number | null>(() => undefined), 1000, 9000, 100),
+    9000,
+    'one never told is not waited for past the limit',
+  );
+  assert.ok(Date.now() - started < 4000, 'and the limit is short');
+  if (process.platform !== 'win32') {
+    assert.equal(await watchExit(process.pid, started).endedBy(started + 5), started + 5, 'off Windows');
+    return;
+  }
+  // A game already running when the holder starts is no game this keeper started, however its number
+  // came about, so a process older than the start is refused.
+  const old = spawnHidden(process.execPath, ['--eval', 'setInterval(() => undefined, 1000)'], {
+    stdio: 'ignore',
+  });
+  try {
+    await delay(1500);
+    const watch = watchExit(old.pid ?? 0, Date.now());
+    await delay(2000);
+    old.kill();
+    const seenAt = Date.now() + 9000;
+    assert.equal(await watch.endedBy(seenAt), seenAt, 'a process older than the start is not dated');
+  } finally {
+    old.kill();
   }
 }
 
@@ -114739,6 +114847,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
+  testALateSightingOfAnExitDoesNotLoseTheSuccessor,
+  testAnExitTimeIsTakenOnlyWhereItCanBeTheGames,
   testARunFollowsTheGamesRestart,
   testAnotherProjectsRunLeavesOursStoppable,
   testARunCanBeStartedOnAnotherEngine,

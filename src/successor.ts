@@ -17,8 +17,9 @@ import { runHidden, spawnHidden } from './spawn.js';
 
 /**
  * How long before a game's exit the process it restarts itself into is started. The engine starts it
- * near the end of its teardown, once the scene tree is gone: measured on 4.7.2 at 51ms before the exit
- * reached the game's parent. The rest is room for a loaded machine. A worker the game started for
+ * near the end of its teardown, once the scene tree is gone: measured on 4.7.2 at 25 to 50ms before the
+ * kernel ended the game, where the keeper's sighting of that exit came up to two seconds later. The
+ * rest is room for a loaded machine. A worker the game started for
  * itself is older than this, unless the game started it in its last moments, and then it is one of
  * two candidates and neither is taken.
  */
@@ -26,6 +27,84 @@ export const RESTARTED_WITHIN_MS = 2000;
 
 /** Long enough for the operating system to list a process's children on a machine that is busy. */
 const LIST_WITHIN_MS = 15_000;
+
+/** How long after the keeper sees a game exit its kernel exit time is waited for. */
+const EXIT_TIME_WITHIN_MS = 5000;
+
+/** A game's own exit time, held open while it runs. */
+export interface ExitWatch {
+  /**
+   * When the kernel ended the game, or [param seenAt] where that was not told in time or is not
+   * before it. The keeper sees an exit when its own event loop gets to it, which a loaded machine
+   * puts seconds after the successor started, so a window measured back from the sighting refused
+   * it. Windows only: elsewhere the sighting is the only date there is.
+   */
+  endedBy(seenAt: number): Promise<number>;
+}
+
+/**
+ * The kernel's exit time [param told] gives, when it comes within [param withinMs] and falls
+ * between [param spawnedAt] and [param seenAt], and [param seenAt] otherwise. A date outside those
+ * is another process's under a number handed on, or a sighting that came before the exit.
+ */
+export async function exitDateOf(
+  told: Promise<number | null>,
+  spawnedAt: number,
+  seenAt: number,
+  withinMs = EXIT_TIME_WITHIN_MS,
+): Promise<number> {
+  const at = await Promise.race([told, delay(withinMs, null, { ref: false })]);
+  return at !== null && at >= spawnedAt && at <= seenAt ? at : seenAt;
+}
+
+/**
+ * Starts holding [param pid], a game started at [param spawnedAt], to read when it ends. A game
+ * that has ended before the holder is up is not told, and its sighting stands.
+ */
+export function watchExit(pid: number, spawnedAt: number): ExitWatch {
+  if (process.platform !== 'win32') {
+    return { endedBy: (seenAt) => Promise.resolve(seenAt) };
+  }
+  const told = (async (): Promise<number | null> => {
+    let loading: string;
+    try {
+      loading = await loadingTheTable();
+    } catch {
+      return null;
+    }
+    const script = [
+      '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
+      loading,
+      `[Console]::Out.Write([GdhProcessTable]::ExitTimeOf(${String(pid)}, ${String(spawnedAt - 1000)}))`,
+    ].join('\n');
+    const started = spawnHidden(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64'),
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    let said = '';
+    started.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString('utf8');
+    });
+    await new Promise<void>((resolve) => {
+      started.once('close', () => {
+        resolve();
+      });
+      started.once('error', () => {
+        resolve();
+      });
+    });
+    return /^\d+$/.test(said.trim()) ? Number(said.trim()) : null;
+  })();
+  return { endedBy: (seenAt) => exitDateOf(told, spawnedAt, seenAt) };
+}
 
 /** How often the end of a successor is looked for where nothing can wait on it. */
 const POLL_MS = 250;
@@ -107,9 +186,15 @@ export async function followSuccessor(
   notBefore: number,
   exitedAt: number,
   transcript: string | undefined,
+  watch?: ExitWatch,
 ): Promise<Followed | null> {
   if (process.platform === 'win32') {
-    return await followOnWindows(exitedPid, engine, notBefore, exitedAt);
+    return await followOnWindows(
+      exitedPid,
+      engine,
+      notBefore,
+      watch === undefined ? exitedAt : await watch.endedBy(exitedAt),
+    );
   }
   return transcript === undefined
     ? null
