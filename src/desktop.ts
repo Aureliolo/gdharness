@@ -917,6 +917,19 @@ export function desktopBoxEnding(
   return `the windowed engine could not create a renderer on the hidden desktop, so it was ended: it opened a box titled "${box.title}", which nobody can press there${after}. Run the suites headless, or check the machine's graphics driver, which a lost GPU needs a reboot to recover.`;
 }
 
+/**
+ * The system refused to run the helper program itself, as a policy that allows only some programs
+ * does. That is a start that failed, which every caller answers as one, and no defect of this
+ * server's. Where a runtime reports a refused spawn as an event, the same text arrives as the
+ * child's error.
+ */
+export class HelperRefused extends Error {
+  constructor(reason: string) {
+    super(`the desktop helper could not be run: ${reason}`);
+    this.name = 'HelperRefused';
+  }
+}
+
 /** A process started on a desktop by `spawnOnDesktop`. */
 export interface DesktopStart {
   /** The helper, which exits with the process's code. */
@@ -973,13 +986,18 @@ export function spawnOnDesktop(
     }
   }
   const wrapper = throughHelper(how, command, args, files, assembly);
-  const child = spawnHidden(wrapper.command, wrapper.args, {
-    ...options,
-    ...(how.outlivesStarter === true ? { detached: true } : {}),
-    ...(how.desktop === undefined
-      ? {}
-      : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),
-  });
+  let child: ChildProcess;
+  try {
+    child = spawnHidden(wrapper.command, wrapper.args, {
+      ...options,
+      ...(how.outlivesStarter === true ? { detached: true } : {}),
+      ...(how.desktop === undefined
+        ? {}
+        : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),
+    });
+  } catch (error) {
+    throw new HelperRefused(error instanceof Error ? error.message : String(error));
+  }
   return {
     child,
     files,

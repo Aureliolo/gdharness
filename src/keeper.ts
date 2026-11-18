@@ -17,7 +17,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
-import { ensureHelperCompiled, helperExit, helperFailure, helperStep, spawnOnDesktop } from './desktop.js';
+import {
+  ensureHelperCompiled,
+  HelperRefused,
+  helperExit,
+  helperFailure,
+  helperStep,
+  spawnOnDesktop,
+} from './desktop.js';
 import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
@@ -104,6 +111,23 @@ async function startDirectly(
  * needs its helper to hold the foreground.
  */
 async function startThroughHelper(
+  spec: SentSpec,
+  output: number | 'ignore',
+  stopFile: string,
+  exitFile: string,
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+  try {
+    return await startedThroughHelper(spec, output, stopFile, exitFile);
+  } catch (error) {
+    // A system that will not run the helper program is a start that failed, and no defect.
+    if (error instanceof HelperRefused) {
+      return { error: error.message };
+    }
+    throw error;
+  }
+}
+
+async function startedThroughHelper(
   spec: SentSpec,
   output: number | 'ignore',
   stopFile: string,

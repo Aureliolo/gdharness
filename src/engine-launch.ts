@@ -26,6 +26,7 @@ import { alive, exitOf } from './alive.js';
 import {
   desktopBoxEnding,
   ensureHelperCompiled,
+  HelperRefused,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
@@ -658,11 +659,19 @@ async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
   // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
   // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
   // helper hands the engine its stdout for both streams, so their lines stay in order.
-  const onDesktop = spawnOnDesktop(how, launch.godotPath, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env,
-    cwd: directory,
-  });
+  let onDesktop: ReturnType<typeof spawnOnDesktop>;
+  try {
+    onDesktop = spawnOnDesktop(how, launch.godotPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+      cwd: directory,
+    });
+  } catch (error) {
+    if (error instanceof HelperRefused) {
+      return { kind: 'refused', end: { code: null, signal: null, ended: error.message } };
+    }
+    throw error;
+  }
   const helped = onDesktop.child;
   return {
     kind: 'started',

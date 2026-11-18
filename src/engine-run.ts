@@ -15,6 +15,7 @@ import {
   desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
+  HelperRefused,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
@@ -206,19 +207,27 @@ function launchOf(
   // On Windows every engine starts through the helper, which puts it in its named job. Without a
   // desktop named it stays on the one in use.
   const scratch = desktop?.scratch ?? scratchDirectory('desktop');
-  const started = spawnOnDesktop(
-    {
-      ...(desktop === undefined ? {} : { desktop: HIDDEN_DESKTOP }),
-      directory: desktop?.directory ?? process.cwd(),
-      endsWithHelper: true,
-      ...(desktop === undefined ? { separateErrors: true } : {}),
-      scratch,
-      exit: join(scratch, 'exit'),
-    },
-    executable,
-    args,
-    options,
-  );
+  let started: ReturnType<typeof spawnOnDesktop>;
+  try {
+    started = spawnOnDesktop(
+      {
+        ...(desktop === undefined ? {} : { desktop: HIDDEN_DESKTOP }),
+        directory: desktop?.directory ?? process.cwd(),
+        endsWithHelper: true,
+        ...(desktop === undefined ? { separateErrors: true } : {}),
+        scratch,
+        exit: join(scratch, 'exit'),
+      },
+      executable,
+      args,
+      options,
+    );
+  } catch (error) {
+    if (desktop === undefined) {
+      discard(scratch);
+    }
+    throw error;
+  }
   return {
     child: started.child,
     files: started.files,
@@ -295,7 +304,17 @@ function runStarted(
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
-    const { child, files, scratch } = launchOf(executable, args, lock, options.desktop, signal);
+    let launched: Launch;
+    try {
+      launched = launchOf(executable, args, lock, options.desktop, signal);
+    } catch (error) {
+      if (!(error instanceof HelperRefused)) {
+        throw error;
+      }
+      resolve({ log, exitCode: null, exitSignal: null, failure: error.message });
+      return;
+    }
+    const { child, files, scratch } = launched;
     belowNormal(child);
     const whole = holdExit(child.pid);
     // The engine itself, which on the hidden desktop the helper starts and writes down.

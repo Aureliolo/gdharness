@@ -105,6 +105,7 @@ import {
   desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
+  HelperRefused,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
@@ -412,7 +413,7 @@ import {
   shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
-import { type SpawnOptions, spawnHidden } from './spawn.js';
+import { type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
@@ -2411,6 +2412,34 @@ function startedByHelper(
     discard(ownScratch);
     throw error;
   }
+}
+
+/**
+ * A run for an engine whose helper the system would not run: ended before it began, with the reason
+ * in its log and no process behind it, so the callers answer it as any start that failed.
+ */
+function refusedStart(
+  said: string,
+): SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void } {
+  const log = new GameLog();
+  log.record('error', `the engine could not be started: ${said}`);
+  return {
+    process: unstartedChild(),
+    pid: null,
+    log,
+    transcript: null,
+    readOffset: 0,
+    projectPath: null,
+    startedAt: Date.now(),
+    endedAt: Date.now(),
+    exitCode: 1,
+    exitSignal: null,
+    throughEditor: false,
+    brokeOn: null,
+    neverStarted: true,
+    settled: Promise.resolve(),
+    stop: () => undefined,
+  };
 }
 
 /**
@@ -15476,6 +15505,9 @@ class GodotServer {
       return run;
     } catch (error) {
       held.release();
+      if (error instanceof HelperRefused) {
+        return refusedStart(error.message);
+      }
       throw error;
     }
   }

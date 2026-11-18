@@ -21132,7 +21132,8 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
       spawnSyncHidden: (file) => Promise.resolve(spawnSyncHidden(probe, [file])),
     };
     const offered = Object.entries(await import('../src/spawn.js'))
-      .filter(([, value]) => typeof value === 'function')
+      // `unstartedChild` makes an object and starts nothing.
+      .filter(([name, value]) => typeof value === 'function' && name !== 'unstartedChild')
       .map(([name]) => name)
       .toSorted();
     assert.deepEqual(
@@ -45255,8 +45256,10 @@ async function testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce(): Promise
 }
 
 /**
- * A helper program the server cannot run leaves no scratch folder behind a start that fails, so a
- * server that lives on does not collect one for every call.
+ * A helper program the system will not run is answered as a start that failed, by the server, a
+ * headless start and the keeper launcher alike, with the helper's path and the system's reason and
+ * no exit code. It leaves no scratch folder behind, so a server that lives on does not collect one
+ * for every call.
  */
 async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -45293,9 +45296,47 @@ async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> 
           encoding: 'utf8',
         });
         assert.equal(acl.status, 0, `the helper is made unrunnable: ${acl.stdout}${acl.stderr}`);
-        for (let again = 0; again < 3; again += 1) {
+        // A system that refuses to run a program, as a policy allowing only some would, is no
+        // defect of the server's: the start failed, and the answer says so and why.
+        const refused = await check();
+        assert.doesNotMatch(refused, /defect|does not handle/iu, `no defect banner: ${refused}`);
+        assert.match(
+          refused,
+          /the desktop helper could not be run: .*gdharness-desktop-[0-9a-f]+\.exe/u,
+          `the helper's path and the system's reason: ${refused}`,
+        );
+        assert.match(refused, /"exitCode": null/u, `and no exit code: ${refused}`);
+        for (let again = 0; again < 2; again += 1) {
           await check();
         }
+        const own = { env: { ...process.env, TEMP: temp, TMP: temp }, encoding: 'utf8' as const };
+        const run = spawnSyncHidden(
+          process.execPath,
+          [join(process.cwd(), 'test', 'support', 'run-engine-once.ts')],
+          { ...own, timeout: 120_000 },
+        );
+        const ranOnce: unknown = JSON.parse(run.stdout.trim().split('\n').at(-1) ?? '{}');
+        assert.equal(get(ranOnce, 'exitCode'), null, `a headless start has no exit code: ${run.stdout}`);
+        assert.match(
+          String(get(ranOnce, 'failure')),
+          /^the desktop helper could not be run: .*gdharness-desktop-[0-9a-f]+\.exe/u,
+          `and names the helper and the reason: ${run.stdout}${run.stderr}`,
+        );
+        const launched = spawnSyncHidden(process.execPath, [resolve('build', 'keeper.js'), 'launch'], {
+          ...own,
+          input: JSON.stringify({
+            command: engine,
+            args: [],
+            envChanges: {},
+            run: { transcript: join(scratch, 'run.log'), startedAt: Date.now(), projectPath: scratch },
+          }),
+          timeout: 120_000,
+        });
+        assert.match(
+          launched.stdout,
+          /^error the desktop helper could not be run: .*gdharness-desktop-[0-9a-f]+\.exe/u,
+          `the launcher says the same: ${launched.stdout}${launched.stderr}`,
+        );
         const left = readdirSync(temp).filter((name) => /^gdharness-desktop-\d+-/u.test(name));
         assert.deepEqual(left, [], 'no scratch folder is left behind three failed starts');
       },
