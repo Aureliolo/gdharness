@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import { startTimesOf } from './process-children.js';
 import { isRecord } from './records.js';
-import { writeWhole } from './whole-file.js';
+import { writeWholeAsync } from './whole-file.js';
 
 /**
  * Where this server says its editor bridge is, so an editor can find it without anybody having
@@ -117,10 +117,10 @@ function announcementIsOurs(path: string): boolean {
  * A failure here is not fatal: without an announcement the editor falls back to the port it was
  * configured with.
  */
-export function announceBridge(
+export async function announceBridge(
   projectPath: string,
   bridge: { host: string; port: number; version: string },
-): string | null {
+): Promise<string | null> {
   const path = announcementPath(projectPath);
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -132,7 +132,7 @@ export function announceBridge(
       version: bridge.version,
       startedAt: new Date().toISOString(),
     };
-    if (!writeWhole(path, `${JSON.stringify(announcement, null, 2)}\n`)) {
+    if (!(await writeWholeAsync(path, `${JSON.stringify(announcement, null, 2)}\n`))) {
       console.error(`[SERVER] Could not announce the editor bridge at ${path}.`);
       return null;
     }

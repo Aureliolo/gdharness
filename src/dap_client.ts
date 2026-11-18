@@ -348,16 +348,18 @@ export class GodotDAPClient {
         return;
       }
 
-      socket.once('close', () => {
-        resolve();
-      });
-      socket.end();
-      setTimeout(() => {
+      const forced = setTimeout(() => {
         if (!socket.destroyed) {
           socket.destroy();
         }
         resolve();
       }, 500);
+      // A timer left running after the close holds the process for its remaining time.
+      socket.once('close', () => {
+        clearTimeout(forced);
+        resolve();
+      });
+      socket.end();
     });
 
     this.forgetConnection();

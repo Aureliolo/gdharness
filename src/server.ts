@@ -34,8 +34,8 @@ import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server
 import { alive } from './alive.js';
 import { answerJson, type ToolResponse } from './answer-json.js';
 import { autoloadNotCompiled, scriptsAutoloaded } from './autoload-failure.js';
-import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
-import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
+import { halfAsLongAgain, MAIN_SCENE, readBootNoteAsync, waitSizedTo, writeBootNote } from './boot-note.js';
+import { readBreakpointNote, writeBreakpointNote, writeBreakpointNoteAsync } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
   type CallNotes,
@@ -53,7 +53,8 @@ import {
   cacheChangesBetween,
   cachedAtMissingPaths,
   cachedClasses,
-  cachedEntries,
+  cachedClassesAsync,
+  cachedEntriesAsync,
   cacheWrittenAt,
   classesNamedIn,
   classesStartedWithout,
@@ -92,7 +93,13 @@ import {
 } from './class-cache.js';
 import { readClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
-import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from './cut-test-run.js';
+import {
+  type CutTestRun,
+  cutTestRunNote,
+  keepCutTestRun,
+  keepCutTestRunAsync,
+  takeCutTestRun,
+} from './cut-test-run.js';
 import {
   DEFAULT_DAP_PORT,
   GodotDAPClient,
@@ -249,7 +256,7 @@ import {
   userDataIn,
   waitFromEnv,
 } from './launch.js';
-import { freeLibraryCopies } from './library-copies.js';
+import { freeLibraryCopiesAsync } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import { statOf } from './listed-reads.js';
 import {
@@ -347,8 +354,8 @@ import {
   stillTheAnnouncedGame,
   sweepTranscripts,
   whyNotStillTheRecordedRun,
-  writeEditorRunNote,
-  writeLatestRun,
+  writeEditorRunNoteAsync,
+  writeLatestRunAsync,
 } from './run-record.js';
 import { currentRunner, runLine } from './runner.js';
 import {
@@ -393,7 +400,7 @@ import {
   type SourceOf,
   totalsSince,
   UNNAMED_PREFIX,
-  writeProfileMark,
+  writeProfileMarkAsync,
 } from './script-profile.js';
 import { serverInstructions } from './server-instructions.js';
 import {
@@ -4510,24 +4517,24 @@ function ranEngineOf(half: OperationParams, json: Record<string, unknown>): RanE
  * every suite still to run, in [param rest], and what the engines before it finished. An engine cut
  * inside keeps its own record, which this adds to. One that answered whole is among what finished.
  */
-function keepCutAcross(
+async function keepCutAcross(
   root: string,
   ran: readonly RanEngine[],
   rest: readonly OperationParams[],
   since: number,
-): void {
+): Promise<void> {
   const left = rest.flatMap((half) => readStringArray(half, 'path') ?? []);
   const kept = takeCutTestRun(root);
   const inner = kept !== null && Date.parse(kept.cutAt) >= since ? kept : null;
   if (inner === null && left.length === 0) {
     // Nothing of this call to keep, so a record an earlier cut call left stays as it was.
     if (kept !== null) {
-      keepCutTestRun(root, kept);
+      await keepCutTestRunAsync(root, kept);
     }
     return;
   }
   const done = inner === null ? ran : ran.slice(0, -1);
-  keepCutTestRun(root, {
+  await keepCutTestRunAsync(root, {
     cutAt: inner?.cutAt ?? new Date().toISOString(),
     paths: [...done.flatMap((one) => one.paths), ...(inner?.paths ?? []), ...left],
     suitesFinished: [...done.flatMap((one) => one.finished), ...(inner?.suitesFinished ?? [])],
@@ -4588,7 +4595,7 @@ export async function runEngines(
     // What an engine without a report said of itself, which the merged answer would otherwise lose.
     explained.push(...explanationsOf(answer, ENGINE_KINDS[at] ?? 'next'));
     if (runner.aborted()) {
-      keepCutAcross(plan.root, ran, plan.halves.slice(at + 1), began);
+      await keepCutAcross(plan.root, ran, plan.halves.slice(at + 1), began);
       return answer;
     }
   }
@@ -5857,7 +5864,7 @@ class GodotServer {
       this.bridgeStartupError = null;
       const bridgeStatus = this.godotBridge.getStatus();
       console.error(`[SERVER] Godot Editor Bridge started on ${bridgeStatus.host}:${bridgeStatus.port}`);
-      this.announceTheBridge();
+      await this.announceTheBridge();
     } catch (bridgeError) {
       const code = errorCode(bridgeError) ?? null;
       const reason = errorMessage(bridgeError);
@@ -5899,7 +5906,7 @@ class GodotServer {
       return;
     }
     this.handingOverFrom = announced.pid;
-    this.announcedAt = announceBridge(this.ownProject, {
+    this.announcedAt = await announceBridge(this.ownProject, {
       host: this.godotBridge.getStatus().host,
       port: wanted,
       version: SERVER_VERSION,
@@ -5957,7 +5964,7 @@ class GodotServer {
     console.error(
       `[SERVER] Godot Editor Bridge came up on ${bridgeStatus.host}:${bridgeStatus.port}, and editor tools are live.`,
     );
-    this.announceTheBridge();
+    await this.announceTheBridge();
   }
 
   /**
@@ -5967,11 +5974,11 @@ class GodotServer {
    * on: an abandoned predecessor holding the old port has an older announcement, and the editor
    * moves off it by itself rather than waiting for somebody to end a process.
    */
-  private announceTheBridge(): void {
+  private async announceTheBridge(): Promise<void> {
     if (this.ownProject === null) {
       return;
     }
-    this.announcedAt = announceBridge(this.ownProject, {
+    this.announcedAt = await announceBridge(this.ownProject, {
       host: this.godotBridge.getStatus().host,
       port: this.godotBridge.port,
       version: SERVER_VERSION,
@@ -7553,7 +7560,7 @@ class GodotServer {
     // Written after the adapter has taken it, so the note never claims a line the editor
     // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
     const held = session.breakpointsHeld();
-    writeBreakpointNote(project.value.path, held);
+    await writeBreakpointNoteAsync(project.value.path, held);
     const kept = this.keptRun();
     const told =
       kept === null
@@ -9738,7 +9745,7 @@ class GodotServer {
       const before = writtenAt();
       const listedBefore = filesIn(folder);
       const cachesBefore = docCachesWritten(caches);
-      const freed = freeLibraryCopies(project.value.path);
+      const freed = await freeLibraryCopiesAsync(project.value.path);
       if (freed.setAside.length > 0 || freed.swept.length > 0) {
         this.logDebug(
           `Before the export: set aside ${freed.setAside.join(', ')}, and swept ${freed.swept.join(', ')}`,
@@ -11887,14 +11894,17 @@ class GodotServer {
    * Notes [param classes] as unseen by the editor connected now before a scan whose end this rescan
    * did not see, or takes the note down when [param classes] is empty. Written only when it changes.
    */
-  private noteUnseenBeforeAnUnfinishedScan(projectPath: string, classes: readonly string[]): void {
+  private async noteUnseenBeforeAnUnfinishedScan(
+    projectPath: string,
+    classes: readonly string[],
+  ): Promise<void> {
     const note = readClassNote(projectPath);
     const held = note?.unseenBeforeAnUnfinishedScan;
     if (classes.length === 0 && held === undefined) {
       return;
     }
     const { unseenBeforeAnUnfinishedScan: _replaced, ...rest } = note ?? { rebuiltWith: [] };
-    writeClassNote(projectPath, {
+    await writeClassNote(projectPath, {
       ...rest,
       ...(classes.length === 0
         ? {}
@@ -11908,9 +11918,9 @@ class GodotServer {
   }
 
   /** Records that the editor connected now wrote [param projectPath]'s class cache short. */
-  private noteAShortListEditor(projectPath: string): void {
+  private async noteAShortListEditor(projectPath: string): Promise<void> {
     const note = readClassNote(projectPath);
-    writeClassNote(projectPath, {
+    await writeClassNote(projectPath, {
       ...note,
       rebuiltWith: note?.rebuiltWith ?? [],
       shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null,
@@ -13439,7 +13449,7 @@ class GodotServer {
     // can be ended: a caller restarts the editor to take an upgrade, and the user reconnects the
     // harness for the same upgrade in the same minute. The successor then finds nothing connected
     // and no reason to think anything is owed, unless it is told.
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath,
       editorPid: editorPid ?? null,
       ports,
@@ -14022,7 +14032,7 @@ class GodotServer {
       platform: process.platform,
       variables: process.env,
     });
-    const runtimeWaitMs = this.announceBudget(args, project.value.path, sceneArgument);
+    const runtimeWaitMs = await this.announceBudget(args, project.value.path, sceneArgument);
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     // A silent run is spawned for the reason a run with arguments is: silence is an engine flag,
     // `--audio-driver Dummy`, and the editor takes none for a game it plays. Only a windowed one:
@@ -14551,13 +14561,17 @@ class GodotServer {
    * The wait a start gives its game to announce: what the caller asked for, or else the usual
    * budget sized to the project's last boot, and which of the two it was.
    */
-  private announceBudget(args: OperationParams, projectPath: string, scene: string | null): AnnounceBudget {
+  private async announceBudget(
+    args: OperationParams,
+    projectPath: string,
+    scene: string | null,
+  ): Promise<AnnounceBudget> {
     const key = scene ?? MAIN_SCENE;
     const asked = readNonNegativeNumber(args, 'runtimeWaitMs');
     if (asked !== undefined) {
       return { ms: asked, scene: key };
     }
-    const lastBoot = readBootNote(projectPath, key);
+    const lastBoot = await readBootNoteAsync(projectPath, key);
     const ms = waitSizedTo(lastBoot);
     return lastBoot !== null && ms > ANNOUNCE_BUDGET_MS
       ? { ms, sizedToMs: lastBoot, scene: key }
@@ -14709,10 +14723,10 @@ class GodotServer {
       slot,
     });
     this.activeProcess = played;
-    this.noteTheLatestRun({ projectPath, pid: null, startedAt });
+    await this.noteTheLatestRun({ projectPath, pid: null, startedAt });
     step('latest run');
     this.watchThePlayedConsole();
-    writeEditorRunNote({
+    await writeEditorRunNoteAsync({
       projectPath,
       transcript: transcript.path,
       startedAt,
@@ -15746,7 +15760,7 @@ class GodotServer {
       return launched;
     }
     const startedBy = Date.now();
-    this.noteTheLatestRun({ projectPath, pid: launched.pid, startedAt });
+    await this.noteTheLatestRun({ projectPath, pid: launched.pid, startedAt });
     sweepTranscripts();
     const keeper = this.keeperOfTheLaunch(projectPath, startedAt, launched.pid);
     return {
@@ -16335,10 +16349,10 @@ class GodotServer {
   }
 
   /** Writes down [param latest] as the run this project's servers started last. See `LatestRun`. */
-  private noteTheLatestRun(latest: LatestRun): void {
+  private async noteTheLatestRun(latest: LatestRun): Promise<void> {
     const mine = this.ourProject();
     if (mine !== null) {
-      writeLatestRun(mine, latest);
+      await writeLatestRunAsync(mine, latest);
     }
   }
 
@@ -16719,7 +16733,7 @@ class GodotServer {
       ]);
     }
     const totals = file.connected ? file : null;
-    return this.profileReply(
+    return await this.profileReply(
       run,
       {
         through: 'gdharness',
@@ -16779,7 +16793,7 @@ class GodotServer {
       return await this.switchTheEditorsProfilerOn(projectPath, going, asked);
     }
     const totals = readBoolean(held, 'profiled') === true ? this.playedTotals(held) : null;
-    return this.profileReply(
+    return await this.profileReply(
       run,
       {
         through: 'editor',
@@ -16877,12 +16891,12 @@ class GodotServer {
    * since, and with the mark set at these totals when it says mark. Since is read first, so one call
    * with both answers for the span just ended and starts the next.
    */
-  private profileReply(
+  private async profileReply(
     run: GodotProcess,
     reading: ProfileReading,
     limit: number,
     asked: MarkAsk,
-  ): ToolResponse {
+  ): Promise<ToolResponse> {
     const markPath = profileMarkPath(run);
     const now = Date.now();
     let shown = reading;
@@ -16898,7 +16912,7 @@ class GodotServer {
       lead.push(...counted.lead);
     }
     if (asked.mark) {
-      const set = this.setTheMark(run, reading, markPath, now, asked.since);
+      const set = await this.setTheMark(run, reading, markPath, now, asked.since);
       if (typeof set !== 'string') {
         return set;
       }
@@ -16967,13 +16981,13 @@ class GodotServer {
    * Sets the run's mark at the totals of [param reading] and returns the note line saying so, or
    * the refusal when there are no totals yet or the mark cannot be written.
    */
-  private setTheMark(
+  private async setTheMark(
     run: GodotProcess,
     reading: ProfileReading,
     markPath: string,
     now: number,
     movesOne: boolean,
-  ): string | ToolResponse {
+  ): Promise<string | ToolResponse> {
     if (reading.totals === null) {
       return this.createErrorResponse(
         'There is nothing to mark yet: the game has not connected to the profiler.',
@@ -16987,7 +17001,7 @@ class GodotServer {
       coveredMs: reading.coveredMs,
       totals: reading.totals,
     };
-    if (!writeProfileMark(markPath, mark)) {
+    if (!(await writeProfileMarkAsync(markPath, mark))) {
       return this.createErrorResponse(`The mark could not be written to ${markPath}, so none is set.`);
     }
     return movesOne
@@ -18681,7 +18695,7 @@ class GodotServer {
   /** Has the class cache put right after the scan, from the files where the editor's list lost classes. */
   private async repairTheClassCache(args: OperationParams, settled: RescanSettled): Promise<ToolResponse> {
     const { projectPath, before, busy } = settled;
-    const after = projectPath === '' || busy ? null : cachedClasses(projectPath);
+    const after = projectPath === '' || busy ? null : await cachedClassesAsync(projectPath);
     // Only what the files still declare. A class the caller renamed or removed leaves the cache on
     // the scan, which is the scan being right, and counting it failed the call, told the caller
     // every engine would report it unknown, and marked the editor as one whose scans lose classes.
@@ -18691,7 +18705,7 @@ class GodotServer {
         ? []
         : [...before.keys()].filter((name) => !after.has(name) && declaredNow.has(name));
     if (lost.length > 0) {
-      this.noteAShortListEditor(projectPath);
+      await this.noteAShortListEditor(projectPath);
     }
     // What the scan wrote for a file that is not there, read off the cache itself rather than off
     // the editor's list: the invariant is the file, and an entry naming a path that does not exist
@@ -18706,7 +18720,7 @@ class GodotServer {
     // an entry at a missing path out.
     const restored =
       lost.length > 0 || atMissingPaths.length > 0 ? await this.rebuildCacheAfterLoss(projectPath, lost) : [];
-    const rebuilt = atMissingPaths.length > 0 ? cachedClasses(projectPath) : null;
+    const rebuilt = atMissingPaths.length > 0 ? await cachedClassesAsync(projectPath) : null;
     const dropped =
       rebuilt === null
         ? []
@@ -18753,7 +18767,7 @@ class GodotServer {
       ? []
       : unseenBefore.filter((name) => !unseen.some((still) => still.className === name));
     if (projectPath !== '') {
-      this.noteUnseenBeforeAnUnfinishedScan(projectPath, busy ? unseenBefore : []);
+      await this.noteUnseenBeforeAnUnfinishedScan(projectPath, busy ? unseenBefore : []);
     }
     const dependents =
       busy || projectPath === '' || broughtIn.length === 0
@@ -19373,7 +19387,7 @@ class GodotServer {
       this.logDebug(`Could not rebuild the class cache after a scan: ${rebuilt.message}`);
       return [];
     }
-    const now = cachedClasses(projectPath);
+    const now = await cachedClassesAsync(projectPath);
     return now === null ? [] : lost.filter((name) => now.has(name));
   }
 
@@ -19397,14 +19411,14 @@ class GodotServer {
   }
 
   private async rebuildClassCacheFromDisk(projectPath: string): Promise<HeadlessOutcome> {
-    const before = cachedClasses(projectPath);
+    const before = await cachedClassesAsync(projectPath);
     const writtenBefore = cacheWrittenAt(projectPath);
     const noted = readClassNote(projectPath);
     const rebuilt = await this.operation(REFRESH_CLASS_CACHE, {}, projectPath);
     if (!rebuilt.ok) {
       return rebuilt;
     }
-    const after = cachedClasses(projectPath);
+    const after = await cachedClassesAsync(projectPath);
     if (after === null) {
       return rebuilt;
     }
@@ -19417,7 +19431,7 @@ class GodotServer {
     const cameBack = writtenBefore === null ? [] : declaredSince(projectPath, after, lost, writtenBefore);
     const droppedByTheEditor = lost.filter((name) => !cameBack.includes(name));
     const seenLosing = droppedByTheEditor.length > 0 && this.godotBridge.isConnected();
-    writeClassNote(projectPath, {
+    await writeClassNote(projectPath, {
       ...noted,
       rebuiltWith: [...after.keys()].toSorted(),
       ...(seenLosing ? { shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null } : {}),
@@ -19537,7 +19551,7 @@ class GodotServer {
     }
     const rebuilt = await this.rebuildClassCache(project.value.path);
     const fullPath = readString(created.payload, 'full_path');
-    const registered = cachedClasses(project.value.path)?.get(declared) === fullPath;
+    const registered = (await cachedClassesAsync(project.value.path))?.get(declared) === fullPath;
     // The engine that wrote the script compiled it against the list from before, which did not hold
     // its class, so a script naming its own class (a static constructor returning one) read as one
     // that does not parse.
@@ -20518,14 +20532,14 @@ class GodotServer {
     let ok = true;
     // The import pass below writes the cache too, so the rebuild after it compares against a cache
     // already holding the rename and answers that nothing changed.
-    const cacheBefore = asked.rebuildCache ? cachedEntries(projectPath) : null;
+    const cacheBefore = asked.rebuildCache ? await cachedEntriesAsync(projectPath) : null;
     if (asked.moved) {
       ok &&= await this.rebuildTheUidTable(projectPath, report);
     }
     if (asked.rebuildCache) {
       const rebuilt = await this.rebuildClassCache(projectPath);
       report['classCache'] = rebuilt.ok
-        ? { ...rebuilt.payload, ...cacheChangesBetween(cacheBefore, cachedEntries(projectPath)) }
+        ? { ...rebuilt.payload, ...cacheChangesBetween(cacheBefore, await cachedEntriesAsync(projectPath)) }
         : { rebuilt: false, problem: rebuilt.message };
       ok &&= rebuilt.ok;
     }
@@ -20647,7 +20661,8 @@ class GodotServer {
     projectPath: string,
     checked: { unchecked?: string },
   ): Promise<{ behind: { className: string; scriptPath: string }[]; behindUnchecked: string | undefined }> {
-    const listed = projectPath === '' || checked.unchecked !== undefined ? null : cachedClasses(projectPath);
+    const listed =
+      projectPath === '' || checked.unchecked !== undefined ? null : await cachedClassesAsync(projectPath);
     const held = listed === null ? null : await this.scriptsHeldBehind([...new Set(listed.values())]);
     return {
       behind: this.classesHeldBehind(listed, held),
@@ -21339,7 +21354,7 @@ class GodotServer {
     // bench workers do, never announces, and every call against it would otherwise sit out the
     // whole timeout before saying so.
     const comingUpUntil =
-      run.startedAt + waitSizedTo(readBootNote(project, run.bootScene ?? MAIN_SCENE)) + budgetMs;
+      run.startedAt + waitSizedTo(await readBootNoteAsync(project, run.bootScene ?? MAIN_SCENE)) + budgetMs;
     const remaining = comingUpUntil - Date.now();
     if (remaining <= 0) {
       const seconds = Math.round((Date.now() - run.startedAt) / 1000);

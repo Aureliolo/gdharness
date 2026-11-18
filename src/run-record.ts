@@ -34,7 +34,7 @@ import { STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runtimeDirectories, runtimeDirectory } from './runtime-directories.js';
 import { runHidden } from './spawn.js';
 import { tableListener } from './tcp-listeners.js';
-import { writeWhole } from './whole-file.js';
+import { writeWhole, writeWholeAsync } from './whole-file.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -183,6 +183,16 @@ export function writeLatestRun(servedBy: string, latest: LatestRun): void {
   }
 }
 
+/** {@link writeLatestRun} for a caller on the event loop. */
+export async function writeLatestRunAsync(servedBy: string, latest: LatestRun): Promise<void> {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    await writeWholeAsync(latestRunPath(servedBy), JSON.stringify(latest, null, 2));
+  } catch {
+    // Unwritable leaves the successor choosing by age.
+  }
+}
+
 /** The run a server of [param servedBy] started last, or null when none has said. */
 export function readLatestRun(servedBy: string, directory = runtimeDirectory()): LatestRun | null {
   try {
@@ -301,6 +311,15 @@ export function writeEditorRunNote(note: EditorRunNote): void {
   mkdirSync(runsDirectory(), { recursive: true });
   const path = editorNotePath(note.projectPath);
   if (!writeWhole(path, JSON.stringify(note, null, 2))) {
+    throw new Error(`the editor run note could not be written at ${path}`);
+  }
+}
+
+/** {@link writeEditorRunNote} for a caller on the event loop. */
+export async function writeEditorRunNoteAsync(note: EditorRunNote): Promise<void> {
+  mkdirSync(runsDirectory(), { recursive: true });
+  const path = editorNotePath(note.projectPath);
+  if (!(await writeWholeAsync(path, JSON.stringify(note, null, 2)))) {
     throw new Error(`the editor run note could not be written at ${path}`);
   }
 }

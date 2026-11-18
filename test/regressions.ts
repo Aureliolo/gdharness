@@ -47,10 +47,16 @@ import {
   LONGEST_SIZED_WAIT_MS,
   MAIN_SCENE,
   readBootNote,
+  readBootNoteAsync,
   waitSizedTo,
   writeBootNote,
 } from '../src/boot-note.js';
-import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
+import {
+  breakpointNotePath,
+  readBreakpointNote,
+  writeBreakpointNote,
+  writeBreakpointNoteAsync,
+} from '../src/breakpoint-note.js';
 import {
   announceBridge,
   announcementPath,
@@ -71,6 +77,7 @@ import {
 import {
   type Contradicted,
   cachedClasses,
+  cachedClassesAsync,
   cacheWrittenAt,
   classDeclarers,
   classesNamedIn,
@@ -95,7 +102,7 @@ import {
   unseenByEditor,
   withAddonClassesCounted,
 } from '../src/class-cache.js';
-import { classNotePath, readClassNote } from '../src/class-note.js';
+import { classNotePath, readClassNote, writeClassNote } from '../src/class-note.js';
 import { CompiledHelper } from '../src/compiled-helper.js';
 import {
   parsedYamlHas,
@@ -107,7 +114,13 @@ import {
   writeYaml,
 } from '../src/config-formats.js';
 import { configDisagrees } from '../src/config-pin.js';
-import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
+import {
+  type CutTestRun,
+  cutTestRunNote,
+  keepCutTestRun,
+  keepCutTestRunAsync,
+  takeCutTestRun,
+} from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
   type DesktopStart,
@@ -379,7 +392,12 @@ import {
   startedAs,
   userDataIn,
 } from '../src/launch.js';
-import { freeLibraryCopies, isLibraryCopy, seedExtensionList } from '../src/library-copies.js';
+import {
+  freeLibraryCopies,
+  freeLibraryCopiesAsync,
+  isLibraryCopy,
+  seedExtensionList,
+} from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import { bytesOf, entriesOf, contentOf as listedContentOf, statOf } from '../src/listed-reads.js';
 import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
@@ -571,6 +589,7 @@ import {
   withEngineArguments,
   writeProfileFile,
   writeProfileMark,
+  writeProfileMarkAsync,
 } from '../src/script-profile.js';
 import {
   aboveTheRunner,
@@ -754,6 +773,7 @@ import {
   windowedSaid,
   windowNeedsOf,
   writeJson,
+  writeJsonAsync,
 } from '../src/suite-plan.js';
 import {
   type Admitted,
@@ -7587,11 +7607,11 @@ function testTheBreakpointNoteIsTheProjects(): void {
 
 // A reader landing on a note mid-write would meet half a file, so each rewrite replaces the file
 // rather than the bytes in it. A hard link to the old file keeps the old bytes only if it did.
-function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
+async function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): Promise<void> {
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-notes-')));
   let count = 0;
   const script = join(project, 'a.gd');
-  const notes: [string, string, () => void][] = [
+  const notes: [string, string, () => unknown][] = [
     [
       'boot note',
       bootNotePath(project),
@@ -7609,9 +7629,7 @@ function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
     [
       'bridge announcement',
       announcementPath(project),
-      () => {
-        announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' });
-      },
+      () => announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' }),
     ],
     [
       'cut run',
@@ -7624,11 +7642,11 @@ function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
   try {
     for (const [said, path, write] of notes) {
       count += 1;
-      write();
+      await write();
       const first = readFileSync(path, 'utf8');
       linkSync(path, `${path}.link`);
       count += 1;
-      write();
+      await write();
       const second = readFileSync(path, 'utf8');
       assert.notEqual(second, first, `${said}: the second write landed`);
       assert.equal(
@@ -8164,7 +8182,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
  * half. A write that cannot be finished leaves the note that was there, and a finished one leaves
  * no temporary file beside it.
  */
-function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
+async function testTheRestartNoteIsReplacedWholeOrNotAtAll(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-note-'));
   const note = (editorPid: number): Parameters<typeof noteRestartBegun>[0] => ({
     projectPath: project,
@@ -8174,9 +8192,9 @@ function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
     byPid: 1,
   });
   try {
-    noteRestartBegun(note(111));
+    await noteRestartBegun(note(111));
     assert.equal(restartOwed(project)?.editorPid, 111);
-    noteRestartBegun(note(222));
+    await noteRestartBegun(note(222));
     assert.equal(restartOwed(project)?.editorPid, 222, 'a second note replaces the first');
     assert.deepEqual(
       readdirSync(dirname(restartNotePath(project))),
@@ -8192,7 +8210,7 @@ function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
       logged.push(said);
     };
     try {
-      noteRestartBegun(note(333));
+      await noteRestartBegun(note(333));
     } finally {
       console.error = error;
     }
@@ -8246,7 +8264,7 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
     mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
     // A server that has gone, so the note reads as a restart left unfinished rather than one under way.
     const ended = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
       ports: { lsp: 6005, dap: 6006 },
@@ -9042,7 +9060,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     mkdirSync(addon, { recursive: true });
     writeFileSync(join(project, 'project.godot'), enabled);
     // What the predecessor wrote before asking its editor to quit.
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
       ports: { lsp: 6005, dap: 6006 },
@@ -9076,8 +9094,8 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
       textOf(
         await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'open', projectPath } }),
       ) ?? '';
-    const begun = (byPid: number, quitAt: string): void => {
-      noteRestartBegun({
+    const begun = async (byPid: number, quitAt: string): Promise<void> => {
+      await noteRestartBegun({
         projectPath: project,
         editorPid: 27040,
         ports: { lsp: 6005, dap: 6006 },
@@ -9088,7 +9106,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
 
     // A writer that answers is not enough: no restart lasts days, so a pid answering under a note
     // that old is a process that reused the number, and the restart it names is over.
-    begun(process.pid, '2026-09-20T19:39:30.000Z');
+    await begun(process.pid, '2026-09-20T19:39:30.000Z');
     const reused = await editorOf();
     assert.equal(get(reused, 'restartInterrupted', 'byServerPid'), process.pid, JSON.stringify(reused));
     assert.equal(get(reused, 'restartUnderway'), undefined, JSON.stringify(reused));
@@ -9097,7 +9115,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     // Nor is a young note: the server that wrote this one has gone, so nothing will launch.
     const ended = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
     assert.ok(ended > 0 && !alive(ended), 'the fixture needs a pid that has gone');
-    begun(ended, new Date().toISOString());
+    await begun(ended, new Date().toISOString());
     const orphaned = await editorOf();
     assert.equal(get(orphaned, 'restartInterrupted', 'byServerPid'), ended, JSON.stringify(orphaned));
     assert.equal(get(orphaned, 'restartUnderway'), undefined, JSON.stringify(orphaned));
@@ -9105,7 +9123,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
 
     // Young and its writer here, which is what a status asked in the gap of a restart reads: the
     // editor is coming, from the restart, and another launch would be a second editor beside it.
-    begun(process.pid, new Date().toISOString());
+    await begun(process.pid, new Date().toISOString());
     const coming = await editorOf();
     assert.equal(
       get(coming, 'restartInterrupted'),
@@ -9152,7 +9170,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
 
     // An editor arriving settles it, whoever opened it: the note is gone from disk, not merely
     // unreported, so the server after this one does not report a debt that was paid.
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
       ports: { lsp: 6005, dap: 6006 },
@@ -10891,7 +10909,7 @@ async function testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart():
       'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
     );
     const options = { projectPath: project, start: { hidden: false, silent: true, until: null } };
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: null,
       ports: { lsp: 6005, dap: 6006 },
@@ -66566,45 +66584,173 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
  * alone, where an open that shares nothing refuses every other open.
  */
 async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'a slot file',
+    (project) => join(project, 'lanes.json'),
+    async (project, file) => {
+      await new EngineSlots(project, 1, { pid: process.pid, started: await ownStart() }).countIn(
+        file,
+        'lanes',
+      );
+    },
+  );
+}
+
+/**
+ * Holds the note that [param noteIn] places in a scratch project shut for 3 s from a hidden child
+ * that shares nothing, calls [param call] with the project and the note, and asserts the process
+ * keeps ticking under 100 ms apart for as long as the call waits its second. Windows alone, and only
+ * once the processor has been quiet for 30 s, since the limit is a time.
+ */
+async function aNoteHeldShutLeavesTheLoopRunning(
+  what: string,
+  noteIn: (project: string) => string,
+  call: (project: string, file: string) => Promise<unknown>,
+): Promise<void> {
   if (process.platform !== 'win32') {
-    console.log('held-file wait regression ran on Windows alone: elsewhere no open shuts another out');
+    console.log(`held ${what} regression ran on Windows alone: elsewhere no open shuts another out`);
     return;
   }
   const busy = await untilTheProcessorIsQuiet();
   if (busy !== null) {
-    const said = 'held-file wait regression skipped: the processor never stayed under 60% for 30 s';
+    const said = `held ${what} regression skipped: the processor never stayed under 60% for 30 s`;
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
       throw new Error(`${said}, the last busy share was ${String(busy)}`);
     }
     console.log(said);
     return;
   }
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
-  const file = join(directory, 'lanes.json');
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-note-'));
+  const file = noteIn(directory);
+  mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ pid: process.pid, started: await ownStart(), count: 2 }));
   const reader = await heldOpenByAReader(file, 'ReadWrite', 3000, 'None');
   const loop = await watchTheLoop();
   const began = Date.now();
-  let refusal = '';
   try {
-    await new EngineSlots(directory, 1, { pid: process.pid, started: await ownStart() }).countIn(
-      file,
-      'lanes',
-    );
-  } catch (error) {
-    refusal = errorMessage(error);
+    await call(directory, file);
+  } catch {
+    // A read held shut past its second refuses, and a write answers that it could not land.
   } finally {
     const waited = Date.now() - began;
     const watched = await loop.stop();
     await reader.letGo();
     rmSync(directory, { recursive: true, force: true });
-    assert.ok(refusal !== '', 'a file held shut past the second refuses the read');
-    assert.ok(waited >= 900, `and only after the second it waits: ${String(waited)} ms`);
+    assert.ok(waited >= 900, `${what} is waited on for its second: ${String(waited)} ms`);
     assert.ok(
       watched.widest < 100,
-      `the process runs while it waits: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
+      `the process runs while ${what} is held shut: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
     );
   }
+}
+
+/** The boot note a reader holds shut is waited on without stopping the process. */
+async function testABootNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('a boot note', bootNotePath, async (project) => {
+    await readBootNoteAsync(project, MAIN_SCENE);
+  });
+}
+
+/** The class cache a reader holds shut is waited on without stopping the process. */
+async function testAClassCacheHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the class cache',
+    (project) => join(project, '.godot', 'global_script_class_cache.cfg'),
+    async (project) => {
+      await cachedClassesAsync(project);
+    },
+  );
+}
+
+/** The bridge announcement a reader holds shut is waited on without stopping the process. */
+async function testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the bridge announcement', announcementPath, async (project) => {
+    await announceBridge(project, { host: '127.0.0.1', port: 6000, version: '1.0.0' });
+  });
+}
+
+/** The class note a reader holds shut is waited on without stopping the process. */
+async function testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the class note', classNotePath, async (project) => {
+    await writeClassNote(project, { rebuiltWith: [] });
+  });
+}
+
+/** The restart note a reader holds shut is waited on without stopping the process. */
+async function testARestartNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the restart note', restartNotePath, async (project) => {
+    await noteRestartBegun({
+      projectPath: project,
+      editorPid: null,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: '2026-10-08T11:42:49.000Z',
+      byPid: 1,
+    });
+  });
+}
+
+/** The breakpoint note a reader holds shut is waited on without stopping the process. */
+async function testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the breakpoint note', breakpointNotePath, async (project) => {
+    await writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
+  });
+}
+
+/** The cut run a reader holds shut is waited on without stopping the process. */
+async function testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the cut run',
+    (project) => join(project, '.godot', 'gdharness-reports', 'cut-run.json'),
+    async (project) => {
+      await keepCutTestRunAsync(project, { cutAt: 't', paths: ['res://t'] });
+    },
+  );
+}
+
+/** The profile mark a reader holds shut is waited on without stopping the process. */
+async function testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the profile mark',
+    (project) => join(project, 'mark.json'),
+    async (_project, file) => {
+      await writeProfileMarkAsync(file, {
+        takenAt: 0,
+        projectPath: null,
+        runStartedAt: 0,
+        coveredMs: 0,
+        totals: {
+          startedAt: 0,
+          lastFrameAt: null,
+          frames: 0,
+          complete: false,
+          unreadable: 0,
+          functions: {},
+        },
+      });
+    },
+  );
+}
+
+/** The extension list a reader holds shut is waited on without stopping the process. */
+async function testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the extension list',
+    (project) => join(project, '.godot', 'extension_list.cfg'),
+    async (project) => {
+      await freeLibraryCopiesAsync(project, 'win32');
+    },
+  );
+}
+
+/** A suite file a reader holds shut is waited on without stopping the process. */
+async function testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'a suite record',
+    (project) => join(project, 'times.json'),
+    async (_project, file) => {
+      await writeJsonAsync(file, { peaks: {} });
+    },
+  );
 }
 
 /**
@@ -117594,6 +117740,16 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportAnnotationHoldingACallIsFound,
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testABootNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAClassCacheHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testARestartNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testALiveReservationShrinksTheRoomByWhatItOwes,

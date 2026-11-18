@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { asParams, readArray, readNumber } from './tool-args.js';
-import { writeWhole } from './whole-file.js';
+import { writeWholeAsync } from './whole-file.js';
 
 /**
  * What a server learned about a project's class cache and the editor writing it, kept in the
@@ -79,7 +79,7 @@ function unfinishedScanIn(value: unknown): UnfinishedScan | null {
  * Writes [param note] for [param projectPath], whole, since the next server reads it while this
  * one may be writing. A project that cannot be written into is forgotten again.
  */
-export function writeClassNote(projectPath: string, note: ClassNote): void {
+export async function writeClassNote(projectPath: string, note: ClassNote): Promise<void> {
   const path = classNotePath(projectPath);
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -88,5 +88,5 @@ export function writeClassNote(projectPath: string, note: ClassNote): void {
   }
   // The next server learns it afresh when the write does not land, which is what it did before
   // there was a note.
-  writeWhole(path, `${JSON.stringify(note, null, 2)}\n`);
+  await writeWholeAsync(path, `${JSON.stringify(note, null, 2)}\n`);
 }
