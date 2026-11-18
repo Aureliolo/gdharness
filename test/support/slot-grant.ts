@@ -9,7 +9,9 @@
  * `GRANT_DEAF` makes it stay up past the end of its input. A line `hand <pid> <start>` is logged as
  * `hand`, answered `handed` and ended with code 0 (`GRANT_HAND=refuse` answers `cannot` and code 2
  * instead), and `GRANT_EXIT_AFTER_MS` makes it exit with code 3 that long after it started.
- * `GRANT_LATE_MS` delays every start but the first by that long.
+ * `GRANT_LATE_MS` delays every start but the first by that long, and `GRANT_QUEUED` makes those late
+ * starts print `queued` before they wait (every start, where `GRANT_LATE_MS` is unset). Each `held`
+ * it prints is first written as a line to the file `<GRANT_LOG>.held`.
  */
 import { appendFileSync, closeSync, openSync } from 'node:fs';
 import process from 'node:process';
@@ -76,10 +78,18 @@ if (exitAfter !== undefined) {
   }, Number(exitAfter));
 }
 
+// `GRANT_QUEUED` prints `queued` first, as a command does that cannot grant at once. With
+// `GRANT_LATE_MS` only the late starts print it.
+if (process.env['GRANT_QUEUED'] !== undefined && (!perStart || !first)) {
+  process.stdout.write('queued\n');
+}
 if (wait > 0) {
   await delay(wait);
 }
 if (said !== '') {
+  if (log !== undefined) {
+    appendFileSync(`${log}.held`, 'held\n');
+  }
   await new Promise<void>((written) => {
     process.stdout.write(`${said}\n`, () => {
       written();

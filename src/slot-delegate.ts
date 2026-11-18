@@ -5,7 +5,9 @@
  *
  * The command is started without a shell, hidden, with `--project <absolute path>` where the take
  * has a project and `--kind gate|side|one-off|game` appended. Its first line on standard output is
- * `held <absolute lock path>` once the slot is granted, or `refused <reason>`. The command keeps the
+ * `held <absolute lock path>` once the slot is granted, or `refused <reason>`. A command that cannot
+ * grant at once may print `queued` before either, and a run that starts several engines then counts
+ * the request as a busy slot, which it does not wait for. The command keeps the
  * slot for as long as its standard input is open and gives it back at end of input, so a gdharness
  * that is killed frees it too. A slot for a process that outlives gdharness is handed on with the
  * line `hand <pid> <start ms>` on its standard input: the command rewrites the lock to that holder,
@@ -31,6 +33,12 @@ const EXIT_WAIT_MS = 5000;
 
 /** How long after `held` a command that exits is still counted as never having held the slot. */
 const GRANT_SETTLE_MS = 100;
+
+/**
+ * What a command prints, before `held`, when it cannot grant the slot at once and the request waits
+ * for a busy one.
+ */
+const QUEUED_LINE = 'queued';
 
 /** How much of what a command printed an error repeats. */
 const PRINTED_KEPT = 300;
@@ -154,6 +162,8 @@ export interface SlotRequest {
   readonly note: (waitedMs: number) => void;
   /** Told when the command exits while it still holds a slot that was granted. */
   readonly onLost: (said: string) => void;
+  /** Told once if the command says it queued the request for a busy slot. */
+  readonly onQueued?: (() => void) | undefined;
 }
 
 function printedSaid(text: string): string {
@@ -171,7 +181,8 @@ export class CommandAnswers {
   private printed = '';
   private written = '';
 
-  constructor(child: ReturnType<typeof startedCommand>) {
+  /** [param queued] is called once, when the command says it cannot grant at once. */
+  constructor(child: ReturnType<typeof startedCommand>, queued?: () => void) {
     this.gone = new Promise<void>((done) => {
       child.once('close', (code, signal) => {
         this.exit = { code, signal };
@@ -190,13 +201,19 @@ export class CommandAnswers {
     });
     this.firstLine = new Promise<string | null>((resolveLine) => {
       let lined = false;
+      let wasQueued = false;
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk: string) => {
         this.printed = `${this.printed}${chunk}`.slice(0, PRINTED_KEPT * 4);
-        const end = this.printed.indexOf('\n');
-        if (!lined && end !== -1) {
+        const lines = this.completeLines();
+        if (!wasQueued && lines[0]?.trim() === QUEUED_LINE) {
+          wasQueued = true;
+          queued?.();
+        }
+        const answer = lines.find((line) => line.trim() !== QUEUED_LINE);
+        if (!lined && answer !== undefined) {
           lined = true;
-          resolveLine(this.printed.slice(0, end).replace(/\r$/, ''));
+          resolveLine(answer);
         }
       });
       void this.gone.then(() => {
@@ -235,11 +252,23 @@ export class CommandAnswers {
     return this.exit?.code === 0 && this.exit.signal === null;
   }
 
-  /** The lines the command printed after its first. */
+  /** The lines the command has printed whole, without a `\r` at their ends. */
+  private completeLines(): string[] {
+    const cut = this.printed.lastIndexOf('\n');
+    return cut === -1
+      ? []
+      : this.printed
+          .slice(0, cut)
+          .split('\n')
+          .map((line) => line.replace(/\r$/, ''));
+  }
+
+  /** The lines the command printed after its answer, which `queued` lines before it do not count as. */
   linesAfterTheFirst(): string[] {
-    return this.printed
-      .split('\n')
-      .slice(1)
+    const lines = this.completeLines();
+    const answer = lines.findIndex((line) => line.trim() !== QUEUED_LINE);
+    return lines
+      .slice(answer + 1)
       .map((line) => line.trim())
       .filter((line) => line !== '');
   }
@@ -341,7 +370,7 @@ export async function askForSlot(request: SlotRequest): Promise<SlotGrant> {
   signal?.throwIfAborted();
   const args = [...given, ...(project === undefined ? [] : ['--project', resolve(project)]), '--kind', kind];
   const child = startedCommand(command, program, args);
-  const answers = new CommandAnswers(child);
+  const answers = new CommandAnswers(child, request.onQueued);
   const first = await firstLineOf(request, child, answers);
   const lock = first === null ? undefined : /^held (.+)$/.exec(first)?.[1]?.trim();
   if (lock !== undefined && isAbsolute(lock)) {
@@ -356,6 +385,12 @@ export async function askForSlot(request: SlotRequest): Promise<SlotGrant> {
     const lost = grant.lostSaid();
     if (lost !== null) {
       throw new Error(lost);
+    }
+    if (signal?.aborted === true) {
+      // Cancelled while the grant settled: given back, since the caller will not take it.
+      grant.release();
+      await answers.gone;
+      signal.throwIfAborted();
     }
     started = true;
     return grant;

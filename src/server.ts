@@ -154,7 +154,7 @@ import {
   startedUntilItRuns,
 } from './engine-run.js';
 import {
-  handSlotToGame,
+  handedRunSlot,
   handSlotToKeeper,
   keeperSlotOf,
   onTheSlot,
@@ -16046,11 +16046,7 @@ class GodotServer {
   private tie(run: GodotProcess, endpoint: RuntimeEndpoint): void {
     run.announcedPid = endpoint.pid;
     this.noteBootOf(run, endpoint);
-    const slot = run.slot;
-    if (slot !== undefined) {
-      delete run.slot;
-      run.slotHanded = handSlotToGame(slot, endpoint.pid, run.projectPath);
-    }
+    handedRunSlot(run, endpoint.pid);
   }
 
   /**

@@ -786,7 +786,9 @@ double quotes, with the quotes taken out.
   other take is a `one-off`. A game that `editor_run` starts is a `game`, played or kept.
 - The command's first line on standard output is `held <absolute lock path>` once the slot is
   granted, or `refused <reason>`. gdharness waits for it as long as it would wait for a slot, and
-  stops at the call's deadline or cancellation.
+  stops at the call's deadline or cancellation. A command that cannot grant at once may print
+  `queued` on a line of its own first, the moment it knows, and `held` once the slot is granted.
+  A start that waits for its one slot ignores `queued`.
 - The engine starts with `GODOT_ENGINE_HELD` set to that path.
 - A refusal, an exit before the first line, a first line in neither form and a command that will
   not start each fail the start. The answer names the command and what it printed or its exit.
@@ -813,11 +815,14 @@ double quotes, with the quotes taken out.
 - A take under an inherited `GODOT_ENGINE_HELD` calls nothing, as without the command.
 
 A take cannot ask for a slot that is free now. `gdharness test` and `spread` therefore ask the
-command for the slot of every lane at once, and count the grants that come within a second of the
-first as free. With all of them, each lane runs what it was dealt. With fewer, the suites are handed
-out a share at a time to whichever engine is granted and free, as with busy slots, and a grant that
-comes once the work is done is given back unused. The waiting marks and the memory marks of the
-steps below belong to taking slots yourself and are not written. A lock that names this process
+command for the slot of every lane at once. A grant with no `queued` before it is a free slot
+however late it answers, and the run waits for it. A queued request is a busy slot, which the run's
+start does not wait for. With every slot free, each lane runs what it was dealt. With a queued
+request, the suites are handed out a share at a time to whichever engine is granted and free, as
+with busy slots. A queued request whose run has dealt all its work is withdrawn by closing the
+command's input before `held`, which leaves no holder. A `held` that arrives after the work was
+dealt is given back by closing the input, as any release. The waiting marks and the memory marks of
+the steps below belong to taking slots yourself and are not written. A lock that names this process
 still has the engine written into it.
 
 ### Taking a slot from your own tool

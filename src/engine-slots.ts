@@ -1280,11 +1280,17 @@ export class EngineSlots {
     blocked?: () => void,
     game = false,
     project?: string,
+    queued?: () => void,
   ): Promise<string> {
     const delegate = slotCommandOf();
     return delegate === undefined
       ? await this.takenFromFolder(signal, waiting, blocked, game, project)
-      : await this.takenFromCommand(delegate, signal, waiting, blocked, game, project ?? this.project);
+      : await this.takenFromCommand(
+          delegate,
+          { signal, waiting, blocked, queued },
+          game,
+          project ?? this.project,
+        );
   }
 
   private async takenFromFolder(
@@ -1346,12 +1352,16 @@ export class EngineSlots {
    */
   private async takenFromCommand(
     command: string,
-    signal: AbortSignal | undefined,
-    waiting: ((waitedMs: number) => void) | undefined,
-    blocked: (() => void) | undefined,
+    asked: {
+      readonly signal: AbortSignal | undefined;
+      readonly waiting: ((waitedMs: number) => void) | undefined;
+      readonly blocked: (() => void) | undefined;
+      readonly queued: (() => void) | undefined;
+    },
     game: boolean,
     project: string | undefined,
   ): Promise<string> {
+    const { signal, waiting, blocked, queued } = asked;
     signal?.throwIfAborted();
     const inherited = await this.inheritedByOne();
     if (inherited !== null) {
@@ -1368,6 +1378,7 @@ export class EngineSlots {
       signal,
       firstNoteMs: COMMAND_WAIT_SAID_MS,
       noteEveryMs: WAIT_SAID_MS,
+      onQueued: queued,
       onLost: (said) => {
         if (notes === undefined) {
           this.say?.(said);
@@ -2539,6 +2550,21 @@ async function handedOrReleased(
   const started = pid === undefined ? undefined : (await startTimesOf([pid])).get(pid);
   if (pid === undefined || started === undefined || !(await slot.handTo({ pid, started, by }))) {
     slot.release();
+  }
+}
+
+/**
+ * Hands the slot of the run the editor plays to the game [param pid] that announced, and keeps the
+ * hand on the run for {@link settledRunSlot} to wait for.
+ */
+export function handedRunSlot(
+  run: { slot?: CallSlot; slotHanded?: Promise<void>; readonly projectPath: string | null },
+  pid: number,
+): void {
+  const slot = run.slot;
+  if (slot !== undefined) {
+    delete run.slot;
+    run.slotHanded = handSlotToGame(slot, pid, run.projectPath);
   }
 }
 

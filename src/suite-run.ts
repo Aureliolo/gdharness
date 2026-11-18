@@ -1312,9 +1312,10 @@ async function slotsFreeNow(slots: Pick<EngineSlots, 'takeFree'>, most: number):
 
 /**
  * Takes a slot for each lane where one is free now, and says what that leaves for the rest. Under a
- * slot command, which has no answer for a slot free now, every lane's slot is asked at once and the
- * ones granted within a moment count as free: the lanes left over wait for their grants as shares
- * are handed out, and a grant that comes once the work is done is given back.
+ * slot command, which has no answer for a slot free now, every lane's slot is asked at once. A grant
+ * the command did not queue counts as free however late it comes, and a queued one as busy: the
+ * lanes left over wait for it as shares are handed out, and one that comes once the work is done is
+ * given back.
  */
 export async function takenLanes<P extends { readonly lane: number }>(
   run: {
