@@ -102,7 +102,7 @@ import {
   unseenByEditor,
   withAddonClassesCounted,
 } from '../src/class-cache.js';
-import { classNotePath, readClassNote, writeClassNote } from '../src/class-note.js';
+import { classNotePath, readClassNote, updateClassNote } from '../src/class-note.js';
 import { CompiledHelper } from '../src/compiled-helper.js';
 import {
   parsedYamlHas,
@@ -844,7 +844,7 @@ import {
 } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
-import { makeWhole, removeWholeAsync, writeWhole, writeWholeAsync } from '../src/whole-file.js';
+import { makeWhole, notesInTurn, removeWholeAsync, writeWhole, writeWholeAsync } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import {
@@ -66445,31 +66445,11 @@ async function heldOpenByAReader(
 }
 
 /**
- * Waits until two samples a second apart show the machine under 60% busy at every reading for 30 s,
- * as [method samplesReadAChildWatchedForMemory] works the share out. Answers null once it is, and the
- * last busy share when it was not within three minutes.
+ * The widest gap between the loop's 20 ms ticks that a wait on a held file may cost. The fault is a
+ * call that sleeps the thread for its whole second, a gap of about 1000 ms, so 700 fails it and
+ * leaves a loaded machine 680 ms of stall. No case waits for a quiet processor.
  */
-async function untilTheProcessorIsQuiet(): Promise<number | null> {
-  const giveUp = Date.now() + 180_000;
-  let quietSince: number | undefined;
-  let share = 1;
-  let before = await sampled();
-  while (Date.now() < giveUp) {
-    await delay(1100);
-    const after = await sampled();
-    share = (after.machine - before.machine) / ((after.at - before.at) * availableParallelism());
-    before = after;
-    if (share >= 0.6) {
-      quietSince = undefined;
-    } else {
-      quietSince ??= Date.now();
-      if (Date.now() - quietSince >= 30_000) {
-        return null;
-      }
-    }
-  }
-  return share;
-}
+const HELD_FILE_WIDEST_GAP_MS = 700;
 
 /**
  * Runs [param call], which takes over the dead [param lock] in [param directory] while a reader holds
@@ -66514,7 +66494,7 @@ async function aHeldDeadLockIsTakenOverOnceLetGo(
       `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
     );
     assert.ok(
-      watched.widest <= 500,
+      watched.widest < HELD_FILE_WIDEST_GAP_MS,
       `${caller} leaves the process free to run: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
     );
   } finally {
@@ -66536,15 +66516,6 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
     console.log(
       'held-lock takeover regression ran on Windows alone: elsewhere a reader holds no removal back',
     );
-    return;
-  }
-  const busy = await untilTheProcessorIsQuiet();
-  if (busy !== null) {
-    const said = 'held-lock takeover regression skipped: the processor never stayed under 60% for 30 s';
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error(`${said}, the last busy share was ${String(busy)}`);
-    }
-    console.log(said);
     return;
   }
   const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
@@ -66597,16 +66568,12 @@ async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promi
   );
 }
 
-/** The widest gap between ticks a held note may cost the loop. */
-const HELD_NOTE_WIDEST_GAP_MS = 400;
-
 /**
  * Holds the note that [param noteIn] places in a scratch project shut for 3 s from a hidden child
  * that shares nothing, calls [param call] with the project and the note, and asserts the process
- * keeps ticking while the call waits its second. A block on the loop lasts the whole second, so the
- * widest gap is held under {@link HELD_NOTE_WIDEST_GAP_MS}, which a loaded machine's stalls stay
- * well below, so no quiet processor is waited for. A call that [param refuses] must throw once the second
- * is spent. Windows alone.
+ * keeps ticking while the call waits its second: the widest gap stays under
+ * {@link HELD_FILE_WIDEST_GAP_MS}. A call that [param refuses] must throw once the second is spent.
+ * Windows alone.
  */
 async function aNoteHeldShutLeavesTheLoopRunning(
   what: string,
@@ -66638,7 +66605,7 @@ async function aNoteHeldShutLeavesTheLoopRunning(
     rmSync(directory, { recursive: true, force: true });
     assert.ok(waited >= 900, `${what} is waited on for its second: ${String(waited)} ms`);
     assert.ok(
-      watched.widest < HELD_NOTE_WIDEST_GAP_MS,
+      watched.widest < HELD_FILE_WIDEST_GAP_MS,
       `the process runs while ${what} is held shut: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
     );
     if (refuses) {
@@ -66675,7 +66642,7 @@ async function testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProces
 /** The class note a reader holds shut is waited on without stopping the process. */
 async function testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
   await aNoteHeldShutLeavesTheLoopRunning('the class note', classNotePath, async (project) => {
-    await writeClassNote(project, { rebuiltWith: [] });
+    await updateClassNote(project, () => ({ rebuiltWith: [] }));
   });
 }
 
@@ -66852,6 +66819,111 @@ async function testARestartSettledWhileTheNoteWaitsStaysSettled(): Promise<void>
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two marks of one run set 300 ms apart, while a reader holds the mark file past both waits: each
+ * answers what became of its own mark. A mark that never landed answered that it was set.
+ */
+async function testAMarkSetBesideALaterOneAnswersWhatBecameOfIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held mark regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-two-marks-'));
+  const file = join(directory, 'mark.json');
+  const markAt = (takenAt: number): Parameters<typeof writeProfileMarkAsync>[1] => ({
+    takenAt,
+    projectPath: null,
+    runStartedAt: 0,
+    coveredMs: 0,
+    totals: { startedAt: 0, lastFrameAt: null, frames: 0, complete: false, unreadable: 0, functions: {} },
+  });
+  writeFileSync(file, JSON.stringify(markAt(1)));
+  const reader = await heldOpenByAReader(file, 'Read');
+  try {
+    const first = writeProfileMarkAsync(file, markAt(100));
+    await delay(300);
+    const second = writeProfileMarkAsync(file, markAt(200));
+    const answers = [await first, await second];
+    assert.equal(readProfileMark(file)?.takenAt, 1, 'the reader kept the old mark in place');
+    assert.deepEqual(answers, [false, false], 'neither mark landed, so neither answers that it is set');
+  } finally {
+    await reader.letGo();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A breakpoint written under the project path a caller typed and cleared under the one the editor
+ * reports, which differs in case and separators, stays cleared.
+ */
+async function testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('respelled breakpoint note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-Respelled-'));
+  try {
+    const note = breakpointNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, '{"breakpoints":[]}\n');
+    await withAHeldNote(note, 500, async (pause) => {
+      const written = writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
+      await pause();
+      writeBreakpointNote(project.toLowerCase().replaceAll('\\', '/'), []);
+      await written;
+    });
+    assert.equal(existsSync(note), false, 'the note cleared under another spelling stays cleared');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A note keeps an entry among the waiting calls only while one waits on it, whether the last call
+ * answers on a timer or a call that sleeps the thread finishes it. A server runs for days and writes
+ * a note for every slot wait.
+ */
+async function testANoteNoCallWaitsOnKeepsNoEntry(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('waiting-calls regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-entries-'));
+  try {
+    const before = notesInTurn();
+    const [timed, slept] = [join(directory, 'timed.json'), join(directory, 'slept.json')];
+    writeFileSync(timed, 'old');
+    writeFileSync(slept, 'old');
+    assert.equal(await writeWholeAsync(join(directory, 'free.json'), 'text'), true);
+    assert.equal(notesInTurn(), before, 'a write that lands at once leaves no entry');
+    await withAHeldNote(timed, 500, async () => {
+      const calls = [
+        writeWholeAsync(timed, 'first'),
+        writeWholeAsync(timed, 'second'),
+        removeWholeAsync(timed),
+      ];
+      assert.equal(notesInTurn(), before + 1, 'three calls on one held note wait under one entry');
+      assert.deepEqual(await Promise.all(calls), [true, true, true]);
+    });
+    assert.equal(notesInTurn(), before, 'the entry goes with the last call answered on a timer');
+    await withAHeldNote(slept, 500, async () => {
+      const waiting = writeWholeAsync(slept, 'first');
+      assert.equal(notesInTurn(), before + 1);
+      assert.equal(writeWhole(slept, 'second'), true);
+      assert.equal(
+        notesInTurn(),
+        before,
+        'the entry goes once a call that sleeps the thread has finished it',
+      );
+      assert.equal(await waiting, true, 'the write finished ahead of the later one answers that it landed');
+    });
+    assert.equal(readFileSync(slept, 'utf8'), 'second');
+    assert.equal(existsSync(timed), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -117920,6 +117992,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoWritesOfOneNoteAtOnceBothLandInOrder,
   testAWriteMadeAfterARemovalWaitsIsNotRemovedByIt,
   testARestartSettledWhileTheNoteWaitsStaysSettled,
+  testAMarkSetBesideALaterOneAnswersWhatBecameOfIt,
+  testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared,
+  testANoteNoCallWaitsOnKeepsNoEntry,
   testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,

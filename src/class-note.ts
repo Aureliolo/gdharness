@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { asParams, readArray, readNumber } from './tool-args.js';
-import { writeWholeAsync } from './whole-file.js';
+import { changeWholeAsync } from './whole-file.js';
 
 /**
  * What a server learned about a project's class cache and the editor writing it, kept in the
@@ -46,7 +46,16 @@ export function classNotePath(projectPath: string): string {
 /** The note as written, or null for a file that is missing, unreadable or not this shape. */
 export function readClassNote(projectPath: string): ClassNote | null {
   try {
-    const fields = asParams(JSON.parse(readFileSync(classNotePath(projectPath), 'utf8')));
+    return classNoteIn(readFileSync(classNotePath(projectPath), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** The note [param text] holds, or null for no text or one that is not this shape. */
+function classNoteIn(text: string | null): ClassNote | null {
+  try {
+    const fields = asParams(JSON.parse(text ?? ''));
     const rebuiltWith = readArray(fields, 'rebuiltWith');
     if (rebuiltWith === undefined || !rebuiltWith.every((name) => typeof name === 'string')) {
       return null;
@@ -75,47 +84,32 @@ function unfinishedScanIn(value: unknown): UnfinishedScan | null {
   return { editorPid: readNumber(fields, 'editorPid') ?? null, classes: classes.map(String) };
 }
 
-/** The updates of each project's note that are running or waiting, so that they run one at a time. */
-const updating = new Map<string, Promise<void>>();
-
 /**
  * Replaces the note of [param projectPath] with what [param change] makes of the note as it is when
- * the update runs, or leaves it when that is null. Updates of one project run one after the other:
- * each reads the note after the one before it has written, since a write that waits on a reader
- * leaves the next to read the note as it was and write over the change.
+ * the update's turn comes, or leaves it when that is null. Updates of one project run one after the
+ * other: each reads the note after the one before it has written, since a write that waits on a
+ * reader leaves the next to read the note as it was and write over the change.
+ *
+ * Written whole, since the next server reads it while this one may be writing. A project that
+ * cannot be written into is forgotten again.
  */
-export function updateClassNote(
+export async function updateClassNote(
   projectPath: string,
   change: (note: ClassNote | null) => ClassNote | null,
 ): Promise<void> {
-  const run = (updating.get(projectPath) ?? Promise.resolve()).then(async () => {
-    const changed = change(readClassNote(projectPath));
-    if (changed !== null) {
-      await writeClassNote(projectPath, changed);
-    }
-  });
-  const settled = run.catch(() => undefined);
-  updating.set(projectPath, settled);
-  void settled.then(() => {
-    if (updating.get(projectPath) === settled) {
-      updating.delete(projectPath);
-    }
-  });
-  return run;
-}
-
-/**
- * Writes [param note] for [param projectPath], whole, since the next server reads it while this
- * one may be writing. A project that cannot be written into is forgotten again.
- */
-export async function writeClassNote(projectPath: string, note: ClassNote): Promise<void> {
   const path = classNotePath(projectPath);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-  } catch {
-    return;
-  }
   // The next server learns it afresh when the write does not land, which is what it did before
   // there was a note.
-  await writeWholeAsync(path, `${JSON.stringify(note, null, 2)}\n`);
+  await changeWholeAsync(path, (text) => {
+    const changed = change(classNoteIn(text));
+    if (changed === null) {
+      return null;
+    }
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+    } catch {
+      return null;
+    }
+    return `${JSON.stringify(changed, null, 2)}\n`;
+  });
 }

@@ -23,6 +23,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 import { alive } from './alive.js';
 import { errorCode } from './errors.js';
+import { isSameDirectory } from './paths.js';
 
 /** The notes whose folder has been looked through for a dead writer's partial file. */
 const sweptNotes = new Set<string>();
@@ -40,9 +41,7 @@ function sweepDeadPartials(path: string): void {
   const prefix = `${basename(path)}.`;
   try {
     for (const entry of readdirSync(dirname(path))) {
-      const found = entry.startsWith(prefix)
-        ? /^(\d+)(?:\.\d+)?\.partial$/.exec(entry.slice(prefix.length))
-        : null;
+      const found = entry.startsWith(prefix) ? /^(\d+)\.partial$/.exec(entry.slice(prefix.length)) : null;
       const pid = Number(found?.[1]);
       if (found !== null && pid !== process.pid && !alive(pid)) {
         rmSync(join(dirname(path), entry), { force: true });
@@ -113,8 +112,12 @@ function waitedOutSync<T>(attempt: () => Attempt<T>): T {
     if (Date.now() >= until) {
       return tried.held();
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
+    sleepBetweenTries();
   }
+}
+
+function sleepBetweenTries(): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
 }
 
 /**
@@ -164,108 +167,186 @@ function readAttempt(path: string): Attempt<string | null> {
  * a throw ends it and the run it holds goes on with nobody holding it.
  */
 export function writeWhole(path: string, text: string): boolean {
-  touched(path);
+  finishTurnsOn(path);
   const partial = stagedBeside(path, text);
-  try {
-    return partial !== null && waitedOutSync(() => renameAttempt(partial, path));
-  } finally {
-    unstage(partial);
-  }
+  return partial !== null && waitedOutSync(() => renameAttempt(partial, path));
 }
 
 /**
- * {@link writeWhole} for a caller on the event loop: the wait between tries is a timer.
+ * {@link writeWhole} for a caller on the event loop: the wait between tries is a timer, and the
+ * write takes its turn behind every call made on the note before it ({@link inTurnOn}).
+ */
+export function writeWholeAsync(path: string, text: string): Promise<boolean> {
+  return inTurnOn(path, () => stagedStep(path, text));
+}
+
+/**
+ * Replaces [param path] with what [param change] makes of its text, read once the call's turn has
+ * come, and answers whether it did. Null from [param change] leaves the file as it is, and so does
+ * a read that a reader holding the file shut refuses for the whole wait.
  *
- * Writes and removals of one note land in the order they were made, and the last wins. A write that
- * a later one of this process has overtaken while it waited is dropped and answers true, since the
- * note holds what the later one said. Without that, a note cleared while an earlier write waited on
- * a reader came back when the reader let go, and a lock given back was made again.
+ * For a caller that writes from what the note holds. Read ahead of its turn, the text misses what a
+ * call still waiting on a reader goes on to write, and the write puts the older note back.
  */
-export async function writeWholeAsync(path: string, text: string): Promise<boolean> {
-  const mine = touched(path);
-  const partial = stagedBeside(path, text);
-  try {
-    return (
-      partial !== null &&
-      (await waitedOut(() =>
-        lastTouchOf(path) === mine ? renameAttempt(partial, path) : { done: overtaken(partial) },
-      ))
-    );
-  } finally {
-    unstage(partial);
+export function changeWholeAsync(
+  path: string,
+  change: (text: string | null) => string | null,
+): Promise<boolean> {
+  return inTurnOn(path, () => {
+    const read = readAttempt(path);
+    if (!('done' in read)) {
+      return { held: () => false };
+    }
+    const text = change(read.done);
+    return text === null ? { done: false } : stagedStep(path, text);
+  });
+}
+
+/**
+ * One try of a call in its turn: an {@link Attempt}, or the tries that follow once its first part
+ * is done, which get the whole wait again as they do in a call of their own.
+ */
+type Step<T> = Attempt<T> | { readonly next: () => Attempt<T> };
+
+/** A call on a note, being tried or waiting behind the ones made before it. */
+interface Turn {
+  /** Tries the call once, and answers whether it has its answer. */
+  readonly tried: () => boolean;
+}
+
+/**
+ * The calls on each note that are being tried or waiting, in the order they were made. The first is
+ * the one being tried. A note's entry goes with its last call, so a server that runs for days keeps
+ * nothing for a note no call is waiting on.
+ */
+const turns = new Map<string, Turn[]>();
+
+/** How many notes have a call being tried or waiting, for a test of the entries being dropped. */
+export function notesInTurn(): number {
+  return turns.size;
+}
+
+/**
+ * Runs the call that begins with [param first] once every call made on [param path] before it has
+ * its answer, and answers what it does: tried on a timer until it answers or its wait is spent, as
+ * it would be alone.
+ *
+ * A write that waited on a reader beside a later call on the note landed after that call when the
+ * reader let go. A note cleared meanwhile came back, and a lock given back was made again.
+ */
+function inTurnOn<T>(path: string, first: () => Step<T>): Promise<T> {
+  return new Promise<T>((answer, refuse) => {
+    const turn = turnOf(first, answer, refuse);
+    const key = waitingKeyOf(path) ?? path;
+    const line = turns.get(key);
+    if (line === undefined) {
+      const fresh = [turn];
+      turns.set(key, fresh);
+      void served(key, fresh);
+    } else {
+      line.push(turn);
+    }
+  });
+}
+
+/**
+ * The key the calls waiting on [param path] are held under, however the first of them spelled it, or
+ * undefined when none is waiting. Two spellings of one file are judged as two spellings of one
+ * project are: a breakpoint written under the path a caller typed is cleared under the one the
+ * editor reports.
+ */
+function waitingKeyOf(path: string): string | undefined {
+  if (turns.has(path)) {
+    return path;
+  }
+  for (const key of turns.keys()) {
+    if (isSameDirectory(key, path)) {
+      return key;
+    }
+  }
+  return undefined;
+}
+
+function turnOf<T>(first: () => Step<T>, answer: (value: T) => void, refuse: (error: unknown) => void): Turn {
+  let attempt = first;
+  let until: number | undefined;
+  const attempted = (): Attempt<T> => {
+    const step = attempt();
+    if (!('next' in step)) {
+      return step;
+    }
+    attempt = step.next;
+    until = Date.now() + HELD_FILE_MS;
+    return step.next();
+  };
+  const tried = (): boolean => {
+    try {
+      until ??= Date.now() + HELD_FILE_MS;
+      const step = attempted();
+      if ('held' in step && Date.now() < until) {
+        return false;
+      }
+      answer('held' in step ? step.held() : step.done);
+    } catch (error) {
+      refuse(error);
+    }
+    return true;
+  };
+  return { tried };
+}
+
+/** Tries each call of [param line] in turn, on a timer, until none is left. */
+async function served(key: string, line: Turn[]): Promise<void> {
+  for (let turn = line[0]; turn !== undefined; turn = line[0]) {
+    if (turn.tried()) {
+      line.shift();
+    } else {
+      await delay(HELD_FILE_RETRY_MS);
+    }
+  }
+  if (turns.get(key) === line) {
+    turns.delete(key);
   }
 }
 
-/** The latest write or removal of each note this process has begun, by its number. */
-const lastTouch = new Map<string, number>();
-let touchCount = 0;
-
-function touched(path: string): number {
-  touchCount += 1;
-  lastTouch.set(path, touchCount);
-  return touchCount;
-}
-
-function lastTouchOf(path: string): number | undefined {
-  return lastTouch.get(path);
-}
-
 /**
- * A check, made after an await, that nothing of this process has written or removed [param path]
- * since this call. For a caller that read the note, waited, and means to act on what it read.
+ * Brings every call waiting on [param path] to its answer before a call that cannot wait on a timer
+ * goes ahead, sleeping the thread between tries. Each gets its own wait and answers what it did, so
+ * the caller's write or removal lands after them, as it did when every call slept the thread.
  */
-export function untouchedSince(path: string): () => boolean {
-  const before = lastTouch.get(path);
-  return () => lastTouch.get(path) === before;
+function finishTurnsOn(path: string): void {
+  const key = waitingKeyOf(path);
+  const line = key === undefined ? undefined : turns.get(key);
+  if (key === undefined || line === undefined) {
+    return;
+  }
+  turns.delete(key);
+  for (let turn = line.shift(); turn !== undefined; turn = line.shift()) {
+    while (!turn.tried()) {
+      sleepBetweenTries();
+    }
+  }
 }
 
-/** The partial files this process has written and not yet renamed or given up, by name. */
-const staged = new Set<string>();
-let stagedCount = 0;
-
 /**
- * Writes [param text] to a partial file beside [param path] that no other write of this process is
- * using, and answers its name, or null when it cannot be written. A second write of one note, while
- * the first waits on a reader, has to stage its text apart: a shared name would hand one write the
- * other's text and let one's give-up delete the other's.
+ * Writes [param text] to the partial file beside [param path], and answers its name, or null when it
+ * cannot be written. One name serves every write of this process, since no two are under way at once.
  */
 function stagedBeside(path: string, text: string): string | null {
-  const plain = `${path}.${process.pid}.partial`;
-  let partial = plain;
-  if (staged.has(plain)) {
-    stagedCount += 1;
-    partial = `${path}.${process.pid}.${stagedCount}.partial`;
-  }
+  const partial = `${path}.${process.pid}.partial`;
   sweepDeadPartials(path);
   try {
     writeFileSync(partial, text, 'utf8');
-    staged.add(partial);
     return partial;
   } catch {
     return null;
   }
 }
 
-function unstage(partial: string | null): void {
-  if (partial !== null) {
-    staged.delete(partial);
-  }
-}
-
-/** Removes [param partial], for a write that is not going to land. */
-function droppedPartial(partial: string): boolean {
-  try {
-    rmSync(partial, { force: true });
-  } catch {
-    // Left behind, and swept with the transcripts once it is old enough.
-  }
-  return false;
-}
-
-/** Drops the partial of a write a later one has overtaken, and answers true: the note holds the later text. */
-function overtaken(partial: string): boolean {
-  droppedPartial(partial);
-  return true;
+/** The first try of a write in its turn: the text staged, then the renames over [param path]. */
+function stagedStep(path: string, text: string): Step<boolean> {
+  const partial = stagedBeside(path, text);
+  return partial === null ? { done: false } : { next: () => renameAttempt(partial, path) };
 }
 
 /** One try at renaming [param partial] over [param path], which a refusal for good ends at once. */
@@ -274,7 +355,14 @@ function renameAttempt(partial: string, path: string): Attempt<boolean> {
     renameSync(partial, path);
     return { done: true };
   } catch (error) {
-    const gaveUp = (): boolean => droppedPartial(partial);
+    const gaveUp = (): boolean => {
+      try {
+        rmSync(partial, { force: true });
+      } catch {
+        // Left behind, and swept with the transcripts once it is old enough.
+      }
+      return false;
+    };
     const code = errorCode(error) ?? '';
     return !HELD_BY_A_READER.has(code) || refusesForGood(path) ? { done: gaveUp() } : { held: gaveUp };
   }
@@ -349,20 +437,16 @@ export function madeInPlace(path: string, text: string): boolean {
  * a removal that landed on such a read names a live holder and keeps its slot for the whole run.
  */
 export function removeWhole(path: string): boolean {
-  touched(path);
+  finishTurnsOn(path);
   return waitedOutSync(() => removeAttempt(path));
 }
 
 /**
- * {@link removeWhole} for a caller on the event loop: the wait between tries is a timer.
- *
- * A removal that a later write or removal of this process has overtaken while it waited is dropped
- * and answers true, as {@link writeWholeAsync} does. Otherwise a write that landed in the moment
- * the reader let go was removed by the earlier removal's next try.
+ * {@link removeWhole} for a caller on the event loop: the wait between tries is a timer, and the
+ * removal takes its turn behind every call made on the note before it ({@link inTurnOn}).
  */
-export async function removeWholeAsync(path: string): Promise<boolean> {
-  const mine = touched(path);
-  return await waitedOut(() => (lastTouchOf(path) === mine ? removeAttempt(path) : { done: true }));
+export function removeWholeAsync(path: string): Promise<boolean> {
+  return inTurnOn(path, () => removeAttempt(path));
 }
 
 function removeAttempt(path: string): Attempt<boolean> {

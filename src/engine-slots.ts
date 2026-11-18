@@ -86,6 +86,7 @@ import {
 } from './slot-delegate.js';
 import { Turns } from './turns.js';
 import {
+  changeWholeAsync,
   madeInPlace,
   makeWhole,
   readWhole,
@@ -93,7 +94,6 @@ import {
   removeWhole,
   removeWholeAsync,
   stagedWriterOf,
-  untouchedSince,
   writeWhole,
   writeWholeAsync,
 } from './whole-file.js';
@@ -2301,15 +2301,11 @@ export async function takenOverUnderSteal(
  * rule every lock is judged by. Renamed over the lock, so a taker reading it never finds it empty.
  */
 export async function handSlot(lock: string, from: number, to: SlotHolder): Promise<boolean> {
-  const unchanged = untouchedSince(lock);
-  let content: string | null;
   try {
-    content = await readWholeAsync(lock);
+    return await changeWholeAsync(lock, (content) => handedText(content, from, to));
   } catch {
     return false;
   }
-  const text = unchanged() ? handedText(content, from, to) : null;
-  return text !== null && (await writeWholeAsync(lock, text));
 }
 
 /** What a lock that read as [param content] holds once handed from [param from] to [param to], or null. */
@@ -2324,16 +2320,12 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
  * names [param holder]. Answers whether it did. Renamed over the lock, as {@link handSlot} is.
  */
 export async function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): Promise<boolean> {
-  const unchanged = untouchedSince(lock);
-  let content: string | null;
   try {
-    content = await readWholeAsync(lock);
+    // Read in the naming's turn, so a lock given back ahead of it is not made again.
+    return await changeWholeAsync(lock, (content) => namedText(content, holder, engine));
   } catch {
     return false;
   }
-  // A lock given back while it was being read is not made again.
-  const text = unchanged() ? namedText(content, holder, engine) : null;
-  return text !== null && (await writeWholeAsync(lock, text));
 }
 
 /** What a lock that read as [param content] holds once it names [param engine], or null. */
