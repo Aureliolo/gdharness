@@ -835,6 +835,7 @@ import {
   boxGameConsole,
 } from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
+import { consoleProbe } from './support/console-probe.js';
 import { containedEngine } from './support/contained-engine.js';
 import { CRASHING_ENGINE_SOURCE, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
 import { endEnginesUnder } from './support/engines.js';
@@ -20993,45 +20994,71 @@ async function testAKeptStartOutlivesAKilledStarter(): Promise<void> {
 }
 
 /**
- * A kept start opens no window, and neither does a console program it starts. Windows are listed
- * by owning process before and after.
+ * Every engine the helper starts has a console that has no window, so a console program the engine
+ * starts joins that console and opens no window of its own. A process with no console at all gives
+ * each such child a new one, which Windows Terminal shows on the desktop in use. The stand-in
+ * starts nothing and reports whether it has a console and whether that console has a window, so no
+ * window can open whatever the flags are.
  */
-async function testAKeptStartAndItsConsoleChildOpenNoWindow(): Promise<void> {
+async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<void> {
   if (process.platform !== 'win32') {
     return;
   }
-  const { processTreeOf, visibleWindows } = await import('./support/windows.js');
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-window-'));
-  const before = new Set(visibleWindows().map((window) => window.handle));
-  let kept: number | undefined;
+  const probe = await consoleProbe();
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-flags-'));
   try {
-    const system = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32');
-    const started = await startedKept(root, 'exit', [join(system, 'PING.EXE'), '-n', '12', '127.0.0.1']);
-    kept = started.pid;
-    assert.ok(await exitedWithin(started.launcher, 120_000), 'the starter exits');
-    const seen = new Set<number>();
-    for (let look = 0; look < 8; look += 1) {
-      await delay(500);
-      const tree = await processTreeOf(started.pid);
-      for (const pid of tree) {
-        seen.add(pid);
-      }
-      const opened = visibleWindows().filter((window) => !before.has(window.handle) && tree.has(window.pid));
+    const reported = async (name: string, file: string): Promise<unknown> => {
+      const said = await answeredWithin(() => {
+        try {
+          return JSON.parse(readFileSync(file, 'utf8')) as unknown;
+        } catch {
+          return undefined;
+        }
+      }, 60_000);
+      assert.ok(said !== undefined, `${name}: the stand-in reported`);
+      return said;
+    };
+    const wanted = { console: true, window: false };
+    const starts: Record<string, (file: string, scratch: string) => Promise<void>> = {
+      'the hidden desktop': async (file, scratch) => {
+        const start = spawnOnDesktop(
+          { desktop: HIDDEN_DESKTOP, directory: root, scratch, endsWithHelper: true },
+          probe,
+          [file],
+          { stdio: ['ignore', 'ignore', 'ignore'] },
+        );
+        assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+      },
+      'the desktop in use': async (file, scratch) => {
+        const start = spawnOnDesktop({ directory: root, scratch, endsWithHelper: true }, probe, [file], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+      },
+      'a kept start': async (file, scratch) => {
+        const start = spawnOnDesktop({ directory: root, scratch, outlivesStarter: true }, probe, [file], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+      },
+      'a headless start': async (file) => {
+        const ran = await runEngine(probe, [file]);
+        assert.equal(ran.exitCode, 0, `the stand-in ran: ${String(ran.failure)}`);
+      },
+    };
+    for (const [name, start] of Object.entries(starts)) {
+      const file = join(root, `${name.replaceAll(' ', '-')}.json`);
+      const scratch = join(root, `${name.replaceAll(' ', '-')}-scratch`);
+      mkdirSync(scratch);
+      await start(file, scratch);
       assert.deepEqual(
-        opened,
-        [],
-        `no window of the kept process or its children is visible: ${JSON.stringify(opened, (_key, value: unknown) => (typeof value === 'bigint' ? String(value) : value))}`,
+        await reported(name, file),
+        wanted,
+        `${name}: a console with no window, which is what a console child shares`,
       );
     }
-    assert.ok(
-      seen.size >= 2,
-      `the console child was running beside the kept process: ${[...seen].join(' ')}`,
-    );
   } finally {
-    writeFileSync(join(root, 'release'), '');
-    if (kept !== undefined && alive(kept)) {
-      process.kill(kept);
-    }
     sweep(root);
   }
 }
@@ -45103,10 +45130,10 @@ async function testABootCheckThatDiesAfterItsBannerIsStartedAgain(): Promise<voi
 }
 
 /**
- * An engine the helper cannot start, after it answered `--version`, is answered at once with the
- * helper's reason, by a boot check and by a test run, and not after the call's whole limit.
+ * An engine the helper cannot start, after it answered `--version`, is answered by a boot check at
+ * once with the helper's reason and no exit code, and not after the call's whole limit.
  */
-async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart(): Promise<void> {
+async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck(): Promise<void> {
   if (process.platform !== 'win32') {
     return;
   }
@@ -45121,10 +45148,6 @@ async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart
       'project.godot':
         'config_version=5\n\n[application]\nconfig/name="Failure"\nrun/main_scene="res://main.tscn"\n',
       'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
-      'tests/a_test.gd': 'extends GdUnitTestSuite\n\nfunc test_a() -> void:\n\tpass\n',
-      'addons/gdUnit4/plugin.cfg': '[plugin]\nname="gdUnit4"\nversion="6.0.0"\n',
-      'addons/gdUnit4/bin/GdUnitCmdTool.gd': 'extends SceneTree\n',
-      'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends RefCounted\n',
     });
     await withStdioServer(
       async (call) => {
@@ -45159,20 +45182,10 @@ async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart
           /could not be started: CreateProcessW .*Access is denied/u,
           `and says why: ${answer}`,
         );
-        const began = Date.now();
-        const tested = await call(
-          'project_test',
-          { projectPath: project, timeoutMs: 60_000 },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        assert.ok(
-          Date.now() - began < 30_000,
-          `a test run answers at once too: ${String(Date.now() - began)} ms`,
-        );
-        assert.match(
-          tested,
-          /could not be started: CreateProcessW .*Access is denied/u,
-          `and says why: ${tested}`,
+        assert.equal(
+          get(failed.said, 'exitCode'),
+          null,
+          `an engine that never ran has no exit code, and the helper's is not its: ${answer}`,
         );
       },
       { GODOT_PATH: engine },
@@ -45180,6 +45193,119 @@ async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart
   } finally {
     // Harmless where nothing was denied.
     spawnSyncHidden('icacls', [engine, '/remove:d', user], { encoding: 'utf8' });
+    sweep(scratch);
+  }
+}
+
+/**
+ * A test run whose own engine the helper cannot start, after the class cache, the import and the
+ * rest were done by engines that started, is answered at once with the helper's reason. The
+ * stand-in makes itself unstartable at the start before the test engine's.
+ */
+async function testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null || process.platform !== 'win32') {
+    return;
+  }
+  const { project, slots, checkouts } = commandTestProject(engines.godotPath, engines.gdunit);
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-denied-'));
+  const engine = join(scratch, 'engine dir', 'godot engine.exe');
+  const marker = join(project, 'marker');
+  try {
+    mkdirSync(dirname(engine));
+    cpSync(await crashingEngine(), engine);
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: project, path: 'res://tests/ok_test.gd', timeoutMs: 60_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const said = blocks.join('\n');
+        assert.doesNotMatch(said, /exit code 1\b/u, `and names no exit code of the helper's: ${said}`);
+        const answered = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.equal(
+          get(answered, 'hung'),
+          false,
+          `the test run is not left to its limit and called a hang: ${said}`,
+        );
+        assert.match(
+          said,
+          /could not be started: CreateProcessW .*Access is denied/u,
+          `and says why, from the test engine's own start: ${said}`,
+        );
+        assert.doesNotMatch(said, /refresh_class_cache|import failed/u, `not from an earlier step: ${said}`);
+        assert.equal(get(answered, 'exitCode'), null, `with no exit code, the engine never ran: ${said}`);
+      },
+      {
+        GODOT_PATH: engine,
+        GDH_REAL_ENGINE: engines.godotPath,
+        GDH_CRASH_MARKER: marker,
+        GDH_DENY_AFTER: '4',
+      },
+    );
+  } finally {
+    spawnSyncHidden('icacls', [engine, '/remove:d', process.env['USERNAME'] ?? ''], { encoding: 'utf8' });
+    sweep(project, slots, checkouts, scratch);
+  }
+}
+
+/**
+ * A helper program the server cannot run leaves no scratch folder behind a start that fails, so a
+ * server that lives on does not collect one for every call.
+ */
+async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-denied-'));
+  const temp = join(scratch, 'temp');
+  const engine = join(scratch, 'engine dir', 'godot engine.exe');
+  const user = process.env['USERNAME'] ?? '';
+  const helper = (): string | undefined =>
+    readdirSync(temp).find((name) => /^gdharness-desktop-[0-9a-f]+\.exe$/u.test(name));
+  try {
+    mkdirSync(temp);
+    mkdirSync(dirname(engine));
+    cpSync(await crashingEngine(), engine);
+    const project = join(scratch, 'project');
+    writeTree(project, {
+      'project.godot':
+        'config_version=5\n\n[application]\nconfig/name="Denied"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    });
+    await withStdioServer(
+      async (call) => {
+        const check = async (): Promise<string> =>
+          await call('editor_run', { projectPath: project, op: 'check', frames: 10 }, ENGINE_CALL_TIMEOUT_MS);
+        const first = await check();
+        assert.match(first, /"booted": true/u, `the first start runs, and compiles the helper: ${first}`);
+        const program = helper();
+        assert.ok(
+          program !== undefined,
+          `the helper is in the server's temp folder: ${readdirSync(temp).join(' ')}`,
+        );
+        const acl = spawnSyncHidden('icacls', [join(temp, program), '/deny', `${user}:(X)`], {
+          encoding: 'utf8',
+        });
+        assert.equal(acl.status, 0, `the helper is made unrunnable: ${acl.stdout}${acl.stderr}`);
+        for (let again = 0; again < 3; again += 1) {
+          await check();
+        }
+        const left = readdirSync(temp).filter((name) => /^gdharness-desktop-\d+-/u.test(name));
+        assert.deepEqual(left, [], 'no scratch folder is left behind three failed starts');
+      },
+      { GODOT_PATH: engine, TEMP: temp, TMP: temp },
+    );
+  } finally {
+    const program = existsSync(temp) ? helper() : undefined;
+    if (program !== undefined) {
+      spawnSyncHidden('icacls', [join(temp, program), '/remove:d', user], { encoding: 'utf8' });
+    }
     sweep(scratch);
   }
 }
@@ -116852,10 +116978,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,
   testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut,
-  testAHelperFailureIsAnsweredAtOnceWithItsReasonByEveryServerStart,
+  testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck,
+  testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce,
+  testAHelperThatCannotBeRunLeavesNoScratchFolder,
   testAnEngineStartedInsideAParentJobStillGetsItsJob,
   testAnEngineStartedUnderAUiLimitedParentJobStillRuns,
-  testAKeptStartAndItsConsoleChildOpenNoWindow,
+  testEveryEngineTheHelperStartsHasAConsoleWithNoWindow,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,

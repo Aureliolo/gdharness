@@ -13,10 +13,19 @@ export const ENGINE_BANNER_LINE = 'Godot Engine v4.7.2.stable.official.ed1daf0bf
 const SOURCE = `using System;
 using System.Diagnostics;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 public static class CrashingEngine {
   static string Env(string name) { return Environment.GetEnvironmentVariable(name) ?? ""; }
+  // Makes this program unstartable for whoever runs it, from the next start on.
+  static void DenyStarts() {
+    FileInfo self = new FileInfo(System.Reflection.Assembly.GetExecutingAssembly().Location);
+    FileSecurity security = self.GetAccessControl();
+    security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().Name, FileSystemRights.ExecuteFile, AccessControlType.Deny));
+    self.SetAccessControl(security);
+  }
   static string Quoted(string[] args) {
     StringBuilder line = new StringBuilder();
     foreach (string arg in args) {
@@ -81,6 +90,7 @@ public static class CrashingEngine {
     }
     string asked = string.Join(" ", args);
     if (marker != "") { File.AppendAllText(marker + ".log", asked + "\\n"); }
+    if (marker != "" && Env("GDH_DENY_AFTER") != "" && File.ReadAllLines(marker + ".log").Length == int.Parse(Env("GDH_DENY_AFTER"))) { DenyStarts(); }
     string debug = Arg(args, "--remote-debug");
     if (marker != "" && debug.StartsWith("tcp://") && Env("GDH_REAL_ENGINE") == "") { Dial(marker, debug.Substring(6)); }
     if (marker != "" && asked.Contains(Env("GDH_CRASH_WHEN")) && !File.Exists(marker)) {
@@ -108,7 +118,8 @@ let built: string | null = null;
  * hold GDH_CRASH_WHEN prints the banner and exits with GDH_CRASH_STATUS, which defaults to
  * 0xC06D007F. Every start is noted in GDH_CRASH_MARKER's log. Any other start hands its arguments to
  * GDH_REAL_ENGINE where that is set, or prints the banner and ends, or with GDH_HOLD stays up. With
- * GDH_CRASH_AFTER_MS the crash comes that many milliseconds in, and with GDH_CHATTY it prints a line past the banner, and with GDH_SILENT it prints nothing.
+ * GDH_DENY_AFTER=n the start that is the n-th noted denies every later start of the program to its
+ * user. With GDH_CRASH_AFTER_MS the crash comes that many milliseconds in, and with GDH_CHATTY it prints a line past the banner, and with GDH_SILENT it prints nothing.
  * `--version` is the real engine's answer, or a Godot version.
  */
 export async function crashingEngine(): Promise<string> {

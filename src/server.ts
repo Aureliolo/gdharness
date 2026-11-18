@@ -2392,19 +2392,25 @@ function startedByHelper(
     return { helped: null, ownScratch: null };
   }
   const ownScratch = scratchDirectory('desktop');
-  const helped = spawnOnDesktop(
-    {
-      directory: process.cwd(),
-      endsWithHelper: true,
-      separateErrors: true,
-      scratch: ownScratch,
-      exit: join(ownScratch, 'exit'),
-    },
-    godotPath,
-    cmdArgs,
-    options,
-  );
-  return { helped, ownScratch };
+  try {
+    const helped = spawnOnDesktop(
+      {
+        directory: process.cwd(),
+        endsWithHelper: true,
+        separateErrors: true,
+        scratch: ownScratch,
+        exit: join(ownScratch, 'exit'),
+      },
+      godotPath,
+      cmdArgs,
+      options,
+    );
+    return { helped, ownScratch };
+  } catch (error) {
+    // A helper that cannot be run throws here, before any exit is there to remove the folder after.
+    discard(ownScratch);
+    throw error;
+  }
 }
 
 /**
@@ -5320,6 +5326,7 @@ function ranAsOf(facts: {
     (uncaught > 0
       ? `${uncaught === 1 ? 'one script error' : `${uncaught} script errors`} that failed no case`
       : undefined) ??
+    (run.neverStarted === true ? 'the engine could not be started' : undefined) ??
     (exitCode === null ? undefined : verdicts[exitCode]) ??
     howItExited(run)
   );
@@ -10451,7 +10458,7 @@ class GodotServer {
       104: 'Godot version not supported by this gdUnit4',
       105: 'script errors',
     };
-    const exitCode = run.exitCode;
+    const exitCode = run.neverStarted === true ? null : run.exitCode;
     const uncaught =
       report !== null && exitCode === 0 && !timedOut && gdUnitFailsOnScriptErrors(project.value.path)
         ? run.log.all.filter(
@@ -15573,6 +15580,7 @@ class GodotServer {
         const said = helperFailure(helped.files.error);
         if (said !== null) {
           log.record('error', `the engine could not be started: ${said}`);
+          started.neverStarted = true;
         }
       }
     });
@@ -16601,7 +16609,7 @@ class GodotServer {
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
       engineNote: engineNote ?? undefined,
-      exitCode: boot.exitCode,
+      exitCode: boot.neverStarted === true ? null : boot.exitCode,
       exitSignal: boot.exitSignal ?? undefined,
       durationMs: Date.now() - boot.startedAt,
       frames,
