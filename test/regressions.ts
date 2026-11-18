@@ -96,6 +96,7 @@ import {
   withAddonClassesCounted,
 } from '../src/class-cache.js';
 import { classNotePath, readClassNote } from '../src/class-note.js';
+import { CompiledHelper } from '../src/compiled-helper.js';
 import {
   parsedYamlHas,
   removeToml,
@@ -110,7 +111,9 @@ import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from 
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
   type DesktopStart,
+  engineJobName,
   ensureHelperCompiled,
+  HELPER_SOURCE,
   HIDDEN_DESKTOP,
   helperAssembly,
   helperExit,
@@ -149,6 +152,7 @@ import {
   openTheEditor,
 } from '../src/editor-open.js';
 import {
+  carryLaneFile,
   endingWithRunner,
   heldRunSaid,
   heldToCores,
@@ -167,6 +171,7 @@ import {
   versionPrinted,
   watchedEngine,
   windowsCommitLeft,
+  writeLaneFile,
 } from '../src/engine-launch.js';
 import {
   projectSelfTypedExports,
@@ -830,8 +835,14 @@ import {
   boxGameConsole,
 } from './support/box-game.js';
 import { withHome } from './support/cli-home.js';
+import { consoleProbe } from './support/console-probe.js';
 import { containedEngine } from './support/contained-engine.js';
-import { CRASHING_ENGINE_SOURCE, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
+import {
+  CRASHING_ENGINE_SOURCE,
+  crashingAfterTheRealEngine,
+  crashingEngine,
+  ENGINE_BANNER_LINE,
+} from './support/crashing-engine.js';
 import { endEnginesUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
@@ -846,6 +857,7 @@ import {
   slotWaitOf,
   textOf,
 } from './support/json-rpc.js';
+import { watchTheLoop } from './support/loop-gaps.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import {
   beginWindow,
@@ -20666,6 +20678,403 @@ async function testADesktopStartIsOneCall(): Promise<void> {
 }
 
 /**
+ * A stand-in engine that starts a child, writes both pids to the file named by its first argument
+ * and waits for the file named by its second. The values arrive as arguments, never as code.
+ */
+function jobEngineScript(): string {
+  return [
+    "const fs = require('node:fs');",
+    HIDDEN_SPAWN_PRELUDE,
+    'const [pidsFile, release] = process.argv.slice(1);',
+    "const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore' });",
+    'fs.writeFileSync(pidsFile, JSON.stringify({ engine: process.pid, child: child.pid }));',
+    'const timer = setInterval(() => { if (fs.existsSync(release)) { child.kill(); clearInterval(timer); } }, 50);',
+  ].join('\n');
+}
+
+/** The pids the stand-in engine wrote to [param file], or undefined before it has. */
+function pidsOf(file: string): { engine: number; child: number } | undefined {
+  try {
+    const written: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    const engine = get(written, 'engine');
+    const child = get(written, 'child');
+    return typeof engine === 'number' && typeof child === 'number' ? { engine, child } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every engine on Windows, headless ones included, runs in a job named for its pid, which holds what it starts. */
+async function testEveryEngineRunsInAJobNamedForItsPid(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-job-'));
+  const pidsFile = join(root, 'pids');
+  const release = join(root, 'release');
+  try {
+    const running = runEngine(process.execPath, ['-e', jobEngineScript(), pidsFile, release]);
+    const pids = await answeredWithin(() => {
+      try {
+        return pidsOf(pidsFile);
+      } catch {
+        return undefined;
+      }
+    }, 60_000);
+    assert.ok(pids !== undefined, 'the engine says its pid and its child');
+    const job = openJob(engineJobName(pids.engine));
+    assert.ok(job !== null, `the job gdharness-engine-${String(pids.engine)} exists while the engine runs`);
+    try {
+      assert.ok(job.holds(pids.engine), 'it holds the engine');
+      assert.ok(job.holds(pids.child), 'and the child the engine started');
+    } finally {
+      job.close();
+      writeFileSync(release, '');
+    }
+    const ran = await running;
+    assert.equal(ran.exitCode, 0, `the engine ends as it does outside the job: ${JSON.stringify(ran)}`);
+    assert.equal(ran.failure, null, 'with no failure');
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The pid a start through the helper names is the engine's own, not the helper's. */
+async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-pid-'));
+  const pidsFile = join(root, 'pids');
+  const release = join(root, 'release');
+  let start: DesktopStart | undefined;
+  try {
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: root },
+      process.execPath,
+      ['-e', jobEngineScript(), pidsFile, release],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    const named = await answeredWithin(() => start?.pid(), 60_000);
+    const said = await answeredWithin(() => {
+      try {
+        return pidsOf(pidsFile);
+      } catch {
+        return undefined;
+      }
+    }, 60_000);
+    assert.equal(named, said?.engine, 'the pid read is the one the engine reports for itself');
+    assert.notEqual(named, start.child.pid, 'and is not the helper');
+  } finally {
+    writeFileSync(release, '');
+    if (start !== undefined) {
+      assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends with its engine');
+    }
+    sweep(root);
+  }
+}
+
+/** A job name that is taken fails the start with the cause, and the engine never runs. */
+async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { createJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-taken-'));
+  const name = `gdharness-engine-taken-${String(process.pid)}`;
+  // The helper names its job after the engine's pid, which no test can know before the start, so
+  // this copy names every job the same.
+  const fixed = HELPER_SOURCE.replace('JobNamePrefix + started.processId', JSON.stringify(name));
+  assert.notEqual(fixed, HELPER_SOURCE, 'the helper names its job in the place this test reaches');
+  const copy = new CompiledHelper('collision helper', 'gdharness-collision', fixed, true);
+  const held = createJob(name);
+  try {
+    const compiled = await copy.ensure(root);
+    assert.equal(compiled, null, 'the copy compiles');
+    const ranMarker = join(root, 'ran');
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: root },
+      process.execPath,
+      ['-e', "require('node:fs').writeFileSync(process.argv[1], 'ran')", ranMarker],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      copy.assembly(root),
+    );
+    assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+    assert.notEqual(start.child.exitCode, 0, 'with a failure');
+    assert.match(helperFailure(start.files.error) ?? '', /already exists/, 'which names the taken job');
+    assert.doesNotMatch(
+      helperFailure(start.files.error) ?? '',
+      /already exists.*already exists|file/isu,
+      'once, and without the system text about a file',
+    );
+    assert.match(helperFailure(start.files.error) ?? '', new RegExp(name), 'and its name');
+    assert.equal(start.pid(), undefined, 'no pid is given out');
+    await delay(1000);
+    assert.equal(existsSync(ranMarker), false, 'and the engine was ended before it ran');
+  } finally {
+    held.close();
+    sweep(root);
+  }
+}
+
+/** A crash status whole, such as the one the engine's start race gives, arrives through a headless start. */
+async function testAWholeExitCodeArrivesThroughAHeadlessStart(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const ran = await runEngine(join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'), [
+    '/d',
+    '/c',
+    'exit',
+    String(0xc06d007f - 0x1_0000_0000),
+  ]);
+  assert.equal(ran.exitCode, 0xc06d007f, `the whole code arrives: ${JSON.stringify(ran)}`);
+}
+
+/**
+ * A kept stand-in started by a launcher that then ends, by exiting or by being killed. The kept
+ * process runs until [code]release[/code] exists, and starts a console child of its own as an
+ * engine's tool would. Hands back what a test needs to look at it.
+ */
+async function startedKept(
+  root: string,
+  after: 'exit' | 'stay',
+  tool: string[],
+): Promise<{ launcher: ReturnType<typeof spawnHidden>; pid: number; release: string }> {
+  const release = join(root, 'release');
+  const waits = [
+    `const fs = require('node:fs');`,
+    HIDDEN_SPAWN_PRELUDE,
+    'const [releaseFile, toolList] = process.argv.slice(1);',
+    'const tool = JSON.parse(toolList);',
+    // Not hidden, as an engine's own child may not be: the point is that none of it shows.
+    `if (tool.length > 0) { require('node:${['child', 'process'].join('_')}').spawn(tool[0], tool.slice(1), { stdio: 'ignore' }); }`,
+    'const t = setInterval(() => { if (fs.existsSync(releaseFile)) { clearInterval(t); } }, 50);',
+  ].join('\n');
+  const launcher = spawnHidden(
+    process.execPath,
+    [
+      join(process.cwd(), 'test', 'support', 'kept-launcher.ts'),
+      root,
+      process.execPath,
+      JSON.stringify(['-e', waits, release, JSON.stringify(tool)]),
+      after,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let said = '';
+  launcher.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString();
+  });
+  const pid = await answeredWithin(() => {
+    const named = /pid (\d+) helper/.exec(said)?.[1];
+    return named === undefined ? undefined : Number(named);
+  }, 120_000);
+  assert.ok(pid !== undefined, `the starter named the process: ${said}`);
+  return { launcher, pid, release };
+}
+
+/**
+ * A parent job with a UI limit is no reason for Windows to refuse the engine's own job: the engine
+ * still runs, with no failure.
+ */
+async function testAnEngineStartedUnderAUiLimitedParentJobStillRuns(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ui-job-'));
+  try {
+    const nested = spawnHidden(
+      process.execPath,
+      [join(process.cwd(), 'test', 'support', 'nested-job.ts'), root, 'ui'],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let said = '';
+    nested.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    assert.ok(await exitedWithin(nested, 180_000), 'the nested process ends');
+    const answer: unknown = JSON.parse(said.trim().split('\n').at(-1) ?? '{}');
+    assert.deepEqual(
+      [get(answer, 'uiSet'), get(answer, 'joined'), get(answer, 'failure'), get(answer, 'ran')],
+      [true, true, null, true],
+      `the engine ran under the limited parent: ${said}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/** A start meant to outlive its starter keeps running when the starter exits, and keeps its job. */
+async function testAKeptStartOutlivesItsStarterInItsJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-job-'));
+  let kept: number | undefined;
+  try {
+    const started = await startedKept(root, 'exit', []);
+    kept = started.pid;
+    assert.ok(await exitedWithin(started.launcher, 120_000), 'the starter exits');
+    await delay(1000);
+    assert.ok(alive(started.pid), 'the process runs on after its starter exited');
+    const job = openJob(engineJobName(started.pid));
+    assert.ok(job !== null, 'and its job is still there');
+    assert.ok(job.holds(started.pid), 'holding it');
+    job.close();
+    writeFileSync(started.release, '');
+    assert.equal(
+      await answeredWithin(() => (alive(started.pid) ? undefined : true), 30_000),
+      true,
+      'until it ends',
+    );
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * A server inside a job that ends its members and allows no breakaway, as a CI runner's or a gate
+ * queue's may be, still gives an engine its named job, and still starts a kept process.
+ */
+async function testAnEngineStartedInsideAParentJobStillGetsItsJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-nested-job-'));
+  mkdirSync(join(root, 'kept'));
+  try {
+    const nested = spawnHidden(
+      process.execPath,
+      [join(process.cwd(), 'test', 'support', 'nested-job.ts'), root],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let said = '';
+    nested.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    assert.ok(await exitedWithin(nested, 180_000), 'the nested process ends');
+    const answer: unknown = JSON.parse(said.trim().split('\n').at(-1) ?? '{}');
+    assert.deepEqual(
+      [get(answer, 'limited'), get(answer, 'joined')],
+      [true, true],
+      `the parent job was made and joined: ${said}`,
+    );
+    assert.deepEqual(
+      [get(answer, 'named'), get(answer, 'holds'), get(answer, 'exitCode'), get(answer, 'failure')],
+      [true, true, 0, null],
+      `the engine has its named job under the parent: ${said}`,
+    );
+    assert.equal(get(answer, 'keptNamed'), true, `and so does a kept start: ${said}`);
+  } finally {
+    sweep(root);
+  }
+}
+
+/** A kept start whose starter is killed outright runs on, and its job is still there. */
+async function testAKeptStartOutlivesAKilledStarter(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-killed-'));
+  let kept: number | undefined;
+  try {
+    const started = await startedKept(root, 'stay', []);
+    kept = started.pid;
+    started.launcher.kill();
+    assert.ok(await exitedWithin(started.launcher, 60_000), 'the starter is killed');
+    await delay(1000);
+    assert.ok(alive(started.pid), 'the process runs on after its starter was killed');
+    const job = openJob(engineJobName(started.pid));
+    assert.ok(job !== null, 'and its job is still there');
+    assert.ok(job.holds(started.pid), 'holding it');
+    job.close();
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * Every engine the helper starts has a console that has no window, so a console program the engine
+ * starts joins that console and opens no window of its own. A process with no console at all gives
+ * each such child a new one, which Windows Terminal shows on the desktop in use. The stand-in
+ * starts nothing and reports whether it has a console and whether that console has a window, so no
+ * window can open whatever the flags are.
+ */
+async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const probe = await consoleProbe();
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-flags-'));
+  try {
+    const reported = async (name: string, file: string): Promise<unknown> => {
+      const said = await answeredWithin(() => {
+        try {
+          return JSON.parse(readFileSync(file, 'utf8')) as unknown;
+        } catch {
+          return undefined;
+        }
+      }, 60_000);
+      assert.ok(said !== undefined, `${name}: the stand-in reported`);
+      return said;
+    };
+    const wanted = { console: true, window: false };
+    const starts: Record<string, (file: string, scratch: string) => Promise<void>> = {
+      'the hidden desktop': async (file, scratch) => {
+        const start = spawnOnDesktop(
+          { desktop: HIDDEN_DESKTOP, directory: root, scratch, endsWithHelper: true },
+          probe,
+          [file],
+          { stdio: ['ignore', 'ignore', 'ignore'] },
+        );
+        assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+      },
+      'the desktop in use': async (file, scratch) => {
+        const start = spawnOnDesktop({ directory: root, scratch, endsWithHelper: true }, probe, [file], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+      },
+      'a kept start': async (file, scratch) => {
+        const start = spawnOnDesktop({ directory: root, scratch, outlivesStarter: true }, probe, [file], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
+      },
+      'a headless start': async (file) => {
+        const ran = await runEngine(probe, [file]);
+        assert.equal(ran.exitCode, 0, `the stand-in ran: ${String(ran.failure)}`);
+      },
+    };
+    for (const [name, start] of Object.entries(starts)) {
+      const file = join(root, `${name.replaceAll(' ', '-')}.json`);
+      const scratch = join(root, `${name.replaceAll(' ', '-')}-scratch`);
+      mkdirSync(scratch);
+      await start(file, scratch);
+      assert.deepEqual(
+        await reported(name, file),
+        wanted,
+        `${name}: a console with no window, which is what a console child shares`,
+      );
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * The helper's command, its spec and its desktop variable are made in one place. Every other start
  * through the helper is a call to it, which a new caller writing its own would bypass.
  */
@@ -20734,7 +21143,8 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
       spawnSyncHidden: (file) => Promise.resolve(spawnSyncHidden(probe, [file])),
     };
     const offered = Object.entries(await import('../src/spawn.js'))
-      .filter(([, value]) => typeof value === 'function')
+      // `unstartedChild` makes an object and starts nothing.
+      .filter(([name, value]) => typeof value === 'function' && name !== 'unstartedChild')
       .map(([name]) => name)
       .toSorted();
     assert.deepEqual(
@@ -21762,6 +22172,17 @@ async function testAnExitAlreadyToldIsStillSeen(): Promise<void> {
 }
 
 /**
+ * The game's parent, or on Windows its grandparent, since the desktop helper starts the game.
+ */
+function keeperAbove(
+  tree: NonNullable<Awaited<ReturnType<typeof processTree>>>,
+  game: number,
+): { command: string } | undefined {
+  const parent = tree.get(tree.get(game)?.parent ?? 0);
+  return parent?.command.includes('keeper.js') === true ? parent : tree.get(parent?.parent ?? 0);
+}
+
+/**
  * The environment a run is started with goes to it without passing through any command line.
  *
  * The launcher and the keeper were handed their spec as a command-line argument, base64 JSON, and
@@ -21845,9 +22266,9 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
       tree !== undefined,
       `the platform should list its processes for this to prove anything: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
     );
-    // The keeper holding this run, which is the game's parent: other keepers on the machine belong
-    // to other sessions' runs, and one from an older version is exactly what this is about.
-    const keeper = tree.get(tree.get(game)?.parent ?? 0);
+    // The keeper holding this run: other keepers on the machine belong to other sessions' runs, and
+    // one from an older version is exactly what this is about.
+    const keeper = keeperAbove(tree, game);
     assert.ok(
       keeper?.command.includes('keeper.js') === true,
       `the keeper holding the run should be listed as the game's parent, or nothing was looked at: ${keeper?.command ?? 'none'}`,
@@ -26204,6 +26625,52 @@ async function testTheKeepersListenerAnswersTheFirstLineOnly(): Promise<void> {
 }
 
 /**
+ * A process the real launcher starts with no run to keep, which is the keeper's launcher exiting
+ * once the pid is known, runs on after the launcher has gone and is still in its named job.
+ */
+async function testAProcessTheLauncherStartsOutlivesItAndKeepsItsJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-outlives-'));
+  const release = join(scratch, 'release');
+  let kept: number | undefined;
+  try {
+    const spec = {
+      command: process.execPath,
+      args: [
+        '-e',
+        "const t = setInterval(() => { if (require('node:fs').existsSync(process.argv[1])) { clearInterval(t); } }, 50);",
+        release,
+      ],
+      envChanges: {},
+    };
+    const ran = spawnSyncHidden(process.execPath, [resolve('build', 'keeper.js'), 'launch'], {
+      encoding: 'utf8',
+      input: JSON.stringify(spec),
+      timeout: 120_000,
+    });
+    const pid = Number(/^pid (\d+)/m.exec(ran.stdout)?.[1]);
+    assert.ok(Number.isInteger(pid) && pid > 0, `the launcher names the process: ${ran.stdout}`);
+    kept = pid;
+    await delay(1000);
+    assert.ok(alive(pid), 'the process runs on after the launcher has exited');
+    const job = openJob(engineJobName(pid));
+    assert.ok(job !== null, 'and is in the job named for its pid');
+    assert.ok(job.holds(pid), 'which holds it');
+    job.close();
+    writeFileSync(release, '');
+    assert.equal(await answeredWithin(() => (alive(pid) ? undefined : true), 30_000), true, 'until it ends');
+  } finally {
+    if (kept !== undefined && alive(kept)) {
+      process.kill(kept);
+    }
+    sweep(scratch);
+  }
+}
+
+/**
  * The launcher says why a run could not be started, in one line, whichever step failed.
  *
  * A command that does not exist fails the keeper's start, and a transcript in a folder that is not
@@ -26233,6 +26700,22 @@ function testTheLauncherSaysWhyARunDidNotStart(): void {
       /^error [^\r\n]*no-such-program[^\r\n]*\r?\n$/u,
       `a command that is not there: ${missing}`,
     );
+    assert.match(
+      missing,
+      process.platform === 'win32' ? /cannot find the (file|path) specified/iu : /ENOENT/u,
+      `and the system's reason: ${missing}`,
+    );
+    if (process.platform === 'win32') {
+      const notAProgram = join(scratch, 'not a program.exe');
+      writeFileSync(notAProgram, 'this is text');
+      const notRun = launched(notAProgram, join(scratch, 'text.log'));
+      assert.match(
+        notRun,
+        /^error [^\r\n]*: (This version of [^\r\n]*not a program\.exe is not compatible|[^\r\n]*not a program\.exe is not a valid Win32 application)[^\r\n]*\r?\n$/iu,
+        `a file that is not a program names the reason, with the program's name filled in: ${notRun}`,
+      );
+      assert.doesNotMatch(notRun, /%1/u, 'and no placeholder is left');
+    }
     const cut = launched(process.execPath, join(scratch, 'no-such-folder', 'run.log'));
     assert.match(
       cut,
@@ -36039,12 +36522,16 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
     const importNote = text(get(imported, 'docCacheNote'));
     const shownImport = JSON.stringify(importedRaw);
     assert.deepEqual(get(imported, 'uidsCreated'), ['second.gd'], shownImport);
+    // Whether the engine crashes as it quits after rebuilding the cache is a race inside it, so
+    // either end is right: a crash is run again and says so, and a clean exit says nothing.
     assert.ok(
-      importNote.startsWith('The first import ended badly (') &&
-        importNote.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
-      `the import over a stale cache crashed, was run again, and says so: ${shownImport}`,
+      importNote === ''
+        ? get(imported, 'docCacheNote') === undefined
+        : importNote.startsWith('The first import ended badly (') &&
+            importNote.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
+      `the import over a stale cache ran again with a note, or ran once cleanly: ${shownImport}`,
     );
-    assert.ok(statSync(docCacheFile()).mtimeMs > staleAt, 'and the crashing run left a fresh cache');
+    assert.ok(statSync(docCacheFile()).mtimeMs > staleAt, 'and the run left a fresh cache');
 
     const added = parseTextContent(
       await call('project_export', {
@@ -36054,7 +36541,7 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
         outputPath: 'res://build/game.x86_64',
       }),
     );
-    await makeStale();
+    const staleAtExport = await makeStale();
     const exported = await call('project_export', {
       op: 'run',
       preset: 'Penguin',
@@ -36070,19 +36557,101 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
         }
       })
       .find((parsed) => get(parsed, 'exported') !== undefined);
+    const exportNote = get(verdict, 'docCacheNote');
     assert.ok(
-      text(get(verdict, 'docCacheNote')).startsWith('The first export ended badly ('),
-      `the export over a stale cache crashed, was run again, and says so: ${shownExport}`,
+      exportNote === undefined || text(exportNote).startsWith('The first export ended badly ('),
+      `the export over a stale cache ran again with a note, or ran once cleanly: ${shownExport}`,
     );
-    // Exported with templates and refused without them, the second run ends in 0 or 1, where the
-    // first ended in a crash.
-    assert.ok(
-      [0, 1].includes(Number(get(verdict, 'exitCode'))),
-      `the answer is the second run's: ${shownExport}`,
-    );
+    assert.ok(statSync(docCacheFile()).mtimeMs > staleAtExport, 'and the run left a fresh cache');
+    // Exported with templates and refused without them, the answer's run ends in 0 or 1.
+    assert.ok([0, 1].includes(Number(get(verdict, 'exitCode'))), `the answer's exit code: ${shownExport}`);
     if (get(added, 'templates_installed') === true) {
       assert.equal(get(verdict, 'exported'), true, `and its export is made: ${shownExport}`);
     }
+    await server.stop();
+
+    // The crash itself is forced, so the second run is covered whatever the engine's timing. The
+    // stand-in runs the real engine to its end, which rewrites the cache, and then reports a crash.
+    const standIn = await crashingAfterTheRealEngine();
+    const crashed = async (
+      when: string,
+      call_: (
+        call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>,
+      ) => Promise<void>,
+    ): Promise<void> => {
+      const forced = new ServerProcess({
+        env: {
+          GODOT_PATH: standIn,
+          GDH_REAL_ENGINE: godotPath,
+          GDH_CRASH_AFTER_REAL: '1',
+          GDH_CRASH_WHEN: when,
+          // An access violation on Windows. A status is one byte elsewhere, so 139 stands for a SIGSEGV.
+          GDH_CRASH_STATUS: process.platform === 'win32' ? '3221225477' : '139',
+          GDH_CRASH_MARKER: join(root, `crash${when}`),
+          GDHARNESS_PROJECT: project,
+          GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+          GDHARNESS_LSP_PORT: String(await reservePort()),
+          GDHARNESS_RUNTIME_DIR: join(root, 'runtime-forced'),
+          ...cacheEnv,
+        },
+      });
+      try {
+        await forced.initialize('stale-doc-cache-forced');
+        await call_(
+          async (name, args) =>
+            await forced.request(
+              'tools/call',
+              { name, arguments: { projectPath: project, ...args } },
+              300_000,
+            ),
+        );
+      } finally {
+        await forced.stop();
+      }
+    };
+    const staleForImport = await makeStale();
+    writeFileSync(join(project, 'third.gd'), 'extends Node\n');
+    await crashed('--import', async (forcedCall) => {
+      const raw = await forcedCall('project_import', { op: 'refresh_uids' });
+      const answer = parseTextContent(raw);
+      const note = text(get(answer, 'docCacheNote'));
+      assert.deepEqual(get(answer, 'uidsCreated'), ['third.gd'], JSON.stringify(raw));
+      assert.ok(
+        note.startsWith('The first import ended badly (exit code ') &&
+          note.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
+        `a crashed import is run again and says so: ${JSON.stringify(raw)}`,
+      );
+      assert.ok(statSync(docCacheFile()).mtimeMs > staleForImport, 'and the crashed run left a fresh cache');
+    });
+    const staleForExport = await makeStale();
+    await crashed('--export', async (forcedCall) => {
+      const raw = await forcedCall('project_export', {
+        op: 'run',
+        preset: 'Penguin',
+        outputPath: 'build/game.x86_64',
+      });
+      const answer = (contentOf(raw) ?? [])
+        .map((block) => {
+          try {
+            return JSON.parse(block.text ?? '') as unknown;
+          } catch {
+            return undefined;
+          }
+        })
+        .find((parsed) => get(parsed, 'exported') !== undefined);
+      assert.ok(
+        text(get(answer, 'docCacheNote')).startsWith('The first export ended badly (exit code '),
+        `a crashed export is run again and says so: ${JSON.stringify(raw)}`,
+      );
+      assert.ok(
+        [0, 1].includes(Number(get(answer, 'exitCode'))),
+        `the answer is the second run's: ${JSON.stringify(raw)}`,
+      );
+      if (get(added, 'templates_installed') === true) {
+        assert.equal(get(answer, 'exported'), true, `and its export is made: ${JSON.stringify(raw)}`);
+      }
+      assert.ok(statSync(docCacheFile()).mtimeMs > staleForExport, 'and the crashed run left a fresh cache');
+    });
   } finally {
     await server.stop();
     sweep(root);
@@ -44664,6 +45233,285 @@ async function testABootCheckThatDiesAfterItsBannerIsStartedAgain(): Promise<voi
         GDH_CRASH_MARKER: marker,
         GDH_CRASH_WHEN: '--quit-after',
       },
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * An engine the helper cannot start, after it answered `--version`, is answered by a boot check at
+ * once with the helper's reason and no exit code, and not after the call's whole limit.
+ */
+async function testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-failure-'));
+  const engine = join(scratch, 'engine dir', 'godot engine.exe');
+  const user = process.env['USERNAME'] ?? '';
+  try {
+    mkdirSync(dirname(engine));
+    cpSync(await crashingEngine(), engine);
+    const project = join(scratch, 'project');
+    writeTree(project, {
+      'project.godot':
+        'config_version=5\n\n[application]\nconfig/name="Failure"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    });
+    await withStdioServer(
+      async (call) => {
+        const check = async (): Promise<{ said: unknown; ms: number }> => {
+          const began = Date.now();
+          const said: unknown = JSON.parse(
+            await call(
+              'editor_run',
+              { projectPath: project, op: 'check', frames: 10, timeoutMs: 60_000 },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          return { said, ms: Date.now() - began };
+        };
+        const first = await check();
+        assert.equal(
+          get(first.said, 'booted'),
+          true,
+          `the engine boots before it is denied: ${JSON.stringify(first.said)}`,
+        );
+        const acl = spawnSyncHidden('icacls', [engine, '/deny', `${user}:(X)`], { encoding: 'utf8' });
+        assert.equal(acl.status, 0, `the engine is made unstartable: ${acl.stdout}${acl.stderr}`);
+        const failed = await check();
+        const answer = JSON.stringify(failed.said);
+        assert.ok(
+          failed.ms < 30_000,
+          `the boot check answers at once, not at its limit: ${String(failed.ms)} ms`,
+        );
+        assert.equal(get(failed.said, 'hung'), false, `and does not call it a hang: ${answer}`);
+        assert.match(
+          answer,
+          /could not be started: CreateProcessW .*Access is denied/u,
+          `and says why: ${answer}`,
+        );
+        assert.equal(
+          get(failed.said, 'exitCode'),
+          null,
+          `an engine that never ran has no exit code, and the helper's is not its: ${answer}`,
+        );
+      },
+      { GODOT_PATH: engine },
+    );
+  } finally {
+    // Harmless where nothing was denied.
+    spawnSyncHidden('icacls', [engine, '/remove:d', user], { encoding: 'utf8' });
+    sweep(scratch);
+  }
+}
+
+/**
+ * A test run whose own engine the helper cannot start, after the class cache, the import and the
+ * rest were done by engines that started, is answered at once with the helper's reason. The
+ * stand-in makes itself unstartable at the start before the test engine's.
+ */
+async function testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null || process.platform !== 'win32') {
+    return;
+  }
+  const { project, slots, checkouts } = commandTestProject(engines.godotPath, engines.gdunit);
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-denied-'));
+  const engine = join(scratch, 'engine dir', 'godot engine.exe');
+  const marker = join(project, 'marker');
+  try {
+    mkdirSync(dirname(engine));
+    cpSync(await crashingEngine(), engine);
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: project, path: 'res://tests/ok_test.gd', timeoutMs: 60_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const said = blocks.join('\n');
+        assert.doesNotMatch(said, /exit code 1\b/u, `and names no exit code of the helper's: ${said}`);
+        const answered = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.equal(
+          get(answered, 'hung'),
+          false,
+          `the test run is not left to its limit and called a hang: ${said}`,
+        );
+        assert.match(
+          said,
+          /could not be started: CreateProcessW .*Access is denied/u,
+          `and says why, from the test engine's own start: ${said}`,
+        );
+        assert.doesNotMatch(said, /refresh_class_cache|import failed/u, `not from an earlier step: ${said}`);
+        assert.equal(get(answered, 'exitCode'), null, `with no exit code, the engine never ran: ${said}`);
+      },
+      {
+        GODOT_PATH: engine,
+        GDH_REAL_ENGINE: engines.godotPath,
+        GDH_CRASH_MARKER: marker,
+        GDH_DENY_AFTER: '4',
+      },
+    );
+  } finally {
+    spawnSyncHidden('icacls', [engine, '/remove:d', process.env['USERNAME'] ?? ''], { encoding: 'utf8' });
+    sweep(project, slots, checkouts, scratch);
+  }
+}
+
+/**
+ * A helper program the system will not run is answered as a start that failed, by the server, a
+ * headless start and the keeper launcher alike, with the helper's path and the system's reason and
+ * no exit code. It leaves no scratch folder behind, so a server that lives on does not collect one
+ * for every call.
+ */
+async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-denied-'));
+  const temp = join(scratch, 'temp');
+  const engine = join(scratch, 'engine dir', 'godot engine.exe');
+  const user = process.env['USERNAME'] ?? '';
+  const helper = (): string | undefined =>
+    readdirSync(temp).find((name) => /^gdharness-desktop-[0-9a-f]+\.exe$/u.test(name));
+  try {
+    mkdirSync(temp);
+    mkdirSync(dirname(engine));
+    cpSync(await crashingEngine(), engine);
+    const project = join(scratch, 'project');
+    writeTree(project, {
+      'project.godot':
+        'config_version=5\n\n[application]\nconfig/name="Denied"\nrun/main_scene="res://main.tscn"\n',
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+    });
+    await withStdioServer(
+      async (call) => {
+        const check = async (): Promise<string> =>
+          await call('editor_run', { projectPath: project, op: 'check', frames: 10 }, ENGINE_CALL_TIMEOUT_MS);
+        const first = await check();
+        assert.match(first, /"booted": true/u, `the first start runs, and compiles the helper: ${first}`);
+        const program = helper();
+        assert.ok(
+          program !== undefined,
+          `the helper is in the server's temp folder: ${readdirSync(temp).join(' ')}`,
+        );
+        const acl = spawnSyncHidden('icacls', [join(temp, program), '/deny', `${user}:(X)`], {
+          encoding: 'utf8',
+        });
+        assert.equal(acl.status, 0, `the helper is made unrunnable: ${acl.stdout}${acl.stderr}`);
+        // A system that refuses to run a program, as a policy allowing only some would, is no
+        // defect of the server's: the start failed, and the answer says so and why.
+        const refused = await check();
+        assert.doesNotMatch(refused, /defect|does not handle/iu, `no defect banner: ${refused}`);
+        assert.match(
+          refused,
+          /the desktop helper could not be run: .*gdharness-desktop-[0-9a-f]+\.exe/u,
+          `the helper's path and the system's reason: ${refused}`,
+        );
+        assert.match(refused, /"exitCode": null/u, `and no exit code: ${refused}`);
+        for (let again = 0; again < 2; again += 1) {
+          await check();
+        }
+        const own = { env: { ...process.env, TEMP: temp, TMP: temp }, encoding: 'utf8' as const };
+        const run = spawnSyncHidden(
+          process.execPath,
+          [join(process.cwd(), 'test', 'support', 'run-engine-once.ts')],
+          { ...own, timeout: 120_000 },
+        );
+        const ranOnce: unknown = JSON.parse(run.stdout.trim().split('\n').at(-1) ?? '{}');
+        assert.equal(get(ranOnce, 'exitCode'), null, `a headless start has no exit code: ${run.stdout}`);
+        assert.match(
+          String(get(ranOnce, 'failure')),
+          /^the desktop helper could not be run: .*gdharness-desktop-[0-9a-f]+\.exe/u,
+          `and names the helper and the reason: ${run.stdout}${run.stderr}`,
+        );
+        const launched = spawnSyncHidden(process.execPath, [resolve('build', 'keeper.js'), 'launch'], {
+          ...own,
+          input: JSON.stringify({
+            command: engine,
+            args: [],
+            envChanges: {},
+            run: { transcript: join(scratch, 'run.log'), startedAt: Date.now(), projectPath: scratch },
+          }),
+          timeout: 120_000,
+        });
+        assert.match(
+          launched.stdout,
+          /^error the desktop helper could not be run: .*gdharness-desktop-[0-9a-f]+\.exe/u,
+          `the launcher says the same: ${launched.stdout}${launched.stderr}`,
+        );
+        const left = readdirSync(temp).filter((name) => /^gdharness-desktop-\d+-/u.test(name));
+        assert.deepEqual(left, [], 'no scratch folder is left behind three failed starts');
+      },
+      { GODOT_PATH: engine, TEMP: temp, TMP: temp },
+    );
+  } finally {
+    const program = existsSync(temp) ? helper() : undefined;
+    if (program !== undefined) {
+      spawnSyncHidden('icacls', [join(temp, program), '/remove:d', user], { encoding: 'utf8' });
+    }
+    sweep(scratch);
+  }
+}
+
+/**
+ * A boot check the server runs for a caller, on the desktop in use, has its engine in the named job
+ * while it runs, and its being cut off at the timeout ends the engine.
+ */
+async function testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut(): Promise<void> {
+  const real = resolveGodotPath();
+  if (process.platform !== 'win32' || real === null) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT'] && real === null) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-boot-job-'));
+  const project = join(scratch, 'project');
+  try {
+    mkdirSync(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="BootJob"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    await withStdioServer(
+      async (call) => {
+        const cut = call(
+          'editor_run',
+          { projectPath: project, op: 'check', frames: 1_000_000_000, timeoutMs: 20_000 },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        let engine: number | undefined;
+        for (let look = 0; engine === undefined && look < 15; look += 1) {
+          engine = (await pidsWithCommandLine('Godot', project))[0];
+        }
+        assert.ok(engine !== undefined, 'the engine is running');
+        const job = openJob(engineJobName(engine));
+        assert.ok(job !== null, `the job gdharness-engine-${String(engine)} exists while the engine runs`);
+        assert.ok(job.holds(engine), 'and holds the engine');
+        job.close();
+        const checked: unknown = JSON.parse(await cut);
+        assert.equal(
+          get(checked, 'booted'),
+          false,
+          `the cut-off boot is not a boot: ${JSON.stringify(checked)}`,
+        );
+        assert.equal(
+          await answeredWithin(() => (alive(engine) ? undefined : true), 30_000),
+          true,
+          'and the engine is gone once the check is cut off',
+        );
+      },
+      { GODOT_PATH: real },
     );
   } finally {
     sweep(scratch);
@@ -65535,8 +66383,8 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
 }
 
 /**
- * A hidden PowerShell opening [param path] for [param access] while sharing reads and writes but no
- * removal, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
+ * A hidden PowerShell opening [param path] for [param access] while sharing [param sharing], reads and
+ * writes but no removal by default, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
  * closes it after [param forMs], and else at [method letGo] or after 30 s, so a run killed before its
  * `finally` leaves no process holding a file for good.
  */
@@ -65544,6 +66392,7 @@ async function heldOpenByAReader(
   path: string,
   access: 'ReadWrite' | 'Read',
   forMs?: number,
+  sharing: 'ReadWrite' | 'None' = 'ReadWrite',
 ): Promise<{ letGo(): Promise<void> }> {
   const reader = spawnHidden(
     'powershell.exe',
@@ -65553,7 +66402,7 @@ async function heldOpenByAReader(
       '-Command',
       // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
       // second a removal waits on a slow runner.
-      `$f = [IO.File]::Open('${path.replaceAll("'", "''")}', 'Open', '${access}', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(${String(forMs ?? 30_000)}); $f.Close()`,
+      `$f = [IO.File]::Open('${path.replaceAll("'", "''")}', 'Open', '${access}', '${sharing}'); 'held'; [System.Threading.Thread]::Sleep(${String(forMs ?? 30_000)}); $f.Close()`,
     ],
     { stdio: ['ignore', 'pipe', 'ignore'] },
   );
@@ -65630,29 +66479,28 @@ async function aHeldDeadLockIsTakenOverOnceLetGo(
       }, 300);
     }
   });
-  let last = Date.now();
-  let widest = 0;
-  const ticking = setInterval(() => {
-    const now = Date.now();
-    widest = Math.max(widest, now - last);
-    last = now;
-  }, 20);
+  const loop = await watchTheLoop();
   const running = call().then(
     () => 'taken',
     (error: unknown) => `refused: ${error instanceof Error ? error.message : String(error)}`,
   );
+  let watched: Awaited<ReturnType<typeof loop.stop>> | undefined;
   try {
     const outcome = await Promise.race([running, delay(20_000).then(() => 'still waiting after 20 s')]);
     const tookAt = Date.now();
+    watched = await loop.stop();
     assert.equal(outcome, 'taken', `${caller} takes the dead lock over once the reader lets go`);
     assert.ok(sawSteal, `${caller} made a steal file while the reader held the lock`);
     assert.ok(
       tookAt - letGoAt < 5000,
       `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
     );
-    assert.ok(widest <= 500, `${caller} leaves the process free to run: ticks ${String(widest)} ms apart`);
+    assert.ok(
+      watched.widest <= 500,
+      `${caller} leaves the process free to run: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
+    );
   } finally {
-    clearInterval(ticking);
+    watched ??= await loop.stop();
     watcher.close();
     await reader.letGo();
     rmSync(lock, { force: true });
@@ -65709,6 +66557,53 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
   } finally {
     rmSync(directory, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A slot file a reader holds shut is waited on without stopping the process: the read retries on a
+ * timer for its second and then refuses, and the loop ticks under 100 ms apart meanwhile. Windows
+ * alone, where an open that shares nothing refuses every other open.
+ */
+async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held-file wait regression ran on Windows alone: elsewhere no open shuts another out');
+    return;
+  }
+  const busy = await untilTheProcessorIsQuiet();
+  if (busy !== null) {
+    const said = 'held-file wait regression skipped: the processor never stayed under 60% for 30 s';
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`${said}, the last busy share was ${String(busy)}`);
+    }
+    console.log(said);
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  const file = join(directory, 'lanes.json');
+  writeFileSync(file, JSON.stringify({ pid: process.pid, started: await ownStart(), count: 2 }));
+  const reader = await heldOpenByAReader(file, 'ReadWrite', 3000, 'None');
+  const loop = await watchTheLoop();
+  const began = Date.now();
+  let refusal = '';
+  try {
+    await new EngineSlots(directory, 1, { pid: process.pid, started: await ownStart() }).countIn(
+      file,
+      'lanes',
+    );
+  } catch (error) {
+    refusal = errorMessage(error);
+  } finally {
+    const waited = Date.now() - began;
+    const watched = await loop.stop();
+    await reader.letGo();
+    rmSync(directory, { recursive: true, force: true });
+    assert.ok(refusal !== '', 'a file held shut past the second refuses the read');
+    assert.ok(waited >= 900, `and only after the second it waits: ${String(waited)} ms`);
+    assert.ok(
+      watched.widest < 100,
+      `the process runs while it waits: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
+    );
   }
 }
 
@@ -68368,12 +69263,12 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
       // The same holder naming the process above this one as the engine it holds the slot for, as
       // a keeper names its game: lent, and left as the holder wrote it.
       assert.equal(
-        nameSlotEngine(strangers, strangerPid, { pid: above, started: aboveStarted ?? 0 }),
+        await nameSlotEngine(strangers, strangerPid, { pid: above, started: aboveStarted ?? 0 }),
         true,
         'named by its holder',
       );
       assert.equal(
-        nameSlotEngine(strangers, process.pid, { pid: 1, started: 0 }),
+        await nameSlotEngine(strangers, process.pid, { pid: 1, started: 0 }),
         false,
         'and by nobody else',
       );
@@ -76542,6 +77437,23 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
       return ran.said;
     };
     const none = broken('none');
+    // Each worker's folder names the lane it ran in and its engine's pid.
+    const kept = join(project, '.godot', 'gdharness', 'spread-runs');
+    const workers = readdirSync(kept).flatMap((run) =>
+      readdirSync(join(kept, run))
+        .filter((name) => name.startsWith('worker-'))
+        .map((name) => laneFileOf(join(kept, run, name))),
+    );
+    assert.deepEqual(
+      workers.map((worker) => worker?.lane ?? -1).toSorted((a, b) => a - b),
+      [0, 1, 2],
+      `three workers ran in three lanes: ${JSON.stringify(workers)}`,
+    );
+    assert.equal(
+      new Set(workers.map((worker) => worker?.pid)).size,
+      3,
+      `each with an engine pid of its own: ${JSON.stringify(workers)}`,
+    );
     assert.match(
       none,
       /^Failed, so nothing was gathered:\n {2}worker 1 played no arm: the scene never asked GdhShare\.outcomes for one, or quit before it did$/m,
@@ -76595,6 +77507,230 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
     rmSync(slots, { recursive: true, force: true });
     rmSync(spreadRuntime, { recursive: true, force: true });
   }
+}
+
+/** The lane file of an engine's folder, or null where there is none. */
+function laneFileOf(directory: string): { lane: number; pid: number } | null {
+  try {
+    const said: unknown = JSON.parse(readFileSync(join(directory, 'lane.json'), 'utf8'));
+    const lane = get(said, 'lane');
+    const pid = get(said, 'pid');
+    return typeof lane === 'number' && typeof pid === 'number' ? { lane, pid } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A run of two engines gives each engine's folder a lane file naming its lane and its own pid. */
+function testEachEnginesFolderNamesItsLaneAndPid(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('lane file regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-lanes-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-lane-slots-'));
+  try {
+    // Failing suites, since a run that passes removes its logs.
+    const failing = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(2)\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="LaneFiles"\n',
+      'tests/a_test.gd': failing('a'),
+      'tests/b_test.gd': failing('b'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    // A tiny measured peak for each suite, so a machine short of memory cannot hold the run to one
+    // engine.
+    const times = join(project, 'times.json');
+    writeFileSync(
+      times,
+      JSON.stringify(
+        Object.fromEntries(
+          ['a', 'b'].map((name) => [
+            `res://tests/${name}_test.gd`,
+            { seconds: 100, cases: { [`test_${name}`]: 100 }, peak: 1 },
+          ]),
+        ),
+      ),
+    );
+    spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--engines',
+        '2',
+        '--slot-count',
+        '4',
+        '--times',
+        times,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const runs = join(project, '.godot', 'gdharness', 'test-runs');
+    const run = readdirSync(runs).toSorted().at(-1) ?? '';
+    const engines = readdirSync(join(runs, run)).filter((name) => /^engine-\d+$/.test(name));
+    const lanes = engines.map((name) => laneFileOf(join(runs, run, name)));
+    assert.equal(engines.length, 2, `two engines ran: ${engines.join(' ')}`);
+    assert.deepEqual(
+      lanes.map((lane) => lane?.lane ?? -1).toSorted((a, b) => a - b),
+      [0, 1],
+      `each engine's folder names its own lane: ${JSON.stringify(lanes)}`,
+    );
+    const pids = lanes.map((lane) => lane?.pid);
+    assert.ok(
+      pids.every((pid) => typeof pid === 'number' && pid > 0) && pids[0] !== pids[1],
+      `and an engine pid of its own: ${JSON.stringify(lanes)}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
+/**
+ * With one slot for two lanes the engine that holds it is handed each further share while it runs,
+ * and every share's folder names that engine's lane and pid. The kept times make each suite cost
+ * 100 s, so every suite is a share of its own, and give each engine a tiny peak, so memory never
+ * holds the run and turns the reuse off.
+ */
+function testEveryShareAnEngineIsHandedNamesItsLaneAndPid(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('handed share lane regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-handed-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-handed-slots-'));
+  try {
+    const names = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const failing = (name: string): string =>
+      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(2)\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="HandedShares"\n',
+      ...Object.fromEntries(names.map((name) => [`tests/${name}_test.gd`, failing(name)])),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const times = join(project, 'times.json');
+    writeFileSync(
+      times,
+      JSON.stringify(
+        Object.fromEntries(
+          names.map((name) => [
+            `res://tests/${name}_test.gd`,
+            { seconds: 100, cases: { [`test_${name}`]: 100 }, peak: 1 },
+          ]),
+        ),
+      ),
+    );
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        project,
+        '--slots',
+        slots,
+        '--engines',
+        '2',
+        '--slot-count',
+        '1',
+        '--times',
+        times,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const runs = join(project, '.godot', 'gdharness', 'test-runs');
+    const run = readdirSync(runs).toSorted().at(-1) ?? '';
+    const shares = readdirSync(join(runs, run)).filter((name) => /^engine-\d+$/.test(name));
+    const named = shares.map((name) => laneFileOf(join(runs, run, name)));
+    assert.ok(shares.length >= 3, `the suites were dealt as shares: ${shares.join(' ')}\n${ran.stdout}`);
+    assert.ok(
+      named.every((lane) => lane !== null),
+      `every share's folder names a lane and an engine: ${JSON.stringify(named)}`,
+    );
+    const engines = new Set(named.map((lane) => lane.pid));
+    assert.ok(
+      engines.size < shares.length,
+      `an engine ran more than one share: ${JSON.stringify(named)}\n${ran.stdout}`,
+    );
+    for (const pid of engines) {
+      const ofEngine: number[] = named.flatMap((share) => (share.pid === pid ? [share.lane] : []));
+      assert.equal(
+        new Set(ofEngine).size,
+        1,
+        `the shares of engine ${String(pid)} name one lane: ${JSON.stringify(named)}`,
+      );
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
+/** An engine handed a further share keeps its lane there, and a kept log takes its lane file along. */
+function testAHandedShareKeepsItsEnginesLane(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-share-'));
+  try {
+    const first = join(root, 'run', 'engine-0');
+    const share = join(root, 'run', 'engine-3');
+    mkdirSync(first, { recursive: true });
+    mkdirSync(share, { recursive: true });
+    writeLaneFile(first, 1, 4242);
+    assert.deepEqual(laneFileOf(first), { lane: 1, pid: 4242 }, 'the lane and pid are written');
+    assert.equal(existsSync(join(first, 'lane.json.tmp')), false, 'by a rename, leaving no temporary file');
+    carryLaneFile(first, share);
+    assert.deepEqual(
+      laneFileOf(share),
+      { lane: 1, pid: 4242 },
+      "the share's folder names the same lane and engine",
+    );
+    writeFileSync(join(share, 'engine.log'), 'x\n');
+    new RunLogs(join(root, 'run'), join(root, 'kept')).keepOnly(new Set([join(share, 'engine.log')]));
+    assert.deepEqual(
+      laneFileOf(join(root, 'kept', 'engine-3')),
+      { lane: 1, pid: 4242 },
+      'and a log kept beside the main checkout has it too',
+    );
+    assert.deepEqual(laneFileOf(join(root, 'run', 'engine-3')), { lane: 1, pid: 4242 }, 'and in the run');
+    assert.equal(laneFileOf(first), null, 'while a folder whose log was not kept is gone');
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The lane an engine runs in is the one [function inTurns] gave it. */
+async function testInTurnsNamesEachItemsLane(): Promise<void> {
+  const seen: number[] = [];
+  await inTurns([0, 1, 2, 3], 2, async (_item, _index, lane) => {
+    seen.push(lane);
+    await delay(20);
+  });
+  assert.deepEqual(
+    seen.toSorted((a, b) => a - b),
+    [0, 0, 1, 1],
+    'two lanes took two items each',
+  );
 }
 
 /**
@@ -79724,9 +80860,11 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
       assert.match(keptLog, /nobody said this/, 'and holds what the engine printed');
       assert.deepEqual(
-        readdirSync(join(keptUnder ?? '', 'engine-0')).filter((name) => !name.endsWith('.log')),
+        readdirSync(join(keptUnder ?? '', 'engine-0')).filter(
+          (name) => !name.endsWith('.log') && name !== 'lane.json',
+        ),
         [],
-        'only the logs are copied, not the engine user folder or the reports',
+        'only the logs and lane.json are copied, not the engine user folder or the reports',
       );
 
       // A run held up by a slot someone else holds says so once, whatever its engines.
@@ -83294,8 +84432,8 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         `${what}: and no box can open (mode 0x${mode.toString(16)})`,
       );
     };
-    // Bun clears the bit in gdharness's own process and Node routes the start through the desktop
-    // helper, so each is held by its own route rather than by the other's.
+    // Every Windows start goes through the desktop helper, which sets the error mode itself, so a kept
+    // run under either runtime is the helper's child.
     const assertStartedBy = async (pid: number, parent: RegExp, what: string): Promise<void> => {
       const tree = await processTree();
       const parentPid = tree?.get(pid)?.parent;
@@ -83401,11 +84539,7 @@ async function checksAnEngineLaunchedWithAndWithoutAKeeper(
     assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
     assertReportable(pid, what);
     if (kept) {
-      await assertStartedBy(
-        pid,
-        runtimeName === 'Bun' ? /keeper\.js"? keep/ : /gdharness-desktop-[0-9a-f]{16}\.exe/i,
-        what,
-      );
+      await assertStartedBy(pid, /gdharness-desktop-[0-9a-f]{16}\.exe/i, what);
     }
   };
   for (const kept of [true, false]) {
@@ -116058,6 +117192,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
   testADesktopStartIsOneCall,
+  testEveryEngineRunsInAJobNamedForItsPid,
+  testAStartThroughTheHelperNamesTheEnginesOwnPid,
+  testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
+  testAWholeExitCodeArrivesThroughAHeadlessStart,
+  testAKeptStartOutlivesItsStarterInItsJob,
+  testAKeptStartOutlivesAKilledStarter,
+  testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut,
+  testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck,
+  testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce,
+  testAHelperThatCannotBeRunLeavesNoScratchFolder,
+  testAnEngineStartedInsideAParentJobStillGetsItsJob,
+  testAnEngineStartedUnderAUiLimitedParentJobStillRuns,
+  testEveryEngineTheHelperStartsHasAConsoleWithNoWindow,
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
@@ -116375,6 +117522,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheKeeperAnswersAStop,
   testTheKeepersListenerAnswersTheFirstLineOnly,
   testTheLauncherSaysWhyARunDidNotStart,
+  testAProcessTheLauncherStartsOutlivesItAndKeepsItsJob,
   testTheKeeperAnswersItsDebuggersQuestions,
   testADebugRequestIsCheckedAgainstItsTable,
   testAKeptGamesStackAndValuesRead,
@@ -116445,6 +117593,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
+  testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testALiveReservationShrinksTheRoomByWhatItOwes,
@@ -116517,6 +117666,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
+  testADisconnectedLanguageClientLeavesNoTimer,
   testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
@@ -116603,6 +117753,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
+  testEachEnginesFolderNamesItsLaneAndPid,
+  testEveryShareAnEngineIsHandedNamesItsLaneAndPid,
+  testAHandedShareKeepsItsEnginesLane,
+  testInTurnsNamesEachItemsLane,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,
@@ -117083,6 +118237,28 @@ async function testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt(): Promis
     openTimers().filter((timer) => timer.what === 'timeout of 5ms'),
     [],
     'a timer that fired is no longer open',
+  );
+}
+
+/**
+ * A disconnected language client leaves no timer. The close waits at most a second for the socket
+ * to end, and a socket that ends at once must take that wait with it, since a ref'd timer left
+ * pending holds the run, and a run that is busy elsewhere reports it as the test's.
+ */
+async function testADisconnectedLanguageClientLeavesNoTimer(): Promise<void> {
+  const mine = 'testADisconnectedLanguageClientLeavesNoTimer';
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      await client.getDiagnostics(join(tmpdir(), 'gdharness-lsp-timer', 'timer.gd'), 'extends Node\n');
+      await client.disconnect();
+      assert.deepEqual(
+        openTimers().filter((timer) => timer.during === mine && timer.what === 'timeout of 1000ms'),
+        [],
+        'the wait for the socket to end is cleared once it has',
+      );
+    },
   );
 }
 

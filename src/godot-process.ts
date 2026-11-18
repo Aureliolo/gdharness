@@ -116,6 +116,11 @@ export interface GodotProcess {
    */
   exitNotTold?: boolean;
   /**
+   * True when the desktop helper could not start the engine. Its own exit code is then in
+   * `exitCode`, which is not the engine's, so an answer gives none.
+   */
+  neverStarted?: boolean;
+  /**
    * The processes that carried a spawned run before `pid`, oldest first, each of which restarted
    * itself into the next (`OS.set_restart_on_exit`), as the keeper wrote them into the run's note.
    */

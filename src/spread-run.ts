@@ -294,8 +294,8 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   process.once('SIGTERM', interrupted);
   try {
     const workers = await workerCountFor(options, slotCount);
-    const engine = (name: string, share: string): Promise<EngineLeft> =>
-      enginePlayed(launch, slots, options, runDirectory, name, [
+    const engine = (name: string, lane: number, share: string): Promise<EngineLeft> =>
+      enginePlayed(launch, slots, options, runDirectory, name, lane, [
         ...options.benchArguments,
         share,
         `${INTO}${shareDirectory}`,
@@ -312,9 +312,10 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
       left = await inTurns(
         Array.from({ length: workers }, (_, index) => index),
         workers,
-        async (index) => {
+        async (index, _at, lane) => {
           const worker = await engine(
             `worker-${String(index)}`,
+            lane,
             `${SHARE}${String(index)}/${String(workers)}`,
           );
           done += 1;
@@ -336,7 +337,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     if (faults.length > 0) {
       return failed(faults, left, runDirectory, 'so nothing was gathered');
     }
-    const gather = await engine('gather', `${GATHER}${String(workers)}`);
+    const gather = await engine('gather', 0, `${GATHER}${String(workers)}`);
     console.log(readLog(gather.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     const gatherFaults = engineFaults(gather, options.godotVersion);
     const gatheredFile = join(shareDirectory, 'gathered.arms');
@@ -391,6 +392,7 @@ async function enginePlayed(
   options: SpreadOptions,
   runDirectory: string,
   name: string,
+  lane: number,
   benchArguments: readonly string[],
 ): Promise<EngineLeft> {
   const directory = join(runDirectory, name);
@@ -409,7 +411,7 @@ async function enginePlayed(
   const lock = await slots.take();
   const began = Date.now();
   try {
-    const end = await watchedEngine(launch, lock, args, directory, log, options.silenceSeconds);
+    const end = await watchedEngine({ ...launch, lane }, lock, args, directory, log, options.silenceSeconds);
     return { name, log, end, seconds: (Date.now() - began) / 1000 };
   } finally {
     slots.release(lock);

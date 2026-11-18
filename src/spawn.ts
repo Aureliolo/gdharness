@@ -1,5 +1,5 @@
 import {
-  type ChildProcess,
+  ChildProcess,
   type ChildProcessByStdio,
   type ChildProcessWithoutNullStreams,
   type ExecFileOptions,
@@ -37,6 +37,11 @@ export type {
   SpawnOptions,
   SpawnSyncReturns,
 } from 'node:child_process';
+
+/** A child that was never started: no pid and no streams, for the answer to a start that could not be made. */
+export function unstartedChild(): ChildProcess {
+  return new ChildProcess();
+}
 
 /**
  * Sets the uid cache and the class list of the project a start names right. Only the program's

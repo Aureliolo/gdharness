@@ -446,6 +446,13 @@ The engine's whole output stays in `.godot/gdharness/test-runs/<start>-<pid>/eng
 which the output names. The file opens with the engine's verdict, so it says why even for an engine
 that printed nothing.
 
+On Windows every engine runs in a job named `gdharness-engine-<pid>`, which holds the engine and
+everything it starts, so a reader can open it by name and total their processor time. Beside each
+`engine.log` is a `lane.json`, `{"lane": 0, "pid": 1234}`, written before the engine runs. It names
+the lane the engine ran in, counting from 0, and the engine's own pid, which the job is named after.
+An engine handed a further share has the same file in each share's folder, and logs copied to the
+main checkout take it with them.
+
 A project that is a worktree of another checkout has the logs of a failed run copied to the same
 place under the main checkout. The output names the copy and then the worktree's own. A gate
 running in a worktree of the commit removes the worktree once the run ends.

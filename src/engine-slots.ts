@@ -85,7 +85,17 @@ import {
   slotCommandOf,
 } from './slot-delegate.js';
 import { Turns } from './turns.js';
-import { madeInPlace, makeWhole, readWhole, removeWhole, stagedWriterOf, writeWhole } from './whole-file.js';
+import {
+  madeInPlace,
+  makeWhole,
+  readWhole,
+  readWholeAsync,
+  removeWhole,
+  removeWholeAsync,
+  stagedWriterOf,
+  writeWhole,
+  writeWholeAsync,
+} from './whole-file.js';
 
 /**
  * The variable an engine started on a slot is given, naming that slot's lock, so a program the
@@ -256,22 +266,37 @@ export function markBegan(mark: string): number | undefined {
   }
 }
 
-/** Removes the notes of waits in [param marks] that ended longer ago than they are kept. */
-function endedNotesSwept(marks: string): void {
+/** The notes of waits in [param marks] that ended longer ago than they are kept. */
+function endedNotesOld(marks: string): string[] {
   let names: string[];
   try {
     names = readdirSync(marks).filter((name) => name.endsWith(ENDED_SUFFIX) || name.endsWith(SEEN_SUFFIX));
   } catch {
-    return;
+    return [];
   }
-  for (const name of names) {
-    try {
-      if (Date.now() - statSync(join(marks, name)).mtimeMs > ENDED_KEPT_MS) {
-        removeWhole(join(marks, name));
+  return names
+    .map((name) => join(marks, name))
+    .filter((path) => {
+      try {
+        return Date.now() - statSync(path).mtimeMs > ENDED_KEPT_MS;
+      } catch {
+        // Gone already, which the next wait sweeps again.
+        return false;
       }
-    } catch {
-      // Gone already, or held past the retries, which the next wait sweeps again.
-    }
+    });
+}
+
+/** Removes the notes of waits in [param marks] that ended longer ago than they are kept. */
+function endedNotesSwept(marks: string): void {
+  for (const path of endedNotesOld(marks)) {
+    removeWhole(path);
+  }
+}
+
+/** {@link endedNotesSwept} for a wait on the event loop. */
+async function endedNotesSweptAsync(marks: string): Promise<void> {
+  for (const path of endedNotesOld(marks)) {
+    await removeWholeAsync(path);
   }
 }
 /**
@@ -388,15 +413,15 @@ const SLOTS_DRAIN_MS = 300_000;
  */
 export function slotWaiters(directory: string): SlotWaiter[] {
   const marks = join(directory, WAITING_FOLDER);
-  let names: string[];
-  try {
-    names = readdirSync(marks).filter((name) => name.endsWith('.json'));
-  } catch {
-    return [];
-  }
   const found: SlotWaiter[] = [];
-  for (const mark of names.toSorted()) {
-    const waiter = waiterOfMark(marks, mark);
+  for (const mark of markNames(marks)) {
+    let content: string | null;
+    try {
+      content = readWhole(join(marks, mark));
+    } catch {
+      continue;
+    }
+    const waiter = waiterOfMark(marks, mark, content);
     if (waiter !== null) {
       found.push(waiter);
     }
@@ -404,12 +429,43 @@ export function slotWaiters(directory: string): SlotWaiter[] {
   return found;
 }
 
-/** The live waiter the mark file [param mark] in [param marks] names, or null when it names none. */
-function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
-  let content: string | null;
+/** {@link slotWaiters} for a take on the event loop, whose waits for a held mark are timers. */
+async function slotWaitersAsync(directory: string): Promise<SlotWaiter[]> {
+  const marks = join(directory, WAITING_FOLDER);
+  const found: SlotWaiter[] = [];
+  for (const mark of markNames(marks)) {
+    let content: string | null;
+    try {
+      content = await readWholeAsync(join(marks, mark));
+    } catch {
+      continue;
+    }
+    const waiter = waiterOfMark(marks, mark, content);
+    if (waiter !== null) {
+      found.push(waiter);
+    }
+  }
+  return found;
+}
+
+/** The names of the mark files in [param marks], in order, none where the folder cannot be listed. */
+function markNames(marks: string): string[] {
+  try {
+    return readdirSync(marks)
+      .filter((name) => name.endsWith('.json'))
+      .toSorted();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The live waiter the mark file [param mark] in [param marks] names, which read as [param content],
+ * or null when it names none.
+ */
+function waiterOfMark(marks: string, mark: string, content: string | null): SlotWaiter | null {
   let madeAt: number;
   try {
-    content = readWhole(join(marks, mark));
     madeAt = statSync(join(marks, mark)).mtimeMs;
   } catch {
     return null;
@@ -1015,7 +1071,7 @@ export class FollowedLanes {
     const took = await this.taking;
     if (took && !this.rises) {
       // Ended while the mark was being taken, so it is given straight back.
-      giveBackSlot(this.mark, this.slots.holder.pid);
+      await giveBackSlotAsync(this.mark, this.slots.holder.pid);
       return;
     }
     this.holding = took;
@@ -1324,7 +1380,7 @@ export class EngineSlots {
             blocked?.();
           }
         } else if (mark === undefined) {
-          mark = this.waitMarked(line);
+          mark = await this.waitMarkedAsync(line);
           blocked?.();
         }
         const now = Date.now();
@@ -1340,7 +1396,7 @@ export class EngineSlots {
     } finally {
       changes?.close();
       if (mark !== undefined) {
-        this.waitEnded(mark);
+        await this.waitEndedAsync(mark);
       }
     }
   }
@@ -1595,7 +1651,7 @@ export class EngineSlots {
   private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateLook>): Promise<number[]> {
     const drawnBefore = this.drawn.numbers;
     const now = Date.now();
-    const waiting = slotWaiters(this.directory);
+    const waiting = await slotWaitersAsync(this.directory);
     for (const mark of this.passedOver.keys()) {
       if (!waiting.some((one) => one.mark === mark)) {
         this.passedOver.delete(mark);
@@ -1675,7 +1731,7 @@ export class EngineSlots {
       return engines;
     }
     const lent = nonEmpty(process.env[TIMED_VARIABLE]);
-    const content = lent === undefined ? null : readWhole(lent);
+    const content = lent === undefined ? null : await readWholeAsync(lent);
     const holder = content === null ? null : holderOf(content);
     if (lent === undefined || holder === null || holder.pid === process.pid || (await this.free(lent))) {
       return null;
@@ -1687,7 +1743,7 @@ export class EngineSlots {
   /** The lock of the engine above this process, which [constant HELD_VARIABLE] names, or null. */
   private async engineLock(): Promise<string | null> {
     const lock = nonEmpty(process.env[HELD_VARIABLE]);
-    const content = lock === undefined ? null : readWhole(lock);
+    const content = lock === undefined ? null : await readWholeAsync(lock);
     const holder = content === null ? null : holderOf(content);
     if (lock === undefined || holder === null || (await this.free(lock))) {
       return null;
@@ -1715,7 +1771,7 @@ export class EngineSlots {
     }
     let content: string | null;
     try {
-      content = readWhole(path);
+      content = await readWholeAsync(path);
     } catch {
       return null;
     }
@@ -1746,6 +1802,26 @@ export class EngineSlots {
    * its path, or undefined when it could not be made, which the next look tries again.
    */
   private waitMarked(line: SlotLine | object): string | undefined {
+    const place = this.markPlace();
+    if (place === undefined) {
+      return undefined;
+    }
+    endedNotesSwept(place.marks);
+    return this.markPut(place.mark, line);
+  }
+
+  /** {@link waitMarked} for a take on the event loop. */
+  private async waitMarkedAsync(line: SlotLine | object): Promise<string | undefined> {
+    const place = this.markPlace();
+    if (place === undefined) {
+      return undefined;
+    }
+    await endedNotesSweptAsync(place.marks);
+    return this.markPut(place.mark, line);
+  }
+
+  /** The next wait mark's path in the waiting folder, made if need be, or undefined where it cannot be. */
+  private markPlace(): { marks: string; mark: string } | undefined {
     const marks = join(this.directory, WAITING_FOLDER);
     waitsMarked += 1;
     const mark = join(marks, `${String(this.holder.pid)}-${String(waitsMarked)}.json`);
@@ -1754,7 +1830,10 @@ export class EngineSlots {
     } catch {
       return undefined;
     }
-    endedNotesSwept(marks);
+    return { marks, mark };
+  }
+
+  private markPut(mark: string, line: SlotLine | object): string | undefined {
     if (!this.made(mark, line instanceof SlotLine ? line.marked(this.holder) : line)) {
       return undefined;
     }
@@ -1781,6 +1860,18 @@ export class EngineSlots {
     removeWhole(seenNoteOf(mark));
   }
 
+  /** {@link waitEnded} for a take on the event loop. */
+  private async waitEndedAsync(mark: string): Promise<void> {
+    const began = this.marks.get(mark);
+    if (began === undefined) {
+      return;
+    }
+    this.marks.delete(mark);
+    await writeWholeAsync(endedNoteOf(mark), JSON.stringify({ began, ended: Date.now() / 1000 }));
+    await removeWholeAsync(mark);
+    await removeWholeAsync(seenNoteOf(mark));
+  }
+
   /**
    * Which of the slots [param numbers] a live game editor_run started holds. A lock that names no
    * holder yet is a taker still writing it, which may be a game's, so it counts as one.
@@ -1789,7 +1880,7 @@ export class EngineSlots {
     const games: number[] = [];
     for (const slot of numbers) {
       const lock = join(this.directory, `${String(slot)}.lock`);
-      const content = readWhole(lock);
+      const content = await readWholeAsync(lock);
       const holder = content === null ? null : holderOf(content);
       if (content !== null && (holder === null || holder.game === true) && !(await this.free(lock))) {
         games.push(slot);
@@ -1825,13 +1916,13 @@ export class EngineSlots {
     let newestSeat = 0;
     for (const name of names) {
       const mark = join(folder, name);
-      const content = readWhole(mark);
+      const content = await readWholeAsync(mark);
       if (content === null || holderOf(content) === null) {
         continue;
       }
       if (await this.free(mark)) {
-        removeWhole(mark);
-        removeWhole(`${mark}${SEATED_SUFFIX}`);
+        await removeWholeAsync(mark);
+        await removeWholeAsync(`${mark}${SEATED_SUFFIX}`);
       } else {
         live += 1;
         newestSeat = Math.max(newestSeat, this.writtenAt(`${mark}${SEATED_SUFFIX}`) ?? 0);
@@ -1863,7 +1954,7 @@ export class EngineSlots {
       return none;
     }
     const path = join(this.directory, SPARE_FILE);
-    const content = readWhole(path);
+    const content = await readWholeAsync(path);
     const said = countWritten(content, Date.now(), 'spare');
     // The count's text, its time and its writer's life are read once: a file made anew between
     // separate reads would be judged by one count and its writer by another.
@@ -1901,7 +1992,7 @@ export class EngineSlots {
   /** Whether a measurement holds the machine's quiet window, which keeps side work off the gates' slots. */
   private async windowHeld(): Promise<boolean> {
     const path = join(this.directory, WINDOW_FILE);
-    const content = readWhole(path);
+    const content = await readWholeAsync(path);
     let said: unknown;
     try {
       said = JSON.parse(content ?? '');
@@ -1919,7 +2010,7 @@ export class EngineSlots {
 
   /** The whole number under [param key] in the file at [param path], 0 once it is stale or its writer has gone. */
   async countIn(path: string, key: string): Promise<number> {
-    const said = countSaid(readWhole(path), Date.now(), key);
+    const said = countSaid(await readWholeAsync(path), Date.now(), key);
     return said > 0 && !(await this.free(path)) ? said : 0;
   }
 
@@ -2009,7 +2100,7 @@ export class EngineSlots {
       }
       return failed === null;
     }
-    const handed = handSlot(lock, this.holder.pid, to);
+    const handed = await handSlot(lock, this.holder.pid, to);
     if (handed) {
       this.held.delete(lock);
     }
@@ -2036,21 +2127,21 @@ export class EngineSlots {
     } catch {
       return;
     }
-    this.clearedStaged(this.directory, names);
+    await this.clearedStaged(this.directory, names);
     for (const name of names) {
       const numbered = /^(\d+)\.lock$/.exec(name)?.[1];
       if (numbered !== undefined && Number(numbered) >= this.count) {
         await this.cleared(join(this.directory, name), false);
       }
     }
-    this.sweepWaits();
+    await this.sweepWaits();
   }
 
   /**
    * Removes the wait marks of takers that have gone. By the pid alone, which costs no query: a taker
    * killed while it waited leaves its mark, and a gate reading it counts a wait that is not happening.
    */
-  private sweepWaits(): void {
+  private async sweepWaits(): Promise<void> {
     const marks = join(this.directory, WAITING_FOLDER);
     let waits: string[];
     try {
@@ -2058,21 +2149,21 @@ export class EngineSlots {
     } catch {
       return;
     }
-    this.clearedStaged(marks, waits);
+    await this.clearedStaged(marks, waits);
     for (const name of waits) {
       if (stagedWriterOf(name) !== undefined) {
         continue;
       }
       let content: string | null;
       try {
-        content = readWhole(join(marks, name));
+        content = await readWholeAsync(join(marks, name));
       } catch {
         // Held by a reader past the retries, which the next look tries again.
         continue;
       }
       const pid = content === null ? undefined : holderOf(content)?.pid;
       if (pid !== undefined && !alive(pid)) {
-        removeWhole(join(marks, name));
+        await removeWholeAsync(join(marks, name));
       }
     }
   }
@@ -2081,11 +2172,11 @@ export class EngineSlots {
    * Removes the staged files among [param names] in [param folder] whose writer has gone, by the pid
    * in the name alone. A live writer's is left, and none is ever opened.
    */
-  private clearedStaged(folder: string, names: readonly string[]): void {
+  private async clearedStaged(folder: string, names: readonly string[]): Promise<void> {
     for (const name of names) {
       const writer = stagedWriterOf(name);
       if (writer !== undefined && writer !== process.pid && !alive(writer)) {
-        removeWhole(join(folder, name));
+        await removeWholeAsync(join(folder, name));
       }
     }
   }
@@ -2205,34 +2296,43 @@ export async function takenOverUnderSteal(
  * one an editor plays: the lock then names that engine's holder and is free once it has gone, by the
  * rule every lock is judged by. Renamed over the lock, so a taker reading it never finds it empty.
  */
-export function handSlot(lock: string, from: number, to: SlotHolder): boolean {
+export async function handSlot(lock: string, from: number, to: SlotHolder): Promise<boolean> {
   let content: string | null;
   try {
-    content = readWhole(lock);
+    content = await readWholeAsync(lock);
   } catch {
     return false;
   }
+  const text = handedText(content, from, to);
+  return text !== null && (await writeWholeAsync(lock, text));
+}
+
+/** What a lock that read as [param content] holds once handed from [param from] to [param to], or null. */
+function handedText(content: string | null, from: number, to: SlotHolder): string | null {
   const holder = content === null ? null : holderOf(content);
   // A game's slot stays a game's in the hands of whatever runs it.
-  return (
-    holder?.pid === from &&
-    writeWhole(lock, JSON.stringify(holder.game === true ? { ...to, game: true } : to))
-  );
+  return holder?.pid === from ? JSON.stringify(holder.game === true ? { ...to, game: true } : to) : null;
 }
 
 /**
  * Names [param engine] in the slot at [param lock] as the engine running on it, when the lock still
  * names [param holder]. Answers whether it did. Renamed over the lock, as {@link handSlot} is.
  */
-export function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): boolean {
+export async function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): Promise<boolean> {
   let content: string | null;
   try {
-    content = readWhole(lock);
+    content = await readWholeAsync(lock);
   } catch {
     return false;
   }
+  const text = namedText(content, holder, engine);
+  return text !== null && (await writeWholeAsync(lock, text));
+}
+
+/** What a lock that read as [param content] holds once it names [param engine], or null. */
+function namedText(content: string | null, holder: number, engine: SlotEngine): string | null {
   const named = content === null ? null : holderOf(content);
-  return named?.pid === holder && writeWhole(lock, JSON.stringify({ ...named, engine }));
+  return named?.pid === holder ? JSON.stringify({ ...named, engine }) : null;
 }
 
 /**
@@ -2243,7 +2343,7 @@ export function nameSlotEngine(lock: string, holder: number, engine: SlotEngine)
 export async function nameSlotEngineOf(lock: string, holder: number, pid: number): Promise<void> {
   const started = (await startTimesOf([pid])).get(pid);
   if (started !== undefined) {
-    nameSlotEngine(lock, holder, { pid, started });
+    await nameSlotEngine(lock, holder, { pid, started });
   }
 }
 
@@ -2286,6 +2386,17 @@ export function giveBackSlot(lock: string, pid: number): void {
   try {
     if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
       removeWhole(lock);
+    }
+  } catch {
+    // Already gone.
+  }
+}
+
+/** {@link giveBackSlot} for a caller on the event loop. */
+export async function giveBackSlotAsync(lock: string, pid: number): Promise<void> {
+  try {
+    if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
+      await removeWholeAsync(lock);
     }
   } catch {
     // Already gone.

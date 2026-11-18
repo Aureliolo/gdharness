@@ -33,6 +33,16 @@ import { isRecord } from './records.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import { mendBeforeStart } from './uid-cache.js';
 
+/**
+ * The name of the Windows job every engine this package starts runs in, for the engine with pid
+ * [param pid]. The job holds the engine and everything it starts, so a reader opens it with
+ * OpenJobObjectW and reads their processor time together. Kept in step with `JobNamePrefix` in the
+ * helper's source.
+ */
+export function engineJobName(pid: number): string {
+  return `gdharness-engine-${String(pid)}`;
+}
+
 /** The desktop every process started this way shares. */
 export const HIDDEN_DESKTOP = 'gdharness';
 
@@ -55,8 +65,7 @@ public static class GdharnessDesktop {
   const int UseStdHandles = 0x100;
   const int UseShowWindow = 0x1;
   const short ShowNoActivate = 4;
-  // No console at all, rather than a hidden one: a console's host would sit on the desktop too.
-  const uint DetachedProcess = 0x00000008;
+  const uint CreateNoWindow = 0x08000000;
   // Every engine runs below normal, so a machine running every core leaves other work its share.
   const uint BelowNormalPriorityClass = 0x00004000;
 
@@ -98,6 +107,9 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool MoveFileExW(string from, string to, uint flags);
+  const uint ReplaceExisting = 0x1;
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle, uint code);
   [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessAffinityMask(IntPtr process, UIntPtr mask);
@@ -123,6 +135,8 @@ public static class GdharnessDesktop {
   static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
   const int ExtendedLimitInformation = 9;
   const uint KillOnJobClose = 0x2000;
+  const int ErrorAlreadyExists = 183;
+  const string JobNamePrefix = "gdharness-engine-";
   const uint FailCriticalErrors = 0x1;
   const uint NoOpenFileErrorBox = 0x8000;
 
@@ -419,19 +433,56 @@ public static class GdharnessDesktop {
     string affinity = field(7);
     string exitFile = field(8);
     bool endsWithThis = field(9) == "1";
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis);
+    bool separateErrors = lines.Length > 10 && field(10) == "1";
+    string laneFile = lines.Length > 12 ? field(11) : "";
+    string lane = lines.Length > 12 ? field(12) : "";
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, separateErrors, laneFile, lane);
+  }
+
+  // The call and what it was given, then the system's own reason for the code. The exception's
+  // message is the given text alone, so the reason is added here. The system leaves the program's
+  // name out of a reason that has a place for it (%1), so it is put there.
+  static Exception Failure(int code, string what, string program) {
+    return new Win32Exception(code, what + ": " + new Win32Exception(code).Message.Replace("%1", program));
+  }
+
+  static Exception Failure(int code, string what) {
+    return Failure(code, what, "");
+  }
+
+  // The program a command line names: what is inside the first quotes, or up to the first space.
+  static string ProgramOf(string commandLine) {
+    if (commandLine.StartsWith("\\"")) {
+      int end = commandLine.IndexOf('"', 1);
+      return end < 0 ? commandLine.Substring(1) : commandLine.Substring(1, end - 1);
+    }
+    int space = commandLine.IndexOf(' ');
+    return space < 0 ? commandLine : commandLine.Substring(0, space);
+  }
+
+  // Written under a temporary name and renamed, so a reader never sees half of it.
+  static void WriteLane(string laneFile, string lane, int processId) {
+    string temporary = laneFile + ".tmp";
+    File.WriteAllText(temporary, "{\\"lane\\": " + lane + ", \\"pid\\": " + processId + "}\\n");
+    if (!MoveFileExW(temporary, laneFile, ReplaceExisting)) {
+      throw Failure(Marshal.GetLastWin32Error(), "MoveFileExW " + laneFile);
+    }
   }
 
   static void Step(string stepFile, string step) {
     File.WriteAllText(stepFile, step);
   }
 
-  // With an affinity, the process starts suspended and is held to those processors before its
-  // first thread runs, so every thread it starts afterwards is held to them as well. With
-  // endsWithThis it starts suspended in a job that ends it once this process has gone, however it
-  // went. A runner's own job ends this helper with the runner, and the process breaks away from that
-  // job, so an engine of a runner that was killed ran on with no parent and held its run's folder.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis) {
+  // The process starts suspended. With an affinity it is held to those processors before its first
+  // thread runs, so every thread it starts afterwards is held to them as well. It then joins a job
+  // named after its own pid, made before it runs so that what it starts is counted in the job too,
+  // and a name already taken ends it unrun. With endsWithThis that job ends it once this process
+  // has gone, however it went. A runner's own job ends this helper with the runner, and the process
+  // breaks away from that job, so an engine of a runner that was killed ran on with no parent and
+  // held its run's folder. Without it the job only counts, so a process meant to outlive whatever
+  // started it keeps its lifetime. Nested jobs need Windows 8, and a job that forbids one fails the
+  // assignment, which ends the process unrun with the cause.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, bool separateErrors, string laneFile, string lane) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     IntPtr desktopHandle = IntPtr.Zero;
@@ -439,17 +490,17 @@ public static class GdharnessDesktop {
       Step(stepFile, "opening the session's own window station");
       IntPtr station = CreateWindowStationW(null, 0, WindowStationAllAccess, IntPtr.Zero);
       if (station == IntPtr.Zero) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateWindowStationW");
+        throw Failure(Marshal.GetLastWin32Error(), "CreateWindowStationW");
       }
       StringBuilder stationName = new StringBuilder(256);
       int needed;
       if (!GetUserObjectInformationW(station, ObjectName, stationName, stationName.Capacity * 2, out needed)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
+        throw Failure(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
       }
       // A desktop is made in the calling process's station, so this one is the caller's while it is.
       IntPtr own = GetProcessWindowStation();
       if (!SetProcessWindowStation(station)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
+        throw Failure(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
       }
       IntPtr held;
       int made;
@@ -461,7 +512,7 @@ public static class GdharnessDesktop {
         SetProcessWindowStation(own);
       }
       if (held == IntPtr.Zero) {
-        throw new Win32Exception(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
+        throw Failure(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
       }
       desktopHandle = held;
       startup.desktop = stationName + "\\\\" + desktop;
@@ -473,7 +524,9 @@ public static class GdharnessDesktop {
     }
     startup.input = GetStdHandle(-10);
     startup.output = GetStdHandle(-11);
-    startup.error = startup.output;
+    // Both streams on one handle keep their lines in order. A start whose reader tells the two apart
+    // keeps its own error stream.
+    startup.error = separateErrors ? GetStdHandle(-12) : startup.output;
     Started started;
     // Inherited by what it starts: without SEM_NOGPFAULTERRORBOX, Windows Error Reporting runs when
     // the target crashes and writes its dump, and with the other two no hard-error box can open.
@@ -487,35 +540,50 @@ public static class GdharnessDesktop {
     JobLimits limits = new JobLimits();
     try {
     Step(stepFile, "starting the process");
-    bool suspended = affinity != 0 || endsWithThis;
-    uint creation = DetachedProcess | BelowNormalPriorityClass | (suspended ? CreateSuspended : 0u);
+    // The process gets a console that is never shown, so a console program it starts joins that one
+    // and opens no window of its own. A process with no console at all gives each such child a new
+    // console, which Windows Terminal shows on the desktop in use, whichever desktop the process is on.
+    uint creation = CreateNoWindow | BelowNormalPriorityClass | CreateSuspended;
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
+      throw Failure(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine, ProgramOf(commandLine));
     }
     if (affinity != 0) {
       Step(stepFile, "holding the process to its processors");
       if (!SetProcessAffinityMask(started.process, new UIntPtr(affinity))) {
         int error = Marshal.GetLastWin32Error();
         TerminateProcess(started.process, 1);
-        throw new Win32Exception(error, "SetProcessAffinityMask " + affinity);
+        throw Failure(error, "SetProcessAffinityMask " + affinity);
       }
     }
-    if (endsWithThis) {
-      Step(stepFile, "tying the process to this helper");
-      // The handle is never closed here: Windows closes it as this process goes, which ends the job.
-      job = CreateJobObjectW(IntPtr.Zero, null);
-      limits.flags = KillOnJobClose;
-      if (job == IntPtr.Zero
-          || !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)))
-          || !AssignProcessToJobObject(job, started.process)) {
-        int error = Marshal.GetLastWin32Error();
+    Step(stepFile, "putting the process in its job");
+    // The handle is never closed here: the job lasts as long as this process, which is as long as
+    // the engine, and with endsWithThis Windows ends the engine if this process goes first.
+    string jobName = JobNamePrefix + started.processId;
+    job = CreateJobObjectW(IntPtr.Zero, jobName);
+    int made = Marshal.GetLastWin32Error();
+    if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
+      TerminateProcess(started.process, 1);
+      // A name already taken says it all itself: the system's text for that code speaks of a file.
+      throw job == IntPtr.Zero
+        ? Failure(made, "CreateJobObjectW " + jobName)
+        : new Win32Exception(made, "the job " + jobName + " already exists");
+    }
+    limits.flags = endsWithThis ? KillOnJobClose : 0u;
+    if ((endsWithThis && !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits))))
+        || !AssignProcessToJobObject(job, started.process)) {
+      int error = Marshal.GetLastWin32Error();
+      TerminateProcess(started.process, 1);
+      throw Failure(error, "a job for the process named " + jobName);
+    }
+    if (laneFile.Length > 0) {
+      try {
+        WriteLane(laneFile, lane, started.processId);
+      } catch (Exception) {
         TerminateProcess(started.process, 1);
-        throw new Win32Exception(error, "a job ending the process with this helper");
+        throw;
       }
     }
-    if (suspended) {
-      ResumeThread(started.thread);
-    }
+    ResumeThread(started.thread);
     File.WriteAllText(pidFile, started.processId.ToString());
     if (noActivate) {
       HoldTheForeground(started);
@@ -560,7 +628,7 @@ public static class GdharnessDesktop {
     }
     // The process has ended, so what it started is let run on, as without the job: only a helper
     // that was ended itself takes them with it.
-    if (job != IntPtr.Zero) {
+    if (endsWithThis) {
       limits.flags = 0;
       SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)));
     }
@@ -583,6 +651,9 @@ public static class GdharnessDesktop {
 `;
 
 const HELPER = new CompiledHelper('desktop helper', 'gdharness-desktop', SOURCE, true);
+
+/** The helper's C# source, which a test compiles with a change of its own to reach a case no real start can. */
+export const HELPER_SOURCE = SOURCE;
 
 /** Where the compiled desktop helper is kept, named after its source. */
 export function helperAssembly(directory = tmpdir()): string {
@@ -724,6 +795,10 @@ export function throughHelper(
     readonly affinity?: bigint;
     /** The process is ended once the helper has gone, as it goes with the process that spawned it. */
     readonly endsWithHelper?: boolean;
+    /** The process's error stream is the helper's own, apart from its output, for a reader that tells them apart. */
+    readonly separateErrors?: boolean;
+    /** Where the helper writes the engine's lane and pid before it runs, and the lane's number. */
+    readonly lane?: { readonly file: string; readonly number: number };
   },
   command: string,
   args: readonly string[],
@@ -743,6 +818,9 @@ export function throughHelper(
     how.affinity === undefined ? '' : how.affinity.toString(),
     files.exit,
     how.endsWithHelper === true ? '1' : '0',
+    how.separateErrors === true ? '1' : '0',
+    how.lane?.file ?? '',
+    how.lane === undefined ? '' : String(how.lane.number),
   ];
   writeFileSync(
     files.spec,
@@ -839,6 +917,19 @@ export function desktopBoxEnding(
   return `the windowed engine could not create a renderer on the hidden desktop, so it was ended: it opened a box titled "${box.title}", which nobody can press there${after}. Run the suites headless, or check the machine's graphics driver, which a lost GPU needs a reboot to recover.`;
 }
 
+/**
+ * The system refused to run the helper program itself, as a policy that allows only some programs
+ * does. That is a start that failed, which every caller answers as one, and no defect of this
+ * server's. Where a runtime reports a refused spawn as an event, the same text arrives as the
+ * child's error.
+ */
+export class HelperRefused extends Error {
+  constructor(reason: string) {
+    super(`the desktop helper could not be run: ${reason}`);
+    this.name = 'HelperRefused';
+  }
+}
+
 /** A process started on a desktop by `spawnOnDesktop`. */
 export interface DesktopStart {
   /** The helper, which exits with the process's code. */
@@ -865,6 +956,13 @@ export function spawnOnDesktop(
     readonly directory: string;
     readonly affinity?: bigint;
     readonly endsWithHelper?: boolean;
+    /**
+     * The helper outlives the process that started it, which only a start meant to outlive its
+     * starter wants, since the helper holds the job the engine's processor time is read from.
+     */
+    readonly outlivesStarter?: boolean;
+    readonly separateErrors?: boolean;
+    readonly lane?: { readonly file: string; readonly number: number };
     readonly scratch: string;
     readonly stop?: string;
     readonly exit?: string;
@@ -888,12 +986,18 @@ export function spawnOnDesktop(
     }
   }
   const wrapper = throughHelper(how, command, args, files, assembly);
-  const child = spawnHidden(wrapper.command, wrapper.args, {
-    ...options,
-    ...(how.desktop === undefined
-      ? {}
-      : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),
-  });
+  let child: ChildProcess;
+  try {
+    child = spawnHidden(wrapper.command, wrapper.args, {
+      ...options,
+      ...(how.outlivesStarter === true ? { detached: true } : {}),
+      ...(how.desktop === undefined
+        ? {}
+        : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),
+    });
+  } catch (error) {
+    throw new HelperRefused(error instanceof Error ? error.message : String(error));
+  }
   return {
     child,
     files,

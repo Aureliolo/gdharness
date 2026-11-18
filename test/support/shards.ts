@@ -256,6 +256,7 @@ export const REGRESSION_SECONDS: Readonly<
     testARealBenchTakesItsWorkerWithIt: 33,
     testTheEditorsViewShowsWhatToolScriptsDrawThere: 33,
     testADeadLockHeldOpenIsTakenOverOnceLetGo: 33,
+    testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess: 33,
     testAHeadlessWriteLeavesOutWhatAnEditorWould: 32,
     testAToolWaitsOutTheEditorsScan: 32,
     testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor: 32,
