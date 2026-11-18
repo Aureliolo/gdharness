@@ -667,7 +667,7 @@ import {
   spreadOptionsOf,
 } from '../src/spread-run.js';
 import { diedAsItStarted, linesAsPrinted } from '../src/start-race.js';
-import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
+import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong, watchExit } from '../src/successor.js';
 import {
   EVERY_FILE,
   EVERY_NAME,
@@ -22855,6 +22855,70 @@ function testASaidRestartIsFollowedHoweverLateItsExitIsSeen(): void {
     slowly.pid,
     'and the newer of the two where it said it restarts',
   );
+}
+
+/**
+ * A game's exit is dated by the kernel, so a sighting that comes late does not lose its successor.
+ *
+ * The keeper saw an exit up to a second or two after the successor started, and under load seconds
+ * more, so a window measured back from the sighting refused the one candidate. The stand-ins here
+ * are the game, a worker it started earlier, and the process it restarted into, and the sighting is
+ * given as nine seconds late. A worker started beside the successor is still a second candidate.
+ */
+async function testALateSightingOfAnExitDoesNotLoseTheSuccessor(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('exit time regression skipped (the kernel dates an exit only on Windows)');
+    return;
+  }
+  const standIns: ChildProcess[] = [];
+  const standIn = (): ChildProcess => {
+    const child = spawnHidden(process.execPath, ['--eval', 'setInterval(() => undefined, 1000)'], {
+      stdio: 'ignore',
+    });
+    standIns.push(child);
+    assert.ok(typeof child.pid === 'number', 'the stand-in started');
+    return child;
+  };
+  try {
+    const spawnedAt = Date.now();
+    const game = standIn();
+    const watch = watchExit(game.pid ?? 0, spawnedAt);
+    const worker = standIn();
+    await delay(RESTARTED_WITHIN_MS + 1500);
+    const successor = standIn();
+    await delay(300);
+    game.kill();
+    const seenAt = Date.now() + 9000;
+    const endedAt = await watch.endedBy(seenAt);
+    watch.stop();
+    assert.ok(
+      endedAt < seenAt - 8000,
+      `dated by the kernel: ${String(seenAt - endedAt)} ms before the sighting`,
+    );
+    const followed = await followSuccessor(
+      process.pid,
+      process.execPath,
+      spawnedAt - 1000,
+      endedAt,
+      undefined,
+    );
+    assert.notEqual(followed?.successor.pid, worker.pid, 'the worker is not followed');
+    assert.equal(
+      followed?.successor.pid,
+      successor.pid,
+      'the successor is, nine seconds before the sighting',
+    );
+    standIn();
+    assert.equal(
+      await followSuccessor(process.pid, process.execPath, spawnedAt - 1000, endedAt, undefined),
+      null,
+      'a second engine started beside it is not chosen between',
+    );
+  } finally {
+    for (const child of standIns) {
+      child.kill();
+    }
+  }
 }
 
 /**
@@ -114806,6 +114870,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
   testASaidRestartIsFollowedHoweverLateItsExitIsSeen,
+  testALateSightingOfAnExitDoesNotLoseTheSuccessor,
   testARunFollowsTheGamesRestart,
   testAnotherProjectsRunLeavesOursStoppable,
   testARunCanBeStartedOnAnotherEngine,

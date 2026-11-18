@@ -49,7 +49,7 @@ import {
   writeProfileFile,
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
-import { followSuccessor } from './successor.js';
+import { type ExitWatch, followSuccessor, watchExit } from './successor.js';
 import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
 /**
@@ -559,18 +559,32 @@ async function handTheSlot(
 
 /**
  * The look for a successor of [param pid], unless the game said it does not restart. A game that said
- * it does has its successor taken as the newest engine it started, whatever the time between.
+ * it does has its successor taken as the newest engine it started, whatever the time between. The
+ * successor is dated against [param watch]'s kernel exit time where there is one, since the sighting
+ * [param exitedAt] comes late on a loaded machine.
  */
 function lookForSuccessor(
   following: Following,
   pid: number,
   notBefore: number,
   exitedAt: number,
+  watch?: ExitWatch,
 ): Promise<Followed | null> | null {
   const said = restartSaid(following.exitNotes, pid);
-  return said === false
-    ? null
-    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript, said === true);
+  if (said === false) {
+    return null;
+  }
+  return (async () => {
+    const endedAt = watch === undefined ? exitedAt : await watch.endedBy(exitedAt);
+    return await followSuccessor(
+      pid,
+      following.command,
+      notBefore,
+      endedAt,
+      following.transcript,
+      said === true,
+    );
+  })();
 }
 
 /** One process in a chain of restarts, from the game's first to the one it restarted into. */
@@ -687,6 +701,7 @@ async function keep(): Promise<void> {
     process.exit(1);
   }
   const { child, pid, whole } = started;
+  const watch = run === undefined ? undefined : watchExit(pid, spawnedAt);
   const record = startingNote(run, spec, pid, toStart.args);
   if (record !== null) {
     // Before the pid goes back, and in the same turn as the exit is listened for: a game that ends at
@@ -713,7 +728,7 @@ async function keep(): Promise<void> {
   const following: Following = { command: spec.command, exitNotes, transcript: run?.transcript, slot, ender };
   // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
   // followed, and the run ends with the first process's exit.
-  const looked = note === null ? null : lookForSuccessor(following, pid, spawnedAt, exitedAt);
+  const looked = note === null ? null : lookForSuccessor(following, pid, spawnedAt, exitedAt, watch);
   // The profile is finished from everything the game sent, which is read after its exit is told.
   if (debuggerPeer !== null) {
     await debuggerPeer.drained(DRAIN_MS);
@@ -725,6 +740,7 @@ async function keep(): Promise<void> {
     following,
   );
   recordTheEnd(last);
+  watch?.stop();
   if (slot !== undefined) {
     giveBackSlot(slot.lock, process.pid);
   }

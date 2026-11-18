@@ -378,6 +378,34 @@ public static class GdhProcessTable
         return said.ToString();
     }
 
+    /// <summary>
+    /// Waits for [pid], started no earlier than [notBeforeMs], and answers when the kernel ended it in
+    /// milliseconds. Empty where it cannot be opened, or is older than that and so another process
+    /// under a number handed on.
+    /// </summary>
+    public static string ExitTimeOf(int pid, long notBeforeMs)
+    {
+        IntPtr handle = OpenProcess(QueryLimitedInformation | Synchronize, false, pid);
+        if (handle == IntPtr.Zero)
+        {
+            return "";
+        }
+        long created;
+        long exited;
+        long kernel;
+        long user;
+        if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)
+            || created <= UnixEpoch || (created - UnixEpoch) / 10000 < notBeforeMs)
+        {
+            CloseHandle(handle);
+            return "";
+        }
+        WaitForSingleObject(handle, 0xFFFFFFFF);
+        string said = GetProcessTimes(handle, out created, out exited, out kernel, out user) ? Milliseconds(exited) : "";
+        CloseHandle(handle);
+        return said;
+    }
+
     /// <summary>"exit code" once a child held by HoldChildren has ended; empty for one not held.</summary>
     public static string WaitFor(int pid)
     {
