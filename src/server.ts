@@ -11722,7 +11722,7 @@ class GodotServer {
         errors,
         warnings: diagnostics.length - errors,
         diagnostics,
-        ...this.whereTheFileDisagrees(diagnostics, args),
+        ...(await this.whereTheFileDisagrees(diagnostics, args)),
       },
     };
   }
@@ -11748,7 +11748,10 @@ class GodotServer {
    * inherited or the diagnostic may simply be right, and calling a real finding stale is the
    * expensive direction. No engine is asked and nothing is re-analysed.
    */
-  private whereTheFileDisagrees(diagnostics: unknown[], args: OperationParams): OperationParams {
+  private async whereTheFileDisagrees(
+    diagnostics: unknown[],
+    args: OperationParams,
+  ): Promise<OperationParams> {
     const messages = diagnostics
       .map((entry) => asParams(entry)['message'])
       .filter((message): message is string => typeof message === 'string');
@@ -11766,7 +11769,7 @@ class GodotServer {
       return {};
     }
     const projectPath = project.value.path;
-    const cached = cachedClasses(projectPath);
+    const cached = await cachedClassesAsync(projectPath);
     const sourceOf = (resourcePath: string): string | null => {
       const contained = resolveWithinProject(projectPath, resourcePath);
       if (!contained.ok || !existsSync(contained.absolutePath)) {
@@ -18517,7 +18520,7 @@ class GodotServer {
       const idle = await this.waitOutTheEditorsOwnScan(() => deadline());
       waitedForEditorMs += idle.waitedMs;
       answerStalledMs += idle.stalledMs;
-      ({ before, writtenBefore } = this.cacheBeforeTheScan(projectPath));
+      ({ before, writtenBefore } = await this.cacheBeforeTheScan(projectPath));
       blind = await this.classesTheEditorCannotSee(args);
       const first = await this.askViaBridge('rescan_filesystem', args);
       if (first instanceof BridgeTimeout) {
@@ -18553,13 +18556,13 @@ class GodotServer {
   }
 
   /** The classes the cache of [param projectPath] holds and when it was written, or none for no project. */
-  private cacheBeforeTheScan(projectPath: string): {
+  private async cacheBeforeTheScan(projectPath: string): Promise<{
     before: Map<string, string> | null;
     writtenBefore: number | null;
-  } {
+  }> {
     return projectPath === ''
       ? { before: null, writtenBefore: null }
-      : { before: cachedClasses(projectPath), writtenBefore: cacheWrittenAt(projectPath) };
+      : { before: await cachedClassesAsync(projectPath), writtenBefore: cacheWrittenAt(projectPath) };
   }
 
   /**
@@ -19214,7 +19217,7 @@ class GodotServer {
    * The project's scripts [param scriptPath] is compiled against: the global classes its file names,
    * at the paths the class list records, and the scripts it preloads or loads by path.
    */
-  private scriptsCompiledAgainst(projectPath: string, scriptPath: string): string[] {
+  private async scriptsCompiledAgainst(projectPath: string, scriptPath: string): Promise<string[]> {
     const resourcePath = scriptPath.startsWith('res://')
       ? scriptPath
       : `res://${scriptPath.replace(/^\/+/, '')}`;
@@ -19222,7 +19225,7 @@ class GodotServer {
     if (source === null) {
       return [];
     }
-    const known = cachedClasses(projectPath) ?? declaredClasses(projectPath);
+    const known = (await cachedClassesAsync(projectPath)) ?? declaredClasses(projectPath);
     const declaring = classesNamedIn(codeOf(source), known).map((name) => known.get(name) ?? '');
     const loaded = [...source.matchAll(/\b(?:pre)?load\(\s*"(res:\/\/[^"]+\.gd)"\s*\)/g)].map(
       (found) => found[1] ?? '',
@@ -19315,7 +19318,7 @@ class GodotServer {
     projectPath: string,
     scriptPath: string,
   ): Promise<{ reloaded: ReloadedFirst[]; said?: string; unchecked?: true }> {
-    const against = this.scriptsCompiledAgainst(projectPath, scriptPath);
+    const against = await this.scriptsCompiledAgainst(projectPath, scriptPath);
     const held = await this.scriptsHeldBehind(against);
     if ('unchecked' in held) {
       return {
@@ -19352,17 +19355,16 @@ class GodotServer {
         said: `It failed again after ${reloaded.map((one) => one.scriptPath).join(', ')} ${reloaded.length === 1 ? 'was' : 'were'} reloaded from ${reloaded.length === 1 ? 'its file' : 'their files'}, so what it compiles against is current and the errors are its own.`,
       };
     }
-    return { reloaded, said: this.nothingBehindNote(projectPath, against) };
+    return { reloaded, said: await this.nothingBehindNote(projectPath, against) };
   }
 
   /** What to say when none of the scripts [param against] is held behind its file by the editor. */
-  private nothingBehindNote(projectPath: string, against: readonly string[]): string {
+  private async nothingBehindNote(projectPath: string, against: readonly string[]): Promise<string> {
     if (against.length === 0) {
       return 'It names no other script of the project.';
     }
-    const classOf = new Map(
-      [...(cachedClasses(projectPath) ?? declaredClasses(projectPath))].map(([name, path]) => [path, name]),
-    );
+    const known = (await cachedClassesAsync(projectPath)) ?? declaredClasses(projectPath);
+    const classOf = new Map([...known].map(([name, path]) => [path, name]));
     const checked = against.map((path) => {
       const name = classOf.get(path);
       return name === undefined ? path : `${name} (${path})`;

@@ -117823,6 +117823,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
   testADisconnectedLanguageClientLeavesNoTimer,
+  testAnAbandonedDebugClientLeavesNoTimer,
   testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
@@ -118416,6 +118417,36 @@ async function testADisconnectedLanguageClientLeavesNoTimer(): Promise<void> {
       );
     },
   );
+}
+
+/**
+ * An abandoned debug client leaves no timer. The close waits at most half a second for the socket
+ * to end, and a socket that ends at once must take that wait with it.
+ */
+async function testAnAbandonedDebugClientLeavesNoTimer(): Promise<void> {
+  const mine = 'testAnAbandonedDebugClientLeavesNoTimer';
+  const respond: FramedPeerHandler = (message, socket) => {
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command: String(message['command']),
+        success: true,
+        body: { breakpoints: [] },
+      }),
+    );
+  };
+  await withFramedPeer(respond, async (port) => {
+    const session = new GodotDAPClient(port, '127.0.0.1');
+    await session.setBreakpoint('/game/main.gd', 1);
+    await session.abandon();
+    assert.deepEqual(
+      openTimers().filter((timer) => timer.during === mine && timer.what === 'timeout of 500ms'),
+      [],
+      'the wait for the socket to end is cleared once it has',
+    );
+  });
 }
 
 /** A process a test leaves running is listed at the end of the run, dated to the test that started it. */
