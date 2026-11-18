@@ -557,16 +557,20 @@ async function handTheSlot(
   });
 }
 
-/** The look for a successor of [param pid], unless the game said it does not restart. */
+/**
+ * The look for a successor of [param pid], unless the game said it does not restart. A game that said
+ * it does has its successor taken as the newest engine it started, whatever the time between.
+ */
 function lookForSuccessor(
   following: Following,
   pid: number,
   notBefore: number,
   exitedAt: number,
 ): Promise<Followed | null> | null {
-  return restartSaid(following.exitNotes, pid) === false
+  const said = restartSaid(following.exitNotes, pid);
+  return said === false
     ? null
-    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript);
+    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript, said === true);
 }
 
 /** One process in a chain of restarts, from the game's first to the one it restarted into. */

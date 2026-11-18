@@ -22792,6 +22792,72 @@ async function testASuccessorIsTheEngineStartedAsTheGameExited(): Promise<void> 
 }
 
 /**
+ * A game that said it set a restart has its successor found however late its exit was seen.
+ *
+ * The engine starts the successor and then tears down, and on a loaded machine the exit reached the
+ * keeper seconds later: the one candidate, listed as that load produced it, had started more than the
+ * window before the sighting and was refused, so the run ended in the first process. The game's word
+ * makes the newest engine it started the successor, since no worker of its can start after that. A
+ * game that said nothing keeps the window, and a tie for newest is still no choice.
+ */
+function testASaidRestartIsFollowedHoweverLateItsExitIsSeen(): void {
+  const engine = process.platform === 'win32' ? 'C:\\Godot\\Godot_v4.exe' : '/opt/godot/godot';
+  const run = (rest: string): string =>
+    process.platform === 'win32' ? `"C:\\Godot\\Godot_v4.exe" ${rest}` : `/opt/godot/godot ${rest}`;
+  const exitedAt = 1_000_000;
+  const notBefore = 900_000;
+  const slowly = {
+    pid: 22,
+    startedAt: exitedAt - RESTARTED_WITHIN_MS - 7000,
+    command: run('--path /p -- --restarted'),
+  };
+  const worker = {
+    pid: 23,
+    startedAt: exitedAt - RESTARTED_WITHIN_MS - 30_000,
+    command: run('--path /p -- --worker'),
+  };
+  const recent = { pid: 24, startedAt: exitedAt - 500, command: run('--path /p -- --worker') };
+  assert.equal(
+    successorAmong([slowly], 11, engine, notBefore, exitedAt, 0),
+    null,
+    'a game that said nothing keeps the window',
+  );
+  assert.deepEqual(
+    successorAmong([worker, slowly], 11, engine, notBefore, exitedAt, 0, true),
+    slowly,
+    'a game that said it restarts is followed into the newest engine it started',
+  );
+  assert.equal(
+    successorAmong([{ ...slowly, startedAt: notBefore - 1 }], 11, engine, notBefore, exitedAt, 0, true),
+    null,
+    'though never into one older than the game',
+  );
+  assert.equal(
+    successorAmong([slowly, { ...slowly, pid: 25 }], 11, engine, notBefore, exitedAt, 0, true),
+    null,
+    'and a tie for newest is not chosen between',
+  );
+  assert.equal(
+    successorAmong([recent, { ...slowly, startedAt: exitedAt - 100 }], 11, engine, notBefore, exitedAt, 0),
+    null,
+    'a worker started in the last moments beside it is a second candidate where the game said nothing',
+  );
+  assert.equal(
+    successorAmong(
+      [recent, { ...slowly, startedAt: exitedAt - 100 }],
+      11,
+      engine,
+      notBefore,
+      exitedAt,
+      0,
+      true,
+    )?.pid,
+    slowly.pid,
+    'and the newer of the two where it said it restarts',
+  );
+}
+
+/**
  * A game that restarts itself with `OS.set_restart_on_exit` stays one run, which a stop ends.
  *
  * The keeper saw the first process exit 0 and recorded the run as over, cleanly. The process it had
@@ -114739,6 +114805,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
+  testASaidRestartIsFollowedHoweverLateItsExitIsSeen,
   testARunFollowsTheGamesRestart,
   testAnotherProjectsRunLeavesOursStoppable,
   testARunCanBeStartedOnAnotherEngine,

@@ -61,6 +61,12 @@ function executableOf(command: string): string {
  * it) and no earlier than [param RESTARTED_WITHIN_MS] before [param exitedAt]. [param early] is how
  * many milliseconds the listing can date a start before it happened: none for one read to the
  * instant, a second for one cut to the second, and a second and a tick for Linux's.
+ *
+ * [param restarting] is the game's own word, written as it exited, that it had set a restart. The
+ * engine starts the successor after the game has run its last script, so no worker of the game's is
+ * younger. The successor is then the newest candidate, however long the exit took to be seen: the
+ * teardown after the start and the exit's delivery both stretch on a loaded machine, and a window
+ * measured back from the sighting then dropped the successor. A tie for newest is still no choice.
  */
 export function successorAmong(
   listed: readonly ListedSuccessor[],
@@ -69,6 +75,7 @@ export function successorAmong(
   notBefore: number,
   exitedAt: number,
   early: number,
+  restarting = false,
 ): ListedSuccessor | null {
   const fold = (name: string): string => (process.platform === 'win32' ? name.toLowerCase() : name);
   const wanted = fold(basename(engine.replaceAll('\\', '/')));
@@ -77,9 +84,14 @@ export function successorAmong(
       one.pid !== exitedPid &&
       fold(executableOf(one.command)) === wanted &&
       one.startedAt + early >= notBefore &&
-      one.startedAt + early >= exitedAt - RESTARTED_WITHIN_MS,
+      (restarting || one.startedAt + early >= exitedAt - RESTARTED_WITHIN_MS),
   );
-  return found.length === 1 ? (found[0] ?? null) : null;
+  if (!restarting) {
+    return found.length === 1 ? (found[0] ?? null) : null;
+  }
+  const newest = Math.max(...found.map((one) => one.startedAt));
+  const last = found.filter((one) => one.startedAt === newest);
+  return last.length === 1 ? (last[0] ?? null) : null;
 }
 
 /**
@@ -107,13 +119,14 @@ export async function followSuccessor(
   notBefore: number,
   exitedAt: number,
   transcript: string | undefined,
+  restarting = false,
 ): Promise<Followed | null> {
   if (process.platform === 'win32') {
-    return await followOnWindows(exitedPid, engine, notBefore, exitedAt);
+    return await followOnWindows(exitedPid, engine, notBefore, exitedAt, restarting);
   }
   return transcript === undefined
     ? null
-    : await followOnPosix(exitedPid, engine, notBefore, exitedAt, transcript);
+    : await followOnPosix(exitedPid, engine, notBefore, exitedAt, transcript, restarting);
 }
 
 async function followOnWindows(
@@ -121,6 +134,7 @@ async function followOnWindows(
   engine: string,
   notBefore: number,
   exitedAt: number,
+  restarting: boolean,
 ): Promise<Followed | null> {
   let loading: string;
   try {
@@ -184,7 +198,7 @@ async function followOnWindows(
       candidates.push({ pid: Number(fields[1]), startedAt: Number(fields[2]), command: fields[3].trim() });
     }
   }
-  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, 0);
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, 0, restarting);
   holder.stdin.end(successor === null ? '\n' : `${String(successor.pid)}\n`);
   if (successor === null) {
     return null;
@@ -202,6 +216,7 @@ async function followOnPosix(
   notBefore: number,
   exitedAt: number,
   transcript: string,
+  restarting: boolean,
 ): Promise<Followed | null> {
   // Linux dates a start from /proc, up to a second and a tick early, where its ps dates it up to two
   // seconds early. See linuxStartTimes. macOS's ps cuts it to the second.
@@ -224,7 +239,7 @@ async function followOnPosix(
   }
   // Asked of the engines that started in time only, since each answer is a look at another process.
   const timely = listed.filter(
-    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, early) !== null,
+    (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, early, restarting) !== null,
   );
   const ours = canonical(transcript);
   const candidates: ListedSuccessor[] = [];
@@ -234,7 +249,7 @@ async function followOnPosix(
       candidates.push(one);
     }
   }
-  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, early);
+  const successor = successorAmong(candidates, exitedPid, engine, notBefore, exitedAt, early, restarting);
   if (successor === null) {
     return null;
   }
