@@ -30,7 +30,6 @@ import { availableParallelism, constants, homedir, setPriority, tmpdir } from 'n
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import { text as pipedText } from 'node:stream/consumers';
-import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { deflateSync, inflateSync } from 'node:zlib';
@@ -848,6 +847,14 @@ import {
   textOf,
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
+import {
+  beginWindow,
+  describeOpenHandles,
+  openChildren,
+  openTimers,
+  testsThatLeftTimers,
+  trackTimers,
+} from './support/open-handles.js';
 import { pixelPng, readPng, solidPng } from './support/png.js';
 import { REAL_ENGINE_VARIABLE, rendererLessEngine } from './support/renderer-less-engine.js';
 import {
@@ -870,6 +877,17 @@ import {
   sweepingFor,
 } from './support/sweep.js';
 import { WINDOWS_ASK_STAND_IN } from './support/windows-ask-stand-in.js';
+
+/**
+ * A pause that does not hold the process. The test running holds it through its deadline timer, so
+ * a pause nothing waits on any more, the loser of a race against a child's exit, must not keep the
+ * run alive for the rest of its time.
+ */
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((done) => {
+    setTimeout(done, milliseconds).unref();
+  });
+}
 
 /**
  * Runs [param run] with a bridge port held by something else, handed to it to configure a server
@@ -116497,6 +116515,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAParkedLaneEndsWhenTheRunFails,
   testAMarkNotTakenStillLetsTheRunFallToTheLanesTold,
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
+  testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
+  testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testAnEngineFinishingItsShareTakesTheNextInTheSameProcess,
@@ -116858,6 +116878,7 @@ const TESTS: (() => void | Promise<void>)[] = [
  * fixture can be run on its own while it is being written.
  */
 async function main(): Promise<void> {
+  trackTimers();
   const named = regressionsNamedOnTheCommandLine();
   if (named === null) {
     return;
@@ -116900,12 +116921,37 @@ async function main(): Promise<void> {
   recordEnginesLeftRunning(await endEnginesLeft(), failed);
 
   await reportUnswept();
+  await failTheTestsThatLeftTimers(failed);
 
   if (failed.length > 0 || unreached.length > 0) {
     reportRegressionFailures({ run, unreached, chosenCount: chosen.length });
-    return;
+  } else {
+    console.log(`regression tests passed (${chosen.length})`);
   }
-  console.log(`regression tests passed (${chosen.length})`);
+  // Whatever a test left referenced would keep this process, and the job waiting on it, alive past
+  // the last line. The handles are named above, so the exit costs the next reader nothing.
+  process.exit(process.exitCode ?? 0);
+}
+
+/**
+ * Names what is still open once every test is done and fails each test that left a timer, since a
+ * timer nobody cleared holds the process after the last line and the job after it. Children the
+ * run started are named too, without failing anyone.
+ */
+async function failTheTestsThatLeftTimers(failed: string[]): Promise<void> {
+  const timers = openTimers();
+  const children = await openChildren();
+  if (timers.length + children.length > 0) {
+    console.error(`${timers.length + children.length} still open at the end of the run:`);
+    for (const line of describeOpenHandles([...timers, ...children])) {
+      console.error(line);
+    }
+  }
+  for (const name of testsThatLeftTimers(timers)) {
+    if (!failed.includes(name)) {
+      failed.push(name);
+    }
+  }
 }
 
 /** One test of the list, as the runner takes it. */
@@ -116994,6 +117040,50 @@ function saidOfAFailure(error: unknown): string | undefined {
       : String(error);
 }
 
+/** A timer a test leaves running is named at the end of the run, with the test that set it. */
+async function testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt(): Promise<void> {
+  const mine = 'testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt';
+  const left = setTimeout(() => undefined, 60_001);
+  const quiet = setTimeout(() => undefined, 60_002);
+  quiet.unref();
+  const cleared = setTimeout(() => undefined, 60_003);
+  clearTimeout(cleared);
+  const repeating = setInterval(() => undefined, 60_004);
+  const mineNow = (): { what: string; during: string | null }[] =>
+    openTimers().filter((timer) => /^(timeout|interval) of 6000[1-4]ms$/.test(timer.what));
+  assert.deepEqual(mineNow(), [
+    { what: 'timeout of 60001ms', during: mine },
+    { what: 'interval of 60004ms', during: mine },
+  ]);
+  assert.deepEqual(testsThatLeftTimers(mineNow()), [mine]);
+  assert.deepEqual(testsThatLeftTimers([{ what: 'timeout of 5ms', during: null }]), ['the end of the run']);
+  clearTimeout(left);
+  clearInterval(repeating);
+  assert.deepEqual(mineNow(), [], 'a timer cleared is no longer open');
+  const fired = new Promise<void>((done) => setTimeout(done, 5));
+  await fired;
+  assert.deepEqual(
+    openTimers().filter((timer) => timer.what === 'timeout of 5ms'),
+    [],
+    'a timer that fired is no longer open',
+  );
+}
+
+/** A process a test leaves running is listed at the end of the run, dated to the test that started it. */
+async function testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt(): Promise<void> {
+  const mine = 'testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt';
+  const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  try {
+    // The listing leaves out what started in the second before it asked.
+    await delay(1_500);
+    const listed = (await openChildren()).filter((open) => open.what.startsWith(`process ${child.pid} `));
+    assert.equal(listed.length, 1, 'the process left running is listed');
+    assert.equal(listed[0]?.during, mine);
+  } finally {
+    child.kill();
+  }
+}
+
 /** Every slot variable the sources read is one a fixture starts without. */
 function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
   const named = new Set<string>();
@@ -117015,6 +117105,10 @@ async function runOneRegression(test: RegressionCase, run: RegressionRun): Promi
   const { failed, ranPast, deadlineMs, budgetMs, runEnds } = run;
   withTheSuitesOwnSlotVariables();
   sweepingFor(test.name);
+  // Said before the test runs, since a job that never ends keeps no log and the live page is all
+  // that names the test it was in.
+  console.log(`start ${test.name}`);
+  const endWindow = beginWindow(test.name);
   let passed = true;
   const began = Date.now();
   const allowedMs = Math.min(deadlineMs, runEnds - began);
@@ -117045,6 +117139,7 @@ async function runOneRegression(test: RegressionCase, run: RegressionRun): Promi
     console.error(`\n${test.name} failed\n${saidOfAFailure(error)}\n`);
   } finally {
     clearTimeout(deadline);
+    endWindow();
   }
   // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing,
   // and so the weights the parts are split by (test/support/shards.ts) can be read off a run.

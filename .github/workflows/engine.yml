@@ -65,8 +65,19 @@ jobs:
       # the run is given twenty minutes, names what it was running and never reached when they
       # run out, and ends itself; the step's limit after that keeps the log of a run so stuck it
       # cannot, and the job's leaves the steps before it their time. A part takes about twelve.
+      # On Windows the runner ends a step by walking the process tree from outside, and a step
+      # past its limit has stayed in progress until the job was cut off, with no log. `timeout`
+      # ends the run from outside its event loop a minute before that limit, so the step finishes
+      # on its own and its log is kept. The other platforms end a step cleanly and have no
+      # `timeout` to rely on.
       - name: Regressions that need the engine
-        run: bun run test:regressions
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            timeout --kill-after=30s 21m bun run test:regressions
+          else
+            bun run test:regressions
+          fi
         timeout-minutes: 22
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
@@ -110,10 +121,18 @@ jobs:
         run: bun run build
 
       # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
-      # again here, where a skip is a failure.
+      # again here, where a skip is a failure. The limits of this step and the next two sit inside
+      # the job's, and `timeout` ends the run on Windows before the runner has to, which keeps its
+      # log as the regressions step does. Together the two editor steps need about seven minutes.
       - name: Bridge integration test with the engine
         if: matrix.part == 'editor fixtures'
-        run: bun run test:integration
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            timeout --kill-after=30s 5m bun run test:integration
+          else
+            bun run test:integration
+          fi
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 
@@ -122,13 +141,26 @@ jobs:
       # checks alone, which a tool answering plausible nonsense passes as well as a working one.
       - name: Editor fixtures
         if: matrix.part == 'editor fixtures' && !cancelled()
-        run: bun run test:editor
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            timeout --kill-after=30s 12m bun run test:editor
+          else
+            bun run test:editor
+          fi
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 
+      # Windows runs this in about twelve minutes of the job's twenty.
       - name: Engine fixtures
         if: matrix.part == 'engine fixtures'
-        run: bun run test:engine
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            timeout --kill-after=30s 17m bun run test:engine
+          else
+            bun run test:engine
+          fi
         env:
           # The suite skips when it cannot run Godot, which is right on a contributor's machine
           # and wrong here: without this a broken install would read as a pass.
