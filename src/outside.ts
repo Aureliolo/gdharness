@@ -260,22 +260,25 @@ function sentSpecOf(value: unknown): SentSpec | null {
   };
 }
 
-/** What the launcher handed back: the pid of what it started, or why it could not. */
-type Launched = { readonly pid: number } | { readonly error: string };
+/**
+ * What the launcher handed back: the pid of what it started and, for a run a keeper holds, the
+ * keeper's own, or why it could not start.
+ */
+type Launched = { readonly pid: number; readonly keeperPid?: number } | { readonly error: string };
 
 /** Beside the bundle that imports this, which is where the build puts it. */
 export const KEEPER_SCRIPT = fileURLToPath(new URL('./keeper.js', import.meta.url));
 
-/** The one line a launcher or a keeper hands back up: `pid N`, or `error` and why. */
+/** The one line a launcher or a keeper hands back up: `pid N`, `pid N keeper M`, or `error` and why. */
 export function readLaunched(printed: string): Launched {
   const line =
     printed
       .split('\n')
       .find((one) => one.trim() !== '')
       ?.trim() ?? '';
-  const pid = /^pid (\d+)$/.exec(line);
+  const pid = /^pid (\d+)(?: keeper (\d+))?$/.exec(line);
   if (pid?.[1] !== undefined) {
-    return { pid: Number(pid[1]) };
+    return { pid: Number(pid[1]), ...(pid[2] === undefined ? {} : { keeperPid: Number(pid[2]) }) };
   }
   return { error: line.replace(/^error /, '') || 'the launcher said nothing' };
 }

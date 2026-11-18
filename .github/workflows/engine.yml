@@ -65,8 +65,13 @@ jobs:
       # the run is given twenty minutes, names what it was running and never reached when they
       # run out, and ends itself; the step's limit after that keeps the log of a run so stuck it
       # cannot, and the job's leaves the steps before it their time. A part takes about twelve.
+      # On Windows the runner ends a step by walking the process tree from outside, and a step
+      # past its limit has stayed in progress until the job was cut off, with no log. The script
+      # ends the run from outside its event loop a minute before that limit, so the step finishes
+      # on its own and its log is kept. It is not a shell's `timeout`, since that needs a Git Bash
+      # step, and the tests of unreadable and held files failed under one on Windows.
       - name: Regressions that need the engine
-        run: bun run test:regressions
+        run: bun scripts/run-limited.ts 21 bun run test:regressions
         timeout-minutes: 22
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
@@ -110,10 +115,12 @@ jobs:
         run: bun run build
 
       # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
-      # again here, where a skip is a failure.
+      # again here, where a skip is a failure. The limits of this step and the next two sit inside
+      # the job's, and the script ends the run before the runner has to, which keeps its log as the
+      # regressions step does. Together the two editor steps need about seven minutes.
       - name: Bridge integration test with the engine
         if: matrix.part == 'editor fixtures'
-        run: bun run test:integration
+        run: bun scripts/run-limited.ts 5 bun run test:integration
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 
@@ -122,13 +129,14 @@ jobs:
       # checks alone, which a tool answering plausible nonsense passes as well as a working one.
       - name: Editor fixtures
         if: matrix.part == 'editor fixtures' && !cancelled()
-        run: bun run test:editor
+        run: bun scripts/run-limited.ts 12 bun run test:editor
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 
+      # Windows runs this in about twelve minutes of the job's twenty.
       - name: Engine fixtures
         if: matrix.part == 'engine fixtures'
-        run: bun run test:engine
+        run: bun scripts/run-limited.ts 17 bun run test:engine
         env:
           # The suite skips when it cannot run Godot, which is right on a contributor's machine
           # and wrong here: without this a broken install would read as a pass.

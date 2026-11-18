@@ -770,6 +770,65 @@ half the processors the machine offers, rounded down, held to the physical memor
 `--engines` for the lanes its run begins on, and names a lanes file where the run may grow. It
 passes the machine's directory and count for the slots.
 
+### A command that grants the slots
+
+Where `GODOT_ENGINE_SLOT_COMMAND` holds a command line, such as
+`/opt/venv/bin/python -m queue --grant`, a machine has one scheduler and gdharness asks it for every
+slot it would take. gdharness then makes, reads and removes nothing in the slots directory for that
+take. Unset, nothing changes. The variable is read at each take.
+
+The command is started without a shell, hidden, with `--project <absolute project path>` and
+`--kind gate|side|one-off|game` added. A take with no project passes no `--project`, as an engine step
+of a command that has not named its project yet does. The line is split on white space outside
+double quotes, with the quotes taken out.
+
+- `gate` is a take inside a gate. `side` is work the machine's queue runs, a timing or a tier. Every
+  other take is a `one-off`. A game that `editor_run` starts is a `game`, played or kept.
+- The command's first line on standard output is `held <absolute lock path>` once the slot is
+  granted, or `refused <reason>`. gdharness waits for it as long as it would wait for a slot, and
+  stops at the call's deadline or cancellation. A command that cannot grant at once may print
+  `queued` on a line of its own first, the moment it knows, and `held` once the slot is granted.
+  A start that waits for its one slot ignores `queued`.
+- The engine starts with `GODOT_ENGINE_HELD` set to that path.
+- A refusal, an exit before the first line, a first line in neither form and a command that will
+  not start each fail the start. The answer names the command and what it printed or its exit, as
+  one line and a non-zero exit, because the scheduler's answer is not a fault of gdharness.
+  gdharness never falls back to taking a slot itself.
+- The command keeps the slot until its standard input ends. gdharness closes it once the engine has
+  gone, or the take is let go for any other reason, a cancelled wait included. A gdharness that is
+  killed closes it too, except on Windows, where the system ends the command with gdharness instead
+  (every child that is not detached is in a job that ends it with its parent), so it never reads the
+  end of its input and must free the slot when it is ended. gdharness waits 5 seconds for the
+  command to exit, then ends it.
+- A command that exits after printing `held` no longer holds the slot. Before the engine starts,
+  the start fails and the answer names the command, its exit and what it printed. While the engine
+  runs, the engine is left running and the call's answer carries an `engineSlotNote` with the same
+  facts.
+- A game that outlives the call is handed on. gdharness writes `hand <pid> <start>` to the command
+  and waits for the line `handed` and an exit with code 0. `<pid>` is the keeper that holds a kept
+  game, or the game's process where the editor played it, and `<start>` is that process's start time
+  in milliseconds since the epoch. The command keeps the slot until that process has gone, and
+  gdharness does not close its input as a release afterwards. A command that answers otherwise, or
+  does not exit within 5 seconds, fails the hand. The slot is then given back by closing the
+  command's input, and nothing else. The answer of the call, an `editor_run` that played the game
+  included, carries an `engineSlotNote` naming what the command printed and its exit. gdharness never
+  makes, rewrites or removes a lock file of the command's.
+- A take under an inherited `GODOT_ENGINE_HELD` calls nothing, as without the command.
+
+A take cannot ask for a slot that is free now. `gdharness test` and `spread` therefore ask the
+command for the slot of every lane at once, and start on the grants that have come within 2
+seconds. A grant with no `queued` before it is a free slot however late it answers: it joins a lane
+that still has work, and is given back when none has. A queued request is a busy slot. With every
+slot granted, each lane runs what it was dealt. Otherwise the suites are handed out a share at a
+time to whichever engine is granted and free, as with busy slots. A request the command refuses
+costs the run that lane only, and a run none of whose requests is granted fails with the reason.
+Every request still open prints the usual wait line naming the command, and a run with no grant
+at all waits as it would for its first slot. A queued request whose run has dealt all its work is
+withdrawn by closing the command's input before `held`, which leaves no holder. A `held` that
+arrives after the work was dealt is given back by closing the input, as any release. The waiting
+marks and the memory marks of the steps below belong to taking slots yourself and are not written. A
+lock that names this process still has the engine written into it.
+
 ### Taking a slot from your own tool
 
 A tool of a game's own that starts engines takes slots the same way, in the steps below.

@@ -177,6 +177,8 @@ export interface GodotProcess {
    * game, which frees it by ending. Given back unhanded when the start's wait ends with no tie.
    */
   slot?: CallSlot;
+  /** The hand of {@link slot} to the game, which the start waits for so that a failure is in its answer. */
+  slotHanded?: Promise<void>;
   /**
    * For a run the editor plays, whether the editor has yet reported it as playing: in its answer
    * to the play, or to a later question. Until it has, the editor saying "not playing" is a play

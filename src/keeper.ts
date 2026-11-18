@@ -322,7 +322,11 @@ async function launch(): Promise<void> {
       return;
     }
     const launched = readLaunched(printed);
-    process.stdout.write('pid' in launched ? `pid ${launched.pid}\n` : `error ${launched.error}\n`);
+    process.stdout.write(
+      'pid' in launched
+        ? `pid ${launched.pid}${launched.keeperPid === undefined ? '' : ` keeper ${launched.keeperPid}`}\n`
+        : `error ${launched.error}\n`,
+    );
     keeper.unref();
     process.exit(0);
   });
@@ -529,7 +533,7 @@ async function sayPid(pid: number): Promise<void> {
     process.stdout.once('error', () => {
       resolve();
     });
-    process.stdout.end(`pid ${pid}\n`, resolve);
+    process.stdout.end(`pid ${pid} keeper ${process.pid}\n`, resolve);
   });
 }
 

@@ -41,8 +41,10 @@ import {
   type CallNotes,
   type CallProgress,
   callNotes,
+  callNotesSaid,
   callProgress,
   callSignal,
+  newCallNotes,
   type SlotWaits,
   stillGoingSaid,
   withCallSignal,
@@ -151,7 +153,15 @@ import {
   runEngine,
   startedUntilItRuns,
 } from './engine-run.js';
-import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
+import {
+  handedRunSlot,
+  handSlotToKeeper,
+  keeperSlotOf,
+  onTheSlot,
+  settledRunSlot,
+  slotEngineNamed,
+  slotForCall,
+} from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -1004,18 +1014,6 @@ function restartsOf(run: GodotProcess): RestartNamed[] | undefined {
  * this, the run was reported over with the first process's clean exit, and nothing could stop the
  * successor, which once sat on a hidden desktop for hours holding a file a later export needed.
  */
-/**
- * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending. The
- * slot is given back when the game's start cannot be read or the lock is no longer this server's
- * to hand.
- */
-async function handToTheGame(slot: CallSlot, pid: number, projectPath: string | null): Promise<void> {
-  const started = (await startTimesOf([pid])).get(pid);
-  const by = `a game${projectPath === null ? '' : ` of ${projectPath}`} the editor played for editor_run`;
-  if (started === undefined || !slot.handTo({ pid, started, by })) {
-    slot.release();
-  }
-}
 
 function followTheRestart(run: GodotProcess): boolean {
   if (run.throughEditor || run.pid === null || run.projectPath === null) {
@@ -6264,7 +6262,7 @@ class GodotServer {
       const call = this.callsTaken++;
       this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
-      const notes: CallNotes = { classList: new Set() };
+      const notes = newCallNotes();
       try {
         const answered = await withCallSignal(
           ctx.mcpReq.signal,
@@ -6495,9 +6493,8 @@ class GodotServer {
 
   /** [param answer] with what the code below its call noted for it in [param notes]. */
   private withCallNotes(answer: ToolResponse, notes: CallNotes): ToolResponse {
-    return notes.classList.size === 0
-      ? answer
-      : this.saying(answer, { classListNote: [...notes.classList].join(' ') });
+    const said = callNotesSaid(notes);
+    return Object.keys(said).length === 0 ? answer : this.saying(answer, said);
   }
 
   /**
@@ -14632,10 +14629,7 @@ class GodotServer {
     // A game that did not announce inside the wait is tied later or never, and nothing ends a lock
     // naming this server until it goes, so the slot is given back rather than held for a run it
     // cannot see end.
-    if (played.slot !== undefined) {
-      played.slot.release();
-      delete played.slot;
-    }
+    await settledRunSlot(played, callSignal());
     return this.jsonTextResponse({
       started: true,
       through: 'editor',
@@ -15585,7 +15579,7 @@ class GodotServer {
           ...this.servedBy(),
           ...this.profileOfAKeptRun(profile, engineCalls),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
-          slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
+          ...keeperSlotOf(slot, `a game of ${projectPath} editor_run started`),
         },
         ...(desktop === undefined ? {} : { desktop }),
       });
@@ -15595,6 +15589,9 @@ class GodotServer {
     }
     if ('error' in launched) {
       slot.release();
+    } else if (slot.delegated) {
+      // The keeper outlives the game's first process and follows its restarts, so it holds the slot.
+      await handSlotToKeeper(slot, launched.keeperPid, projectPath);
     } else {
       slot.leave();
     }
@@ -16049,11 +16046,7 @@ class GodotServer {
   private tie(run: GodotProcess, endpoint: RuntimeEndpoint): void {
     run.announcedPid = endpoint.pid;
     this.noteBootOf(run, endpoint);
-    const slot = run.slot;
-    if (slot !== undefined) {
-      delete run.slot;
-      void handToTheGame(slot, endpoint.pid, run.projectPath);
-    }
+    handedRunSlot(run, endpoint.pid);
   }
 
   /**

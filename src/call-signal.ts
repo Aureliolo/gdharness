@@ -32,6 +32,21 @@ export interface SlotWaits {
  */
 export interface CallNotes {
   readonly classList: Set<string>;
+  /** What the slot command said of a slot it lost or would not hand on. */
+  readonly slotNotes: Set<string>;
+}
+
+/** Notes with nothing in them, for a call that has found nothing yet. */
+export function newCallNotes(): CallNotes {
+  return { classList: new Set(), slotNotes: new Set() };
+}
+
+/** The members a call's answer carries for what its code found: none where it found nothing. */
+export function callNotesSaid(notes: CallNotes): Record<string, string> {
+  return {
+    ...(notes.classList.size === 0 ? {} : { classListNote: [...notes.classList].join(' ') }),
+    ...(notes.slotNotes.size === 0 ? {} : { engineSlotNote: [...notes.slotNotes].join(' ') }),
+  };
 }
 
 interface Call {
@@ -118,6 +133,27 @@ function risingOnly(progress: CallProgress): CallProgress {
     last = number > last ? number : last + 1;
     progress(last, message);
   };
+}
+
+/** Waits for [param work], or until [param signal] aborts, whichever comes first. */
+export async function waitedUnlessAborted(
+  work: Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) {
+    await work;
+    return;
+  }
+  let onAbort: () => void = () => undefined;
+  const aborted = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([work, aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /** The signal of the call being answered, or undefined outside one. */
