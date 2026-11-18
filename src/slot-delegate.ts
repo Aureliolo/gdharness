@@ -16,6 +16,7 @@
  */
 
 import { isAbsolute, resolve } from 'node:path';
+import { Refusal } from './errors.js';
 import { commandLineWords } from './launch.js';
 import { type ChildProcess, spawnHidden } from './spawn.js';
 
@@ -274,12 +275,12 @@ export class CommandAnswers {
   }
 
   /** The error for [param first], the command's first line or null for none, which gave no grant. */
-  failureOf(command: string, first: string | null): Error {
+  failureOf(command: string, first: string | null): Refusal {
     const said = (what: string): string => `The engine slot command \`${command}\` ${what}`;
     const exited = this.exitSaid();
     const written = this.writtenSaid();
     if (first === null) {
-      return new Error(
+      return new Refusal(
         said(
           this.startError === undefined
             ? `exited before it answered.${this.describe()}`
@@ -290,11 +291,11 @@ export class CommandAnswers {
     const refused = /^refused(?: (.*))?$/.exec(first);
     if (refused !== null) {
       const why = refused[1]?.trim();
-      return new Error(
+      return new Refusal(
         said(`refused the slot: ${why === undefined || why === '' ? 'no reason given' : why}.${exited}`),
       );
     }
-    return new Error(
+    return new Refusal(
       said(
         `answered with a first line in neither form, \`held <absolute lock path>\` nor \`refused <reason>\`: ${JSON.stringify(printedSaid(first))}.${exited}${written}`,
       ),
@@ -308,7 +309,7 @@ function startedCommand(command: string, program: string, args: readonly string[
     return spawnHidden(program, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (error) {
     // A runtime that reports a missing program by throwing rather than by an error event.
-    throw new Error(
+    throw new Refusal(
       `The engine slot command \`${command}\` could not be started: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
@@ -365,7 +366,7 @@ export async function askForSlot(request: SlotRequest): Promise<SlotGrant> {
   const { command, kind, project, signal } = request;
   const [program, ...given] = commandLineWords(command);
   if (program === undefined) {
-    throw new Error(`${SLOT_COMMAND_VARIABLE} holds no command.`);
+    throw new Refusal(`${SLOT_COMMAND_VARIABLE} holds no command.`);
   }
   signal?.throwIfAborted();
   const args = [...given, ...(project === undefined ? [] : ['--project', resolve(project)]), '--kind', kind];
@@ -384,7 +385,7 @@ export async function askForSlot(request: SlotRequest): Promise<SlotGrant> {
     await Promise.race([answers.gone, new Promise((settled) => setTimeout(settled, GRANT_SETTLE_MS))]);
     const lost = grant.lostSaid();
     if (lost !== null) {
-      throw new Error(lost);
+      throw new Refusal(lost);
     }
     if (signal?.aborted === true) {
       // Cancelled while the grant settled: given back, since the caller will not take it.

@@ -791,7 +791,8 @@ double quotes, with the quotes taken out.
   A start that waits for its one slot ignores `queued`.
 - The engine starts with `GODOT_ENGINE_HELD` set to that path.
 - A refusal, an exit before the first line, a first line in neither form and a command that will
-  not start each fail the start. The answer names the command and what it printed or its exit.
+  not start each fail the start. The answer names the command and what it printed or its exit, as
+  one line and a non-zero exit, because the scheduler's answer is not a fault of gdharness.
   gdharness never falls back to taking a slot itself.
 - The command keeps the slot until its standard input ends. gdharness closes it once the engine has
   gone, or the take is let go for any other reason, a cancelled wait included. A gdharness that is
@@ -815,15 +816,18 @@ double quotes, with the quotes taken out.
 - A take under an inherited `GODOT_ENGINE_HELD` calls nothing, as without the command.
 
 A take cannot ask for a slot that is free now. `gdharness test` and `spread` therefore ask the
-command for the slot of every lane at once. A grant with no `queued` before it is a free slot
-however late it answers, and the run waits for it. A queued request is a busy slot, which the run's
-start does not wait for. With every slot free, each lane runs what it was dealt. With a queued
-request, the suites are handed out a share at a time to whichever engine is granted and free, as
-with busy slots. A queued request whose run has dealt all its work is withdrawn by closing the
-command's input before `held`, which leaves no holder. A `held` that arrives after the work was
-dealt is given back by closing the input, as any release. The waiting marks and the memory marks of
-the steps below belong to taking slots yourself and are not written. A lock that names this process
-still has the engine written into it.
+command for the slot of every lane at once, and start on the grants that have come within 2
+seconds. A grant with no `queued` before it is a free slot however late it answers: it joins a lane
+that still has work, and is given back when none has. A queued request is a busy slot. With every
+slot granted, each lane runs what it was dealt. Otherwise the suites are handed out a share at a
+time to whichever engine is granted and free, as with busy slots. A request the command refuses
+costs the run that lane only, and a run none of whose requests is granted fails with the reason.
+Every request still open prints the usual wait line naming the command, and a run with no grant
+at all waits as it would for its first slot. A queued request whose run has dealt all its work is
+withdrawn by closing the command's input before `held`, which leaves no holder. A `held` that
+arrives after the work was dealt is given back by closing the input, as any release. The waiting
+marks and the memory marks of the steps below belong to taking slots yourself and are not written. A
+lock that names this process still has the engine written into it.
 
 ### Taking a slot from your own tool
 

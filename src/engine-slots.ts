@@ -1230,6 +1230,8 @@ export class EngineSlots {
   private readonly inheriting = new Turns();
   /** The slots a delegate command granted this process and still holds, by lock: {@link slotCommandOf}. */
   private readonly delegated = new Map<string, SlotGrant>();
+  /** When a wait for a grant was last said, so that asks waiting together say it once. */
+  private delegateSaidAt = Number.NEGATIVE_INFINITY;
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
   drawn: SlotsDrawn = { numbers: [] };
   private saidAt = Number.NEGATIVE_INFINITY;
@@ -1389,7 +1391,9 @@ export class EngineSlots {
       note: (waitedMs) => {
         if (waiting !== undefined) {
           waiting(waitedMs);
-        } else if (this.say !== undefined && this.delegated.size === 0) {
+        } else if (this.say !== undefined && Date.now() - this.delegateSaidAt >= WAIT_SAID_MS / 2) {
+          // Every ask outstanding notes on the same schedule, and one line says it for them all.
+          this.delegateSaidAt = Date.now();
           this.say(delegateWaitSaid(waitedMs, command));
         }
       },

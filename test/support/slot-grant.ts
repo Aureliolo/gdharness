@@ -38,7 +38,9 @@ const claimedFirst = (): boolean => {
 };
 const perStart = process.env['GRANT_LATE_MS'] !== undefined;
 const first = !perStart || claimedFirst();
+// `GRANT_LATE_SAY` is what a late start prints in place of its `held` line.
 const said =
+  (first ? undefined : process.env['GRANT_LATE_SAY']) ??
   process.env['GRANT_SAY'] ??
   `held ${process.env['GRANT_LOCK'] ?? ''}${perStart ? `.${String(process.pid)}` : ''}`;
 const wait =

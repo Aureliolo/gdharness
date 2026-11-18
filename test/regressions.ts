@@ -80601,6 +80601,8 @@ interface GrantAnswer {
   readonly lateMs?: number;
   /** Prints `queued` before waiting, in a late start only where `lateMs` is set. */
   readonly queued?: boolean;
+  /** What a late start prints in place of `held`. */
+  readonly lateSay?: string;
   /** A command line in place of the stand-in's. */
   readonly command?: string;
 }
@@ -80640,6 +80642,7 @@ async function withASlotCommand<T>(
     GRANT_EXIT_AFTER_MS: grantNumber(answer.exitAfterMs),
     GRANT_LATE_MS: grantNumber(answer.lateMs),
     GRANT_QUEUED: grantFlag(answer.queued, '1'),
+    GRANT_LATE_SAY: answer.lateSay,
   };
   const restore = settingEnvironment(set);
   const entries = (): GrantEntry[] =>
@@ -81573,28 +81576,134 @@ async function testAQueuedGrantDoesNotHoldARunUp(): Promise<void> {
 }
 
 /**
- * A grant with no `queued` before it is a free slot however late it comes, so the run waits for it
- * and starts every lane on its own, as it does with free slots on the slots folder.
+ * A grant with no `queued` before it is a free slot however late it comes. The run starts on the
+ * grants it holds without waiting for it, and the late grant joins the lane that asks for it, or
+ * is given back when none does. A command that never answers holds up no start either.
  */
-async function testAGrantThatWasNotQueuedIsAFreeSlotHoweverLate(): Promise<void> {
-  await withASlotCommand({ lateMs: 2500 }, async (command) => {
+async function testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart(): Promise<void> {
+  await withASlotCommand({ lateMs: 6000 }, async (command) => {
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
     });
-    const said: string[] = [];
     const began = Date.now();
-    const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
-    assert.ok(Date.now() - began >= 2000, 'the run waited for the slow grant');
-    assert.equal(started.taken.length, 2, 'both lanes start on a grant');
-    assert.equal(started.shared, false);
-    assert.deepEqual(said, []);
-    for (const lock of started.taken) {
-      slots.release(lock);
-    }
+    const started = await takenLanes(twoLanesOn(slots), () => undefined);
+    assert.ok(
+      Date.now() - began < 5000,
+      `the start waited for the late grant: ${String(Date.now() - began)} ms`,
+    );
+    assert.equal(started.taken.length, 1, 'the run starts on the grant it holds');
+    assert.equal(started.shared, true);
+    const joined = await started.granted?.slots.take();
+    assert.notEqual(joined, undefined, 'the late grant joins the lane that asks for it');
+    assert.notEqual(joined, started.taken[0]);
+    slots.release(joined ?? '');
+    slots.release(started.taken[0] ?? '');
     started.granted?.end();
     await untilCount(command, 'eof', 2);
   });
+  await withASlotCommand({ lateMs: 6000 }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    const started = await takenLanes(twoLanesOn(slots), () => undefined);
+    // No lane asks for it before the work is done, so it is given back unused.
+    started.granted?.end();
+    slots.release(started.taken[0] ?? '');
+    await untilCount(command, 'eof', 2);
+  });
+  await withASlotCommand({ say: '' }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    const began = Date.now();
+    const started = await takenLanes(twoLanesOn(slots), () => undefined);
+    assert.ok(Date.now() - began < 6000, 'a command that never answers does not hold the start');
+    assert.equal(started.taken.length, 0);
+    started.granted?.end();
+    await untilCount(command, 'eof', 2);
+  });
+}
+
+/** While an ask is outstanding the run says what it waits for, though it holds a grant already. */
+async function testAnOutstandingAskSaysItsWaitWhileAGrantIsHeld(): Promise<void> {
+  await withASlotCommand({ lateMs: 30_000 }, async (command) => {
+    const lines: string[] = [];
+    const slots = new EngineSlots(
+      join(command.directory, 'slots'),
+      2,
+      { pid: process.pid, started: await ownStart() },
+      (line) => lines.push(line),
+    );
+    const held = await slots.take();
+    const over = new AbortController();
+    const waiting = slots.take(over.signal);
+    waiting.catch(() => undefined);
+    const until = Date.now() + 8000;
+    while (lines.length === 0 && Date.now() < until) {
+      await delay(100);
+    }
+    over.abort();
+    slots.release(held);
+    assert.match(lines.join('\n'), /Waiting \d+ s so far for an engine slot from `.*slot-grant\.ts/);
+    await untilCount(command, 'eof', 2);
+  });
+}
+
+/**
+ * A command that queues a request and then refuses it takes one lane from the run, not the run:
+ * the lane waits for the end of the hand-out without a slot. A run whose every ask is refused
+ * fails with the command's reason, as the error type the CLI and the tool answers print as itself.
+ */
+async function testARefusedLaneIsALaneTheRunDoesNotGet(): Promise<void> {
+  await withASlotCommand({ lateMs: 300, queued: true, lateSay: 'refused busy' }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    const started = await takenLanes(twoLanesOn(slots), () => undefined);
+    assert.equal(started.taken.length, 1);
+    const over = new AbortController();
+    const lane = started.granted?.slots.take(over.signal);
+    assert.notEqual(lane, undefined);
+    const outcome = await Promise.race([
+      lane?.then(
+        () => 'granted',
+        () => 'rejected',
+      ),
+      delay(1500).then(() => 'waiting'),
+    ]);
+    assert.equal(outcome, 'waiting', 'the refused lane waits for the end of the hand-out');
+    over.abort(new Error('handed out'));
+    await assert.rejects(async () => await lane, /handed out/);
+    slots.release(started.taken[0] ?? '');
+    started.granted?.end();
+  });
+  await withASlotCommand({ say: 'refused no room' }, async (command) => {
+    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
+      pid: process.pid,
+      started: await ownStart(),
+    });
+    await assert.rejects(
+      async () => await takenLanes(twoLanesOn(slots), () => undefined),
+      (error: unknown) => error instanceof Refusal && error.message.includes('refused the slot: no room'),
+    );
+    await assert.rejects(
+      async () => await slotForCall(false),
+      (error: unknown) => error instanceof Refusal && error.message.includes('refused the slot: no room'),
+    );
+  });
+  for (const answer of [{ say: 'gibberish' }, { say: '', exit: 0 }]) {
+    await withASlotCommand(answer, async () => {
+      await assert.rejects(
+        async () => await slotForCall(false),
+        (error: unknown) => error instanceof Refusal,
+        `${JSON.stringify(answer)} is the scheduler's doing, not a defect`,
+      );
+    });
+  }
 }
 
 /** A start that waits for its one slot ignores `queued` and waits for the grant as it does without. */
@@ -116512,7 +116621,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotCommandIsToldAGameIsAGame,
   testARunUnderASlotCommandStartsOnTheGrantsThatCameAtOnce,
   testAQueuedGrantDoesNotHoldARunUp,
-  testAGrantThatWasNotQueuedIsAFreeSlotHoweverLate,
+  testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart,
+  testAnOutstandingAskSaysItsWaitWhileAGrantIsHeld,
+  testARefusedLaneIsALaneTheRunDoesNotGet,
   testAStartForOneSlotIgnoresQueued,
   testAPlayedGamesSlotIsHandedAndSettledByTheServer,
   testAQueuedGrantEndsAGdharnessTestRunWithItsSuites,
