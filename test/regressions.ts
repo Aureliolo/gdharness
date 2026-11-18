@@ -117617,6 +117617,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
+  testADisconnectedLanguageClientLeavesNoTimer,
   testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
@@ -118187,6 +118188,28 @@ async function testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt(): Promis
     openTimers().filter((timer) => timer.what === 'timeout of 5ms'),
     [],
     'a timer that fired is no longer open',
+  );
+}
+
+/**
+ * A disconnected language client leaves no timer. The close waits at most a second for the socket
+ * to end, and a socket that ends at once must take that wait with it, since a ref'd timer left
+ * pending holds the run, and a run that is busy elsewhere reports it as the test's.
+ */
+async function testADisconnectedLanguageClientLeavesNoTimer(): Promise<void> {
+  const mine = 'testADisconnectedLanguageClientLeavesNoTimer';
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      await client.getDiagnostics(join(tmpdir(), 'gdharness-lsp-timer', 'timer.gd'), 'extends Node\n');
+      await client.disconnect();
+      assert.deepEqual(
+        openTimers().filter((timer) => timer.during === mine && timer.what === 'timeout of 1000ms'),
+        [],
+        'the wait for the socket to end is cleared once it has',
+      );
+    },
   );
 }
 

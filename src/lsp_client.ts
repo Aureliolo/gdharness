@@ -301,16 +301,18 @@ export class GodotLSPClient {
     this.forgetOpenDocuments();
 
     await new Promise<void>((resolveClose) => {
-      socketToClose.once('close', () => {
-        resolveClose();
-      });
-      socketToClose.end();
-      setTimeout(() => {
+      // A socket that closes cleanly leaves no timer, since a pending one keeps the process alive.
+      const forceClose = setTimeout(() => {
         if (!socketToClose.destroyed) {
           socketToClose.destroy();
         }
         resolveClose();
       }, 1000);
+      socketToClose.once('close', () => {
+        clearTimeout(forceClose);
+        resolveClose();
+      });
+      socketToClose.end();
     });
 
     const disconnected = new Error('Disconnected from Godot LSP');
