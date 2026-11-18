@@ -844,7 +844,7 @@ import {
 } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
-import { makeWhole, writeWhole } from '../src/whole-file.js';
+import { makeWhole, writeWhole, writeWholeAsync } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import {
@@ -66580,7 +66580,7 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
 
 /**
  * A slot file a reader holds shut is waited on without stopping the process: the read retries on a
- * timer for its second and then refuses, and the loop ticks under 100 ms apart meanwhile. Windows
+ * timer for its second and then refuses, and the loop keeps ticking meanwhile. Windows
  * alone, where an open that shares nothing refuses every other open.
  */
 async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
@@ -66593,31 +66593,29 @@ async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promi
         'lanes',
       );
     },
+    true,
   );
 }
+
+/** The widest gap between ticks a held note may cost the loop. */
+const HELD_NOTE_WIDEST_GAP_MS = 400;
 
 /**
  * Holds the note that [param noteIn] places in a scratch project shut for 3 s from a hidden child
  * that shares nothing, calls [param call] with the project and the note, and asserts the process
- * keeps ticking under 100 ms apart for as long as the call waits its second. Windows alone, and only
- * once the processor has been quiet for 30 s, since the limit is a time.
+ * keeps ticking while the call waits its second. A block on the loop lasts the whole second, so the
+ * widest gap is held under {@link HELD_NOTE_WIDEST_GAP_MS}, which a loaded machine's stalls stay
+ * well below, so no quiet processor is waited for. A call that [param refuses] must throw once the second
+ * is spent. Windows alone.
  */
 async function aNoteHeldShutLeavesTheLoopRunning(
   what: string,
   noteIn: (project: string) => string,
   call: (project: string, file: string) => Promise<unknown>,
+  refuses = false,
 ): Promise<void> {
   if (process.platform !== 'win32') {
     console.log(`held ${what} regression ran on Windows alone: elsewhere no open shuts another out`);
-    return;
-  }
-  const busy = await untilTheProcessorIsQuiet();
-  if (busy !== null) {
-    const said = `held ${what} regression skipped: the processor never stayed under 60% for 30 s`;
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error(`${said}, the last busy share was ${String(busy)}`);
-    }
-    console.log(said);
     return;
   }
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-note-'));
@@ -66627,10 +66625,12 @@ async function aNoteHeldShutLeavesTheLoopRunning(
   const reader = await heldOpenByAReader(file, 'ReadWrite', 3000, 'None');
   const loop = await watchTheLoop();
   const began = Date.now();
+  let refusal = '';
   try {
     await call(directory, file);
-  } catch {
+  } catch (error) {
     // A read held shut past its second refuses, and a write answers that it could not land.
+    refusal = errorMessage(error);
   } finally {
     const waited = Date.now() - began;
     const watched = await loop.stop();
@@ -66638,9 +66638,12 @@ async function aNoteHeldShutLeavesTheLoopRunning(
     rmSync(directory, { recursive: true, force: true });
     assert.ok(waited >= 900, `${what} is waited on for its second: ${String(waited)} ms`);
     assert.ok(
-      watched.widest < 100,
+      watched.widest < HELD_NOTE_WIDEST_GAP_MS,
       `the process runs while ${what} is held shut: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
     );
+    if (refuses) {
+      assert.ok(refusal !== '', `${what} held shut past the second refuses the read`);
+    }
   }
 }
 
@@ -66694,6 +66697,97 @@ async function testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess():
   await aNoteHeldShutLeavesTheLoopRunning('the breakpoint note', breakpointNotePath, async (project) => {
     await writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
   });
+}
+
+/**
+ * Runs [param body] with [param file] held by a reader that allows reads and writes but no rename or
+ * removal, for [param forMs]. Windows alone, where a rename over an open file is refused.
+ */
+async function withAHeldNote(
+  file: string,
+  forMs: number,
+  body: (pause: () => Promise<void>) => Promise<void>,
+): Promise<void> {
+  const reader = await heldOpenByAReader(file, 'Read', forMs, 'ReadWrite');
+  try {
+    await body(() => new Promise((settle) => setTimeout(settle, 100)));
+  } finally {
+    await reader.letGo();
+  }
+}
+
+/** A slot given back while an engine is being named in it stays given back. */
+async function testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held slot regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-given-back-'));
+  try {
+    const lock = join(directory, '0.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    await withAHeldNote(lock, 500, async (pause) => {
+      const named = nameSlotEngine(lock, process.pid, { pid: 4242, started: 1 });
+      await pause();
+      giveBackSlot(lock, process.pid);
+      await named;
+    });
+    assert.equal(existsSync(lock), false, 'the lock given back is not made again by the naming');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A breakpoint cleared while an earlier write of the note waits stays cleared. */
+async function testABreakpointClearedWhileAnEarlierWriteWaitsStaysCleared(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held breakpoint note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cleared-'));
+  try {
+    const note = breakpointNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, '{"breakpoints":[]}\n');
+    await withAHeldNote(note, 500, async (pause) => {
+      const written = writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
+      await pause();
+      writeBreakpointNote(project, []);
+      await written;
+    });
+    assert.equal(
+      existsSync(note),
+      false,
+      'the note cleared stays cleared once the earlier write is let through',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** Two writes of one note at once both answer that they landed, the second's text stays and no partial is left. */
+async function testTwoWritesOfOneNoteAtOnceBothLandInOrder(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-two-writes-'));
+  try {
+    const note = join(directory, 'note.json');
+    writeFileSync(note, 'old');
+    const answers: boolean[] = [];
+    await withAHeldNote(note, 500, async (pause) => {
+      const first = writeWholeAsync(note, 'first');
+      await pause();
+      const second = writeWholeAsync(note, 'second');
+      answers.push(await first, await second);
+    });
+    assert.deepEqual(answers, [true, true]);
+    assert.equal(readFileSync(note, 'utf8'), 'second');
+    assert.deepEqual(readdirSync(directory), ['note.json'], 'no partial file is left beside the note');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /** The cut run a reader holds shut is waited on without stopping the process. */
@@ -117746,6 +117840,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testARestartNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack,
+  testABreakpointClearedWhileAnEarlierWriteWaitsStaysCleared,
+  testTwoWritesOfOneNoteAtOnceBothLandInOrder,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess,

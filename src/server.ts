@@ -91,7 +91,7 @@ import {
   withAddonClassesCounted,
   withAddonPathsCounted,
 } from './class-cache.js';
-import { readClassNote, writeClassNote } from './class-note.js';
+import { readClassNote, updateClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
 import {
   type CutTestRun,
@@ -11901,33 +11901,29 @@ class GodotServer {
     projectPath: string,
     classes: readonly string[],
   ): Promise<void> {
-    const note = readClassNote(projectPath);
-    const held = note?.unseenBeforeAnUnfinishedScan;
-    if (classes.length === 0 && held === undefined) {
-      return;
-    }
-    const { unseenBeforeAnUnfinishedScan: _replaced, ...rest } = note ?? { rebuiltWith: [] };
-    await writeClassNote(projectPath, {
-      ...rest,
-      ...(classes.length === 0
-        ? {}
-        : {
-            unseenBeforeAnUnfinishedScan: {
-              editorPid: this.godotBridge.getStatus().editorPid ?? null,
-              classes: [...classes].toSorted(),
-            },
-          }),
+    const editorPid = this.godotBridge.getStatus().editorPid ?? null;
+    await updateClassNote(projectPath, (note) => {
+      if (classes.length === 0 && note?.unseenBeforeAnUnfinishedScan === undefined) {
+        return null;
+      }
+      const { unseenBeforeAnUnfinishedScan: _replaced, ...rest } = note ?? { rebuiltWith: [] };
+      return {
+        ...rest,
+        ...(classes.length === 0
+          ? {}
+          : { unseenBeforeAnUnfinishedScan: { editorPid, classes: [...classes].toSorted() } }),
+      };
     });
   }
 
   /** Records that the editor connected now wrote [param projectPath]'s class cache short. */
   private async noteAShortListEditor(projectPath: string): Promise<void> {
-    const note = readClassNote(projectPath);
-    await writeClassNote(projectPath, {
+    const editorPid = this.godotBridge.getStatus().editorPid ?? null;
+    await updateClassNote(projectPath, (note) => ({
       ...note,
       rebuiltWith: note?.rebuiltWith ?? [],
-      shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null,
-    });
+      shortListEditorPid: editorPid,
+    }));
   }
 
   /**

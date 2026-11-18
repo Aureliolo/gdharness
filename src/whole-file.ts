@@ -40,7 +40,9 @@ function sweepDeadPartials(path: string): void {
   const prefix = `${basename(path)}.`;
   try {
     for (const entry of readdirSync(dirname(path))) {
-      const found = entry.startsWith(prefix) ? /^(\d+)\.partial$/.exec(entry.slice(prefix.length)) : null;
+      const found = entry.startsWith(prefix)
+        ? /^(\d+)(?:\.\d+)?\.partial$/.exec(entry.slice(prefix.length))
+        : null;
       const pid = Number(found?.[1]);
       if (found !== null && pid !== process.pid && !alive(pid)) {
         rmSync(join(dirname(path), entry), { force: true });
@@ -162,29 +164,108 @@ function readAttempt(path: string): Attempt<string | null> {
  * a throw ends it and the run it holds goes on with nobody holding it.
  */
 export function writeWhole(path: string, text: string): boolean {
+  touched(path);
   const partial = stagedBeside(path, text);
-  return partial !== null && waitedOutSync(() => renameAttempt(partial, path));
-}
-
-/** {@link writeWhole} for a caller on the event loop: the wait between tries is a timer. */
-export async function writeWholeAsync(path: string, text: string): Promise<boolean> {
-  const partial = stagedBeside(path, text);
-  return partial !== null && (await waitedOut(() => renameAttempt(partial, path)));
+  try {
+    return partial !== null && waitedOutSync(() => renameAttempt(partial, path));
+  } finally {
+    unstage(partial);
+  }
 }
 
 /**
- * Writes [param text] to the partial file beside [param path], and answers its name, or null when it
- * cannot be written.
+ * {@link writeWhole} for a caller on the event loop: the wait between tries is a timer.
+ *
+ * Writes and removals of one note land in the order they were made, and the last wins. A write that
+ * a later one of this process has overtaken while it waited is dropped and answers true, since the
+ * note holds what the later one said. Without that, a note cleared while an earlier write waited on
+ * a reader came back when the reader let go, and a lock given back was made again.
+ */
+export async function writeWholeAsync(path: string, text: string): Promise<boolean> {
+  const mine = touched(path);
+  const partial = stagedBeside(path, text);
+  try {
+    return (
+      partial !== null &&
+      (await waitedOut(() =>
+        lastTouchOf(path) === mine ? renameAttempt(partial, path) : { done: overtaken(partial) },
+      ))
+    );
+  } finally {
+    unstage(partial);
+  }
+}
+
+/** The latest write or removal of each note this process has begun, by its number. */
+const lastTouch = new Map<string, number>();
+let touchCount = 0;
+
+function touched(path: string): number {
+  touchCount += 1;
+  lastTouch.set(path, touchCount);
+  return touchCount;
+}
+
+function lastTouchOf(path: string): number | undefined {
+  return lastTouch.get(path);
+}
+
+/**
+ * A check, made after an await, that nothing of this process has written or removed [param path]
+ * since this call. For a caller that read the note, waited, and means to act on what it read.
+ */
+export function untouchedSince(path: string): () => boolean {
+  const before = lastTouch.get(path);
+  return () => lastTouch.get(path) === before;
+}
+
+/** The partial files this process has written and not yet renamed or given up, by name. */
+const staged = new Set<string>();
+let stagedCount = 0;
+
+/**
+ * Writes [param text] to a partial file beside [param path] that no other write of this process is
+ * using, and answers its name, or null when it cannot be written. A second write of one note, while
+ * the first waits on a reader, has to stage its text apart: a shared name would hand one write the
+ * other's text and let one's give-up delete the other's.
  */
 function stagedBeside(path: string, text: string): string | null {
-  const partial = `${path}.${process.pid}.partial`;
+  const plain = `${path}.${process.pid}.partial`;
+  let partial = plain;
+  if (staged.has(plain)) {
+    stagedCount += 1;
+    partial = `${path}.${process.pid}.${stagedCount}.partial`;
+  }
   sweepDeadPartials(path);
   try {
     writeFileSync(partial, text, 'utf8');
+    staged.add(partial);
     return partial;
   } catch {
     return null;
   }
+}
+
+function unstage(partial: string | null): void {
+  if (partial !== null) {
+    staged.delete(partial);
+  }
+}
+
+/** Removes [param partial], for a write that is not going to land. */
+function droppedPartial(partial: string): boolean {
+  try {
+    rmSync(partial, { force: true });
+  } catch {
+    // Left behind, and swept with the transcripts once it is old enough.
+  }
+  return false;
+}
+
+/** Drops the partial of a write a later one has overtaken, and answers true: the note holds the later text. */
+function overtaken(partial: string): boolean {
+  droppedPartial(partial);
+  return true;
 }
 
 /** One try at renaming [param partial] over [param path], which a refusal for good ends at once. */
@@ -193,14 +274,7 @@ function renameAttempt(partial: string, path: string): Attempt<boolean> {
     renameSync(partial, path);
     return { done: true };
   } catch (error) {
-    const gaveUp = (): boolean => {
-      try {
-        rmSync(partial, { force: true });
-      } catch {
-        // Left behind, and swept with the transcripts once it is old enough.
-      }
-      return false;
-    };
+    const gaveUp = (): boolean => droppedPartial(partial);
     const code = errorCode(error) ?? '';
     return !HELD_BY_A_READER.has(code) || refusesForGood(path) ? { done: gaveUp() } : { held: gaveUp };
   }
@@ -275,11 +349,13 @@ export function madeInPlace(path: string, text: string): boolean {
  * a removal that landed on such a read names a live holder and keeps its slot for the whole run.
  */
 export function removeWhole(path: string): boolean {
+  touched(path);
   return waitedOutSync(() => removeAttempt(path));
 }
 
 /** {@link removeWhole} for a caller on the event loop: the wait between tries is a timer. */
 export async function removeWholeAsync(path: string): Promise<boolean> {
+  touched(path);
   return await waitedOut(() => removeAttempt(path));
 }
 

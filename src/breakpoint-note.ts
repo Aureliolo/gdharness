@@ -1,10 +1,10 @@
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
 import { realAsFarAsItExists, relativeWithin } from './paths.js';
 import { isRecord } from './records.js';
-import { writeWhole, writeWholeAsync } from './whole-file.js';
+import { removeWhole, removeWholeAsync, writeWhole, writeWholeAsync } from './whole-file.js';
 
 /**
  * The breakpoints set through this server, written down in the project.
@@ -37,7 +37,7 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
   const path = breakpointNotePath(projectPath);
   try {
     const text = noteTextOf(projectPath, held, path);
-    if (text !== null && !writeWhole(path, text)) {
+    if (!(text === null ? removeWhole(path) : writeWhole(path, text))) {
       console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
     }
   } catch (error) {
@@ -53,7 +53,7 @@ export async function writeBreakpointNoteAsync(
   const path = breakpointNotePath(projectPath);
   try {
     const text = noteTextOf(projectPath, held, path);
-    if (text !== null && !(await writeWholeAsync(path, text))) {
+    if (!(await (text === null ? removeWholeAsync(path) : writeWholeAsync(path, text)))) {
       console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
     }
   } catch (error) {
@@ -63,7 +63,7 @@ export async function writeBreakpointNoteAsync(
 
 /**
  * The text of the note for [param held], with the folder made for it, or null once the note is
- * taken down because nothing is held inside the project.
+ * to be taken down because nothing is held inside the project.
  */
 function noteTextOf(projectPath: string, held: readonly HeldBreakpoint[], path: string): string | null {
   // Spelt as debug_breakpoint spells it, the project resolved and the path below it as written:
@@ -78,7 +78,6 @@ function noteTextOf(projectPath: string, held: readonly HeldBreakpoint[], path: 
     }))
     .filter((one) => one.lines.length > 0 && withinProject(root, one.scriptPath));
   if (inside.length === 0) {
-    rmSync(path, { force: true });
     return null;
   }
   const note: BreakpointNote = {

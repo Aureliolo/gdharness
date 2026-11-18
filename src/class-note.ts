@@ -75,6 +75,35 @@ function unfinishedScanIn(value: unknown): UnfinishedScan | null {
   return { editorPid: readNumber(fields, 'editorPid') ?? null, classes: classes.map(String) };
 }
 
+/** The updates of each project's note that are running or waiting, so that they run one at a time. */
+const updating = new Map<string, Promise<void>>();
+
+/**
+ * Replaces the note of [param projectPath] with what [param change] makes of the note as it is when
+ * the update runs, or leaves it when that is null. Updates of one project run one after the other:
+ * each reads the note after the one before it has written, since a write that waits on a reader
+ * leaves the next to read the note as it was and write over the change.
+ */
+export function updateClassNote(
+  projectPath: string,
+  change: (note: ClassNote | null) => ClassNote | null,
+): Promise<void> {
+  const run = (updating.get(projectPath) ?? Promise.resolve()).then(async () => {
+    const changed = change(readClassNote(projectPath));
+    if (changed !== null) {
+      await writeClassNote(projectPath, changed);
+    }
+  });
+  const settled = run.catch(() => undefined);
+  updating.set(projectPath, settled);
+  void settled.then(() => {
+    if (updating.get(projectPath) === settled) {
+      updating.delete(projectPath);
+    }
+  });
+  return run;
+}
+
 /**
  * Writes [param note] for [param projectPath], whole, since the next server reads it while this
  * one may be writing. A project that cannot be written into is forgotten again.

@@ -93,6 +93,7 @@ import {
   removeWhole,
   removeWholeAsync,
   stagedWriterOf,
+  untouchedSince,
   writeWhole,
   writeWholeAsync,
 } from './whole-file.js';
@@ -2297,13 +2298,14 @@ export async function takenOverUnderSteal(
  * rule every lock is judged by. Renamed over the lock, so a taker reading it never finds it empty.
  */
 export async function handSlot(lock: string, from: number, to: SlotHolder): Promise<boolean> {
+  const unchanged = untouchedSince(lock);
   let content: string | null;
   try {
     content = await readWholeAsync(lock);
   } catch {
     return false;
   }
-  const text = handedText(content, from, to);
+  const text = unchanged() ? handedText(content, from, to) : null;
   return text !== null && (await writeWholeAsync(lock, text));
 }
 
@@ -2319,13 +2321,15 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
  * names [param holder]. Answers whether it did. Renamed over the lock, as {@link handSlot} is.
  */
 export async function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): Promise<boolean> {
+  const unchanged = untouchedSince(lock);
   let content: string | null;
   try {
     content = await readWholeAsync(lock);
   } catch {
     return false;
   }
-  const text = namedText(content, holder, engine);
+  // A lock given back while it was being read is not made again.
+  const text = unchanged() ? namedText(content, holder, engine) : null;
   return text !== null && (await writeWholeAsync(lock, text));
 }
 
