@@ -95,8 +95,38 @@ func _check_every_module_was_seen(
 
 
 func _run() -> void:
+	await _check_a_module_asked_for_beside_a_loading_thread()
 	await _check_the_last_module_asked_for_early()
 	await _check_the_modules_compile_beside_frames()
+
+
+## A module asked for while the loading thread compiles another is not compiled beside it: the
+## runtime takes the thread's module first, so the loader has one caller at a time. Seen as the
+## thread's request being taken, which only the main thread's code does.
+func _check_a_module_asked_for_beside_a_loading_thread() -> void:
+	await process_frame
+	var until: int = Time.get_ticks_msec() + 20000
+	while node._in_flight.is_empty() and Time.get_ticks_msec() < until:
+		await process_frame
+	var busy: String = node._in_flight
+	var target: String = ""
+	# Modules built with the values module would take the loading thread's module for it when it is
+	# that one, so only those built on their own show whether a module asked for first does.
+	for file: String in [Runtime.TYPING, Runtime.PAD, Runtime.TOUCH]:
+		var path: String = Runtime.ADDON_DIR + file
+		if path != busy and not ResourceLoader.has_cached(path):
+			target = file
+			break
+	if busy.is_empty() or target.is_empty():
+		failures.append("a module was compiling and another was waiting: %s, %s" % [busy, target])
+		return
+	var _made: Object = node._module(target)
+	if not node._modules.has(target):
+		failures.append("%s is loaded when asked for beside a loading thread" % target)
+	if not node._in_flight.is_empty():
+		failures.append(
+			"%s was compiled while a loading thread had %s" % [target, node._in_flight.get_file()]
+		)
 
 
 func _check_the_last_module_asked_for_early() -> void:

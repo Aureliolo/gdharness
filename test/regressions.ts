@@ -55333,6 +55333,10 @@ interface ReadingGame {
    * [param expected] errors at least.
    */
   readonly counted: (expected?: number) => Promise<{ errors: number; clean: unknown }>;
+  /** What the server has written to its stderr so far. */
+  readonly stderr: () => string;
+  /** The run's error output as it stands, without waiting for it to settle. */
+  readonly errorOutput: () => Promise<unknown>;
 }
 
 /**
@@ -55491,7 +55495,15 @@ async function withAReadingGame(skipped: string, body: (game: ReadingGame) => Pr
         return { errors: asNumber(get(answer, 'errors')), clean: get(answer, 'clean') };
       };
       try {
-        await body({ ask, counted });
+        await body({
+          ask,
+          counted,
+          stderr: () => server.stderr,
+          errorOutput: async () =>
+            parseTextContent(
+              await server.request('tools/call', { name: 'editor_output', arguments: { severity: 'error' } }),
+            ),
+        });
       } finally {
         await server.request(
           'tools/call',
@@ -55777,12 +55789,52 @@ async function testTwoPathsInOneRequestKeepBothSetsOfErrors(): Promise<void> {
   });
 }
 
+/**
+ * What a call left pending says about where the time went: when its late reply came, or that it
+ * never did, and how many of its error lines the run held at the timeout.
+ */
+async function saidOfAPendingCall(
+  { ask, stderr, errorOutput }: ReadingGame,
+  sentAt: number,
+): Promise<string> {
+  const steps = JSON.stringify(await errorOutput()).match(/noisy step/g)?.length ?? 0;
+  let cameAfter = 'never';
+  for (let waited = 0; waited < 60_000; waited += 500) {
+    const late = await ask('runtime_invoke', { op: 'result', requestId: 1 });
+    let pending = true;
+    try {
+      pending = get(JSON.parse(late), 'pending') === true;
+    } catch {
+      // A refusal in words is still pending.
+    }
+    if (!pending) {
+      cameAfter = `${Date.now() - sentAt} ms after it was sent`;
+      break;
+    }
+    await delay(500);
+  }
+  return `the late reply came: ${cameAfter}. The run held ${steps} 'noisy step' lines at the timeout. Server stderr tail:\n${stderr().slice(-2000)}`;
+}
+
 /** The errors of the call itself come first, and a cut counts what it leaves out. */
 async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
-  await withAReadingGame('walk error cut regression', async ({ ask }) => {
-    const answer: unknown = JSON.parse(
-      await ask('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'noisy25():fail' }),
-    );
+  await withAReadingGame('walk error cut regression', async (game) => {
+    const { ask } = game;
+    const sentAt = Date.now();
+    // The call checks the order of errors and the cut, not speed, and a slow runner spends seconds
+    // on the game's first request, so it waits for the work rather than the usual ten seconds.
+    const said = await ask('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'noisy25():fail',
+      timeoutMs: 30_000,
+    });
+    let answer: unknown;
+    try {
+      answer = JSON.parse(said);
+    } catch {
+      throw new Error(`${said}\n${await saidOfAPendingCall(game, sentAt)}`);
+    }
     const errors = asArray(get(answer, 'errors'), `errors of ${JSON.stringify(answer)}`).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
     assert.equal(errors.length, 20);
