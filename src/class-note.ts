@@ -91,7 +91,8 @@ function unfinishedScanIn(value: unknown): UnfinishedScan | null {
  * reader leaves the next to read the note as it was and write over the change.
  *
  * Written whole, since the next server reads it while this one may be writing. A project that
- * cannot be written into is forgotten again.
+ * cannot be written into is forgotten again, and a note that cannot be read leaves the call as it
+ * is, without a throw.
  */
 export async function updateClassNote(
   projectPath: string,
@@ -100,16 +101,21 @@ export async function updateClassNote(
   const path = classNotePath(projectPath);
   // The next server learns it afresh when the write does not land, which is what it did before
   // there was a note.
-  await changeWholeAsync(path, (text) => {
-    const changed = change(classNoteIn(text));
-    if (changed === null) {
-      return null;
-    }
-    try {
-      mkdirSync(dirname(path), { recursive: true });
-    } catch {
-      return null;
-    }
-    return `${JSON.stringify(changed, null, 2)}\n`;
-  });
+  try {
+    await changeWholeAsync(path, (text) => {
+      const changed = change(classNoteIn(text));
+      if (changed === null) {
+        return null;
+      }
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+      } catch {
+        return null;
+      }
+      return `${JSON.stringify(changed, null, 2)}\n`;
+    });
+  } catch {
+    // A note that cannot be read for good, such as a folder at its path, cannot be replaced either.
+    // Callers have already done what the note records, so they carry on without it.
+  }
 }

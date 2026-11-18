@@ -100,10 +100,12 @@ type Attempt<T> = { readonly done: T } | { readonly held: () => T };
 
 /**
  * Tries [param attempt] until it answers or [constant HELD_FILE_MS] has passed, sleeping the thread
- * between tries. For a caller that has to answer at once: a process exit, a synchronous API.
+ * between tries. For a caller that has to answer at once: a process exit, a synchronous API. The
+ * wait is counted from [param began], which a caller that finished other calls first sets to its
+ * own start, so those calls and its own share one wait.
  */
-function waitedOutSync<T>(attempt: () => Attempt<T>): T {
-  const until = Date.now() + HELD_FILE_MS;
+function waitedOutSync<T>(attempt: () => Attempt<T>, began = Date.now()): T {
+  const until = began + HELD_FILE_MS;
   for (;;) {
     const tried = attempt();
     if ('done' in tried) {
@@ -167,9 +169,10 @@ function readAttempt(path: string): Attempt<string | null> {
  * a throw ends it and the run it holds goes on with nobody holding it.
  */
 export function writeWhole(path: string, text: string): boolean {
+  const began = Date.now();
   finishTurnsOn(path);
   const partial = stagedBeside(path, text);
-  return partial !== null && waitedOutSync(() => renameAttempt(partial, path));
+  return partial !== null && waitedOutSync(() => renameAttempt(partial, path), began);
 }
 
 /**
@@ -212,6 +215,11 @@ type Step<T> = Attempt<T> | { readonly next: () => Attempt<T> };
 interface Turn {
   /** Tries the call once, and answers whether it has its answer. */
   readonly tried: () => boolean;
+  /**
+   * Fixes the call's deadline where it stands, counted from when the call was made if its turn has
+   * not come, so a caller finishing it by hand waits no longer than the call would have.
+   */
+  readonly fixDeadline: () => void;
 }
 
 /**
@@ -270,13 +278,17 @@ function waitingKeyOf(path: string): string | undefined {
 function turnOf<T>(first: () => Step<T>, answer: (value: T) => void, refuse: (error: unknown) => void): Turn {
   let attempt = first;
   let until: number | undefined;
+  const made = Date.now();
+  let fixed = false;
   const attempted = (): Attempt<T> => {
     const step = attempt();
     if (!('next' in step)) {
       return step;
     }
     attempt = step.next;
-    until = Date.now() + HELD_FILE_MS;
+    if (!fixed) {
+      until = Date.now() + HELD_FILE_MS;
+    }
     return step.next();
   };
   const tried = (): boolean => {
@@ -292,7 +304,11 @@ function turnOf<T>(first: () => Step<T>, answer: (value: T) => void, refuse: (er
     }
     return true;
   };
-  return { tried };
+  const fixDeadline = (): void => {
+    until ??= made + HELD_FILE_MS;
+    fixed = true;
+  };
+  return { tried, fixDeadline };
 }
 
 /** Tries each call of [param line] in turn, on a timer, until none is left. */
@@ -311,8 +327,8 @@ async function served(key: string, line: Turn[]): Promise<void> {
 
 /**
  * Brings every call waiting on [param path] to its answer before a call that cannot wait on a timer
- * goes ahead, sleeping the thread between tries. Each gets its own wait and answers what it did, so
- * the caller's write or removal lands after them, as it did when every call slept the thread.
+ * goes ahead, sleeping the thread between tries. Each answers what it did by the deadline it had, so
+ * the caller's write or removal lands after them and the thread sleeps about one wait in all.
  */
 function finishTurnsOn(path: string): void {
   const key = waitingKeyOf(path);
@@ -321,6 +337,9 @@ function finishTurnsOn(path: string): void {
     return;
   }
   turns.delete(key);
+  for (const turn of line) {
+    turn.fixDeadline();
+  }
   for (let turn = line.shift(); turn !== undefined; turn = line.shift()) {
     while (!turn.tried()) {
       sleepBetweenTries();
@@ -437,8 +456,9 @@ export function madeInPlace(path: string, text: string): boolean {
  * a removal that landed on such a read names a live holder and keeps its slot for the whole run.
  */
 export function removeWhole(path: string): boolean {
+  const began = Date.now();
   finishTurnsOn(path);
-  return waitedOutSync(() => removeAttempt(path));
+  return waitedOutSync(() => removeAttempt(path), began);
 }
 
 /**

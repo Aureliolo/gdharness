@@ -66959,6 +66959,57 @@ async function testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay(): Promise<
 }
 
 /**
+ * A class note that cannot be read for good, such as a folder at its path, leaves an update
+ * answering as if it wrote nothing, and the folder stays.
+ */
+async function testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-class-folder-'));
+  try {
+    const note = classNotePath(project);
+    mkdirSync(note, { recursive: true });
+    let changed = 0;
+    await updateClassNote(project, () => {
+      changed += 1;
+      return { rebuiltWith: ['Kept'] };
+    });
+    assert.equal(statSync(note).isDirectory(), true, 'the folder at the note path stays');
+    assert.equal(readClassNote(project), null);
+    assert.ok(changed <= 1, 'the change is not run again');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A call that sleeps the thread on a note with three async writes waiting finishes them within one
+ * wait in all, each by the deadline it had from its own start, and each answers what landed.
+ */
+async function testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held sync finish regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sync-finish-'));
+  try {
+    const note = join(directory, 'note.json');
+    writeFileSync(note, 'old');
+    await withAHeldNote(note, 4000, async (pause) => {
+      const waiting = [writeWholeAsync(note, 'a'), writeWholeAsync(note, 'b'), writeWholeAsync(note, 'c')];
+      await pause();
+      const started = Date.now();
+      const landed = writeWhole(note, 'sync');
+      const blocked = Date.now() - started;
+      assert.ok(blocked < 1500, `the sync write blocked ${blocked} ms, over one wait and its own retry`);
+      assert.equal(landed, false, 'the note is still held, so the sync write answers that it did not land');
+      assert.deepEqual(await Promise.all(waiting), [false, false, false]);
+    });
+    assert.equal(readFileSync(note, 'utf8'), 'old');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * A slot handed on while an engine is being named in it waits for the naming and is handed once: a
  * second hand from the same holder finds the slot no longer its own.
  */
@@ -118055,6 +118106,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared,
   testANoteNoCallWaitsOnKeepsNoEntry,
   testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay,
+  testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow,
+  testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll,
   testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt,
   testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,

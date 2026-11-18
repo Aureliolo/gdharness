@@ -272,6 +272,8 @@ export const REGRESSION_SECONDS: Readonly<
     testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared: 5,
     testANoteNoCallWaitsOnKeepsNoEntry: 5,
     testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay: 5,
+    testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow: 1,
+    testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll: 8,
     testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt: 5,
     testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier: 1,
     testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess: 33,
