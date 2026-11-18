@@ -24061,6 +24061,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     sweep(run.decoyProject);
     await run.first.stop().catch(() => undefined);
     await run.second?.stop();
+    await retireHelper();
     sweep(project);
     sweep(runtime);
   }
