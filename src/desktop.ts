@@ -20,17 +20,18 @@
  *
  * Node cannot name a desktop when it starts a process, and the package ships no native code, so the
  * one call that can, CreateProcessW with a desktop in its startup information, is made from C# (see
- * `compiled-helper.ts`). Every such start is `spawnOnDesktop`, which starts the helper through
- * `spawnHidden`.
+ * `compiled-helper.ts`). Every such start is `spawnOnDesktop`, which hands it to the one helper this
+ * process keeps running (see `desktop-process.ts`).
  */
 
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CompiledHelper, HELPER_COMPILE_MS } from './compiled-helper.js';
+import { HelpedChild, HelperRefused, helperFor, retireHelper, type StreamKind } from './desktop-process.js';
 import type { LogEntry } from './game-log.js';
 import { isRecord } from './records.js';
-import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
+import type { ChildProcess, SpawnOptions } from './spawn.js';
 import { mendBeforeStart } from './uid-cache.js';
 
 /**
@@ -59,6 +60,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 public static class GdharnessDesktop {
   const uint GenericAll = 0x10000000;
@@ -78,6 +80,22 @@ public static class GdharnessDesktop {
     public int x, y, xSize, ySize, xCount, yCount, fill, flags;
     public short show, reservedSize;
     public IntPtr reservedBytes, input, output, error;
+  }
+
+  // The startup information with an attribute list, which names the handles a process inherits. A
+  // start that inherited every inheritable handle of this process would hand an engine the pipe
+  // of another engine started at the same moment, and that pipe would then stay open until both ended.
+  [StructLayout(LayoutKind.Sequential)]
+  struct StartupInfoEx {
+    public StartupInfo startup;
+    public IntPtr attributes;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct Security {
+    public int length;
+    public IntPtr descriptor;
+    public bool inherit;
   }
 
   [StructLayout(LayoutKind.Sequential)]
@@ -101,7 +119,32 @@ public static class GdharnessDesktop {
   const uint DesktopHeapKilobytes = 20480;
 
   [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-  static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out Started started);
+  static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfoEx startup, out Started started);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateFileW(string name, uint access, uint share, ref Security security, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool WriteFile(IntPtr file, byte[] bytes, uint count, out uint written, IntPtr overlapped);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+  [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target, uint access, bool inherit, uint options);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  const uint GenericRead = 0x80000000;
+  const uint GenericWrite = 0x40000000;
+  const uint FileAppendData = 0x4;
+  const uint ShareAll = 0x7;
+  const uint OpenExisting = 3;
+  const uint OpenAlways = 4;
+  const uint ExtendedStartupInfoPresent = 0x00080000;
+  const uint CreateUnicodeEnvironment = 0x00000400;
+  const int HandleListAttribute = 0x20002;
+  const uint DuplicateSameAccess = 0x2;
+  const uint DuplicateCloseSource = 0x1;
+  const uint ProcessDuplicateHandle = 0x40;
+  const uint Synchronize = 0x00100000;
 
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
@@ -358,14 +401,10 @@ public static class GdharnessDesktop {
   }
 
   // Written as UTF-8 whatever the console's code page is, which is how a run reads it.
-  static void Say(string line) {
-    try {
-      byte[] bytes = new UTF8Encoding(false).GetBytes(Environment.NewLine + line + Environment.NewLine);
-      Stream output = Console.OpenStandardOutput();
-      output.Write(bytes, 0, bytes.Length);
-      output.Flush();
-    } catch (IOException) {
-    }
+  static void Say(IntPtr output, string line) {
+    byte[] bytes = new UTF8Encoding(false).GetBytes(Environment.NewLine + line + Environment.NewLine);
+    uint written;
+    WriteFile(output, bytes, (uint)bytes.Length, out written, IntPtr.Zero);
   }
 
   static bool ShowsAWindow(int processId) {
@@ -402,15 +441,259 @@ public static class GdharnessDesktop {
     }
   }
 
-  // The spec, the error file and the step file, by path. What stops it before the pid is written
-  // goes to the error file, since its own streams are the ones the process inherits.
+  // Either the spec, the error file and the step file of one start, by path, which is run and
+  // answered with its exit code, or --serve and the pid of the process it serves, which answers
+  // any number of starts. What stops a start before its pid is written goes to its error file,
+  // since its own streams are the ones the process inherits.
   public static int Main(string[] args) {
+    if (args.Length > 1 && args[0] == "--serve") {
+      return Serve(int.Parse(args[1]));
+    }
+    return Serve1(args[0], args[1], args[2]);
+  }
+
+  static int Serve1(string spec, string error, string step) {
     try {
-      Step(args[2], "reading its spec");
-      return RunSpec(args[0]);
+      Step(step, "reading its spec");
+      return RunSpec(spec);
     } catch (Exception e) {
-      File.WriteAllText(args[1], e.Message);
+      File.WriteAllText(error, e.Message);
       return 1;
+    }
+  }
+
+  // The process this one serves, which is asked to hold a copy of every job that ends its engine,
+  // so that the engines do not end with this helper alone but only with whatever started it.
+  static IntPtr served = IntPtr.Zero;
+  static readonly object running = new object();
+  static readonly Dictionary<string, IntPtr> processes = new Dictionary<string, IntPtr>();
+  // The starts this process ended on request, so that an engine's own exit code 1 is not taken for it.
+  static readonly HashSet<string> stopped = new HashSet<string>();
+
+  static string Ending(string id, uint code) {
+    lock (running) {
+      return "ended " + id + " " + code + (stopped.Remove(id) ? " stopped" : "");
+    }
+  }
+  static readonly object replying = new object();
+  [ThreadStatic] static string requestId;
+
+  static void Reply(string line) {
+    lock (replying) {
+      byte[] bytes = new UTF8Encoding(false).GetBytes(line + "\\n");
+      uint written;
+      WriteFile(GetStdHandle(-11), bytes, (uint)bytes.Length, out written, IntPtr.Zero);
+    }
+  }
+
+  static string Decoded(string base64) {
+    return Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+  }
+
+  // One line a request, read until the served process closes its end or ends: "start id spec error
+  // step" runs a start on a thread of its own and answers "started id pid job" once the process
+  // runs and "ended id code" once it has ended, "kill id" ends a start's process, and "adopt id
+  // pid job" waits for a process a helper before this one started and answers its end. The
+  // engines of starts still running end with this process when they are in a job that ends them,
+  // and run on when they are not.
+  static int Serve(int servedPid) {
+    served = OpenProcess(ProcessDuplicateHandle, false, (uint)servedPid);
+    if (served == IntPtr.Zero) {
+      return 1;
+    }
+    StreamReader reader = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+    for (string line = Next(reader); line != null; line = Next(reader)) {
+      string[] parts = line.Split(' ');
+      if (parts[0] == "start" && parts.Length == 5) {
+        string id = parts[1];
+        string spec = Decoded(parts[2]);
+        string error = Decoded(parts[3]);
+        string step = Decoded(parts[4]);
+        Thread start = new Thread(delegate() {
+          requestId = id;
+          int code = Serve1(spec, error, step);
+          Reply(Ending(id, unchecked((uint)code)));
+        });
+        start.IsBackground = true;
+        start.Start();
+      } else if (parts[0] == "kill" && parts.Length == 2) {
+        lock (running) {
+          IntPtr process;
+          if (processes.TryGetValue(parts[1], out process)) {
+            stopped.Add(parts[1]);
+            TerminateProcess(process, 1);
+          }
+        }
+      } else if (parts[0] == "adopt" && parts.Length == 4) {
+        string id = parts[1];
+        uint pid = uint.Parse(parts[2]);
+        IntPtr copy = new IntPtr(long.Parse(parts[3]));
+        Thread adoption = new Thread(delegate() { Adopt(id, pid, copy); });
+        adoption.IsBackground = true;
+        adoption.Start();
+      }
+    }
+    Leave();
+    Thread.Sleep(Timeout.Infinite);
+    return 0;
+  }
+
+  // The process this one serves has gone. What was to end with it ends now, and this process ends
+  // with it unless a start meant to outlive its starter still runs: the job of such a process is
+  // named, and exists only while a handle to it is open, so this process keeps its handle until the
+  // process has ended.
+  static void Leave() {
+    lock (running) {
+      leaving = true;
+      foreach (IntPtr job in jobs.Values) {
+        TerminateJobObject(job, 1);
+      }
+      ExitWhenIdle();
+    }
+  }
+
+  // Called with the lock held. This process ends once its starter has gone, no start meant to outlive
+  // it runs and none is between creating its process and putting it in a job, which would be left
+  // suspended and in no job.
+  static void ExitWhenIdle() {
+    if (leaving && kept == 0 && creating == 0) {
+      Environment.Exit(0);
+    }
+  }
+
+  static bool leaving = false;
+  static int kept = 0;
+  static int creating = 0;
+  static readonly Dictionary<string, IntPtr> jobs = new Dictionary<string, IntPtr>();
+  [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
+
+  // The next request, or null once the served process has closed its end, which reads as a broken
+  // pipe when it was killed.
+  static string Next(StreamReader reader) {
+    try {
+      return reader.ReadLine();
+    } catch (IOException) {
+      return null;
+    }
+  }
+
+  // Waits for a process a helper before this one started, whose exit code only a handle opened
+  // while it ran can read, and answers it as the start's end. Its job copy is closed after.
+  static void Adopt(string id, uint pid, IntPtr copy) {
+    uint code = 1;
+    IntPtr process = OpenProcess(ProcessTerminate | ProcessQueryLimited | Synchronize, false, pid);
+    if (process != IntPtr.Zero) {
+      lock (running) {
+        processes[id] = process;
+      }
+      WaitForSingleObject(process, 0xFFFFFFFF);
+      GetExitCodeProcess(process, out code);
+      lock (running) {
+        processes.Remove(id);
+      }
+      CloseHandle(process);
+    }
+    ReleaseCopy(copy);
+    Reply(Ending(id, code));
+  }
+
+  // Closes the copy of a job held by the served process.
+  static void ReleaseCopy(IntPtr copy) {
+    IntPtr unused;
+    if (copy != IntPtr.Zero) {
+      DuplicateHandle(served, copy, IntPtr.Zero, out unused, 0, false, DuplicateCloseSource);
+    }
+  }
+
+  // What a process is given for one of its standard streams: this process's own for an empty
+  // target, the null device for "nul", the client end of a named pipe for "pipe:name", and a
+  // file opened for appending for "file:path". Each is inheritable, and closed by the caller.
+  sealed class Stdio {
+    public IntPtr input, output, error;
+    public readonly List<IntPtr> opened = new List<IntPtr>();
+
+    public void Close() {
+      foreach (IntPtr handle in opened) {
+        CloseHandle(handle);
+      }
+      opened.Clear();
+    }
+
+    public IntPtr Open(string target, bool reading, int own) {
+      if (target.Length == 0) {
+        return GetStdHandle(own);
+      }
+      Security security = new Security();
+      security.length = Marshal.SizeOf(typeof(Security));
+      security.inherit = true;
+      string path;
+      uint access;
+      uint disposition;
+      if (target == "nul") {
+        path = "NUL";
+        access = reading ? GenericRead : GenericWrite;
+        disposition = OpenExisting;
+      } else if (target.StartsWith("pipe:")) {
+        char slash = (char)92;
+        path = "" + slash + slash + "." + slash + "pipe" + slash + target.Substring(5);
+        access = GenericWrite;
+        disposition = OpenExisting;
+      } else {
+        path = target.Substring(5);
+        access = FileAppendData;
+        disposition = OpenAlways;
+      }
+      IntPtr handle = CreateFileW(path, access, ShareAll, ref security, disposition, 0, IntPtr.Zero);
+      if (handle == new IntPtr(-1)) {
+        throw Failure(Marshal.GetLastWin32Error(), "CreateFileW " + path);
+      }
+      opened.Add(handle);
+      return handle;
+    }
+  }
+
+  // The windows stations and desktops this process has made, which it holds for as long as it runs:
+  // a desktop goes when the last handle to it does, and every start on it shares the one handle.
+  static readonly object desktops = new object();
+  static readonly Dictionary<string, KeyValuePair<string, IntPtr>> madeDesktops = new Dictionary<string, KeyValuePair<string, IntPtr>>();
+
+  // The desktop's full name, which starts a process on it, and the handle held for it.
+  static KeyValuePair<string, IntPtr> DesktopOf(string desktop, string stepFile) {
+    lock (desktops) {
+      KeyValuePair<string, IntPtr> made;
+      if (madeDesktops.TryGetValue(desktop, out made)) {
+        return made;
+      }
+      Step(stepFile, "opening the session's own window station");
+      IntPtr station = CreateWindowStationW(null, 0, WindowStationAllAccess, IntPtr.Zero);
+      if (station == IntPtr.Zero) {
+        throw Failure(Marshal.GetLastWin32Error(), "CreateWindowStationW");
+      }
+      StringBuilder stationName = new StringBuilder(256);
+      int needed;
+      if (!GetUserObjectInformationW(station, ObjectName, stationName, stationName.Capacity * 2, out needed)) {
+        throw Failure(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
+      }
+      // A desktop is made in the calling process's station, so this one is the caller's while it is.
+      IntPtr own = GetProcessWindowStation();
+      if (!SetProcessWindowStation(station)) {
+        throw Failure(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
+      }
+      IntPtr held;
+      int error;
+      try {
+        Step(stepFile, "creating the " + desktop + " desktop");
+        held = CreateDesktopExW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero, DesktopHeapKilobytes, IntPtr.Zero);
+        error = Marshal.GetLastWin32Error();
+      } finally {
+        SetProcessWindowStation(own);
+      }
+      if (held == IntPtr.Zero) {
+        throw Failure(error, "CreateDesktopExW " + stationName + "\\\\" + desktop);
+      }
+      made = new KeyValuePair<string, IntPtr>(stationName + "\\\\" + desktop, held);
+      madeDesktops[desktop] = made;
+      return made;
     }
   }
 
@@ -436,7 +719,19 @@ public static class GdharnessDesktop {
     bool separateErrors = lines.Length > 10 && field(10) == "1";
     string laneFile = lines.Length > 12 ? field(11) : "";
     string lane = lines.Length > 12 ? field(12) : "";
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, separateErrors, laneFile, lane);
+    // A trailing empty field is no line of the file, so a field is there only when a later one is.
+    bool described = lines.Length > 15;
+    string environment = lines.Length > 16 ? field(16) : "";
+    Stdio io = new Stdio();
+    try {
+      io.input = io.Open(described ? field(13) : "", true, -10);
+      io.output = io.Open(described ? field(14) : "", false, -11);
+      string errors = described ? field(15) : "";
+      io.error = errors == "same" || (errors.Length == 0 && !separateErrors) ? io.output : io.Open(errors, false, -12);
+      return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis, io, environment, laneFile, lane);
+    } finally {
+      io.Close();
+    }
   }
 
   // The call and what it was given, then the system's own reason for the code. The exception's
@@ -482,52 +777,26 @@ public static class GdharnessDesktop {
   // held its run's folder. Without it the job only counts, so a process meant to outlive whatever
   // started it keeps its lifetime. Nested jobs need Windows 8, and a job that forbids one fails the
   // assignment, which ends the process unrun with the cause.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, bool separateErrors, string laneFile, string lane) {
-    StartupInfo startup = new StartupInfo();
-    startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+  static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, Stdio io, string environment, string laneFile, string lane) {
+    StartupInfoEx extended = new StartupInfoEx();
+    extended.startup.cb = Marshal.SizeOf(typeof(StartupInfoEx));
     IntPtr desktopHandle = IntPtr.Zero;
     if (desktop.Length > 0) {
-      Step(stepFile, "opening the session's own window station");
-      IntPtr station = CreateWindowStationW(null, 0, WindowStationAllAccess, IntPtr.Zero);
-      if (station == IntPtr.Zero) {
-        throw Failure(Marshal.GetLastWin32Error(), "CreateWindowStationW");
-      }
-      StringBuilder stationName = new StringBuilder(256);
-      int needed;
-      if (!GetUserObjectInformationW(station, ObjectName, stationName, stationName.Capacity * 2, out needed)) {
-        throw Failure(Marshal.GetLastWin32Error(), "GetUserObjectInformationW");
-      }
-      // A desktop is made in the calling process's station, so this one is the caller's while it is.
-      IntPtr own = GetProcessWindowStation();
-      if (!SetProcessWindowStation(station)) {
-        throw Failure(Marshal.GetLastWin32Error(), "SetProcessWindowStation");
-      }
-      IntPtr held;
-      int made;
-      try {
-        Step(stepFile, "creating the " + desktop + " desktop");
-        held = CreateDesktopExW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero, DesktopHeapKilobytes, IntPtr.Zero);
-        made = Marshal.GetLastWin32Error();
-      } finally {
-        SetProcessWindowStation(own);
-      }
-      if (held == IntPtr.Zero) {
-        throw Failure(made, "CreateDesktopExW " + stationName + "\\\\" + desktop);
-      }
-      desktopHandle = held;
-      startup.desktop = stationName + "\\\\" + desktop;
+      KeyValuePair<string, IntPtr> made = DesktopOf(desktop, stepFile);
+      desktopHandle = made.Value;
+      extended.startup.desktop = made.Key;
     }
-    startup.flags = UseStdHandles;
+    extended.startup.flags = UseStdHandles;
     if (noActivate) {
-      startup.flags |= UseShowWindow;
-      startup.show = ShowNoActivate;
+      extended.startup.flags |= UseShowWindow;
+      extended.startup.show = ShowNoActivate;
     }
-    startup.input = GetStdHandle(-10);
-    startup.output = GetStdHandle(-11);
     // Both streams on one handle keep their lines in order. A start whose reader tells the two apart
     // keeps its own error stream.
-    startup.error = separateErrors ? GetStdHandle(-12) : startup.output;
-    Started started;
+    extended.startup.input = io.input;
+    extended.startup.output = io.output;
+    extended.startup.error = io.error;
+    Started started = new Started();
     // Inherited by what it starts: without SEM_NOGPFAULTERRORBOX, Windows Error Reporting runs when
     // the target crashes and writes its dump, and with the other two no hard-error box can open.
     // Set outright rather than cleared from this process's own, which is whatever started it chose:
@@ -537,15 +806,34 @@ public static class GdharnessDesktop {
       LockSetForegroundWindow(LockForeground);
     }
     IntPtr job = IntPtr.Zero;
+    IntPtr copy = IntPtr.Zero;
+    bool counted = false;
+    bool creatingHeld = false;
     JobLimits limits = new JobLimits();
+    try {
     try {
     Step(stepFile, "starting the process");
     // The process gets a console that is never shown, so a console program it starts joins that one
     // and opens no window of its own. A process with no console at all gives each such child a new
     // console, which Windows Terminal shows on the desktop in use, whichever desktop the process is on.
-    uint creation = CreateNoWindow | BelowNormalPriorityClass | CreateSuspended;
-    if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
-      throw Failure(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine, ProgramOf(commandLine));
+    uint creation = CreateNoWindow | BelowNormalPriorityClass | CreateSuspended | ExtendedStartupInfoPresent;
+    lock (running) {
+      if (leaving && endsWithThis) {
+        throw new Win32Exception(0, "the process that started this one has ended");
+      }
+      creating++;
+      creatingHeld = true;
+    }
+    Create(commandLine, ref creation, directory, environment, io, ref extended, out started);
+    lock (running) {
+      // A start that was in flight when the process it serves ended, which Leave could not see yet.
+      if (leaving && endsWithThis) {
+        TerminateProcess(started.process, 1);
+        throw new Win32Exception(0, "the process that started this one has ended");
+      }
+      if (requestId != null) {
+        processes[requestId] = started.process;
+      }
     }
     if (affinity != 0) {
       Step(stepFile, "holding the process to its processors");
@@ -556,8 +844,9 @@ public static class GdharnessDesktop {
       }
     }
     Step(stepFile, "putting the process in its job");
-    // The handle is never closed here: the job lasts as long as this process, which is as long as
-    // the engine, and with endsWithThis Windows ends the engine if this process goes first.
+    // With endsWithThis Windows ends the engine once the last handle to the job is closed. This
+    // process holds one until the engine has ended, and the process it serves holds a copy, so the
+    // engine outlives this process alone but not whatever started it.
     string jobName = JobNamePrefix + started.processId;
     job = CreateJobObjectW(IntPtr.Zero, jobName);
     int made = Marshal.GetLastWin32Error();
@@ -575,6 +864,22 @@ public static class GdharnessDesktop {
       TerminateProcess(started.process, 1);
       throw Failure(error, "a job for the process named " + jobName);
     }
+    if (endsWithThis && served != IntPtr.Zero) {
+      DuplicateHandle(GetCurrentProcess(), job, served, out copy, 0, false, DuplicateSameAccess);
+    }
+    lock (running) {
+      if (!endsWithThis) {
+        kept++;
+      } else if (requestId != null) {
+        jobs[requestId] = job;
+        if (leaving) {
+          TerminateJobObject(job, 1);
+        }
+      }
+      creating--;
+      creatingHeld = false;
+    }
+    counted = true;
     if (laneFile.Length > 0) {
       try {
         WriteLane(laneFile, lane, started.processId);
@@ -585,6 +890,9 @@ public static class GdharnessDesktop {
     }
     ResumeThread(started.thread);
     File.WriteAllText(pidFile, started.processId.ToString());
+    if (requestId != null) {
+      Reply("started " + requestId + " " + started.processId + " " + copy.ToInt64());
+    }
     if (noActivate) {
       HoldTheForeground(started);
     }
@@ -609,7 +917,7 @@ public static class GdharnessDesktop {
         looks = box == null ? 0 : (owner == lastOwner ? looks + 1 : 1);
         lastOwner = box == null ? 0 : owner;
         if (looks >= BoxLooks) {
-          Say(box);
+          Say(io.output, box);
           looks = 0;
           lastOwner = 0;
           // Only the owner of the box is ended: an editor stays up when a game it plays is stuck.
@@ -634,8 +942,6 @@ public static class GdharnessDesktop {
     }
     uint code;
     GetExitCodeProcess(started.process, out code);
-    CloseHandle(started.thread);
-    CloseHandle(started.process);
     if (exitFile.Length > 0) {
       // A file that cannot be written leaves the parent the code this exits with, which says less
       // but still says it.
@@ -646,6 +952,86 @@ public static class GdharnessDesktop {
       }
     }
     return unchecked((int)code);
+    } finally {
+      lock (running) {
+        if (requestId != null) {
+          processes.Remove(requestId);
+          jobs.Remove(requestId);
+        }
+      }
+      if (started.thread != IntPtr.Zero) {
+        CloseHandle(started.thread);
+      }
+      if (started.process != IntPtr.Zero) {
+        CloseHandle(started.process);
+      }
+      if (job != IntPtr.Zero) {
+        CloseHandle(job);
+      }
+      ReleaseCopy(copy);
+      lock (running) {
+        if (creatingHeld) {
+          creating--;
+        }
+        if (counted && !endsWithThis) {
+          kept--;
+        }
+        ExitWhenIdle();
+      }
+    }
+  }
+
+  // Starts the process with only the handles of io inherited, and with the environment when there is one.
+  static void Create(string commandLine, ref uint creation, string directory, string environment, Stdio io, ref StartupInfoEx extended, out Started started) {
+    List<IntPtr> inherited = new List<IntPtr>();
+    foreach (IntPtr handle in new IntPtr[] { io.input, io.output, io.error }) {
+      if (handle != IntPtr.Zero && handle != new IntPtr(-1) && !inherited.Contains(handle)) {
+        inherited.Add(handle);
+      }
+    }
+    IntPtr attributes = IntPtr.Zero;
+    IntPtr table = IntPtr.Zero;
+    IntPtr block = IntPtr.Zero;
+    bool ready = false;
+    try {
+      if (inherited.Count > 0) {
+        IntPtr size = IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+        attributes = Marshal.AllocHGlobal(size);
+        if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref size)) {
+          throw Failure(Marshal.GetLastWin32Error(), "InitializeProcThreadAttributeList");
+        }
+        ready = true;
+        table = Marshal.AllocHGlobal(IntPtr.Size * inherited.Count);
+        for (int index = 0; index < inherited.Count; index++) {
+          Marshal.WriteIntPtr(table, index * IntPtr.Size, inherited[index]);
+        }
+        if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(HandleListAttribute), table, new IntPtr(IntPtr.Size * inherited.Count), IntPtr.Zero, IntPtr.Zero)) {
+          throw Failure(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute");
+        }
+        extended.attributes = attributes;
+      }
+      if (environment.Length > 0) {
+        block = Marshal.StringToHGlobalUni(environment);
+        creation |= CreateUnicodeEnvironment;
+      }
+      if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, inherited.Count > 0, creation, block, directory, ref extended, out started)) {
+        throw Failure(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine, ProgramOf(commandLine));
+      }
+    } finally {
+      if (ready) {
+        DeleteProcThreadAttributeList(attributes);
+      }
+      if (attributes != IntPtr.Zero) {
+        Marshal.FreeHGlobal(attributes);
+      }
+      if (table != IntPtr.Zero) {
+        Marshal.FreeHGlobal(table);
+      }
+      if (block != IntPtr.Zero) {
+        Marshal.FreeHGlobal(block);
+      }
+    }
   }
 }
 `;
@@ -799,6 +1185,13 @@ export function throughHelper(
     readonly separateErrors?: boolean;
     /** Where the helper writes the engine's lane and pid before it runs, and the lane's number. */
     readonly lane?: { readonly file: string; readonly number: number };
+    /**
+     * Where the engine's three streams go, as the helper reads them: `nul`, `pipe:<name>`,
+     * `file:<path>` or `same` for the error stream on the output. Empty is the helper's own.
+     */
+    readonly streams?: readonly [string, string, string];
+    /** The engine's environment as `NAME=value` entries each ended by a NUL, or empty for the helper's own. */
+    readonly environment?: string;
   },
   command: string,
   args: readonly string[],
@@ -821,6 +1214,8 @@ export function throughHelper(
     how.separateErrors === true ? '1' : '0',
     how.lane?.file ?? '',
     how.lane === undefined ? '' : String(how.lane.number),
+    ...(how.streams ?? ['', '', '']),
+    how.environment ?? '',
   ];
   writeFileSync(
     files.spec,
@@ -917,25 +1312,17 @@ export function desktopBoxEnding(
   return `the windowed engine could not create a renderer on the hidden desktop, so it was ended: it opened a box titled "${box.title}", which nobody can press there${after}. Run the suites headless, or check the machine's graphics driver, which a lost GPU needs a reboot to recover.`;
 }
 
-/**
- * The system refused to run the helper program itself, as a policy that allows only some programs
- * does. That is a start that failed, which every caller answers as one, and no defect of this
- * server's. Where a runtime reports a refused spawn as an event, the same text arrives as the
- * child's error.
- */
-export class HelperRefused extends Error {
-  constructor(reason: string) {
-    super(`the desktop helper could not be run: ${reason}`);
-    this.name = 'HelperRefused';
-  }
-}
+export { HelperRefused, retireHelper };
 
 /** A process started on a desktop by `spawnOnDesktop`. */
 export interface DesktopStart {
-  /** The helper, which exits with the process's code. */
+  /**
+   * Stands for the process: it tells its exit with the whole code once the helper has, and its
+   * streams are the engine's. Its pid is the helper's, which serves every start of this process.
+   */
   readonly child: ChildProcess;
   readonly files: HelperFiles;
-  /** Writes the stop file, or ends the helper where the start named none. */
+  /** Writes the stop file, or asks the helper to end the process where the start named none. */
   stop(): void;
   /** The process's own pid, undefined until the helper has written it. */
   pid(): number | undefined;
@@ -956,16 +1343,13 @@ export function spawnOnDesktop(
     readonly directory: string;
     readonly affinity?: bigint;
     readonly endsWithHelper?: boolean;
-    /**
-     * The helper outlives the process that started it, which only a start meant to outlive its
-     * starter wants, since the helper holds the job the engine's processor time is read from.
-     */
-    readonly outlivesStarter?: boolean;
     readonly separateErrors?: boolean;
     readonly lane?: { readonly file: string; readonly number: number };
     readonly scratch: string;
     readonly stop?: string;
     readonly exit?: string;
+    /** Where an output that is not piped is appended to, and the null device where there is none. */
+    readonly outputFile?: string | undefined;
   },
   command: string,
   args: readonly string[],
@@ -985,19 +1369,30 @@ export function spawnOnDesktop(
       rmSync(file, { force: true });
     }
   }
-  const wrapper = throughHelper(how, command, args, files, assembly);
-  let child: ChildProcess;
-  try {
-    child = spawnHidden(wrapper.command, wrapper.args, {
-      ...options,
-      ...(how.outlivesStarter === true ? { detached: true } : {}),
-      ...(how.desktop === undefined
-        ? {}
-        : { env: { ...(options.env ?? process.env), [DESKTOP_VARIABLE]: how.desktop } }),
-    });
-  } catch (error) {
-    throw new HelperRefused(error instanceof Error ? error.message : String(error));
-  }
+  const helper = helperFor(assembly);
+  const piped = (stream: unknown): StreamKind => (stream === 'pipe' ? 'pipe' : 'ignore');
+  const stdio = Array.isArray(options.stdio) ? options.stdio : [];
+  const child = new HelpedChild(
+    {
+      kinds: [piped(stdio[0]), piped(stdio[1]), piped(stdio[2])],
+      separateErrors: how.separateErrors === true,
+      outputFile: how.outputFile,
+    },
+    options.signal,
+  );
+  child.errorFile = files.error;
+  const environment = {
+    ...(options.env ?? process.env),
+    ...(how.desktop === undefined ? {} : { [DESKTOP_VARIABLE]: how.desktop }),
+  };
+  const wrapper = throughHelper(
+    { ...how, streams: child.streams, environment: environmentBlock(environment) },
+    command,
+    args,
+    files,
+    assembly,
+  );
+  helper.give(child, requestFor(wrapper.args));
   return {
     child,
     files,
@@ -1010,4 +1405,18 @@ export function spawnOnDesktop(
     },
     pid: () => helperPid(files.pid),
   };
+}
+
+/** The environment as the helper hands it to the engine: each entry ended by a NUL, sorted as Windows asks. */
+function environmentBlock(environment: NodeJS.ProcessEnv): string {
+  return Object.entries(environment)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined)
+    .toSorted(([one], [other]) => one.toUpperCase().localeCompare(other.toUpperCase()))
+    .map(([name, value]) => `${name}=${value}\0`)
+    .join('');
+}
+
+/** What the helper is sent for a start: its spec, error and step files, each as base64 of its UTF-8. */
+function requestFor(files: readonly string[]): string {
+  return files.map((file) => Buffer.from(file, 'utf8').toString('base64')).join(' ');
 }

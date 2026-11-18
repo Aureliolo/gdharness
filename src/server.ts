@@ -492,7 +492,7 @@ import {
 } from './tool-definitions.js';
 import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
-import { holdExit } from './whole-exit.js';
+import { holdChildExit } from './whole-exit.js';
 import { inTurnFor } from './write-turns.js';
 
 /**
@@ -15565,7 +15565,7 @@ class GodotServer {
           })
         : helped.child;
     belowNormal(child);
-    const whole = holdExit(child.pid);
+    const whole = holdChildExit(child);
     const stop = (): void => {
       if (helped === null) {
         child.kill();

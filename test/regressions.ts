@@ -132,6 +132,8 @@ import {
   helperExit,
   helperFailure,
   helperStep,
+  helperPid as pidTheHelperWrote,
+  retireHelper,
   spawnOnDesktop,
   throughHelper,
   windowsCommandLine,
@@ -20840,6 +20842,7 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     await delay(1000);
     assert.equal(existsSync(ranMarker), false, 'and the engine was ended before it ran');
   } finally {
+    await retireHelper();
     held.close();
     sweep(root);
   }
@@ -21030,6 +21033,623 @@ async function testAKeptStartOutlivesAKilledStarter(): Promise<void> {
   }
 }
 
+/** An engine that prints one line, waits [param ms] and exits with [param code]. */
+function lineThenExit(index: number, ms: number, code: number): string[] {
+  return [
+    '-e',
+    `console.log('engine ${String(index)}'); setTimeout(() => process.exit(${String(code)}), ${String(ms)})`,
+  ];
+}
+
+/** A start of [param command] through the helper in a folder of its own under [param root], its output collected. */
+function collectedStart(
+  root: string,
+  name: string,
+  command: string,
+  args: readonly string[],
+  how: { desktop?: boolean; kept?: boolean } = {},
+): { start: DesktopStart; text: () => string } {
+  const scratch = join(root, name);
+  mkdirSync(scratch);
+  const start = spawnOnDesktop(
+    {
+      ...(how.desktop === true ? { desktop: HIDDEN_DESKTOP } : {}),
+      directory: root,
+      ...(how.kept === true ? {} : { endsWithHelper: true }),
+      scratch,
+      exit: join(scratch, 'exit'),
+    },
+    command,
+    args,
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let collected = '';
+  start.child.stdout?.on('data', (chunk: Buffer) => {
+    collected += chunk.toString();
+  });
+  return { start, text: () => collected };
+}
+
+/**
+ * Starts made at once from several callers go to one helper and none waits on another's engine: a
+ * run's engines, a boot check and a played game start together while one engine runs for good. Each
+ * keeps its own lines and its own exit code.
+ */
+async function testStartsMadeAtOnceWaitOnNoOthersEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-starts-at-once-'));
+  const running = collectedStart(root, 'long', process.execPath, lineThenExit(0, 600_000, 1), {
+    desktop: true,
+  });
+  try {
+    const others = [1, 2, 3, 4, 5].map((index) =>
+      collectedStart(root, `start-${String(index)}`, process.execPath, lineThenExit(index, 0, 10 + index), {
+        desktop: index % 2 === 0,
+      }),
+    );
+    for (const [at, other] of others.entries()) {
+      const index = at + 1;
+      assert.ok(await exitedWithin(other.start.child, 60_000), `start ${String(index)} ends`);
+      assert.equal(other.start.child.exitCode, 10 + index, `start ${String(index)} has its own exit code`);
+      assert.equal(running.start.child.exitCode, null, 'while the long engine still runs');
+      await delay(200);
+      assert.equal(
+        other.text().trim(),
+        `engine ${String(index)}`,
+        `start ${String(index)} has its own lines`,
+      );
+    }
+    const helpers = new Set([running, ...others].map((one) => one.start.child.pid));
+    assert.equal(helpers.size, 1, 'and one helper served them all');
+  } finally {
+    running.start.stop();
+    await exitedWithin(running.start.child, 60_000);
+    sweep(root);
+  }
+}
+
+/**
+ * A helper that is killed fails the start it had not answered, with a reason, and leaves the engines
+ * it started running with their jobs and their ends reported. The next start gets a new helper.
+ */
+async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-killed-'));
+  let engine: number | undefined;
+  try {
+    const running = collectedStart(root, 'running', process.execPath, lineThenExit(0, 600_000, 1));
+    engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
+    assert.ok(engine !== undefined, 'the first engine runs');
+    const helper = running.start.child.pid;
+    assert.ok(helper !== undefined && alive(helper), 'its helper runs');
+    const inFlight = collectedStart(root, 'in-flight', process.execPath, lineThenExit(1, 0, 3));
+    process.kill(helper);
+    assert.ok(await exitedWithin(inFlight.start.child, 60_000), 'the start in flight ends');
+    assert.equal(
+      pidTheHelperWrote(inFlight.start.files.pid) === undefined
+        ? helperFailure(inFlight.start.files.error)?.includes('desktop helper')
+        : true,
+      true,
+      `with the helper's end as its reason: ${String(helperFailure(inFlight.start.files.error))}`,
+    );
+    await delay(1000);
+    assert.ok(alive(engine), 'the engine that was running runs on');
+    const job = openJob(engineJobName(engine));
+    assert.ok(job !== null, 'and its job is there');
+    assert.ok(job.holds(engine), 'holding it');
+    job.close();
+    const next = collectedStart(root, 'next', process.execPath, lineThenExit(2, 0, 7));
+    assert.ok(await exitedWithin(next.start.child, 60_000), 'the next start ends');
+    assert.equal(next.start.child.exitCode, 7, 'with its own code');
+    assert.notEqual(next.start.child.pid, helper, 'through a new helper');
+    process.kill(engine);
+    assert.ok(
+      await exitedWithin(running.start.child, 60_000),
+      "and the first engine's end is still reported",
+    );
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * A process that started engines and is killed takes its helper with it, and with the helper every
+ * engine that was to end with it. An engine kept past its starter runs on. No scratch folder of
+ * the helper's is left.
+ */
+async function testAKilledStarterTakesItsHelperAndItsEnginesButNotAKeptOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-owner-killed-'));
+  const own = join(root, 'temp');
+  mkdirSync(own);
+  const owner = spawnHidden(
+    process.execPath,
+    [join(process.cwd(), 'test', 'support', 'helper-owner.ts'), root],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, TEMP: own, TMP: own },
+    },
+  );
+  let said = '';
+  owner.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString();
+  });
+  try {
+    const line = await answeredWithin(() => said.split('\n').find((one) => one.startsWith('{')), 120_000);
+    assert.ok(line !== undefined, `the owner started its engines: ${said}`);
+    const pids: unknown = JSON.parse(line);
+    const [helper, engine] = [Number(get(pids, 'helper')), Number(get(pids, 'engine'))];
+    assert.ok(alive(helper) && alive(engine), 'both run');
+    owner.kill();
+    assert.ok(await answeredWithin(() => (alive(helper) ? undefined : true), 30_000), 'the helper ends');
+    assert.ok(await answeredWithin(() => (alive(engine) ? undefined : true), 30_000), 'and its engine');
+    assert.deepEqual(
+      readdirSync(own).filter((name) => name.startsWith('gdharness-desktop-') && !name.endsWith('.exe')),
+      [],
+      'no scratch folder is left',
+    );
+  } finally {
+    owner.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * A start's piped output that nobody reads still closes once the engine has ended, as a child
+ * process's does, with and without output.
+ */
+async function testAnUnreadOutputStreamStillCloses(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unread-'));
+  try {
+    for (const [name, script] of [
+      ['silent', 'process.exit(3)'],
+      ['chatty', "console.log('x'.repeat(2000)); process.exit(3)"],
+    ] as const) {
+      const scratch = join(root, name);
+      mkdirSync(scratch);
+      const start = spawnOnDesktop(
+        { directory: root, scratch, endsWithHelper: true, exit: join(scratch, 'exit') },
+        process.execPath,
+        ['-e', script],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      const closed = await Promise.race([
+        new Promise<number | null>((settle) => {
+          start.child.once('close', (code: number | null) => {
+            settle(code);
+          });
+        }),
+        delay(30_000).then(() => 'no close in 30 s'),
+      ]);
+      assert.equal(closed, 3, `${name}: an unread start closes with its code`);
+    }
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * An engine that outlives its helper, when no helper can be run any more, still ends its start once
+ * the engine ends, and does not use the processor meanwhile. The program is moved away, which Node
+ * reports as an event after the start of a new helper, and denied to run, which it reports at once.
+ */
+function testAnEngineOutlivingAHelperThatCannotBeRunStillEndsItsStart(): void {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-lost-'));
+  try {
+    for (const [runtimeName, interpreter, how] of [
+      ['Node', 'node', 'move'],
+      ['Node', 'node', 'acl'],
+      ['Bun', process.execPath, 'acl'],
+    ] as const) {
+      const own = join(root, `${runtimeName}-${how}`);
+      mkdirSync(own);
+      const ran = spawnSyncHidden(
+        interpreter,
+        [join(process.cwd(), 'test', 'support', 'helper-lost-owner.ts'), own, how],
+        { encoding: 'utf8', timeout: 240_000, env: { ...process.env, TEMP: own, TMP: own } },
+      );
+      const said: unknown = JSON.parse(ran.stdout.trim().split('\n').pop() ?? 'null');
+      const label = `${runtimeName}, ${how}: ${ran.stdout}${ran.stderr}`;
+      const end = get(said, 'end');
+      assert.ok(typeof end === 'object', `the start ends: ${label}`);
+      assert.ok(get(end, 'code') === 4 || get(end, 'signal') === 'SIGKILL', `by the engine's end: ${label}`);
+      assert.ok(Number(get(said, 'cpuMs')) < 6000, `without pinning the processor: ${label}`);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A start in flight when its starter is killed leaves no engine behind. This copy of the helper
+ * waits after it has made the engine, before the engine is in its job, which is the moment the
+ * starter is killed, so the engine would otherwise stay suspended and in no job.
+ */
+async function testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inflight-'));
+  const slowed = HELPER_SOURCE.replace(
+    'Create(commandLine, ref creation, directory, environment, io, ref extended, out started);',
+    'Create(commandLine, ref creation, directory, environment, io, ref extended, out started); Thread.Sleep(3000);',
+  );
+  assert.notEqual(slowed, HELPER_SOURCE, 'the helper makes its engine in the place this test reaches');
+  const copy = new CompiledHelper('in-flight helper', 'gdharness-inflight', slowed, true);
+  const marker = `gdharness-inflight-${String(process.pid)}`;
+  const strays = (): string => {
+    const read = spawnSyncHidden(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `@(Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='bun.exe'" | Where-Object { $_.CommandLine -like '*setTimeout(() => undefined, 600000)*${marker}*' -and $_.ProcessId -ne $PID }).Count`,
+      ],
+      { encoding: 'utf8', timeout: 120_000 },
+    );
+    return read.stdout.trim();
+  };
+  let owner: ChildProcess | undefined;
+  try {
+    assert.equal(await copy.ensure(root), null, 'the copy compiles');
+    const started = spawnHidden(
+      process.execPath,
+      [join(process.cwd(), 'test', 'support', 'inflight-owner.ts'), root, copy.assembly(root), marker],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    owner = started;
+    let said = '';
+    started.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    assert.ok(
+      await answeredWithin(() => (said.includes('begun') ? true : undefined), 60_000),
+      'a start begins',
+    );
+    await delay(1200);
+    assert.equal(strays(), '1', 'the engine is made and waits for its job');
+    started.kill();
+    assert.ok(
+      await answeredWithin(() => (strays() === '0' ? true : undefined), 30_000),
+      `no engine is left once the starter has gone: ${strays()}`,
+    );
+  } finally {
+    owner?.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * An engine's whole exit code and its end are reported while the helper serves other starts: an
+ * access violation's code, 0xC0000005, ends one start as others run and begin.
+ */
+async function testAnEnginesWholeExitIsToldWhileTheHelperServesOthers(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exit-while-serving-'));
+  const busy = collectedStart(root, 'busy', process.execPath, lineThenExit(0, 600_000, 1));
+  try {
+    const crashed = collectedStart(root, 'crashed', 'cmd.exe', ['/c', 'exit', '/b', '3221225477']);
+    const later = collectedStart(root, 'later', process.execPath, lineThenExit(1, 0, 4));
+    assert.ok(await exitedWithin(crashed.start.child, 60_000), 'the crashed start ends');
+    assert.equal(crashed.start.child.exitCode, 0xc0000005, 'with its whole code');
+    assert.equal(busy.start.child.exitCode, null, 'as the first engine runs on');
+    assert.ok(await exitedWithin(later.start.child, 60_000), 'and a later start ends');
+    assert.equal(later.start.child.exitCode, 4, 'with its own code');
+  } finally {
+    busy.start.stop();
+    await exitedWithin(busy.start.child, 60_000);
+    sweep(root);
+  }
+}
+
+/**
+ * An engine that outlives its helper still ends with its whole exit code: the next helper waits on
+ * it through a handle opened while it runs. The stand-in is a Windows PowerShell that exits with an
+ * access violation's code after the helper has been killed.
+ */
+async function testAnEngineThatOutlivesItsHelperStillEndsWithItsWholeCode(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-outlives-helper-'));
+  try {
+    const running = collectedStart(root, 'running', 'powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Start-Sleep -Seconds 8; exit -1073741819',
+    ]);
+    const engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
+    const helper = running.start.child.pid;
+    assert.ok(engine !== undefined && helper !== undefined, 'the engine runs');
+    process.kill(helper);
+    assert.ok(await exitedWithin(running.start.child, 120_000), 'its end is reported');
+    assert.equal(running.start.child.exitCode, 0xc0000005, 'with the code the engine itself exited with');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A start asked to end before the helper has answered, by `kill()` and by an aborted signal, ends by
+ * SIGTERM with its engine gone, and the abort also tells the caller as an AbortError.
+ */
+async function testAStartEndedBeforeTheHelperAnswersEndsBySigterm(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-early-end-'));
+  const waiting = ['-e', 'setInterval(() => undefined, 1000)'];
+  try {
+    for (const how of ['kill', 'abort'] as const) {
+      const scratch = join(root, how);
+      mkdirSync(scratch);
+      const controller = new AbortController();
+      const start = spawnOnDesktop(
+        { directory: root, scratch, endsWithHelper: true, exit: join(scratch, 'exit') },
+        process.execPath,
+        waiting,
+        { stdio: ['ignore', 'ignore', 'ignore'], signal: controller.signal },
+      );
+      let told: Error | undefined;
+      start.child.on('error', (error: Error) => {
+        told = error;
+      });
+      if (how === 'kill') {
+        start.child.kill();
+      } else {
+        controller.abort();
+      }
+      assert.ok(await exitedWithin(start.child, 60_000), `${how}: the start ends`);
+      assert.equal(start.child.exitCode, null, `${how}: with no exit code`);
+      assert.equal(start.child.signalCode, 'SIGTERM', `${how}: by SIGTERM`);
+      assert.equal(
+        told?.name,
+        how === 'abort' ? 'AbortError' : undefined,
+        `${how}: the caller is told as a child is`,
+      );
+      const engine = pidTheHelperWrote(start.files.pid);
+      assert.ok(
+        engine === undefined || (await answeredWithin(() => (alive(engine) ? undefined : true), 30_000)),
+        `${how}: its engine is gone`,
+      );
+    }
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A start's output closes when its own engine ends, while a later engine still runs. An engine that
+ * inherited another start's pipe would hold that output open until the later engine ended.
+ */
+async function testAStartsOutputClosesWhileALaterEngineStillRuns(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pipe-inherit-'));
+  const first = collectedStart(root, 'first', process.execPath, lineThenExit(0, 500, 0));
+  let later: ReturnType<typeof collectedStart> | undefined;
+  try {
+    const closed = new Promise<void>((settle) => {
+      first.start.child.once('close', () => {
+        settle();
+      });
+    });
+    await delay(300);
+    later = collectedStart(root, 'later', process.execPath, lineThenExit(1, 12_000, 0));
+    const began = Date.now();
+    const settled = await Promise.race([closed.then(() => true), delay(10_000).then(() => false)]);
+    assert.ok(settled, 'the first start closes before the later engine has ended');
+    assert.equal(later.start.child.exitCode, null, 'while the later engine still runs');
+    assert.ok(Date.now() - began < 8000, `and promptly (${String(Date.now() - began)} ms)`);
+  } finally {
+    later?.start.stop();
+    if (later !== undefined) {
+      await exitedWithin(later.start.child, 60_000);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * An engine gdharness stops past its timeout ends by SIGTERM with no exit code, under either runtime,
+ * and the sentence says so. An engine that exits 1 by itself keeps its exit code 1 and no signal.
+ */
+async function testAStoppedEngineEndsBySigtermAndNotByExitCodeOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stopped-engine-'));
+  try {
+    for (const [runtimeName, interpreter] of [
+      ['Bun', process.execPath],
+      ['Node', 'node'],
+    ] as const) {
+      const ran = spawnSyncHidden(
+        interpreter,
+        [join(process.cwd(), 'test', 'support', 'stopped-engine.ts'), resolve('build')],
+        {
+          encoding: 'utf8',
+          timeout: 120_000,
+          env: {
+            ...process.env,
+            GODOT_ENGINE_SLOTS: join(root, 'slots'),
+            XDG_CACHE_HOME: join(root, 'cache'),
+          },
+        },
+      );
+      const said: unknown = JSON.parse(ran.stdout.trim().split('\n').pop() ?? 'null');
+      const stopped = get(said, 'stopped');
+      assert.equal(
+        get(stopped, 'exitCode'),
+        null,
+        `${runtimeName}: no exit code: ${ran.stdout}${ran.stderr}`,
+      );
+      assert.equal(get(stopped, 'exitSignal'), 'SIGTERM', `${runtimeName}: ended by SIGTERM`);
+      assert.match(
+        String(get(stopped, 'said')),
+        /^ended by SIGTERM, because it ran past its 1\.5 s timeout/u,
+        `${runtimeName}: the sentence names the signal`,
+      );
+      const exits = get(said, 'exits');
+      assert.equal(get(exits, 'exitCode'), 1, `${runtimeName}: an engine's own code 1 stays`);
+      assert.equal(get(exits, 'exitSignal'), null, `${runtimeName}: with no signal`);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A process that has run an engine through the helper ends on its own once the start is over, under
+ * Bun as under Node: the helper it keeps for the next start does not hold it open.
+ */
+async function testAProcessThatRanAnEngineEndsOnItsOwn(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const script = join(process.cwd(), 'test', 'support', 'run-engine-and-leave.ts');
+  const ran = spawnSyncHidden(process.execPath, [script], { encoding: 'utf8', timeout: 90_000 });
+  assert.equal(ran.error, undefined, `the process ended by itself: ${ran.error?.message ?? ''}`);
+  assert.match(ran.stdout, /"exitCode":0/u, `and the start reported its code: ${ran.stdout}${ran.stderr}`);
+}
+
+/**
+ * A helper that never answers is given up on after its limit: the start fails with that as its
+ * reason, the helper is ended, and the next start gets a new one. The limit is shortened for the test.
+ */
+async function testAHelperThatNeverAnswersFailsTheStartAndIsEnded(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-helper-'));
+  const silent = new CompiledHelper(
+    'silent helper',
+    'gdharness-silent',
+    'public static class Silent { public static void Main() { System.Threading.Thread.Sleep(600000); } }',
+    true,
+  );
+  const limit = process.env['GDHARNESS_HELPER_ANSWER_MS'];
+  try {
+    assert.equal(await silent.ensure(root), null, 'the stand-in compiles');
+    process.env['GDHARNESS_HELPER_ANSWER_MS'] = '1500';
+    const scratch = join(root, 'start');
+    mkdirSync(scratch);
+    const start = spawnOnDesktop(
+      { directory: root, scratch },
+      process.execPath,
+      ['-e', ''],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      silent.assembly(root),
+    );
+    const helper = start.child.pid;
+    assert.ok(await exitedWithin(start.child, 60_000), 'the start ends');
+    assert.match(helperFailure(start.files.error) ?? '', /gave no answer within 1500 ms/u, 'with the reason');
+    assert.ok(helper !== undefined, 'a helper served it');
+    assert.ok(
+      await answeredWithin(() => (alive(helper) ? undefined : true), 30_000),
+      'and the helper is ended',
+    );
+  } finally {
+    if (limit === undefined) {
+      delete process.env['GDHARNESS_HELPER_ANSWER_MS'];
+    } else {
+      process.env['GDHARNESS_HELPER_ANSWER_MS'] = limit;
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * The helper starts with no window and a console that has none, and opens none for any start it
+ * serves, a failed one included. Read from the system: the helper and everything it started that is
+ * still running own no visible window.
+ */
+async function testTheHelperOpensNoWindowForAnyStart(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-windows-'));
+  const running = collectedStart(root, 'running', process.execPath, lineThenExit(0, 600_000, 1), {
+    desktop: true,
+  });
+  try {
+    const refused = collectedStart(root, 'refused', join(root, 'missing.exe'), []);
+    assert.ok(await exitedWithin(refused.start.child, 60_000), 'a start that fails ends');
+    // The stand-in reports whether it has a console and whether that console has a window.
+    const reported = join(root, 'console.json');
+    const probed = collectedStart(root, 'probe', await consoleProbe(), [reported], { desktop: true });
+    assert.ok(await exitedWithin(probed.start.child, 60_000), 'the stand-in ends');
+    assert.deepEqual(
+      await answeredWithin(() => {
+        try {
+          return JSON.parse(readFileSync(reported, 'utf8')) as unknown;
+        } catch {
+          return undefined;
+        }
+      }, 60_000),
+      { console: true, window: false },
+      'an engine the helper serves has a console with no window',
+    );
+    const engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
+    const helper = running.start.child.pid;
+    assert.ok(engine !== undefined && helper !== undefined, 'the helper and an engine run');
+    const script = [
+      `$family = @(${String(helper)}, ${String(engine)})`,
+      `$family += (Get-CimInstance Win32_Process -Filter "ParentProcessId=${String(helper)}").ProcessId`,
+      '$shown = Get-Process -Id $family -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }',
+      '@($shown).Count',
+    ].join('; ');
+    const read = spawnSyncHidden('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.equal(
+      read.stdout.trim(),
+      '0',
+      `no window of the helper's own or its engine's: ${read.stdout}${read.stderr}`,
+    );
+  } finally {
+    running.start.stop();
+    await exitedWithin(running.start.child, 60_000);
+    sweep(root);
+  }
+}
+
 /**
  * Every engine the helper starts has a console that has no window, so a console program the engine
  * starts joins that console and opens no window of its own. A process with no console at all gives
@@ -21074,7 +21694,7 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
         assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
       },
       'a kept start': async (file, scratch) => {
-        const start = spawnOnDesktop({ directory: root, scratch, outlivesStarter: true }, probe, [file], {
+        const start = spawnOnDesktop({ directory: root, scratch }, probe, [file], {
           stdio: ['ignore', 'ignore', 'ignore'],
         });
         assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
@@ -21169,8 +21789,12 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
       spawnSyncHidden: (file) => Promise.resolve(spawnSyncHidden(probe, [file])),
     };
     const offered = Object.entries(await import('../src/spawn.js'))
-      // `unstartedChild` makes an object and starts nothing.
-      .filter(([name, value]) => typeof value === 'function' && name !== 'unstartedChild')
+      // `unstartedChild` makes an object and starts nothing, and `RelayedChild` is the class of a
+      // process another process started.
+      .filter(
+        ([name, value]) =>
+          typeof value === 'function' && name !== 'unstartedChild' && name !== 'RelayedChild',
+      )
       .map(([name]) => name)
       .toSorted();
     assert.deepEqual(
@@ -45416,11 +46040,15 @@ async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> 
         'config_version=5\n\n[application]\nconfig/name="Denied"\nrun/main_scene="res://main.tscn"\n',
       'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
     });
+    // A server keeps its helper running, so one that was started before the program was made
+    // unrunnable still serves. The refusal is met by the servers started after it.
     await withStdioServer(
       async (call) => {
-        const check = async (): Promise<string> =>
-          await call('editor_run', { projectPath: project, op: 'check', frames: 10 }, ENGINE_CALL_TIMEOUT_MS);
-        const first = await check();
+        const first = await call(
+          'editor_run',
+          { projectPath: project, op: 'check', frames: 10 },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
         assert.match(first, /"booted": true/u, `the first start runs, and compiles the helper: ${first}`);
         const program = helper();
         assert.ok(
@@ -45431,6 +46059,13 @@ async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> 
           encoding: 'utf8',
         });
         assert.equal(acl.status, 0, `the helper is made unrunnable: ${acl.stdout}${acl.stderr}`);
+      },
+      { GODOT_PATH: engine, TEMP: temp, TMP: temp },
+    );
+    await withStdioServer(
+      async (call) => {
+        const check = async (): Promise<string> =>
+          await call('editor_run', { projectPath: project, op: 'check', frames: 10 }, ENGINE_CALL_TIMEOUT_MS);
         // A system that refuses to run a program, as a policy allowing only some would, is no
         // defect of the server's: the start failed, and the answer says so and why.
         const refused = await check();
@@ -117777,6 +118412,20 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck,
   testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce,
   testAHelperThatCannotBeRunLeavesNoScratchFolder,
+  testStartsMadeAtOnceWaitOnNoOthersEngine,
+  testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne,
+  testAKilledStarterTakesItsHelperAndItsEnginesButNotAKeptOne,
+  testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine,
+  testAnEngineOutlivingAHelperThatCannotBeRunStillEndsItsStart,
+  testAnUnreadOutputStreamStillCloses,
+  testAStartEndedBeforeTheHelperAnswersEndsBySigterm,
+  testAnEnginesWholeExitIsToldWhileTheHelperServesOthers,
+  testTheHelperOpensNoWindowForAnyStart,
+  testAnEngineThatOutlivesItsHelperStillEndsWithItsWholeCode,
+  testAHelperThatNeverAnswersFailsTheStartAndIsEnded,
+  testAProcessThatRanAnEngineEndsOnItsOwn,
+  testAStoppedEngineEndsBySigtermAndNotByExitCodeOne,
+  testAStartsOutputClosesWhileALaterEngineStillRuns,
   testAnEngineStartedInsideAParentJobStillGetsItsJob,
   testAnEngineStartedUnderAUiLimitedParentJobStillRuns,
   testEveryEngineTheHelperStartsHasAConsoleWithNoWindow,

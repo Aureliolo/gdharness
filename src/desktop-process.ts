@@ -1,0 +1,532 @@
+/**
+ * The one desktop helper a process keeps running, and the child each start through it is given.
+ *
+ * Starting the helper program for every engine cost a process launch on the path of every start.
+ * One helper per process is started when the first engine needs it, takes a line a start on its
+ * standard input and answers a line when the engine runs and another when it has ended. The engine's
+ * own streams never pass through it: each start's output goes down a named pipe this process
+ * listens on, which the helper hands the engine as its standard stream.
+ *
+ * A helper that dies leaves the engines it started running, since this process holds a copy of the
+ * job of each that ends with its starter. The next start gets a new helper.
+ */
+
+import { randomBytes } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
+import net from 'node:net';
+import { PassThrough, type Writable } from 'node:stream';
+import { alive } from './alive.js';
+import { type ChildProcess, RelayedChild, spawnHidden } from './spawn.js';
+
+/**
+ * The system refused to run the helper program itself, as a policy that allows only some programs
+ * does. That is a start that failed, which every caller answers as one, and no defect of this
+ * server's. Where a runtime reports a refused spawn as an event, the same text arrives as the
+ * child's error.
+ */
+export class HelperRefused extends Error {
+  constructor(reason: string) {
+    super(`the desktop helper could not be run: ${reason}`);
+    this.name = 'HelperRefused';
+  }
+}
+
+/** How long a start waits for the helper to say its engine runs, before the helper is taken for hung. */
+const ANSWER_MS = 30_000;
+
+/** The limit, which GDHARNESS_HELPER_ANSWER_MS shortens for a test of a helper that never answers. */
+function answerMs(): number {
+  const set = Number(process.env['GDHARNESS_HELPER_ANSWER_MS']);
+  return Number.isInteger(set) && set > 0 ? set : ANSWER_MS;
+}
+
+/** How often the engine of a helper that has gone is looked for. */
+const WATCH_MS = 250;
+
+/** What a stream of a start is: closed to the engine, or read here. */
+export type StreamKind = 'ignore' | 'pipe';
+
+/** What a start is given for its streams, which the helper reads. */
+export interface StreamPlan {
+  readonly kinds: readonly [StreamKind, StreamKind, StreamKind];
+  /** Where the output goes when it is not piped here, or none for the null device. */
+  readonly outputFile?: string | undefined;
+  /** The error stream is the engine's own, apart from its output. */
+  readonly separateErrors: boolean;
+}
+
+interface Listening {
+  readonly stream: PassThrough;
+  readonly server: net.Server;
+  connected: boolean;
+}
+
+function pipePath(name: string): string {
+  return ['', '', '.', 'pipe', name].join('\\');
+}
+
+/**
+ * Sets whether [param target], if it can be, keeps this process running. Node's pipes are sockets.
+ * Bun's child output is a stream with its own `ref` and `unref`, which is what holds Bun open.
+ */
+function holdsProcess(target: unknown, held: boolean): void {
+  const method = held ? 'ref' : 'unref';
+  const call: unknown =
+    target === null || typeof target !== 'object' ? undefined : Reflect.get(target, method);
+  if (typeof call === 'function') {
+    Reflect.apply(call, target, []);
+  }
+}
+
+/** A start through the helper: the process the caller holds, whose events the helper's answers drive. */
+export class HelpedChild extends RelayedChild {
+  readonly id = randomBytes(6).toString('hex');
+  /** Where the helper is to put the engine's input, output and error. */
+  readonly streams: readonly [string, string, string];
+  private readonly listening: Listening[] = [];
+  private readonly ready: Promise<void>[] = [];
+  private readonly closing: Promise<void>[] = [];
+  private readonly unfed: PassThrough[] = [];
+  private helper: ServedHelper | null = null;
+  private enginePid: number | undefined;
+  private copy = '0';
+  private answered = false;
+  private adopted = false;
+  private done = false;
+  private killRequested = false;
+  private watchdog: NodeJS.Timeout | undefined;
+  private watching: NodeJS.Timeout | undefined;
+  private abort: (() => void) | undefined;
+  private signal: AbortSignal | undefined;
+
+  constructor(plan: StreamPlan, signal?: AbortSignal) {
+    super();
+    this.signal = signal;
+    const output = plan.kinds[1] === 'pipe' ? this.piped() : null;
+    // Without an error stream of its own the engine's errors go down its output, and the error
+    // stream a caller holds only ends with the engine.
+    let error: { stream: PassThrough; target: string } | null = null;
+    if (plan.kinds[2] === 'pipe') {
+      error = plan.separateErrors ? this.piped() : { stream: new PassThrough(), target: 'same' };
+      if (!plan.separateErrors) {
+        this.unfed.push(error.stream);
+      }
+    }
+    this.streams = [
+      'nul',
+      output?.target ?? (plan.outputFile === undefined ? 'nul' : `file:${plan.outputFile}`),
+      plan.separateErrors ? (error?.target ?? 'nul') : 'same',
+    ];
+    this.define('stdout', output?.stream ?? null);
+    this.define('stderr', error?.stream ?? null);
+    this.define('stdin', null);
+    for (const stream of [output?.stream, error?.stream]) {
+      if (stream !== undefined) {
+        this.closing.push(
+          new Promise((resolve) => {
+            stream.once('close', resolve);
+          }),
+        );
+      }
+    }
+  }
+
+  private piped(): { stream: PassThrough; target: string } {
+    const stream = new PassThrough();
+    const name = `gdharness-${String(process.pid)}-${this.id}-${String(this.listening.length)}`;
+    const listening: Listening = {
+      stream,
+      server: net.createServer((socket) => {
+        listening.connected = true;
+        socket.on('error', () => undefined);
+        listening.server.close();
+        socket.pipe(stream);
+      }),
+      connected: false,
+    };
+    this.listening.push(listening);
+    this.ready.push(
+      new Promise((resolve, reject) => {
+        listening.server.once('error', reject);
+        listening.server.listen(pipePath(name), resolve);
+      }),
+    );
+    return { stream, target: `pipe:${name}` };
+  }
+
+  /** Sets one of the properties a started process has, which are read-only on the type. */
+  private define(name: string, value: unknown): void {
+    Object.defineProperty(this, name, { value, writable: true, configurable: true, enumerable: true });
+  }
+
+  /** Gives the start to [param helper] once its pipes are listening, and answers a start it could not give. */
+  async deliver(helper: ServedHelper, request: string): Promise<void> {
+    this.helper = helper;
+    this.define('pid', helper.process.pid);
+    if (this.signal !== undefined) {
+      const signal = this.signal;
+      this.abort = (): void => {
+        this.kill();
+        this.emit(
+          'error',
+          Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' }),
+        );
+      };
+      if (signal.aborted) {
+        queueMicrotask(this.abort);
+      } else {
+        signal.addEventListener('abort', this.abort, { once: true });
+      }
+    }
+    try {
+      await Promise.all(this.ready);
+    } catch (error) {
+      this.failed(
+        `a pipe for the engine's output could not be made: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (this.done) {
+      return;
+    }
+    const limit = answerMs();
+    this.watchdog = setTimeout(() => {
+      this.watchdog = undefined;
+      this.failed(`the desktop helper gave no answer within ${String(limit)} ms`);
+      helper.hang();
+    }, limit);
+    this.watchdog.unref();
+    if (!helper.write(`start ${this.id} ${request}`)) {
+      // A helper that has not yet reported its end says why itself, as its error or exit.
+      if (!helper.running) {
+        this.failed('the desktop helper could not be written to');
+      }
+      return;
+    }
+    this.emit('spawn');
+  }
+
+  /** The helper says the engine runs, with its pid and the copy of its job this process holds. */
+  started(pid: number, copy: string): void {
+    this.answered = true;
+    this.enginePid = pid;
+    this.copy = copy;
+    clearTimeout(this.watchdog);
+    if (this.killRequested) {
+      this.kill();
+    }
+  }
+
+  /**
+   * The helper says the engine has ended with [param code], whole. An engine it ended on request is
+   * reported as one ended by SIGTERM, as a stopped child process is, and not by the code 1 that
+   * ending it leaves, which an engine can exit with itself.
+   */
+  ended(code: number, stopped: boolean): void {
+    if (stopped) {
+      this.finish(null, 'SIGTERM');
+      return;
+    }
+    this.finish(code, null);
+  }
+
+  /**
+   * The helper is gone: a start it had not answered has failed. One it had is handed to
+   * [param adopt], the next helper, which reads the engine's exit code from a handle opened while
+   * the engine runs. Where none can take it, the engine is watched until it has gone and ends
+   * without a code.
+   */
+  helperGone(reason: string, adopt: (child: HelpedChild) => boolean, refused?: Error): void {
+    if (this.done) {
+      return;
+    }
+    if (!this.answered) {
+      // A helper the system would not run is the child's error, as a refused spawn is, where the
+      // caller listens for one.
+      if (refused !== undefined && this.listenerCount('error') > 0) {
+        this.emit('error', refused);
+      }
+      this.failed(reason);
+      return;
+    }
+    // One adoption a start: a helper that cannot run would otherwise be asked again for ever.
+    if (!this.adopted && adopt(this)) {
+      return;
+    }
+    const engine = this.enginePid;
+    this.watching = setInterval(() => {
+      if (!alive(engine)) {
+        this.finish(null, 'SIGKILL');
+      }
+    }, WATCH_MS);
+  }
+
+  /** Makes [param helper] this start's, and says the engine and the copy of its job it is to wait on. */
+  adoptedBy(helper: ServedHelper): string {
+    this.helper = helper;
+    this.adopted = true;
+    return `${String(this.enginePid)} ${this.copy}`;
+  }
+
+  /** Ends the start with [param reason] where the helper's error file would have said it. */
+  private failed(reason: string): void {
+    const file = this.errorFile;
+    if (file !== undefined) {
+      try {
+        writeFileSync(file, reason, { flag: 'wx' });
+      } catch {
+        // The helper wrote its own reason there, or the folder has gone.
+      }
+    }
+    this.finish(1, null);
+  }
+
+  /** Where a reason for a start that failed is written, which the caller of the start sets. */
+  errorFile: string | undefined;
+
+  private finish(code: number | null, signal: NodeJS.Signals | null): void {
+    if (this.done) {
+      return;
+    }
+    this.done = true;
+    clearTimeout(this.watchdog);
+    clearInterval(this.watching);
+    if (this.abort !== undefined) {
+      this.signal?.removeEventListener('abort', this.abort);
+    }
+    this.helper?.forget(this);
+    for (const { stream, server, connected } of this.listening) {
+      if (!connected) {
+        server.close();
+        stream.end();
+      }
+    }
+    // Nothing is written to these, and nothing may read them, so they are drained to let them close.
+    for (const stream of this.unfed) {
+      stream.resume();
+      stream.end();
+    }
+    this.define('exitCode', code);
+    this.define('signalCode', signal);
+    this.emit('exit', code, signal);
+    // As a child process does, output nobody reads is let go so that the stream can close.
+    for (const stream of [this.stdout, this.stderr]) {
+      if (
+        stream?.readableFlowing === null &&
+        stream.listenerCount('data') === 0 &&
+        stream.listenerCount('readable') === 0
+      ) {
+        stream.resume();
+      }
+    }
+    void Promise.all(this.closing).then(() => {
+      this.emit('close', code, signal);
+    });
+  }
+
+  override kill(): boolean {
+    if (this.done) {
+      return false;
+    }
+    this.define('killed', true);
+    if (this.answered && this.helper !== null) {
+      this.helper.write(`kill ${this.id}`);
+    } else {
+      this.killRequested = true;
+    }
+    return true;
+  }
+
+  override unref(): void {
+    this.helper?.process.unref();
+  }
+
+  override ref(): void {
+    this.helper?.process.ref();
+  }
+}
+
+/** The helper program, running, and the starts it has been given. */
+export class ServedHelper {
+  readonly process: ChildProcess;
+  private readonly input: Writable;
+  readonly assembly: string;
+  private readonly starts = new Map<string, HelpedChild>();
+  private open = true;
+  private holding = true;
+  private heard = '';
+
+  constructor(assembly: string) {
+    this.assembly = assembly;
+    try {
+      this.process = spawnHidden(assembly, ['--serve', String(process.pid)], {
+        stdio: ['pipe', 'pipe', 'ignore'],
+        // Apart from its starter's process group and job, so a helper that holds the job of a kept
+        // engine is not ended with a starter that is killed. It ends itself once its starter has
+        // gone and no kept engine is left.
+        detached: true,
+      });
+    } catch (error) {
+      throw new HelperRefused(error instanceof Error ? error.message : String(error));
+    }
+    const { stdin, stdout } = this.process;
+    if (stdin === null || stdout === null) {
+      throw new HelperRefused('it was given no streams');
+    }
+    this.input = stdin;
+    stdin.on('error', () => undefined);
+    stdout.setEncoding('utf8');
+    stdout.on('data', (chunk: string) => {
+      this.heard += chunk;
+      for (let end = this.heard.indexOf('\n'); end >= 0; end = this.heard.indexOf('\n')) {
+        this.answer(this.heard.slice(0, end).trim());
+        this.heard = this.heard.slice(end + 1);
+      }
+    });
+    this.process.once('error', (error: Error) => {
+      this.gone(new HelperRefused(error.message).message, error);
+    });
+    this.process.once('exit', (code, signal) => {
+      this.gone(
+        `the desktop helper ended (${code === null ? String(signal) : `exit code ${String(code)}`}) before it started the engine`,
+      );
+    });
+  }
+
+  get running(): boolean {
+    return this.open;
+  }
+
+  /** Settles once the helper's process has gone. */
+  get ended(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.process.exitCode !== null || this.process.signalCode !== null) {
+        resolve();
+        return;
+      }
+      this.process.once('exit', () => {
+        resolve();
+      });
+    });
+  }
+
+  /** How many starts are with the helper. */
+  get busy(): number {
+    return this.starts.size;
+  }
+
+  private answer(line: string): void {
+    const [word, id, first, second] = line.split(' ');
+    const start = this.starts.get(id ?? '');
+    if (word === 'started') {
+      start?.started(Number(first), second ?? '0');
+    } else if (word === 'ended') {
+      start?.ended(Number(first), second === 'stopped');
+    }
+  }
+
+  /** Gives [param child] the start that [param request] names. */
+  give(child: HelpedChild, request: string): void {
+    this.starts.set(child.id, child);
+    this.hold(true);
+    void child.deliver(this, request);
+  }
+
+  forget(child: HelpedChild): void {
+    this.starts.delete(child.id);
+    if (this.starts.size === 0) {
+      this.hold(false);
+    }
+  }
+
+  /** Writes a line to the helper, and says whether it could. */
+  write(line: string): boolean {
+    if (!this.open || this.input.destroyed) {
+      return false;
+    }
+    this.input.write(`${line}\n`);
+    return true;
+  }
+
+  /** Ends a helper that does not answer, so the next start gets a new one. */
+  hang(): void {
+    this.process.kill();
+  }
+
+  /** Ends the helper when nothing is with it. */
+  retire(): void {
+    if (this.starts.size === 0 && this.open) {
+      this.input.end();
+    }
+  }
+
+  /**
+   * Bun counts every `ref`, so one made while the process is already held takes two `unref` to
+   * release. A call that changes nothing is skipped.
+   */
+  private hold(held: boolean): void {
+    if (held === this.holding) {
+      return;
+    }
+    this.holding = held;
+    holdsProcess(this.input, held);
+    holdsProcess(this.process.stdout, held);
+    if (held) {
+      this.process.ref();
+    } else {
+      this.process.unref();
+    }
+  }
+
+  private gone(reason: string, refused?: Error): void {
+    if (!this.open) {
+      return;
+    }
+    this.open = false;
+    const starts = [...this.starts.values()];
+    this.starts.clear();
+    for (const child of starts) {
+      child.helperGone(reason, (orphan) => this.adopt(orphan), refused);
+    }
+  }
+
+  /** Has the next helper wait for an engine this one started, so its whole exit code still arrives. */
+  private adopt(child: HelpedChild): boolean {
+    try {
+      return helperFor(this.assembly).take(child);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Takes over the wait for the engine of [param child], which a helper that has gone started. */
+  take(child: HelpedChild): boolean {
+    this.starts.set(child.id, child);
+    this.hold(true);
+    if (this.write(`adopt ${child.id} ${child.adoptedBy(this)}`)) {
+      return true;
+    }
+    this.starts.delete(child.id);
+    return false;
+  }
+}
+
+let current: ServedHelper | null = null;
+
+/** Ends the helper this process keeps once its starts have ended, as a test that compiled a helper of its own needs. */
+export async function retireHelper(): Promise<void> {
+  const retiring = current;
+  current = null;
+  retiring?.retire();
+  await retiring?.ended;
+}
+
+/** The helper running [param assembly], started when there is none. Throws [class HelperRefused] where the system will not run it. */
+export function helperFor(assembly: string): ServedHelper {
+  if (current?.running === true && current.assembly === assembly) {
+    return current;
+  }
+  current?.retire();
+  current = new ServedHelper(assembly);
+  return current;
+}

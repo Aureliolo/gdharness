@@ -76,7 +76,7 @@ const ran = await running;
 
 const compiled = await ensureHelperCompiled();
 const kept = spawnOnDesktop(
-  { directory: root, outlivesStarter: true, scratch: join(root, 'kept') },
+  { directory: root, scratch: join(root, 'kept') },
   process.execPath,
   ['-e', 'setTimeout(() => undefined, 2000)'],
   { stdio: ['ignore', 'ignore', 'ignore'] },

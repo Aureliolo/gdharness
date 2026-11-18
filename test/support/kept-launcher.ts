@@ -22,12 +22,9 @@ const compiled = await ensureHelperCompiled();
 if (compiled !== null) {
   throw new Error(compiled);
 }
-const started = spawnOnDesktop(
-  { directory: scratch, outlivesStarter: true, scratch },
-  program,
-  listOfText(argumentList),
-  { stdio: ['ignore', 'ignore', 'ignore'] },
-);
+const started = spawnOnDesktop({ directory: scratch, scratch }, program, listOfText(argumentList), {
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
 started.child.unref();
 let pid = helperPid(started.files.pid);
 for (let waited = 0; pid === undefined && waited < 60_000; waited += 20) {
