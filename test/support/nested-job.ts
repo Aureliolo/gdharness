@@ -43,7 +43,8 @@ if (mode === 'ui') {
   const marker = join(root, 'ran');
   const refused = await runEngine(process.execPath, [
     '-e',
-    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+    "require('node:fs').writeFileSync(process.argv[1], 'ran')",
+    marker,
   ]);
   await delay(1000);
   process.stdout.write(
@@ -56,10 +57,11 @@ const pids = join(root, 'pids');
 const release = join(root, 'release');
 const script = [
   "const fs = require('node:fs');",
-  `fs.writeFileSync(${JSON.stringify(pids)}, String(process.pid));`,
-  `const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(t); } }, 50);`,
+  'const [pidsFile, releaseFile] = process.argv.slice(1);',
+  'fs.writeFileSync(pidsFile, String(process.pid));',
+  'const t = setInterval(() => { if (fs.existsSync(releaseFile)) { clearInterval(t); } }, 50);',
 ].join('\n');
-const running = runEngine(process.execPath, ['-e', script]);
+const running = runEngine(process.execPath, ['-e', script, pids, release]);
 let engine: number | undefined;
 for (let waited = 0; engine === undefined && waited < 60_000; waited += 50) {
   await delay(50);

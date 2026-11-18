@@ -20671,14 +20671,18 @@ async function testADesktopStartIsOneCall(): Promise<void> {
   }
 }
 
-/** A stand-in engine that starts a child, writes both pids to [param pidsFile] and waits for [param release]. */
-function jobEngineScript(pidsFile: string, release: string): string {
+/**
+ * A stand-in engine that starts a child, writes both pids to the file named by its first argument
+ * and waits for the file named by its second. The values arrive as arguments, never as code.
+ */
+function jobEngineScript(): string {
   return [
     "const fs = require('node:fs');",
     HIDDEN_SPAWN_PRELUDE,
+    'const [pidsFile, release] = process.argv.slice(1);',
     "const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore' });",
-    `fs.writeFileSync(${JSON.stringify(pidsFile)}, JSON.stringify({ engine: process.pid, child: child.pid }));`,
-    `const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) { child.kill(); clearInterval(timer); } }, 50);`,
+    'fs.writeFileSync(pidsFile, JSON.stringify({ engine: process.pid, child: child.pid }));',
+    'const timer = setInterval(() => { if (fs.existsSync(release)) { child.kill(); clearInterval(timer); } }, 50);',
   ].join('\n');
 }
 
@@ -20704,7 +20708,7 @@ async function testEveryEngineRunsInAJobNamedForItsPid(): Promise<void> {
   const pidsFile = join(root, 'pids');
   const release = join(root, 'release');
   try {
-    const running = runEngine(process.execPath, ['-e', jobEngineScript(pidsFile, release)]);
+    const running = runEngine(process.execPath, ['-e', jobEngineScript(), pidsFile, release]);
     const pids = await answeredWithin(() => {
       try {
         return pidsOf(pidsFile);
@@ -20744,7 +20748,7 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
     start = spawnOnDesktop(
       { directory: root, endsWithHelper: true, scratch: root },
       process.execPath,
-      ['-e', jobEngineScript(pidsFile, release)],
+      ['-e', jobEngineScript(), pidsFile, release],
       { stdio: ['ignore', 'ignore', 'ignore'] },
     );
     const named = await answeredWithin(() => start?.pid(), 60_000);
@@ -20787,7 +20791,7 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     const start = spawnOnDesktop(
       { directory: root, endsWithHelper: true, scratch: root },
       process.execPath,
-      ['-e', `require('node:fs').writeFileSync(${JSON.stringify(ranMarker)}, 'ran')`],
+      ['-e', "require('node:fs').writeFileSync(process.argv[1], 'ran')", ranMarker],
       { stdio: ['ignore', 'ignore', 'ignore'] },
       copy.assembly(root),
     );
@@ -20837,10 +20841,11 @@ async function startedKept(
   const waits = [
     `const fs = require('node:fs');`,
     HIDDEN_SPAWN_PRELUDE,
-    `const tool = ${JSON.stringify(tool)};`,
+    'const [releaseFile, toolList] = process.argv.slice(1);',
+    'const tool = JSON.parse(toolList);',
     // Not hidden, as an engine's own child may not be: the point is that none of it shows.
-    `if (tool.length > 0) { require(${JSON.stringify(`node:${['child', 'process'].join('_')}`)}).spawn(tool[0], tool.slice(1), { stdio: 'ignore' }); }`,
-    `const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(t); } }, 50);`,
+    `if (tool.length > 0) { require('node:${['child', 'process'].join('_')}').spawn(tool[0], tool.slice(1), { stdio: 'ignore' }); }`,
+    'const t = setInterval(() => { if (fs.existsSync(releaseFile)) { clearInterval(t); } }, 50);',
   ].join('\n');
   const launcher = spawnHidden(
     process.execPath,
@@ -20848,7 +20853,7 @@ async function startedKept(
       join(process.cwd(), 'test', 'support', 'kept-launcher.ts'),
       root,
       process.execPath,
-      JSON.stringify(['-e', waits]),
+      JSON.stringify(['-e', waits, release, JSON.stringify(tool)]),
       after,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
@@ -26630,7 +26635,8 @@ async function testAProcessTheLauncherStartsOutlivesItAndKeepsItsJob(): Promise<
       command: process.execPath,
       args: [
         '-e',
-        `const t = setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(release)})) { clearInterval(t); } }, 50);`,
+        "const t = setInterval(() => { if (require('node:fs').existsSync(process.argv[1])) { clearInterval(t); } }, 50);",
+        release,
       ],
       envChanges: {},
     };
