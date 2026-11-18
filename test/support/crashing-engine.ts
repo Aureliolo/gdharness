@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CompiledHelper } from '../../src/compiled-helper.js';
@@ -114,6 +114,41 @@ public static class CrashingEngine {
 
 /** The source the check of hidden starts reads. */
 export const CRASHING_ENGINE_SOURCE = SOURCE;
+
+/**
+ * The POSIX stand-in for a start that crashes after the real engine ran. Exit statuses there are one
+ * byte, so GDH_CRASH_STATUS is a number below 256.
+ */
+const POSIX_SOURCE = `#!/bin/sh
+case " $* " in
+  *"$GDH_CRASH_WHEN"*)
+    if [ ! -e "$GDH_CRASH_MARKER" ]; then
+      : > "$GDH_CRASH_MARKER"
+      "$GDH_REAL_ENGINE" "$@"
+      exit "$GDH_CRASH_STATUS"
+    fi
+    ;;
+esac
+exec "$GDH_REAL_ENGINE" "$@"
+`;
+
+/**
+ * A stand-in whose first start matching GDH_CRASH_WHEN runs the real engine at GDH_REAL_ENGINE to its
+ * end and then exits with GDH_CRASH_STATUS, whichever platform this is. Every other start is the real
+ * engine's. On Windows it is the compiled stand-in, which also needs GDH_CRASH_AFTER_REAL set.
+ */
+export async function crashingAfterTheRealEngine(): Promise<string> {
+  if (process.platform === 'win32') {
+    return await crashingEngine();
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crash-after-'));
+  process.once('exit', () => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const script = join(directory, 'godot');
+  writeFileSync(script, POSIX_SOURCE, { mode: 0o755 });
+  return script;
+}
 
 let built: string | null = null;
 

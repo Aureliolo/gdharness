@@ -837,7 +837,12 @@ import {
 import { withHome } from './support/cli-home.js';
 import { consoleProbe } from './support/console-probe.js';
 import { containedEngine } from './support/contained-engine.js';
-import { CRASHING_ENGINE_SOURCE, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
+import {
+  CRASHING_ENGINE_SOURCE,
+  crashingAfterTheRealEngine,
+  crashingEngine,
+  ENGINE_BANNER_LINE,
+} from './support/crashing-engine.js';
 import { endEnginesUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
@@ -36566,7 +36571,7 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
 
     // The crash itself is forced, so the second run is covered whatever the engine's timing. The
     // stand-in runs the real engine to its end, which rewrites the cache, and then reports a crash.
-    const standIn = await crashingEngine();
+    const standIn = await crashingAfterTheRealEngine();
     const crashed = async (
       when: string,
       call_: (
@@ -36579,7 +36584,8 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
           GDH_REAL_ENGINE: godotPath,
           GDH_CRASH_AFTER_REAL: '1',
           GDH_CRASH_WHEN: when,
-          GDH_CRASH_STATUS: '3221225477',
+          // An access violation on Windows. A status is one byte elsewhere, so 139 stands for a SIGSEGV.
+          GDH_CRASH_STATUS: process.platform === 'win32' ? '3221225477' : '139',
           GDH_CRASH_MARKER: join(root, `crash${when}`),
           GDHARNESS_PROJECT: project,
           GDHARNESS_BRIDGE_PORT: String(await reservePort()),
@@ -36610,7 +36616,7 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
       const note = text(get(answer, 'docCacheNote'));
       assert.deepEqual(get(answer, 'uidsCreated'), ['third.gd'], JSON.stringify(raw));
       assert.ok(
-        note.startsWith('The first import ended badly (exit code 0xC0000005') &&
+        note.startsWith('The first import ended badly (exit code ') &&
           note.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
         `a crashed import is run again and says so: ${JSON.stringify(raw)}`,
       );
@@ -36633,7 +36639,7 @@ async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise
         })
         .find((parsed) => get(parsed, 'exported') !== undefined);
       assert.ok(
-        text(get(answer, 'docCacheNote')).startsWith('The first export ended badly (exit code 0xC0000005'),
+        text(get(answer, 'docCacheNote')).startsWith('The first export ended badly (exit code '),
         `a crashed export is run again and says so: ${JSON.stringify(raw)}`,
       );
       assert.ok(
