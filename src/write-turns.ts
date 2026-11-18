@@ -17,7 +17,7 @@ import { alive } from './alive.js';
 import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './engine-slots.js';
 import { startTimesOf } from './process-children.js';
 import { Turns } from './turns.js';
-import { removeWhole } from './whole-file.js';
+import { removeWholeAsync } from './whole-file.js';
 
 /** The folder under a project's .godot that holds a lock for each file a write is under way to. */
 const WRITES_FOLDER = 'gdharness-writes';
@@ -108,7 +108,7 @@ export async function tryTake(
  */
 async function giveBack(lock: string): Promise<boolean> {
   for (let tries = 0; tries < GIVE_BACK_TRIES; tries += 1) {
-    if (removeWhole(lock)) {
+    if (await removeWholeAsync(lock)) {
       return true;
     }
     await delay(TURN_LOOK_MS);

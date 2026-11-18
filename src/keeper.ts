@@ -25,7 +25,7 @@ import {
   helperStep,
   spawnOnDesktop,
 } from './desktop.js';
-import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
+import { giveBackSlotAsync, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
@@ -577,7 +577,7 @@ async function handTheSlot(
     return;
   }
   const gameStarted = (await startTimesOf([pid])).get(pid);
-  handSlot(slot.lock, slot.from, {
+  await handSlot(slot.lock, slot.from, {
     pid: process.pid,
     started: await keeperStarted,
     by: `${slot.by}, through the keeper process that runs it`,
@@ -628,7 +628,7 @@ async function followRestart(
   };
   amendNoteIfItCan(moved);
   if (following.slot !== undefined) {
-    nameSlotEngine(following.slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
+    await nameSlotEngine(following.slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
   }
   following.ender.end = () => {
     try {
@@ -756,7 +756,7 @@ async function keep(): Promise<void> {
   );
   recordTheEnd(last);
   if (slot !== undefined) {
-    giveBackSlot(slot.lock, process.pid);
+    await giveBackSlotAsync(slot.lock, process.pid);
   }
   debuggerPeer?.close();
   listening?.close();

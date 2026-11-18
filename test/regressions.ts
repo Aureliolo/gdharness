@@ -857,6 +857,7 @@ import {
   slotWaitOf,
   textOf,
 } from './support/json-rpc.js';
+import { watchTheLoop } from './support/loop-gaps.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import {
   beginWindow,
@@ -66382,8 +66383,8 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
 }
 
 /**
- * A hidden PowerShell opening [param path] for [param access] while sharing reads and writes but no
- * removal, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
+ * A hidden PowerShell opening [param path] for [param access] while sharing [param sharing], reads and
+ * writes but no removal by default, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
  * closes it after [param forMs], and else at [method letGo] or after 30 s, so a run killed before its
  * `finally` leaves no process holding a file for good.
  */
@@ -66391,6 +66392,7 @@ async function heldOpenByAReader(
   path: string,
   access: 'ReadWrite' | 'Read',
   forMs?: number,
+  sharing: 'ReadWrite' | 'None' = 'ReadWrite',
 ): Promise<{ letGo(): Promise<void> }> {
   const reader = spawnHidden(
     'powershell.exe',
@@ -66400,7 +66402,7 @@ async function heldOpenByAReader(
       '-Command',
       // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
       // second a removal waits on a slow runner.
-      `$f = [IO.File]::Open('${path.replaceAll("'", "''")}', 'Open', '${access}', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(${String(forMs ?? 30_000)}); $f.Close()`,
+      `$f = [IO.File]::Open('${path.replaceAll("'", "''")}', 'Open', '${access}', '${sharing}'); 'held'; [System.Threading.Thread]::Sleep(${String(forMs ?? 30_000)}); $f.Close()`,
     ],
     { stdio: ['ignore', 'pipe', 'ignore'] },
   );
@@ -66477,29 +66479,28 @@ async function aHeldDeadLockIsTakenOverOnceLetGo(
       }, 300);
     }
   });
-  let last = Date.now();
-  let widest = 0;
-  const ticking = setInterval(() => {
-    const now = Date.now();
-    widest = Math.max(widest, now - last);
-    last = now;
-  }, 20);
+  const loop = await watchTheLoop();
   const running = call().then(
     () => 'taken',
     (error: unknown) => `refused: ${error instanceof Error ? error.message : String(error)}`,
   );
+  let watched: Awaited<ReturnType<typeof loop.stop>> | undefined;
   try {
     const outcome = await Promise.race([running, delay(20_000).then(() => 'still waiting after 20 s')]);
     const tookAt = Date.now();
+    watched = await loop.stop();
     assert.equal(outcome, 'taken', `${caller} takes the dead lock over once the reader lets go`);
     assert.ok(sawSteal, `${caller} made a steal file while the reader held the lock`);
     assert.ok(
       tookAt - letGoAt < 5000,
       `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
     );
-    assert.ok(widest <= 500, `${caller} leaves the process free to run: ticks ${String(widest)} ms apart`);
+    assert.ok(
+      watched.widest <= 500,
+      `${caller} leaves the process free to run: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
+    );
   } finally {
-    clearInterval(ticking);
+    watched ??= await loop.stop();
     watcher.close();
     await reader.letGo();
     rmSync(lock, { force: true });
@@ -66556,6 +66557,53 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
   } finally {
     rmSync(directory, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A slot file a reader holds shut is waited on without stopping the process: the read retries on a
+ * timer for its second and then refuses, and the loop ticks under 100 ms apart meanwhile. Windows
+ * alone, where an open that shares nothing refuses every other open.
+ */
+async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held-file wait regression ran on Windows alone: elsewhere no open shuts another out');
+    return;
+  }
+  const busy = await untilTheProcessorIsQuiet();
+  if (busy !== null) {
+    const said = 'held-file wait regression skipped: the processor never stayed under 60% for 30 s';
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`${said}, the last busy share was ${String(busy)}`);
+    }
+    console.log(said);
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  const file = join(directory, 'lanes.json');
+  writeFileSync(file, JSON.stringify({ pid: process.pid, started: await ownStart(), count: 2 }));
+  const reader = await heldOpenByAReader(file, 'ReadWrite', 3000, 'None');
+  const loop = await watchTheLoop();
+  const began = Date.now();
+  let refusal = '';
+  try {
+    await new EngineSlots(directory, 1, { pid: process.pid, started: await ownStart() }).countIn(
+      file,
+      'lanes',
+    );
+  } catch (error) {
+    refusal = errorMessage(error);
+  } finally {
+    const waited = Date.now() - began;
+    const watched = await loop.stop();
+    await reader.letGo();
+    rmSync(directory, { recursive: true, force: true });
+    assert.ok(refusal !== '', 'a file held shut past the second refuses the read');
+    assert.ok(waited >= 900, `and only after the second it waits: ${String(waited)} ms`);
+    assert.ok(
+      watched.widest < 100,
+      `the process runs while it waits: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
+    );
   }
 }
 
@@ -69215,12 +69263,12 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
       // The same holder naming the process above this one as the engine it holds the slot for, as
       // a keeper names its game: lent, and left as the holder wrote it.
       assert.equal(
-        nameSlotEngine(strangers, strangerPid, { pid: above, started: aboveStarted ?? 0 }),
+        await nameSlotEngine(strangers, strangerPid, { pid: above, started: aboveStarted ?? 0 }),
         true,
         'named by its holder',
       );
       assert.equal(
-        nameSlotEngine(strangers, process.pid, { pid: 1, started: 0 }),
+        await nameSlotEngine(strangers, process.pid, { pid: 1, started: 0 }),
         false,
         'and by nobody else',
       );
@@ -117545,6 +117593,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
+  testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testALiveReservationShrinksTheRoomByWhatItOwes,

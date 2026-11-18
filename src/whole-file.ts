@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 import { alive } from './alive.js';
 import { errorCode } from './errors.js';
@@ -82,20 +83,72 @@ const HELD_BY_A_READER = new Set(['EPERM', 'EACCES', 'EBUSY']);
  * wrote it, and the call ended in a crash report.
  */
 export function readWhole(path: string): string | null {
+  return waitedOutSync(() => readAttempt(path));
+}
+
+/** {@link readWhole} for a caller on the event loop: the wait between tries is a timer. */
+export async function readWholeAsync(path: string): Promise<string | null> {
+  return await waitedOut(() => readAttempt(path));
+}
+
+/**
+ * One try at a call that a reader holding the file can refuse for a moment: its answer, or what to
+ * answer once the wait is spent. Both ways of waiting judge a refusal by it, so they cannot differ.
+ */
+type Attempt<T> = { readonly done: T } | { readonly held: () => T };
+
+/**
+ * Tries [param attempt] until it answers or [constant HELD_FILE_MS] has passed, sleeping the thread
+ * between tries. For a caller that has to answer at once: a process exit, a synchronous API.
+ */
+function waitedOutSync<T>(attempt: () => Attempt<T>): T {
   const until = Date.now() + HELD_FILE_MS;
   for (;;) {
-    try {
-      return readFileSync(path, 'utf8');
-    } catch (error) {
-      const code = errorCode(error) ?? '';
-      if (code === 'ENOENT') {
-        return null;
-      }
-      if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
-        throw error;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
+    const tried = attempt();
+    if ('done' in tried) {
+      return tried.done;
     }
+    if (Date.now() >= until) {
+      return tried.held();
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
+  }
+}
+
+/**
+ * Tries [param attempt] as {@link waitedOutSync} does, with a timer between tries so the event loop
+ * keeps running while a reader holds the file.
+ */
+async function waitedOut<T>(attempt: () => Attempt<T>): Promise<T> {
+  const until = Date.now() + HELD_FILE_MS;
+  for (;;) {
+    const tried = attempt();
+    if ('done' in tried) {
+      return tried.done;
+    }
+    if (Date.now() >= until) {
+      return tried.held();
+    }
+    await delay(HELD_FILE_RETRY_MS);
+  }
+}
+
+function readAttempt(path: string): Attempt<string | null> {
+  try {
+    return { done: readFileSync(path, 'utf8') };
+  } catch (error) {
+    const code = errorCode(error) ?? '';
+    if (code === 'ENOENT') {
+      return { done: null };
+    }
+    if (!HELD_BY_A_READER.has(code)) {
+      throw error;
+    }
+    return {
+      held: () => {
+        throw error;
+      },
+    };
   }
 }
 
@@ -109,30 +162,47 @@ export function readWhole(path: string): string | null {
  * a throw ends it and the run it holds goes on with nobody holding it.
  */
 export function writeWhole(path: string, text: string): boolean {
+  const partial = stagedBeside(path, text);
+  return partial !== null && waitedOutSync(() => renameAttempt(partial, path));
+}
+
+/** {@link writeWhole} for a caller on the event loop: the wait between tries is a timer. */
+export async function writeWholeAsync(path: string, text: string): Promise<boolean> {
+  const partial = stagedBeside(path, text);
+  return partial !== null && (await waitedOut(() => renameAttempt(partial, path)));
+}
+
+/**
+ * Writes [param text] to the partial file beside [param path], and answers its name, or null when it
+ * cannot be written.
+ */
+function stagedBeside(path: string, text: string): string | null {
   const partial = `${path}.${process.pid}.partial`;
   sweepDeadPartials(path);
   try {
     writeFileSync(partial, text, 'utf8');
+    return partial;
   } catch {
-    return false;
+    return null;
   }
-  const until = Date.now() + HELD_FILE_MS;
-  for (;;) {
-    try {
-      renameSync(partial, path);
-      return true;
-    } catch (error) {
-      const code = errorCode(error) ?? '';
-      if (!HELD_BY_A_READER.has(code) || Date.now() >= until || refusesForGood(path)) {
-        try {
-          rmSync(partial, { force: true });
-        } catch {
-          // Left behind, and swept with the transcripts once it is old enough.
-        }
-        return false;
+}
+
+/** One try at renaming [param partial] over [param path], which a refusal for good ends at once. */
+function renameAttempt(partial: string, path: string): Attempt<boolean> {
+  try {
+    renameSync(partial, path);
+    return { done: true };
+  } catch (error) {
+    const gaveUp = (): boolean => {
+      try {
+        rmSync(partial, { force: true });
+      } catch {
+        // Left behind, and swept with the transcripts once it is old enough.
       }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
-    }
+      return false;
+    };
+    const code = errorCode(error) ?? '';
+    return !HELD_BY_A_READER.has(code) || refusesForGood(path) ? { done: gaveUp() } : { held: gaveUp };
   }
 }
 
@@ -205,17 +275,19 @@ export function madeInPlace(path: string, text: string): boolean {
  * a removal that landed on such a read names a live holder and keeps its slot for the whole run.
  */
 export function removeWhole(path: string): boolean {
-  const until = Date.now() + HELD_FILE_MS;
-  for (;;) {
-    try {
-      rmSync(path, { force: true });
-      return true;
-    } catch (error) {
-      const code = errorCode(error) ?? '';
-      if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
-        return false;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_FILE_RETRY_MS);
-    }
+  return waitedOutSync(() => removeAttempt(path));
+}
+
+/** {@link removeWhole} for a caller on the event loop: the wait between tries is a timer. */
+export async function removeWholeAsync(path: string): Promise<boolean> {
+  return await waitedOut(() => removeAttempt(path));
+}
+
+function removeAttempt(path: string): Attempt<boolean> {
+  try {
+    rmSync(path, { force: true });
+    return { done: true };
+  } catch (error) {
+    return HELD_BY_A_READER.has(errorCode(error) ?? '') ? { held: () => false } : { done: false };
   }
 }
