@@ -22777,7 +22777,7 @@ async function testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain(): Promise<
   // says when it is there and stays for the test to look.
   const held = (file: string): string =>
     `WriteText(${JSON.stringify(file)}, "holding");\nThread.Sleep(${String(HELD_MS)});\n`;
-  const adopts = 'static void Adopt(string id, IntPtr process, IntPtr copy, string stopFile) {';
+  const adopts = 'static void Adopt(';
   let slowed = withAddedBefore(HELPER_SOURCE, '', 'CloseHandle(started.process);', held(own));
   slowed = withAddedBefore(slowed, adopts, 'CloseHandle(process);', held(taken));
   slowed = withAddedBefore(
@@ -22867,6 +22867,71 @@ function withAddedBefore(source: string, after: string, anchor: string, added: s
   const at = from === -1 ? -1 : source.indexOf(anchor, from);
   assert.notEqual(at, -1, `the helper has ${anchor} after ${after === '' ? 'its start' : after}`);
   return `${source.slice(0, at)}${added}${source.slice(at)}`;
+}
+
+/**
+ * A helper told to take over a start whose engine has gone closes the served process's copy of that
+ * engine's job and no other handle. The helper that died may have closed the copy already, and the
+ * served process may hold something else under the copy's number since.
+ */
+async function testAHelperTakingOverAnEndedStartClosesOnlyThatEnginesJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { createJob, openJob } = await import('./support/job-objects.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  // No process began at -1, so the helper finds no engine under this pid to wait on.
+  const gone = process.pid;
+  const otherName = `gdharness-test-other-${String(process.pid)}-${String(Date.now())}`;
+  const other = createJob(otherName);
+  const its = createJob(engineJobName(gone));
+  const named = (name: string): boolean => {
+    const job = openJob(name);
+    job?.close();
+    return job !== null;
+  };
+  const helper = spawnHidden(helperAssembly(), ['--serve', String(process.pid)], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  let said = '';
+  helper.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString('utf8');
+  });
+  /** Has the helper take over the start [param id], whose job copy is said to be [param copy], and waits for its end. */
+  const takenOver = async (id: string, copy: bigint): Promise<boolean> => {
+    helper.stdin.write(`adopt ${id} ${String(gone)} -1 ${String(copy)}  0\n`);
+    const ended = await answeredWithin(() => (said.includes(`ended ${id} 1\n`) ? true : undefined), 60_000);
+    return ended === true;
+  };
+  try {
+    assert.ok(
+      named(otherName) && named(engineJobName(gone)),
+      'both jobs have their names before the helper acts',
+    );
+    assert.ok(await takenOver('other', other.value), `the helper answers the start as ended: ${said}`);
+    assert.ok(named(otherName), "a handle that is not the engine's job is left open");
+    assert.ok(await takenOver('its', its.value), `the helper answers the second start as ended: ${said}`);
+    assert.equal(
+      named(engineJobName(gone)),
+      false,
+      "the copy of the engine's job is closed, and its name is free",
+    );
+  } finally {
+    helper.stdin.end();
+    const ended = await answeredWithin(
+      () => (helper.exitCode !== null || helper.signalCode !== null ? true : undefined),
+      30_000,
+    );
+    if (ended !== true) {
+      helper.kill();
+    }
+    if (named(otherName)) {
+      other.close();
+    }
+    if (named(engineJobName(gone))) {
+      its.close();
+    }
+  }
 }
 
 /** A crash status whole, such as the one the engine's start race gives, arrives through a headless start. */
@@ -121522,6 +121587,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
   testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain,
+  testAHelperTakingOverAnEndedStartClosesOnlyThatEnginesJob,
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,

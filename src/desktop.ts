@@ -571,7 +571,7 @@ public static class GdharnessDesktop {
             }
           }
         }
-        Thread adoption = new Thread(delegate() { Adopt(id, process, copy, stopFile); });
+        Thread adoption = new Thread(delegate() { Adopt(id, pid, process, copy, stopFile); });
         adoption.IsBackground = true;
         adoption.Start();
       } else if (parts[0] == "release" && parts.Length == 3) {
@@ -646,7 +646,7 @@ public static class GdharnessDesktop {
   // hand the pid to a later process. The start's stop file is watched as the helper that started it
   // did, since it is how its starter, or a keeper, stops the process, and only a helper alive can
   // act on it.
-  static void Adopt(string id, IntPtr process, IntPtr copy, string stopFile) {
+  static void Adopt(string id, uint pid, IntPtr process, IntPtr copy, string stopFile) {
     uint code = 1;
     if (process != IntPtr.Zero) {
       bool ended = false;
@@ -661,7 +661,7 @@ public static class GdharnessDesktop {
         processes.Remove(id);
       }
     }
-    ReleaseCopy(copy);
+    ReleaseCopyOf(pid, copy);
     if (process != IntPtr.Zero) {
       CloseHandle(process);
     }
@@ -764,6 +764,28 @@ public static class GdharnessDesktop {
     if (copy != IntPtr.Zero) {
       DuplicateHandle(served, copy, IntPtr.Zero, out unused, 0, false, DuplicateCloseSource);
     }
+  }
+
+  // Closes a copy a helper before this one made, where it still is the job named for pid. That
+  // helper may have closed it before it died, and the served process may hold something else under
+  // the number since, which is not this one's to close.
+  static void ReleaseCopyOf(uint pid, IntPtr copy) {
+    if (copy == IntPtr.Zero) {
+      return;
+    }
+    IntPtr job = OpenJobObjectW(JobQuery, false, JobNamePrefix + pid);
+    if (job == IntPtr.Zero) {
+      return;
+    }
+    IntPtr mine;
+    if (DuplicateHandle(served, copy, GetCurrentProcess(), out mine, 0, false, DuplicateSameAccess)) {
+      bool same = CompareObjectHandles(mine, job);
+      CloseHandle(mine);
+      if (same) {
+        ReleaseCopy(copy);
+      }
+    }
+    CloseHandle(job);
   }
 
   // What a process is given for one of its standard streams: this process's own for an empty
