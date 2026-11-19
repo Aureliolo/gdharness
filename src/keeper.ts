@@ -57,7 +57,7 @@ import {
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { type ExitWatch, followSuccessor, watchExit } from './successor.js';
-import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
+import { holdChildExit, holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process.
@@ -103,21 +103,19 @@ async function startDirectly(
  * activation: the child is the process that waits for it and exits with its code, and the pid is
  * the target's own, read from the file that process writes once the target has started.
  *
- * The helper is started detached, so it outlives this process and lives as long as the target. It
- * holds the target's job, which is named and only counts, so the target's lifetime is its own. A
- * helper that went with a launcher that had exited after the pid would also take the desktop with
- * it, and a process the target had started on a desktop of its own could no longer start one of its
- * own there, which is what an editor does when it plays a game. A start without activation also
- * needs its helper to hold the foreground.
+ * The helper is this process's own, so a keeper's lasts as long as its target, and it holds the
+ * desktop a process the target starts on a desktop of its own needs, as an editor does when it plays
+ * a game. The target's job is named and only counts, so the target's lifetime is its own and it runs
+ * on when the helper goes. A start without activation needs the helper to hold the foreground.
  */
 async function startThroughHelper(
   spec: SentSpec,
-  output: number | 'ignore',
+  outputFile: string | undefined,
   stopFile: string,
   exitFile: string,
 ): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   try {
-    return await startedThroughHelper(spec, output, stopFile, exitFile);
+    return await startedThroughHelper(spec, outputFile, stopFile, exitFile);
   } catch (error) {
     // A system that will not run the helper program is a start that failed, and no defect.
     if (error instanceof HelperRefused) {
@@ -127,9 +125,27 @@ async function startThroughHelper(
   }
 }
 
+/**
+ * Null once [param child] has spawned or ended, or why it could not be. A start the helper answers
+ * before it is given to it never spawns, and ends with its reason in the helper's error file.
+ */
+function spawnedOrEnded(child: ChildProcess): Promise<string | null> {
+  return new Promise((resolve) => {
+    child.once('error', (error: Error) => {
+      resolve(error.message);
+    });
+    child.once('spawn', () => {
+      resolve(child.pid === undefined ? 'the operating system gave it no pid' : null);
+    });
+    child.once('exit', () => {
+      resolve(null);
+    });
+  });
+}
+
 async function startedThroughHelper(
   spec: SentSpec,
-  output: number | 'ignore',
+  outputFile: string | undefined,
   stopFile: string,
   exitFile: string,
 ): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
@@ -156,8 +172,7 @@ async function startedThroughHelper(
         ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
         ...(spec.noActivate === undefined ? {} : { noActivate: spec.noActivate }),
         directory: process.cwd(),
-        // The helper holds the job the process is counted in, so it lives as long as the process.
-        outlivesStarter: true,
+        outputFile,
         scratch,
         stop: stopFile,
         exit: exitFile,
@@ -165,35 +180,24 @@ async function startedThroughHelper(
       spec.command,
       spec.args,
       {
-        stdio: ['ignore', output, 'ignore'],
+        stdio: ['ignore', 'ignore', 'ignore'],
         env: withChanges(process.env, spec.envChanges),
         cwd: tmpdir(),
       },
     );
     const { child } = onDesktop;
     belowNormal(child);
-    const whole = holdExit(child.pid);
-    const spawned = await new Promise<string | null>((resolve) => {
-      child.once('error', (error: Error) => {
-        resolve(error.message);
-      });
-      child.once('spawn', () => {
-        resolve(child.pid === undefined ? 'the operating system gave it no pid' : null);
-      });
-    });
+    const whole = holdChildExit(child);
+    const spawned = await spawnedOrEnded(child);
     if (spawned !== null) {
       return { error: spawned };
     }
-    const exited = { now: false };
-    child.once('exit', () => {
-      exited.now = true;
-    });
     for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
       const pid = onDesktop.pid();
       if (pid !== undefined) {
         return { child, pid, whole };
       }
-      if (exited.now) {
+      if (child.exitCode !== null || child.signalCode !== null) {
         const why = helperFailure(onDesktop.files.error) ?? 'it exited saying nothing';
         return { error: `it could not be started ${where}: ${why}` };
       }
@@ -290,9 +294,10 @@ async function startDetached(
   hidden: boolean,
   stopFile = '',
   exitFile = '',
+  outputFile?: string,
 ): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   return throughTheHelper(spec)
-    ? await startThroughHelper(spec, output, stopFile, exitFile)
+    ? await startThroughHelper(spec, outputFile, stopFile, exitFile)
     : await startDirectly(spec, output, hidden);
 }
 
@@ -483,7 +488,7 @@ async function startTheGame(
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
   try {
-    started = await startDetached(toStart, transcript, run === undefined, stopFile, exitFile);
+    started = await startDetached(toStart, transcript, run === undefined, stopFile, exitFile, outputFile);
   } finally {
     // The game holds its own copy from here on.
     if (transcript !== 'ignore') {
