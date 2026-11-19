@@ -57475,36 +57475,53 @@ async function saidOfAPendingCall(
   return `the late answer ${cameAfter}. The run held ${steps} 'noisy step' lines at the timeout. Server stderr tail:\n${stderr().slice(-2000)}`;
 }
 
+/**
+ * How long a step that raises 25 errors is given. On Windows the engine flushes its output file to
+ * disk after every write, and an error is several writes. Locally that costs 5 ms an error, the
+ * same as a bare engine writing into a file, against 0.1 ms writing into a pipe. A Windows runner
+ * once spent about 20 s on 26 errors, so ten seconds is too short there.
+ */
+const NOISY_STEP_MS = 30_000;
+
+/** The answer of a step given [param NOISY_STEP_MS], or the error saying where its time went. */
+async function noisyAnswer(game: ReadingGame, said: string, sentAt: number, what: string): Promise<unknown> {
+  let answer: unknown;
+  try {
+    answer = JSON.parse(said);
+  } catch {
+    throw new Error(`the ${what} was refused: ${said}`);
+  }
+  if (get(answer, 'pending') === true) {
+    const requestId = asNumber(get(answer, 'requestId'), `requestId of ${said}`);
+    throw new Error(`the ${what}: ${said}\n${await saidOfAPendingCall(game, sentAt, requestId)}`);
+  }
+  return answer;
+}
+
 /** The errors of the call itself come first, and a cut counts what it leaves out. */
 async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
   await withAReadingGame('walk error cut regression', async (game) => {
     const { ask } = game;
     const sentAt = Date.now();
-    // The call checks the order of errors and the cut, not speed, and a slow runner spends seconds
-    // on the game's first request, so it waits for the work rather than the usual ten seconds.
     const said = await ask('runtime_invoke', {
       op: 'call',
       nodePath: '/root/Main',
       method: 'noisy25():fail',
-      timeoutMs: 30_000,
+      timeoutMs: NOISY_STEP_MS,
     });
-    let answer: unknown;
-    try {
-      answer = JSON.parse(said);
-    } catch {
-      throw new Error(`the call was refused: ${said}`);
-    }
-    if (get(answer, 'pending') === true) {
-      const requestId = asNumber(get(answer, 'requestId'), `requestId of ${said}`);
-      throw new Error(`${said}\n${await saidOfAPendingCall(game, sentAt, requestId)}`);
-    }
+    const answer = await noisyAnswer(game, said, sentAt, 'call');
     const errors = asArray(get(answer, 'errors'), `errors of ${JSON.stringify(answer)}`).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
     assert.equal(errors.length, 20);
     assert.equal(get(answer, 'errors_not_shown'), 6, 'the game raised 26 and 20 are shown');
-    const read: unknown = JSON.parse(
-      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'noisy25():name' }),
-    );
+    const readAt = Date.now();
+    const readSaid = await ask('runtime_inspect', {
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'noisy25():name',
+      timeoutMs: NOISY_STEP_MS,
+    });
+    const read = await noisyAnswer(game, readSaid, readAt, 'read');
     assert.equal(asArray(get(read, 'errors'), `errors of ${JSON.stringify(read)}`).length, 20);
     assert.equal(get(read, 'errors_not_shown'), 5, 'a read that raised 25 shows 20');
   });
