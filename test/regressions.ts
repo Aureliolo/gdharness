@@ -67005,13 +67005,15 @@ async function testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll(): Pr
     };
     for (const [name, call] of Object.entries(syncCalls)) {
       writeFileSync(note, 'old');
-      await withAHeldNote(note, 3000, async (pause) => {
+      await withAHeldNote(note, 3000, async () => {
         const waiting = [writeWholeAsync(note, 'a'), writeWholeAsync(note, 'b'), writeWholeAsync(note, 'c')];
-        await pause();
+        // A short pause keeps the waiting writes' deadlines near the sync call's own, so a build that
+        // restarts the wait after finishing them blocks close to two seconds against one.
+        await new Promise((settle) => setTimeout(settle, 20));
         const started = Date.now();
         const landed = call();
         const blocked = Date.now() - started;
-        assert.ok(blocked < 1500, `the sync ${name} blocked ${blocked} ms, over one wait and its own retry`);
+        assert.ok(blocked < 1490, `the sync ${name} blocked ${blocked} ms, over one wait and its own retry`);
         assert.equal(
           landed,
           false,
