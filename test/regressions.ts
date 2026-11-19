@@ -25,7 +25,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { createConnection, createServer, type Server, type Socket } from 'node:net';
+import { createConnection, createServer, type Server, Socket } from 'node:net';
 import { availableParallelism, constants, homedir, setPriority, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
@@ -455,7 +455,7 @@ import {
   sameEntry,
   sameIdentity,
 } from '../src/paths.js';
-import { counting, PendingRequests } from '../src/pending-requests.js';
+import { numbering, PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
@@ -9667,10 +9667,10 @@ async function testAWaitingRequestSettlesOnce(): Promise<void> {
   assert.equal(await eighth, 'kept');
   assert.equal(lateCalls, 0, 'no deadline came but the one that was waited for');
 
-  const count = counting();
+  const count = numbering();
   assert.deepEqual([count(), count(), count()], [1, 2, 3]);
-  assert.equal(counting()(), 1, 'a count starts again with each');
-  assert.equal(counting(5)(), 5);
+  assert.equal(numbering()(), 1, 'a count starts again with each');
+  assert.equal(numbering(5)(), 5);
 }
 
 /**
@@ -9795,7 +9795,9 @@ function askedOf(peer: RecordingPeer, name: string): HeardByAPeer {
 function askedBy(client: GodotLSPClient | GodotDAPClient, name: string, waitMs: number): Promise<unknown> {
   const send: unknown = Reflect.get(client, 'sendRequest');
   assert.ok(typeof send === 'function', 'both clients build a request in sendRequest');
-  return Reflect.apply(send, client, [name, {}, waitMs]) as Promise<unknown>;
+  const pending: unknown = Reflect.apply(send, client, [name, {}, waitMs]);
+  assert.ok(pending instanceof Promise, 'sendRequest answers with a promise');
+  return pending;
 }
 
 /** Runs [param work] with what the process says on stderr kept in the lines it is handed. */
@@ -9814,7 +9816,8 @@ async function heardOnStderr<T>(work: (lines: string[]) => Promise<T>): Promise<
 
 /** The socket [param client] holds, with its writes failing as a broken pipe does until the returned call mends it. */
 function breakTheWrites(client: GodotLSPClient | GodotDAPClient): () => void {
-  const socket = Reflect.get(client, 'socket') as Socket;
+  const socket: unknown = Reflect.get(client, 'socket');
+  assert.ok(socket instanceof Socket, 'the client holds a socket');
   Reflect.set(socket, 'write', (_chunk: unknown, done?: (error?: Error | null) => void): boolean => {
     done?.(new Error('EPIPE'));
     return true;
@@ -9855,8 +9858,18 @@ function languageServerPeer(
     const behaviours = new Map<string, () => void>([
       ['ok', answerOk],
       ['initialize', answerOk],
-      ['notFound', () => say({ error: { code: -32601, message: 'Method not found' } })],
-      ['bare', () => say({ error: {} })],
+      [
+        'notFound',
+        () => {
+          say({ error: { code: -32601, message: 'Method not found' } });
+        },
+      ],
+      [
+        'bare',
+        () => {
+          say({ error: {} });
+        },
+      ],
       ['oversize', () => socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'))],
       ['reset', () => socket.resetAndDestroy()],
       ['close', () => socket.destroy()],
@@ -9962,7 +9975,9 @@ async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
         await assert.rejects(askedBy(client, 'reset', 5000), /^Error: Godot LSP connection error: /);
 
         const script = join(tmpdir(), 'gdharness-lsp-ends', 'ends.gd');
-        const versions = Reflect.get(client, 'documentVersions') as Map<string, number>;
+        const remembered: unknown = Reflect.get(client, 'documentVersions');
+        assert.ok(remembered instanceof Map, 'the client remembers its open documents in a map');
+        const versions: Map<unknown, unknown> = remembered;
         versions.set(pathToFileURL(resolve(script)).href, 1);
         await assert.rejects(
           askedBy(client, 'oversize', 5000),
@@ -10018,11 +10033,36 @@ function debugAdapterPeer(): RecordingPeer {
     };
     const command = String(message['command']);
     const behaviours = new Map<string, () => void>([
-      ['body', () => respond(true, { command, body: { answered: 'body' } })],
-      ['bare', () => respond(true, { command })],
-      ['refused', () => respond(false, { command, message: 'no such thing' })],
-      ['unsaid', () => respond(false, { command })],
-      ['unnamed', () => respond(false, {})],
+      [
+        'body',
+        () => {
+          respond(true, { command, body: { answered: 'body' } });
+        },
+      ],
+      [
+        'bare',
+        () => {
+          respond(true, { command });
+        },
+      ],
+      [
+        'refused',
+        () => {
+          respond(false, { command, message: 'no such thing' });
+        },
+      ],
+      [
+        'unsaid',
+        () => {
+          respond(false, { command });
+        },
+      ],
+      [
+        'unnamed',
+        () => {
+          respond(false, {});
+        },
+      ],
       ['oversize', () => socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'))],
       ['reset', () => socket.resetAndDestroy()],
       ['close', () => socket.destroy()],

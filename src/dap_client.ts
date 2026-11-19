@@ -4,7 +4,7 @@ import { answerJson, type ToolResponse } from './answer-json.js';
 import { errorMessage, Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { EVALUATE_MS } from './game-debugger.js';
-import { counting, PendingRequests } from './pending-requests.js';
+import { numbering, PendingRequests } from './pending-requests.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 
@@ -180,7 +180,7 @@ export class GodotDAPClient {
   readonly port: number;
   private host: string;
   /** Numbers run on across connections, so a request's seq names it for the client's life. */
-  private readonly nextSeq = counting();
+  private readonly nextSeq = numbering();
   /** The held connection's requests, beside its `socket`. */
   private requests = new PendingRequests<number, DAPBody>();
   /** The dial in progress, which every caller that needs the connection waits on. */

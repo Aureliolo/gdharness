@@ -8,7 +8,7 @@ interface Wait<Answer, Tag> {
   readonly resolve: (answer: Answer) => void;
   readonly reject: (error: Error) => void;
   readonly timer: NodeJS.Timeout;
-  readonly tag: Tag;
+  readonly tag: Tag | undefined;
 }
 
 export class PendingRequests<Id, Answer, Tag = undefined> {
@@ -28,7 +28,7 @@ export class PendingRequests<Id, Answer, Tag = undefined> {
         this.waits.delete(id);
         reject(late());
       }, withinMs);
-      this.waits.set(id, { resolve, reject, timer, tag: tag as Tag });
+      this.waits.set(id, { resolve, reject, timer, tag });
     });
   }
 
@@ -56,8 +56,8 @@ export class PendingRequests<Id, Answer, Tag = undefined> {
     }
   }
 
-  /** The tags of the waits, oldest first. */
-  public waiting(): readonly Tag[] {
+  /** The tag of each wait, oldest first, undefined for a wait given none. */
+  public waiting(): readonly (Tag | undefined)[] {
     return [...this.waits.values()].map((wait) => wait.tag);
   }
 
@@ -73,7 +73,7 @@ export class PendingRequests<Id, Answer, Tag = undefined> {
 }
 
 /** A count that answers [param first], then one more with each call. */
-export function counting(first = 1): () => number {
+export function numbering(first = 1): () => number {
   let next = first;
   return () => next++;
 }

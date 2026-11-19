@@ -9,7 +9,7 @@ import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory, notAGodotProject, resolveWithinProject } from './paths.js';
-import { counting, PendingRequests } from './pending-requests.js';
+import { numbering, PendingRequests } from './pending-requests.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 import { Turns } from './turns.js';
@@ -158,7 +158,7 @@ export class GodotLSPClient {
   readonly port: number;
   private host: string;
   /** Ids run on across connections, so a request's number names it for the client's life. */
-  private readonly nextRequestId = counting();
+  private readonly nextRequestId = numbering();
   /** The held connection's tables, beside its `socket`. */
   private requests = new PendingRequests<number, unknown>();
   private diagnostics = new PendingRequests<string, unknown[]>();

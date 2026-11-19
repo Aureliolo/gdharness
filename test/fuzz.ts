@@ -4042,12 +4042,12 @@ interface FramedPeer {
 }
 
 /** The name and number a frame asks under, or null for one that asks nothing. */
-function requestIn(received: Frame): { name: string; id: number } | null {
-  if (received.kind !== 'message' || !isRecord(received.value)) {
+function requestIn(heard: Frame): { name: string; id: number } | null {
+  if (heard.kind !== 'message' || !isRecord(heard.value)) {
     return null;
   }
-  const name = received.value['method'] ?? received.value['command'];
-  const id = received.value['id'] ?? received.value['seq'];
+  const name = heard.value['method'] ?? heard.value['command'];
+  const id = heard.value['id'] ?? heard.value['seq'];
   return typeof name === 'string' && typeof id === 'number' ? { name, id } : null;
 }
 
@@ -4060,8 +4060,8 @@ async function framedPeer(): Promise<FramedPeer> {
     const reader = new FrameReader();
     socket.on('error', () => undefined);
     socket.on('data', (chunk: Buffer) => {
-      for (const received of reader.push(chunk)) {
-        const asked = requestIn(received);
+      for (const heard of reader.push(chunk)) {
+        const asked = requestIn(heard);
         if (asked !== null) {
           seen.set(asked.name, { connection, id: asked.id });
         }
@@ -4221,20 +4221,21 @@ function framedHeldBy(model: FramedModel): { socket: Socket; number: number } | 
   return socket === undefined || socket.destroyed ? undefined : { socket, number };
 }
 
-async function framedAnswers(model: FramedModel, step: FramedStep): Promise<void> {
+function framedAnswers(model: FramedModel, step: FramedStep): Promise<void> {
   const waiting = framedWaiting(model);
   const request = waiting[step.at % Math.max(waiting.length, 1)];
   if (request === undefined) {
-    return;
+    return Promise.resolve();
   }
   model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, step.how));
   settleFramed(
     request,
     step.how === 'ok' ? `ok:${JSON.stringify({ tag: request.tag })}` : `fail:${String(request.tag)}`,
   );
+  return Promise.resolve();
 }
 
-async function framedAnswersAgain(model: FramedModel, step: FramedStep): Promise<void> {
+function framedAnswersAgain(model: FramedModel, step: FramedStep): Promise<void> {
   const answered = model.requests.filter(
     (request) =>
       request.state === 'settled' && model.peer.connections[request.connection]?.destroyed === false,
@@ -4243,22 +4244,25 @@ async function framedAnswersAgain(model: FramedModel, step: FramedStep): Promise
   if (request !== undefined) {
     model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, step.how));
   }
+  return Promise.resolve();
 }
 
-async function framedAnswersNothingAsked(model: FramedModel, step: FramedStep): Promise<void> {
+function framedAnswersNothingAsked(model: FramedModel, step: FramedStep): Promise<void> {
   framedHeldBy(model)?.socket.write(framedAnswer(model.kind, { name: 'm-1', id: 900_000 + step.at }, 'ok'));
+  return Promise.resolve();
 }
 
 /** The language server's own request, which carries a number of its own count: one a waiting request may share. */
-async function framedServerAsks(model: FramedModel, step: FramedStep): Promise<void> {
+function framedServerAsks(model: FramedModel, step: FramedStep): Promise<void> {
   const waiting = framedWaiting(model);
   const request = waiting[step.at % Math.max(waiting.length, 1)];
   if (request === undefined || model.kind !== 'lsp') {
-    return;
+    return Promise.resolve();
   }
   model.peer.connections[request.connection]?.write(
     frame({ jsonrpc: '2.0', id: request.id, method: 'workspace/applyEdit', params: {} }),
   );
+  return Promise.resolve();
 }
 
 async function framedAsksOnce(model: FramedModel): Promise<void> {

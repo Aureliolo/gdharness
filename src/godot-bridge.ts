@@ -755,8 +755,7 @@ export class GodotBridge extends EventEmitter {
   public requestsInFlight(): { tool: string; startedAt: number }[] {
     return this.pending
       .waiting()
-      .filter((call) => call.counted)
-      .map((call) => ({ tool: call.tool, startedAt: call.startedAt }))
+      .flatMap((call) => (call?.counted === true ? [{ tool: call.tool, startedAt: call.startedAt }] : []))
       .toSorted((a, b) => a.startedAt - b.startedAt);
   }
 
