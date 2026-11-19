@@ -491,16 +491,21 @@ async function checksTheToolList(rig: BridgeRig): Promise<void> {
         'description',
       ),
     );
-  assert.match(described('editor_launch', 'projectPath'), /\. Only for op open\.$/, 'one op is named');
+  assert.match(described('editor_launch', 'projectPath'), /\. For op open\.$/, 'one op is named');
   assert.match(
     described('scene_node', 'index'),
-    /\. Only for ops add, duplicate, reparent\.$/,
+    /\. For ops add, duplicate, reparent\.$/,
     'several ops are named',
   );
-  assert.match(described('editor_launch', 'hidden'), /\. Only for ops open, restart\.$/, 'every op but one');
+  assert.match(described('editor_launch', 'hidden'), /\. Not for op close\.$/, 'every op but one');
+  assert.match(
+    described('scene_animation', 'animationName'),
+    /\. Not for ops read_states, remove_state, connect_states, disconnect_states\.$/,
+    'the fewer ops are named, whichever way round',
+  );
   assert.doesNotMatch(
     described('scene_node', 'scenePath'),
-    /Only for/,
+    /(?:^|\. )(?:For|Not for) ops? /,
     'an argument every op reads names none',
   );
 }
