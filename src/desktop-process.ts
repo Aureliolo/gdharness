@@ -114,8 +114,6 @@ export class HelpedChild extends RelayedChild {
   private killRequested = false;
   /** How this process ended the engine itself, where no helper was left to. */
   private endedHere: 'kill' | 'stop' | null = null;
-  /** Whether a look at the engine's start time is under way. */
-  private ending = false;
   /** Whether the process under the engine's pid began at another time, so the engine has gone. */
   private notTheEngine = false;
   private watchdog: NodeJS.Timeout | undefined;
@@ -329,7 +327,7 @@ export class HelpedChild extends RelayedChild {
       }
       return;
     }
-    if (this.endedHere !== null || this.ending) {
+    if (this.endedHere !== null) {
       return;
     }
     if (this.killRequested) {
@@ -351,7 +349,6 @@ export class HelpedChild extends RelayedChild {
     if (pid === undefined || began === undefined) {
       return;
     }
-    this.ending = true;
     try {
       const now = (await startTimesOf([pid])).get(pid);
       if (now === undefined) {
@@ -365,8 +362,6 @@ export class HelpedChild extends RelayedChild {
       process.kill(pid);
     } catch {
       // It ended on its own meanwhile, which the next look tells.
-    } finally {
-      this.ending = false;
     }
   }
 
