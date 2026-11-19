@@ -896,12 +896,22 @@ Take in the order you began to wait. At each look, read every live mark but your
 ones.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited two minutes or more. The second is `other` takers of the store class (below) and
-  games that have waited two minutes or more. The third is every other `other` taker. The wait and
-  the class change only the place in line, never which slots a taker may take.
+  and have waited long enough. A store-class taker waits two minutes. Any other waits two minutes
+  while no store-class taker is in line, and ten minutes while one is. The second group is the
+  other store-class takers and games that have waited as long. The third is every other `other`
+  taker. The wait and the class change only the place in line, never which slots a taker may take.
+- A store-class taker is in line when you are one, or when a live store-class mark last looked
+  under 5,000 ms ago (its `.seen` file, below). Read that time and your clock in whole
+  milliseconds, rounded down, from the file's nanoseconds where the system gives them. A taker
+  that stops looking stops holding others back, and every looker reads that alike.
 - Each group is ahead of the next. Within each group, those whose `since` is earlier are ahead of
-  you, the earliest first. A store-class taker passes another `other` taker only in that taker's
-  first two minutes, so a stream of them delays it by two minutes at most.
+  you, the earliest first. Where two `since` values are equal, the mark whose file name is first,
+  byte by byte, is ahead. Name marks in ASCII, so that every reader orders them alike.
+- Before you have a mark of your own, no other taker sees you. Two takers that began in the same
+  millisecond may then both go first, and the slot's lock decides between them.
+- A stream of store-class takers delays an `other` taker that is not a game by ten minutes at most.
+  A game is never in the first group, so a store-class taker that is not a game and has waited two
+  minutes goes before a game of any age.
 - A mark may hold `class` `store`, written by an `other` taker that has the class and by no other.
   A mark with no class, or any other, has none.
 - A taker has the class where `<directory>/store.json` lists the repository of the Godot project
