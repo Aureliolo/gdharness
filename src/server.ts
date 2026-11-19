@@ -12079,17 +12079,18 @@ class GodotServer {
   /** The client for the language server of the editor this server follows, on the port it serves. */
   private async lsp(): Promise<GodotLSPClient> {
     const port = this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT);
+    const servedHere = (): boolean => {
+      const status = this.godotBridge.getStatus();
+      return status.connected && status.lspPort === port;
+    };
     const moved = this.lspClient;
     if (moved !== null && moved.port !== port) {
       // Let go before the wait, so a call arriving during it builds on the client already made
       // for the new port instead of finding the old one and tearing the new one down.
       this.lspClient = null;
-      await moved.disconnect();
+      await moved.disconnect(servedHere());
     }
-    this.lspClient ??= new GodotLSPClient(port, undefined, undefined, () => {
-      const status = this.godotBridge.getStatus();
-      return status.connected && status.lspPort === port;
-    });
+    this.lspClient ??= new GodotLSPClient(port, undefined, undefined, servedHere);
     return this.lspClient;
   }
 

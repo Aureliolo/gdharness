@@ -489,21 +489,18 @@ export class GodotDAPClient {
     }
   }
 
-  /**
-   * A connection let go of can still speak during its close. Its console lines are the game's and
-   * are kept. What it says about the session describes a connection this client no longer holds.
-   */
+  /** [param held] says whether the event came from the connection this client holds. */
   private handleEvent(event: ReceivedMessage, held: boolean): void {
-    if (event.event === 'output') {
-      this.handleOutputEvent(event);
-      return;
-    }
-    if (!held) {
-      return;
-    }
     switch (event.event ?? '') {
+      case 'output':
+        this.handleOutputEvent(event);
+        return;
       case 'stopped':
-        this.handleStoppedEvent(event);
+        // A connection let go of can still speak during its close. A stop it says is a hold on
+        // that connection, which the one this client dials next was never told of.
+        if (held) {
+          this.handleStoppedEvent(event);
+        }
         return;
       case 'continued':
         // Sent to every connection when the game is let go, whoever let it go: measured on 4.7.2

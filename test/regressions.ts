@@ -10491,6 +10491,84 @@ async function testACallInFlightOverAPortMoveSaysToCallAgain(): Promise<void> {
   }
 }
 
+/**
+ * A call waiting on the language server when its editor leaves the bridge is told to start the
+ * editor. No editor serves the port this server falls back to, so calling again is refused.
+ */
+async function testACallInFlightWhenTheEditorLeavesSaysToStartTheEditor(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-leaves-in-flight-'));
+  const before = languageServerPeer({ onOpen: 'never' });
+  const editors: WebSocket[] = [];
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'probe.gd'), 'class_name Probe\nextends Node\n');
+    await withFramedPeer(
+      before.onMessage,
+      async (beforePort) => {
+        const bridgePort = await reservePort();
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(bridgePort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const first = await greetAsAStandInEditor(server, bridgePort, project, undefined, {
+            lsp_port: beforePort,
+          });
+          editors.push(first);
+          const inFlight = server.request(
+            'tools/call',
+            { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath: 'probe.gd' } },
+            30_000,
+          );
+          assert.equal(
+            await cameTrue(
+              () => before.heard.some((one) => one.message['method'] === 'textDocument/didOpen'),
+              10_000,
+            ),
+            true,
+            'the call waits on the editor port',
+          );
+          await untilTheEditorIsGone(server, first);
+          // A script that is not there lets the server move off the port without dialling the
+          // default one, where another editor on this machine may be listening.
+          const moving =
+            textOf(
+              await server.request(
+                'tools/call',
+                {
+                  name: 'script_info',
+                  arguments: { op: 'symbols', projectPath: project, scriptPath: 'absent.gd' },
+                },
+                30_000,
+              ),
+            ) ?? '';
+          assert.match(moving, /^Script file does not exist: res:\/\/absent\.gd/u, moving);
+          const said = textOf(await inFlight) ?? '';
+          assert.match(
+            said,
+            new RegExp(
+              `^Diagnostics unavailable: Godot LSP is unavailable on port ${String(beforePort)}\\. Start the Godot editor`,
+              'u',
+            ),
+            said,
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+      before.onConnect,
+    );
+  } finally {
+    for (const editor of editors) {
+      editor.terminate();
+    }
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /** What a debug adapter peer writes to say [param event] with [param body]. */
 function adapterEvent(event: string, body: Record<string, unknown>): Buffer {
   return frameJsonRpc({ seq: 1, type: 'event', event, body });
@@ -10552,6 +10630,43 @@ async function testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept(): Promi
       assert.equal(errorMessage(await heldOpen), 'DAP connection closed');
       assert.equal(client.holdIsKnown(), false, 'a stop the closing connection said is not known');
       assert.equal(client.whereItStopped(), null);
+    },
+    peer.onConnect,
+  );
+}
+
+/**
+ * A breakpoint the editor says it removed while the old connection closes is let go of and
+ * reported, so the next server does not put it back.
+ */
+async function testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      const reported: string[] = [];
+      client.setBreakpointsSink((held) => reported.push(JSON.stringify(held)));
+      client.holdBreakpoints([{ scriptPath: 'res://player.gd', lines: [3] }]);
+      assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+      const old = askedOf(peer, 'body').socket;
+      const abandoning = client.abandon();
+      // Written before the peer hears the end, so the client reads it during its close wait.
+      old.write(
+        adapterEvent('breakpoint', {
+          reason: 'removed',
+          breakpoint: { line: 3, source: { path: 'res://player.gd' } },
+        }),
+      );
+      old.write(adapterEvent('output', { output: 'after the removal\n' }));
+      assert.equal(
+        await cameTrue(() => client.getOutput().includes('after the removal')),
+        true,
+        'the closing connection was heard',
+      );
+      await abandoning;
+      assert.deepEqual(client.breakpointsHeld(), [], 'the removed breakpoint is not held');
+      assert.deepEqual(reported, ['[]'], 'and the removal is reported');
     },
     peer.onConnect,
   );
@@ -120916,8 +121031,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALostConnectionIsNotSaidToBeTheEditorsAnswer,
   testTwoCallsOverAPortMoveEndWithOneLiveClient,
   testACallInFlightOverAPortMoveSaysToCallAgain,
+  testACallInFlightWhenTheEditorLeavesSaysToStartTheEditor,
   testADebugAdapterDialAbandonedLeavesTheNextCallAnswered,
   testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept,
+  testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo,
   testACallDuringADebugAdapterAbandonKeepsItsOwnConnection,
   testEveryRequestWaitsInTheOneTable,
   testTheStatusCountsTheResourcesWithCallsQueued,

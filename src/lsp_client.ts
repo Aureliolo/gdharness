@@ -79,8 +79,12 @@ export class LSPTimeout extends Error {
 
 /** A request this client ended by letting go of its connection, before the server answered. */
 class LSPLetGo extends Error {
-  constructor() {
+  /** Whether an editor on the bridge serves the port this server moves to, so calling again answers. */
+  readonly toServedPort: boolean;
+
+  constructor(toServedPort: boolean) {
     super('Disconnected from Godot LSP');
+    this.toServedPort = toServedPort;
   }
 }
 
@@ -302,7 +306,11 @@ export class GodotLSPClient {
     }
   }
 
-  async disconnect(): Promise<void> {
+  /**
+   * Lets go of the connection. [param toServedPort] says the server is moving to a port an editor
+   * on the bridge serves, where a request cut off here is answered when made again.
+   */
+  async disconnect(toServedPort = false): Promise<void> {
     const socketToClose = this.socket;
     const { requests, diagnostics } = this;
     if (!socketToClose) {
@@ -319,7 +327,7 @@ export class GodotLSPClient {
 
     // Said before the close, which the runtimes order differently against the socket's own close
     // handler, so a request ended by this call always reads the same.
-    const disconnected = new LSPLetGo();
+    const disconnected = new LSPLetGo(toServedPort);
     requests.drop(disconnected);
     diagnostics.drop(disconnected);
 
@@ -842,17 +850,19 @@ function asToolResponse(payload: unknown): ToolResponse {
  */
 export function normalizeLSPError(error: unknown, port: number): string {
   if (error instanceof Error) {
+    // The editor this server follows moved its language server, so the answer is on the new port.
+    if (error instanceof LSPLetGo && error.toServedPort) {
+      return `This server closed its connection to Godot LSP on port ${port} before the answer came. Calling again asks the language server the editor serves now.`;
+    }
+    // Let go of any other way, the editor left the bridge or this server is stopping, and no
+    // language server is known to be there to call again.
     if (
+      error instanceof LSPLetGo ||
       error.message.includes('ECONNREFUSED') ||
       error.message.includes('Failed to connect to Godot LSP') ||
       error.message.includes('socket closed')
     ) {
       return `Godot LSP is unavailable on port ${port}. Start the Godot editor and enable Language Server in Editor Settings, or set GDHARNESS_LSP_PORT to the port it serves.`;
-    }
-    // This server lets go when the editor it follows moves its language server, so the answer
-    // is on the new port.
-    if (error instanceof LSPLetGo) {
-      return `This server closed its connection to Godot LSP on port ${port} before the answer came. Calling again asks the language server the editor serves now.`;
     }
     if (error instanceof LSPTimeout && error.method === 'initialize') {
       return `The language server on port ${port} took the connection and did not answer initialize within ${String(error.seconds)}s. Godot reads every script in the project before it answers the first initialize after its editor starts, and goes on reading after this call stops waiting, so call again once the editor has settled.`;
