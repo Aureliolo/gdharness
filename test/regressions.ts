@@ -74937,9 +74937,7 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
   // A stream of store-class work, one arriving a second before each look, holds an ordinary one-off
   // back until it has waited 600 s and not a look longer.
   const heldFor = (waited: number): string[] =>
-    marksOf(begunBefore('other', waited), [
-      lineWaiter('s.json', 'other', now, 1000, { store: true }),
-    ]);
+    marksOf(begunBefore('other', waited), [lineWaiter('s.json', 'other', now, 1000, { store: true })]);
   for (const waited of [0, 121_000, 300_000, 599_999]) {
     assert.deepEqual(heldFor(waited), ['s.json'], `held behind store work after ${waited} ms`);
   }
