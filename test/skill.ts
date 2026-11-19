@@ -92,9 +92,11 @@ function testTheReferenceIsTheServersOwnToolList(): void {
     assert.ok(reference.includes(`## ${tool.name}`), `${tool.name} is in the reference`);
   }
   // What the description a client is sent leaves out for room, the reference carries whole.
+  // An answer opening with a list starts on a line of its own.
   for (const tool of TOOL_SPECS) {
+    const gap = tool.answer.startsWith('- ') ? '\n\n' : ' ';
     assert.ok(
-      reference.includes(`The answer: ${withSharedParagraphsLinked(tool.answer)}`),
+      reference.includes(`The answer:${gap}${withSharedParagraphsLinked(tool.answer)}`),
       `${tool.name}'s answer is in the reference`,
     );
   }

@@ -10045,10 +10045,10 @@ function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
     /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
   );
   assert.ok(
-    readFileSync('src/tool-definitions.ts', 'utf8').includes(
-      'One opened by hand comes back with a window, so hidden: true is refused there.',
+    readFileSync('src/server.ts', 'utf8').includes(
+      'This editor was opened by hand, and restarts itself as it was, so it cannot come back hidden.',
     ),
-    'and the hidden argument says the same of its own value',
+    'and the refusal of hidden: true says the same of its own value',
   );
 }
 
@@ -13104,7 +13104,7 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
 }
 
 /** The arguments with a sentence opening by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 22;
+const READ_IN_WORDS = 24;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -14374,6 +14374,117 @@ function testTheToolListStaysSmall(): void {
     .filter(({ size }) => size > MOST_TOOL_CHARACTERS)
     .map(({ name, size }) => `${name} ${size}`);
   assert.deepEqual(large, [], `tools past ${MOST_TOOL_CHARACTERS} characters`);
+}
+
+/** The description of [argument] of [tool] in the tool list, or of the tool itself without one. */
+function listedText(tool: string, argument?: string): string {
+  const listed = buildToolDefinitions().find((entry) => entry.name === tool);
+  assert.ok(listed, `${tool} is in the tool list`);
+  if (argument === undefined) {
+    return listed.description ?? '';
+  }
+  const properties = listed.inputSchema.properties as Record<string, { description?: string }>;
+  const schema = properties[argument];
+  assert.ok(schema, `${tool} takes ${argument}`);
+  return schema.description ?? '';
+}
+
+/**
+ * Sentences of the tool text that once said something the code does not do, held against the code.
+ */
+function testTheToolTextSaysWhatTheCodeDoes(): void {
+  // add_autoload refuses enabled: false, so the argument says so rather than offering it.
+  assert.match(listedText('project_settings', 'enabled'), /add_autoload refuses false/);
+  assert.match(
+    readFileSync('src/godot/operations/project_config.gd', 'utf8'),
+    /An autoload cannot be added disabled/,
+    'and the operation is what refuses it',
+  );
+
+  // printed matches case aside, and is not limited to the ordinary lines.
+  const printed = listedText('project_test', 'printed');
+  assert.match(printed, /case aside/);
+  assert.doesNotMatch(printed, /ordinary/, 'printed matches error and warning lines too');
+
+  // scene_create has no read, so it has no readBy to name.
+  assert.equal(toolSpec('scene_create')?.operations?.['read'], undefined, 'scene_create has no read op');
+  assert.doesNotMatch(listedText('scene_create'), /readBy/);
+
+  // A TileSet source takes a texture, never a .tres resource.
+  const tileSet = toolSpec('resource_edit')?.parameters['sources'] as
+    | { items?: { properties?: { texture?: { description?: string } } } }
+    | undefined;
+  const texture = tileSet?.items?.properties?.texture?.description ?? '';
+  assert.match(texture, /A texture file/, `the source's texture is a texture: ${texture}`);
+  assert.doesNotMatch(texture, /\.tres/);
+
+  // A scene that prints and quits is waited for with the op made for it.
+  assert.ok(toolSpec('editor_run')?.operations?.['wait'], 'editor_run has a wait op');
+  assert.match(listedText('editor_run'), /is start, then wait\./);
+
+  // Which runs the server starts: silent names every argument that makes it, each one editor_run
+  // takes, and debug_objects sends the caller there rather than to a partial list of its own.
+  const silent = listedText('editor_run', 'silent');
+  for (const spawning of ['args', 'engineArgs', 'env', 'savesIn', 'godot', 'executable']) {
+    assert.ok(silent.includes(spawning), `silent names ${spawning}: ${silent}`);
+    assert.ok(toolSpec('editor_run')?.parameters[spawning], `and editor_run takes ${spawning}`);
+  }
+  assert.match(silent, /not an executable/, 'an exported build has no debugger to reach');
+  assert.match(listedText('debug_objects'), /editor_run start's silent says when/);
+
+  // The tool names are an area and what it works on, scene_node and editor_status among them.
+  for (const [where, text] of [
+    ['the reference', renderToolsMarkdown()],
+    ['the skill', skillFiles('0.0.0').get('SKILL.md') ?? ''],
+  ] as const) {
+    assert.doesNotMatch(text, /domain_verb/, `${where} names no domain_verb`);
+    assert.match(
+      text,
+      /each named for its area\s+and\s+what it works on/,
+      `${where} says how tools are named`,
+    );
+  }
+}
+
+/**
+ * What a first call of an op needs, in the tool list a client is sent, where it is read before the
+ * call rather than in a refusal after it.
+ */
+function testTheFirstCallRulesAreInTheToolList(): void {
+  const operations = (tool: string): string => {
+    const text = listedText(tool);
+    return text.slice(text.indexOf('Operations:'));
+  };
+  assert.match(
+    operations('scene_node'),
+    /add[^:;]*: a node of class nodeType, or an instance of the scene at instancePath/,
+  );
+  assert.match(
+    operations('runtime_input'),
+    /choose[^:]*: take an item out of a menu, by its words in text or its place in index/,
+  );
+  assert.match(operations('runtime_wait'), /signal[^:]*: wait for nodePath to emit signal, or for a watch/);
+  assert.match(
+    operations('runtime_wait'),
+    /until[^:]*: wait for property to read as value, or for the words in says/,
+  );
+  assert.match(
+    listedText('runtime_inspect', 'timeoutMs'),
+    /requestId, which runtime_invoke op result collects/,
+  );
+  assert.match(listedText('scene_animation', 'track'), /add_track: the track to add/);
+  const track = toolSpec('scene_animation')?.parameters['track'] as
+    | { properties?: { type?: { description?: string } } }
+    | undefined;
+  assert.match(track?.properties?.type?.description ?? '', /add_track: property or method/);
+  assert.match(
+    listedText('project_export', 'outputPath'),
+    /add_preset, set_preset: the path the preset stores/,
+  );
+  for (const debug of ['debug_objects', 'debug_control']) {
+    const text = `${listedText(debug)} ${JSON.stringify(buildToolDefinitions().find((entry) => entry.name === debug))}`;
+    assert.match(text, /this server started/, `${debug} says which games it reaches`);
+  }
 }
 
 /**
@@ -17367,6 +17478,17 @@ function testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked(): void {
   const instructions = serverInstructions();
   for (const named of ['editor_status', 'editor_run start', 'editor_output', 'runtime_*', 'debug_*']) {
     assert.ok(instructions.includes(named), `the instructions name ${named}: ${instructions}`);
+  }
+  // What each tool of a family would otherwise repeat, said once here.
+  for (const said of [
+    'projectPath is the absolute path of the project folder.',
+    '"scenes/main.tscn" or "res://scenes/main.tscn"',
+    'which needs the runtime addon',
+    'whether this server started the game or the editor plays it',
+    'writtenBy says which',
+    'alsoSaved',
+  ]) {
+    assert.ok(instructions.includes(said), `the instructions say ${said}: ${instructions}`);
   }
   assert.doesNotMatch(instructions, /\s{2}/, 'and read as plain sentences');
 
@@ -31820,7 +31942,11 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
  */
 function testTheCureIsWrittenWhole(): void {
   const rescan = toolSpec('editor_rescan')?.description ?? '';
-  assert.match(rescan, /Calling it again is the cure/, 'the tool that is the cure says so');
+  assert.match(
+    rescan,
+    /Call it again when another tool names a class_name under unseenByEditor/,
+    'the tool that is the cure says so',
+  );
   assert.match(rescan, /editor_launch restart/, 'and names the restart for when it is not enough');
 
   // What a caller receives, as it is written: every file of the installed skill, whole.
@@ -31869,7 +31995,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 49, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 48, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -37157,12 +37283,15 @@ function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
     section('editor_classes').find((line) => line.startsWith('- `op: query`')),
     `- \`op: query\` (default): ${query.summary}. Needs: \`projectPath\`. Takes: \`filter\`, \`category\`, \`instantiableOnly\`.`,
   );
-  const remove = exported.operations['remove_preset'];
-  assert.ok(remove !== undefined);
+  assert.equal(
+    exported.operations['remove_preset']?.summary,
+    '',
+    'remove_preset says nothing its name does not',
+  );
   assert.equal(
     section('project_export').find((line) => line.startsWith('- `op: remove_preset`')),
-    `- \`op: remove_preset\`: ${remove.summary}. Needs: \`projectPath\`, \`preset\`.`,
-    'an op that is not the default has no mark and no Takes when it takes nothing more',
+    '- `op: remove_preset`. Needs: `projectPath`, `preset`.',
+    'an op that is not the default has no mark and no Takes when it takes nothing more, and no gloss when it has none',
   );
 }
 
@@ -91626,10 +91755,10 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1396;
+const TOOL_NAME_MENTIONS = 1389;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 62;
+const TOOL_OP_MENTIONS = 59;
 
 /**
  * Every tool this server names in something it says is a tool it has.
@@ -119173,6 +119302,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectTestRunsAtOnceEachSeedFromTheKeptCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testTheToolListStaysSmall,
+  testTheToolTextSaysWhatTheCodeDoes,
+  testTheFirstCallRulesAreInTheToolList,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
   testInteractiveIsABooleanWhateverTheStreamsAre,

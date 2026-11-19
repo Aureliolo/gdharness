@@ -86,10 +86,7 @@ export function headlessSection(): string[] {
     '',
     ...byTool.map((line) => `- ${line}`),
     '',
-    'Most of these still write to the project: `script_edit create` writes a file,',
-    '`project_settings set` rewrites `project.godot`, `project_import reimport` and `refresh_classes`',
-    'write under `.godot`, and `project_import refresh_uids` writes a `.uid` beside each script that',
-    "had none. A CI job checks with the reading ops. Each op's own summary below says which is which.",
+    'Most of these still write to the project, so a CI job checks with the reading ops.',
     '',
     '`scene_create`, `scene_node`, `scene_signal`, `scene_animation`, `scene_tree` and `resource_edit`',
     'go through the editor when one serves the project and through a headless engine when none does.',
@@ -192,12 +189,12 @@ export function renderToolsMarkdown(): string {
   const lines: string[] = [
     '# Tools',
     '',
-    `${TOOL_SPECS.length} tools, named \`domain_verb\`. A tool that does several related things takes an`,
-    '`op`. An unknown op or argument is refused with the valid set listed. Generated from the server.',
+    `${TOOL_SPECS.length} tools, each named for its area and what it works on, such as \`scene_node\`. A tool`,
+    'that does several related things takes an `op`. An unknown op or argument is refused with the',
+    'valid set listed. Generated from the server.',
     '',
     `${projectPathSentence()}. The \`debug_*\` calls among them answer about the game this server`,
-    'started or the editor is playing, and the `editor_*` ones about the editor on this server. A',
-    '`runtime_*` call takes `projectPath` only to pick a game.',
+    'started or the editor is playing, and the `editor_*` ones about the editor on this server.',
     '',
     theGamePicked(),
     '',
@@ -224,7 +221,10 @@ function toolSection(tool: ToolSpec): string[] {
     '',
     withSharedParagraphsLinked(tool.description),
     '',
-    `The answer: ${withSharedParagraphsLinked(tool.answer)}`,
+    // An answer that opens with a list gets a line of its own, so its first item renders as one.
+    tool.answer.startsWith('- ')
+      ? `The answer:\n\n${withSharedParagraphsLinked(tool.answer)}`
+      : `The answer: ${withSharedParagraphsLinked(tool.answer)}`,
     '',
   ];
 
@@ -267,5 +267,6 @@ function operationLine(
   // writing one call wants it.
   const spare = argumentsOf(tool, op).filter((name) => !needs.includes(name) && name !== 'projectPath');
   const takes = spare.length > 0 ? ` Takes: ${spare.map((name) => `\`${name}\``).join(', ')}.` : '';
-  return `- \`op: ${op}\`${isDefault}: ${spec.summary}.${wants}${takes}`;
+  const what = spec.summary === '' ? '.' : `: ${spec.summary}.`;
+  return `- \`op: ${op}\`${isDefault}${what}${wants}${takes}`;
 }
