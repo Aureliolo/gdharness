@@ -22131,40 +22131,26 @@ async function quitsAtOnceOnItsOwnDesktop(project: string, runtime: string): Pro
 }
 
 /**
- * A run on a desktop of its own, held by its keeper from start to close: what the game prints reaches
- * the transcript, the keeper answers a request for the run's debugger, and the run's note gains the
- * game's own exit code once it has gone. The keeper starts the game through a helper of its own,
- * which carries the game's output to the transcript and tells the keeper how the game ended.
- *
- * The game exits 3, whose low byte is that of the code Windows reads off a process still running
- * (259). The helper outlives the game, so a code read off the helper rather than the game is 259.
+ * A stand-in game in [param folder] that prints a line, then exits 3 once a file named `go` is there.
  */
-async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log('hidden keeper run regression skipped (desktops are a Windows boundary)');
-    return;
-  }
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-hidden-keeper-run-'));
-  const runtime = join(scratch, 'runtime');
-  mkdirSync(runtime);
-  const answer = join(scratch, 'answer.json');
-  const launcher = join(scratch, 'launch.mjs');
-  const transcript = join(scratch, 'run.log');
-  const spec = {
-    command: process.execPath,
-    args: [
-      '-e',
-      [
-        "const go = require('node:path').join(process.argv.at(-1), 'go');",
-        "console.log('the hidden game started');",
-        "setInterval(() => { if (require('node:fs').existsSync(go)) process.exit(3); }, 100);",
-      ].join(' '),
-      '--',
-      scratch,
-    ],
-    run: { transcript, startedAt: Date.now(), projectPath: scratch },
-    desktop: `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`,
-  };
+function gameThatExitsThreeOnGo(folder: string): string[] {
+  return [
+    '-e',
+    [
+      "const go = require('node:path').join(process.argv.at(-1), 'go');",
+      "console.log('the hidden game started');",
+      "setInterval(() => { if (require('node:fs').existsSync(go)) process.exit(3); }, 100);",
+    ].join(' '),
+    '--',
+    folder,
+  ];
+}
+
+/** What a launch of [param spec] through the launcher and keeper the server uses answers. */
+function launchedThroughTheKeeper(folder: string, runtime: string, spec: object): unknown {
+  mkdirSync(folder, { recursive: true });
+  const answer = join(folder, 'answer.json');
+  const launcher = join(folder, 'launch.mjs');
   writeFileSync(
     launcher,
     [
@@ -22174,26 +22160,62 @@ async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> 
       `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
     ].join('\n'),
   );
+  const ran = spawnSyncHidden(process.execPath, [launcher], {
+    encoding: 'utf8',
+    env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    timeout: 90_000,
+  });
+  return existsSync(answer)
+    ? JSON.parse(readFileSync(answer, 'utf8'))
+    : { noAnswer: `${String(ran.error ?? '')} ${ran.stdout} ${ran.stderr}` };
+}
+
+/** Whether [param file] holds [param line] within 30 seconds. */
+async function printedWithin(file: string, line: string): Promise<boolean> {
+  const printed = await answeredWithin(
+    () => (existsSync(file) && readFileSync(file, 'utf8').includes(line) ? true : undefined),
+    30_000,
+  );
+  return printed === true;
+}
+
+/**
+ * A run on a desktop of its own, held by its keeper from start to close: what the game prints reaches
+ * the transcript, the keeper answers a request for the run's debugger, and the run's note gains the
+ * game's own exit code once it has gone. The keeper starts the game through a helper of its own,
+ * which carries the game's output to the transcript and tells the keeper how the game ended.
+ *
+ * A launch with no run, as an editor's is, has its output carried to the file it names and its exit
+ * code written to its exit note. The game exits 3, whose low byte is that of the code Windows reads
+ * off a process still running (259). The helper outlives the game, so a code read off the helper
+ * rather than the game is 259. A launch the helper cannot start answers why, rather than waiting.
+ */
+async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('hidden keeper run regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-hidden-keeper-run-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  const transcript = join(scratch, 'run.log');
+  const desktop = (): string => `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`;
   try {
-    const ran = spawnSyncHidden(process.execPath, [launcher], {
-      encoding: 'utf8',
-      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
-      timeout: 90_000,
+    const launched = launchedThroughTheKeeper(join(scratch, 'run'), runtime, {
+      command: process.execPath,
+      args: gameThatExitsThreeOnGo(scratch),
+      run: { transcript, startedAt: Date.now(), projectPath: scratch },
+      desktop: desktop(),
     });
-    const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
     const pid = get(launched, 'pid');
     assert.ok(
       typeof pid === 'number',
-      `the launch should answer the game's pid: ${JSON.stringify(launched)}: ${ran.stdout} ${ran.stderr}`,
+      `the launch should answer the game's pid: ${JSON.stringify(launched)}`,
     );
-    const printed = await answeredWithin(
-      () =>
-        existsSync(transcript) && readFileSync(transcript, 'utf8').includes('the hidden game started')
-          ? true
-          : undefined,
-      30_000,
+    assert.ok(
+      await printedWithin(transcript, 'the hidden game started'),
+      'what the game prints reaches the run transcript',
     );
-    assert.equal(printed, true, 'what the game prints reaches the run transcript');
     const note = runRecordPath(scratch, runtime);
     const keeper = text(get(existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null, 'keeper'));
     assert.ok(keeper.length > 0, 'the note names the keeper holding the run');
@@ -22212,6 +22234,42 @@ async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> 
     assert.ok(
       typeof after === 'object' && 'unreached' in after,
       `and so has its keeper: ${JSON.stringify(after)}`,
+    );
+
+    const editor = join(scratch, 'editor');
+    const output = join(editor, 'output.log');
+    const exitNote = join(editor, 'exit');
+    const opened = launchedThroughTheKeeper(editor, runtime, {
+      command: process.execPath,
+      args: gameThatExitsThreeOnGo(editor),
+      output,
+      exitNote,
+      desktop: desktop(),
+    });
+    const editorPid = get(opened, 'pid');
+    assert.ok(typeof editorPid === 'number', `a launch with no run starts: ${JSON.stringify(opened)}`);
+    assert.ok(await printedWithin(output, 'the hidden game started'), 'its output reaches the file it names');
+    writeFileSync(join(editor, 'go'), '');
+    assert.ok(
+      await printedWithin(exitNote, `${String(editorPid)} `),
+      'and its exit is noted once it has gone',
+    );
+    assert.equal(readFileSync(exitNote, 'utf8'), `${String(editorPid)} 3`, "with the game's own code");
+
+    const refused = launchedThroughTheKeeper(join(scratch, 'refused'), runtime, {
+      command: join(scratch, 'no such engine.exe'),
+      args: [],
+      run: {
+        transcript: join(scratch, 'refused.log'),
+        startedAt: Date.now(),
+        projectPath: join(scratch, 'refused'),
+      },
+      desktop: desktop(),
+    });
+    assert.match(
+      text(get(refused, 'error')),
+      /could not be started on the .* desktop/,
+      `a start the helper cannot make answers why: ${JSON.stringify(refused)}`,
     );
   } finally {
     await endEnginesUnder(scratch);
