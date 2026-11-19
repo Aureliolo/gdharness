@@ -641,9 +641,11 @@ public static class GdharnessDesktop {
   }
 
   // Waits for a process a helper before this one started, whose exit code only a handle opened
-  // while it ran can read, and answers it as the start's end. Its job copy is closed after. The
-  // start's stop file is watched as the helper that started it did, since it is how its starter,
-  // or a keeper, stops the process, and only a helper alive can act on it.
+  // while it ran can read, and answers it as the start's end. Its job copy is closed once it has
+  // ended and before the process is let go, so that the job's name is free by the time Windows can
+  // hand the pid to a later process. The start's stop file is watched as the helper that started it
+  // did, since it is how its starter, or a keeper, stops the process, and only a helper alive can
+  // act on it.
   static void Adopt(string id, IntPtr process, IntPtr copy, string stopFile) {
     uint code = 1;
     if (process != IntPtr.Zero) {
@@ -658,9 +660,11 @@ public static class GdharnessDesktop {
       lock (running) {
         processes.Remove(id);
       }
-      CloseHandle(process);
     }
     ReleaseCopy(copy);
+    if (process != IntPtr.Zero) {
+      CloseHandle(process);
+    }
     Reply(Ending(id, code));
   }
 
@@ -1189,19 +1193,22 @@ public static class GdharnessDesktop {
           jobs.Remove(requestId);
         }
       }
+      // The job gives up its name before the process is let go. Windows hands the pid to a later
+      // process once the last handle to this one is closed, and a start given that pid while the
+      // name is still taken fails.
+      if (job != IntPtr.Zero) {
+        CloseHandle(job);
+      }
+      ReleaseCopy(copy);
+      if (birth != IntPtr.Zero) {
+        CloseHandle(birth);
+      }
       if (started.thread != IntPtr.Zero) {
         CloseHandle(started.thread);
       }
       if (started.process != IntPtr.Zero) {
         CloseHandle(started.process);
       }
-      if (job != IntPtr.Zero) {
-        CloseHandle(job);
-      }
-      if (birth != IntPtr.Zero) {
-        CloseHandle(birth);
-      }
-      ReleaseCopy(copy);
       lock (running) {
         if (creatingHeld) {
           creating--;

@@ -22757,6 +22757,67 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
   }
 }
 
+/**
+ * An engine's job gives up its name while the helper still holds the engine's process. Windows hands
+ * a pid to a later process once the last handle to its owner is closed, and a job name still taken
+ * then fails that process's start.
+ */
+async function testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-freed-'));
+  const holding = join(root, 'holding');
+  const release = join(root, 'release');
+  // The moment the helper lets go of an ended engine's process is over in microseconds, so this copy
+  // says when it is there and stays for the test to look.
+  const closes = '      if (started.process != IntPtr.Zero) {\n        CloseHandle(started.process);';
+  const HELD_MS = 5000;
+  const slowed = HELPER_SOURCE.replace(
+    closes,
+    `      if (started.process != IntPtr.Zero) {\n        WriteText(${JSON.stringify(holding)}, "holding");\n        Thread.Sleep(${String(HELD_MS)});\n        CloseHandle(started.process);`,
+  );
+  assert.notEqual(
+    slowed,
+    HELPER_SOURCE,
+    'the helper closes the engine process in the place this test reaches',
+  );
+  const copy = new CompiledHelper('slow close helper', 'gdharness-slow-close', slowed, true);
+  try {
+    assert.equal(await copy.ensure(root), null, 'the copy compiles');
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: root },
+      process.execPath,
+      [
+        '-e',
+        "const fs = require('node:fs'); setInterval(() => fs.existsSync(process.argv[1]) && process.exit(0), 50)",
+        release,
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      copy.assembly(root),
+    );
+    const pid = await answeredWithin(() => start.pid(), 60_000);
+    assert.ok(pid !== undefined, 'the engine starts');
+    const running = openJob(engineJobName(pid));
+    running?.close();
+    assert.ok(running !== null, 'its job has its name while it runs');
+    writeFileSync(release, '');
+    const reached = await answeredWithin(() => (existsSync(holding) ? Date.now() : undefined), 60_000);
+    assert.ok(reached !== undefined, 'the helper comes to let go of the ended engine');
+    const left = openJob(engineJobName(pid));
+    left?.close();
+    assert.ok(
+      Date.now() - reached < HELD_MS - 1000,
+      'the look falls while the helper still holds the process',
+    );
+    assert.equal(left, null, 'and the job name is free by then, so a later engine given the pid can take it');
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
 /** A crash status whole, such as the one the engine's start race gives, arrives through a headless start. */
 async function testAWholeExitCodeArrivesThroughAHeadlessStart(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -121409,6 +121470,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
+  testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain,
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,
