@@ -55796,11 +55796,12 @@ async function testTwoPathsInOneRequestKeepBothSetsOfErrors(): Promise<void> {
 async function saidOfAPendingCall(
   { ask, stderr, errorOutput }: ReadingGame,
   sentAt: number,
+  requestId: number,
 ): Promise<string> {
   const steps = JSON.stringify(await errorOutput()).match(/noisy step/g)?.length ?? 0;
   let cameAfter = 'never';
   for (let waited = 0; waited < 60_000; waited += 500) {
-    const late = await ask('runtime_invoke', { op: 'result', requestId: 1 });
+    const late = await ask('runtime_invoke', { op: 'result', requestId });
     let pending = true;
     try {
       pending = get(JSON.parse(late), 'pending') === true;
@@ -55833,7 +55834,11 @@ async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
     try {
       answer = JSON.parse(said);
     } catch {
-      throw new Error(`${said}\n${await saidOfAPendingCall(game, sentAt)}`);
+      throw new Error(`the call was refused: ${said}`);
+    }
+    if (get(answer, 'pending') === true) {
+      const requestId = asNumber(get(answer, 'requestId'), `requestId of ${said}`);
+      throw new Error(`${said}\n${await saidOfAPendingCall(game, sentAt, requestId)}`);
     }
     const errors = asArray(get(answer, 'errors'), `errors of ${JSON.stringify(answer)}`).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
