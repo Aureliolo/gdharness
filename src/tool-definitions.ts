@@ -835,7 +835,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       preset: {
         type: 'string',
         ops: ['list', 'run', 'add_preset', 'set_preset', 'remove_preset'],
-        description: 'Preset name from export_presets.cfg. add_preset: the name of the new one.',
+        description:
+          "Preset name from export_presets.cfg. add_preset: the name of the new one. list: answers this preset's options too.",
       },
       platform: {
         type: 'string',
@@ -1471,6 +1472,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
     },
   },
+
+  // -------------------------------------------------------------------------------------------
+  // script
+  // -------------------------------------------------------------------------------------------
   {
     name: 'script_edit',
     title: 'Edit scripts',
@@ -2202,6 +2207,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     defaultOperation: 'query',
   },
+
+  // -------------------------------------------------------------------------------------------
+  // runtime
+  // -------------------------------------------------------------------------------------------
   {
     name: 'runtime_inspect',
     title: 'Inspect the running game',
