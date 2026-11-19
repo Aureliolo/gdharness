@@ -2,7 +2,7 @@ extends RefCounted
 
 # A value out of a dictionary that came from JSON, as the type the caller wants.
 #
-# This file is the one beside the operations, and `bun run sync:gd` copies it into each addon,
+# This file is the one beside the operations, and the build copies it into each addon,
 # because an addon is installed as a directory and cannot preload out of one. The runtime addon's
 # copy ships inside exported games and the editor addon's does not, which is the other reason
 # neither of them reaches into the other.

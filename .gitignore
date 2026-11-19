@@ -28,3 +28,23 @@ Thumbs.db
 
 # Coverage directory
 coverage/
+
+# Shared GDScript helpers. The build and the suites write each from src/godot/operations. The .uid
+# beside each is tracked.
+/src/godot/addons/gdharness_editor/animation_reads.gd
+/src/godot/addons/gdharness_editor/declared_values.gd
+/src/godot/addons/gdharness_runtime/declared_values.gd
+/src/godot/addons/gdharness_editor/file_reads.gd
+/src/godot/addons/gdharness_editor/file_walk.gd
+/src/godot/addons/gdharness_editor/picture_saves.gd
+/src/godot/addons/gdharness_runtime/picture_saves.gd
+/src/godot/addons/gdharness_editor/property_paths.gd
+/src/godot/addons/gdharness_editor/property_values.gd
+/src/godot/addons/gdharness_editor/reading.gd
+/src/godot/addons/gdharness_runtime/reading.gd
+/src/godot/addons/gdharness_editor/same_values.gd
+/src/godot/addons/gdharness_editor/serialisation.gd
+/src/godot/addons/gdharness_runtime/serialisation.gd
+/src/godot/addons/gdharness_editor/setting_reads.gd
+/src/godot/addons/gdharness_editor/value_shapes.gd
+/src/godot/addons/gdharness_runtime/value_shapes.gd

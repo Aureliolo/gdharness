@@ -13,6 +13,7 @@ import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type RawData, WebSocket } from 'ws';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { EDITOR_REQUEST_BYTES } from '../src/godot-bridge.js';
 import { currentRunner, runLine } from '../src/runner.js';
 import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
@@ -317,6 +318,7 @@ function parseFrame(data: RawData): Record<string, unknown> | null {
 }
 
 async function main(): Promise<void> {
+  syncSharedGdscript();
   const bridgePort = await reservePort();
   const projectPath = createTestProjectFixture();
   // Announcements go to a directory of this test's own, so a game running on the machine is

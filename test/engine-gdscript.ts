@@ -26,6 +26,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { declaredClassLines } from '../src/class-cache.js';
 import {
   ANSWERED,
@@ -6712,6 +6713,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
 };
 
 async function main(): Promise<void> {
+  syncSharedGdscript();
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     skipWithoutGodot();

@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -9456,6 +9457,7 @@ async function timedCase(name: string, run: () => Promise<void>): Promise<void> 
 }
 
 async function main(): Promise<void> {
+  syncSharedGdscript();
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT'] === '1') {
