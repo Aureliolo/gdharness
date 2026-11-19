@@ -12,7 +12,9 @@ import {
   argumentsOf,
   CLASSES_REBUILT,
   effectsOf,
+  listed,
   projectPathSentence,
+  requiredSetsSaid,
   TOOL_SPECS,
   type ToolSpec,
   theGamePicked,
@@ -192,12 +194,6 @@ function whatItCanChange(tool: ToolSpec): string {
   return `Can overwrite, remove or end what is there, through ${coded(destroying)}.`;
 }
 
-/** [items] as prose: "a", "a and b", "a, b and c". */
-function listed(items: readonly string[]): string {
-  const last = items.at(-1) ?? '';
-  return items.length === 1 ? last : `${items.slice(0, -1).join(', ')} and ${last}`;
-}
-
 /**
  * The tool reference as markdown, which is what an agent gets pointed at.
  *
@@ -237,11 +233,11 @@ export function renderToolsMarkdown(): string {
  * then its answer, which a caller reads after the call rather than before it.
  */
 export function toolSection(tool: ToolSpec): string[] {
+  const description = withoutSharedParagraphs(tool.description);
   const lines = [
     `## ${tool.name}`,
     '',
-    withoutSharedParagraphs(tool.description),
-    '',
+    ...(description === '' ? [] : [description, '']),
     whatItCanChange(tool),
     '',
   ];
@@ -327,23 +323,29 @@ function sharedArguments(tool: ToolSpec): { needs: string[]; takes: string[] } {
 function operationLine(
   tool: ToolSpec,
   op: string,
-  spec: { summary: string; requires: readonly string[] },
+  spec: { summary: string; requires: readonly string[]; requiresOneOf?: readonly (readonly string[])[] },
 ): string {
   const shared = sharedArguments(tool);
   const needs = spec.requires.filter((name) => !shared.needs.includes(name));
+  const sets = spec.requiresOneOf ?? [];
   // What else the op will take, because an argument meant for another op is refused. The
   // list below says which ops each argument belongs to. This says it the way round somebody
   // writing one call wants it.
   const spare = argumentsOf(tool, op).filter(
     (name) =>
       !needs.includes(name) &&
+      !sets.some((set) => set.includes(name)) &&
       !shared.needs.includes(name) &&
       !shared.takes.includes(name) &&
       name !== 'projectPath',
   );
+  const needed = [
+    ...(needs.length > 0 ? [coded(needs)] : []),
+    ...(sets.length > 0 ? [requiredSetsSaid(sets, (name) => `\`${name}\``)] : []),
+  ];
   const marks = [
     ...(tool.defaultOperation === op ? ['default'] : []),
-    ...(needs.length > 0 ? [`needs ${coded(needs)}`] : []),
+    ...(needed.length > 0 ? [`needs ${needed.join(', and ')}`] : []),
     ...(spare.length > 0 ? [`takes ${coded(spare)}`] : []),
   ];
   // Commas, since the page is prose and the words needs and takes already part the lists.

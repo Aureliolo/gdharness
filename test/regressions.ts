@@ -14292,6 +14292,27 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       await call('project_settings', { op: 'add_input_action', actionName: '' }),
       'project_settings add_input_action needs projectPath; actionName, which was given empty; events.',
     );
+    // An op that needs one of two sets is refused with both, in the words the op line prints.
+    assert.equal(
+      await call('runtime_wait', { op: 'until', nodePath: '/root/Main', property: 'hp' }),
+      'runtime_wait until needs nodePath, property and value, or says.',
+    );
+    assert.equal(
+      await call('runtime_wait', { op: 'signal', signal: 'pressed' }),
+      'runtime_wait signal needs nodePath and signal, or watch.',
+    );
+    for (const call_ of [
+      { op: 'until', says: 'Start' },
+      { op: 'until', nodePath: '/root/Main', property: 'target', value: null },
+      { op: 'until', nodePath: '/root/Main', property: 'label', value: '' },
+      { op: 'signal', watch: 1 },
+    ]) {
+      assert.match(
+        await call('runtime_wait', call_),
+        /No game with the runtime addon is running/,
+        `${JSON.stringify(call_)} gives one whole set`,
+      );
+    }
 
     // The other half, or this passes against a server that refuses every op-specific argument.
     // Accepted means reaching the runtime and finding nothing there, which is one sentence. The
@@ -15676,9 +15697,9 @@ function testTheToolTextSaysWhatTheCodeDoes(): void {
     'and the operation is what refuses it',
   );
 
-  // printed matches case aside, and is not limited to the ordinary lines.
+  // printed matches ignoring case, and is not limited to the ordinary lines.
   const printed = listedText('project_test', 'printed');
-  assert.match(printed, /case aside/);
+  assert.match(printed, /ignoring case/);
   assert.doesNotMatch(printed, /ordinary/, 'printed matches error and warning lines too');
 
   // scene_create has no read, so it has no readBy to name.
@@ -15696,14 +15717,18 @@ function testTheToolTextSaysWhatTheCodeDoes(): void {
   assert.match(listedText('editor_run'), /is start, then wait\./);
 
   // Which runs the server starts: silent names every argument that makes it, each one editor_run
-  // takes, and debug_objects sends the caller there rather than to a partial list of its own.
+  // takes, and debug_objects names the answer that says so rather than a partial list of its own.
   const silent = listedText('editor_run', 'silent');
   for (const spawning of ['args', 'engineArgs', 'env', 'savesIn', 'godot', 'executable']) {
     assert.ok(silent.includes(spawning), `silent names ${spawning}: ${silent}`);
     assert.ok(toolSpec('editor_run')?.parameters[spawning], `and editor_run takes ${spawning}`);
   }
-  assert.match(silent, /not an executable/, 'an exported build has no debugger to reach');
-  assert.match(listedText('debug_objects'), /editor_run's silent argument says which runs those are\./);
+  assert.match(silent, /cannot reach an executable/, 'an exported build has no debugger to reach');
+  assert.match(listedText('debug_objects'), /whose editor_run start answered through gdharness\./);
+  assert.match(
+    toolSpec('editor_run')?.answer ?? '',
+    /start answers through, gdharness for a game this server started/,
+  );
 
   // The tool names are an area and what it works on, scene_node and editor_status among them.
   for (const [where, page] of [
@@ -15736,7 +15761,10 @@ function testTheFirstCallRulesAreInTheToolList(): void {
     operations('runtime_input'),
     /choose[^:]*: take an item out of a menu, by its words in text or its place in index/,
   );
-  assert.match(operations('runtime_wait'), /signal[^:]*: wait for nodePath to emit signal, or for a watch/);
+  assert.match(
+    operations('runtime_wait'),
+    /signal \(needs nodePath and signal, or watch\): wait for the signal and answer with what it carried/,
+  );
   assert.match(
     operations('runtime_wait'),
     /until[^:]*: wait for property to read as value, or for the words in says/,
@@ -18752,7 +18780,7 @@ function testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked(): void {
   }
   // What each tool of a family would otherwise repeat, said once here.
   for (const said of [
-    'projectPath is the absolute path of the project folder.',
+    "`projectPath`, the project folder's absolute path,",
     '"scenes/main.tscn" or "res://scenes/main.tscn"',
     'which needs the runtime addon',
     'whether this server started the game or the editor plays it',
@@ -32311,7 +32339,7 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
     );
     assert.match(
       await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),
-      /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered/,
+      /runtime_wait signal needs nodePath and signal, or watch\./,
     );
 
     const pidOf = /"pid": (\d+)/.exec(started)?.[1];
@@ -40072,7 +40100,7 @@ function assertTheGeneratedClauseIsCarriedUnaltered(without: readonly string[]):
   // "except , which take none", which would ship in the skill every agent reads.
   assert.equal(
     projectPathSentence([]),
-    'Every call takes `projectPath`',
+    "Every call takes `projectPath`, the project folder's absolute path",
     'with nothing to except, the sentence is the rule on its own',
   );
   assert.match(
@@ -40223,6 +40251,18 @@ function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
     'an argument every op needs is said once, not on each op line',
   );
   assert.ok(section('scene_node').includes('Every op needs `projectPath` and `scenePath`.'));
+  // An op that needs one of two sets says both, so its arguments do not read as all optional.
+  for (const [op, needs, takes] of [
+    ['signal', '`nodePath` and `signal`, or `watch`', '`timeoutMs`'],
+    ['until', '`nodePath`, `property` and `value`, or `says`', '`compare`, `includeHidden` and `timeoutMs`'],
+  ]) {
+    assert.ok(
+      section('runtime_wait').some((line) =>
+        line.startsWith(`- \`${op}\` (needs ${needs}, takes ${takes}): `),
+      ),
+      `runtime_wait ${op} says what it needs: ${section('runtime_wait').join('\n')}`,
+    );
+  }
 
   // The answer comes last, under a heading of its own, and the forms the reference used to print
   // are gone.
@@ -58120,7 +58160,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
             ENGINE_CALL_TIMEOUT_MS,
           ),
         );
-        assert.match(unnamed ?? '', /needs nodePath to wait for a property/, unnamed ?? '');
+        assert.equal(unnamed, 'runtime_wait until needs nodePath, property and value, or says.');
         const absent = await call('runtime_inspect', { op: 'find', says: 'GLOW\\nshines 4' });
         assert.deepEqual(
           asArray(get(absent, 'nodes')),
@@ -94721,7 +94761,7 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1482;
+const TOOL_NAME_MENTIONS = 1479;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
 const TOOL_OP_MENTIONS = 59;

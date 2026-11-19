@@ -17,7 +17,7 @@ import { marked, type Tokens } from 'marked';
 import { displayPath, HARNESSES, type Harness } from '../src/harnesses.js';
 import { runLine } from '../src/runner.js';
 import { SERVER_VERSION } from '../src/server-version.js';
-import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { requiredSetsSaid, TOOL_SPECS } from '../src/tool-definitions.js';
 import { argumentShape, renderToolsMarkdown, SHARED_PARAGRAPHS } from '../src/tool-reference.js';
 import { HeadingIds } from './doc-slug.js';
 
@@ -568,7 +568,9 @@ function renderTools(): string {
 
     parts.push(`<section class="tool" id="${escaped(tool.name)}">\n`);
     parts.push(`<h3><code>${escaped(tool.name)}</code></h3>\n`);
-    parts.push(`<p>${escaped(tool.description)}</p>\n`);
+    if (tool.description !== '') {
+      parts.push(`<p>${escaped(tool.description)}</p>\n`);
+    }
     // The answer is read after the call, so it comes after what the call takes.
     parts.push(renderOperations(tool), renderArguments(tool));
     const answer = tool.answer.split('\n\n').filter((paragraph) => paragraph !== '');
@@ -597,11 +599,15 @@ function renderOperations(tool: ToolSpec): string {
       : '';
   }
   const rows = operations.map(([op, spec]) => {
-    const needs = [...tool.requires, ...spec.requires];
+    const coded = (name: string): string => `<code>${escaped(name)}</code>`;
+    const needs = [
+      ...[...tool.requires, ...spec.requires].map(coded),
+      ...(spec.requiresOneOf === undefined ? [] : [requiredSetsSaid(spec.requiresOneOf, coded)]),
+    ];
     const isDefault = tool.defaultOperation === op ? ' <span class="tag">default</span>' : '';
     return (
       `<tr><td><code>${escaped(op)}</code>${isDefault}</td><td>${escaped(spec.summary)}</td>` +
-      `<td>${needs.map((name) => `<code>${escaped(name)}</code>`).join(' ') || '&mdash;'}</td></tr>\n`
+      `<td>${needs.join(' ') || '&mdash;'}</td></tr>\n`
     );
   });
   return [

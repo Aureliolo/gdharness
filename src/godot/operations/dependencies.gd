@@ -817,9 +817,9 @@ func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
 				if dep_path.get_extension().is_empty():
 					continue
 
-				# Skip engine-internal resources unless requested. `addons/` is not one of
-				# them: it is ordinary project content, and often shipping content, so
-				# treating it as built-in dropped every dependency of anything living there.
+				# Skip paths starting res://., such as those under .godot, unless requested.
+				# `addons/` is not one of them: it is ordinary project content, and often shipping
+				# content, so treating it as built-in dropped every dependency of anything there.
 				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 

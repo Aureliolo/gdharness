@@ -488,6 +488,7 @@ import {
   type MCPToolDefinition,
   opTakes,
   type ProjectInfoSection,
+  requiredSetsSaid,
   TOOL_SPECS,
   type ToolSpec,
   toolSpec,
@@ -1063,6 +1064,20 @@ function followTheRestart(run: GodotProcess): boolean {
  */
 function errorsUnread(run: GodotProcess): boolean {
   return run.throughEditor && typeof run.errorReport !== 'string';
+}
+
+/**
+ * Whether [args] gives [field] as one of an op's `requiresOneOf` sets asks. Blank is missing, as
+ * for a required argument, unless the parameter is `blank`. Null is given for a parameter of no
+ * declared type, which takes any value, such as the value runtime_wait until waits for.
+ */
+function givenInASet(spec: ToolSpec, args: OperationParams, field: string): boolean {
+  const value = Object.hasOwn(args, field) ? args[field] : undefined;
+  const parameter = spec.parameters[field];
+  if (value === undefined || (value === null && parameter?.['type'] !== undefined)) {
+    return false;
+  }
+  return !(typeof value === 'string' && value.trim() === '' && parameter?.blank !== true);
 }
 
 /**
@@ -6837,6 +6852,17 @@ class GodotServer {
       );
       const joined = fields.join(blank.length > 0 ? '; ' : ', ');
       return { ok: false, response: this.createErrorResponse(`${where} needs ${joined}.`) };
+    }
+    const sets = op === null ? undefined : spec.operations?.[op]?.requiresOneOf;
+    if (
+      op !== null &&
+      sets !== undefined &&
+      !sets.some((set) => set.every((field) => givenInASet(spec, args, field)))
+    ) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(`${spec.name} ${op} needs ${requiredSetsSaid(sets)}.`),
+      };
     }
     return { ok: true, op };
   }
@@ -21918,26 +21944,9 @@ class GodotServer {
     watch: number | undefined,
   ): Promise<ToolResponse> {
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
-    if (
-      op === 'signal' &&
-      watch === undefined &&
-      (readNonEmptyString(args, 'nodePath') === undefined || readNonEmptyString(args, 'signal') === undefined)
-    ) {
-      return this.createErrorResponse(
-        'runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered.',
-      );
-    }
-    const asked = readNonEmptyString(args, 'nodePath');
-    // Words are waited for anywhere in the game when no node is named, which is what the skill
-    // told callers to do and the tool refused. A property belongs to one node, so it has none to
-    // default to.
-    if (asked === undefined && op === 'until' && readNonEmptyString(args, 'says') === undefined) {
-      return this.createErrorResponse(
-        'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.',
-        ['With says instead of property, nodePath can be left out and the whole game is searched'],
-      );
-    }
-    const nodePath = asked ?? '/root';
+    // The op's requiresOneOf has been checked: a wait for words without a node searches the whole
+    // game, and a property belongs to one node, so a wait for one names it.
+    const nodePath = readNonEmptyString(args, 'nodePath') ?? '/root';
     const patience = Math.max(this.runtimeTimeoutMs(), timeoutMs + 5000);
     return op === 'signal'
       ? await this.handleRuntimeCommand(

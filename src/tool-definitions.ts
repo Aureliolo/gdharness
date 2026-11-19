@@ -59,6 +59,26 @@ interface OperationSpec {
   readonly effect: Effect;
   /** Arguments the op needs on top of the tool's own. */
   readonly requires: readonly string[];
+  /**
+   * Sets of arguments of which a call gives at least one whole, for an op whose need is a choice
+   * the schema's `required` cannot say. The tool list, the reference and the server's refusal all
+   * read it, so none can say the op needs something else.
+   */
+  readonly requiresOneOf?: readonly (readonly string[])[];
+}
+
+/** [items] as prose: "a", "a and b", "a, b and c". */
+export function listed(items: readonly string[]): string {
+  const last = items.at(-1) ?? '';
+  return items.length === 1 ? last : `${items.slice(0, -1).join(', ')} and ${last}`;
+}
+
+/** An op's `requiresOneOf` as prose, each name passed through [named]: "nodePath and signal, or watch". */
+export function requiredSetsSaid(
+  sets: readonly (readonly string[])[],
+  named: (name: string) => string = (name) => name,
+): string {
+  return sets.map((set) => listed(set.map(named))).join(', or ');
 }
 
 interface ToolSpecBase {
@@ -174,13 +194,12 @@ export function callsWithoutProjectPath(): string[] {
  * in the same way as the original or in a different one, and neither tells you anything.
  */
 export function projectPathSentence(without: readonly string[] = callsWithoutProjectPath()): string {
+  const rule = "Every call takes `projectPath`, the project folder's absolute path";
   if (without.length === 0) {
-    return 'Every call takes `projectPath`';
+    return rule;
   }
   const named = without.map((name) => `\`${name}\``).join(', ');
-  return `Every call takes \`projectPath\` except ${named}, which ${
-    without.length === 1 ? 'takes' : 'take'
-  } none`;
+  return `${rule}, except ${named}, which ${without.length === 1 ? 'takes' : 'take'} none`;
 }
 
 /**
@@ -276,7 +295,7 @@ const ANIMATION_TRACK: JsonSchema = {
   properties: {
     type: {
       type: 'string',
-      description: 'add_track: property or method. remove_track: any type read answers.',
+      description: 'add_track: property or method. remove_track: any of these types.',
       enum: [
         'property',
         'method',
@@ -465,7 +484,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Assets are images, fonts, sound, models, video and shaders, and other counts every remaining file. No count includes the .import and .uid files beside others, or the addons gdharness installed. Nor does one include a file in a folder holding a .gdignore or its own project.godot, or one behind a link out of the project. ' +
       "classes lists each class_name with its script, read from the files. Those an addon declares are counted per addon under inAddons, unless addonClasses names the addon. input_actions lists the project's actions with their events, and an engine ui_ action only when the project rebinds it, as engineAction. export_presets marks as runnable the one preset of its platform the editor's one-click deploy uses. " +
       'health and validation name each script that fails with its first error, and each missing file a scene, resource or script refers to. They name each input action a script reads by a literal name that nothing defines, with every line reading it. They name each scene connection whose method or signal the node at its end lacks, or whose argument count does not fit. ' +
-      "health's score starts at 100 and loses each finding's weight. A missing main scene costs 15 and a broken connection 5. Grade A is 90 and up, F below 60, so a failed check can still grade A. Notes such as TODO under addons/ are left out.",
+      'health answers a score out of 100 and a grade, and a failed check can still grade A. Notes such as TODO under addons/ are left out.',
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
@@ -739,7 +758,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       includeBuiltin: {
         type: 'boolean',
-        description: "forward: include the engine's own res://. resources. Default false.",
+        description:
+          'forward: also list files whose path starts res://., such as those under .godot. Default false.',
       },
       fileTypes: {
         type: 'array',
@@ -753,7 +773,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_import',
     title: 'Asset imports',
-    description: 'The import pipeline.',
+    description: '',
     answer: [
       "options answers remap, deps and params as the .import file holds them, so an enum option such as compress/mode is its number. Godot's documentation of the importer says what each number means.",
       'reimport is answered from a second status read. reimported lists what is current now, and notReimported what is not. Each has one entry per status and reason, with the paths sharing them. via says which of the two did the work. When nothing needed reimporting, the two lists are empty, a note says so, and there is no via.',
@@ -969,7 +989,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'A case declared in a suite that passed and that gdUnit4 never ran comes back under testsNotRun. A row it skipped for data that does not fit the case comes back under rowsMismatched. A case it cannot run as declared (a parameter nothing fills, or a fuzzer after a setting) comes back under casesUnrunnable. Each has the reason gdUnit4 gave.',
       'An ignore entry that named a case which ran all the same comes back under ignoreNotApplied, with the form that would have left the case out. Every case the list left out comes back under ignored as suite_name:test_name, and every row as suite_name:test_name:N. An entry naming no suite, case or row under path comes back under ignoreUnmatched.',
       'A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing. It is called hung only when that was half the limit, or thirty seconds of a longer one. Otherwise it was still running and wants a longer timeoutMs or a narrower path. The limit is counted from the engine starting, and the class rebuild and any import before it are outside it, though tookMs counts them.',
-      'With failFast the counts cover only what ran, and notRun counts the cases left. printed holds the lines matched case aside in the text and the backtrace, at most 200, the newest kept. printedOmitted counts the rest.',
+      'With failFast the counts cover only what ran, and notRun counts the cases left. printed holds the lines matched, ignoring case, in the text and the backtrace, at most 200, the newest kept. printedOmitted counts the rest.',
     ].join('\n\n'),
     parameters: {
       projectPath: PROJECT_PATH,
@@ -977,7 +997,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: ['string', 'array'],
         items: { type: 'string' },
         description:
-          'A test directory or suite file, or a list of them. Default tests and test. "tests/suite.gd:test_name" runs one case, as tests would.',
+          'A test directory or suite file, or a list of them. Default tests and test. "tests/suite.gd:test_name" runs one case.',
       },
       ignore: {
         type: 'array',
@@ -989,7 +1009,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string' },
         description:
-          'Run only these cases of the suites under path. Each is "test_name", or "suite:test_name" with the file name less .gd.',
+          'Run only these cases of the suites under path: "test_name", or "suite:test_name" with suite the file name without .gd.',
       },
       engineArgs: {
         type: 'array',
@@ -1009,7 +1029,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       printed: {
         type: 'string',
         description:
-          'Also answer with the lines the run printed that contain this, case aside, under printed.',
+          'Also answer with the lines the run printed that contain this, ignoring case, under printed.',
       },
     },
     requires: ['projectPath'],
@@ -1055,7 +1075,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         enum: ['editor'],
         ops: ['save'],
         description:
-          "editor saves the editor's copy of the scene. Left out, a scene the editor has not open is saved as the file loads.",
+          'editor opens a closed scene in the editor and saves it from there. Left out, a closed scene is saved as the file loads.',
       },
     },
     requires: ['projectPath', 'scenePath'],
@@ -1346,7 +1366,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description:
-      'Animations in an AnimationPlayer and states in an AnimationTree state machine. scene_node add puts the player or tree in the scene first, and autoplay is scene_node set. read answers each track in the shape add_track takes.',
+      'Animations in an AnimationPlayer and states in an AnimationTree state machine. scene_node add puts the player or tree in the scene first, and autoplay is scene_node set.',
     answer:
       `${WITHOUT_AN_EDITOR} ${ALSO_SAVED} read and read_states need no editor. ` +
       'add_track on an existing track adds keys to it. remove_track takes out every matching track, or with a method only the keys calling it. ' +
@@ -1449,7 +1469,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       read: {
         effect: 'read',
-        summary: 'the animations of a player, or one with its tracks',
+        summary: 'the animations of a player, or one with its tracks in the shape add_track takes',
         requires: ['playerNodePath'],
       },
       read_states: {
@@ -1609,7 +1629,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['structure'],
         description:
-          "Also list what the script inherits through the project's other scripts. A native base is for editor_classes info.",
+          "Also list what the script inherits through the project's other scripts. A native base class is read with editor_classes info.",
       },
       line: {
         type: 'integer',
@@ -1675,7 +1695,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'resource_edit',
     title: 'Edit resources',
     description:
-      'Resource files. create makes any ClassDB resource as .tres, and a material is a create of a Material class. read answers in the form modify takes. A Theme item is named `Button/colors/font_color`. move and read need no editor.',
+      'Resource files. create makes a .tres of any engine resource class, a Material class for a material. read answers in the form modify takes. A Theme item is a property named like `Button/colors/font_color`. move and read need no editor.',
     answer: [
       WITHOUT_AN_EDITOR,
       'create and modify answer each property given under properties as the file holds it once saved. modify answers each one unset under unset. A property given its default is left out of a .tres file and named under notStored. alsoChanged names what the engine changed in step with a given property. alsoSaved names what the save changed, added or dropped in the main resource, as {property, was, saved}.',
@@ -1817,8 +1837,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_launch',
     title: 'Open, restart or close the editor, or bind its debug adapter again',
-    description:
-      'open answers once the process has started, before the editor connects. restart puts a gdharness upgrade into effect. editor_status says which editor is connected.',
+    description: 'editor_status says which editor is connected.',
     answer: [
       'close answers settingsDropped, what its save took out of project.godot. It is left out when the save took nothing. settingsNote says when the file could not be read to tell. An editor stopped before it connected is answered with beforeConnecting.',
       'close and restart name under savedScenes the open scenes that had unsaved changes and were saved on the way out. The list is empty when none had. A scene that would not save refuses the close or restart and leaves the editor running. Both answer tookMs, how long the editor took to go or to come back.',
@@ -1847,10 +1866,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      open: { effect: 'additive', summary: 'open the editor on a project', requires: ['projectPath'] },
+      open: {
+        effect: 'additive',
+        summary: 'open the editor on a project, answering once its process has started, before it connects',
+        requires: ['projectPath'],
+      },
       restart: {
         effect: 'destructive',
-        summary: 'restart the connected editor and wait for it',
+        summary: 'restart the connected editor and wait for it, which puts a gdharness upgrade into effect',
         requires: [],
       },
       close: {
@@ -1870,7 +1893,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_run',
     title: 'Run the game',
     description:
-      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. One server holds one run.',
+      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. One server keeps one run.',
     parameters: {
       // start and check need telling which project. The ops about the run already going take it
       // too, because a call copied from the start carries it, and they check it rather than ignore
@@ -1918,7 +1941,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          'Default true: this server starts the game, with no sound. false lets a connected editor play it, with sound. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* reach the game in both cases, but not an executable.',
+          'Default true: this server starts the game, with no sound. false lets a connected editor play it, with sound. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.',
       },
       executable: {
         type: 'string',
@@ -1963,7 +1986,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       profile: {
         type: 'boolean',
         ops: ['start'],
-        description: "Profile the run's GDScript from its start. Needs an engine built with debugging.",
+        description:
+          "Time the run's GDScript from its start, for op profile to read. Needs an engine built with debugging.",
       },
       engineCalls: {
         type: 'boolean',
@@ -2007,7 +2031,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['stop'],
         description:
-          'A game of this project that no server here holds, as editor_status lists it under runtimes.',
+          'A game of this project that no server here keeps, as editor_status lists it under runtimes.',
       },
     },
     requires: [],
@@ -2029,8 +2053,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       wait: {
         effect: 'read',
-        summary:
-          'wait for the run to end, be held by its debugger or crash, then answer as editor_output does',
+        summary: 'wait for the run to end, stop in its debugger or crash, then answer as editor_output does',
         requires: [],
       },
       profile: {
@@ -2081,7 +2104,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_output',
     title: 'Game and editor output',
     description:
-      'What the project started by editor_run has printed, as entries with a severity (error, warning or info). A run answers with counts and a verdict: clean is true when no error was reported. A run that has quit still answers until the next one starts.',
+      'What a game or the editor has printed, as entries with a severity (error, warning or info). Op run also answers counts, and clean, true when no error was reported. A run that has quit still answers until the next one starts.',
     answer:
       "For a run the editor plays the reports come from the game itself, through the runtime addon. A played game without the runtime addon answers with its prints alone, with errorsUnread true and no clean. A run ended by a signal has no exit code, and exitSignal names the signal. endedBy says whether gdharness ended the run. A transcript that has stopped growing is a run between prints rather than a run that is over. startedAt is when the run began and elapsedMs how long it has been going. For a run that is over, endedAt is when it ended and elapsedMs how long it ran. Both are left out when nobody saw the end. running is asked of the operating system whenever there is a process to ask about. For an editor-played run that never announced, running is the editor's answer, which can lag.\n\n" +
       "An entry with lines under its headline has them as detail. When one of them names a project script, script, line and function say where. That is the at: line when it names one, otherwise the innermost frame of the backtrace that does. A push_error or push_warning has the engine's own push_error as its at: line, so its script and line are the game's call that raised it. Each entry's source says where it was read. transcript is a line of the run's transcript file, which holds both its streams and is how every run with one is read. stdout or stderr is a line of that stream of a run with no transcript. An example is an editor-played run picked up after a reconnect whose first server left no note. debugger is what the editor's debug adapter reported and the game never printed, such as the script error a game stopped on. A printerr line is info: it prints to stderr, and the engine reports no error for it.\n\n" +
@@ -2089,7 +2112,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: {
         type: 'string',
-        description: 'The project whose output you mean. Another project than the held one is refused.',
+        description:
+          'The project whose output you mean. Refused when it is not the project of the run or editor this server keeps.',
       },
       severity: {
         type: 'string',
@@ -2131,7 +2155,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       run: {
         effect: 'read',
-        summary: 'what the game a run is playing has printed',
+        summary: 'what the game started by editor_run has printed',
         requires: [],
       },
       editor: {
@@ -2245,7 +2269,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_classes',
     title: 'Engine classes',
     description:
-      "The engine's ClassDB, with the classes the project's scripts declare beside it: find classes, read one in full, or walk an inheritance tree. info reads engine classes only, and script_info structure reads a project class.",
+      "The engine's classes and those the project's scripts declare: find classes, read one in full, or walk an inheritance tree. info reads engine classes only, and script_info structure reads a project class.",
     answer:
       `${CLASSES_REBUILT} ` +
       "The project's classes are read from the scripts on disk, so one written a moment ago is there before any scan. query and inheritance answer them under project_classes, project_children and project_descendants, each with its path, what it extends and whether it is abstract. filtered_count, direct_children_count and all_descendants_count count the engine classes in the lists beside them. instantiableOnly leaves out an engine class that cannot be instantiated and a project class that is @abstract or built on one that cannot be, and keeps a class extending an @abstract one. info gives each property of a class that can be made its default, the value a new one holds. includeInherited gives one entry per ancestor, nearest first, with the names of what it declares, and member reads any inherited member in full, looked for on the class and every ancestor. The whole of Control is about a hundred thousand characters.",
@@ -2386,7 +2410,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['find', 'accessibility'],
         description:
-          'The words a node shows, as drawn, case-insensitive. A bare word is a contains, * or ? makes a glob over the whole text, | splits alternatives. accessibility: filters elements by name, value or value_text.',
+          'The words a node shows, as drawn, case-insensitive. A bare word matches anywhere in the text. * or ? makes a glob over the whole text. | splits alternatives. accessibility: filters elements by name, value or value_text.',
       },
       limit: {
         type: 'integer',
@@ -2645,7 +2669,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click'],
         description:
-          'The words on the control to click, matched as runtime_inspect find matches says. The best match is pressed, and index picks among equals.',
+          'The words on the control to click, matched as runtime_inspect matches says. The best match is pressed, and index picks among equals.',
       },
       action: {
         type: 'string',
@@ -2868,7 +2892,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['signal', 'watch', 'until'],
         description:
-          'The node, such as "/root/Main/Player" or "%Player". Not needed for signal when watch is given. until with says defaults to /root.',
+          'The node, such as "/root/Main/Player" or "%Player". With op until and says, it defaults to /root.',
       },
       signal: {
         type: 'string',
@@ -2880,7 +2904,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['signal', 'recorded'],
         description:
-          'The watch an earlier watch call answered. signal takes it in place of nodePath and signal.',
+          'The number an earlier op watch answered. signal takes it in place of nodePath and signal.',
       },
       property: {
         type: 'string',
@@ -2890,6 +2914,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       value: {
         ops: ['until'],
+        blank: true,
         description:
           "The value to wait for, fitted to the property's type. An enum takes a name or a number.",
       },
@@ -2898,13 +2923,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         enum: ['==', '!=', '>=', '<=', '>', '<'],
         ops: ['until'],
         description:
-          'How what the property reads stands to value. Default ==. The orderings suit a counter that steps.',
+          'How the property is compared with value. Default ==. Use >= or <= for a counter that steps.',
       },
       says: {
         type: 'string',
         ops: ['until'],
         description:
-          'Wait for these words to appear instead of for a property, matched as runtime_inspect find matches says. Not with property.',
+          'Wait for these words to appear instead of for a property, matched as runtime_inspect matches says. Not with property.',
       },
       includeHidden: {
         type: 'boolean',
@@ -2929,15 +2954,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       signal: {
         effect: 'read',
-        summary: 'wait for nodePath to emit signal, or for a watch, and answer with what it carried',
-        // nodePath and signal, or a watch in their place, which the declaration cannot say, so the
-        // handler asks.
+        summary: 'wait for the signal and answer with what it carried, at once if the watch saw it fire',
         requires: [],
+        requiresOneOf: [['nodePath', 'signal'], ['watch']],
       },
       watch: {
         effect: 'read',
         summary:
-          'start recording a signal or a property, and answer with a watch that signal or recorded collects',
+          'start recording a signal or a property, and answer with its number, which signal or recorded takes as watch',
         // A signal or a property, which the declaration cannot say, so the handler asks.
         requires: ['nodePath'],
       },
@@ -2948,10 +2972,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       until: {
         effect: 'read',
-        summary: 'wait for property to read as value, or for the words in says to appear under a node',
-        // Not required here: a wait for words has a node to default to and a wait for a property
-        // does not, and the declaration cannot say which, so the handler asks.
+        summary: 'wait for property to read as value, or for the words in says to appear under nodePath',
+        // A wait for words has a node to default to, and a wait for a property does not.
         requires: [],
+        requiresOneOf: [['nodePath', 'property', 'value'], ['says']],
       },
     },
   },
@@ -2962,8 +2986,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'debug_breakpoint',
     title: 'Breakpoints',
-    description:
-      "Sets, removes or lists breakpoints. A breakpoint set before editor_run is in place from the game's first frame.",
+    description: "A breakpoint set before editor_run is in place from the game's first frame.",
     answer: [
       "Every answer lists the whole set under held, and the ones set in the editor's gutter under setInEditor. A set on a line the engine never stops on is refused. The refusal names the next line it does stop on. A set on a script behind a link that leads out of the project is not read, so its line is not checked. lineNotChecked names the link.",
       "With the editor connected a set goes through the editor's debug adapter. With none it is held here. editor_run start starts the game itself unless silent: false lets a connected editor play it.",
@@ -2984,7 +3007,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       remove: { effect: 'destructive', summary: 'remove a breakpoint', requires: ['scriptPath', 'line'] },
       list: {
         effect: 'read',
-        summary: 'the breakpoints held here under held, and with the editor connected the ones in its gutter',
+        summary:
+          'the breakpoints this server keeps, under held, and with the editor connected the ones in its gutter',
         requires: [],
       },
     },
@@ -2994,7 +3018,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Step the debugger',
     changes: 'Acts on the running game. Writes no file.',
     description:
-      'Pauses, continues or steps the debugged game. A step waits for the game to stop again and answers with the stack, or with heldAgain false after ten seconds. pause and step_out need a game this server started. To stop an editor-played game, set a breakpoint.',
+      'A step waits for the game to stop again and answers with the stack, or with heldAgain false after ten seconds. pause and step_out need a game this server started. To stop an editor-played game, set a breakpoint.',
     answer: [
       "A game the editor plays is moved through the editor's debug adapter. It answers a pause by reporting the game stopped while leaving it running, and implements no stepOut. A game this server started itself has its keeper as its debugger, which does both.",
       'pause breaks into the game wherever it is, a script spinning in a loop included. That is how a game hung on its first frame is asked where it is. A pause answers paused false after thirty seconds, with the request still standing. A loop that runs few lines between sleeps can take seconds to stop.',
@@ -3028,9 +3052,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_state',
     title: 'Debugger state',
     description:
-      "Where the debugged game is stopped: the stack, the scope at a frame, an expression evaluated at a frame, or the debugger's console output. The errors and warnings a game reported are in editor_output. evaluate runs what the expression calls, so a call that changes something changes the game.",
+      'Where the debugged game is stopped. The errors and warnings a game reported are in editor_output. evaluate runs what the expression calls, so a call that changes something changes the game.',
     answer: [
-      "For a game this server started, its keeper's debugger answers. held says which thread stopped and why, and output is what the game printed. A typed array or dictionary is typed as declared, such as Array[String]. A list or a dictionary shows its first 20 entries and says how many more it holds. An evaluate such as items.slice(20, 40) reads the rest.",
+      "For a game this server started, this server's own debugger answers. held says which thread stopped and why, and output is what the game printed. A typed array or dictionary is typed as declared, such as Array[String]. A list or a dictionary shows its first 20 entries and says how many more it holds. An evaluate such as items.slice(20, 40) reads the rest.",
       "For a game the editor plays, the editor's debug adapter answers. After a reconnect a game still at its breakpoint shows a thread and no frames, and the refusal says held rather than running. debug_control continue lets it go, and the next stop carries its stack. With no runtime addon, the reason an evaluate failed reaches only the editor's Debugger panel. So a null there carries a note saying it may be either.",
       "stack names each frame's script as the project spells it under script and on this machine under path. A function that awaited is resumed with no caller below it, so its frame is the only one.",
       "variables lists members, the script's variables and not its constants, which an evaluate reads by name. An object is given as its class and instance id only, and evaluate reads into it. The compiler's own locals, named with @ such as a for loop's @counter_pos, are left out. A frame the stack no longer holds is refused. A scope whose values did not arrive in time answers variables null and is named under valuesMissing.",
@@ -3062,7 +3086,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       evaluate: {
         effect: 'destructive',
-        summary: 'what an expression comes to at a frame, worked out by the held game',
+        summary: 'what an expression evaluates to at a frame, run in the stopped game',
         requires: ['expression'],
       },
       output: { effect: 'read', summary: 'console output captured through the debug adapter', requires: [] },
@@ -3073,7 +3097,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_objects',
     title: 'Object snapshots',
     description:
-      "Counts the objects the running game holds by class, and compares two snapshots to show what an action kept alive. Each snapshot is kept under the id its answer names. Only for a game this server started. editor_run's silent argument says which runs those are. Needs an engine with debug features.",
+      'Counts the objects the running game holds by class, and compares two snapshots to show what an action kept alive. Each snapshot is kept under the id its answer names. Only for a game this server started, whose editor_run start answered through gdharness. Needs an engine with debug features.',
     answer:
       "A scripted object is counted under its script's class_name, or under the script's path when it declares none, with its engine class beside it. Objects of inner classes are counted under their native class, as the engine's profiler counts them, and note says how many. kind says whether a class is RefCounted, a Node or neither, and refCounted and nodes total them. The editor's ObjectDB Profiler takes every snapshot a game the editor plays sends, which is why it is only for a game this server started.",
     parameters: {
@@ -3117,11 +3141,15 @@ function describeOperations(spec: ToolSpec): string {
     return '';
   }
   const lines = Object.entries(spec.operations).map(([op, operation]) => {
-    const needs = operation.requires.length > 0 ? ` (needs ${operation.requires.join(', ')})` : '';
+    const needed = [
+      ...(operation.requires.length > 0 ? [operation.requires.join(', ')] : []),
+      ...(operation.requiresOneOf === undefined ? [] : [requiredSetsSaid(operation.requiresOneOf)]),
+    ];
+    const needs = needed.length > 0 ? ` (needs ${needed.join(', and ')})` : '';
     return operation.summary === '' ? `${op}${needs}` : `${op}${needs}: ${operation.summary}`;
   });
   const fallback = spec.defaultOperation ? ` Default ${spec.defaultOperation}.` : '';
-  return ` Operations: ${lines.join('; ')}.${fallback}`;
+  return `Operations: ${lines.join('; ')}.${fallback}`;
 }
 
 /** The longest description a client is sent. Claude Code cuts a tool's description beyond it. */
@@ -3129,7 +3157,7 @@ export const MOST_DESCRIPTION_CHARACTERS = 4096;
 
 /** A tool's description as a client is sent it: the prose and its ops. */
 function servedDescription(spec: ToolSpec): string {
-  return `${spec.description}${describeOperations(spec)}`;
+  return [spec.description, describeOperations(spec)].filter((part) => part !== '').join(' ');
 }
 
 /**
