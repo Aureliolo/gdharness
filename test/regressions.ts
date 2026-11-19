@@ -75151,29 +75151,20 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
     return line;
   };
   const aged = lineWaiter('aged.json', 'other', now, 121_000);
-  const nearlyHeld = lineWaiter('nearly.json', 'other', now, 599_999);
-  const held = lineWaiter('held.json', 'other', now, 600_000);
+  const anHour = lineWaiter('hour.json', 'other', now, 3_600_000);
   assert.deepEqual(
-    marksOf(store, [aged, nearlyHeld]),
+    marksOf(store, [aged, anHour]),
     [],
-    'no ordinary one-off younger than 600 s goes before a store-class waiter',
+    'no ordinary one-off of any age goes before a store-class waiter',
   );
   assert.deepEqual(
-    marksOf(store, [held, nearlyHeld]),
-    ['held.json'],
-    'and one that has waited 600 s stands with gate work again',
-  );
-  // A stream of store-class work, one arriving a second before each look, holds an ordinary one-off
-  // back until it has waited 600 s and not a look longer.
-  const heldFor = (waited: number): string[] =>
-    marksOf(begunBefore('other', waited), [
+    marksOf(begunBefore('other', 3_600_000), [
       lineWaiter('s.json', 'other', now, 1000, { store: true }),
-    ]);
-  for (const waited of [0, 121_000, 300_000, 599_999]) {
-    assert.deepEqual(heldFor(waited), ['s.json'], `held behind store work after ${waited} ms`);
-  }
-  assert.deepEqual(heldFor(600_000), [], 'and let go of it at 600 s');
-  assert.deepEqual(heldFor(3_600_000), [], 'and at an hour');
+      aged,
+    ]),
+    ['s.json'],
+    'and an ordinary one-off waiting an hour has a store-class waiter of a second ahead of it',
+  );
   const agedGame = lineWaiter('game.json', 'other', now, 130_000, { game: true });
   assert.deepEqual(
     marksOf(store, [agedGame]),
