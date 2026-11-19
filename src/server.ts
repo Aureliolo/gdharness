@@ -420,7 +420,7 @@ import {
   shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
-import { type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
+import { RelayedChild, type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
@@ -10349,9 +10349,13 @@ class GodotServer {
     });
     clearInterval(reporting);
     // A signal is not an exit: the engine still holds its log in the user data directory while it
-    // goes, and the removal below would find it there.
-    if ((timedOut || stopped.for !== null) && run.process.pid !== undefined) {
-      await untilGone([run.process.pid]);
+    // goes, and the removal below would find it there. The pid waited on is the engine's own. A start
+    // through the desktop helper has the helper's pid, and the helper serves every start and outlives
+    // this one.
+    const enginePid =
+      run.process instanceof RelayedChild && run.pid === run.process.pid ? undefined : (run.pid ?? undefined);
+    if ((timedOut || stopped.for !== null) && enginePid !== undefined) {
+      await untilGone([enginePid]);
     }
     await run.settled;
     await keeping;
