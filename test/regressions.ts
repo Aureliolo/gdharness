@@ -90443,6 +90443,75 @@ async function testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed(): Promise<vo
 }
 
 /**
+ * A copy holding text a sync wrote is stale however later syncs went, so it is rewritten.
+ *
+ * Two syncs running while an original changes twice can leave a record that names an older text
+ * than the copy holds, when the record is one file each sync rewrites whole. The next change then
+ * read the copy as a hand edit. The first half sets that state up with files, by putting a whole-file
+ * record of an older text beside the godot folder. The second half runs real syncs in a loop while
+ * the originals change often, and the last sync must still succeed.
+ */
+async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): Promise<void> {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-twice-'));
+  try {
+    const godot = scratchGodotForTheHelperCopies(scratch);
+    const reading = join(godot, 'operations', 'reading.gd');
+    const copy = join(godot, 'addons', 'gdharness_editor', 'reading.gd');
+    syncSharedGdscript(godot);
+    const older = readFileSync(copy, 'utf8');
+    writeFileSync(reading, `${older}# text A\n`);
+    syncSharedGdscript(godot);
+    assert.equal(readFileSync(copy, 'utf8'), `${older}# text A\n`);
+    const names = sharedCopies(godot).map((entry) => relative(godot, entry.copy));
+    const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
+    writeFileSync(
+      join(scratch, '.shared-gd-hashes.json'),
+      JSON.stringify(Object.fromEntries(names.map((name) => [name, sha(older)]))),
+    );
+    writeFileSync(reading, `${older}# text C\n`);
+    assert.ok(syncSharedGdscript(godot).includes(copy));
+    assert.equal(readFileSync(copy, 'utf8'), `${older}# text C\n`);
+
+    const script = pathToFileURL(resolve('scripts', 'sync-shared-gd.ts')).href;
+    const code = [
+      `import(process.env.SYNC_SCRIPT).then(({ syncSharedGdscript }) => {`,
+      `  const wait = Number(process.env.SYNC_START) - Date.now();`,
+      `  if (wait > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);`,
+      `  const until = Date.now() + 1200;`,
+      `  while (Date.now() < until) syncSharedGdscript(process.env.SYNC_GODOT);`,
+      `}).catch((error) => { console.error(String(error.message)); process.exit(1); });`,
+    ].join('\n');
+    const originals = [...new Set(sharedCopies(godot).map((entry) => entry.original))];
+    const stopped: string[] = [];
+    const rounds = 6;
+    for (let round = 0; round < rounds; round++) {
+      const start = Date.now() + 400;
+      const runs = [0, 1].map(async () => {
+        const child = spawnHidden(process.execPath, ['-e', code], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, SYNC_SCRIPT: script, SYNC_START: String(start), SYNC_GODOT: godot },
+        });
+        const said = pipedText(child.stderr);
+        const { code: status } = await exitOf(child);
+        return status === 0 ? '' : `exit ${String(status)}: ${await said}`;
+      });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+      for (let edit = 0; edit < 120; edit++) {
+        for (const original of originals) {
+          writeFileSync(original, `${readFileSync(original, 'utf8')}# round ${round} edit ${edit}\n`);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8);
+      }
+      stopped.push(...(await Promise.all(runs)).filter((line) => line !== ''));
+      syncSharedGdscript(godot);
+    }
+    assert.deepEqual(stopped, []);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * Whether a copy is stale or edited is a question about its text, never about file times.
  *
  * A copy that keeps its source's time (`cp -p`, `Copy-Item`, an unpacked backup) puts an original
@@ -90487,12 +90556,12 @@ function testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes(): void {
 
     // No record: a tree an older sync left, or a clone after a build elsewhere, has copies that differ
     // with nobody having edited them.
-    const record = join(scratch, '.shared-gd-hashes.json');
+    const record = join(scratch, '.shared-gd-written');
     assert.ok(existsSync(record), 'the sync should keep its record beside the godot folder');
-    rmSync(record);
+    rmSync(record, { recursive: true });
     assert.deepEqual(syncSharedGdscript(godot), []);
     assert.ok(existsSync(record), 'a sync with all copies equal should write the record again');
-    rmSync(record);
+    rmSync(record, { recursive: true });
     writeFileSync(reading, `${held(reading)}# changed with no record\n`);
     assert.deepEqual(syncSharedGdscript(godot).toSorted(), [editorReading, runtimeReading].toSorted());
     assert.equal(held(editorReading), held(reading));
@@ -117987,6 +118056,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryAddonScriptKeepsItsIdentity,
   testTheHelperCopiesAreWrittenFromTheirOriginals,
   testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed,
+  testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal,
   testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes,
   testNoHelperCopyIsTracked,
   testEveryHelperCopyInAnAddonIsListed,

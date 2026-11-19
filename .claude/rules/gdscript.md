@@ -26,7 +26,7 @@ shape.
 
 The modules listed in `scripts/sync-shared-gd.ts` are edited in `src/godot/operations/` only.
 The build and every suite write the copies inside the addons, and git ignores them. A copy changed by
-hand stops both, judged by its text against the hash the sync last wrote, never by file times. Nothing writes a copy's `.gd.uid`, which stays tracked.
+hand stops both, judged by its text against the hashes of every text the sync wrote, never by file times. Nothing writes a copy's `.gd.uid`, which stays tracked.
 
 Commit the `.gd.uid` Godot writes beside every new addon script. Add a new operations module to the
 list in `test/packaging-consistency.ts`. `test:packaging` checks both, on Linux and macOS only. From

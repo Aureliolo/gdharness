@@ -48,4 +48,4 @@ coverage/
 /src/godot/addons/gdharness_editor/setting_reads.gd
 /src/godot/addons/gdharness_editor/value_shapes.gd
 /src/godot/addons/gdharness_runtime/value_shapes.gd
-/src/.shared-gd-hashes.json
+/src/.shared-gd-written/
