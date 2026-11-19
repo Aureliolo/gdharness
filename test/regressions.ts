@@ -20847,8 +20847,11 @@ async function testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine(): Promise<voi
     const run = { process: begun.child, pid: begun.child.pid ?? null };
     assert.notEqual(run.pid, engine, 'the pid the run holds is not the engine');
     begun.stop();
+    const began = Date.now();
     await untilStoppedEngineGone(run);
+    const waited = Date.now() - began;
     assert.equal(alive(engine), false, 'the engine has gone when the wait returns');
+    assert.ok(waited < 5000, `the wait ends with the engine, not at the stop wait: ${String(waited)} ms`);
     rmSync(user, { recursive: true });
     assert.equal(existsSync(user), false, 'and its user data directory can be removed');
   } finally {
