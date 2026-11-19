@@ -21194,11 +21194,7 @@ async function testAStopFileWithALongPathStillStopsTheRun(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-stop-'));
   const engines: number[] = [];
   try {
-    let deep = root;
-    while (deep.length < 300) {
-      deep = join(deep, 'a-folder-name-that-makes-the-path-long');
-    }
-    mkdirSync(deep, { recursive: true });
+    const deep = aLongFolder(root);
     for (const adopted of [false, true]) {
       const name = adopted ? 'adopted' : 'live';
       const scratch = join(deep, name);
@@ -21245,6 +21241,97 @@ async function testAStopFileWithALongPathStillStopsTheRun(): Promise<void> {
     for (const engine of engines.filter((pid) => alive(pid))) {
       process.kill(engine);
     }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** A folder under [param root] whose path is longer than MAX_PATH, made. */
+function aLongFolder(root: string): string {
+  let deep = root;
+  while (deep.length < 300) {
+    deep = join(deep, 'a-folder-name-that-makes-the-path-long');
+  }
+  mkdirSync(deep, { recursive: true });
+  return deep;
+}
+
+/**
+ * The helper writes a start's lane file, and the reason a start failed, at paths longer than
+ * MAX_PATH.
+ */
+async function testTheHelperWritesItsLaneAndErrorFilesThroughLongPaths(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-files-'));
+  let engine: number | undefined;
+  try {
+    const deep = aLongFolder(root);
+    const lane = join(deep, 'lane.json');
+    const laned = join(deep, 'laned');
+    mkdirSync(laned);
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: laned, lane: { file: lane, number: 1 } },
+      process.execPath,
+      ['-e', 'setInterval(() => undefined, 1000)'],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    engine = await answeredWithin(() => start.pid(), 60_000);
+    assert.ok(
+      engine !== undefined,
+      `the helper names the engine: ${String(helperFailure(start.files.error))}`,
+    );
+    assert.deepEqual(JSON.parse(readFileSync(lane, 'utf8')), { lane: 1, pid: engine }, 'the lane file');
+    start.stop();
+    assert.ok(await endWithin(start.child, 5000), 'the run is stopped');
+
+    const failing = join(deep, 'failing');
+    mkdirSync(failing);
+    const failed = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: failing },
+      join(root, 'no-such-program.exe'),
+      [],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    failed.child.on('error', () => undefined);
+    assert.equal(await endWithin(failed.child, 30_000), '1/null', 'the start fails');
+    assert.match(
+      helperFailure(failed.files.error) ?? '',
+      /CreateProcessW/u,
+      'and says why in its error file',
+    );
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * An exit file the helper cannot write leaves the run its engine's own code, as the helper's exit
+ * says it.
+ */
+async function testAnExitFileThatCannotBeWrittenStillLeavesTheEnginesCode(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unwritable-exit-'));
+  try {
+    const scratch = join(root, 'scratch');
+    mkdirSync(scratch);
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch, exit: join(root, 'missing', 'exit') },
+      process.execPath,
+      ['-e', 'process.exit(3)'],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    assert.equal(await endWithin(start.child, 30_000), '3/null', 'the run ends with the engine code');
+  } finally {
     await retireHelper();
     sweep(root);
   }
@@ -119869,6 +119956,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoHelperCanTakeOverIsStillStopped,
   testAProcessThatOnlySharesTheEnginesPidIsNeverEnded,
   testAStopFileWithALongPathStillStopsTheRun,
+  testTheHelperWritesItsLaneAndErrorFilesThroughLongPaths,
+  testAnExitFileThatCannotBeWrittenStillLeavesTheEnginesCode,
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
