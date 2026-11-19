@@ -14383,10 +14383,9 @@ function listedText(tool: string, argument?: string): string {
   if (argument === undefined) {
     return listed.description ?? '';
   }
-  const properties = listed.inputSchema.properties as Record<string, { description?: string }>;
-  const schema = properties[argument];
+  const schema = get(listed.inputSchema, 'properties', argument);
   assert.ok(schema, `${tool} takes ${argument}`);
-  return schema.description ?? '';
+  return text(get(schema, 'description'));
 }
 
 /**
@@ -14411,10 +14410,8 @@ function testTheToolTextSaysWhatTheCodeDoes(): void {
   assert.doesNotMatch(listedText('scene_create'), /readBy/);
 
   // A TileSet source takes a texture, never a .tres resource.
-  const tileSet = toolSpec('resource_edit')?.parameters['sources'] as
-    | { items?: { properties?: { texture?: { description?: string } } } }
-    | undefined;
-  const texture = tileSet?.items?.properties?.texture?.description ?? '';
+  const tileSet = toolSpec('resource_edit')?.parameters['sources'];
+  const texture = text(get(tileSet, 'items', 'properties', 'texture', 'description'));
   assert.match(texture, /A texture file/, `the source's texture is a texture: ${texture}`);
   assert.doesNotMatch(texture, /\.tres/);
 
@@ -14433,13 +14430,13 @@ function testTheToolTextSaysWhatTheCodeDoes(): void {
   assert.match(listedText('debug_objects'), /editor_run start's silent says when/);
 
   // The tool names are an area and what it works on, scene_node and editor_status among them.
-  for (const [where, text] of [
+  for (const [where, page] of [
     ['the reference', renderToolsMarkdown()],
     ['the skill', skillFiles('0.0.0').get('SKILL.md') ?? ''],
   ] as const) {
-    assert.doesNotMatch(text, /domain_verb/, `${where} names no domain_verb`);
+    assert.doesNotMatch(page, /domain_verb/, `${where} names no domain_verb`);
     assert.match(
-      text,
+      page,
       /each named for its area\s+and\s+what it works on/,
       `${where} says how tools are named`,
     );
@@ -14452,8 +14449,8 @@ function testTheToolTextSaysWhatTheCodeDoes(): void {
  */
 function testTheFirstCallRulesAreInTheToolList(): void {
   const operations = (tool: string): string => {
-    const text = listedText(tool);
-    return text.slice(text.indexOf('Operations:'));
+    const described = listedText(tool);
+    return described.slice(described.indexOf('Operations:'));
   };
   assert.match(
     operations('scene_node'),
@@ -14473,17 +14470,15 @@ function testTheFirstCallRulesAreInTheToolList(): void {
     /requestId, which runtime_invoke op result collects/,
   );
   assert.match(listedText('scene_animation', 'track'), /add_track: the track to add/);
-  const track = toolSpec('scene_animation')?.parameters['track'] as
-    | { properties?: { type?: { description?: string } } }
-    | undefined;
-  assert.match(track?.properties?.type?.description ?? '', /add_track: property or method/);
+  const track = toolSpec('scene_animation')?.parameters['track'];
+  assert.match(text(get(track, 'properties', 'type', 'description')), /add_track: property or method/);
   assert.match(
     listedText('project_export', 'outputPath'),
     /add_preset, set_preset: the path the preset stores/,
   );
   for (const debug of ['debug_objects', 'debug_control']) {
-    const text = `${listedText(debug)} ${JSON.stringify(buildToolDefinitions().find((entry) => entry.name === debug))}`;
-    assert.match(text, /this server started/, `${debug} says which games it reaches`);
+    const listed = `${listedText(debug)} ${JSON.stringify(buildToolDefinitions().find((entry) => entry.name === debug))}`;
+    assert.match(listed, /this server started/, `${debug} says which games it reaches`);
   }
 }
 
