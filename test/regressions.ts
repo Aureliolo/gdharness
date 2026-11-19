@@ -842,7 +842,13 @@ import {
   theGamePicked,
   toolSpec,
 } from '../src/tool-definitions.js';
-import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import {
+  argumentShape,
+  headlessSection,
+  namedType,
+  renderToolsMarkdown,
+  toolSection,
+} from '../src/tool-reference.js';
 import { Turns } from '../src/turns.js';
 import {
   encodedUidCache,
@@ -15697,7 +15703,7 @@ function testTheToolTextSaysWhatTheCodeDoes(): void {
     assert.ok(toolSpec('editor_run')?.parameters[spawning], `and editor_run takes ${spawning}`);
   }
   assert.match(silent, /not an executable/, 'an exported build has no debugger to reach');
-  assert.match(listedText('debug_objects'), /editor_run start's silent says when/);
+  assert.match(listedText('debug_objects'), /editor_run's silent argument says which runs those are\./);
 
   // The tool names are an area and what it works on, scene_node and editor_status among them.
   for (const [where, page] of [
@@ -40088,14 +40094,17 @@ function assertTheGamePickIsCarriedUnaltered(): void {
     'the tool reference carries the generated pick unaltered',
   );
   assert.ok((skillFiles('0.0.0').get('SKILL.md') ?? '').includes(picked), 'and so does the skill');
-  // The schema is all an agent reads that loads only the tool list, so each running-game path
-  // says the pick in short. Every runtime_* call goes to a running game the server picks.
+  // An agent that loads only the tool list still reads the server instructions, so the pick in
+  // short is said there once rather than in each running-game path.
+  assert.ok(
+    serverInstructions().includes(THE_GAME_PICKED_IN_SHORT),
+    `the instructions state the pick: ${serverInstructions()}`,
+  );
   const picking = TOOL_SPECS.filter((spec) => spec.name.startsWith('runtime_')).map((spec) => spec.name);
   assert.equal(picking.length, 5, `the running-game tools are found: ${picking.join(', ')}`);
   for (const name of picking) {
     const schema = text(toolSpec(name)?.parameters['projectPath']?.['description']);
-    assert.ok(schema.includes(THE_GAME_PICKED_IN_SHORT), `${name} projectPath states the pick: ${schema}`);
-    assert.doesNotMatch(schema, /not needed/i, `and no pick of its own: ${schema}`);
+    assert.equal(schema, 'Which game, when several run: its project folder.', `${name} projectPath`);
   }
   for (const step of ['this server started or plays', 'the only game running']) {
     assert.ok(THE_GAME_PICKED_IN_SHORT.includes(step), `the short pick names ${step}`);
@@ -40175,21 +40184,29 @@ function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
   const classes = toolSpec('editor_classes');
   const exported = toolSpec('project_export');
   assert.ok(classes?.operations !== undefined && exported?.operations !== undefined);
-  assert.equal(section('editor_classes')[2], 'Changes nothing.');
+  assert.equal(section('editor_classes')[4], 'Changes nothing.');
   const destructive = Object.entries(exported.operations)
     .filter(([, op]) => op.effect === 'destructive')
     .map(([name]) => `\`${name}\``);
   assert.deepEqual(destructive, ['`run`', '`set_preset`', '`remove_preset`']);
   assert.equal(
-    section('project_export')[2],
-    'Can overwrite, remove or end what is there, through `run`, `set_preset` and `remove_preset`.',
+    section('project_export')[4],
+    'Can overwrite, remove or end what is there, through every op but `list` and `add_preset`.',
+    'the ops that spare what is there are named when they are the fewer',
   );
+  assert.equal(
+    section('scene_signal')[4],
+    'Can overwrite, remove or end what is there, through `disconnect`.',
+    'and the destructive ones when they are',
+  );
+  assert.equal(section('project_export')[6], 'Every op needs `projectPath`, and takes `preset`.');
   const query = classes.operations['query'];
   assert.equal(classes.defaultOperation, 'query');
   assert.ok(query !== undefined);
   assert.equal(
-    section('editor_classes').find((line) => line.startsWith('- `op: query`')),
-    `- \`op: query\` (default): ${query.summary}. Needs: \`projectPath\`. Takes: \`filter\`, \`category\`, \`instantiableOnly\`.`,
+    section('editor_classes').find((line) => line.startsWith('- `query`')),
+    `- \`query\` (default, takes \`filter\`, \`category\` and \`instantiableOnly\`): ${query.summary}.`,
+    'the op line has the tool list form, with projectPath said once for the tool',
   );
   assert.equal(
     exported.operations['remove_preset']?.summary,
@@ -40197,10 +40214,40 @@ function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
     'remove_preset says nothing its name does not',
   );
   assert.equal(
-    section('project_export').find((line) => line.startsWith('- `op: remove_preset`')),
-    '- `op: remove_preset`. Needs: `projectPath`, `preset`.',
-    'an op that is not the default has no mark and no Takes when it takes nothing more, and no gloss when it has none',
+    section('project_export').find((line) => line.startsWith('- `remove_preset`')),
+    '- `remove_preset` (needs `preset`).',
+    'an op that is not the default has no mark and takes nothing past what every op takes, and no gloss when it has none',
   );
+  assert.ok(
+    section('scene_node').every((line) => !line.startsWith('- `') || !line.includes('needs `scenePath`')),
+    'an argument every op needs is said once, not on each op line',
+  );
+  assert.ok(section('scene_node').includes('Every op needs `projectPath` and `scenePath`.'));
+
+  // The answer comes last, under a heading of its own, and the forms the reference used to print
+  // are gone.
+  const answerAt = section('scene_node').indexOf('### scene_node answer');
+  assert.ok(answerAt > section('scene_node').indexOf('Arguments:'), 'the answer follows the arguments');
+  const markdown = lines.join('\n');
+  for (const gone of ['The answer:', '`op: ', ' Needs: ', ' Takes: ', ') applies.']) {
+    assert.ok(!markdown.includes(gone), `the reference no longer prints ${gone}`);
+  }
+
+  // A tool with one op, which no tool has today: the op line carries only its gloss.
+  const single = toolSection({
+    name: 'only_tool',
+    title: 'One op',
+    description: 'One op.',
+    answer: '',
+    parameters: { projectPath: { type: 'string' }, size: { type: 'number' } },
+    requires: ['projectPath'],
+    operations: { only: { effect: 'read', summary: 'read it', requires: ['size'] } },
+  });
+  assert.ok(single.includes('Its op needs `projectPath` and `size`.'), single.join('\n'));
+  assert.ok(single.includes('- `only`: read it.'), single.join('\n'));
+  assert.ok(!single.some((line) => line.startsWith('### ')), 'an empty answer gets no heading');
+  // A tool whose ops share nothing past projectPath says nothing for the tool.
+  assert.ok(!section('editor_launch').some((line) => line.startsWith('Every op ')));
 }
 
 /**

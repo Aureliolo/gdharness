@@ -569,14 +569,19 @@ function renderTools(): string {
     parts.push(`<section class="tool" id="${escaped(tool.name)}">\n`);
     parts.push(`<h3><code>${escaped(tool.name)}</code></h3>\n`);
     parts.push(`<p>${escaped(tool.description)}</p>\n`);
+    // The answer is read after the call, so it comes after what the call takes.
+    parts.push(renderOperations(tool), renderArguments(tool));
+    const answer = tool.answer.split('\n\n').filter((paragraph) => paragraph !== '');
+    if (answer.length > 0) {
+      parts.push('<h4>Answer</h4>\n', ...answer.map((paragraph) => `<p>${escaped(paragraph)}</p>\n`));
+    }
     // This page states each shared paragraph in every tool that has it, so its detail goes there too.
     for (const { text, detail } of SHARED_PARAGRAPHS) {
       if (`${tool.description}${tool.answer}`.includes(text)) {
         parts.push(`<p>${escaped(detail)}</p>\n`);
       }
     }
-    parts.push(`<p><strong>The answer:</strong> ${escaped(tool.answer)}</p>\n`);
-    parts.push(renderOperations(tool), renderArguments(tool), '</section>\n');
+    parts.push('</section>\n');
   }
   return parts.join('');
 }
