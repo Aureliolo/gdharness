@@ -289,6 +289,11 @@ export class GodotDAPClient {
         });
 
         socket.on('error', (error: Error) => {
+          // A socket that errored is destroyed and its close comes later. A request made in
+          // between must dial anew instead of writing to it.
+          if (this.socket === socket) {
+            this.forgetConnection();
+          }
           connection.requests.drop(new Error(`DAP connection error: ${error.message}`));
         });
 

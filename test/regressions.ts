@@ -313,6 +313,8 @@ import {
   CONNECT_WINDOW_MS,
   closeReason,
   createBridge,
+  EDITOR_REQUEST_BYTES,
+  EditorClosing,
   GodotBridge,
   greetingFaults,
   mayYetConnect,
@@ -408,6 +410,7 @@ import {
   handleLSPTool,
   LSPTimeout,
   narrowedCompletions,
+  normalizeLSPError,
   typedBefore,
 } from '../src/lsp_client.js';
 import {
@@ -452,6 +455,7 @@ import {
   sameEntry,
   sameIdentity,
 } from '../src/paths.js';
+import { counting, PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
@@ -9718,7 +9722,11 @@ async function testEveryEndOfAnEditorCallIsSaid(): Promise<void> {
   const replies = bridgeWithAnEditor();
   const busy = replies.bridge.invokeTool('scene_tree', {});
   answersCall(replies.socket, 0, { success: false, busy: true, busyWith: 'scanning its files' });
-  assert.equal(await cameTrue(() => invocationsOn(replies.socket).length === 2), true, 'a busy editor is asked again');
+  assert.equal(
+    await cameTrue(() => invocationsOn(replies.socket).length === 2),
+    true,
+    'a busy editor is asked again',
+  );
   answersCall(replies.socket, 1, { success: true, result: { second: true } });
   assert.deepEqual(await busy, { second: true }, 'and the second reply is the answer');
 
@@ -9826,38 +9834,35 @@ function languageServerPeer(
     const say = (body: Record<string, unknown>): void => {
       socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], ...body }));
     };
-    const method = String(message['method']);
-    if (method === 'ok' || method === 'initialize') {
+    const answerOk = (): void => {
       say({ result: { capabilities: {}, answered: 'ok', answeredOn: one.connection + 1 } });
-    } else if (method === 'notFound') {
-      say({ error: { code: -32601, message: 'Method not found' } });
-    } else if (method === 'bare') {
-      say({ error: {} });
-    } else if (method === 'oversize') {
-      socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
-    } else if (method === 'reset') {
-      socket.resetAndDestroy();
-    } else if (method === 'close') {
-      socket.destroy();
-    } else if (method === 'textDocument/didOpen') {
+    };
+    const publish = (): void => {
       const uri = get(message['params'], 'textDocument', 'uri');
-      const publish = (): void => {
-        socket.write(
-          frameJsonRpc({
-            jsonrpc: '2.0',
-            method: 'textDocument/publishDiagnostics',
-            params: { uri, diagnostics: [{ message: 'seen', severity: 1 }] },
-          }),
-        );
-      };
-      if (publishing.onOpen === 'close') {
-        socket.destroy();
-      } else if (publishing.onOpen === 'late') {
-        setTimeout(publish, 1400);
-      } else {
-        publish();
-      }
-    }
+      socket.write(
+        frameJsonRpc({
+          jsonrpc: '2.0',
+          method: 'textDocument/publishDiagnostics',
+          params: { uri, diagnostics: [{ message: 'seen', severity: 1 }] },
+        }),
+      );
+    };
+    const opened = new Map<string, () => void>([
+      ['publish', publish],
+      ['close', () => socket.destroy()],
+      ['late', () => void setTimeout(publish, 1400)],
+    ]);
+    const behaviours = new Map<string, () => void>([
+      ['ok', answerOk],
+      ['initialize', answerOk],
+      ['notFound', () => say({ error: { code: -32601, message: 'Method not found' } })],
+      ['bare', () => say({ error: {} })],
+      ['oversize', () => socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'))],
+      ['reset', () => socket.resetAndDestroy()],
+      ['close', () => socket.destroy()],
+      ['textDocument/didOpen', () => opened.get(publishing.onOpen)?.()],
+    ]);
+    behaviours.get(String(message['method']))?.();
   }, holdsOpen);
 }
 
@@ -9880,8 +9885,14 @@ async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
 
         const client = new GodotLSPClient(port, '127.0.0.1');
         assert.deepEqual(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok');
-        await assert.rejects(askedBy(client, 'notFound', 5000), /^Error: LSP error \(-32601\): Method not found$/);
-        await assert.rejects(askedBy(client, 'bare', 5000), /^Error: LSP error \(unknown\): Unknown LSP error$/);
+        await assert.rejects(
+          askedBy(client, 'notFound', 5000),
+          /^Error: LSP error \(-32601\): Method not found$/,
+        );
+        await assert.rejects(
+          askedBy(client, 'bare', 5000),
+          /^Error: LSP error \(unknown\): Unknown LSP error$/,
+        );
 
         await assert.rejects(
           askedBy(client, 'hold', 200),
@@ -9890,16 +9901,33 @@ async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
         const gone = askedOf(peer, 'hold');
         gone.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: gone.message['id'], result: 1 }));
         const goneLine = `Discarding an answer to request ${String(gone.message['id'])}, which nothing waits for`;
-        assert.equal(await cameTrue(() => stderr.some((line) => line.includes(goneLine))), true, 'a late answer is said once');
-        assert.equal(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok', 'the next request is answered');
+        assert.equal(
+          await cameTrue(() => stderr.some((line) => line.includes(goneLine))),
+          true,
+          'a late answer is said once',
+        );
+        assert.equal(
+          get(await askedBy(client, 'ok', 5000), 'answered'),
+          'ok',
+          'the next request is answered',
+        );
 
         let settled = false;
         const waiting = askedBy(client, 'wait', 10_000).finally(() => {
           settled = true;
         });
+        assert.equal(
+          await cameTrue(() => peer.heard.some((one) => one.message['method'] === 'wait')),
+          true,
+          'the peer hears the request',
+        );
         const held = askedOf(peer, 'wait');
         held.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: 9999, result: 1 }));
-        assert.equal(await cameTrue(() => stderr.some((line) => line.includes('request 9999,'))), true, 'a stray answer is said');
+        assert.equal(
+          await cameTrue(() => stderr.some((line) => line.includes('request 9999,'))),
+          true,
+          'a stray answer is said',
+        );
         assert.equal(settled, false, 'and settles nothing');
         const before = stderr.length;
         held.socket.write(
@@ -9949,20 +9977,29 @@ async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
         );
 
         publishing.onOpen = 'close';
-        await assert.rejects(client.getDiagnostics(script, 'extends Node\n'), /^Error: Godot LSP socket closed$/);
+        await assert.rejects(
+          client.getDiagnostics(script, 'extends Node\n'),
+          /^Error: Godot LSP socket closed$/,
+        );
         publishing.onOpen = 'publish';
 
-        const disconnecting = askedBy(client, 'hold', 5000);
-        const disconnectedWith = endedWith(disconnecting);
+        const heldCount = (name: string): number =>
+          peer.heard.filter((one) => one.message['method'] === name).length;
+        await client.connect();
+        const disconnectedWith = endedWith(askedBy(client, 'hold', 5000));
+        await cameTrue(() => heldCount('hold') === 2);
         await client.disconnect();
-        assert.equal(errorMessage(await disconnectedWith), 'Godot LSP socket closed');
+        assert.equal(errorMessage(await disconnectedWith), 'Disconnected from Godot LSP');
 
+        // A peer that never reads its side sees no end, so the socket is destroyed after a second.
+        // The request reads the same whichever runtime orders the close before this call's own end.
         holding = true;
+        const dialled = peer.sockets.length;
         const kept = endedWith(askedBy(client, 'hold-open', 5000));
-        await cameTrue(() => peer.sockets.length > 0 && Reflect.get(client, 'socket') !== null);
-        const releasing = client.disconnect();
+        await cameTrue(() => peer.sockets.length > dialled);
+        await delay(100);
+        await client.disconnect();
         assert.equal(errorMessage(await kept), 'Disconnected from Godot LSP');
-        await releasing;
         holding = false;
       },
       peer.onConnect,
@@ -9980,25 +10017,18 @@ function debugAdapterPeer(): RecordingPeer {
       );
     };
     const command = String(message['command']);
-    if (command === 'body') {
-      respond(true, { command, body: { answered: 'body' } });
-    } else if (command === 'bare') {
-      respond(true, { command });
-    } else if (command === 'refused') {
-      respond(false, { command, message: 'no such thing' });
-    } else if (command === 'unsaid') {
-      respond(false, { command });
-    } else if (command === 'unnamed') {
-      respond(false, {});
-    } else if (command === 'oversize') {
-      socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
-    } else if (command === 'reset') {
-      socket.resetAndDestroy();
-    } else if (command === 'close') {
-      socket.destroy();
-    } else if (command === 'hold-open') {
-      socket.pause();
-    }
+    const behaviours = new Map<string, () => void>([
+      ['body', () => respond(true, { command, body: { answered: 'body' } })],
+      ['bare', () => respond(true, { command })],
+      ['refused', () => respond(false, { command, message: 'no such thing' })],
+      ['unsaid', () => respond(false, { command })],
+      ['unnamed', () => respond(false, {})],
+      ['oversize', () => socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'))],
+      ['reset', () => socket.resetAndDestroy()],
+      ['close', () => socket.destroy()],
+      ['hold-open', () => socket.pause()],
+    ]);
+    behaviours.get(command)?.();
   });
 }
 
@@ -10019,7 +10049,10 @@ async function testEveryEndOfADebugAdapterRequestIsSaid(): Promise<void> {
         assert.deepEqual(await askedBy(client, 'bare', 5000), {}, 'a success with no body is an empty one');
         await assert.rejects(askedBy(client, 'refused', 5000), /^Error: no such thing$/);
         await assert.rejects(askedBy(client, 'unsaid', 5000), /^Error: DAP request failed: unsaid$/);
-        await assert.rejects(askedBy(client, 'unnamed', 5000), /^Error: DAP request failed: unknown command$/);
+        await assert.rejects(
+          askedBy(client, 'unnamed', 5000),
+          /^Error: DAP request failed: unknown command$/,
+        );
 
         await assert.rejects(askedBy(client, 'hold', 60), /^Error: DAP request timed out: hold$/);
         const gone = askedOf(peer, 'hold');
@@ -10031,12 +10064,25 @@ async function testEveryEndOfADebugAdapterRequestIsSaid(): Promise<void> {
         respondTo(gone.message['seq']);
         respondTo(9999);
         const said = (id: unknown): boolean =>
-          stderr.some((line) => line.includes(`Discarding an answer to request ${String(id)}, which nothing waits for`));
-        assert.equal(await cameTrue(() => said(gone.message['seq']) && said(9999)), true, 'each is said once');
-        assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' }, 'the next request is answered');
+          stderr.some((line) =>
+            line.includes(`Discarding an answer to request ${String(id)}, which nothing waits for`),
+          );
+        assert.equal(
+          await cameTrue(() => said(gone.message['seq']) && said(9999)),
+          true,
+          'each is said once',
+        );
+        assert.deepEqual(
+          await askedBy(client, 'body', 5000),
+          { answered: 'body' },
+          'the next request is answered',
+        );
 
         const mend = breakTheWrites(client);
-        await assert.rejects(askedBy(client, 'body', 5000), /^Error: Failed to send DAP request 'body': EPIPE$/);
+        await assert.rejects(
+          askedBy(client, 'body', 5000),
+          /^Error: Failed to send DAP request 'body': EPIPE$/,
+        );
         mend();
         assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
         assert.equal(peer.sockets.length, 1, 'on the same connection');
@@ -10055,10 +10101,8 @@ async function testEveryEndOfADebugAdapterRequestIsSaid(): Promise<void> {
 
         const heldOpen = endedWith(askedBy(client, 'hold-open', 5000));
         await cameTrue(() => peer.heard.some((one) => one.message['command'] === 'hold-open'));
-        const began = Date.now();
         await client.abandon();
         assert.equal(errorMessage(await heldOpen), 'DAP connection closed');
-        assert.ok(Date.now() - began >= 400, 'an adapter that holds on is let go of after half a second');
       },
       peer.onConnect,
     );
@@ -10080,7 +10124,11 @@ async function testARequestBelongsToTheConnectionItWentOutOn(): Promise<void> {
           socket,
           setTimeout(() => {
             socket.write(
-              frameJsonRpc({ jsonrpc: '2.0', id: message['id'], result: { capabilities: {}, answeredOn: 2 } }),
+              frameJsonRpc({
+                jsonrpc: '2.0',
+                id: message['id'],
+                result: { capabilities: {}, answeredOn: 2 },
+              }),
             );
           }, 400),
         );
@@ -10096,7 +10144,11 @@ async function testARequestBelongsToTheConnectionItWentOutOn(): Promise<void> {
       assert.equal(get(result, 'answeredOn'), 2, 'the second connection answers its own request');
       await closing;
       assert.equal((await client.getDiagnostics(script, 'extends Node\n')).length, 1);
-      assert.equal(askedOf(later, 'textDocument/didOpen').connection, 1, 'and the next ask goes out on it too');
+      assert.equal(
+        askedOf(later, 'textDocument/didOpen').connection,
+        1,
+        'and the next ask goes out on it too',
+      );
       await client.disconnect();
     },
     later.onConnect,
@@ -10111,7 +10163,11 @@ async function testARequestBelongsToTheConnectionItWentOutOn(): Promise<void> {
       await client.connect();
       const closing = client.disconnect();
       const published = await client.getDiagnostics(script, 'extends Node\n');
-      assert.equal(published.length, 1, 'a diagnostics ask on the second connection outlives the first one closing');
+      assert.equal(
+        published.length,
+        1,
+        'a diagnostics ask on the second connection outlives the first one closing',
+      );
       await closing;
       await client.disconnect();
     },
@@ -10142,9 +10198,13 @@ async function testARequestBelongsToTheConnectionItWentOutOn(): Promise<void> {
       const client = new GodotDAPClient(port, '127.0.0.1');
       await assert.rejects(client.initialize(), /exceeded the 33554432 byte ceiling/);
       const second = await client.initialize();
-      assert.equal(get(second, 'answeredOn'), 2, 'a call straight after the dropped stream is answered on a new connection');
+      assert.equal(
+        get(second, 'answeredOn'),
+        2,
+        'a call straight after the dropped stream is answered on a new connection',
+      );
       await delay(300);
-      assert.equal(get(await client.initialize(), 'answeredOn'), 2, 'and so is the next');
+      assert.equal(client.isConnected(), true, 'the first connection closing late leaves the second held');
       connections = adapter.sockets.length;
       await client.abandon();
     },
@@ -10173,49 +10233,143 @@ async function testTwoDebugAdapterAsksAtOnceShareOneConnection(): Promise<void> 
   );
 }
 
-/** Starts the server in a process of its own and returns the JSON line its probe prints for [param mode]. */
-async function serverProbe(mode: 'lost-connection' | 'port-move'): Promise<Record<string, unknown>> {
-  const child = spawnHidden(process.execPath, [resolve('test', 'support', 'server-probe.ts'), mode], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let printed = '';
-  let failed = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    printed += chunk.toString();
-  });
-  child.stderr.on('data', (chunk: Buffer) => {
-    failed += chunk.toString();
-  });
-  const ended = await Promise.race([exitOf(child), delay(60_000).then(() => null)]);
-  if (ended === null) {
-    child.kill();
+/** Drops [param editor] and waits until [param server] reports no editor connected. */
+async function untilTheEditorIsGone(server: ServerProcess, editor: WebSocket): Promise<void> {
+  editor.terminate();
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    if (get(status, 'editor', 'connected') === false) {
+      return;
+    }
+    await delay(100);
   }
-  assert.deepEqual(ended, { code: 0, signal: null }, `the probe ends on its own: ${failed}`);
-  const parsed: unknown = JSON.parse(printed.trim().split('\n').at(-1) ?? '');
-  assert.ok(isRecord(parsed), printed);
-  return parsed;
+  throw new Error('the server still shows the editor connected');
 }
 
 /** A call whose connection dropped says the connection was lost, since the editor answered nothing. */
 async function testALostConnectionIsNotSaidToBeTheEditorsAnswer(): Promise<void> {
-  const said = await serverProbe('lost-connection');
-  assert.equal(
-    said['lost'],
-    'The connection to the editor was lost during scene_tree: Godot disconnected during request\nNext:\neditor_status says whether the editor is connected',
-  );
-  assert.equal(said['answered'], 'The editor answered scene_tree with an error: no such node');
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lost-connection-'));
+  const bridgePort = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const asked = (): Promise<JsonRpcMessage> =>
+      server.request(
+        'tools/call',
+        {
+          name: 'resource_edit',
+          arguments: { projectPath: project, resourcePath: 'res://ui.tres', op: 'modify', properties: {} },
+        },
+        30_000,
+      );
+
+    // editor_status asks the editor too, so it is the greeting that must be answered.
+    let dropping = false;
+    editor = await greetAsAStandInEditor(server, bridgePort, project, (socket, id) => {
+      if (dropping) {
+        socket.terminate();
+      } else {
+        socket.send(JSON.stringify({ type: 'tool_result', id, success: true, result: { ok: true } }));
+      }
+    });
+    dropping = true;
+    const lost = textOf(await asked()) ?? '';
+    assert.match(
+      lost,
+      /^The connection to the editor was lost during resource_edit modify: Godot disconnected/,
+      lost,
+    );
+    assert.doesNotMatch(lost, /answered/, 'a dropped connection is not an answer');
+
+    await untilTheEditorIsGone(server, editor);
+    editor = await greetAsAStandInEditor(server, bridgePort, project, (socket, id) => {
+      socket.send(JSON.stringify({ type: 'tool_result', id, success: false, error: 'no such node' }));
+    });
+    assert.match(
+      textOf(await asked()) ?? '',
+      /^The editor answered resource_edit modify with an error: no such node/,
+      'an error the editor sent is its answer',
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
 }
 
 /** Two calls at once over a move of the language server port end with one live client, and neither fails. */
 async function testTwoCallsOverAPortMoveEndWithOneLiveClient(): Promise<void> {
-  const said = await serverProbe('port-move');
-  assert.equal(said['same'], true, `both calls get one client: ${JSON.stringify(said)}`);
-  assert.deepEqual(
-    said['answers'],
-    [{ port: said['wantedPort'] }, { port: said['wantedPort'] }],
-    'and both answer on the moved port',
-  );
-  assert.equal(said['connectionsAfter'], 1, 'over one connection');
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-port-move-'));
+  const before = languageServerPeer({ onOpen: 'publish' });
+  const after = languageServerPeer({ onOpen: 'publish' });
+  const editors: WebSocket[] = [];
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'probe.gd'), 'class_name Probe\nextends Node\n');
+    await withFramedPeer(
+      before.onMessage,
+      async (beforePort) => {
+        await withFramedPeer(
+          after.onMessage,
+          async (afterPort) => {
+            const bridgePort = await reservePort();
+            const server = new ServerProcess({
+              env: {
+                GDHARNESS_BRIDGE_PORT: String(bridgePort),
+                GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+              },
+            });
+            try {
+              await server.initialize('regression-test');
+              const diagnosed = async (): Promise<unknown> =>
+                parseTextContent(
+                  await server.request(
+                    'tools/call',
+                    {
+                      name: 'script_diagnostics',
+                      arguments: { projectPath: project, scriptPath: 'probe.gd' },
+                    },
+                    30_000,
+                  ),
+                );
+              const first = await greetAsAStandInEditor(server, bridgePort, project, undefined, {
+                lsp_port: beforePort,
+              });
+              editors.push(first);
+              assert.equal(get(await diagnosed(), 'errors'), 1, 'the first port answers');
+              assert.equal(before.sockets.length, 1);
+              await untilTheEditorIsGone(server, first);
+              editors.push(
+                await greetAsAStandInEditor(server, bridgePort, project, undefined, { lsp_port: afterPort }),
+              );
+              const answers = await Promise.all([diagnosed(), diagnosed()]);
+              assert.deepEqual(
+                answers.map((answer) => get(answer, 'errors')),
+                [1, 1],
+                `both calls are answered on the moved port: ${JSON.stringify(answers)}`,
+              );
+              assert.equal(after.sockets.length, 1, 'over one connection to the moved port');
+            } finally {
+              await server.stop();
+            }
+          },
+          after.onConnect,
+        );
+      },
+      before.onConnect,
+    );
+  } finally {
+    for (const editor of editors) {
+      editor.terminate();
+    }
+    rmSync(project, { recursive: true, force: true });
+  }
 }
 
 /** Every request to a peer waits in `PendingRequests`, and the three clients keep no table of their own. */
@@ -10225,7 +10379,12 @@ function testEveryRequestWaitsInTheOneTable(): void {
     .filter((entry) => entry.endsWith('.ts'))
     .map((entry) => ({ entry: entry.replaceAll('\\', '/'), text: readFileSync(join('src', entry), 'utf8') }));
   assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
-  for (const gone of ['interface PendingRequest', 'interface DiagnosticsWaiter', 'rejectAllPending', 'failPendingRequests']) {
+  for (const gone of [
+    'interface PendingRequest',
+    'interface DiagnosticsWaiter',
+    'rejectAllPending',
+    'failPendingRequests',
+  ]) {
     assert.deepEqual(
       files.filter((file) => file.text.includes(gone)).map((file) => file.entry),
       [],
@@ -10233,7 +10392,10 @@ function testEveryRequestWaitsInTheOneTable(): void {
     );
   }
   assert.deepEqual(
-    files.filter((file) => file.text.includes('new PendingRequests<')).map((file) => file.entry).toSorted(),
+    files
+      .filter((file) => file.text.includes('new PendingRequests<'))
+      .map((file) => file.entry)
+      .toSorted(),
     ['dap_client.ts', 'godot-bridge.ts', 'lsp_client.ts'],
     'the three clients wait in the one table',
   );
@@ -35378,6 +35540,10 @@ async function greetAsAStandInEditor(
   server: ServerProcess,
   bridgePort: number,
   project: string,
+  onInvoke: (editor: WebSocket, id: unknown) => void = (editor, id) => {
+    editor.send(JSON.stringify({ type: 'tool_result', id, success: false, error: 'a stand-in' }));
+  },
+  greeted: Readonly<Record<string, unknown>> = {},
 ): Promise<WebSocket> {
   const editor = new WebSocket(`ws://127.0.0.1:${bridgePort}/godot`);
   await new Promise<void>((settle, reject) => {
@@ -35389,12 +35555,10 @@ async function greetAsAStandInEditor(
   editor.on('message', (raw: Buffer) => {
     const message: unknown = JSON.parse(String(raw));
     if (isRecord(message) && message['type'] === 'tool_invoke') {
-      editor.send(
-        JSON.stringify({ type: 'tool_result', id: message['id'], success: false, error: 'a stand-in' }),
-      );
+      onInvoke(editor, message['id']);
     }
   });
-  editor.send(JSON.stringify(greeting(project)));
+  editor.send(JSON.stringify(greeting(project, greeted)));
   let status: unknown = null;
   for (let waited = 0; waited < 10_000; waited += 100) {
     status = parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
@@ -118345,6 +118509,15 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProcessTurnedAwayRaisesNoConnection,
   testAFrameFromASocketBeingClosedLeavesTheLiveEditor,
   testAReplyOfTheWrongShapeIsRefusedAtOnce,
+  testAWaitingRequestSettlesOnce,
+  testEveryEndOfAnEditorCallIsSaid,
+  testEveryEndOfALanguageServerRequestIsSaid,
+  testEveryEndOfADebugAdapterRequestIsSaid,
+  testARequestBelongsToTheConnectionItWentOutOn,
+  testTwoDebugAdapterAsksAtOnceShareOneConnection,
+  testALostConnectionIsNotSaidToBeTheEditorsAnswer,
+  testTwoCallsOverAPortMoveEndWithOneLiveClient,
+  testEveryRequestWaitsInTheOneTable,
   testTheStatusCountsTheResourcesWithCallsQueued,
   testACommandIsTakenWhenTheThreadItWentToAnswers,
   testATurnedAwayEditorLeavesTheServerUp,

@@ -310,6 +310,12 @@ export class GodotLSPClient {
     this.initialized = false;
     this.forgetOpenDocuments();
 
+    // Said before the close, which the runtimes order differently against the socket's own close
+    // handler, so a request ended by this call always reads the same.
+    const disconnected = new Error('Disconnected from Godot LSP');
+    requests.drop(disconnected);
+    diagnostics.drop(disconnected);
+
     await new Promise<void>((resolveClose) => {
       // A socket that closes cleanly leaves no timer, since a pending one keeps the process alive.
       const forceClose = setTimeout(() => {
@@ -324,10 +330,6 @@ export class GodotLSPClient {
       });
       socketToClose.end();
     });
-
-    const disconnected = new Error('Disconnected from Godot LSP');
-    requests.drop(disconnected);
-    diagnostics.drop(disconnected);
   }
 
   private async ensureConnected(): Promise<void> {

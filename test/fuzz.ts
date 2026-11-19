@@ -4137,7 +4137,11 @@ function framedOutcome(kind: FramedKind, error: unknown): string {
   if (error instanceof LSPTimeout || said.startsWith('DAP request timed out')) {
     return 'timeout';
   }
-  if (said === `Godot ${name} socket closed` || said === 'DAP connection closed') {
+  if (
+    said === `Godot ${name} socket closed` ||
+    said === 'DAP connection closed' ||
+    said === 'Disconnected from Godot LSP'
+  ) {
     return 'closed';
   }
   if (said.startsWith(`Godot ${name} connection error: `) || said.startsWith('DAP connection error: ')) {

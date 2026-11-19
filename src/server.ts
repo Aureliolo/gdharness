@@ -5627,7 +5627,7 @@ const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>(
   completion: ['lsp_get_completions', 'Completion'],
 });
 
-export class GodotServer {
+class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = shippedOperationsScript();

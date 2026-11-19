@@ -4,8 +4,8 @@
   // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
   // keep-cache.ts, keep-rounds.ts, kept-launcher.ts, nested-job.ts, run-engine-once.ts,
-  // server-probe.ts, slot-grant.ts and slot-holder.ts are started as processes by the fuzz
-  // properties and regressions, so nothing imports them.
+  // slot-grant.ts and slot-holder.ts are started as processes by the fuzz properties and
+  // regressions, so nothing imports them.
   "entry": [
     "src/cli.ts",
     "scripts/*.ts",
@@ -15,7 +15,6 @@
     "test/support/kept-launcher.ts",
     "test/support/nested-job.ts",
     "test/support/run-engine-once.ts",
-    "test/support/server-probe.ts",
     "test/support/slot-grant.ts",
     "test/support/slot-holder.ts"
   ],
