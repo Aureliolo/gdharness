@@ -54283,9 +54283,25 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
     assert.ok(counted('nodes') >= 3 && counted('refCounted') > 0, fresh.said);
     assert.ok(counted('objects') > counted('nodes') + counted('refCounted'), fresh.said);
 
-    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_items', args: [100] });
+    // A game that exits and one whose debugger frame is too large both read as a closed debugger
+    // connection, and only how the run ended tells them apart.
+    const told = async (said: string): Promise<string> => {
+      const output = await call('editor_output', {});
+      return `${said}\nThe run's output: ${output.said.slice(-3000)}\nServer stderr tail:\n${server.stderr.slice(-2000)}`;
+    };
+    const keptItems = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'keep_items',
+      args: [100],
+    });
+    if (keptItems.answer === null) {
+      assert.fail(await told(keptItems.said));
+    }
     const kept = await call('debug_objects', { op: 'diff', before: 's1' });
-    assert.equal(get(kept.answer, 'after'), 's2', kept.said);
+    if (get(kept.answer, 'after') !== 's2') {
+      assert.fail(await told(kept.said));
+    }
     const changed = asArray(get(kept.answer, 'changed'));
     assert.deepEqual(
       changed.find((one) => get(one, 'class') === 'Item'),
