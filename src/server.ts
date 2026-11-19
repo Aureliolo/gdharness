@@ -193,6 +193,7 @@ import {
   anEditorIsStillComing,
   BridgeTimeout,
   EditorClosing,
+  EditorDisconnected,
   type GodotBridge,
   getDefaultBridge,
   theEditorHasComeBack,
@@ -5626,7 +5627,7 @@ const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>(
   completion: ['lsp_get_completions', 'Completion'],
 });
 
-class GodotServer {
+export class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = shippedOperationsScript();
@@ -12066,9 +12067,12 @@ class GodotServer {
   /** The client for the language server of the editor this server follows, on the port it serves. */
   private async lsp(): Promise<GodotLSPClient> {
     const port = this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT);
-    if (this.lspClient !== null && this.lspClient.port !== port) {
-      await this.lspClient.disconnect();
+    const moved = this.lspClient;
+    if (moved !== null && moved.port !== port) {
+      // Let go before the wait, so a call arriving during it builds on the client already made
+      // for the new port instead of finding the old one and tearing the new one down.
       this.lspClient = null;
+      await moved.disconnect();
     }
     this.lspClient ??= new GodotLSPClient(port, undefined, undefined, () => {
       const status = this.godotBridge.getStatus();
@@ -21123,6 +21127,12 @@ class GodotServer {
       return this.createErrorResponse(error.message, ['editor_status says which addon the editor holds']);
     }
     const message = errorMessage(error);
+    if (error instanceof EditorDisconnected) {
+      return this.createErrorResponse(
+        `The connection to the editor was lost during ${callName}: ${message}`,
+        ['editor_status says whether the editor is connected'],
+      );
+    }
     // The bridge sends nothing to another release's addon, and this server's has every command, so
     // one lacking a command did not load all of itself: a script of it that fails to compile in this
     // engine leaves the commands it holds unregistered.

@@ -9571,6 +9571,674 @@ async function testAReplyOfTheWrongShapeIsRefusedAtOnce(): Promise<void> {
   assert.deepEqual(bridge.getStatus().pendingRequests, 0, 'and nothing is left waiting');
 }
 
+/** The tool calls a fake editor has been sent, in order. */
+function invocationsOn(socket: FakeSocket): { id: string; tool: string }[] {
+  return socket.sent
+    .map((payload) => JSON.parse(String(payload)) as unknown)
+    .filter((payload) => get(payload, 'type') === 'tool_invoke')
+    .map((payload) => ({ id: asString(get(payload, 'id')), tool: asString(get(payload, 'tool')) }));
+}
+
+/** The fake editor answers the [param nth] call it was sent. */
+function answersCall(socket: FakeSocket, nth: number, fields: Record<string, unknown>): void {
+  const id = invocationsOn(socket)[nth]?.id;
+  assert.ok(id !== undefined, `the editor was sent call ${String(nth)}`);
+  socket.emit('message', Buffer.from(JSON.stringify({ type: 'tool_result', id, ...fields })));
+}
+
+/** What a call that must fail failed with. */
+async function endedWith(asked: Promise<unknown>): Promise<unknown> {
+  try {
+    await asked;
+  } catch (error) {
+    return error;
+  }
+  return assert.fail('the call was answered');
+}
+
+/** A bridge with a greeted fake editor on it. */
+function bridgeWithAnEditor(): { bridge: GodotBridge; socket: FakeSocket } {
+  const bridge = createBridge(0, 20_000, '127.0.0.1');
+  const socket = new FakeSocket('editor');
+  connectFake(bridge, socket);
+  saysHello(socket, process.cwd());
+  return { bridge, socket };
+}
+
+/**
+ * A request waiting on a peer settles once, on its answer, a failure, its deadline or a drop, and a
+ * reply for one that is not waiting changes nothing. The bridge and both framed clients wait here.
+ */
+async function testAWaitingRequestSettlesOnce(): Promise<void> {
+  const table = new PendingRequests<number, string, string>();
+  let lateCalls = 0;
+  const late = (): Error => {
+    lateCalls += 1;
+    return new Error('late');
+  };
+
+  const first = table.wait(1, 10_000, late);
+  assert.equal(table.answer(1, 'a'), true);
+  assert.equal(await first, 'a');
+  assert.deepEqual(table.waiting(), [], 'an answered wait is gone');
+  assert.equal(lateCalls, 0, 'and its deadline is not left running');
+  assert.equal(table.answer(1, 'b'), false, 'a second answer finds nothing waiting');
+  assert.equal(table.fail(1, new Error('after')), false, 'and so does a failure');
+  assert.equal(await first, 'a', 'the first answer is kept');
+
+  const refused = new Error('no');
+  const second = table.wait(2, 10_000, late);
+  assert.equal(table.fail(2, refused), true);
+  await assert.rejects(second, (error: unknown) => error === refused);
+  assert.deepEqual(table.waiting(), []);
+
+  const began = Date.now();
+  const third = table.wait(3, 40, () => new Error('late 3'));
+  await assert.rejects(third, /late 3/);
+  assert.ok(Date.now() - began >= 30, 'the deadline error is made when the deadline comes');
+  assert.deepEqual(table.waiting(), []);
+  assert.equal(table.answer(3, 'x'), false, 'an answer after the deadline finds nothing waiting');
+
+  const dropped = new Error('dropped');
+  const ended: string[] = [];
+  const outcomes = ['d', 'e', 'f'].map((tag, at) =>
+    table.wait(4 + at, 10_000, late, tag).catch((error: unknown) => {
+      assert.equal(error, dropped, 'every wait is dropped with the one error');
+      ended.push(tag);
+    }),
+  );
+  assert.deepEqual(table.waiting(), ['d', 'e', 'f'], 'the tags, oldest first');
+  table.drop(dropped);
+  await Promise.all(outcomes);
+  assert.deepEqual(ended, ['d', 'e', 'f'], 'rejected oldest first');
+  assert.deepEqual(table.waiting(), []);
+  const seventh = table.wait(7, 10_000, late);
+  assert.equal(table.answer(7, 'again'), true, 'a table is usable after a drop');
+  assert.equal(await seventh, 'again');
+
+  const eighth = table.wait(8, 10_000, late);
+  assert.throws(() => table.wait(8, 10_000, late), /already waiting/);
+  assert.deepEqual(table.waiting().length, 1, 'the first wait stays waiting');
+  assert.equal(table.answer(8, 'kept'), true);
+  assert.equal(await eighth, 'kept');
+  assert.equal(lateCalls, 0, 'no deadline came but the one that was waited for');
+
+  const count = counting();
+  assert.deepEqual([count(), count(), count()], [1, 2, 3]);
+  assert.equal(counting()(), 1, 'a count starts again with each');
+  assert.equal(counting(5)(), 5);
+}
+
+/**
+ * Every way a call to the editor ends says what happened: a call that could not be sent, one the
+ * socket's error ended, one the socket's close ended, a stop, and each reply the editor gives.
+ */
+async function testEveryEndOfAnEditorCallIsSaid(): Promise<void> {
+  const oversized = bridgeWithAnEditor();
+  const tooBig = await endedWith(
+    oversized.bridge.invokeTool('scene_tree', { text: 'x'.repeat(EDITOR_REQUEST_BYTES) }),
+  );
+  assert.match(errorMessage(tooBig), /^The request is \d+ bytes, .* so it was not sent\.$/);
+  assert.deepEqual(invocationsOn(oversized.socket), [], 'nothing was sent');
+  assert.equal(oversized.bridge.getStatus().pendingRequests, 0, 'and no wait is left behind');
+
+  const faulted = bridgeWithAnEditor();
+  const hit = endedWith(faulted.bridge.invokeTool('scene_tree', {}));
+  faulted.socket.readyState = 2;
+  faulted.socket.emit('error', new Error('read ECONNRESET'));
+  assert.equal(errorMessage(await hit), 'Godot disconnected during request: read ECONNRESET');
+  assert.equal(faulted.bridge.isConnected(), false);
+  assert.equal(faulted.bridge.getStatus().pendingRequests, 0);
+
+  const closed = bridgeWithAnEditor();
+  const counted = endedWith(closed.bridge.invokeTool('scene_tree', {}));
+  const uncounted = endedWith(closed.bridge.invokeTool('scene_info', {}, { counted: false }));
+  const inFlight = closed.bridge.requestsInFlight();
+  assert.deepEqual(
+    inFlight.map((call) => call.tool),
+    ['scene_tree'],
+    'only the counted call is in flight',
+  );
+  assert.equal(typeof inFlight[0]?.startedAt, 'number');
+  closed.socket.emit('close', 1006, Buffer.from(''));
+  assert.equal(errorMessage(await counted), 'Godot disconnected during request');
+  assert.equal(errorMessage(await uncounted), 'Godot disconnected during request');
+
+  const stopped = bridgeWithAnEditor();
+  const held = endedWith(stopped.bridge.invokeTool('scene_tree', {}));
+  await stopped.bridge.stop();
+  assert.equal(errorMessage(await held), 'GodotBridge stopped');
+
+  const early = createBridge(0, 1000, '127.0.0.1');
+  const quietSocket = new FakeSocket('early');
+  connectFake(early, quietSocket);
+  assert.equal(errorMessage(await endedWith(early.invokeTool('scene_tree', {}))), 'Godot is not connected');
+  assert.deepEqual(invocationsOn(quietSocket), [], 'a call before the greeting sends nothing');
+
+  const replies = bridgeWithAnEditor();
+  const busy = replies.bridge.invokeTool('scene_tree', {});
+  answersCall(replies.socket, 0, { success: false, busy: true, busyWith: 'scanning its files' });
+  assert.equal(await cameTrue(() => invocationsOn(replies.socket).length === 2), true, 'a busy editor is asked again');
+  answersCall(replies.socket, 1, { success: true, result: { second: true } });
+  assert.deepEqual(await busy, { second: true }, 'and the second reply is the answer');
+
+  const quitting = endedWith(replies.bridge.invokeTool('scene_tree', {}));
+  answersCall(replies.socket, 2, { success: false, closing: true });
+  const closing = await quitting;
+  assert.ok(closing instanceof EditorClosing, String(closing));
+  assert.equal(errorMessage(closing), 'The editor is quitting, so scene_tree was not run.');
+
+  const refusedByTheEditor = endedWith(replies.bridge.invokeTool('scene_tree', {}));
+  answersCall(replies.socket, 3, { success: false, error: 'no such node' });
+  assert.equal(errorMessage(await refusedByTheEditor), 'no such node');
+
+  const failedWithNoWord = endedWith(replies.bridge.invokeTool('scene_tree', {}));
+  answersCall(replies.socket, 4, { success: false });
+  assert.equal(errorMessage(await failedWithNoWord), 'Tool scene_tree failed');
+}
+
+/** What a peer of the two framed clients was asked, and on which of its connections. */
+interface HeardByAPeer {
+  readonly message: Record<string, unknown>;
+  readonly socket: Socket;
+  readonly connection: number;
+}
+
+interface RecordingPeer {
+  readonly sockets: Socket[];
+  readonly heard: HeardByAPeer[];
+  readonly onMessage: FramedPeerHandler;
+  readonly onConnect: (socket: Socket) => void;
+}
+
+/** A framed peer that keeps what it heard and which connection each came in on, and answers as [param behave] says. */
+function recordingPeer(
+  behave: (heard: HeardByAPeer) => void,
+  holdsOpen: (connection: number) => boolean = () => false,
+): RecordingPeer {
+  const sockets: Socket[] = [];
+  const heard: HeardByAPeer[] = [];
+  return {
+    sockets,
+    heard,
+    onConnect: (socket) => {
+      sockets.push(socket);
+      // A socket nobody reads from never sees its peer's end, so it stays open from this side.
+      if (holdsOpen(sockets.length - 1)) {
+        socket.pause();
+      }
+    },
+    onMessage: (message, socket) => {
+      const one = { message, socket, connection: sockets.indexOf(socket) };
+      heard.push(one);
+      behave(one);
+    },
+  };
+}
+
+/** The last request the peer was asked under [param name]. */
+function askedOf(peer: RecordingPeer, name: string): HeardByAPeer {
+  const found = peer.heard.findLast((one) => (one.message['method'] ?? one.message['command']) === name);
+  assert.ok(found !== undefined, `the peer was asked ${name}`);
+  return found;
+}
+
+/** What a client of either protocol answers to [param name], reached through the call both build their requests with. */
+function askedBy(client: GodotLSPClient | GodotDAPClient, name: string, waitMs: number): Promise<unknown> {
+  const send: unknown = Reflect.get(client, 'sendRequest');
+  assert.ok(typeof send === 'function', 'both clients build a request in sendRequest');
+  return Reflect.apply(send, client, [name, {}, waitMs]) as Promise<unknown>;
+}
+
+/** Runs [param work] with what the process says on stderr kept in the lines it is handed. */
+async function heardOnStderr<T>(work: (lines: string[]) => Promise<T>): Promise<T> {
+  const lines: string[] = [];
+  const error = console.error;
+  console.error = (...said: unknown[]): void => {
+    lines.push(said.map(String).join(' '));
+  };
+  try {
+    return await work(lines);
+  } finally {
+    console.error = error;
+  }
+}
+
+/** The socket [param client] holds, with its writes failing as a broken pipe does until the returned call mends it. */
+function breakTheWrites(client: GodotLSPClient | GodotDAPClient): () => void {
+  const socket = Reflect.get(client, 'socket') as Socket;
+  Reflect.set(socket, 'write', (_chunk: unknown, done?: (error?: Error | null) => void): boolean => {
+    done?.(new Error('EPIPE'));
+    return true;
+  });
+  return () => {
+    Reflect.deleteProperty(socket, 'write');
+  };
+}
+
+/** A language server stand-in that answers each request by the name it comes under. */
+function languageServerPeer(
+  publishing: { onOpen: 'publish' | 'close' | 'late' },
+  holdsOpen?: (connection: number) => boolean,
+): RecordingPeer {
+  return recordingPeer((one) => {
+    const { message, socket } = one;
+    const say = (body: Record<string, unknown>): void => {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], ...body }));
+    };
+    const method = String(message['method']);
+    if (method === 'ok' || method === 'initialize') {
+      say({ result: { capabilities: {}, answered: 'ok', answeredOn: one.connection + 1 } });
+    } else if (method === 'notFound') {
+      say({ error: { code: -32601, message: 'Method not found' } });
+    } else if (method === 'bare') {
+      say({ error: {} });
+    } else if (method === 'oversize') {
+      socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+    } else if (method === 'reset') {
+      socket.resetAndDestroy();
+    } else if (method === 'close') {
+      socket.destroy();
+    } else if (method === 'textDocument/didOpen') {
+      const uri = get(message['params'], 'textDocument', 'uri');
+      const publish = (): void => {
+        socket.write(
+          frameJsonRpc({
+            jsonrpc: '2.0',
+            method: 'textDocument/publishDiagnostics',
+            params: { uri, diagnostics: [{ message: 'seen', severity: 1 }] },
+          }),
+        );
+      };
+      if (publishing.onOpen === 'close') {
+        socket.destroy();
+      } else if (publishing.onOpen === 'late') {
+        setTimeout(publish, 1400);
+      } else {
+        publish();
+      }
+    }
+  }, holdsOpen);
+}
+
+/**
+ * Every way a language server request ends says what happened, whether the client's own call, the
+ * peer, a late answer or the close of the connection it went out on.
+ */
+async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
+  await heardOnStderr(async (stderr) => {
+    const publishing = { onOpen: 'publish' as 'publish' | 'close' | 'late' };
+    let holding = false;
+    const peer = languageServerPeer(publishing, () => holding);
+    await withFramedPeer(
+      peer.onMessage,
+      async (port) => {
+        const idle = new GodotLSPClient(port, '127.0.0.1');
+        Reflect.set(idle, 'ensureConnected', () => Promise.resolve());
+        await assert.rejects(askedBy(idle, 'ok', 1000), /Not connected to Godot LSP/);
+        assert.equal(peer.sockets.length, 0, 'a request before any connection dials nothing');
+
+        const client = new GodotLSPClient(port, '127.0.0.1');
+        assert.deepEqual(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok');
+        await assert.rejects(askedBy(client, 'notFound', 5000), /^Error: LSP error \(-32601\): Method not found$/);
+        await assert.rejects(askedBy(client, 'bare', 5000), /^Error: LSP error \(unknown\): Unknown LSP error$/);
+
+        await assert.rejects(
+          askedBy(client, 'hold', 200),
+          (error: unknown) => error instanceof LSPTimeout && error.method === 'hold' && error.seconds === 0.2,
+        );
+        const gone = askedOf(peer, 'hold');
+        gone.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: gone.message['id'], result: 1 }));
+        const goneLine = `Discarding an answer to request ${String(gone.message['id'])}, which nothing waits for`;
+        assert.equal(await cameTrue(() => stderr.some((line) => line.includes(goneLine))), true, 'a late answer is said once');
+        assert.equal(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok', 'the next request is answered');
+
+        let settled = false;
+        const waiting = askedBy(client, 'wait', 10_000).finally(() => {
+          settled = true;
+        });
+        const held = askedOf(peer, 'wait');
+        held.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: 9999, result: 1 }));
+        assert.equal(await cameTrue(() => stderr.some((line) => line.includes('request 9999,'))), true, 'a stray answer is said');
+        assert.equal(settled, false, 'and settles nothing');
+        const before = stderr.length;
+        held.socket.write(
+          frameJsonRpc({ jsonrpc: '2.0', id: held.message['id'], method: 'workspace/applyEdit', params: {} }),
+        );
+        await delay(100);
+        assert.equal(settled, false, "the server's own request carrying this id settles nothing");
+        assert.equal(stderr.length, before, 'and is not said');
+        held.socket.write(
+          frameJsonRpc({
+            jsonrpc: '2.0',
+            method: 'textDocument/publishDiagnostics',
+            params: { uri: 'file:///nobody-asked.gd', diagnostics: [] },
+          }),
+        );
+        await delay(100);
+        assert.equal(settled, false, 'a list nobody asked for settles nothing');
+        assert.equal(stderr.length, before, 'and is not said');
+        held.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: held.message['id'], result: { own: true } }));
+        assert.deepEqual(await waiting, { own: true }, 'its own answer settles it');
+
+        const mend = breakTheWrites(client);
+        await assert.rejects(askedBy(client, 'ok', 5000), /^Error: Failed to send LSP request ok: EPIPE$/);
+        mend();
+        const connectionsBefore = peer.sockets.length;
+        assert.equal(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok');
+        assert.equal(peer.sockets.length, connectionsBefore, 'on the same connection');
+
+        const closedOn = await endedWith(askedBy(client, 'close', 5000));
+        assert.equal(errorMessage(closedOn), 'Godot LSP socket closed');
+        assert.match(normalizeLSPError(closedOn, port), /^Godot LSP is unavailable on port/);
+        await assert.rejects(askedBy(client, 'reset', 5000), /^Error: Godot LSP connection error: /);
+
+        const script = join(tmpdir(), 'gdharness-lsp-ends', 'ends.gd');
+        const versions = Reflect.get(client, 'documentVersions') as Map<string, number>;
+        versions.set(pathToFileURL(resolve(script)).href, 1);
+        await assert.rejects(
+          askedBy(client, 'oversize', 5000),
+          /^Error: Godot LSP stream exceeded the 33554432 byte ceiling.* The connection was dropped\.$/,
+        );
+        assert.equal(versions.size, 0, 'a dropped connection leaves no document remembered as open');
+        assert.equal((await client.getDiagnostics(script, 'extends Node\n')).length, 1);
+        assert.equal(
+          askedOf(peer, 'textDocument/didOpen').message['method'],
+          'textDocument/didOpen',
+          'the first ask on a new connection opens the document',
+        );
+
+        publishing.onOpen = 'close';
+        await assert.rejects(client.getDiagnostics(script, 'extends Node\n'), /^Error: Godot LSP socket closed$/);
+        publishing.onOpen = 'publish';
+
+        const disconnecting = askedBy(client, 'hold', 5000);
+        const disconnectedWith = endedWith(disconnecting);
+        await client.disconnect();
+        assert.equal(errorMessage(await disconnectedWith), 'Godot LSP socket closed');
+
+        holding = true;
+        const kept = endedWith(askedBy(client, 'hold-open', 5000));
+        await cameTrue(() => peer.sockets.length > 0 && Reflect.get(client, 'socket') !== null);
+        const releasing = client.disconnect();
+        assert.equal(errorMessage(await kept), 'Disconnected from Godot LSP');
+        await releasing;
+        holding = false;
+      },
+      peer.onConnect,
+    );
+  });
+}
+
+/** A debug adapter stand-in that answers each request by the command it comes under. */
+function debugAdapterPeer(): RecordingPeer {
+  return recordingPeer((one) => {
+    const { message, socket } = one;
+    const respond = (success: boolean, fields: Record<string, unknown>): void => {
+      socket.write(
+        frameJsonRpc({ seq: 1, type: 'response', request_seq: message['seq'], success, ...fields }),
+      );
+    };
+    const command = String(message['command']);
+    if (command === 'body') {
+      respond(true, { command, body: { answered: 'body' } });
+    } else if (command === 'bare') {
+      respond(true, { command });
+    } else if (command === 'refused') {
+      respond(false, { command, message: 'no such thing' });
+    } else if (command === 'unsaid') {
+      respond(false, { command });
+    } else if (command === 'unnamed') {
+      respond(false, {});
+    } else if (command === 'oversize') {
+      socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+    } else if (command === 'reset') {
+      socket.resetAndDestroy();
+    } else if (command === 'close') {
+      socket.destroy();
+    } else if (command === 'hold-open') {
+      socket.pause();
+    }
+  });
+}
+
+/** Every way a debug adapter request ends says what happened. */
+async function testEveryEndOfADebugAdapterRequestIsSaid(): Promise<void> {
+  await heardOnStderr(async (stderr) => {
+    const peer = debugAdapterPeer();
+    await withFramedPeer(
+      peer.onMessage,
+      async (port) => {
+        const idle = new GodotDAPClient(port, '127.0.0.1');
+        Reflect.set(idle, 'ensureConnected', () => Promise.resolve());
+        await assert.rejects(askedBy(idle, 'body', 1000), /^Error: DAP socket is not available$/);
+        assert.equal(peer.sockets.length, 0, 'a request before any connection dials nothing');
+
+        const client = new GodotDAPClient(port, '127.0.0.1');
+        assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+        assert.deepEqual(await askedBy(client, 'bare', 5000), {}, 'a success with no body is an empty one');
+        await assert.rejects(askedBy(client, 'refused', 5000), /^Error: no such thing$/);
+        await assert.rejects(askedBy(client, 'unsaid', 5000), /^Error: DAP request failed: unsaid$/);
+        await assert.rejects(askedBy(client, 'unnamed', 5000), /^Error: DAP request failed: unknown command$/);
+
+        await assert.rejects(askedBy(client, 'hold', 60), /^Error: DAP request timed out: hold$/);
+        const gone = askedOf(peer, 'hold');
+        const respondTo = (seq: unknown): void => {
+          gone.socket.write(
+            frameJsonRpc({ seq: 1, type: 'response', request_seq: seq, command: 'hold', success: true }),
+          );
+        };
+        respondTo(gone.message['seq']);
+        respondTo(9999);
+        const said = (id: unknown): boolean =>
+          stderr.some((line) => line.includes(`Discarding an answer to request ${String(id)}, which nothing waits for`));
+        assert.equal(await cameTrue(() => said(gone.message['seq']) && said(9999)), true, 'each is said once');
+        assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' }, 'the next request is answered');
+
+        const mend = breakTheWrites(client);
+        await assert.rejects(askedBy(client, 'body', 5000), /^Error: Failed to send DAP request 'body': EPIPE$/);
+        mend();
+        assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+        assert.equal(peer.sockets.length, 1, 'on the same connection');
+
+        await assert.rejects(askedBy(client, 'close', 5000), /^Error: DAP connection closed$/);
+        await assert.rejects(askedBy(client, 'reset', 5000), /^Error: DAP connection error: /);
+        await assert.rejects(
+          askedBy(client, 'oversize', 5000),
+          /^Error: Godot DAP stream exceeded the 33554432 byte ceiling.* The connection was dropped\.$/,
+        );
+
+        const abandoned = endedWith(askedBy(client, 'hold', 5000));
+        await cameTrue(() => peer.heard.filter((one) => one.message['command'] === 'hold').length === 2);
+        await client.abandon();
+        assert.equal(errorMessage(await abandoned), 'DAP connection closed');
+
+        const heldOpen = endedWith(askedBy(client, 'hold-open', 5000));
+        await cameTrue(() => peer.heard.some((one) => one.message['command'] === 'hold-open'));
+        const began = Date.now();
+        await client.abandon();
+        assert.equal(errorMessage(await heldOpen), 'DAP connection closed');
+        assert.ok(Date.now() - began >= 400, 'an adapter that holds on is let go of after half a second');
+      },
+      peer.onConnect,
+    );
+  });
+}
+
+/**
+ * A request is ended by the connection it went out on and by no other. A connection let go of
+ * closes after the next has been dialled, and a late close ended the request waiting on its successor.
+ */
+async function testARequestBelongsToTheConnectionItWentOutOn(): Promise<void> {
+  const script = join(tmpdir(), 'gdharness-lsp-belongs', 'belongs.gd');
+  const afterTheFirstClose = new Map<Socket, ReturnType<typeof setTimeout>>();
+  const later = languageServerPeer({ onOpen: 'publish' });
+  await withFramedPeer(
+    (message, socket) => {
+      if (message['method'] === 'initialize' && later.sockets.indexOf(socket) > 0) {
+        afterTheFirstClose.set(
+          socket,
+          setTimeout(() => {
+            socket.write(
+              frameJsonRpc({ jsonrpc: '2.0', id: message['id'], result: { capabilities: {}, answeredOn: 2 } }),
+            );
+          }, 400),
+        );
+        return;
+      }
+      later.onMessage(message, socket);
+    },
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      await client.connect();
+      const closing = client.disconnect();
+      const result = await client.initialize(tmpdir());
+      assert.equal(get(result, 'answeredOn'), 2, 'the second connection answers its own request');
+      await closing;
+      assert.equal((await client.getDiagnostics(script, 'extends Node\n')).length, 1);
+      assert.equal(askedOf(later, 'textDocument/didOpen').connection, 1, 'and the next ask goes out on it too');
+      await client.disconnect();
+    },
+    later.onConnect,
+  );
+
+  const publishing = { onOpen: 'late' as const };
+  const slow = languageServerPeer(publishing, (connection) => connection === 0);
+  await withFramedPeer(
+    slow.onMessage,
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      await client.connect();
+      const closing = client.disconnect();
+      const published = await client.getDiagnostics(script, 'extends Node\n');
+      assert.equal(published.length, 1, 'a diagnostics ask on the second connection outlives the first one closing');
+      await closing;
+      await client.disconnect();
+    },
+    slow.onConnect,
+  );
+
+  let connections = 0;
+  const adapter = recordingPeer((one) => {
+    const { message, socket } = one;
+    if (one.connection === 0) {
+      socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+      return;
+    }
+    socket.write(
+      frameJsonRpc({
+        seq: 1,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: { answeredOn: one.connection + 1 },
+      }),
+    );
+  });
+  await withFramedPeer(
+    adapter.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      await assert.rejects(client.initialize(), /exceeded the 33554432 byte ceiling/);
+      const second = await client.initialize();
+      assert.equal(get(second, 'answeredOn'), 2, 'a call straight after the dropped stream is answered on a new connection');
+      await delay(300);
+      assert.equal(get(await client.initialize(), 'answeredOn'), 2, 'and so is the next');
+      connections = adapter.sockets.length;
+      await client.abandon();
+    },
+    adapter.onConnect,
+  );
+  assert.equal(connections, 2, 'the third call used the second connection');
+  for (const timer of afterTheFirstClose.values()) {
+    clearTimeout(timer);
+  }
+}
+
+/** Two asks at once on a closed debug adapter client dial one socket, and both are answered on it. */
+async function testTwoDebugAdapterAsksAtOnceShareOneConnection(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      const answers = await Promise.all([askedBy(client, 'body', 5000), askedBy(client, 'body', 5000)]);
+      assert.deepEqual(answers, [{ answered: 'body' }, { answered: 'body' }], 'both are answered');
+      await delay(50);
+      assert.equal(peer.sockets.length, 1, 'on one connection');
+      await client.abandon();
+    },
+    peer.onConnect,
+  );
+}
+
+/** Starts the server in a process of its own and returns the JSON line its probe prints for [param mode]. */
+async function serverProbe(mode: 'lost-connection' | 'port-move'): Promise<Record<string, unknown>> {
+  const child = spawnHidden(process.execPath, [resolve('test', 'support', 'server-probe.ts'), mode], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let printed = '';
+  let failed = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    printed += chunk.toString();
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    failed += chunk.toString();
+  });
+  const ended = await Promise.race([exitOf(child), delay(60_000).then(() => null)]);
+  if (ended === null) {
+    child.kill();
+  }
+  assert.deepEqual(ended, { code: 0, signal: null }, `the probe ends on its own: ${failed}`);
+  const parsed: unknown = JSON.parse(printed.trim().split('\n').at(-1) ?? '');
+  assert.ok(isRecord(parsed), printed);
+  return parsed;
+}
+
+/** A call whose connection dropped says the connection was lost, since the editor answered nothing. */
+async function testALostConnectionIsNotSaidToBeTheEditorsAnswer(): Promise<void> {
+  const said = await serverProbe('lost-connection');
+  assert.equal(
+    said['lost'],
+    'The connection to the editor was lost during scene_tree: Godot disconnected during request\nNext:\neditor_status says whether the editor is connected',
+  );
+  assert.equal(said['answered'], 'The editor answered scene_tree with an error: no such node');
+}
+
+/** Two calls at once over a move of the language server port end with one live client, and neither fails. */
+async function testTwoCallsOverAPortMoveEndWithOneLiveClient(): Promise<void> {
+  const said = await serverProbe('port-move');
+  assert.equal(said['same'], true, `both calls get one client: ${JSON.stringify(said)}`);
+  assert.deepEqual(
+    said['answers'],
+    [{ port: said['wantedPort'] }, { port: said['wantedPort'] }],
+    'and both answer on the moved port',
+  );
+  assert.equal(said['connectionsAfter'], 1, 'over one connection');
+}
+
+/** Every request to a peer waits in `PendingRequests`, and the three clients keep no table of their own. */
+function testEveryRequestWaitsInTheOneTable(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => ({ entry: entry.replaceAll('\\', '/'), text: readFileSync(join('src', entry), 'utf8') }));
+  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
+  for (const gone of ['interface PendingRequest', 'interface DiagnosticsWaiter', 'rejectAllPending', 'failPendingRequests']) {
+    assert.deepEqual(
+      files.filter((file) => file.text.includes(gone)).map((file) => file.entry),
+      [],
+      `no client keeps ${gone} of its own`,
+    );
+  }
+  assert.deepEqual(
+    files.filter((file) => file.text.includes('new PendingRequests<')).map((file) => file.entry).toSorted(),
+    ['dap_client.ts', 'godot-bridge.ts', 'lsp_client.ts'],
+    'the three clients wait in the one table',
+  );
+}
+
 /**
  * The status counts the resources with a call waiting or running, one for each resource however
  * many calls it has, and none once every call is answered.

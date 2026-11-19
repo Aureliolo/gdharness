@@ -8,6 +8,7 @@ import { errorCode, errorMessage, Refusal, toError } from './errors.js';
 import { idleClosed } from './idle-close.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory } from './paths.js';
+import { PendingRequests } from './pending-requests.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 import { addonMismatch, SERVER_VERSION } from './server-version.js';
@@ -239,16 +240,14 @@ function servedPort(said: number): number | undefined {
   return Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
 }
 
-interface PendingRequest {
-  toolName: string;
-  timeout: NodeJS.Timeout;
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  startedAt: number;
-  // Explicitly `| undefined`: under exactOptionalPropertyTypes the bare `?` means the key may
-  // be missing, not that it may be present and unset, and these are built from optional chains.
-  resourceKey?: string | undefined;
-  counted: boolean;
+/** What a call waiting on the editor is told: its reply, or the fields of a reply that could not be read. */
+type BridgeAnswer = ToolResultMessage | { readonly unreadable: readonly string[] };
+
+/** What a call waiting on the editor is known by. */
+interface WaitingCall {
+  readonly tool: string;
+  readonly startedAt: number;
+  readonly counted: boolean;
 }
 
 /** How a request to the editor is sent. */
@@ -449,6 +448,9 @@ export class AddonOfAnotherRelease extends Error {}
 /** The editor turned a tool away unrun because it is quitting after going unused. */
 export class EditorClosing extends Error {}
 
+/** The connection to the editor ended while a call waited on it, so the editor answered nothing. */
+export class EditorDisconnected extends Error {}
+
 /**
  * The most one answer from the editor may carry. Kept in step with `ANSWER_BYTES` in the editor
  * addon's bridge_client.gd, which sends a larger answer as an error saying its size.
@@ -532,7 +534,7 @@ export class GodotBridge extends EventEmitter {
   /** Processes already found to be one-shot runs, so one that dials in again is told at once. */
   private readonly oneShots = new Map<number, string>();
   private turnedAway: TurnedAway | null = null;
-  private pendingRequests = new Map<string, PendingRequest>();
+  private readonly pending = new PendingRequests<string, BridgeAnswer, WaitingCall>();
   private resourceQueues = new Turns<string>();
 
   private readonly wantedPort: number;
@@ -684,7 +686,7 @@ export class GodotBridge extends EventEmitter {
 
   public async stop(): Promise<void> {
     this.stopKeepalive();
-    this.rejectAllPending(new Error('GodotBridge stopped'));
+    this.pending.drop(new Error('GodotBridge stopped'));
     this.resourceQueues.clear();
     const closeTasks: Promise<void>[] = [];
 
@@ -751,9 +753,10 @@ export class GodotBridge extends EventEmitter {
 
   /** The counted requests sent to the editor and not yet answered, oldest first. */
   public requestsInFlight(): { tool: string; startedAt: number }[] {
-    return [...this.pendingRequests.values()]
-      .filter((pending) => pending.counted)
-      .map((pending) => ({ tool: pending.toolName, startedAt: pending.startedAt }))
+    return this.pending
+      .waiting()
+      .filter((call) => call.counted)
+      .map((call) => ({ tool: call.tool, startedAt: call.startedAt }))
       .toSorted((a, b) => a.startedAt - b.startedAt);
   }
 
@@ -827,9 +830,7 @@ export class GodotBridge extends EventEmitter {
       return this.invokeUntilTaken(toolName, args, asked);
     }
 
-    return this.enqueueResourceRequest(resourceKey, () =>
-      this.invokeUntilTaken(toolName, args, asked, resourceKey),
-    );
+    return this.enqueueResourceRequest(resourceKey, () => this.invokeUntilTaken(toolName, args, asked));
   }
 
   /**
@@ -841,7 +842,6 @@ export class GodotBridge extends EventEmitter {
     toolName: string,
     args: Record<string, unknown>,
     asked: Asked,
-    resourceKey?: string,
   ): Promise<unknown> {
     const waitMs = busyWaitMs();
     const began = Date.now();
@@ -855,7 +855,7 @@ export class GodotBridge extends EventEmitter {
     };
     for (;;) {
       try {
-        return await this.invokeToolDirect(toolName, args, asked, resourceKey);
+        return await this.invokeToolDirect(toolName, args, asked);
       } catch (error) {
         if (!(error instanceof EditorBusy)) {
           throw error;
@@ -948,13 +948,16 @@ export class GodotBridge extends EventEmitter {
     nextSocket.on('close', (code, reasonBuffer) => {
       const reason = reasonBuffer.toString();
       this.log('warn', `Godot disconnected (code=${code}, reason=${reason || 'none'})`);
-      this.handleDisconnect(nextSocket, new Error('Godot disconnected during request'));
+      this.handleDisconnect(nextSocket, new EditorDisconnected('Godot disconnected during request'));
     });
 
     nextSocket.on('error', (error) => {
       this.log('error', `WebSocket error: ${error.message}`);
       if (nextSocket.readyState === WebSocket.CLOSED || nextSocket.readyState === WebSocket.CLOSING) {
-        this.handleDisconnect(nextSocket, error);
+        this.handleDisconnect(
+          nextSocket,
+          new EditorDisconnected(`Godot disconnected during request: ${error.message}`),
+        );
       }
     });
   }
@@ -983,27 +986,8 @@ export class GodotBridge extends EventEmitter {
   }
 
   private handleToolResult(message: ToolResultMessage): void {
-    const pending = this.pendingRequests.get(message.id);
-    if (!pending) {
+    if (!this.pending.answer(message.id, message)) {
       this.log('warn', `Received tool_result for unknown id=${message.id}`);
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingRequests.delete(message.id);
-    const duration = Date.now() - pending.startedAt;
-    this.log('debug', `Tool ${pending.toolName} finished in ${duration}ms`);
-
-    if (message.success) {
-      pending.resolve(message.result);
-    } else if (message.busy === true) {
-      pending.reject(new EditorBusy(pending.toolName, message.busyWith ?? 'busy', message.progress ?? ''));
-    } else if (message.closing === true) {
-      pending.reject(
-        new EditorClosing(message.error ?? `The editor is quitting, so ${pending.toolName} was not run.`),
-      );
-    } else {
-      pending.reject(new Error(message.error ?? `Tool ${pending.toolName} failed`));
     }
   }
 
@@ -1065,18 +1049,17 @@ export class GodotBridge extends EventEmitter {
     }
   }
 
-  private invokeToolDirect(
+  private async invokeToolDirect(
     toolName: string,
     args: Record<string, unknown>,
     { counted, waitMs }: Asked,
-    resourceKey?: string,
   ): Promise<unknown> {
     if (!this.isConnected()) {
-      return Promise.reject(new Error('Godot is not connected'));
+      throw new Error('Godot is not connected');
     }
     const otherRelease = ASKED_OF_ANY_RELEASE.has(toolName) ? undefined : this.anotherRelease();
     if (otherRelease !== undefined) {
-      return Promise.reject(new AddonOfAnotherRelease(otherRelease));
+      throw new AddonOfAnotherRelease(otherRelease);
     }
 
     const requestId = randomUUID();
@@ -1087,30 +1070,35 @@ export class GodotBridge extends EventEmitter {
       args,
     };
 
-    return new Promise<unknown>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new BridgeTimeout(toolName, waitMs));
-      }, waitMs);
-
-      this.pendingRequests.set(requestId, {
-        toolName,
-        timeout,
-        resolve,
-        reject,
-        startedAt: Date.now(),
-        resourceKey,
-        counted,
-      });
-
-      try {
-        this.sendMessage(message);
-      } catch (error) {
-        clearTimeout(timeout);
-        this.pendingRequests.delete(requestId);
-        reject(toError(error));
-      }
+    const startedAt = Date.now();
+    const reply = this.pending.wait(requestId, waitMs, () => new BridgeTimeout(toolName, waitMs), {
+      tool: toolName,
+      startedAt,
+      counted,
     });
+    try {
+      this.sendMessage(message);
+    } catch (error) {
+      this.pending.fail(requestId, toError(error));
+    }
+
+    const answer = await reply;
+    this.log('debug', `Tool ${toolName} finished in ${Date.now() - startedAt}ms`);
+    if ('unreadable' in answer) {
+      throw new Error(
+        `The editor answered ${toolName} with a reply gdharness cannot read: ${answer.unreadable.join(', ')}. Sending the call again gets the same reply.`,
+      );
+    }
+    if (answer.success) {
+      return answer.result;
+    }
+    if (answer.busy === true) {
+      throw new EditorBusy(toolName, answer.busyWith ?? 'busy', answer.progress ?? '');
+    }
+    if (answer.closing === true) {
+      throw new EditorClosing(answer.error ?? `The editor is quitting, so ${toolName} was not run.`);
+    }
+    throw new Error(answer.error ?? `Tool ${toolName} failed`);
   }
 
   /** Tells the connected editor calls are being made, so it does not quit as unused. */
@@ -1304,17 +1292,8 @@ export class GodotBridge extends EventEmitter {
     this.socket = null;
     this.connectionInfo = null;
 
-    this.rejectAllPending(quitUnused(gone) ? new EditorClosing(QUIT_UNANSWERED) : reason);
+    this.pending.drop(quitUnused(gone) ? new EditorClosing(QUIT_UNANSWERED) : reason);
     this.resourceQueues.clear();
-  }
-
-  private rejectAllPending(error: Error): void {
-    for (const pending of this.pendingRequests.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(error);
-    }
-
-    this.pendingRequests.clear();
   }
 
   private enqueueResourceRequest<T>(resourceKey: string, task: () => Promise<T>): Promise<T> {
@@ -1370,18 +1349,7 @@ export class GodotBridge extends EventEmitter {
     if (!isRecord(message) || message['type'] !== 'tool_result' || typeof message['id'] !== 'string') {
       return false;
     }
-    const pending = this.pendingRequests.get(message['id']);
-    if (pending === undefined) {
-      return false;
-    }
-    clearTimeout(pending.timeout);
-    this.pendingRequests.delete(message['id']);
-    pending.reject(
-      new Error(
-        `The editor answered ${pending.toolName} with a reply gdharness cannot read: ${replyFaults(message).join(', ')}. Sending the call again gets the same reply.`,
-      ),
-    );
-    return true;
+    return this.pending.answer(message['id'], { unreadable: replyFaults(message) });
   }
 
   private log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
