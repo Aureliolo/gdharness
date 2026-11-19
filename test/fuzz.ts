@@ -4009,7 +4009,7 @@ interface FramedStep {
     | 'reset'
     | 'oversized'
     | 'clientClose'
-    | 'clientMoves'
+    | 'answerAsLetGo'
     | 'stopAsLetGo'
     | 'dialLetGo';
   at: number;
@@ -4031,7 +4031,7 @@ const framedStep: fc.Arbitrary<FramedStep> = fc.record({
     'reset' as const,
     'oversized' as const,
     'clientClose' as const,
-    'clientMoves' as const,
+    'answerAsLetGo' as const,
     'stopAsLetGo' as const,
     'dialLetGo' as const,
   ),
@@ -4096,8 +4096,7 @@ async function framedPeer(): Promise<FramedPeer> {
 /** What a client of either protocol is asked, through the one call both build their requests with. */
 interface FramedClient {
   ask(name: string, waitMs: number): Promise<unknown>;
-  /** Lets go of the connection. [param toServedPort] is a language server moving to an editor's port. */
-  close(toServedPort?: boolean): Promise<void>;
+  close(): Promise<void>;
   /** The socket the client holds, or null. */
   held(): unknown;
   /** Whether the client takes the game to be stopped, which only a debug adapter can. */
@@ -4113,8 +4112,7 @@ function framedClient(kind: FramedKind, port: number): FramedClient {
   assert.ok(typeof send === 'function', 'both clients build a request in sendRequest');
   return {
     ask: async (name, waitMs) => (await Reflect.apply(send, client, [name, {}, waitMs])) as unknown,
-    close: (toServedPort = false) =>
-      client instanceof GodotLSPClient ? client.disconnect(toServedPort) : client.abandon(),
+    close: () => (client instanceof GodotLSPClient ? client.disconnect() : client.abandon()),
     held: () => Reflect.get(client, 'socket') as unknown,
     knowsAStop: () => client instanceof GodotDAPClient && client.whereItStopped() !== null,
     waiting: () => {
@@ -4144,8 +4142,7 @@ interface FramedModel {
 
 /**
  * The way a request of either client ended, in the words the model draws its ends in. A language
- * server's end is read as its tools answer it, where the peer closing and the client letting go
- * name different next steps.
+ * server's end is read as its tools word it, so an end that names no next step is not a close.
  */
 function framedOutcome(kind: FramedKind, error: unknown): string {
   const said = error instanceof Error ? error.message : String(error);
@@ -4156,9 +4153,6 @@ function framedOutcome(kind: FramedKind, error: unknown): string {
     const told = normalizeLSPError(error, 0);
     if (told.startsWith('Godot LSP is unavailable on port')) {
       return 'closed';
-    }
-    if (told.startsWith('This server closed its connection to Godot LSP')) {
-      return 'let go';
     }
   }
   const name = kind === 'lsp' ? 'LSP' : 'DAP';
@@ -4259,15 +4253,19 @@ function framedHeldBy(model: FramedModel): { socket: Socket; number: number } | 
 function framedAnswers(model: FramedModel, step: FramedStep): Promise<void> {
   const waiting = framedWaiting(model);
   const request = waiting[step.at % Math.max(waiting.length, 1)];
-  if (request === undefined) {
-    return Promise.resolve();
+  if (request !== undefined) {
+    answerFramed(model, request, step.how);
   }
-  model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, step.how));
+  return Promise.resolve();
+}
+
+/** The peer answers [param request] on the connection it came in on. */
+function answerFramed(model: FramedModel, request: FramedRequest, how: 'ok' | 'fail'): void {
+  model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, how));
   settleFramed(
     request,
-    step.how === 'ok' ? `ok:${JSON.stringify({ tag: request.tag })}` : `fail:${String(request.tag)}`,
+    how === 'ok' ? `ok:${JSON.stringify({ tag: request.tag })}` : `fail:${String(request.tag)}`,
   );
-  return Promise.resolve();
 }
 
 function framedAnswersAgain(model: FramedModel, step: FramedStep): Promise<void> {
@@ -4332,23 +4330,35 @@ function framedPeerEnds(end: 'closed' | 'reset' | 'oversized'): (model: FramedMo
 }
 
 /**
- * How a request ends when its client lets go of the connection. Only a language server moving to
- * a port an editor serves says to call again. Every other end reads as a close.
+ * The client lets go of its connection and a request is made beside it. The peer closes its half
+ * when the client ends, so a request still waiting reads as a close.
  */
-function framedLetGo(kind: FramedKind, toServedPort: boolean): string {
-  return kind === 'lsp' && toServedPort ? 'let go' : 'closed';
+async function framedClientCloses(model: FramedModel): Promise<void> {
+  const closing = model.client.close();
+  for (const request of framedWaiting(model)) {
+    settleFramed(request, 'closed');
+  }
+  await askFramed(model, FRAMED_WAIT_MS);
+  await closing;
 }
 
-/** The client lets go of its connection and a request is made beside it. */
-function framedClientCloses(toServedPort: boolean): (model: FramedModel) => Promise<void> {
-  return async (model) => {
-    const closing = model.client.close(toServedPort);
-    for (const request of framedWaiting(model)) {
-      settleFramed(request, framedLetGo(model.kind, toServedPort));
-    }
-    await askFramed(model, FRAMED_WAIT_MS);
-    await closing;
-  };
+/**
+ * The client lets go of its connection, and the peer answers a request on it before it reads the
+ * end, as a busy Godot does. That answer still reaches its request.
+ */
+async function framedAnswerAsLetGo(model: FramedModel, step: FramedStep): Promise<void> {
+  const held = framedHeldBy(model);
+  const onHeld = framedWaiting(model).filter((request) => request.connection === held?.number);
+  const request = onHeld[step.at % Math.max(onHeld.length, 1)];
+  if (request === undefined || model.client.held() === null) {
+    return;
+  }
+  const closing = model.client.close();
+  answerFramed(model, request, step.how);
+  for (const other of framedWaiting(model)) {
+    settleFramed(other, 'closed');
+  }
+  await closing;
 }
 
 /**
@@ -4362,7 +4372,7 @@ async function framedStopAsLetGo(model: FramedModel): Promise<void> {
       frame({ seq: 1, type: 'event', event: 'stopped', body: { reason: 'breakpoint', threadId: 1 } }),
     );
   }
-  await framedClientCloses(false)(model);
+  await framedClientCloses(model);
   assert.equal(model.client.knowsAStop(), false, 'a stop the let-go connection said is not kept');
 }
 
@@ -4392,8 +4402,8 @@ const FRAMED_STEPS: Record<FramedStep['kind'], (model: FramedModel, step: Framed
   close: framedPeerEnds('closed'),
   reset: framedPeerEnds('reset'),
   oversized: framedPeerEnds('oversized'),
-  clientClose: framedClientCloses(false),
-  clientMoves: framedClientCloses(true),
+  clientClose: framedClientCloses,
+  answerAsLetGo: framedAnswerAsLetGo,
   stopAsLetGo: framedStopAsLetGo,
   dialLetGo: framedDialLetGo,
 };
@@ -4427,7 +4437,7 @@ async function everyFramedRequestSettlesOnceWithItsOwnAnswer(kind: FramedKind): 
           }
           await model.client.close();
           for (const request of framedWaiting(model)) {
-            settleFramed(request, framedLetGo(kind, false));
+            settleFramed(request, 'closed');
           }
           await checkFramedModel(model);
           assert.equal(model.client.waiting(), 0, 'nothing waits once the client is closed');

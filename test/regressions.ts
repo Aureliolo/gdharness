@@ -10008,10 +10008,9 @@ async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
         const disconnectedWith = endedWith(askedBy(client, 'hold', 5000));
         await cameTrue(() => heldCount('hold') === 2);
         await client.disconnect();
-        assert.equal(errorMessage(await disconnectedWith), 'Disconnected from Godot LSP');
+        assert.equal(errorMessage(await disconnectedWith), 'Godot LSP socket closed');
 
         // A peer that never reads its side sees no end, so the socket is destroyed after a second.
-        // The request reads the same whichever runtime orders the close before this call's own end.
         holding = true;
         const dialled = peer.sockets.length;
         const kept = endedWith(askedBy(client, 'hold-open', 5000));
@@ -10416,18 +10415,166 @@ async function testTwoCallsOverAPortMoveEndWithOneLiveClient(): Promise<void> {
   }
 }
 
-/** A call waiting on the language server when the editor moves its port says to call again, which the moved port answers. */
-async function testACallInFlightOverAPortMoveSaysToCallAgain(): Promise<void> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-port-move-in-flight-'));
-  const before = languageServerPeer({ onOpen: 'never' });
+/** What a language server does once the client ends its connection. */
+type LanguageServerEnd = 'closes' | 'answers' | 'stays silent';
+
+/** The scripts a language server stand-in was told of on one connection, and the requests it was asked. */
+interface HeardByALanguageServer {
+  readonly openedUris: unknown[];
+  readonly asked: unknown[];
+}
+
+/** Answers initialize at once, and keeps every other request and each script opened for the end. */
+function hearAsALanguageServer(message: unknown, socket: Socket, heard: HeardByALanguageServer): void {
+  if (!isRecord(message)) {
+    return;
+  }
+  if (message['method'] === 'initialize') {
+    socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], result: { capabilities: {} } }));
+  } else if (message['method'] === 'textDocument/didOpen') {
+    heard.openedUris.push(get(message['params'], 'textDocument', 'uri'));
+  } else if (typeof message['id'] === 'number') {
+    heard.asked.push(message['id']);
+  }
+}
+
+/** Ends a language server stand-in's connection as [param atItsEnd] says, once the client has ended it. */
+function endAsALanguageServer(
+  atItsEnd: LanguageServerEnd,
+  socket: Socket,
+  heard: HeardByALanguageServer,
+): void {
+  if (atItsEnd === 'stays silent') {
+    return;
+  }
+  if (atItsEnd === 'answers') {
+    const seen = { message: 'seen', severity: 1 };
+    for (const uri of heard.openedUris) {
+      socket.write(
+        frameJsonRpc({
+          jsonrpc: '2.0',
+          method: 'textDocument/publishDiagnostics',
+          params: { uri, diagnostics: [seen, seen] },
+        }),
+      );
+    }
+    for (const id of heard.asked) {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id, result: { answered: 'as it closed' } }));
+    }
+  }
+  socket.end();
+}
+
+/**
+ * Runs [param work] with a language server that answers initialize and nothing else until the
+ * client ends the connection. It then closes its half, or first publishes two errors for each
+ * script opened and answers each request heard, or stays open and silent. Godot answers what it
+ * read before it notices that the peer has gone, so a busy one answers as it closes.
+ */
+async function withALanguageServerThatEnds<T>(
+  atItsEnd: LanguageServerEnd,
+  work: (port: number, heardAnOpen: () => boolean) => Promise<T>,
+): Promise<T> {
+  const heard: HeardByALanguageServer[] = [];
+  const sockets: Socket[] = [];
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
+    sockets.push(socket);
+    const onThis: HeardByALanguageServer = { openedUris: [], asked: [] };
+    heard.push(onThis);
+    let buffer: Buffer = Buffer.alloc(0);
+    socket.on('error', () => {});
+    socket.on('data', (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      for (let taken = takeByteFrame(buffer); taken !== null; taken = takeByteFrame(buffer)) {
+        buffer = taken.rest;
+        hearAsALanguageServer(JSON.parse(taken.body), socket, onThis);
+      }
+    });
+    socket.on('end', () => {
+      endAsALanguageServer(atItsEnd, socket, onThis);
+    });
+  });
+  await listenOnAReservedPort(server);
+  try {
+    return await work(portOf(server), () => heard.some((one) => one.openedUris.length > 0));
+  } finally {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((closed) =>
+      server.close(() => {
+        closed();
+      }),
+    );
+  }
+}
+
+/**
+ * A language server request the client lets go of ends as its server does: on the close, on the
+ * answer the server sent as it closed, or as let go once the client stops waiting for the close.
+ * Node, which runs the published server, reads each the same as Bun.
+ */
+async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-let-go-'));
+  try {
+    const probe = join(scratch, 'let-go.mjs');
+    writeFileSync(
+      probe,
+      [
+        `import { GodotLSPClient } from ${JSON.stringify(pathToFileURL(resolve('build', 'lsp_client.js')).href)};`,
+        `const client = new GodotLSPClient(Number(process.argv[2]), '127.0.0.1');`,
+        'await client.connect();',
+        `const asked = client.sendRequest('ask', {}, 5000).then(`,
+        `  (answer) => 'answered: ' + JSON.stringify(answer),`,
+        `  (error) => 'ended: ' + error.message,`,
+        ');',
+        // Once the request is written, so the server reads it before the end.
+        'await new Promise((written) => setTimeout(written, 50));',
+        'await client.disconnect();',
+        'console.log(await asked);',
+      ].join('\n'),
+    );
+    const ends: [LanguageServerEnd, string][] = [
+      ['closes', 'ended: Godot LSP socket closed'],
+      ['answers', 'answered: {"answered":"as it closed"}'],
+      ['stays silent', 'ended: Disconnected from Godot LSP'],
+    ];
+    for (const [end, expected] of ends) {
+      for (const [runtime, program] of [
+        ['Bun', process.execPath],
+        ['Node', 'node'],
+      ] as const) {
+        await withALanguageServerThatEnds(end, async (port) => {
+          const { stdout } = await runHidden(program, [probe, String(port)], { timeout: 30_000 });
+          assert.equal(stdout.trim(), expected, `${runtime}, with a server that ${end}`);
+        });
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What a script_diagnostics call waiting on an editor's language server says once the editor
+ * leaves the bridge and the server lets go of that language server, which then [param atItsEnd].
+ * With [param moves], another editor serves its language server on a new port, and a second
+ * script_diagnostics both lets go and is answered there as [param again]. Without, script_info on
+ * a missing script lets go. It dials no default port, where another editor on this machine may listen.
+ */
+async function aCallInFlightWhenItsEditorGoes(
+  atItsEnd: LanguageServerEnd,
+  moves: boolean,
+): Promise<{ readonly said: string; readonly port: number; readonly again: string }> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-goes-in-flight-'));
   const after = languageServerPeer({ onOpen: 'publish' });
   const editors: WebSocket[] = [];
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     writeFileSync(join(project, 'probe.gd'), 'class_name Probe\nextends Node\n');
-    await withFramedPeer(
-      before.onMessage,
-      async (beforePort) => {
+    return await withALanguageServerThatEnds(
+      atItsEnd,
+      async (beforePort, heardAnOpen) =>
         await withFramedPeer(
           after.onMessage,
           async (afterPort) => {
@@ -10451,37 +10598,37 @@ async function testACallInFlightOverAPortMoveSaysToCallAgain(): Promise<void> {
               });
               editors.push(first);
               const inFlight = diagnosed();
-              assert.equal(
-                await cameTrue(
-                  () => before.heard.some((one) => one.message['method'] === 'textDocument/didOpen'),
-                  10_000,
-                ),
-                true,
-                'the first call waits on the first port',
-              );
+              assert.equal(await cameTrue(heardAnOpen, 10_000), true, "the call waits on the editor's port");
               await untilTheEditorIsGone(server, first);
-              editors.push(
-                await greetAsAStandInEditor(server, bridgePort, project, undefined, { lsp_port: afterPort }),
-              );
-              const again = parseTextContent(await diagnosed());
-              const said = textOf(await inFlight) ?? '';
-              assert.match(
-                said,
-                new RegExp(
-                  `^Diagnostics unavailable: This server closed its connection to Godot LSP on port ${String(beforePort)} before the answer came\\. Calling again asks the language server the editor serves now\\.`,
-                  'u',
-                ),
-                said,
-              );
-              assert.equal(get(again, 'errors'), 1, 'and calling again is answered on the moved port');
+              let again = '';
+              if (moves) {
+                editors.push(
+                  await greetAsAStandInEditor(server, bridgePort, project, undefined, {
+                    lsp_port: afterPort,
+                  }),
+                );
+                again = textOf(await diagnosed()) ?? '';
+              } else {
+                const moving =
+                  textOf(
+                    await server.request(
+                      'tools/call',
+                      {
+                        name: 'script_info',
+                        arguments: { op: 'symbols', projectPath: project, scriptPath: 'absent.gd' },
+                      },
+                      30_000,
+                    ),
+                  ) ?? '';
+                assert.match(moving, /^Script file does not exist: res:\/\/absent\.gd/u, moving);
+              }
+              return { said: textOf(await inFlight) ?? '', port: beforePort, again };
             } finally {
               await server.stop();
             }
           },
           after.onConnect,
-        );
-      },
-      before.onConnect,
+        ),
     );
   } finally {
     for (const editor of editors) {
@@ -10491,81 +10638,34 @@ async function testACallInFlightOverAPortMoveSaysToCallAgain(): Promise<void> {
   }
 }
 
-/**
- * A call waiting on the language server when its editor leaves the bridge is told to start the
- * editor. No editor serves the port this server falls back to, so calling again is refused.
- */
-async function testACallInFlightWhenTheEditorLeavesSaysToStartTheEditor(): Promise<void> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-leaves-in-flight-'));
-  const before = languageServerPeer({ onOpen: 'never' });
-  const editors: WebSocket[] = [];
-  try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-    writeFileSync(join(project, 'probe.gd'), 'class_name Probe\nextends Node\n');
-    await withFramedPeer(
-      before.onMessage,
-      async (beforePort) => {
-        const bridgePort = await reservePort();
-        const server = new ServerProcess({
-          env: {
-            GDHARNESS_BRIDGE_PORT: String(bridgePort),
-            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
-          },
-        });
-        try {
-          await server.initialize('regression-test');
-          const first = await greetAsAStandInEditor(server, bridgePort, project, undefined, {
-            lsp_port: beforePort,
-          });
-          editors.push(first);
-          const inFlight = server.request(
-            'tools/call',
-            { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath: 'probe.gd' } },
-            30_000,
-          );
-          assert.equal(
-            await cameTrue(
-              () => before.heard.some((one) => one.message['method'] === 'textDocument/didOpen'),
-              10_000,
-            ),
-            true,
-            'the call waits on the editor port',
-          );
-          await untilTheEditorIsGone(server, first);
-          // A script that is not there lets the server move off the port without dialling the
-          // default one, where another editor on this machine may be listening.
-          const moving =
-            textOf(
-              await server.request(
-                'tools/call',
-                {
-                  name: 'script_info',
-                  arguments: { op: 'symbols', projectPath: project, scriptPath: 'absent.gd' },
-                },
-                30_000,
-              ),
-            ) ?? '';
-          assert.match(moving, /^Script file does not exist: res:\/\/absent\.gd/u, moving);
-          const said = textOf(await inFlight) ?? '';
-          assert.match(
-            said,
-            new RegExp(
-              `^Diagnostics unavailable: Godot LSP is unavailable on port ${String(beforePort)}\\. Start the Godot editor`,
-              'u',
-            ),
-            said,
-          );
-        } finally {
-          await server.stop();
-        }
-      },
-      before.onConnect,
-    );
-  } finally {
-    for (const editor of editors) {
-      editor.terminate();
-    }
-    rmSync(project, { recursive: true, force: true });
+/** The answer a call waiting on a language server gets for each way that server ends, given its port. */
+const CALLS_IN_FLIGHT_END: readonly [LanguageServerEnd, (port: number) => RegExp][] = [
+  [
+    'closes',
+    (port) =>
+      new RegExp(
+        `^Diagnostics unavailable: Godot LSP is unavailable on port ${String(port)}\\. Start the Godot editor`,
+        'u',
+      ),
+  ],
+  ['answers', () => /^\{[\s\S]*"errors": 2,[\s\S]*"checkedBy": "language server"/u],
+  ['stays silent', () => /^Diagnostics unavailable: Disconnected from Godot LSP(?! )/u],
+];
+
+/** A call waiting on the language server when the editor moves its port ends as the old server does, and calling again is answered on the moved port. */
+async function testACallInFlightOverAPortMoveEndsAsTheOldServerDoes(): Promise<void> {
+  for (const [end, expected] of CALLS_IN_FLIGHT_END) {
+    const { said, port, again } = await aCallInFlightWhenItsEditorGoes(end, true);
+    assert.match(said, expected(port), `with an old server that ${end}: ${said}`);
+    assert.match(again, /"errors": 1,/u, `calling again is answered on the moved port: ${again}`);
+  }
+}
+
+/** A call waiting on the language server when its editor leaves the bridge ends as that server does. */
+async function testACallInFlightWhenTheEditorLeavesEndsAsItsServerDoes(): Promise<void> {
+  for (const [end, expected] of CALLS_IN_FLIGHT_END) {
+    const { said, port } = await aCallInFlightWhenItsEditorGoes(end, false);
+    assert.match(said, expected(port), `with a server that ${end}: ${said}`);
   }
 }
 
@@ -121030,8 +121130,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoDebugAdapterAsksAtOnceShareOneConnection,
   testALostConnectionIsNotSaidToBeTheEditorsAnswer,
   testTwoCallsOverAPortMoveEndWithOneLiveClient,
-  testACallInFlightOverAPortMoveSaysToCallAgain,
-  testACallInFlightWhenTheEditorLeavesSaysToStartTheEditor,
+  testALanguageServerRequestLetGoEndsAsItsServerDoes,
+  testACallInFlightOverAPortMoveEndsAsTheOldServerDoes,
+  testACallInFlightWhenTheEditorLeavesEndsAsItsServerDoes,
   testADebugAdapterDialAbandonedLeavesTheNextCallAnswered,
   testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept,
   testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo,
