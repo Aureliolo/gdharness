@@ -37,7 +37,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { headingIdsOf } from '../scripts/doc-slug.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
-import { noteWritten, sharedCopies, syncRecordPath, syncSharedGdscript } from '../scripts/sync-shared-gd.js';
+import { sharedCopies, syncRecordPath, syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
 import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
@@ -90464,27 +90464,15 @@ async function testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed(): Promise<vo
  *
  * Two syncs running while an original changes twice can note an older text after a newer one was
  * written, so a record that keeps only the latest note names an older text than the copy holds. The
- * next change then read the copy as a hand edit. The first half sets that state up by noting the
- * older text late, as the slower sync does. The second half runs real syncs in a loop while the
- * originals change often, and the last sync must still succeed.
+ * next change then read the copy as a hand edit. Real syncs run here in a loop while the originals
+ * change often, and every sync must succeed.
  */
 async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-twice-'));
   const restoreCache = pointTheCacheAt(scratch);
   try {
     const godot = scratchGodotForTheHelperCopies(scratch);
-    const reading = join(godot, 'operations', 'reading.gd');
-    const copy = join(godot, 'addons', 'gdharness_editor', 'reading.gd');
     syncSharedGdscript(godot);
-    const older = readFileSync(copy, 'utf8');
-    writeFileSync(reading, `${older}# text A\n`);
-    syncSharedGdscript(godot);
-    assert.equal(readFileSync(copy, 'utf8'), `${older}# text A\n`);
-    noteWritten(syncRecordPath(), older);
-    writeFileSync(reading, `${older}# text C\n`);
-    assert.ok(syncSharedGdscript(godot).includes(copy));
-    assert.equal(readFileSync(copy, 'utf8'), `${older}# text C\n`);
-
     const script = pathToFileURL(resolve('scripts', 'sync-shared-gd.ts')).href;
     const code = [
       `import(process.env.SYNC_SCRIPT).then(({ syncSharedGdscript }) => {`,
@@ -90643,6 +90631,33 @@ function testAGodotFolderCopiedFromATreeWithStaleCopiesIsNotRefused(): void {
       [stale, join(treeB, 'addons', 'gdharness_runtime', 'reading.gd')].toSorted(),
     );
     assert.equal(readFileSync(stale, 'utf8'), original);
+  } finally {
+    restoreCache();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A cache folder that cannot be written stops neither the build nor a suite.
+ *
+ * A read-only home, or a container run with no home of its own, leaves nowhere to keep the record.
+ * The copies are still written, and a stale one is taken for stale, since a record nobody can keep
+ * current cannot tell an edit from an old sync.
+ */
+function testAnUnwritableCacheFolderStillWritesTheHelperCopies(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-nocache-'));
+  const restoreCache = pointTheCacheAt(scratch);
+  try {
+    const godot = scratchGodotForTheHelperCopies(scratch);
+    const reading = join(godot, 'operations', 'reading.gd');
+    const copy = join(godot, 'addons', 'gdharness_editor', 'reading.gd');
+    // A file where the cache folder belongs makes every write under it fail on every platform.
+    writeFileSync(join(scratch, 'cache'), 'not a folder\n');
+    assert.equal(syncSharedGdscript(godot).length, sharedCopies(godot).length);
+    assert.equal(readFileSync(copy, 'utf8'), readFileSync(reading, 'utf8'));
+    writeFileSync(reading, `${readFileSync(reading, 'utf8')}# edited with no record\n`);
+    assert.equal(syncSharedGdscript(godot).length, 2);
+    assert.equal(readFileSync(copy, 'utf8'), readFileSync(reading, 'utf8'));
   } finally {
     restoreCache();
     rmSync(scratch, { recursive: true, force: true });
@@ -118134,6 +118149,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes,
   testACleanRecordNotesTheCopiesAlreadyEqualToTheirOriginals,
   testAGodotFolderCopiedFromATreeWithStaleCopiesIsNotRefused,
+  testAnUnwritableCacheFolderStillWritesTheHelperCopies,
   testNoHelperCopyIsTracked,
   testEveryHelperCopyInAnAddonIsListed,
   testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst,

@@ -20,7 +20,8 @@
  * cannot undo each other. The folder gains one empty file per edit of an original and is not pruned,
  * since removing a hash a copy still holds would refuse that copy. Deleting the whole folder is safe.
  * File times judge nothing, since a copy that keeps its source's time or two syncs at once make
- * them lie. Without the folder, as on a machine no sync ran on, a differing copy is taken for stale.
+ * them lie. Without the folder, as on a machine no sync ran on, or with one that cannot be written, a
+ * differing copy is taken for stale.
  * Each file is written to a temporary name and renamed, so a suite starting beside another reads
  * a whole copy.
  *
@@ -89,7 +90,7 @@ function writeWhole(path: string, text: string): void {
 }
 
 /** Notes that the sync wrote or found this text. A file already there is the same note, so it is kept. */
-export function noteWritten(folder: string, text: string): void {
+function noteWritten(folder: string, text: string): void {
   try {
     writeFileSync(join(folder, sha256(text)), '', { flag: 'wx' });
   } catch (error) {
@@ -101,34 +102,48 @@ export function noteWritten(folder: string, text: string): void {
  * Writes each missing or outdated copy and answers the copies it wrote.
  *
  * A copy that differs from its original is stale when the sync wrote its text, and edited by hand
- * otherwise, which stops the sync before anything is written. With no folder of what was written, a
- * copy that differs is taken for stale. A text is noted before any copy holds it and a note is never
+ * otherwise, which stops the sync before any copy is written. With no folder of what was written, or
+ * one that cannot be written, a copy that differs is taken for stale. A text is noted before any copy holds it and a note is never
  * rewritten or removed, so no process can undo another's.
  */
 export function syncSharedGdscript(godot: string = GODOT): string[] {
   const folder = syncRecordPath();
-  const recorded = existsSync(folder);
-  const due: { copy: string; wanted: string }[] = [];
-  const equal: string[] = [];
-  for (const { original, copy } of sharedCopies(godot)) {
-    const wanted = readFileSync(original, 'utf8');
-    const held = existsSync(copy) ? readFileSync(copy, 'utf8') : null;
-    if (held === wanted) {
-      equal.push(held);
-      continue;
-    }
-    if (held !== null && recorded && !existsSync(join(folder, sha256(held)))) {
+  const pairs = sharedCopies(godot).map(({ original, copy }) => ({
+    original,
+    copy,
+    wanted: readFileSync(original, 'utf8'),
+    held: existsSync(copy) ? readFileSync(copy, 'utf8') : null,
+  }));
+  const existed = existsSync(folder);
+  const judged =
+    noteAll(
+      folder,
+      pairs.map(({ wanted }) => wanted),
+    ) && existed;
+  const due = pairs.filter(({ held, wanted }) => held !== wanted);
+  for (const { original, copy, held } of due) {
+    if (held !== null && judged && !existsSync(join(folder, sha256(held)))) {
       throw new Error(
         `${copy} was changed after it was written. It is a copy of ${original}: make the change there, then delete the copy.`,
       );
     }
-    due.push({ copy, wanted });
   }
-  mkdirSync(folder, { recursive: true });
-  for (const text of equal) noteWritten(folder, text);
-  for (const { copy, wanted } of due) {
-    noteWritten(folder, wanted);
-    writeWhole(copy, wanted);
-  }
+  for (const { copy, wanted } of due) writeWhole(copy, wanted);
   return due.map(({ copy }) => copy);
+}
+
+/**
+ * Notes every text the copies are about to hold, answering whether the record took them all.
+ *
+ * A record that cannot be written, as under a read-only home, cannot be kept current either, so it
+ * judges nothing and the sync falls back to taking a differing copy for stale.
+ */
+function noteAll(folder: string, texts: readonly string[]): boolean {
+  try {
+    mkdirSync(folder, { recursive: true });
+    for (const text of texts) noteWritten(folder, text);
+    return true;
+  } catch {
+    return false;
+  }
 }
