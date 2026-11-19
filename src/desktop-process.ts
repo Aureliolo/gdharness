@@ -392,6 +392,8 @@ export class ServedHelper {
   private heard = '';
   /** Settles once every line the helper wrote has been read, which can be after its exit is told. */
   readonly heardAll: Promise<void>;
+  /** Settles once the helper's process has gone, or never ran. */
+  readonly ended: Promise<void>;
 
   constructor(assembly: string) {
     this.assembly = assembly;
@@ -424,6 +426,17 @@ export class ServedHelper {
         this.heard = this.heard.slice(end + 1);
       }
     });
+    this.ended = new Promise((resolve) => {
+      this.process.once('exit', () => {
+        resolve();
+      });
+      // A helper whose spawn failed has no pid and tells only its error, never an exit.
+      this.process.once('error', () => {
+        if (this.process.pid === undefined) {
+          resolve();
+        }
+      });
+    });
     this.process.once('error', (error: Error) => {
       this.gone(new HelperRefused(error.message).message, error);
     });
@@ -436,19 +449,6 @@ export class ServedHelper {
 
   get running(): boolean {
     return this.open;
-  }
-
-  /** Settles once the helper's process has gone. */
-  get ended(): Promise<void> {
-    return new Promise((resolve) => {
-      if (this.process.exitCode !== null || this.process.signalCode !== null) {
-        resolve();
-        return;
-      }
-      this.process.once('exit', () => {
-        resolve();
-      });
-    });
   }
 
   /** How many starts are with the helper. */

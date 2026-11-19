@@ -138,6 +138,7 @@ import {
   throughHelper,
   windowsCommandLine,
 } from '../src/desktop.js';
+import { ServedHelper } from '../src/desktop-process.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import {
   docCacheCrash,
@@ -20701,6 +20702,49 @@ async function testADesktopStartIsOneCall(): Promise<void> {
         process.kill(pid);
       }
     }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A helper whose program is not there tells only its error, never an exit. Its end still arrives,
+ * so retiring it, and the wait of a start it failed, do not hang.
+ */
+async function testAHelperThatNeverRanHasEnded(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-never-ran-'));
+  const settled = async (what: Promise<void>): Promise<boolean> => {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((settle) => {
+      timer = setTimeout(() => {
+        settle(false);
+      }, 5000);
+    });
+    const done = await Promise.race([what.then(() => true), late]);
+    clearTimeout(timer);
+    return done;
+  };
+  try {
+    const missing = join(root, 'no-helper');
+    const helper = new ServedHelper(missing);
+    const failed = new Promise<void>((settle) => {
+      helper.process.once('error', () => {
+        settle();
+      });
+    });
+    assert.ok(await settled(failed), 'a helper that is not there fails to start');
+    assert.ok(await settled(helper.ended), 'a helper that never ran has ended');
+
+    const start = spawnOnDesktop(
+      { directory: root, scratch: root },
+      process.execPath,
+      ['-e', ''],
+      { stdio: 'ignore' },
+      missing,
+    );
+    start.child.on('error', () => undefined);
+    assert.ok(await settled(retireHelper()), 'retiring a helper that never ran returns');
+  } finally {
     await retireHelper();
     sweep(root);
   }
@@ -118793,6 +118837,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
   testADesktopStartIsOneCall,
+  testAHelperThatNeverRanHasEnded,
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
