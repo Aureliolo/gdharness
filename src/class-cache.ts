@@ -16,7 +16,7 @@ import { codeOf, shapeOf } from './gdscript-source.js';
 import { bytesOf } from './listed-reads.js';
 import { walkProject } from './project-walk.js';
 import { isRecord } from './records.js';
-import { readWhole } from './whole-file.js';
+import { readWhole, readWholeAsync } from './whole-file.js';
 
 /**
  * What a `class_name` line looks like, including the annotations that may share it.
@@ -241,7 +241,19 @@ export function scriptsDeclaring(projectPath: string, classes: readonly string[]
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */
 export function cachedClasses(projectPath: string): Map<string, string> | null {
-  const text = readWhole(join(projectPath, '.godot', 'global_script_class_cache.cfg'));
+  return classesIn(readWhole(classCachePath(projectPath)));
+}
+
+/** {@link cachedClasses} for a caller on the event loop. */
+export async function cachedClassesAsync(projectPath: string): Promise<Map<string, string> | null> {
+  return classesIn(await readWholeAsync(classCachePath(projectPath)));
+}
+
+function classCachePath(projectPath: string): string {
+  return join(projectPath, '.godot', 'global_script_class_cache.cfg');
+}
+
+function classesIn(text: string | null): Map<string, string> | null {
   if (text === null) {
     return null;
   }
@@ -257,7 +269,15 @@ export function cachedClasses(projectPath: string): Map<string, string> | null {
  * writes it, or null when there is no cache.
  */
 export function cachedEntries(projectPath: string): Map<string, string> | null {
-  const text = readWhole(join(projectPath, '.godot', 'global_script_class_cache.cfg'));
+  return entriesIn(readWhole(classCachePath(projectPath)));
+}
+
+/** {@link cachedEntries} for a caller on the event loop. */
+export async function cachedEntriesAsync(projectPath: string): Promise<Map<string, string> | null> {
+  return entriesIn(await readWholeAsync(classCachePath(projectPath)));
+}
+
+function entriesIn(text: string | null): Map<string, string> | null {
   if (text === null) {
     return null;
   }

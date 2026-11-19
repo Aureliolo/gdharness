@@ -4617,10 +4617,10 @@ async function openAsked(project: string): Promise<string> {
   return outcome.refused;
 }
 
-function setRestartNote(project: string, underway: boolean): void {
+async function setRestartNote(project: string, underway: boolean): Promise<void> {
   rmSync(restartNotePath(project), { force: true });
   if (underway) {
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: null,
       ports: { lsp: 6005, dap: 6006 },
@@ -4671,7 +4671,7 @@ async function everyOpenEnds(): Promise<void> {
           }
           if (step.under !== held.restarting) {
             held.restarting = step.under;
-            setRestartNote(project, held.restarting);
+            await setRestartNote(project, held.restarting);
           }
           await opensAreRefusedWithTheirCause(project, step, held);
         }

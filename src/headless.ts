@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { cachedClasses } from './class-cache.js';
+import { cachedClasses, cachedClassesAsync } from './class-cache.js';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
@@ -18,7 +18,7 @@ import type { Sample } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
-import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
+import { freeLibraryCopiesAsync, seedExtensionList } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
 import { forceNextImport } from './reimport.js';
@@ -421,7 +421,7 @@ export async function runImport(
     for (const target of options.forcing ?? []) {
       forceNextImport(projectPath, target);
     }
-    freeLibraryCopies(projectPath);
+    await freeLibraryCopiesAsync(projectPath);
     const cachesBefore = docCachesWritten(caches);
     const ran = await engine(['--headless', '--path', projectPath, '--import']);
     return judgeImport(ran, docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import'));
@@ -525,7 +525,7 @@ export async function runOperation(
   // Read before the engine starts, since every start first drops the entries whose script is gone,
   // and the rebuild could then answer them neither as removed nor, moved to another declarer, as
   // changed.
-  const listedBefore = operation === REFRESH_CLASS_LIST ? cachedClasses(projectPath) : null;
+  const listedBefore = operation === REFRESH_CLASS_LIST ? await cachedClassesAsync(projectPath) : null;
   const run = await operationOutcome(engine, operation, params, projectPath);
   const outcome = listedBefore === null ? run : answeredAgainst(run, listedBefore, projectPath);
   const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>

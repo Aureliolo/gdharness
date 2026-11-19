@@ -35,7 +35,7 @@ import { isRecord } from './records.js';
 import { ClassGraph, type ClassId, declaredIn, fileOf, Script } from './rename.js';
 import { parseProjectGodot } from './resources.js';
 import { RUNTIME_AUTOLOAD } from './setup.js';
-import { writeWhole } from './whole-file.js';
+import { writeWhole, writeWholeAsync } from './whole-file.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
 interface FunctionTotals {
@@ -666,6 +666,11 @@ export interface ProfileMark {
 /** Writes [param mark] whole, and answers whether it did. */
 export function writeProfileMark(path: string, mark: ProfileMark): boolean {
   return writeWhole(path, JSON.stringify(mark));
+}
+
+/** {@link writeProfileMark} for a caller on the event loop. */
+export async function writeProfileMarkAsync(path: string, mark: ProfileMark): Promise<boolean> {
+  return await writeWholeAsync(path, JSON.stringify(mark));
 }
 
 /** The mark at [param path], or null where there is none or it cannot be read. */

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { walkProject } from './project-walk.js';
-import { readWhole } from './whole-file.js';
+import { readWhole, readWholeAsync } from './whole-file.js';
 
 /** What freeing a project's library copies did, for the debug log. */
 interface FreedCopies {
@@ -31,12 +31,23 @@ export function freeLibraryCopies(
   projectPath: string,
   platform: NodeJS.Platform = process.platform,
 ): FreedCopies {
+  return platform === 'win32' ? freeCopiesOf(windowsLibraries(projectPath)) : { setAside: [], swept: [] };
+}
+
+/** {@link freeLibraryCopies} for a caller on the event loop, whose reads of a held manifest wait on a timer. */
+export async function freeLibraryCopiesAsync(
+  projectPath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<FreedCopies> {
+  return platform === 'win32'
+    ? freeCopiesOf(await windowsLibrariesAsync(projectPath))
+    : { setAside: [], swept: [] };
+}
+
+function freeCopiesOf(libraries: readonly string[]): FreedCopies {
   const setAside: string[] = [];
   const swept: string[] = [];
-  if (platform !== 'win32') {
-    return { setAside, swept };
-  }
-  for (const library of windowsLibraries(projectPath)) {
+  for (const library of libraries) {
     const folder = dirname(library);
     const copy = `~${basename(library)}`;
     const aside = setAsideCopy(folder, copy);
@@ -166,22 +177,49 @@ export function unlistedExtensions(projectPath: string): string[] {
  * `.godot/extension_list.cfg` lists. A project no editor has opened has no list and no copies.
  */
 function windowsLibraries(projectPath: string): string[] {
-  const listed = readWhole(join(projectPath, '.godot', 'extension_list.cfg'));
-  if (listed === null) {
-    return [];
-  }
   const libraries = new Set<string>();
-  for (const line of listed.split(/\r?\n/)) {
-    const manifest = resolveResource(projectPath, projectPath, line.trim());
-    const text = manifest === null ? null : readWhole(manifest);
-    if (manifest === null || text === null) {
-      continue;
-    }
-    for (const library of manifestLibraries(projectPath, manifest, text)) {
-      libraries.add(library);
-    }
+  for (const manifest of manifestsListed(projectPath, readWhole(listPath(projectPath)))) {
+    addLibraries(libraries, projectPath, manifest, readWhole(manifest));
   }
   return [...libraries];
+}
+
+async function windowsLibrariesAsync(projectPath: string): Promise<string[]> {
+  const libraries = new Set<string>();
+  for (const manifest of manifestsListed(projectPath, await readWholeAsync(listPath(projectPath)))) {
+    addLibraries(libraries, projectPath, manifest, await readWholeAsync(manifest));
+  }
+  return [...libraries];
+}
+
+function listPath(projectPath: string): string {
+  return join(projectPath, '.godot', 'extension_list.cfg');
+}
+
+/** The manifests of the extension list's text, as absolute paths, or none when there is no list. */
+function manifestsListed(projectPath: string, listed: string | null): string[] {
+  const manifests: string[] = [];
+  for (const line of listed?.split(/\r?\n/) ?? []) {
+    const manifest = resolveResource(projectPath, projectPath, line.trim());
+    if (manifest !== null) {
+      manifests.push(manifest);
+    }
+  }
+  return manifests;
+}
+
+function addLibraries(
+  libraries: Set<string>,
+  projectPath: string,
+  manifest: string,
+  text: string | null,
+): void {
+  if (text === null) {
+    return;
+  }
+  for (const library of manifestLibraries(projectPath, manifest, text)) {
+    libraries.add(library);
+  }
 }
 
 /** The Windows libraries the `[libraries]` section of the manifest at [param manifest] names, in order. */

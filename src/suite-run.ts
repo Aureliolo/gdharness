@@ -115,6 +115,7 @@ import {
   viewportOf,
   windowedSaid,
   writeJson,
+  writeJsonAsync,
 } from './suite-plan.js';
 import { Turns } from './turns.js';
 import { getLocalVersion } from './version.js';
@@ -2044,7 +2045,7 @@ async function compiledUnlessKept(
   const compiled = await compileCheck(launch, suites, handed, memory);
   const after = compiledPrint(kept, launch.projectPath, suites);
   if (compiled.faults.length === 0 && !after.inputs.modifiedAfter(after.read, began)) {
-    writeJson(kept.file, { print: after.print });
+    await writeJsonAsync(kept.file, { print: after.print });
   } else {
     rmSync(kept.file, { force: true });
   }

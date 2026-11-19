@@ -1,10 +1,10 @@
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
 import { realAsFarAsItExists, relativeWithin } from './paths.js';
 import { isRecord } from './records.js';
-import { writeWhole } from './whole-file.js';
+import { removeWhole, removeWholeAsync, writeWhole, writeWholeAsync } from './whole-file.js';
 
 /**
  * The breakpoints set through this server, written down in the project.
@@ -35,6 +35,37 @@ export function breakpointNotePath(projectPath: string): string {
  */
 export function writeBreakpointNote(projectPath: string, held: readonly HeldBreakpoint[]): void {
   const path = breakpointNotePath(projectPath);
+  try {
+    const text = noteTextOf(projectPath, held, path);
+    if (!(text === null ? removeWhole(path) : writeWhole(path, text))) {
+      console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
+    }
+  } catch (error) {
+    console.error(`[SERVER] Could not record the breakpoints at ${path}: ${errorMessage(error)}`);
+  }
+}
+
+/** {@link writeBreakpointNote} for a caller on the event loop. */
+export async function writeBreakpointNoteAsync(
+  projectPath: string,
+  held: readonly HeldBreakpoint[],
+): Promise<void> {
+  const path = breakpointNotePath(projectPath);
+  try {
+    const text = noteTextOf(projectPath, held, path);
+    if (!(await (text === null ? removeWholeAsync(path) : writeWholeAsync(path, text)))) {
+      console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
+    }
+  } catch (error) {
+    console.error(`[SERVER] Could not record the breakpoints at ${path}: ${errorMessage(error)}`);
+  }
+}
+
+/**
+ * The text of the note for [param held], with the folder made for it, or null once the note is
+ * to be taken down because nothing is held inside the project.
+ */
+function noteTextOf(projectPath: string, held: readonly HeldBreakpoint[], path: string): string | null {
   // Spelt as debug_breakpoint spells it, the project resolved and the path below it as written:
   // on macOS every /var/folders project is really under /private/var/folders, and a file compared
   // against the unresolved root reads as outside it. A path elsewhere is resolved to be compared.
@@ -46,24 +77,17 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
       lines: one.lines,
     }))
     .filter((one) => one.lines.length > 0 && withinProject(root, one.scriptPath));
-  try {
-    if (inside.length === 0) {
-      rmSync(path, { force: true });
-      return;
-    }
-    const note: BreakpointNote = {
-      breakpoints: inside.map((one) => ({
-        script: relative(root, one.scriptPath).replaceAll('\\', '/'),
-        lines: [...one.lines],
-      })),
-    };
-    mkdirSync(dirname(path), { recursive: true });
-    if (!writeWhole(path, `${JSON.stringify(note, null, 2)}\n`)) {
-      console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
-    }
-  } catch (error) {
-    console.error(`[SERVER] Could not record the breakpoints at ${path}: ${errorMessage(error)}`);
+  if (inside.length === 0) {
+    return null;
   }
+  const note: BreakpointNote = {
+    breakpoints: inside.map((one) => ({
+      script: relative(root, one.scriptPath).replaceAll('\\', '/'),
+      lines: [...one.lines],
+    })),
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  return `${JSON.stringify(note, null, 2)}\n`;
 }
 
 /**

@@ -86,6 +86,7 @@ import {
 } from './slot-delegate.js';
 import { Turns } from './turns.js';
 import {
+  changeWholeAsync,
   madeInPlace,
   makeWhole,
   readWhole,
@@ -1649,7 +1650,10 @@ export class EngineSlots {
    * take first are left to them. It records the slots it left for them in the draw.
    */
   private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateLook>): Promise<number[]> {
-    const drawnBefore = this.drawn.numbers;
+    // The draw of this take, held across the awaits below: another take of the process may record
+    // its own in the field meanwhile.
+    const drawn = this.drawn;
+    const drawnBefore = drawn.numbers;
     const now = Date.now();
     const waiting = await slotWaitersAsync(this.directory);
     for (const mark of this.passedOver.keys()) {
@@ -1667,9 +1671,9 @@ export class EngineSlots {
       }
     }
     const tried = placed.admitted(drawnBefore, new Set(claims.keys()));
-    const left = placed.leaves().filter((slot) => this.drawn.numbers.includes(slot) && !tried.includes(slot));
-    if (left.length > 0) {
-      this.drawn = { ...this.drawn, left };
+    const left = placed.leaves().filter((slot) => drawnBefore.includes(slot) && !tried.includes(slot));
+    if (left.length > 0 && this.drawn === drawn) {
+      this.drawn = { ...drawn, left };
     }
     return tried;
   }
@@ -2297,14 +2301,11 @@ export async function takenOverUnderSteal(
  * rule every lock is judged by. Renamed over the lock, so a taker reading it never finds it empty.
  */
 export async function handSlot(lock: string, from: number, to: SlotHolder): Promise<boolean> {
-  let content: string | null;
   try {
-    content = await readWholeAsync(lock);
+    return await changeWholeAsync(lock, (content) => handedText(content, from, to));
   } catch {
     return false;
   }
-  const text = handedText(content, from, to);
-  return text !== null && (await writeWholeAsync(lock, text));
 }
 
 /** What a lock that read as [param content] holds once handed from [param from] to [param to], or null. */
@@ -2319,14 +2320,12 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
  * names [param holder]. Answers whether it did. Renamed over the lock, as {@link handSlot} is.
  */
 export async function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): Promise<boolean> {
-  let content: string | null;
   try {
-    content = await readWholeAsync(lock);
+    // Read in the naming's turn, so a lock given back ahead of it is not made again.
+    return await changeWholeAsync(lock, (content) => namedText(content, holder, engine));
   } catch {
     return false;
   }
-  const text = namedText(content, holder, engine);
-  return text !== null && (await writeWholeAsync(lock, text));
 }
 
 /** What a lock that read as [param content] holds once it names [param engine], or null. */

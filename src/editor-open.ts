@@ -19,7 +19,7 @@ import {
 } from './editor-log.js';
 import { EngineUsageError } from './errors.js';
 import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
-import { freeLibraryCopies } from './library-copies.js';
+import { freeLibraryCopiesAsync } from './library-copies.js';
 import { DEFAULT_LSP_PORT } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
 import { commandProjectRefusal, isGodotProject } from './paths.js';
@@ -217,7 +217,7 @@ export async function openEditorProcess(
 ): Promise<EditorOpened> {
   clearEditorLog(projectPath);
   // An editor being restarted may not have let its library copies go yet.
-  freeLibraryCopies(projectPath);
+  await freeLibraryCopiesAsync(projectPath);
   if (start.hidden) {
     const unplaced = await placeEmptyScriptDocs(engine, projectPath);
     if (unplaced !== null) {

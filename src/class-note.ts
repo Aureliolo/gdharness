@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { asParams, readArray, readNumber } from './tool-args.js';
-import { writeWhole } from './whole-file.js';
+import { changeWholeAsync } from './whole-file.js';
 
 /**
  * What a server learned about a project's class cache and the editor writing it, kept in the
@@ -46,7 +46,16 @@ export function classNotePath(projectPath: string): string {
 /** The note as written, or null for a file that is missing, unreadable or not this shape. */
 export function readClassNote(projectPath: string): ClassNote | null {
   try {
-    const fields = asParams(JSON.parse(readFileSync(classNotePath(projectPath), 'utf8')));
+    return classNoteIn(readFileSync(classNotePath(projectPath), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** The note [param text] holds, or null for no text or one that is not this shape. */
+function classNoteIn(text: string | null): ClassNote | null {
+  try {
+    const fields = asParams(JSON.parse(text ?? ''));
     const rebuiltWith = readArray(fields, 'rebuiltWith');
     if (rebuiltWith === undefined || !rebuiltWith.every((name) => typeof name === 'string')) {
       return null;
@@ -76,17 +85,37 @@ function unfinishedScanIn(value: unknown): UnfinishedScan | null {
 }
 
 /**
- * Writes [param note] for [param projectPath], whole, since the next server reads it while this
- * one may be writing. A project that cannot be written into is forgotten again.
+ * Replaces the note of [param projectPath] with what [param change] makes of the note as it is when
+ * the update's turn comes, or leaves it when that is null. Updates of one project run one after the
+ * other: each reads the note after the one before it has written, since a write that waits on a
+ * reader leaves the next to read the note as it was and write over the change.
+ *
+ * Written whole, since the next server reads it while this one may be writing. A project that
+ * cannot be written into is forgotten again, and a note that cannot be read leaves the call as it
+ * is, without a throw.
  */
-export function writeClassNote(projectPath: string, note: ClassNote): void {
+export async function updateClassNote(
+  projectPath: string,
+  change: (note: ClassNote | null) => ClassNote | null,
+): Promise<void> {
   const path = classNotePath(projectPath);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-  } catch {
-    return;
-  }
   // The next server learns it afresh when the write does not land, which is what it did before
   // there was a note.
-  writeWhole(path, `${JSON.stringify(note, null, 2)}\n`);
+  try {
+    await changeWholeAsync(path, (text) => {
+      const changed = change(classNoteIn(text));
+      if (changed === null) {
+        return null;
+      }
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+      } catch {
+        return null;
+      }
+      return `${JSON.stringify(changed, null, 2)}\n`;
+    });
+  } catch {
+    // A note that cannot be read for good, such as a folder at its path, cannot be replaced either.
+    // Callers have already done what the note records, so they carry on without it.
+  }
 }

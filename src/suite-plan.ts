@@ -15,7 +15,7 @@ import { type ClassBody, codeOf, shapeOf } from './gdscript-source.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
 import type { HandedSuite, RowShare, RunPrinted } from './suite-judge.js';
-import { writeWhole } from './whole-file.js';
+import { writeWhole, writeWholeAsync } from './whole-file.js';
 
 /** The class every gdUnit4 suite extends, by name. */
 const SUITE_BASE = 'GdUnitTestSuite';
@@ -515,6 +515,16 @@ export function writeJson(file: string, value: unknown): boolean {
     return false;
   }
   return writeWhole(file, `${JSON.stringify(value, null, 1)}\n`);
+}
+
+/** {@link writeJson} for a caller on the event loop. */
+export async function writeJsonAsync(file: string, value: unknown): Promise<boolean> {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+  } catch {
+    return false;
+  }
+  return await writeWholeAsync(file, `${JSON.stringify(value, null, 1)}\n`);
 }
 
 /**

@@ -47,10 +47,16 @@ import {
   LONGEST_SIZED_WAIT_MS,
   MAIN_SCENE,
   readBootNote,
+  readBootNoteAsync,
   waitSizedTo,
   writeBootNote,
 } from '../src/boot-note.js';
-import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
+import {
+  breakpointNotePath,
+  readBreakpointNote,
+  writeBreakpointNote,
+  writeBreakpointNoteAsync,
+} from '../src/breakpoint-note.js';
 import {
   announceBridge,
   announcementPath,
@@ -71,6 +77,7 @@ import {
 import {
   type Contradicted,
   cachedClasses,
+  cachedClassesAsync,
   cacheWrittenAt,
   classDeclarers,
   classesNamedIn,
@@ -95,7 +102,7 @@ import {
   unseenByEditor,
   withAddonClassesCounted,
 } from '../src/class-cache.js';
-import { classNotePath, readClassNote } from '../src/class-note.js';
+import { classNotePath, readClassNote, updateClassNote } from '../src/class-note.js';
 import { CompiledHelper } from '../src/compiled-helper.js';
 import {
   parsedYamlHas,
@@ -107,7 +114,13 @@ import {
   writeYaml,
 } from '../src/config-formats.js';
 import { configDisagrees } from '../src/config-pin.js';
-import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
+import {
+  type CutTestRun,
+  cutTestRunNote,
+  keepCutTestRun,
+  keepCutTestRunAsync,
+  takeCutTestRun,
+} from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
   type DesktopStart,
@@ -203,6 +216,7 @@ import {
   gamesKeptOf,
   giveBackSlot,
   handedRunSlot,
+  handSlot,
   handSlotToGame,
   handSlotToKeeper,
   holderOf,
@@ -379,7 +393,12 @@ import {
   startedAs,
   userDataIn,
 } from '../src/launch.js';
-import { freeLibraryCopies, isLibraryCopy, seedExtensionList } from '../src/library-copies.js';
+import {
+  freeLibraryCopies,
+  freeLibraryCopiesAsync,
+  isLibraryCopy,
+  seedExtensionList,
+} from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import { bytesOf, entriesOf, contentOf as listedContentOf, statOf } from '../src/listed-reads.js';
 import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
@@ -496,7 +515,7 @@ import {
 } from '../src/rename-symbol.js';
 import { repositoryNameOf } from '../src/repository.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
-import { noteRestartBegun, restartNotePath, restartOwed } from '../src/restart-note.js';
+import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
   amendRunRecord,
   clearRunRecord,
@@ -571,6 +590,7 @@ import {
   withEngineArguments,
   writeProfileFile,
   writeProfileMark,
+  writeProfileMarkAsync,
 } from '../src/script-profile.js';
 import {
   aboveTheRunner,
@@ -754,6 +774,7 @@ import {
   windowedSaid,
   windowNeedsOf,
   writeJson,
+  writeJsonAsync,
 } from '../src/suite-plan.js';
 import {
   type Admitted,
@@ -824,7 +845,14 @@ import {
 } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
-import { makeWhole, writeWhole } from '../src/whole-file.js';
+import {
+  makeWhole,
+  notesInTurn,
+  removeWhole,
+  removeWholeAsync,
+  writeWhole,
+  writeWholeAsync,
+} from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import {
@@ -7587,11 +7615,11 @@ function testTheBreakpointNoteIsTheProjects(): void {
 
 // A reader landing on a note mid-write would meet half a file, so each rewrite replaces the file
 // rather than the bytes in it. A hard link to the old file keeps the old bytes only if it did.
-function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
+async function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): Promise<void> {
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-notes-')));
   let count = 0;
   const script = join(project, 'a.gd');
-  const notes: [string, string, () => void][] = [
+  const notes: [string, string, () => unknown][] = [
     [
       'boot note',
       bootNotePath(project),
@@ -7609,9 +7637,7 @@ function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
     [
       'bridge announcement',
       announcementPath(project),
-      () => {
-        announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' });
-      },
+      () => announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' }),
     ],
     [
       'cut run',
@@ -7624,11 +7650,11 @@ function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
   try {
     for (const [said, path, write] of notes) {
       count += 1;
-      write();
+      await write();
       const first = readFileSync(path, 'utf8');
       linkSync(path, `${path}.link`);
       count += 1;
-      write();
+      await write();
       const second = readFileSync(path, 'utf8');
       assert.notEqual(second, first, `${said}: the second write landed`);
       assert.equal(
@@ -8164,7 +8190,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
  * half. A write that cannot be finished leaves the note that was there, and a finished one leaves
  * no temporary file beside it.
  */
-function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
+async function testTheRestartNoteIsReplacedWholeOrNotAtAll(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-note-'));
   const note = (editorPid: number): Parameters<typeof noteRestartBegun>[0] => ({
     projectPath: project,
@@ -8174,9 +8200,9 @@ function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
     byPid: 1,
   });
   try {
-    noteRestartBegun(note(111));
+    await noteRestartBegun(note(111));
     assert.equal(restartOwed(project)?.editorPid, 111);
-    noteRestartBegun(note(222));
+    await noteRestartBegun(note(222));
     assert.equal(restartOwed(project)?.editorPid, 222, 'a second note replaces the first');
     assert.deepEqual(
       readdirSync(dirname(restartNotePath(project))),
@@ -8192,7 +8218,7 @@ function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
       logged.push(said);
     };
     try {
-      noteRestartBegun(note(333));
+      await noteRestartBegun(note(333));
     } finally {
       console.error = error;
     }
@@ -8246,7 +8272,7 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
     mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
     // A server that has gone, so the note reads as a restart left unfinished rather than one under way.
     const ended = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
       ports: { lsp: 6005, dap: 6006 },
@@ -9042,7 +9068,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     mkdirSync(addon, { recursive: true });
     writeFileSync(join(project, 'project.godot'), enabled);
     // What the predecessor wrote before asking its editor to quit.
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
       ports: { lsp: 6005, dap: 6006 },
@@ -9076,8 +9102,8 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
       textOf(
         await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'open', projectPath } }),
       ) ?? '';
-    const begun = (byPid: number, quitAt: string): void => {
-      noteRestartBegun({
+    const begun = async (byPid: number, quitAt: string): Promise<void> => {
+      await noteRestartBegun({
         projectPath: project,
         editorPid: 27040,
         ports: { lsp: 6005, dap: 6006 },
@@ -9088,7 +9114,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
 
     // A writer that answers is not enough: no restart lasts days, so a pid answering under a note
     // that old is a process that reused the number, and the restart it names is over.
-    begun(process.pid, '2026-09-20T19:39:30.000Z');
+    await begun(process.pid, '2026-09-20T19:39:30.000Z');
     const reused = await editorOf();
     assert.equal(get(reused, 'restartInterrupted', 'byServerPid'), process.pid, JSON.stringify(reused));
     assert.equal(get(reused, 'restartUnderway'), undefined, JSON.stringify(reused));
@@ -9097,7 +9123,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     // Nor is a young note: the server that wrote this one has gone, so nothing will launch.
     const ended = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
     assert.ok(ended > 0 && !alive(ended), 'the fixture needs a pid that has gone');
-    begun(ended, new Date().toISOString());
+    await begun(ended, new Date().toISOString());
     const orphaned = await editorOf();
     assert.equal(get(orphaned, 'restartInterrupted', 'byServerPid'), ended, JSON.stringify(orphaned));
     assert.equal(get(orphaned, 'restartUnderway'), undefined, JSON.stringify(orphaned));
@@ -9105,7 +9131,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
 
     // Young and its writer here, which is what a status asked in the gap of a restart reads: the
     // editor is coming, from the restart, and another launch would be a second editor beside it.
-    begun(process.pid, new Date().toISOString());
+    await begun(process.pid, new Date().toISOString());
     const coming = await editorOf();
     assert.equal(
       get(coming, 'restartInterrupted'),
@@ -9152,7 +9178,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
 
     // An editor arriving settles it, whoever opened it: the note is gone from disk, not merely
     // unreported, so the server after this one does not report a debt that was paid.
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: 27040,
       ports: { lsp: 6005, dap: 6006 },
@@ -10891,7 +10917,7 @@ async function testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart():
       'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
     );
     const options = { projectPath: project, start: { hidden: false, silent: true, until: null } };
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: null,
       ports: { lsp: 6005, dap: 6006 },
@@ -66427,31 +66453,11 @@ async function heldOpenByAReader(
 }
 
 /**
- * Waits until two samples a second apart show the machine under 60% busy at every reading for 30 s,
- * as [method samplesReadAChildWatchedForMemory] works the share out. Answers null once it is, and the
- * last busy share when it was not within three minutes.
+ * The widest gap between the loop's 20 ms ticks that a wait on a held file may cost. The fault is a
+ * call that sleeps the thread for its whole second, a gap of about 1000 ms, so 700 fails it and
+ * leaves a loaded machine 680 ms of stall. No case waits for a quiet processor.
  */
-async function untilTheProcessorIsQuiet(): Promise<number | null> {
-  const giveUp = Date.now() + 180_000;
-  let quietSince: number | undefined;
-  let share = 1;
-  let before = await sampled();
-  while (Date.now() < giveUp) {
-    await delay(1100);
-    const after = await sampled();
-    share = (after.machine - before.machine) / ((after.at - before.at) * availableParallelism());
-    before = after;
-    if (share >= 0.6) {
-      quietSince = undefined;
-    } else {
-      quietSince ??= Date.now();
-      if (Date.now() - quietSince >= 30_000) {
-        return null;
-      }
-    }
-  }
-  return share;
-}
+const HELD_FILE_WIDEST_GAP_MS = 700;
 
 /**
  * Runs [param call], which takes over the dead [param lock] in [param directory] while a reader holds
@@ -66496,7 +66502,7 @@ async function aHeldDeadLockIsTakenOverOnceLetGo(
       `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
     );
     assert.ok(
-      watched.widest <= 500,
+      watched.widest < HELD_FILE_WIDEST_GAP_MS,
       `${caller} leaves the process free to run: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
     );
   } finally {
@@ -66518,15 +66524,6 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
     console.log(
       'held-lock takeover regression ran on Windows alone: elsewhere a reader holds no removal back',
     );
-    return;
-  }
-  const busy = await untilTheProcessorIsQuiet();
-  if (busy !== null) {
-    const said = 'held-lock takeover regression skipped: the processor never stayed under 60% for 30 s';
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error(`${said}, the last busy share was ${String(busy)}`);
-    }
-    console.log(said);
     return;
   }
   const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
@@ -66562,49 +66559,568 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
 
 /**
  * A slot file a reader holds shut is waited on without stopping the process: the read retries on a
- * timer for its second and then refuses, and the loop ticks under 100 ms apart meanwhile. Windows
+ * timer for its second and then refuses, and the loop keeps ticking meanwhile. Windows
  * alone, where an open that shares nothing refuses every other open.
  */
 async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'a slot file',
+    (project) => join(project, 'lanes.json'),
+    async (project, file) => {
+      await new EngineSlots(project, 1, { pid: process.pid, started: await ownStart() }).countIn(
+        file,
+        'lanes',
+      );
+    },
+    true,
+  );
+}
+
+/**
+ * Holds the note that [param noteIn] places in a scratch project shut for 3 s from a hidden child
+ * that shares nothing, calls [param call] with the project and the note, and asserts the process
+ * keeps ticking while the call waits its second: the widest gap stays under
+ * {@link HELD_FILE_WIDEST_GAP_MS}. A call that [param refuses] must throw once the second is spent.
+ * Windows alone.
+ */
+async function aNoteHeldShutLeavesTheLoopRunning(
+  what: string,
+  noteIn: (project: string) => string,
+  call: (project: string, file: string) => Promise<unknown>,
+  refuses = false,
+): Promise<void> {
   if (process.platform !== 'win32') {
-    console.log('held-file wait regression ran on Windows alone: elsewhere no open shuts another out');
+    console.log(`held ${what} regression ran on Windows alone: elsewhere no open shuts another out`);
     return;
   }
-  const busy = await untilTheProcessorIsQuiet();
-  if (busy !== null) {
-    const said = 'held-file wait regression skipped: the processor never stayed under 60% for 30 s';
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error(`${said}, the last busy share was ${String(busy)}`);
-    }
-    console.log(said);
-    return;
-  }
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
-  const file = join(directory, 'lanes.json');
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-note-'));
+  const file = noteIn(directory);
+  mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ pid: process.pid, started: await ownStart(), count: 2 }));
   const reader = await heldOpenByAReader(file, 'ReadWrite', 3000, 'None');
   const loop = await watchTheLoop();
   const began = Date.now();
   let refusal = '';
   try {
-    await new EngineSlots(directory, 1, { pid: process.pid, started: await ownStart() }).countIn(
-      file,
-      'lanes',
-    );
+    await call(directory, file);
   } catch (error) {
+    // A read held shut past its second refuses, and a write answers that it could not land.
     refusal = errorMessage(error);
   } finally {
     const waited = Date.now() - began;
     const watched = await loop.stop();
     await reader.letGo();
     rmSync(directory, { recursive: true, force: true });
-    assert.ok(refusal !== '', 'a file held shut past the second refuses the read');
-    assert.ok(waited >= 900, `and only after the second it waits: ${String(waited)} ms`);
+    assert.ok(waited >= 900, `${what} is waited on for its second: ${String(waited)} ms`);
     assert.ok(
-      watched.widest < 100,
-      `the process runs while it waits: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
+      watched.widest < HELD_FILE_WIDEST_GAP_MS,
+      `the process runs while ${what} is held shut: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
     );
+    if (refuses) {
+      assert.ok(refusal !== '', `${what} held shut past the second refuses the read`);
+    }
   }
+}
+
+/** The boot note a reader holds shut is waited on without stopping the process. */
+async function testABootNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('a boot note', bootNotePath, async (project) => {
+    await readBootNoteAsync(project, MAIN_SCENE);
+  });
+}
+
+/** The class cache a reader holds shut is waited on without stopping the process. */
+async function testAClassCacheHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the class cache',
+    (project) => join(project, '.godot', 'global_script_class_cache.cfg'),
+    async (project) => {
+      await cachedClassesAsync(project);
+    },
+  );
+}
+
+/** The bridge announcement a reader holds shut is waited on without stopping the process. */
+async function testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the bridge announcement', announcementPath, async (project) => {
+    await announceBridge(project, { host: '127.0.0.1', port: 6000, version: '1.0.0' });
+  });
+}
+
+/** The class note a reader holds shut is waited on without stopping the process. */
+async function testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the class note', classNotePath, async (project) => {
+    await updateClassNote(project, () => ({ rebuiltWith: [] }));
+  });
+}
+
+/** The restart note a reader holds shut is waited on without stopping the process. */
+async function testARestartNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the restart note', restartNotePath, async (project) => {
+    await noteRestartBegun({
+      projectPath: project,
+      editorPid: null,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: '2026-10-08T11:42:49.000Z',
+      byPid: 1,
+    });
+  });
+}
+
+/** The breakpoint note a reader holds shut is waited on without stopping the process. */
+async function testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning('the breakpoint note', breakpointNotePath, async (project) => {
+    await writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
+  });
+}
+
+/**
+ * Runs [param body] with [param file] held by a reader that allows reads and writes but no rename or
+ * removal, for [param forMs]. Windows alone, where a rename over an open file is refused.
+ */
+async function withAHeldNote(
+  file: string,
+  forMs: number,
+  body: (pause: () => Promise<void>) => Promise<void>,
+): Promise<void> {
+  const reader = await heldOpenByAReader(file, 'Read', forMs, 'ReadWrite');
+  try {
+    await body(() => new Promise((settle) => setTimeout(settle, 100)));
+  } finally {
+    await reader.letGo();
+  }
+}
+
+/** A slot given back while an engine is being named in it stays given back. */
+async function testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held slot regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-given-back-'));
+  try {
+    const lock = join(directory, '0.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    await withAHeldNote(lock, 500, async (pause) => {
+      const named = nameSlotEngine(lock, process.pid, { pid: 4242, started: 1 });
+      await pause();
+      giveBackSlot(lock, process.pid);
+      await named;
+    });
+    assert.equal(existsSync(lock), false, 'the lock given back is not made again by the naming');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A breakpoint cleared while an earlier write of the note waits stays cleared. */
+async function testABreakpointClearedWhileAnEarlierWriteWaitsStaysCleared(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held breakpoint note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cleared-'));
+  try {
+    const note = breakpointNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, '{"breakpoints":[]}\n');
+    await withAHeldNote(note, 500, async (pause) => {
+      const written = writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
+      await pause();
+      writeBreakpointNote(project, []);
+      await written;
+    });
+    assert.equal(
+      existsSync(note),
+      false,
+      'the note cleared stays cleared once the earlier write is let through',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** Two writes of one note at once both answer that they landed, the second's text stays and no partial is left. */
+async function testTwoWritesOfOneNoteAtOnceBothLandInOrder(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-two-writes-'));
+  try {
+    const note = join(directory, 'note.json');
+    writeFileSync(note, 'old');
+    const answers: boolean[] = [];
+    await withAHeldNote(note, 500, async (pause) => {
+      const first = writeWholeAsync(note, 'first');
+      await pause();
+      const second = writeWholeAsync(note, 'second');
+      answers.push(await first, await second);
+    });
+    assert.deepEqual(answers, [true, true]);
+    assert.equal(readFileSync(note, 'utf8'), 'second');
+    assert.deepEqual(readdirSync(directory), ['note.json'], 'no partial file is left beside the note');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A removal waiting on a reader, then a write made in the moment the reader lets go: the removal's
+ * next try must not take the write away. The loop is stalled after the let-go, so the removal's
+ * timer cannot fire before the write is made.
+ */
+async function testAWriteMadeAfterARemovalWaitsIsNotRemovedByIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held removal regression ran on Windows alone: elsewhere no removal is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-removal-'));
+  try {
+    const note = join(directory, 'note.json');
+    writeFileSync(note, 'old');
+    const reader = await heldOpenByAReader(note, 'Read');
+    try {
+      const removed = removeWholeAsync(note);
+      await new Promise((settle) => setTimeout(settle, 100));
+      const letGo = reader.letGo();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      const written = writeWholeAsync(note, 'later');
+      await Promise.all([letGo, removed, written]);
+    } finally {
+      await reader.letGo();
+    }
+    assert.equal(existsSync(note), true, 'the write made after the removal began is not removed by it');
+    assert.equal(readFileSync(note, 'utf8'), 'later');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A restart settled while the note of its beginning waits on a reader leaves no note behind. */
+async function testARestartSettledWhileTheNoteWaitsStaysSettled(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held restart note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-settled-'));
+  try {
+    const note = restartNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, '{}\n');
+    await withAHeldNote(note, 500, async (pause) => {
+      const begun = noteRestartBegun({
+        projectPath: project,
+        editorPid: 1,
+        ports: { lsp: 6005, dap: 6006 },
+        quitAt: '2026-10-08T11:42:49.000Z',
+        byPid: 1,
+      });
+      await pause();
+      restartSettled(project);
+      await begun;
+    });
+    assert.equal(
+      existsSync(note),
+      false,
+      'the note settled stays settled once the earlier write is let through',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two marks of one run set 300 ms apart, while a reader holds the mark file past both waits: each
+ * answers what became of its own mark. A mark that never landed answered that it was set.
+ */
+async function testAMarkSetBesideALaterOneAnswersWhatBecameOfIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held mark regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-two-marks-'));
+  const file = join(directory, 'mark.json');
+  const markAt = (takenAt: number): Parameters<typeof writeProfileMarkAsync>[1] => ({
+    takenAt,
+    projectPath: null,
+    runStartedAt: 0,
+    coveredMs: 0,
+    totals: { startedAt: 0, lastFrameAt: null, frames: 0, complete: false, unreadable: 0, functions: {} },
+  });
+  writeFileSync(file, JSON.stringify(markAt(1)));
+  const reader = await heldOpenByAReader(file, 'Read');
+  try {
+    const first = writeProfileMarkAsync(file, markAt(100));
+    await delay(300);
+    const second = writeProfileMarkAsync(file, markAt(200));
+    const answers = [await first, await second];
+    assert.equal(readProfileMark(file)?.takenAt, 1, 'the reader kept the old mark in place');
+    assert.deepEqual(answers, [false, false], 'neither mark landed, so neither answers that it is set');
+  } finally {
+    await reader.letGo();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A breakpoint written under the project path a caller typed and cleared under the one the editor
+ * reports, which differs in case and separators, stays cleared.
+ */
+async function testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('respelled breakpoint note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-Respelled-'));
+  try {
+    const note = breakpointNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, '{"breakpoints":[]}\n');
+    await withAHeldNote(note, 500, async (pause) => {
+      const written = writeBreakpointNoteAsync(project, [{ scriptPath: join(project, 'a.gd'), lines: [1] }]);
+      await pause();
+      writeBreakpointNote(project.toLowerCase().replaceAll('\\', '/'), []);
+      await written;
+    });
+    assert.equal(existsSync(note), false, 'the note cleared under another spelling stays cleared');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A note keeps an entry among the waiting calls only while one waits on it, whether the last call
+ * answers on a timer or a call that sleeps the thread finishes it. A server runs for days and writes
+ * a note for every slot wait.
+ */
+async function testANoteNoCallWaitsOnKeepsNoEntry(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('waiting-calls regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-entries-'));
+  try {
+    const before = notesInTurn();
+    const [timed, slept] = [join(directory, 'timed.json'), join(directory, 'slept.json')];
+    writeFileSync(timed, 'old');
+    writeFileSync(slept, 'old');
+    assert.equal(await writeWholeAsync(join(directory, 'free.json'), 'text'), true);
+    assert.equal(notesInTurn(), before, 'a write that lands at once leaves no entry');
+    await withAHeldNote(timed, 500, async () => {
+      const calls = [
+        writeWholeAsync(timed, 'first'),
+        writeWholeAsync(timed, 'second'),
+        removeWholeAsync(timed),
+      ];
+      assert.equal(notesInTurn(), before + 1, 'three calls on one held note wait under one entry');
+      assert.deepEqual(await Promise.all(calls), [true, true, true]);
+    });
+    assert.equal(notesInTurn(), before, 'the entry goes with the last call answered on a timer');
+    await withAHeldNote(slept, 500, async () => {
+      const waiting = writeWholeAsync(slept, 'first');
+      assert.equal(notesInTurn(), before + 1);
+      assert.equal(writeWhole(slept, 'second'), true);
+      assert.equal(
+        notesInTurn(),
+        before,
+        'the entry goes once a call that sleeps the thread has finished it',
+      );
+      assert.equal(await waiting, true, 'the write finished ahead of the later one answers that it landed');
+    });
+    assert.equal(readFileSync(slept, 'utf8'), 'second');
+    assert.equal(existsSync(timed), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two updates of the class note made under two spellings of the project, the first waiting on a
+ * reader: the second reads what the first wrote, so both stay. An update that makes nothing leaves
+ * the note.
+ */
+async function testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('respelled class note regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-Class-Note-'));
+  try {
+    const note = classNotePath(project);
+    mkdirSync(dirname(note), { recursive: true });
+    writeFileSync(note, JSON.stringify({ rebuiltWith: ['Old'] }));
+    const adding = (name: string) => (held: ReturnType<typeof readClassNote>) => ({
+      rebuiltWith: [...(held?.rebuiltWith ?? []), name],
+    });
+    await withAHeldNote(note, 500, async (pause) => {
+      const first = updateClassNote(project, adding('First'));
+      await pause();
+      const second = updateClassNote(project.toLowerCase().replaceAll('\\', '/'), adding('Second'));
+      await Promise.all([first, second, updateClassNote(project, () => null)]);
+    });
+    assert.deepEqual(readClassNote(project)?.rebuiltWith, ['Old', 'First', 'Second']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A class note that cannot be read for good, such as a folder at its path, leaves an update
+ * answering as if it wrote nothing, and the folder stays.
+ */
+async function testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-class-folder-'));
+  try {
+    const note = classNotePath(project);
+    mkdirSync(note, { recursive: true });
+    let changed = 0;
+    await updateClassNote(project, () => {
+      changed += 1;
+      return { rebuiltWith: ['Kept'] };
+    });
+    assert.equal(statSync(note).isDirectory(), true, 'the folder at the note path stays');
+    assert.equal(readClassNote(project), null);
+    assert.ok(changed <= 1, 'the change is not run again');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A call that sleeps the thread on a note with three async writes waiting finishes them within one
+ * wait in all, each by the deadline it had from its own start, and each answers what landed.
+ */
+async function testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held sync finish regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sync-finish-'));
+  try {
+    const note = join(directory, 'note.json');
+    const syncCalls = {
+      write: () => writeWhole(note, 'sync'),
+      removal: () => removeWhole(note),
+    };
+    for (const [name, call] of Object.entries(syncCalls)) {
+      writeFileSync(note, 'old');
+      await withAHeldNote(note, 3000, async () => {
+        const waiting = [writeWholeAsync(note, 'a'), writeWholeAsync(note, 'b'), writeWholeAsync(note, 'c')];
+        // A short pause keeps the waiting writes' deadlines near the sync call's own, so a build that
+        // restarts the wait after finishing them blocks close to two seconds against one.
+        await new Promise((settle) => setTimeout(settle, 20));
+        const started = Date.now();
+        const landed = call();
+        const blocked = Date.now() - started;
+        assert.ok(blocked < 1490, `the sync ${name} blocked ${blocked} ms, over one wait and its own retry`);
+        assert.equal(
+          landed,
+          false,
+          `the note is still held, so the sync ${name} answers that it did not land`,
+        );
+        assert.deepEqual(await Promise.all(waiting), [false, false, false]);
+      });
+      assert.equal(readFileSync(note, 'utf8'), 'old');
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A slot handed on while an engine is being named in it waits for the naming and is handed once: a
+ * second hand from the same holder finds the slot no longer its own.
+ */
+async function testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held slot hand regression ran on Windows alone: elsewhere no rename is refused');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-handed-'));
+  try {
+    const lock = join(directory, '0.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    let answers: boolean[] = [];
+    await withAHeldNote(lock, 500, async (pause) => {
+      const named = nameSlotEngine(lock, process.pid, { pid: 4242, started: 1 });
+      await pause();
+      const handed = handSlot(lock, process.pid, { pid: 4343, started: 2 });
+      const handedAgain = handSlot(lock, process.pid, { pid: 4444, started: 3 });
+      answers = await Promise.all([named, handed, handedAgain]);
+    });
+    assert.deepEqual(answers, [true, true, false]);
+    assert.equal(holderOf(readFileSync(lock, 'utf8'))?.pid, 4343);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The class note changes only through the update that reads it when it runs. A write of a copy read
+ * before an await puts back what a call made meanwhile took out. The server's source is read, since
+ * its calls need an engine and an editor.
+ */
+function testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier(): void {
+  const source = readFileSync(join('src', 'server.ts'), 'utf8');
+  assert.equal(/\bwriteClassNote\(/.test(source), false, 'the server updates the note, never writes one');
+}
+
+/** The cut run a reader holds shut is waited on without stopping the process. */
+async function testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the cut run',
+    (project) => join(project, '.godot', 'gdharness-reports', 'cut-run.json'),
+    async (project) => {
+      await keepCutTestRunAsync(project, { cutAt: 't', paths: ['res://t'] });
+    },
+  );
+}
+
+/** The profile mark a reader holds shut is waited on without stopping the process. */
+async function testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the profile mark',
+    (project) => join(project, 'mark.json'),
+    async (_project, file) => {
+      await writeProfileMarkAsync(file, {
+        takenAt: 0,
+        projectPath: null,
+        runStartedAt: 0,
+        coveredMs: 0,
+        totals: {
+          startedAt: 0,
+          lastFrameAt: null,
+          frames: 0,
+          complete: false,
+          unreadable: 0,
+          functions: {},
+        },
+      });
+    },
+  );
+}
+
+/** The extension list a reader holds shut is waited on without stopping the process. */
+async function testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'the extension list',
+    (project) => join(project, '.godot', 'extension_list.cfg'),
+    async (project) => {
+      await freeLibraryCopiesAsync(project, 'win32');
+    },
+  );
+}
+
+/** A suite file a reader holds shut is waited on without stopping the process. */
+async function testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
+  await aNoteHeldShutLeavesTheLoopRunning(
+    'a suite record',
+    (project) => join(project, 'times.json'),
+    async (_project, file) => {
+      await writeJsonAsync(file, { peaks: {} });
+    },
+  );
 }
 
 /**
@@ -117594,6 +118110,29 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportAnnotationHoldingACallIsFound,
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testABootNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAClassCacheHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testARestartNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack,
+  testABreakpointClearedWhileAnEarlierWriteWaitsStaysCleared,
+  testTwoWritesOfOneNoteAtOnceBothLandInOrder,
+  testAWriteMadeAfterARemovalWaitsIsNotRemovedByIt,
+  testARestartSettledWhileTheNoteWaitsStaysSettled,
+  testAMarkSetBesideALaterOneAnswersWhatBecameOfIt,
+  testABreakpointClearedUnderAnotherSpellingOfTheProjectStaysCleared,
+  testANoteNoCallWaitsOnKeepsNoEntry,
+  testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay,
+  testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow,
+  testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll,
+  testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt,
+  testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
+  testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess,
+  testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testALiveReservationShrinksTheRoomByWhatItOwes,
@@ -117667,6 +118206,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
   testADisconnectedLanguageClientLeavesNoTimer,
+  testAnAbandonedDebugClientLeavesNoTimer,
   testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt,
   testAShareFloorIsWhatTheRunsEnginesTookToStart,
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
@@ -118260,6 +118800,36 @@ async function testADisconnectedLanguageClientLeavesNoTimer(): Promise<void> {
       );
     },
   );
+}
+
+/**
+ * An abandoned debug client leaves no timer. The close waits at most half a second for the socket
+ * to end, and a socket that ends at once must take that wait with it.
+ */
+async function testAnAbandonedDebugClientLeavesNoTimer(): Promise<void> {
+  const mine = 'testAnAbandonedDebugClientLeavesNoTimer';
+  const respond: FramedPeerHandler = (message, socket) => {
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command: String(message['command']),
+        success: true,
+        body: { breakpoints: [] },
+      }),
+    );
+  };
+  await withFramedPeer(respond, async (port) => {
+    const session = new GodotDAPClient(port, '127.0.0.1');
+    await session.setBreakpoint('/game/main.gd', 1);
+    await session.abandon();
+    assert.deepEqual(
+      openTimers().filter((timer) => timer.during === mine && timer.what === 'timeout of 500ms'),
+      [],
+      'the wait for the socket to end is cleared once it has',
+    );
+  });
 }
 
 /** A process a test leaves running is listed at the end of the run, dated to the test that started it. */

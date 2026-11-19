@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isRecord, isStringList } from './records.js';
-import { writeWhole } from './whole-file.js';
+import { writeWhole, writeWholeAsync } from './whole-file.js';
 
 /** A suite that finished with cases that did not pass, and which ones. */
 interface FailingSuite {
@@ -39,6 +39,17 @@ export function keepCutTestRun(projectPath: string, run: CutTestRun): void {
   try {
     mkdirSync(dirname(path), { recursive: true });
     writeWhole(path, `${JSON.stringify(run, null, 2)}\n`);
+  } catch {
+    // A project that cannot be written to keeps nothing, and the call it was for has no reader.
+  }
+}
+
+/** {@link keepCutTestRun} for a caller on the event loop. */
+export async function keepCutTestRunAsync(projectPath: string, run: CutTestRun): Promise<void> {
+  const path = keptAt(projectPath);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    await writeWholeAsync(path, `${JSON.stringify(run, null, 2)}\n`);
   } catch {
     // A project that cannot be written to keeps nothing, and the call it was for has no reader.
   }
