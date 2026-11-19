@@ -505,8 +505,9 @@ public static class GdharnessDesktop {
   // One line a request, read until the served process closes its end or ends: "start id spec error
   // step" runs a start on a thread of its own and answers "made id pid began" once its process
   // exists, "started id pid job" once it runs and "ended id code" once it has ended. "kill id" ends
-  // a start's process. "adopt id pid job" waits for a process a helper before this one started and
-  // answers its end. "release pid began" ends the process of a start a helper before this one made
+  // a start's process. "adopt id pid job stop killed" waits for a process a helper before this one
+  // started, ends it once its stop file (base64, empty for none) appears or at once when killed is
+  // 1, and answers its end. "release pid began" ends the process of a start a helper before this one made
   // but never answered. The engines of starts still running end with this process when they are in
   // a job that ends them, and run on when they are not.
   static int Serve(int servedPid) {
@@ -538,11 +539,24 @@ public static class GdharnessDesktop {
             TerminateProcess(process, 1);
           }
         }
-      } else if (parts[0] == "adopt" && parts.Length == 4) {
+      } else if (parts[0] == "adopt" && parts.Length == 6) {
         string id = parts[1];
         uint pid = uint.Parse(parts[2]);
         IntPtr copy = new IntPtr(long.Parse(parts[3]));
-        Thread adoption = new Thread(delegate() { Adopt(id, pid, copy); });
+        string stopFile = Decoded(parts[4]);
+        // Opened before the next request is read, so a "kill" that follows finds it.
+        IntPtr process = OpenProcess(ProcessTerminate | ProcessQueryLimited | Synchronize, false, pid);
+        if (process != IntPtr.Zero) {
+          lock (running) {
+            processes[id] = process;
+            // A stop the dead helper was asked for and may never have acted on.
+            if (parts[5] == "1") {
+              stopped.Add(id);
+              TerminateProcess(process, 1);
+            }
+          }
+        }
+        Thread adoption = new Thread(delegate() { Adopt(id, process, copy, stopFile); });
         adoption.IsBackground = true;
         adoption.Start();
       } else if (parts[0] == "release" && parts.Length == 3) {
@@ -612,15 +626,19 @@ public static class GdharnessDesktop {
   }
 
   // Waits for a process a helper before this one started, whose exit code only a handle opened
-  // while it ran can read, and answers it as the start's end. Its job copy is closed after.
-  static void Adopt(string id, uint pid, IntPtr copy) {
+  // while it ran can read, and answers it as the start's end. Its job copy is closed after. The
+  // start's stop file is watched as the helper that started it did, since it is how its starter,
+  // or a keeper, stops the process, and only a helper alive can act on it.
+  static void Adopt(string id, IntPtr process, IntPtr copy, string stopFile) {
     uint code = 1;
-    IntPtr process = OpenProcess(ProcessTerminate | ProcessQueryLimited | Synchronize, false, pid);
     if (process != IntPtr.Zero) {
-      lock (running) {
-        processes[id] = process;
+      bool ended = false;
+      while (WaitForSingleObject(process, 100) == TimedOut) {
+        if (!ended && stopFile.Length > 0 && File.Exists(stopFile)) {
+          TerminateProcess(process, 1);
+          ended = true;
+        }
       }
-      WaitForSingleObject(process, 0xFFFFFFFF);
       GetExitCodeProcess(process, out code);
       lock (running) {
         processes.Remove(id);
@@ -1532,6 +1550,9 @@ export function spawnOnDesktop(
     options.signal,
   );
   child.errorFile = files.error;
+  if (files.stop !== '') {
+    child.stopFile = files.stop;
+  }
   const environment = {
     ...(options.env ?? process.env),
     ...(how.desktop === undefined ? {} : { [DESKTOP_VARIABLE]: how.desktop }),

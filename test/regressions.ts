@@ -20861,6 +20861,256 @@ async function testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine(): Promise<voi
   }
 }
 
+/** A stand-in engine started through the helper in [param root], once the helper has said it runs. */
+async function runningThroughTheHelper(
+  root: string,
+  name: string,
+  hidden: boolean,
+  assembly = helperAssembly(),
+): Promise<{ start: DesktopStart; engine: number; helper: number }> {
+  const scratch = join(root, name);
+  mkdirSync(scratch);
+  const how = hidden
+    ? { desktop: HIDDEN_DESKTOP, stop: join(root, `${name}-stop`), exit: join(root, `${name}-exit`) }
+    : { endsWithHelper: true, separateErrors: true, exit: join(root, `${name}-exit`) };
+  const start = spawnOnDesktop(
+    { ...how, directory: root, scratch },
+    process.execPath,
+    ['-e', 'setInterval(() => undefined, 1000)'],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+    assembly,
+  );
+  start.child.stdout?.resume();
+  start.child.stderr?.resume();
+  const engine = await answeredWithin(() => start.pid(), 60_000);
+  assert.ok(engine !== undefined, `the helper names the engine: ${helperStep(start.files.step)}`);
+  const helper = start.child.pid;
+  assert.ok(helper !== undefined, 'the start names its helper');
+  return { start, engine, helper };
+}
+
+/** Kills [param helper], and waits until it has gone. */
+async function killTheHelper(helper: number): Promise<void> {
+  process.kill(helper);
+  assert.ok(await answeredWithin(() => (alive(helper) ? undefined : true), 30_000), 'the helper is killed');
+}
+
+/** How [param child] ended, or null when it has not within [param ms]. */
+async function endWithin(child: DesktopStart['child'], ms: number): Promise<string | null> {
+  if (!(await exitedWithin(child, ms))) {
+    return null;
+  }
+  return `${String(child.exitCode)}/${String(child.signalCode)}`;
+}
+
+/**
+ * A run on the hidden desktop whose helper died after it started the engine is still stopped by its
+ * stop file, and ends as one its own helper stopped, with the engine's code 1.
+ */
+async function testARunOnTheHiddenDesktopIsStoppedAfterItsHelperDied(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-stop-'));
+  let engine: number | undefined;
+  try {
+    const run = await runningThroughTheHelper(root, 'one', true);
+    engine = run.engine;
+    await killTheHelper(run.helper);
+    await delay(500);
+    assert.ok(alive(engine), 'the engine runs on after its helper died');
+    run.start.stop();
+    assert.equal(
+      await endWithin(run.start.child, 5000),
+      '1/null',
+      'the stopped run ends within the stop wait',
+    );
+    assert.equal(alive(engine), false, 'and its engine has gone');
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stop asked of a helper that dies before it acts on it still ends the run, through the stop file
+ * on the hidden desktop and through the request on the desktop in use.
+ */
+async function testAStopTheDeadHelperNeverActedOnStillEndsTheRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-asked-'));
+  const engines: number[] = [];
+  try {
+    const hidden = await runningThroughTheHelper(root, 'hidden', true);
+    engines.push(hidden.engine);
+    hidden.start.stop();
+    await killTheHelper(hidden.helper);
+    assert.equal(await endWithin(hidden.start.child, 5000), '1/null', 'the hidden run ends');
+    assert.equal(alive(hidden.engine), false, 'and its engine has gone');
+
+    const inUse = await runningThroughTheHelper(root, 'inuse', false);
+    engines.push(inUse.engine);
+    // In one turn, so the request reaches only a helper that is already being ended.
+    process.kill(inUse.helper);
+    inUse.start.stop();
+    assert.equal(
+      await endWithin(inUse.start.child, 5000),
+      'null/SIGTERM',
+      'the run on the desktop in use ends',
+    );
+    assert.equal(alive(inUse.engine), false, 'and its engine has gone');
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** The helper that takes over a dead one's run still starts and stops runs of its own. */
+async function testAStartAfterItsHelperDiedIsStillStopped(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-next-'));
+  const engines: number[] = [];
+  try {
+    const first = await runningThroughTheHelper(root, 'first', true);
+    engines.push(first.engine);
+    await killTheHelper(first.helper);
+    // Until this process has heard the exit: a start given to a helper that is dying fails.
+    await delay(500);
+    const second = await runningThroughTheHelper(root, 'second', true);
+    engines.push(second.engine);
+    assert.notEqual(second.helper, first.helper, 'the second start has a new helper');
+    second.start.stop();
+    assert.equal(await endWithin(second.start.child, 5000), '1/null', 'the second run is stopped');
+    assert.equal(alive(second.engine), false, 'and its engine has gone');
+    first.start.stop();
+    assert.equal(await endWithin(first.start.child, 5000), '1/null', 'the first run is stopped too');
+    assert.equal(alive(first.engine), false, 'and its engine has gone');
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** On the desktop in use a run whose helper died is stopped by the helper that took it over. */
+async function testARunOnTheDesktopInUseIsStoppedAfterItsHelperDied(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-inuse-'));
+  let engine: number | undefined;
+  try {
+    const run = await runningThroughTheHelper(root, 'one', false);
+    engine = run.engine;
+    await killTheHelper(run.helper);
+    await delay(500);
+    assert.ok(alive(engine), 'the engine runs on after its helper died');
+    run.start.stop();
+    assert.equal(await endWithin(run.start.child, 5000), 'null/SIGTERM', 'the stopped run ends');
+    assert.equal(alive(engine), false, 'and its engine has gone');
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A test run cut off by its limit after its helper died is stopped, waited on and settled as a
+ * timed-out test run is, within the stop wait, and leaves no engine.
+ */
+async function testATimedOutRunWhoseHelperDiedEndsWithinTheStopWait(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-timed-'));
+  let engine: number | undefined;
+  try {
+    const { start, engine: pid, helper } = await runningThroughTheHelper(root, 'one', true);
+    engine = pid;
+    await killTheHelper(helper);
+    const child = start.child;
+    const closed = [child.stdout, child.stderr].map(
+      (stream) =>
+        new Promise<void>((settle) => {
+          stream?.once('close', settle);
+        }),
+    );
+    const settled = Promise.all([exitedWithin(child, 60_000), ...closed]);
+    // The run's limit, then what a timed-out test run does: stop, wait for the engine, settle.
+    await delay(1000);
+    const began = Date.now();
+    start.stop();
+    await untilStoppedEngineGone({ process: child, pid: child.pid ?? null });
+    assert.ok(await settledWithin(settled, 3000), 'the run settles once its engine has gone');
+    const took = Date.now() - began;
+    assert.equal(alive(engine), false, 'no engine is left');
+    assert.ok(took < 5000, `the stopped run ends well within the 10 s stop wait: ${String(took)} ms`);
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A run whose helper died where no helper can take it over is still stopped, by the engine's pid
+ * the dead helper reported.
+ */
+async function testARunNoHelperCanTakeOverIsStillStopped(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-none-'));
+  const engines: number[] = [];
+  try {
+    for (const hidden of [true, false]) {
+      const name = hidden ? 'hidden' : 'inuse';
+      const assembly = join(root, `${name}-helper.exe`);
+      cpSync(helperAssembly(), assembly);
+      const run = await runningThroughTheHelper(root, name, hidden, assembly);
+      engines.push(run.engine);
+      // A running program can be renamed but not removed, so the next helper of this path cannot start.
+      renameSync(assembly, `${assembly}.gone`);
+      await killTheHelper(run.helper);
+      await delay(500);
+      assert.ok(alive(run.engine), `the ${name} engine runs on with no helper`);
+      run.start.stop();
+      const ended = await endWithin(run.start.child, 5000);
+      assert.equal(ended, hidden ? '1/null' : 'null/SIGTERM', `the ${name} run is stopped`);
+      assert.equal(alive(run.engine), false, `and its ${name} engine has gone`);
+    }
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
 /**
  * A stand-in engine that starts a child, writes both pids to the file named by its first argument
  * and waits for the file named by its second. The values arrive as arguments, never as code.
@@ -118951,6 +119201,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHelperThatNeverRanHasEnded,
   testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine,
   testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine,
+  testARunOnTheHiddenDesktopIsStoppedAfterItsHelperDied,
+  testAStopTheDeadHelperNeverActedOnStillEndsTheRun,
+  testAStartAfterItsHelperDiedIsStillStopped,
+  testARunOnTheDesktopInUseIsStoppedAfterItsHelperDied,
+  testATimedOutRunWhoseHelperDiedEndsWithinTheStopWait,
+  testARunNoHelperCanTakeOverIsStillStopped,
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,

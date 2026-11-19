@@ -12,7 +12,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { PassThrough, type Writable } from 'node:stream';
 import { alive } from './alive.js';
@@ -96,6 +96,8 @@ export class HelpedChild extends RelayedChild {
   private adopted = false;
   private done = false;
   private killRequested = false;
+  /** How this process ended the engine itself, where no helper was left to. */
+  private endedHere: 'kill' | 'stop' | null = null;
   private watchdog: NodeJS.Timeout | undefined;
   private watching: NodeJS.Timeout | undefined;
   private abort: (() => void) | undefined;
@@ -269,7 +271,7 @@ export class HelpedChild extends RelayedChild {
    * The helper is gone: a start it had not answered has failed. One it had is handed to
    * [param adopt], the next helper, which reads the engine's exit code from a handle opened while
    * the engine runs. Where none can take it, the engine is watched until it has gone and ends
-   * without a code.
+   * without a code, and a stop asked meanwhile ends it by its pid.
    */
   helperGone(reason: string, adopt: (child: HelpedChild) => boolean, refused?: Error): void {
     if (this.done) {
@@ -294,16 +296,47 @@ export class HelpedChild extends RelayedChild {
     const engine = this.enginePid;
     this.watching = setInterval(() => {
       if (!alive(engine)) {
-        this.finish(null, 'SIGKILL');
+        // Told as a helper tells the same stop: code 1 for the stop file, SIGTERM for a kill.
+        if (this.endedHere === 'stop') {
+          this.finish(1, null);
+        } else {
+          this.finish(null, this.endedHere === 'kill' ? 'SIGTERM' : 'SIGKILL');
+        }
+        return;
+      }
+      if (this.endedHere === null && this.killRequested) {
+        this.endByPid('kill');
+      } else if (this.endedHere === null && this.stopFile !== undefined && existsSync(this.stopFile)) {
+        this.endByPid('stop');
       }
     }, WATCH_MS);
   }
 
-  /** Makes [param helper] this start's, and says the engine and the copy of its job it is to wait on. */
+  /**
+   * Ends the engine by its pid, where no helper is left to end it through its handle. A pid can name
+   * a later process once the engine has gone, so it is used only just after it was seen alive.
+   */
+  private endByPid(how: 'kill' | 'stop'): void {
+    this.endedHere = how;
+    if (this.enginePid === undefined) {
+      return;
+    }
+    try {
+      process.kill(this.enginePid);
+    } catch {
+      // It ended on its own meanwhile, which the next look tells.
+    }
+  }
+
+  /**
+   * Makes [param helper] this start's, and says the engine and the copy of its job it is to wait on,
+   * the stop file it is to watch and whether a stop the last helper may not have acted on was asked.
+   */
   adoptedBy(helper: ServedHelper): string {
     this.helper = helper;
     this.adopted = true;
-    return `${String(this.enginePid)} ${this.copy}`;
+    const stop = Buffer.from(this.stopFile ?? '', 'utf8').toString('base64');
+    return `${String(this.enginePid)} ${this.copy} ${stop} ${this.killRequested ? '1' : '0'}`;
   }
 
   /** Ends the start with [param reason] where the helper's error file would have said it. */
@@ -321,6 +354,9 @@ export class HelpedChild extends RelayedChild {
 
   /** Where a reason for a start that failed is written, which the caller of the start sets. */
   errorFile: string | undefined;
+
+  /** The file whose appearance stops the engine, where the start named one. */
+  stopFile: string | undefined;
 
   private finish(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.done) {
@@ -367,10 +403,10 @@ export class HelpedChild extends RelayedChild {
       return false;
     }
     this.define('killed', true);
+    // Kept once answered too, so a helper that takes over from one that died first ends the engine.
+    this.killRequested = true;
     if (this.answered && this.helper !== null) {
       this.helper.write(`kill ${this.id}`);
-    } else {
-      this.killRequested = true;
     }
     return true;
   }
