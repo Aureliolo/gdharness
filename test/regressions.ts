@@ -21050,7 +21050,7 @@ function collectedStart(
   command: string,
   args: readonly string[],
   how: { desktop?: boolean; kept?: boolean } = {},
-): { start: DesktopStart; text: () => string } {
+): { start: DesktopStart; text: () => string; outputEnded: Promise<void> } {
   const scratch = join(root, name);
   mkdirSync(scratch);
   const start = spawnOnDesktop(
@@ -21066,10 +21066,37 @@ function collectedStart(
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let collected = '';
-  start.child.stdout?.on('data', (chunk: Buffer) => {
+  const output = start.child.stdout;
+  output?.on('data', (chunk: Buffer) => {
     collected += chunk.toString();
   });
-  return { start, text: () => collected };
+  const outputEnded = new Promise<void>((settle) => {
+    if (output === null) {
+      settle();
+      return;
+    }
+    output.once('end', () => {
+      settle();
+    });
+  });
+  return { start, text: () => collected, outputEnded };
+}
+
+/** Whether [param promise] settles within [param ms]. */
+async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((settle) => {
+        timer = setTimeout(() => {
+          settle(false);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -21097,7 +21124,8 @@ async function testStartsMadeAtOnceWaitOnNoOthersEngine(): Promise<void> {
       assert.ok(await exitedWithin(other.start.child, 60_000), `start ${String(index)} ends`);
       assert.equal(other.start.child.exitCode, 10 + index, `start ${String(index)} has its own exit code`);
       assert.equal(running.start.child.exitCode, null, 'while the long engine still runs');
-      await delay(200);
+      // The output comes down a pipe of its own, which can end after the exit is told.
+      assert.ok(await settledWithin(other.outputEnded, 60_000), `start ${String(index)}'s output ends`);
       assert.equal(
         other.text().trim(),
         `engine ${String(index)}`,
@@ -21109,39 +21137,97 @@ async function testStartsMadeAtOnceWaitOnNoOthersEngine(): Promise<void> {
   } finally {
     running.start.stop();
     await exitedWithin(running.start.child, 60_000);
+    await retireHelper();
     sweep(root);
   }
 }
 
 /**
- * A helper that is killed fails the start it had not answered, with a reason, and leaves the engines
- * it started running with their jobs and their ends reported. The next start gets a new helper.
+ * A helper that is killed after it made an engine and handed this process a copy of its job, but
+ * before it answered, fails that start with a reason. The engine is ended and the copy closed, as the
+ * job would have ended it with the helper, so the start's close follows its exit. The engines it had
+ * answered run on with their jobs and their ends reported. The next start gets a new helper.
  */
 async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne(): Promise<void> {
   if (process.platform !== 'win32') {
     return;
   }
   const { openJob } = await import('./support/job-objects.js');
+  const { holdFile } = await import('./support/held-file.js');
+  const { pidsWithCommandLine } = await import('./support/windows.js');
   assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-killed-'));
   let engine: number | undefined;
+  let made: number | undefined;
+  let letGo: (() => void) | undefined;
   try {
     const running = collectedStart(root, 'running', process.execPath, lineThenExit(0, 600_000, 1));
     engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
     assert.ok(engine !== undefined, 'the first engine runs');
     const helper = running.start.child.pid;
     assert.ok(helper !== undefined && alive(helper), 'its helper runs');
-    const inFlight = collectedStart(root, 'in-flight', process.execPath, lineThenExit(1, 0, 3));
-    process.kill(helper);
-    assert.ok(await exitedWithin(inFlight.start.child, 60_000), 'the start in flight ends');
-    assert.equal(
-      pidTheHelperWrote(inFlight.start.files.pid) === undefined
-        ? helperFailure(inFlight.start.files.error)?.includes('desktop helper')
-        : true,
-      true,
-      `with the helper's end as its reason: ${String(helperFailure(inFlight.start.files.error))}`,
+    // The helper writes the lane file after the copy of the job and before its answer. Held, that
+    // write waits, which keeps the helper in that gap until it is killed.
+    const lane = join(root, 'lane.json');
+    letGo = holdFile(`${lane}.tmp`);
+    const scratch = join(root, 'in-flight');
+    mkdirSync(scratch);
+    const marker = `gdharness-in-flight-${String(process.pid)}`;
+    const inFlight = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch, exit: join(scratch, 'exit'), lane: { file: lane, number: 1 } },
+      process.execPath,
+      ['-e', `setTimeout(() => {}, 600000) // ${marker}`],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
     );
-    await delay(1000);
+    inFlight.child.stdout?.resume();
+    const events: string[] = [];
+    const closed = new Promise<void>((settle) => {
+      inFlight.child.on('close', (code: number | null) => {
+        events.push(`close ${String(code)}`);
+        settle();
+      });
+    });
+    inFlight.child.on('exit', (code: number | null) => {
+      events.push(`exit ${String(code)}`);
+    });
+    for (let waited = 0; made === undefined && waited < 60_000; waited += 250) {
+      made = (await pidsWithCommandLine('bun', marker))[0];
+      if (made === undefined) {
+        await delay(250);
+      }
+    }
+    assert.ok(made !== undefined, 'the helper made the engine in flight');
+    const pid = made;
+    const jobNamed = (): boolean => {
+      const job = openJob(engineJobName(pid));
+      job?.close();
+      return job !== null;
+    };
+    assert.equal(await answeredWithin(() => (jobNamed() ? true : undefined), 60_000), true, 'and its job');
+    // The copy follows the job at once, and the held write after it never returns.
+    await delay(500);
+    assert.equal(inFlight.child.exitCode, null, 'and has not answered');
+    process.kill(helper);
+    letGo();
+    assert.ok(await exitedWithin(inFlight.child, 60_000), 'the start in flight ends');
+    assert.equal(inFlight.child.exitCode, 1, 'as a start that failed');
+    assert.match(
+      helperFailure(inFlight.files.error) ?? '',
+      /desktop helper ended/u,
+      "with the helper's end as its reason",
+    );
+    assert.ok(await settledWithin(closed, 60_000), 'and closes');
+    assert.deepEqual(events, ['exit 1', 'close 1'], 'once each, the exit first');
+    assert.equal(
+      await answeredWithin(() => (alive(pid) ? undefined : true), 10_000),
+      true,
+      'its engine is ended',
+    );
+    assert.equal(
+      await answeredWithin(() => (jobNamed() ? undefined : true), 10_000),
+      true,
+      'and no copy of its job is left holding its name',
+    );
     assert.ok(alive(engine), 'the engine that was running runs on');
     const job = openJob(engineJobName(engine));
     assert.ok(job !== null, 'and its job is there');
@@ -21157,8 +21243,11 @@ async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne():
       "and the first engine's end is still reported",
     );
   } finally {
-    if (engine !== undefined && alive(engine)) {
-      process.kill(engine);
+    letGo?.();
+    for (const pid of [engine, made]) {
+      if (pid !== undefined && alive(pid)) {
+        process.kill(pid);
+      }
     }
     await retireHelper();
     sweep(root);
@@ -22528,6 +22617,7 @@ async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Prom
   } finally {
     start.stop();
     await exitedWithin(start.child, 60_000);
+    await retireHelper();
     sweep(scratch);
   }
 }
@@ -22778,6 +22868,7 @@ async function testAHelperWatchingNoBoxUsesNoProcessorTime(): Promise<void> {
   } finally {
     start.stop();
     await exitedWithin(start.child, 60_000);
+    await retireHelper();
     sweep(scratch);
   }
 }

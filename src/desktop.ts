@@ -249,7 +249,17 @@ public static class GdharnessDesktop {
   const uint SnapshotThreads = 0x4;
   const uint ProcessTerminate = 0x1;
   const uint ProcessQueryLimited = 0x1000;
+  const uint ProcessQueryInformation = 0x400;
   const uint ThreadQueryLimited = 0x800;
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr OpenJobObjectW(uint access, bool inherit, string name);
+  [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool member);
+  [DllImport("kernelbase.dll")] static extern bool CompareObjectHandles(IntPtr first, IntPtr second);
+  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr info, int length, out int needed);
+  const uint JobQuery = 0x4;
+  const int ProcessHandleInformation = 51;
+  const int InfoLengthMismatch = unchecked((int)0xC0000004);
+  const int BufferTooSmall = unchecked((int)0xC0000023);
 
   [StructLayout(LayoutKind.Sequential)]
   struct ThreadEntry {
@@ -465,6 +475,7 @@ public static class GdharnessDesktop {
   // The process this one serves, which is asked to hold a copy of every job that ends its engine,
   // so that the engines do not end with this helper alone but only with whatever started it.
   static IntPtr served = IntPtr.Zero;
+  static uint servedId = 0;
   static readonly object running = new object();
   static readonly Dictionary<string, IntPtr> processes = new Dictionary<string, IntPtr>();
   // The starts this process ended on request, so that an engine's own exit code 1 is not taken for it.
@@ -491,13 +502,15 @@ public static class GdharnessDesktop {
   }
 
   // One line a request, read until the served process closes its end or ends: "start id spec error
-  // step" runs a start on a thread of its own and answers "started id pid job" once the process
-  // runs and "ended id code" once it has ended, "kill id" ends a start's process, and "adopt id
-  // pid job" waits for a process a helper before this one started and answers its end. The
-  // engines of starts still running end with this process when they are in a job that ends them,
-  // and run on when they are not.
+  // step" runs a start on a thread of its own and answers "made id pid began" once its process
+  // exists, "started id pid job" once it runs and "ended id code" once it has ended. "kill id" ends
+  // a start's process. "adopt id pid job" waits for a process a helper before this one started and
+  // answers its end. "release pid began" ends the process of a start a helper before this one made
+  // but never answered. The engines of starts still running end with this process when they are in
+  // a job that ends them, and run on when they are not.
   static int Serve(int servedPid) {
-    served = OpenProcess(ProcessDuplicateHandle, false, (uint)servedPid);
+    servedId = (uint)servedPid;
+    served = OpenProcess(ProcessDuplicateHandle, false, servedId);
     if (served == IntPtr.Zero) {
       return 1;
     }
@@ -531,6 +544,26 @@ public static class GdharnessDesktop {
         Thread adoption = new Thread(delegate() { Adopt(id, pid, copy); });
         adoption.IsBackground = true;
         adoption.Start();
+      } else if (parts[0] == "release" && parts.Length == 3) {
+        uint pid = uint.Parse(parts[1]);
+        long began = long.Parse(parts[2]);
+        // Counted as a start being made, so that the served process ending meanwhile does not end
+        // this one before the engine, which may be in no job yet, is ended.
+        lock (running) {
+          creating++;
+        }
+        Thread release = new Thread(delegate() {
+          try {
+            Release(pid, began);
+          } finally {
+            lock (running) {
+              creating--;
+              ExitWhenIdle();
+            }
+          }
+        });
+        release.IsBackground = true;
+        release.Start();
       }
     }
     Leave();
@@ -595,6 +628,83 @@ public static class GdharnessDesktop {
     }
     ReleaseCopy(copy);
     Reply(Ending(id, code));
+  }
+
+  // Ends the process a helper before this one made for a start it never answered, as its job would
+  // have once that helper ended, had the served process not held a copy. That copy is closed too,
+  // wherever it is, since the served process was never told it. A pid is that process's only while
+  // the process there began when the helper said it did.
+  static void Release(uint pid, long began) {
+    IntPtr process = OpenProcess(ProcessTerminate | ProcessQueryLimited, false, pid);
+    if (process == IntPtr.Zero) {
+      return;
+    }
+    long created, exited, kernel, user;
+    if (GetProcessTimes(process, out created, out exited, out kernel, out user) && created == began) {
+      IntPtr job = OpenJobObjectW(JobQuery, false, JobNamePrefix + pid);
+      bool member = false;
+      if (job != IntPtr.Zero && !IsProcessInJob(process, job, out member)) {
+        member = false;
+      }
+      if (member) {
+        CloseCopies(job);
+      }
+      TerminateProcess(process, 1);
+      if (job != IntPtr.Zero) {
+        CloseHandle(job);
+      }
+    }
+    CloseHandle(process);
+  }
+
+  // Closes every handle the served process holds to job. A copy left there would keep the job's name
+  // taken, and fail the start of a later engine given the same pid.
+  static void CloseCopies(IntPtr job) {
+    IntPtr owner = OpenProcess(ProcessQueryInformation | ProcessDuplicateHandle, false, servedId);
+    if (owner == IntPtr.Zero) {
+      return;
+    }
+    IntPtr table = IntPtr.Zero;
+    try {
+      int size = 1 << 16;
+      int status;
+      while (true) {
+        table = Marshal.AllocHGlobal(size);
+        int needed;
+        status = NtQueryInformationProcess(owner, ProcessHandleInformation, table, size, out needed);
+        if ((status != InfoLengthMismatch && status != BufferTooSmall) || size >= 1 << 26) {
+          break;
+        }
+        Marshal.FreeHGlobal(table);
+        table = IntPtr.Zero;
+        size = Math.Max(size * 2, needed);
+      }
+      if (status != 0) {
+        return;
+      }
+      // The table: a count and a reserved field, then one entry a handle, which begins with its value
+      // and two counts, then four 32-bit fields.
+      long count = Marshal.ReadIntPtr(table).ToInt64();
+      int entry = IntPtr.Size * 3 + 16;
+      for (long index = 0; index < count; index++) {
+        IntPtr value = Marshal.ReadIntPtr(table, IntPtr.Size * 2 + (int)index * entry);
+        IntPtr mine;
+        if (!DuplicateHandle(owner, value, GetCurrentProcess(), out mine, 0, false, DuplicateSameAccess)) {
+          continue;
+        }
+        bool same = CompareObjectHandles(mine, job);
+        CloseHandle(mine);
+        if (same) {
+          IntPtr unused;
+          DuplicateHandle(owner, value, IntPtr.Zero, out unused, 0, false, DuplicateCloseSource);
+        }
+      }
+    } finally {
+      if (table != IntPtr.Zero) {
+        Marshal.FreeHGlobal(table);
+      }
+      CloseHandle(owner);
+    }
   }
 
   // Closes the copy of a job held by the served process.
@@ -834,6 +944,14 @@ public static class GdharnessDesktop {
       if (requestId != null) {
         processes[requestId] = started.process;
       }
+    }
+    if (requestId != null) {
+      // Said before the served process is handed a copy of the job, which it learns of only from the
+      // answer. A helper that ends before it answers leaves the next one the engine to end and the
+      // copy to close. The time the process began tells it from a later one given the same pid.
+      long began, exited, kernel, user;
+      GetProcessTimes(started.process, out began, out exited, out kernel, out user);
+      Reply("made " + requestId + " " + started.processId + " " + began);
     }
     if (affinity != 0) {
       Step(stepFile, "holding the process to its processors");

@@ -90,6 +90,8 @@ export class HelpedChild extends RelayedChild {
   private helper: ServedHelper | null = null;
   private enginePid: number | undefined;
   private copy = '0';
+  /** The pid and start time the helper gave for the engine's process once it made it. */
+  private madeProcess: string | undefined;
   private answered = false;
   private adopted = false;
   private done = false;
@@ -193,7 +195,9 @@ export class HelpedChild extends RelayedChild {
     this.watchdog = setTimeout(() => {
       this.watchdog = undefined;
       this.failed(`the desktop helper gave no answer within ${String(limit)} ms`);
+      helper.abandon(this);
       helper.hang();
+      this.release(helper);
     }, limit);
     this.watchdog.unref();
     if (!helper.write(`start ${this.id} ${request}`)) {
@@ -204,6 +208,32 @@ export class HelpedChild extends RelayedChild {
       return;
     }
     this.emit('spawn');
+  }
+
+  /** The helper says the engine's process exists, suspended, and when it began. */
+  made(pid: number, began: string): void {
+    this.madeProcess = `${String(pid)} ${began}`;
+  }
+
+  /**
+   * Has the next helper end the engine of a start its helper made but never answered, and close the
+   * copy of its job this process was handed, once [param gone] has ended. Without that the engine
+   * stays suspended while this process runs, and its output never closes.
+   */
+  private release(gone: ServedHelper): void {
+    void Promise.all([gone.ended, gone.heardAll]).then(() => {
+      // Read once the helper has ended and all it said is heard, since a hung one can still say it
+      // made the engine.
+      const made = this.madeProcess;
+      if (made === undefined) {
+        return;
+      }
+      try {
+        helperFor(gone.assembly).release(made);
+      } catch {
+        // No helper can be run, so nothing can end the engine before this process does.
+      }
+    });
   }
 
   /** The helper says the engine runs, with its pid and the copy of its job this process holds. */
@@ -247,6 +277,9 @@ export class HelpedChild extends RelayedChild {
         this.emit('error', refused);
       }
       this.failed(reason);
+      if (this.helper !== null) {
+        this.release(this.helper);
+      }
       return;
     }
     // One adoption a start: a helper that cannot run would otherwise be asked again for ever.
@@ -352,9 +385,13 @@ export class ServedHelper {
   private readonly input: Writable;
   readonly assembly: string;
   private readonly starts = new Map<string, HelpedChild>();
+  private readonly abandoned = new Map<string, HelpedChild>();
   private open = true;
+  private retiring = false;
   private holding = true;
   private heard = '';
+  /** Settles once every line the helper wrote has been read, which can be after its exit is told. */
+  readonly heardAll: Promise<void>;
 
   constructor(assembly: string) {
     this.assembly = assembly;
@@ -376,6 +413,10 @@ export class ServedHelper {
     this.input = stdin;
     stdin.on('error', () => undefined);
     stdout.setEncoding('utf8');
+    this.heardAll = new Promise((resolve) => {
+      stdout.once('end', resolve);
+      stdout.once('close', resolve);
+    });
     stdout.on('data', (chunk: string) => {
       this.heard += chunk;
       for (let end = this.heard.indexOf('\n'); end >= 0; end = this.heard.indexOf('\n')) {
@@ -417,8 +458,10 @@ export class ServedHelper {
 
   private answer(line: string): void {
     const [word, id, first, second] = line.split(' ');
-    const start = this.starts.get(id ?? '');
-    if (word === 'started') {
+    const start = this.starts.get(id ?? '') ?? this.abandoned.get(id ?? '');
+    if (word === 'made') {
+      start?.made(Number(first), second ?? '0');
+    } else if (word === 'started') {
       start?.started(Number(first), second ?? '0');
     } else if (word === 'ended') {
       start?.ended(Number(first), second === 'stopped');
@@ -432,10 +475,27 @@ export class ServedHelper {
     void child.deliver(this, request);
   }
 
+  /** Has the helper end the engine a helper before it made for a start that failed, named by [param made]. */
+  release(made: string): void {
+    this.write(`release ${made}`);
+    // A helper started only for this holds nothing this process waits on.
+    if (this.starts.size === 0) {
+      this.hold(false);
+    }
+  }
+
+  /** Keeps hearing what the helper says of [param child], a start that failed before the helper ended. */
+  abandon(child: HelpedChild): void {
+    this.abandoned.set(child.id, child);
+  }
+
   forget(child: HelpedChild): void {
     this.starts.delete(child.id);
     if (this.starts.size === 0) {
       this.hold(false);
+      if (this.retiring) {
+        this.retire();
+      }
     }
   }
 
@@ -453,8 +513,9 @@ export class ServedHelper {
     this.process.kill();
   }
 
-  /** Ends the helper when nothing is with it. */
+  /** Ends the helper once nothing is with it. */
   retire(): void {
+    this.retiring = true;
     if (this.starts.size === 0 && this.open) {
       this.input.end();
     }
@@ -486,6 +547,7 @@ export class ServedHelper {
     const starts = [...this.starts.values()];
     this.starts.clear();
     for (const child of starts) {
+      this.abandon(child);
       child.helperGone(reason, (orphan) => this.adopt(orphan), refused);
     }
   }
