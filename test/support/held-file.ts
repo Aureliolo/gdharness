@@ -11,7 +11,16 @@ const kernel32 = dlopen('kernel32.dll', {
     returns: FFIType.u64,
   },
   DeviceIoControl: {
-    args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
+    args: [
+      FFIType.u64,
+      FFIType.u32,
+      FFIType.ptr,
+      FFIType.u32,
+      FFIType.ptr,
+      FFIType.u32,
+      FFIType.ptr,
+      FFIType.ptr,
+    ],
     returns: FFIType.bool,
   },
   CloseHandle: { args: [FFIType.u64], returns: FFIType.bool },

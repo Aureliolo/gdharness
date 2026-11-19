@@ -21174,7 +21174,13 @@ async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne():
     mkdirSync(scratch);
     const marker = `gdharness-in-flight-${String(process.pid)}`;
     const inFlight = spawnOnDesktop(
-      { directory: root, endsWithHelper: true, scratch, exit: join(scratch, 'exit'), lane: { file: lane, number: 1 } },
+      {
+        directory: root,
+        endsWithHelper: true,
+        scratch,
+        exit: join(scratch, 'exit'),
+        lane: { file: lane, number: 1 },
+      },
       process.execPath,
       ['-e', `setTimeout(() => {}, 600000) // ${marker}`],
       { stdio: ['ignore', 'pipe', 'pipe'] },
