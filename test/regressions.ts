@@ -37,7 +37,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { headingIdsOf } from '../scripts/doc-slug.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
-import { sharedCopies, syncSharedGdscript } from '../scripts/sync-shared-gd.js';
+import { noteWritten, sharedCopies, syncRecordPath, syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
 import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
@@ -90270,6 +90270,7 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
  */
 function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-copies-'));
+  const restoreCache = pointTheCacheAt(scratch);
   try {
     const godot = join(scratch, 'godot');
     cpSync(join('src', 'godot', 'operations'), join(godot, 'operations'), { recursive: true });
@@ -90331,6 +90332,7 @@ function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
     assert.deepEqual(syncSharedGdscript(godot), [runtimeReading]);
     assert.equal(held(`${runtimeReading}.uid`), 'uid://kept');
   } finally {
+    restoreCache();
     rmSync(scratch, { recursive: true, force: true });
   }
 
@@ -90380,6 +90382,19 @@ function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
   }
 }
 
+/**
+ * Points gdharness's cache folder at one under [scratch] for this process and the children it
+ * starts, so no sync here writes the real record. Answers the call that puts the old value back.
+ */
+function pointTheCacheAt(scratch: string): () => void {
+  const before = process.env['XDG_CACHE_HOME'];
+  process.env['XDG_CACHE_HOME'] = join(scratch, 'cache');
+  return () => {
+    if (before === undefined) delete process.env['XDG_CACHE_HOME'];
+    else process.env['XDG_CACHE_HOME'] = before;
+  };
+}
+
 /** A `godot` folder holding the operations and two empty addon folders, for a sync to fill. */
 function scratchGodotForTheHelperCopies(scratch: string): string {
   const godot = join(scratch, 'godot');
@@ -90400,6 +90415,7 @@ function scratchGodotForTheHelperCopies(scratch: string): string {
  */
 async function testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-race-'));
+  const restoreCache = pointTheCacheAt(scratch);
   try {
     const godot = scratchGodotForTheHelperCopies(scratch);
     syncSharedGdscript(godot);
@@ -90438,6 +90454,7 @@ async function testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed(): Promise<vo
     }
     assert.deepEqual(refusals, []);
   } finally {
+    restoreCache();
     rmSync(scratch, { recursive: true, force: true });
   }
 }
@@ -90445,14 +90462,15 @@ async function testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed(): Promise<vo
 /**
  * A copy holding text a sync wrote is stale however later syncs went, so it is rewritten.
  *
- * Two syncs running while an original changes twice can leave a record that names an older text
- * than the copy holds, when the record is one file each sync rewrites whole. The next change then
- * read the copy as a hand edit. The first half sets that state up with files, by putting a whole-file
- * record of an older text beside the godot folder. The second half runs real syncs in a loop while
- * the originals change often, and the last sync must still succeed.
+ * Two syncs running while an original changes twice can note an older text after a newer one was
+ * written, so a record that keeps only the latest note names an older text than the copy holds. The
+ * next change then read the copy as a hand edit. The first half sets that state up by noting the
+ * older text late, as the slower sync does. The second half runs real syncs in a loop while the
+ * originals change often, and the last sync must still succeed.
  */
 async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-twice-'));
+  const restoreCache = pointTheCacheAt(scratch);
   try {
     const godot = scratchGodotForTheHelperCopies(scratch);
     const reading = join(godot, 'operations', 'reading.gd');
@@ -90462,12 +90480,7 @@ async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): 
     writeFileSync(reading, `${older}# text A\n`);
     syncSharedGdscript(godot);
     assert.equal(readFileSync(copy, 'utf8'), `${older}# text A\n`);
-    const names = sharedCopies(godot).map((entry) => relative(godot, entry.copy));
-    const sha = (value: string): string => createHash('sha256').update(value).digest('hex');
-    writeFileSync(
-      join(scratch, '.shared-gd-hashes.json'),
-      JSON.stringify(Object.fromEntries(names.map((name) => [name, sha(older)]))),
-    );
+    noteWritten(syncRecordPath(), older);
     writeFileSync(reading, `${older}# text C\n`);
     assert.ok(syncSharedGdscript(godot).includes(copy));
     assert.equal(readFileSync(copy, 'utf8'), `${older}# text C\n`);
@@ -90507,6 +90520,7 @@ async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): 
     }
     assert.deepEqual(stopped, []);
   } finally {
+    restoreCache();
     rmSync(scratch, { recursive: true, force: true });
   }
 }
@@ -90522,6 +90536,7 @@ async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): 
  */
 function testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes(): void {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-text-'));
+  const restoreCache = pointTheCacheAt(scratch);
   try {
     const godot = scratchGodotForTheHelperCopies(scratch);
     const held = (path: string): string => readFileSync(path, 'utf8');
@@ -90556,8 +90571,8 @@ function testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes(): void {
 
     // No record: a tree an older sync left, or a clone after a build elsewhere, has copies that differ
     // with nobody having edited them.
-    const record = join(scratch, '.shared-gd-written');
-    assert.ok(existsSync(record), 'the sync should keep its record beside the godot folder');
+    const record = syncRecordPath();
+    assert.ok(existsSync(record), 'the sync should keep its record in the cache folder');
     rmSync(record, { recursive: true });
     assert.deepEqual(syncSharedGdscript(godot), []);
     assert.ok(existsSync(record), 'a sync with all copies equal should write the record again');
@@ -90571,6 +90586,65 @@ function testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes(): void {
     writeFileSync(runtimeReading, 'extends RefCounted\n# by hand\n');
     assert.throws(() => syncSharedGdscript(godot), /make the change there/);
   } finally {
+    restoreCache();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A record made fresh from copies already equal to their originals still guards them.
+ *
+ * With no record, a sync that finds every copy equal has nothing to write, and the texts the copies
+ * hold are the only ones a later sync can tell from a hand edit. Left unnoted, the next edit of an
+ * original makes those copies refused as edited by hand, though nobody touched them.
+ */
+function testACleanRecordNotesTheCopiesAlreadyEqualToTheirOriginals(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-equal-'));
+  const restoreCache = pointTheCacheAt(scratch);
+  try {
+    const godot = scratchGodotForTheHelperCopies(scratch);
+    const reading = join(godot, 'operations', 'reading.gd');
+    syncSharedGdscript(godot);
+    rmSync(syncRecordPath(), { recursive: true });
+    assert.deepEqual(syncSharedGdscript(godot), []);
+    writeFileSync(reading, `${readFileSync(reading, 'utf8')}# edited after the record was made\n`);
+    assert.equal(syncSharedGdscript(godot).length, 2);
+  } finally {
+    restoreCache();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A `godot` folder copied in from a tree whose copies are stale is not refused.
+ *
+ * Tree A had an original edited, a sync, and the edit undone with no sync since, so its copies hold
+ * a text its original no longer does. Copying only its `godot` folder into tree B brings those
+ * copies, and the text is one a sync on this machine wrote, so B's sync rewrites them.
+ */
+function testAGodotFolderCopiedFromATreeWithStaleCopiesIsNotRefused(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-trees-'));
+  const restoreCache = pointTheCacheAt(scratch);
+  try {
+    const treeA = scratchGodotForTheHelperCopies(join(scratch, 'a', 'src'));
+    const treeB = scratchGodotForTheHelperCopies(join(scratch, 'b', 'src'));
+    syncSharedGdscript(treeB);
+    const reading = join(treeA, 'operations', 'reading.gd');
+    const original = readFileSync(reading, 'utf8');
+    syncSharedGdscript(treeA);
+    writeFileSync(reading, `${original}# edited in the other tree\n`);
+    syncSharedGdscript(treeA);
+    writeFileSync(reading, original);
+    cpSync(treeA, treeB, { recursive: true });
+    const stale = join(treeB, 'addons', 'gdharness_editor', 'reading.gd');
+    assert.notEqual(readFileSync(stale, 'utf8'), original, 'the copied copy should be stale');
+    assert.deepEqual(
+      syncSharedGdscript(treeB).toSorted(),
+      [stale, join(treeB, 'addons', 'gdharness_runtime', 'reading.gd')].toSorted(),
+    );
+    assert.equal(readFileSync(stale, 'utf8'), original);
+  } finally {
+    restoreCache();
     rmSync(scratch, { recursive: true, force: true });
   }
 }
@@ -118058,6 +118132,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed,
   testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal,
   testTheHelperCopiesAreJudgedByTheirTextNotTheirTimes,
+  testACleanRecordNotesTheCopiesAlreadyEqualToTheirOriginals,
+  testAGodotFolderCopiedFromATreeWithStaleCopiesIsNotRefused,
   testNoHelperCopyIsTracked,
   testEveryHelperCopyInAnAddonIsListed,
   testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst,

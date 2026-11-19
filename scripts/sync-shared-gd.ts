@@ -14,12 +14,13 @@
  * A copy that differs from its original and holds no text the sync wrote was edited by hand.
  * The sync stops there and names the original, because overwriting it would lose the edit and
  * leaving it would test the wrong text. Each text it wrote is kept as an empty file named by its
- * hash in `.shared-gd-written` beside the `godot` folder, which git ignores and no package carries.
- * A file there is created once and never changed, so syncs running together cannot undo each other.
- * The folder gains one empty file per edit of an original and is not pruned, since removing a hash
- * a copy still holds would refuse that copy. Deleting the whole folder is safe.
+ * hash in `written-helpers` in gdharness's cache folder, which no tree holds and no package carries.
+ * Every tree on the machine shares it, so a `godot` folder copied from another tree is judged by
+ * what any sync here wrote. A file there is created once and never changed, so syncs running together
+ * cannot undo each other. The folder gains one empty file per edit of an original and is not pruned,
+ * since removing a hash a copy still holds would refuse that copy. Deleting the whole folder is safe.
  * File times judge nothing, since a copy that keeps its source's time or two syncs at once make
- * them lie. Without the folder, as on a tree an older sync left, a differing copy is taken for stale.
+ * them lie. Without the folder, as on a machine no sync ran on, a differing copy is taken for stale.
  * Each file is written to a temporary name and renamed, so a suite starting beside another reads
  * a whole copy.
  *
@@ -31,9 +32,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { cacheHome } from '../src/cache-home.js';
 
 const GODOT = join('src', 'godot');
-const RECORD = '.shared-gd-written';
 
 /** Which helpers are shared, and which addons hold a copy of each. */
 export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
@@ -63,9 +64,9 @@ export function sharedCopies(godot: string = GODOT): { original: string; copy: s
 
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
 
-/** The folder of what the sync wrote, beside the `godot` folder so it never ships or enters a digest. */
-export function syncRecordPath(godot: string = GODOT): string {
-  return join(godot, '..', RECORD);
+/** The folder of what any sync on this machine wrote, in the cache so it never ships or enters a digest. */
+export function syncRecordPath(): string {
+  return join(cacheHome(), 'written-helpers');
 }
 
 /** Replaces a file in one step, so a process reading it sees the old text or the new and never half. */
@@ -88,7 +89,7 @@ function writeWhole(path: string, text: string): void {
 }
 
 /** Notes that the sync wrote or found this text. A file already there is the same note, so it is kept. */
-function noteWritten(folder: string, text: string): void {
+export function noteWritten(folder: string, text: string): void {
   try {
     writeFileSync(join(folder, sha256(text)), '', { flag: 'wx' });
   } catch (error) {
@@ -105,7 +106,7 @@ function noteWritten(folder: string, text: string): void {
  * rewritten or removed, so no process can undo another's.
  */
 export function syncSharedGdscript(godot: string = GODOT): string[] {
-  const folder = syncRecordPath(godot);
+  const folder = syncRecordPath();
   const recorded = existsSync(folder);
   const due: { copy: string; wanted: string }[] = [];
   const equal: string[] = [];
