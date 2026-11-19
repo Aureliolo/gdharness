@@ -829,6 +829,7 @@ import {
   callsWithoutProjectPath,
   opTakes,
   projectPathSentence,
+  THE_GAME_PICKED_IN_SHORT,
   TOOL_SPECS,
   theGamePicked,
   toolSpec,
@@ -37046,17 +37047,25 @@ function assertTheGamePickIsCarriedUnaltered(): void {
   // The other sentence both renderings share: which game answers a call that names neither. It was
   // written three times and said a different amount each time, which is how a session with a
   // second project's game listed beside its own was left with "not needed with one game" and no
-  // way to tell what had answered it. The schema says only when the path is needed, since the
-  // answer names the game under answeredBy and a refusal names every game.
+  // way to tell what had answered it.
   const picked = theGamePicked();
   assert.ok(
     renderToolsMarkdown().includes(picked),
     'the tool reference carries the generated pick unaltered',
   );
   assert.ok((skillFiles('0.0.0').get('SKILL.md') ?? '').includes(picked), 'and so does the skill');
-  const schema = toolSpec('runtime_inspect')?.parameters['projectPath']?.['description'];
-  assert.equal(typeof schema, 'string', 'the running-game path still has a description');
-  assert.doesNotMatch(text(schema), /not needed/i, `and it states no pick of its own: ${text(schema)}`);
+  // The schema is all an agent reads that loads only the tool list, so each running-game path
+  // says the pick in short. Every runtime_* call goes to a running game the server picks.
+  const picking = TOOL_SPECS.filter((spec) => spec.name.startsWith('runtime_')).map((spec) => spec.name);
+  assert.equal(picking.length, 5, `the running-game tools are found: ${picking.join(', ')}`);
+  for (const name of picking) {
+    const schema = text(toolSpec(name)?.parameters['projectPath']?.['description']);
+    assert.ok(schema.includes(THE_GAME_PICKED_IN_SHORT), `${name} projectPath states the pick: ${schema}`);
+    assert.doesNotMatch(schema, /not needed/i, `and no pick of its own: ${schema}`);
+  }
+  for (const step of ['this server started or plays', 'the only game running']) {
+    assert.ok(THE_GAME_PICKED_IN_SHORT.includes(step), `the short pick names ${step}`);
+  }
 }
 
 /**
