@@ -337,15 +337,20 @@ func _advance_modules() -> void:
 ## finished it yet. A command acts in the frame it arrives, so it never waits frames for its module:
 ## a frame wait let 38 frames pass for three, and a signal fired before the wait began. Such a frame
 ## is the runtime's slowness, and is left out of the timing.
+##
+## A module compiled here while the thread compiles another that shares preloads with it is two
+## loads at once, which have deadlocked Godot's loader. So the thread's module is taken first, which
+## waits for that one compile. A module already compiled, such as one another module preloads, is
+## returned at once: waiting for the thread there held a timed frame some 150 ms.
 func _compiled(file: String) -> GDScript:
 	var path: String = ADDON_DIR + file
-	if not ResourceLoader.has_cached(path):
+	var cached: bool = ResourceLoader.has_cached(path)
+	if not cached:
 		_frames.skip_this_frame()
-	if path == _in_flight:
-		var _taken: Resource = ResourceLoader.load_threaded_get(path)
+	if path == _in_flight or not (cached or _in_flight.is_empty()):
+		var _taken: Resource = ResourceLoader.load_threaded_get(_in_flight)
 		_in_flight = ""
-	else:
-		_queued.erase(path)
+	_queued.erase(path)
 	return _loaded(file)
 
 
