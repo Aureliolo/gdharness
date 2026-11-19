@@ -20701,6 +20701,7 @@ async function testADesktopStartIsOneCall(): Promise<void> {
         process.kill(pid);
       }
     }
+    await retireHelper();
     sweep(root);
   }
 }
@@ -20800,6 +20801,7 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
     if (start !== undefined) {
       assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends with its engine');
     }
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21158,6 +21160,7 @@ async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne():
     if (engine !== undefined && alive(engine)) {
       process.kill(engine);
     }
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21363,6 +21366,7 @@ async function testAnEnginesWholeExitIsToldWhileTheHelperServesOthers(): Promise
   } finally {
     busy.start.stop();
     await exitedWithin(busy.start.child, 60_000);
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21392,6 +21396,7 @@ async function testAnEngineThatOutlivesItsHelperStillEndsWithItsWholeCode(): Pro
     assert.ok(await exitedWithin(running.start.child, 120_000), 'its end is reported');
     assert.equal(running.start.child.exitCode, 0xc0000005, 'with the code the engine itself exited with');
   } finally {
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21477,6 +21482,7 @@ async function testAStartsOutputClosesWhileALaterEngineStillRuns(): Promise<void
     if (later !== undefined) {
       await exitedWithin(later.start.child, 60_000);
     }
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21646,6 +21652,7 @@ async function testTheHelperOpensNoWindowForAnyStart(): Promise<void> {
   } finally {
     running.start.stop();
     await exitedWithin(running.start.child, 60_000);
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21716,6 +21723,7 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
       );
     }
   } finally {
+    await retireHelper();
     sweep(root);
   }
 }
@@ -22306,6 +22314,7 @@ async function testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds(): Promise<
     assert.match(run.failure ?? '', NO_RENDERER_VERDICT, `the failure names the renderer: ${run.failure}`);
     assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it ends at once');
   } finally {
+    await retireHelper();
     sweep(scratch);
   }
 }

@@ -513,7 +513,10 @@ export class ServedHelper {
 
 let current: ServedHelper | null = null;
 
-/** Ends the helper this process keeps once its starts have ended, as a test that compiled a helper of its own needs. */
+/**
+ * Ends the helper this process keeps once its starts have ended. A test that started it ends it, so
+ * the run's own process is not left holding a helper no later test asked for.
+ */
 export async function retireHelper(): Promise<void> {
   const retiring = current;
   current = null;
