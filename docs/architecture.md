@@ -1329,9 +1329,9 @@ templates directory. That directory holds whichever platforms were installed int
 
 ### The serialiser
 
-The serialiser both readings use is one file, `serialisation.gd`. `bun run sync:gd` copies it into
-each addon, because an addon is installed as a directory and cannot preload out of one. A fixture
-refuses a copy that has drifted.
+The serialiser both readings use is one file, `serialisation.gd`. The build and every suite write a
+copy of it into each addon, because an addon is installed as a directory and cannot preload out of
+one. Git tracks the one beside the operations, and a copy changed by hand stops the build.
 
 What is tagged is what JSON cannot carry. JSON does not refuse such a value. It writes the value's
 own text instead. A `Polygon2D`'s points would come back as the string `"[(1.0, 2.0), (3.0, 4.0)]"`

@@ -31,6 +31,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 import { extract } from '../scripts/install-godot.js';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { declaredClasses, declaredClassLines } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { openTheEditor } from '../src/editor-open.js';
@@ -5088,6 +5089,7 @@ async function everyOpenEnds(): Promise<void> {
   );
 }
 
+syncSharedGdscript();
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();

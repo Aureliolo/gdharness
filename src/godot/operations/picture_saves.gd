@@ -2,7 +2,7 @@ extends RefCounted
 
 # How a captured picture is sized and saved, for the game's captures and the editor's alike.
 #
-# This file is the one beside the operations, and `bun run sync:gd` copies it into each addon,
+# This file is the one beside the operations, and the build copies it into each addon,
 # because an addon is installed as a directory and cannot preload out of one.
 
 ## Measured on a downstream game's 1280x720 frame: its interface text and pixel art read as they do
