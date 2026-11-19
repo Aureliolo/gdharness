@@ -20824,10 +20824,11 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     const compiled = await copy.ensure(root);
     assert.equal(compiled, null, 'the copy compiles');
     const ranMarker = join(root, 'ran');
+    const marker = `gdharness-taken-${String(process.pid)}`;
     const start = spawnOnDesktop(
       { directory: root, endsWithHelper: true, scratch: root },
       process.execPath,
-      ['-e', "require('node:fs').writeFileSync(process.argv[1], 'ran')", ranMarker],
+      ['-e', `require('node:fs').writeFileSync(process.argv[1], 'ran') // ${marker}`, ranMarker],
       { stdio: ['ignore', 'ignore', 'ignore'] },
       copy.assembly(root),
     );
@@ -20843,6 +20844,14 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     assert.equal(start.pid(), undefined, 'no pid is given out');
     await delay(1000);
     assert.equal(existsSync(ranMarker), false, 'and the engine was ended before it ran');
+    // The helper still runs here, so only the closed birth handle can have ended the suspended engine.
+    const { pidsWithCommandLine } = await import('./support/windows.js');
+    let left = await pidsWithCommandLine('bun', marker);
+    for (let waited = 0; left.length > 0 && waited < 10_000; waited += 500) {
+      await delay(500);
+      left = await pidsWithCommandLine('bun', marker);
+    }
+    assert.deepEqual(left, [], 'and no process of it is left while the helper runs');
   } finally {
     await retireHelper();
     held.close();
@@ -21031,6 +21040,42 @@ async function testAKeptStartOutlivesAKilledStarter(): Promise<void> {
     if (kept !== undefined && alive(kept)) {
       process.kill(kept);
     }
+    sweep(root);
+  }
+}
+
+/**
+ * A kept engine runs on when its helper is killed. The engine leaves the helper's kill-on-close
+ * job once the start is said to be made, so the helper's end takes nothing with it.
+ */
+async function testAKeptStartOutlivesItsKilledHelper(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-helper-killed-'));
+  let engine: number | undefined;
+  try {
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: false, scratch: root },
+      process.execPath,
+      ['-e', 'setTimeout(() => undefined, 600000)'],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    engine = await answeredWithin(() => pidTheHelperWrote(start.files.pid), 60_000);
+    assert.ok(engine !== undefined, 'the kept engine started');
+    assert.ok(alive(engine), 'and runs');
+    const helper = start.child.pid;
+    assert.ok(helper !== undefined && alive(helper), 'the helper runs');
+    process.kill(helper);
+    assert.ok(await answeredWithin(() => (alive(helper) ? undefined : true), 30_000), 'the helper is killed');
+    await delay(2000);
+    assert.ok(alive(engine), 'the kept engine runs on after its helper was killed');
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
     sweep(root);
   }
 }
@@ -118754,6 +118799,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,
+  testAKeptStartOutlivesItsKilledHelper,
   testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut,
   testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck,
   testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce,
