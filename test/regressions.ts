@@ -845,7 +845,14 @@ import {
 } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
-import { makeWhole, notesInTurn, removeWholeAsync, writeWhole, writeWholeAsync } from '../src/whole-file.js';
+import {
+  makeWhole,
+  notesInTurn,
+  removeWhole,
+  removeWholeAsync,
+  writeWhole,
+  writeWholeAsync,
+} from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import {
@@ -66992,18 +66999,28 @@ async function testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll(): Pr
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sync-finish-'));
   try {
     const note = join(directory, 'note.json');
-    writeFileSync(note, 'old');
-    await withAHeldNote(note, 4000, async (pause) => {
-      const waiting = [writeWholeAsync(note, 'a'), writeWholeAsync(note, 'b'), writeWholeAsync(note, 'c')];
-      await pause();
-      const started = Date.now();
-      const landed = writeWhole(note, 'sync');
-      const blocked = Date.now() - started;
-      assert.ok(blocked < 1500, `the sync write blocked ${blocked} ms, over one wait and its own retry`);
-      assert.equal(landed, false, 'the note is still held, so the sync write answers that it did not land');
-      assert.deepEqual(await Promise.all(waiting), [false, false, false]);
-    });
-    assert.equal(readFileSync(note, 'utf8'), 'old');
+    const syncCalls = {
+      write: () => writeWhole(note, 'sync'),
+      removal: () => removeWhole(note),
+    };
+    for (const [name, call] of Object.entries(syncCalls)) {
+      writeFileSync(note, 'old');
+      await withAHeldNote(note, 3000, async (pause) => {
+        const waiting = [writeWholeAsync(note, 'a'), writeWholeAsync(note, 'b'), writeWholeAsync(note, 'c')];
+        await pause();
+        const started = Date.now();
+        const landed = call();
+        const blocked = Date.now() - started;
+        assert.ok(blocked < 1500, `the sync ${name} blocked ${blocked} ms, over one wait and its own retry`);
+        assert.equal(
+          landed,
+          false,
+          `the note is still held, so the sync ${name} answers that it did not land`,
+        );
+        assert.deepEqual(await Promise.all(waiting), [false, false, false]);
+      });
+      assert.equal(readFileSync(note, 'utf8'), 'old');
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
