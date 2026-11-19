@@ -51,7 +51,7 @@ metadata:
 An MCP server and four Godot addons. Together they answer about the editor that is open, the game
 that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`domain_verb\`.
 
-\`references/tools.md\` is every tool, op and argument.
+\`references/tools.md\` is every tool, op and argument, and what each answer's fields mean.
 
 ## Start here
 

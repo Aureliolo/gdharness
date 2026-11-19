@@ -132,7 +132,7 @@ export function resolveSilent(requested: unknown): boolean {
  * caller all of those. The flags this server sets itself (--headless, --path, --audio-driver,
  * --quit-after) are taken as the arguments that set them.
  */
-export const ENGINE_FLAGS: Readonly<Record<string, 'none' | FlagValue>> = Object.freeze({
+const ENGINE_FLAGS: Readonly<Record<string, 'none' | FlagValue>> = Object.freeze({
   '--verbose': 'none',
   '--quiet': 'none',
   '--debug-collisions': 'none',

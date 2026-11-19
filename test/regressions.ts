@@ -825,6 +825,7 @@ import type { OperationParams } from '../src/tool-args.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
+  buildToolDefinitions,
   callsWithoutProjectPath,
   opTakes,
   projectPathSentence,
@@ -10036,10 +10037,10 @@ async function testAnEditorThatNeverSaidItHasNoWindowIsNotRestarted(): Promise<v
   assert.ok(accepted.asked.includes('restart_editor'), 'and hidden: false accepts a window');
 }
 
-/** The editor_launch description says what a restart of an editor opened elsewhere does. */
+/** The editor_launch reference says what a restart of an editor opened elsewhere does. */
 function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
   assert.match(
-    toolSpec('editor_launch')?.description ?? '',
+    toolSpec('editor_launch')?.answer ?? '',
     /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
   );
   assert.ok(
@@ -13101,8 +13102,8 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
   }
 }
 
-/** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 165;
+/** The arguments with a sentence opening by naming the ops that read them, as the table stands. */
+const READ_IN_WORDS = 22;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -14347,30 +14348,61 @@ function testAnArgumentScopedInWordsIsScopedInItsSchema(): void {
     }
     read += assertArgumentsScopedInWordsAreScoped(spec, ops);
   }
-  assert.equal(read, READ_IN_WORDS, 'the arguments whose descriptions open by naming their ops');
+  assert.equal(read, READ_IN_WORDS, 'the arguments with a sentence opening by naming their ops');
 }
 
-/** Holds each argument of [spec] whose description opens by naming ops to declare them. Answers how many it read. */
+/** The most characters the whole tool list may take, and one tool of it. */
+const MOST_LIST_CHARACTERS = 80_000;
+const MOST_TOOL_CHARACTERS = 6_500;
+
+/**
+ * The tool list a client is sent stays small. A client carries the whole list in every request, so
+ * its size is paid on every call of every session. What only a later call needs goes in `answer`.
+ */
+function testTheToolListStaysSmall(): void {
+  const sizes = buildToolDefinitions().map((tool) => ({
+    name: tool.name,
+    size: JSON.stringify(tool).length,
+  }));
+  const total = sizes.reduce((sum, { size }) => sum + size, 0);
+  assert.ok(
+    total <= MOST_LIST_CHARACTERS,
+    `the tool list is ${total} characters, past ${MOST_LIST_CHARACTERS}`,
+  );
+  const large = sizes
+    .filter(({ size }) => size > MOST_TOOL_CHARACTERS)
+    .map(({ name, size }) => `${name} ${size}`);
+  assert.deepEqual(large, [], `tools past ${MOST_TOOL_CHARACTERS} characters`);
+}
+
+/**
+ * Holds each argument of [spec] with a sentence of its description opening by naming ops, as
+ * "check: ... wait: ...", to be taken by those ops, and one whose description opens so to declare
+ * them. Answers how many it read.
+ */
 function assertArgumentsScopedInWordsAreScoped(
   spec: (typeof TOOL_SPECS)[number],
   ops: readonly string[],
 ): number {
   let read = 0;
+  const namedIn = (head: string | undefined): string[] =>
+    head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
   for (const [name, schema] of Object.entries(spec.parameters)) {
     const said = typeof schema['description'] === 'string' ? schema['description'] : '';
-    const head = /^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1];
-    const named = head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
+    const heads = [...said.matchAll(/(?:^|\. )([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/g)];
+    const named = heads.flatMap(([, head]) => namedIn(head));
     if (named.length === 0) {
       continue;
     }
     read += 1;
+    const opening = namedIn(/^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1]);
     assert.ok(
-      schema.ops !== undefined,
-      `${spec.name}.${name} says it is for ${named.join(', ')} and every op takes it`,
+      opening.length === 0 || schema.ops !== undefined,
+      `${spec.name}.${name} says it is for ${opening.join(', ')} and every op takes it`,
     );
     for (const op of named) {
       assert.ok(
-        schema.ops.includes(op),
+        opTakes(spec, op, name),
         `${spec.name}.${name} says it is for ${op} and ${op} does not take it`,
       );
     }
@@ -31836,7 +31868,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 50, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 49, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -31882,7 +31914,11 @@ function testEveryRemedyLeadsWithTheScan(): void {
   assert.ok(editing.length > 200, 'the Editing section is found and holds its paragraphs');
 
   const choosing: { where: string; text: string }[] = [
-    { where: 'script_diagnostics description', text: toolSpec('script_diagnostics')?.description ?? '' },
+    // The description names the scan alone, and the answer chooses between the remedies after it.
+    {
+      where: 'script_diagnostics description and answer',
+      text: `${toolSpec('script_diagnostics')?.description ?? ''} ${toolSpec('script_diagnostics')?.answer ?? ''}`,
+    },
     {
       where: 'staleAnalysisNote',
       text: staleAnalysisNote(
@@ -37007,10 +37043,11 @@ function assertTheGeneratedClauseIsCarriedUnaltered(without: readonly string[]):
 
 /** The sentence about which game answers a call that names neither is the same in both renderings. */
 function assertTheGamePickIsCarriedUnaltered(): void {
-  // The other sentence both renderings share, and the schema with them: which game answers a
-  // call that names neither. It was written three times and said a different amount each time,
-  // which is how a session with a second project's game listed beside its own was left with
-  // "not needed with one game" and no way to tell what had answered it.
+  // The other sentence both renderings share: which game answers a call that names neither. It was
+  // written three times and said a different amount each time, which is how a session with a
+  // second project's game listed beside its own was left with "not needed with one game" and no
+  // way to tell what had answered it. The schema says only when the path is needed, since the
+  // answer names the game under answeredBy and a refusal names every game.
   const picked = theGamePicked();
   assert.ok(
     renderToolsMarkdown().includes(picked),
@@ -37019,10 +37056,7 @@ function assertTheGamePickIsCarriedUnaltered(): void {
   assert.ok((skillFiles('0.0.0').get('SKILL.md') ?? '').includes(picked), 'and so does the skill');
   const schema = toolSpec('runtime_inspect')?.parameters['projectPath']?.['description'];
   assert.equal(typeof schema, 'string', 'the running-game path still has a description');
-  assert.ok(
-    text(schema).includes(picked.replaceAll('`', '')),
-    `and it carries the same pick, without the markup a schema has no use for: ${text(schema)}`,
-  );
+  assert.doesNotMatch(text(schema), /not needed/i, `and it states no pick of its own: ${text(schema)}`);
 }
 
 /**
@@ -91566,10 +91600,10 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1488;
+const TOOL_NAME_MENTIONS = 1396;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 51;
+const TOOL_OP_MENTIONS = 62;
 
 /**
  * Every tool this server names in something it says is a tool it has.
@@ -119112,6 +119146,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASeedNeverTakesPartOfACacheBeingSwapped,
   testProjectTestRunsAtOnceEachSeedFromTheKeptCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
+  testTheToolListStaysSmall,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
   testInteractiveIsABooleanWhateverTheStreamsAre,

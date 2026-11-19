@@ -67,11 +67,11 @@ interface ToolSpecBase {
   readonly title: string;
   readonly description: string;
   /**
-   * What the fields of the answer mean, for a tool whose answer needs more than its description has
-   * room for. Rendered in the skill's tool reference and on the site, and not in the description a
-   * client is sent, which every client carries on every call.
+   * What the fields of the answer mean, and what the call does past what a first call needs.
+   * Rendered in the skill's tool reference and on the site, and not in the description a client is
+   * sent, which every client carries on every call.
    */
-  readonly answer?: string;
+  readonly answer: string;
   /**
    * What the tool leaves changed, for the reference, when its effect alone would mislead. A test
    * run is additive to a client, and it still rewrites the class cache and adds `.uid` files.
@@ -450,6 +450,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'The project name, main scene and Godot version, with counts of its scenes, scripts and assets. Optional sections go on top. ' +
       CLASSES_REBUILT,
+    answer:
+      'Assets are images, fonts, sound, models, video and shaders, and other counts every remaining file. No count includes the .import and .uid files beside others, the addons gdharness installed, a file in a folder holding a .gdignore or its own project.godot, or one behind a link out of the project. ' +
+      "classes lists each class_name with its script, read from the files. Those an addon declares are counted per addon under inAddons, unless addonClasses names the addon. input_actions lists the project's actions with their events, and an engine ui_ action only when the project rebinds it, as engineAction. export_presets marks as runnable the one preset of its platform the editor's one-click deploy uses. " +
+      'health and validation name each script that fails with its first error, each missing file a scene, resource or script refers to, each input action a script reads by a literal name that nothing defines, with every line reading it, and each scene connection whose method or signal the node at its end lacks or whose argument count does not fit. ' +
+      "health's score starts at 100 and loses each finding's weight, 15 for a missing main scene and 5 for a broken connection. Its grade is A from 90 down to F below 60, so a failed check can still grade A. Notes such as TODO under addons/ are left out.",
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
@@ -524,13 +529,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       enabled: {
         type: 'boolean',
         ops: ['add_autoload', 'set_audio_bus_effect'],
-        description:
-          'add_autoload: false is refused, so use global: false or remove_autoload. set_audio_bus_effect: whether the effect is on. Default true.',
+        description: 'set_audio_bus_effect: whether the effect is on. Default true.',
       },
       global: {
         type: 'boolean',
         ops: ['add_autoload'],
-        description: 'Default true.',
+        description: 'Make the name a global variable. Default true.',
       },
       scenePath: { ...SCENE_PATH, ops: ['set_main_scene'] },
       actionName: {
@@ -554,10 +558,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       busName: {
         type: 'string',
         ops: ['add_audio_bus', 'remove_audio_bus', 'rename_audio_bus'],
+        description: 'The audio bus.',
       },
       newBusName: {
         type: 'string',
         ops: ['rename_audio_bus'],
+        description: 'The name the bus takes. Buses sending to it follow.',
       },
       sendTo: {
         type: 'string',
@@ -572,6 +578,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       busIndex: {
         type: 'number',
         ops: ['set_audio_bus_effect', 'set_audio_bus_volume', 'set_audio_bus_send'],
+        description: 'The audio bus, by index.',
       },
       effectIndex: {
         type: 'number',
@@ -583,10 +590,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['set_audio_bus_effect'],
         description: 'Effect class, such as "AudioEffectReverb".',
       },
-      volumeDb: { type: 'number', ops: ['set_audio_bus_volume'] },
-      mute: { type: 'boolean', ops: ['set_audio_bus_volume'] },
-      solo: { type: 'boolean', ops: ['set_audio_bus_volume'] },
-      bypassEffects: { type: 'boolean', ops: ['set_audio_bus_volume'] },
+      volumeDb: { type: 'number', ops: ['set_audio_bus_volume'], description: 'Volume in decibels.' },
+      mute: { type: 'boolean', ops: ['set_audio_bus_volume'], description: 'Mute the bus, or unmute it.' },
+      solo: {
+        type: 'boolean',
+        ops: ['set_audio_bus_volume'],
+        description: 'Solo the bus, silencing every bus not soloed.',
+      },
+      bypassEffects: {
+        type: 'boolean',
+        ops: ['set_audio_bus_volume'],
+        description: "Pass the sound by the bus's effects.",
+      },
     },
     requires: ['projectPath'],
     operations: {
@@ -656,9 +671,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     effect: 'read',
     description:
       'Searches text or a regular expression across project files and answers file paths with line numbers, one entry per matching line. A line over 400 characters is cut around its first match. Dot names, addons gdharness installed, and folders holding a .gdignore or their own project.godot are skipped.',
+    answer:
+      'total_matches counts the matching lines, however often each holds the query. Past maxResults truncated is true, and the summary still counts the whole search. A line cut to the 400 characters around its first match carries shownFrom, the column they start at, and lineLength, the length of the whole line. not_searched names each skipped folder or link the search passed, a link out of the project or to a folder the search is inside among them. A path naming a skipped folder is searched as asked, and note says the whole-project search steps over it. When no file searched has one of fileTypes, note names the extensions there are.',
     parameters: {
       projectPath: PROJECT_PATH,
-      query: { type: 'string', description: 'The text or pattern to find. One line.' },
+      query: { type: 'string', description: 'The text or pattern to find.' },
       path: {
         type: 'string',
         description:
@@ -684,6 +701,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Project dependencies',
     effect: 'read',
     description: `What a resource depends on, or what depends on it. ${CLASSES_REBUILT}`,
+    answer:
+      "forward lists each file this one loads or names by its path, with kind: ext_resource, extends, preload, load, include, or path for a path only written in a string, which the file may never load. A reference closing a cycle is marked circular, with the cycle under circular_references. A script's dependencies include every script whose class_name it uses, marked by_class, and the script of every autoload it names, marked by_autoload. An ext_resource whose uid names another file than its path is followed to that file, as the engine loads it, with the path under stale_path. One whose uid names no file is followed by its path, with the uid under unknown_uid. A load or preload of an unknown uid is listed under that uid as missing. A shader's #include is followed relative to the shader. A file the depth stops at carries beyond_depth, how many files it names that were not walked. A file's dependencies are listed at its first entry, and later entries carry dependencies_listed_above. summary.total_dependencies counts each file reached once, total_references counts the entries in the tree, and missing names each file referenced that does not exist, with the files referring to it. " +
+      'reverse lists every file that refers to this one and how, for a file that is gone too, answered with exists: false. It covers a scene instancing it, a script extending, preloading or loading it, every use of its class_name, and every use of its autoload name, marked autoload. ext_resource, extends, preload, load, include and path mark a reference by path, with stale_path or unknown_uid as forward has them. setting, plugin, export_preset and import mark one in project.godot, a plugin.cfg, export_presets.cfg or an import sidecar. class_name marks a use of the declared name. Three kinds are not uses: doc, a name in a ## comment, comment, one in ordinary prose, and stale_path as a kind, an ext_resource naming it by a path the engine does not load. A file claiming the same uid is listed under shares_uid, since the engine loads only one file per uid. summary.in_code counts the uses with those left out, which is the number to read when asking whether anything still uses this.',
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: RESOURCE_PATH,
@@ -696,7 +716,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       depth: {
         type: 'integer',
         minimum: 1,
-        description: 'forward: levels to follow. Default unlimited.',
+        description:
+          'forward: levels to follow. Default unlimited, which can answer a megabyte. 2 or 3 stays near.',
       },
       includeBuiltin: {
         type: 'boolean',
@@ -719,7 +740,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     answer:
       "options answers remap, deps and params as the .import file holds them, so an enum option such as compress/mode is its number: the engine gives scripts no list of a built-in importer's options or of what the numbers mean, so Godot's documentation of that importer is where a number is looked up. reimport is answered from a second status read: reimported lists what is current now, notReimported what is not, one entry per status and reason with the paths sharing them, and via says which of the two did the work. importedByTheScan names what the editor's scan imported first, and alsoImported, on a reimport of one resourcePath, the others it imported. wroteInProject names, by source, what an import wrote into the project itself rather than under .godot, such as the .translation a CSV gives each language, which version control sees and internationalization/locale/translations names. The import gives every script without a .uid sidecar one, as the editor's scan does, and uidsWritten names those scripts, counted per addon under uidsWrittenInAddons for the ones inside an addon. When nothing needed reimporting, the two lists are empty, a note says so, and there is no via. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, even when nothing needed reimporting. One resourcePath leaves it out. stillImporting is an editor that had not finished within timeoutMs. " +
       'status judges by content, with the checks the editor makes before a reimport: a sidecar changed since its import, a sidecar with no uid or written for another file, an output under .godot/imported that is gone (missing_outputs) or changed, and a source whose hash differs from the recorded one. A glTF scene built before an image it names was imported is named under imported_without. failed is an import that failed, which the editor never retries on its own. ' +
-      'set_options answers changed, each option written as {was, now}, unchanged_options for the ones already holding the value, and nothing is written or reimported when none changed. ' +
+      'set_options answers changed, each option written as {was, now}, unchanged_options for the ones already holding the value, and nothing is written or reimported when none changed. A dictionary option keyed by numbers, such as a font\'s opentype_features, takes its keys as strings of digits, and opentype_features also takes a four-letter OpenType tag: {"opentype_features": {"liga": 0}} turns ligatures off. Its reimport is answered under reimport as op reimport answers. ' +
       "refresh_classes answers added, and for a running editor unseenByEditor (a class it cannot resolve), heldBehindInEditor (one it holds from an older text) and lostSinceLastRebuild (one the editor's own save dropped from the cache, until it restarts). staleInThisEngine names a class the rebuild added that the autoloads' engine did not know. twiceDeclared names a class several scripts declare, so rename it in all but one. unreadableList says the old list could not be read and every class was added. " +
       'refresh_uids names under uidsCreated the sidecars it made, under uidsCached the files the cache newly took, and under stillWithoutUid the ones the engine would not import. It writes no scene and no script.',
     parameters: {
@@ -798,7 +819,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_export',
     title: 'Export',
     description:
-      "Export presets and exports. add_preset writes a preset to export_presets.cfg with its platform's default options. set_preset changes a preset's path, filters, files, custom features and options. A secret option is never answered. list shows every preset, with its options when preset is given. run imports what changed on disk, then exports.",
+      "Export presets and exports. add_preset writes a preset to export_presets.cfg with its platform's default options. A secret option is never answered. list shows every preset, with its options when preset is given. run imports what changed on disk, then exports.",
+    answer:
+      "add_preset writes the keys the editor's Project > Export writes for a new preset, and every option a new preset of its platform shows at its default, and makes it the platform's runnable preset when the platform has none. set_preset answers under changed what each value held before and holds now, and under unchanged what already held the value given. saved is false when nothing changed, and nothing is written when any of it is refused. Option names are the exporter's own, as the Export dialog's Options tab shows them, such as binary_format/embed_pck. An enum takes the name the dialog shows or its number. An option the dialog shows only while another is on, such as codesign/identity behind codesign/enable, is taken when the preset has that one on or the same call turns it on. A secret option, such as a signing password, is written to .godot/export_credentials.cfg, where the editor keeps secrets out of the committed file. A file an option names that is not there is written and listed under missing_files, or for a secret under secretsNamingNoFile. " +
+      "exportFilter's dependencies are what the engine counts as them, so a file named only in a string, such as a scene path in an exported property, or a script reached only by its class_name, is left out of the export, though project_dependencies lists both. " +
+      "remove_preset names under runnableNow the next preset of the platform that becomes runnable, or null, and takes a secret the preset held with it. A preset op answers where this engine's export templates belong and whether the preset's platform has them, and list says so for every preset. An editor open on the project does not see a preset added this way until it restarts. " +
+      'run names under importedFirst what it imported first. A preset with shader_baker/enabled on, whose platform draws with Forward+ or Mobile, is exported by an editor drawing with that renderer, named under bakedWith, since a headless one bakes no shader. On Windows that editor draws out of sight. Elsewhere its window shows, which showWindow allows. run answers bytes, the size of the output, and alsoWritten, what the export wrote beside it, such as the .pck a Windows or Linux build needs. Its entries are the newest two hundred distinct errors and warnings it printed, one printed more than once carrying times, and errors and warnings count them. exported is true only when this run wrote the output and printed no error.',
     parameters: {
       projectPath: PROJECT_PATH,
       preset: {
@@ -938,7 +964,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string' },
         description:
-          'Suites, cases or rows to leave out: "suite", "suite:test", or "suite:test:N" for row N, from 0.',
+          'Suites, cases or rows to leave out: "suite", "suite:test", or "suite:test:N" for row N, from 0. suite is the file name without .gd, so a bare test name leaves out nothing.',
       },
       tests: {
         type: 'array',
@@ -977,6 +1003,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_create',
     title: 'Create or save a scene',
     description: `Creates a scene file where none is, saves one, or saves a copy under a new path. A missing folder is made. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
+    answer:
+      "create names a folder it made under madeFolder, and the root as scene_node get names a node: rootNodeType its engine class, scriptClass for a class_name, and the script it carries under script. A root made from a class_name is made as that script's base with the script attached. With inherits, the root is an instance of that scene, so changes there reach it, and the answer names the scene under inherits. A save of a scene open in the editor saves the editor's copy, unsaved changes included. save with from editor opens a closed scene in the editor, gives its @tool scripts and layout their frames, saves it and closes it, and says so under openedFirst, or stillOpen when it could not close it.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1028,6 +1056,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     effect: 'read',
     description:
       'The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node instancing another scene names it under instanceOf. Needs no editor. For the nodes of a running game, runtime_inspect tree.',
+    answer:
+      'type is the engine class, and a node whose script declares a class_name names it under scriptClass. The nodes listed under an instance come from its file, and its editableChildren says whether this scene, or one it inherits, keeps values of its own for them. One saved as a placeholder answers placeholder true, with InstancePlaceholder as its type. The root of an inheriting scene names the scene under inherits, and every node that scene or one further down makes names its file under inheritedFrom. A node in any group answers groups, sorted, from this file and every scene it comes from. The engine stops reading at a node instancing a scene it cannot load, and notRead lists that node and every one after it. A node at the last level that has children says how many under childrenNotListed. With properties, defaultsLeftOut counts the defaults left out, and on a node another scene makes setHere names the properties this file sets. A TileMapLayer or TileMap whose cells the file sets answers cellCount and cellsListedBy, the scene_node get call that lists them. An editor serving the project answers and says whether it holds unsaved changes to the scene. With none, a headless engine reads the file without making its nodes, so no script of theirs runs.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1042,7 +1072,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       includeDefaults: {
         type: 'boolean',
-        description: 'List every stored property, defaults included. Turns includeProperties on.',
+        description:
+          'List every stored property, defaults included. Large: a Control has about a hundred. Turns includeProperties on.',
       },
     },
     requires: ['projectPath', 'scenePath'],
@@ -1053,6 +1084,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description: `One node in a scene file: add, read, set, duplicate, reparent or delete it, change its type, save it as a scene of its own, paint TileMap cells, or bake a navigation region. Another scene is instanced with instancePath. A set with properties {"name": "Boss"} renames a node, and the paths naming it are rewritten. ${WITHOUT_AN_EDITOR}`,
     answer:
       "get answers nodeType, the node's engine class, with scriptClass when its script declares a class_name. It answers nodePath, its path from the root however it was named, and setHere, the properties this scene's own file sets on it. valuesFrom is the scene every value outside setHere comes from, when another scene makes the node. An instance of another scene also answers instanceOf, editableChildren and placeholder. A set that gives a property the value the node has without it (what the scene it comes from gives, or its default) leaves it out of the file, as the editor does, and answers it under notStored, with notStoredNote saying what it follows now. retargeted lists each path a rename or a reparent rewrote, as {scenePath, nodePath, property or animation and track, from, to}, and notRetargeted each it left, with a reason: a track kept in another scene or an imported file, or a value another scene gives that the move left naming nothing. A rename or a reparent carries NodePath values on nodes (in arrays, dictionaries, built-in resources, %unique paths) and the tracks of the scene's players, saving a library kept in a .tres of its own. followed names the other scenes a move rewrote at any depth, and notFollowed any left as they were, with why. It names each link that leads out of the project and can hold a scene too, a folder or a scene file, since no scene behind one is read. A delete rewrites no path. scriptsNaming lists each line of a script that reads a node a rename, a reparent or a delete took by the path it had, as {scenePath, nodePath, script, line, from, to}: the script is on the node at nodePath, or is one that node's script extends, in this scene or one instancing or inheriting it, and to is the path that reaches the node from there now, absent after a delete. It reads $Path, %Unique, and a string handed to get_node, get_node_or_null or has_node on the node itself. A path built at run time is not seen. Scripts are left as they were, as the editor's own rename leaves them, so each line listed fails until it is changed. change_type answers nodeType and wasType, with scriptClass when nodeType named a class_name. Its dropped names each value the new class lacks. Its connectionsRemoved lists, in the shape a delete gives, each connection the new class has no signal or method for. Its cleared lists each node value typed so it cannot hold the new class, now null, as {nodePath, property}. bake_navigation answers polygons and vertices, savedTo (the polygon's file), made (true when the region had none and was given one), a note saying why when none came out, and meshesNote on the engine's mesh warning. A 2D bake_navigation that read no obstacle says in its note that all its outlines enclose is walkable, and names the nodes giving obstacles that sit under no region. stillNaming lists each node path and track, here and in the scenes instancing or inheriting this one, that named a deleted node. A property typed as a node, or an array or dictionary of nodes, holds the node itself, so the one that held a deleted node holds null there, as the editor saves it, and its entry adds cleared: true. deletedWithIt lists each node of this scene's own that went with it, the nodes inside an instance going with the instance. connectionsRemoved lists each connection the file held from or to a node a delete took, as {sourceNodePath, signalName, targetNodePath, methodName}. A duplicate's connectionsCopied lists those its copy got, in the same shape, and notUnique each copy of a node with a unique name, which the original keeps. A scene instancing or inheriting this one loses what it kept for a node a delete took or one below it: values set there, a node added there, a connection from or to one, and an editable mark. The engine skips each with a warning on every load, and the editor's next save leaves it out. dropped lists each as {scenePath, nodePath, entry}, entry being values, node, connection (with signal and method) or editable, and the scene is named under followed. A save_branch writes the node, its children, their values, built-in resources, groups and the connections among them to newScenePath, with the new root's position reset as the editor resets it. The instance put in its place keeps its name, place among its siblings, position, rotation, scale and unique_id. The rest of the scene keeps the connections to the branch's nodes and the properties holding them. A %unique path through one of them, in a value, a built-in resource or a track, is written as the plain path, since that node is unique only in the new scene. A scene that instances or inherits this one and keeps values below the branch gets the instance marked editable there, since its next save would drop them otherwise, and is named under followed. The root, a node another scene makes and an instance of a scene already are refused. save_branch answers nodePath, newScenePath and index. Its connectionsLost lists, in the same shape, each connection from a node inside the new scene to one outside it that the file cannot hold, since a scene saves a connection from inside an instance only once the instance's children are editable. Its namesOutside lists each node path or node in the new scene that reaches a node outside it, as {nodePath, property, path, names}, nodePath in the new scene and names here: a path is kept and reaches that node only where the scene is instanced as here, and a node is cleared, with cleared: true. Its retargeted gives each %unique path rewritten. Its scriptsNaming gives each script line naming a node through a %unique name across the branch's edge, with to only for a line outside the branch. groups lists, sorted, every group a node is in, on a get, an add that gave addGroups and every set that changes them. get adds groupsHere, the groups this file puts it in, when another scene puts it in others, and layers, each layer mask it answers (collision_layer, collision_mask, visibility_layer) as the layers it holds, {layer, name} with the name project.godot gives the layer. Each of these lists is answered only when it names anything. add and set answer each property given under properties as the node holds it once written, and set each one unset under unset. unsetNote names the scene an unset value now follows. alsoChanged gives the other properties the engine changed in step with a set, as a Control's offsets with its size, and those a reparent changed to keep the node where it is drawn or that the new parent sets, as a container gives a Control its layout_mode, as {was, now}. namesNoNode gives each node path written naming no node. sharedWith gives, for a property written through a resource built into the scene, each other {node, property} holding it, which changed too. setByScript gives what a script that is not a tool set as a headless write ran, which the file does not hold. loadsAs gives a value given that the file holds and the node's own script changes as the scene loads, as it loads. get adds placement, a Node3D's position, rotation_degrees and scale from its transform. A property typed outside the declared range, an enum number or name it does not list, flags it does not have, a file its filter does not take, or an alpha on a colour declared without one, is written as given and named under outsideDeclared. A set with a key reaching into a built-in resource, \"sources/0/0:0/0/probability\" on a TileSet or \"lines/1/text\" on a list of resources, writes inside it, and the next element of a list the engine keeps by index is made by writing to it. A node this scene inherits takes values of this scene's own, and so does a node inside an instance once that instance's editableChildren is true. editableChildren false answers the nodes whose values went under droppedValues and the added nodes that went under droppedNodes. A reparent drops the parent_id_path, from_uid_path and to_uid_path saved beside each rewritten path and keeps the node's unique_id. A Node3D kept in place under a parent scaled unevenly across its turn ends up sheared, and the answer then carries its transform under alsoChanged and says so under sheared. unset of a shader parameter is written back at the shader's default by an editor with a renderer on its next save. " +
+      'An add with instancePath saves the node as an instance of that file, as Instantiate Child Scene does, and properties set its root. save_branch gives a newScenePath with no extension .tscn. set_tilemap_cells answers placed and erased, counting the cells as they end. ' +
+      'properties takes more forms than the listed ones. An enum takes its number or a value\'s name, as the script spells it, as the inspector shows it, or as the engine constant, so Add or BLEND_MODE_ADD. A typed list or map of resources or nodes, such as Array[Item], takes each in the same forms. A map takes a plain object, with text for StringName and NodePath keys, and one keyed by anything else, such as Dictionary[Vector2i, int], takes {"_type": "Dictionary", "entries": [[key, value], ...]}. In a list or dictionary that declares no element type, a bare whole number is an int, and a whole float is {"_type": "float", "value": 7}. An element of an exported array is added by giving the array whole. A "metadata/" key that is not there is added, and null takes it off, named under metadataRemoved. Each value is read back once set, and one the engine changed or refused is refused with what it holds. ' +
       ALSO_SAVED,
     parameters: {
       projectPath: PROJECT_PATH,
@@ -1212,6 +1245,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_signal',
     title: 'Scene signals',
     description: `Signal connections in a scene file. A connect to a method the target lacks is still written and answers methodFound false. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
+    answer:
+      'Each connection answers its flags as the number and as flagNames, binds and unbinds only when it has them. persist is on every connection, since a scene saves no other kind, and is added to flags either way. A read can name inherited, 32, on a connection an instanced scene makes. A connect of a pair already connected says alreadyConnected, with flagsBefore, bindsBefore and unbindsBefore when it changed them, and keeps what the call does not give. Until a method a connect names exists, the signal fails each time it is emitted. One whose method cannot take what the signal passes, with its unbinds, binds and appended source, is written too, and answers argumentsFit false with misfit saying why. list gives each connection its methodFound, and misfit when it has one. It marks editable false on a connection a scene this one instances or inherits makes, and names that scene under madeIn. A file can hold a connection the engine loads the scene without: one that binds to a missing method, one whose signal its source no longer declares, or one whose node is gone. Every tool that writes a .tscn puts each back as the file held it and says so under unmadeConnections.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1248,7 +1283,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 0,
         ops: ['connect'],
         description:
-          "How many of the signal's own arguments are dropped. 0 takes it off. Default: what the connection has.",
+          "How many of the signal's own arguments are dropped from the end. 0 takes it off. Default: what the connection has.",
       },
       nodePath: { type: 'string', ops: ['list'], description: 'Only connections involving this node.' },
     },
@@ -1271,12 +1306,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_animation',
     title: 'Animations',
     description: `Animations in an AnimationPlayer and states in an AnimationTree state machine. scene_node add puts the player or tree in the scene first, and autoplay is scene_node set. read answers each track in the shape add_track takes. add_track on an existing track adds keys to it. remove_track takes out every matching track, or with a method only the keys calling it. A transition from Start sets the first state. read and read_states need no editor. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
+    answer:
+      "read without animationName lists the animations, each with the number of its tracks under tracks. add_track on a path the animation already has a track of that type for answers existingTrack true, and keysAdded beside keys, the track's count. replaceKeys names each key it replaced under keysReplaced, its time and the value it held, and keysAdded then counts only the new times. A key written past the animation's end, by add_track or by a set that shortens it, is kept and named under pastLength, since it never plays. To move a key, remove it with times and add it at the new time. create names a library it made under libraryMade, an empty name being the player's default library. rename renames the player's autoplay and every state playing the animation, named under autoplay and statesFollowed. remove clears the player's autoplay when it named the animation, and names under statesPlayingNothing the states that played it, which stay until remove_state takes them out. " +
+      'read_states gives each state that plays an animation animationFound, and animationMissing saying why when the player lacks it. add_state writes a state for an animation the player lacks all the same, answering animationFound false, and puts it right of the rightmost state in the graph, answered under position. remove_state names the transitions it took out under transitionsRemoved. Every state machine has Start and End, which cannot be added or removed. An immediate auto transition with no advanceCondition leaves its state the frame the state is reached. advanceMode defaults to auto for a transition leaving Start, since a machine leaves Start only through an auto one.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
       playerNodePath: {
         type: 'string',
         ops: ['read', 'create', 'add_track', 'remove_track', 'set', 'rename', 'remove'],
+        description: 'The AnimationPlayer node.',
       },
       animationName: {
         type: 'string',
@@ -1502,6 +1541,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Script info',
     description:
       "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server. It reads .gd files only. For where a class, member or signal is used, project_search.",
+    answer:
+      'structure gives each parameter\'s default as the source text after its =, so = null reads "null", and null for a parameter with none. Static variables are marked is_static, and one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does. An export in an inspector group names it under group, as "Stats/Loot" for a subgroup. Each enum has its members under values and their numbers under numbers, counted as the engine counts and left out from one given an expression. inner_classes gives each with its name, line and extends, and its own members in the same fields. It also answers class_name, extends, is_abstract and line_count. dependencies are the paths the script loads or preloads as written, by a constant too, and the paths it or an inner class extends by, then the scripts declaring each project class_name its code uses, which classes_used names with the class. autoloads_used names each autoload the code uses, with its script. A member or inner class with a ## comment directly above it carries the text as doc, and the script\'s own comment above class_name or extends comes back as class_doc. With includeInherited each inherited member carries inherited_from, the file declaring it, the answer gains inherits_from, the chain walked, and a name the script overrides is listed at both its lines. ' +
+      'symbols gives each symbol its kind, the line and column of its name, and lastLine, the end of its declaration. detail is the language server\'s own text, which writes a default through the engine (Callable() as "null::null") and leaves out a signal\'s argument types. completion is narrowed to the part of a name written before the position. symbols, completion and hover name under unseenByEditor each project class the editor cannot see yet, with unseenNote: the language server reads such a class as nothing, so a completion after self. in a script extending one comes back empty. editor_rescan brings it in.',
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
@@ -1552,6 +1594,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     effect: 'read',
     description:
       "Errors and warnings for a script or several, from the editor's language server, and whether each is clean. With no editor open, a headless engine compiles instead and checkedBy says engine. Lines and columns count from 1. If staleAnalysis appears, editor_rescan first.",
+    answer:
+      'Each diagnostic carries its severity, its message, and line, column, endLine and endColumn as the editor shows them. One script is answered on its own. Several are answered together, each named by its res:// path: a script with nothing to report is named in nothingReported, and every other is answered under scripts, a script that could not be read named with why. A folder skips what the engine skips and the addons gdharness installed. A script named under a folder holding a .gdignore is checked as asked and listed under underGdignore, and one under a folder holding its own project.godot under inNestedProject. A class the class cache lacks is put in it first, under classesRebuiltFirst. ' +
+      'The engine, with no editor, answers every error up to the first syntax error, at its line with no column, and the warnings at the levels the project sets, warnings being null when it could not answer. A method or property another class lacks is not a compile error, since the object may be a subclass that has it. dependenciesWithErrors names the other scripts that failed while it loaded, and typesMissingFromTheClassCache a project class the engine could not resolve because the cache lacks it. A language server that stops answering partway leaves the rest to the engine, and checkedBy then says language server, then engine, with checkedByLanguageServer counting the scripts it answered. ' +
+      'A diagnostic the files disprove is named rather than passed on: a member the class cache or a project class it extends declares comes back under contradictedByTheFile with the declaring script, and a project class the diagnostic could not resolve under typesTheEditorHasNotLoaded, with inTheClassCache. staleAnalysis then says what to do, usually editor_rescan. For an enum member, constant or static function of a global class it is editor_rescan with reloadScript on the declaring script. For an editor whose last scan wrote the class cache shorter than the files, it is editor_launch restart. A class missing from the cache is mended by project_import refresh_classes.',
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: {
@@ -1572,7 +1618,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Edit resources',
     description: `Resource files: read one, create any ClassDB resource as .tres (a material is a create with resourceType StandardMaterial3D, ShaderMaterial or CanvasItemMaterial), change one, write a shader, build a TileSet, set a Theme colour or font size, or move a file or directory. read answers in the form modify takes. A Theme item is named \`Button/colors/font_color\`. move and read need no editor. ${WITHOUT_AN_EDITOR}`,
     answer:
-      "create and modify answer each property given under properties as the file holds it once saved, and modify each one unset under unset. A property given its default is left out of a .tres file and named under notStored. alsoChanged names what the engine changed in step with a given property, and alsoSaved what the save changed, added or dropped in the main resource, as {property, was, saved}. loadsAs and setByScript (with setByScriptNote) name what a script of the resource changes as the file loads. read lists under notLoaded the lines the engine does not load, which a modify drops. read of a shader says whether it compiles under compiles, with compileErrors. A Curve reads as the inspector shows it (point_count, point_0/position). A file never imported is refused with the reimport that imports it. move with an editor open brings it up to date as after a move in the FileSystem dock. With none, an import pass rebuilds the uid cache, and uidTable says whether it ran and writtenByImport names the .uid and .import files it gave. A directory's answer names each file moved. A resource built into a scene becomes a file of its own by a create given its _type and the rest of what a read answers for it as properties, then a set of the property to the new file.",
+      "create and modify answer each property given under properties as the file holds it once saved, and modify each one unset under unset. A property given its default is left out of a .tres file and named under notStored. alsoChanged names what the engine changed in step with a given property, and alsoSaved what the save changed, added or dropped in the main resource, as {property, was, saved}. loadsAs and setByScript (with setByScriptNote) name what a script of the resource changes as the file loads. read lists under notLoaded the lines the engine does not load, which a modify drops. read of a shader says whether it compiles under compiles, with compileErrors. A Curve reads as the inspector shows it (point_count, point_0/position). A file never imported is refused with the reimport that imports it. move with an editor open brings it up to date as after a move in the FileSystem dock. With none, an import pass rebuilds the uid cache, and uidTable says whether it ran and writtenByImport names the .uid and .import files it gave. A directory's answer names each file moved. A resource built into a scene becomes a file of its own by a create given its _type and the rest of what a read answers for it as properties, then a set of the property to the new file. " +
+      "properties takes the forms scene_node's answer lists. A resource with a script that is not a tool, written by a headless engine, has what that script changes put back before the save, answered under setByScript, and one where that cannot be done is refused with the file left as it was. " +
+      'create_tileset gives a wholly transparent cell no tile and lists it under leftBlank, describes a strip no whole tile reaches under notInAnyTile, and answers tileSize, the size the first source sets. A custom data layer written with modify after it takes a type name such as "int". create_shader answers compiles, and compileErrors with each error\'s line. ' +
+      "A controlType that is no Control or Window class is set as a type variation, with a note saying so. A colorName or fontSizeName the engine's theme gives the class none by is set, with a note naming the nearest it has. remove_theme_item without item takes the type with every item, and its base_type when it is a variation, naming each one removed. " +
+      'move rewrites every path naming what moved in a scene, resource, script, project.godot or other text file, in the style it was written, res:// or relative, and the relative paths inside a moved file. A relative string stays as written in the text, tooltip_text, placeholder_text and resource_name of a scene or resource, in node names and groups, on a ; comment line and in a .import file. A GDScript comment stays whole. A string naming it any other way, such as the start of a path built at run time, and a .scn or .res file, which this cannot rewrite, are answered under leftAlone. A preview is refused when the move would be.',
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: {
@@ -1606,6 +1656,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create_shader'],
         enum: ['canvas_item', 'spatial', 'particles', 'sky', 'fog'],
+        description: 'The shader_type line.',
       },
       code: {
         type: 'string',
@@ -1709,7 +1760,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       hidden: {
         type: 'boolean',
         ops: ['open', 'restart'],
-        description: `Open the editor out of sight. Default false on open, and on restart how the editor was started. A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no call, set by ${IDLE_CLOSE_SETTING}, 0 turning it off.`,
+        description: `Open the editor out of sight. Default false on open, and on restart how the editor was started. One opened by hand comes back with a window, so hidden: true is refused there. A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no call, set by ${IDLE_CLOSE_SETTING}, 0 turning it off.`,
       },
       silent: {
         type: 'boolean',
@@ -1819,13 +1870,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 0,
         ops: ['start'],
         description:
-          'How long to wait for the game to announce its runtime. Default 5000, up to 60000. 0 does not wait.',
+          'How long to wait for the game to announce its runtime. Default 5000, raised up to 60000 for a scene that booted slowly before. 0 does not wait.',
       },
       frames: {
         type: 'integer',
         minimum: 1,
         ops: ['check'],
-        description: 'Default 3.',
+        description: 'Frames to run before quitting. Default 3.',
       },
       timeoutMs: {
         type: 'integer',
@@ -1857,6 +1908,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         enum: ['mark'],
         ops: ['profile'],
+        description: 'Answer only what ran after the mark.',
       },
       limit: {
         type: 'integer',
@@ -1920,7 +1972,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "check: hung is a run killed at timeoutMs, and errors and warnings count what it printed, which comes back under entries with repeats folded together. printed holds the ordinary lines the run printed, the newest 50 kept and printedLinesNotShown counting those left out. A check keeps no run for editor_output to read afterwards. editor_run start then editor_output reads everything. An engine crash is an error whatever it prints after: the crash handler's report is the entry, and the engine version and the native and GDScript backtraces are its detail, so a crashed run is never booted or clean. A crash that printed no report is an error entry, read off its exit code or signal. arguments is the engine command line the check ran, and durationMs runs from that engine's start to the check's answer. start and check wait first for a scan the open editor is running and for the class cache it writes just after, since a game booted in between resolves no global class. waitedForEditorScanMs and scanNote say how long, and when a scan ran past thirty seconds, and are left out when no scan was waited for. " +
       IMPORTED_FIRST +
       ' An exported build carries its own imports and is not asked. A silent windowed run has --audio-driver Dummy in its arguments. ' +
-      "profile: per function its script, the function (Class.name when the script declares a class_name), the line its body's first statement is on, for a lambda the named function it is written in (within), calls, and self and total milliseconds, with functionsCounted, scriptMs (the self time of them all) and coveredMs. The functions of gdharness's own runtime are not among them, and their self time is runtimeAddonMs, over runtimeAddonFunctions functions. complete is true when the engine's own totals arrived, which it sends only when the profiler is switched off: the runtime addon does that as a game quits, so a scene that does its work in _ready and quits is covered whole. Otherwise the answer is the frames summed so far and the note says what that misses. frames counts the frames of the profile that arrived, and the engine's totals also hold the work after the last of them, so once complete a function run every frame can show a call more than frames. firstFrame and lastFrame are the game's own numbers, counted from 0, in a run this server started. A firstFrame above 0 is frames run before the profiler came on, and a gap between the two is frames that never arrived. A call to another script function is not in the caller's self time. A call through an engine method, such as callv, emit_signal or any Node method, is not either when the run started with engineCalls: true: it is the caller's engineMs, left out when 0. Without engineCalls no row has engineMs and those calls stay in the caller's selfMs. engineMs is never more than totalMs less selfMs. Calls to built-in types and utility functions such as print stay in self time, and so does a call through super, while the overridden function's row counts it again: such a row carries selfIncludesSuper. The profiler's own cost of timing a call lands in the self time of the function called, and a row with at least half its selfMs in it carries overheadMs, with perCallOverheadUs measured each run. The milliseconds are time passed while the function ran, not processor time, so compare two profiles taken under the same load. They are summed over every thread, so scriptMs can exceed coveredMs. A property's get and set blocks are named Class.@name_getter and Class.@name_setter, and their rows carry property. A game the editor plays that was not started with profile: true says it was profiled from the moment it was asked. A run this server started without profile: true is refused, since its debugger is fixed as it starts. callersOf lists, under callers, each place with its script, line, the named function it is written in (within), whether the function is called there or passed on as a Callable (called), and the profile's calls, self and total milliseconds for the function it is in, forty at most. A function called through a string, and a parameter, local or class variable of the same name, are not listed. A property's blocks are asked about by their profile name or by the property's, and each place then says whether it writes the property (access write) or reads it (access read). A profile with mark answers marked: true, and one with since answers since: \"mark\" and markSetMsAgo. The mark is kept beside the run's profile, so a server that replaces this one reads it too, and setting it again moves it. since counts from the mark before it moves, and lessThanAtMark counts the functions left out for reading less than at the mark.",
+      "profile: per function its script, the function (Class.name when the script declares a class_name), the line its body's first statement is on, for a lambda the named function it is written in (within), calls, and self and total milliseconds, with functionsCounted, scriptMs (the self time of them all) and coveredMs. The functions of gdharness's own runtime are not among them, and their self time is runtimeAddonMs, over runtimeAddonFunctions functions. complete is true when the engine's own totals arrived, which it sends only when the profiler is switched off: the runtime addon does that as a game quits, so a scene that does its work in _ready and quits is covered whole. Otherwise the answer is the frames summed so far and the note says what that misses. frames counts the frames of the profile that arrived, and the engine's totals also hold the work after the last of them, so once complete a function run every frame can show a call more than frames. firstFrame and lastFrame are the game's own numbers, counted from 0, in a run this server started. A firstFrame above 0 is frames run before the profiler came on, and a gap between the two is frames that never arrived. A call to another script function is not in the caller's self time. A call through an engine method, such as callv, emit_signal or any Node method, is not either when the run started with engineCalls: true: it is the caller's engineMs, left out when 0. Without engineCalls no row has engineMs and those calls stay in the caller's selfMs. engineMs is never more than totalMs less selfMs. Calls to built-in types and utility functions such as print stay in self time, and so does a call through super, while the overridden function's row counts it again: such a row carries selfIncludesSuper. The profiler's own cost of timing a call lands in the self time of the function called, and a row with at least half its selfMs in it carries overheadMs, with perCallOverheadUs measured each run. The milliseconds are time passed while the function ran, not processor time, so compare two profiles taken under the same load. They are summed over every thread, so scriptMs can exceed coveredMs. A property's get and set blocks are named Class.@name_getter and Class.@name_setter, and their rows carry property. A game the editor plays that was not started with profile: true says it was profiled from the moment it was asked. A run this server started without profile: true is refused, since its debugger is fixed as it starts. callersOf lists, under callers, each place with its script, line, the named function it is written in (within), whether the function is called there or passed on as a Callable (called), and the profile's calls, self and total milliseconds for the function it is in, forty at most. A function called through a string, and a parameter, local or class variable of the same name, are not listed. A property's blocks are asked about by their profile name or by the property's, and each place then says whether it writes the property (access write) or reads it (access read). A profile with mark answers marked: true, and one with since answers since: \"mark\" and markSetMsAgo. The mark is kept beside the run's profile, so a server that replaces this one reads it too, and setting it again moves it. since counts from the mark before it moves, and lessThanAtMark counts the functions left out for reading less than at the mark. " +
+      'engineCalls crashes the game or corrupts strings when any script runs off the main thread, through WorkerThreadPool, a Thread, a node processing on a sub-thread or threaded loading, and on Linux and macOS when a script frees an object through an untyped call. profile alone is safe. A headless run given --fixed-fps races ahead of the clock: given --fixed-fps 60 one ran two hours of game time in a second. --write-movie takes an absolute path outside the project ending in .avi or .png, and a run with headless: false. savesIn need not exist: the engine makes Godot/app_userdata/<project> under it, and runtime.userDir names the directory user:// is. On macOS the engine ignores it, and savesNote says so.',
     defaultOperation: 'start',
   },
   {
@@ -2011,7 +2064,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     effect: 'additive',
     changes: 'Writes under `.godot` and adds `.uid` files. Changes no script or scene.',
     description:
-      'Makes the running editor scan the project filesystem, so files written outside it are picked up. A class_name the editor cannot see, named under unseenByEditor by other tools, is the cure here. Needs the editor connected.',
+      'Makes the running editor scan the project filesystem, so files written outside it are picked up. Calling it again is the cure for a class_name the editor cannot see, named under unseenByEditor by other tools. editor_launch restart also does it. Needs the editor connected.',
     answer:
       'waitedMs is the whole call, and waitedForEditorScanMs, given only when a scan or an import was already running, the part spent waiting it out. waitedForEditorAnswerMs, given when an idle editor took a second or more to say so, is how long that took: such an editor is busy on the thread that answers with an earlier request rather than scanning, so the time is added to timeoutMs rather than taken from it, and the note says so. stillWorking is true when a scan was still running at the end of the wait. The scan the call started is looked at once even when the wait has run out, so stillWorking is never said of a scan nothing looked at. ' +
       'The scan the editor runs on its own is a change-detecting walk, so a file another engine has already imported reads as settled and its class_name stays out of the list the editor resolves against, however often it scans. Calling this again is the cure. editor_launch restart also does it and costs a window, and project_import refresh_classes does not touch what the editor holds. The walk also passes over a file whose .uid alone changed, so each file whose .uid names a UID the editor does not hold for it is read again before scanning and named under uidsReread, and files on disk naming one UID between them are named under uidsDuplicatedOnDisk, which reading again cannot settle. Every script naming a brought-in class is reloaded, because what the editor compiled from them while it could not see the class stays compiled that way. One that would not reload is named under dependentsNotReloaded and the call is not ok, as it is not when the script named in reloadScript was not reloaded. A script that fails to compile is tried again once the scripts it is compiled against that the editor holds behind their files are reloaded, named under reloadedFirst. The classes the editor could not see before that scan are noted in the project, and the next editor_rescan of the same editor, from any server, names them under broughtIn and reloads what names them. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file: the answer names the loss under cacheLost and rebuilds the cache from the files, naming what came back under cacheRestored, and the note says to restart an editor that lost classes before scanning again. A class the editor still holds for a script that was renamed or deleted is left out of the rebuilt cache and named under cacheDropped, and every scan until the editor restarts ends in that rebuild. A script or shader written outside the editor has no .uid sidecar until something imports it, and the scan writes one beside it. A hidden editor imports on the thread that answers, so a large addon install can leave the rescan itself unanswered, and when the wait runs out first the answer is stillWorking.',
@@ -2078,6 +2131,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "The engine's ClassDB, with the classes the project's scripts declare beside it: find classes, read one in full, or walk an inheritance tree. info reads engine classes only, and script_info structure reads a project class. " +
       CLASSES_REBUILT,
+    answer:
+      "The project's classes are read from the scripts on disk, so one written a moment ago is there before any scan. query and inheritance answer them under project_classes, project_children and project_descendants, each with its path, what it extends and whether it is abstract. filtered_count, direct_children_count and all_descendants_count count the engine classes in the lists beside them. instantiableOnly leaves out an engine class that cannot be instantiated and a project class that is @abstract or built on one that cannot be, and keeps a class extending an @abstract one. info gives each property of a class that can be made its default, the value a new one holds. includeInherited gives one entry per ancestor, nearest first, with the names of what it declares, and member reads any inherited member in full, looked for on the class and every ancestor. The whole of Control is seventy thousand characters.",
     parameters: {
       projectPath: PROJECT_PATH,
       filter: { type: 'string', ops: ['query'], description: 'A substring of the class name.' },
@@ -2352,6 +2407,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Capture the screen',
     description:
       "A picture of the running game: the whole screen, one region or node of it at full resolution, or one viewport. The screen is the game's window with its dialogs and popups laid over it. Needs the game running with a window. A capture before the first frame is drawn waits for it.",
+    answer:
+      "A region partly outside the window is cut to it and answered clipped. The answer names the region captured in window pixels, and drawnAt when the project draws at its own size and stretches that to the window, since the picture then has the game's pixels. nodePath captures what runtime_inspect rect answers for the node: a Control's rectangle, what a 3D node's geometry covers, or what a Sprite2D draws. zoom makes each pixel a square of pixels rather than blending it. An inline picture is sent as a JPEG when that is smaller than the PNG and the picture has no transparency, and the text says so with both sizes. outputPath saves a lossless PNG, and the answer says where.",
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -2473,9 +2530,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'click: which equal match, from 0. choose: the item by place. touch: the finger. Default 0.',
       },
-      shift: { type: 'boolean', ops: ['key'] },
-      ctrl: { type: 'boolean', ops: ['key'] },
-      alt: { type: 'boolean', ops: ['key'] },
+      shift: { type: 'boolean', ops: ['key'], description: 'Hold Shift with it.' },
+      ctrl: { type: 'boolean', ops: ['key'], description: 'Hold Ctrl with it.' },
+      alt: { type: 'boolean', ops: ['key'], description: 'Hold Alt with it.' },
       x: {
         type: 'number',
         ops: ['click', 'mouse_click', 'mouse_motion', 'mouse_drag', 'touch', 'touch_drag'],
@@ -2526,7 +2583,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: -1,
         maximum: 1,
         ops: ['joypad_motion'],
-        description: 'The axis position. It stays until another motion moves it, or for holdFrames.',
+        description:
+          'The axis position. Down and right are positive, and a trigger runs 0 to 1. It stays until another motion moves it, or for holdFrames. 0 lets it go back.',
       },
       device: {
         type: 'number',
@@ -2537,6 +2595,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       doubleClick: {
         type: 'boolean',
         ops: ['click', 'mouse_click'],
+        description: 'Click twice, the second press marked double_click.',
       },
       relativeX: {
         type: 'number',
@@ -2546,6 +2605,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       relativeY: {
         type: 'number',
         ops: ['mouse_motion'],
+        description: 'As relativeX.',
       },
     },
     requires: [],
@@ -2638,7 +2698,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['signal', 'watch', 'until'],
         description:
-          'The node, such as "/root/Main/Player" or "%Player". Needed except for a signal with a watch. For says, default /root.',
+          'The node, such as "/root/Main/Player" or "%Player". Needed but for a signal with a watch and for says, which defaults to /root.',
       },
       signal: {
         type: 'string',
@@ -2877,10 +2937,9 @@ function describeOperations(spec: ToolSpec): string {
 /** The longest description a client is sent. Claude Code cuts a tool's description beyond it. */
 export const MOST_DESCRIPTION_CHARACTERS = 4096;
 
-/** A tool's description as a client is sent it: the prose, its ops, and where its answer is described. */
+/** A tool's description as a client is sent it: the prose and its ops. */
 function servedDescription(spec: ToolSpec): string {
-  const answer = spec.answer === undefined ? '' : ' Answer fields: see the tool reference.';
-  return `${spec.description}${describeOperations(spec)}${answer}`;
+  return `${spec.description}${describeOperations(spec)}`;
 }
 
 /**

@@ -497,7 +497,8 @@ async function checksTheToolList(rig: BridgeRig): Promise<void> {
     /\. For ops add, duplicate, reparent\.$/,
     'several ops are named',
   );
-  assert.match(described('editor_launch', 'hidden'), /\. Not for op close\.$/, 'every op but one');
+  assert.match(described('editor_launch', 'hidden'), /\. For ops open, restart\.$/, 'two of four ops');
+  assert.match(described('scene_node', 'nodePath'), /\. Not for op add\.$/, 'every op but one');
   assert.match(
     described('scene_animation', 'animationName'),
     /\. Not for ops read_states, remove_state, connect_states, disconnect_states\.$/,

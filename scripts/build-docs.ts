@@ -18,7 +18,7 @@ import { displayPath, HARNESSES, type Harness } from '../src/harnesses.js';
 import { runLine } from '../src/runner.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
-import { argumentShape, renderToolsMarkdown } from '../src/tool-reference.js';
+import { argumentShape, renderToolsMarkdown, SHARED_PARAGRAPHS } from '../src/tool-reference.js';
 import { HeadingIds } from './doc-slug.js';
 
 const DOCS = 'docs';
@@ -569,9 +569,13 @@ function renderTools(): string {
     parts.push(`<section class="tool" id="${escaped(tool.name)}">\n`);
     parts.push(`<h3><code>${escaped(tool.name)}</code></h3>\n`);
     parts.push(`<p>${escaped(tool.description)}</p>\n`);
-    if (tool.answer !== undefined) {
-      parts.push(`<p><strong>The answer:</strong> ${escaped(tool.answer)}</p>\n`);
+    // This page states each shared paragraph in every tool that has it, so its detail goes there too.
+    for (const { text, detail } of SHARED_PARAGRAPHS) {
+      if (`${tool.description}${tool.answer}`.includes(text)) {
+        parts.push(`<p>${escaped(detail)}</p>\n`);
+      }
     }
+    parts.push(`<p><strong>The answer:</strong> ${escaped(tool.answer)}</p>\n`);
     parts.push(renderOperations(tool), renderArguments(tool), '</section>\n');
   }
   return parts.join('');

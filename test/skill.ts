@@ -92,44 +92,23 @@ function testTheReferenceIsTheServersOwnToolList(): void {
     assert.ok(reference.includes(`## ${tool.name}`), `${tool.name} is in the reference`);
   }
   // What the description a client is sent leaves out for room, the reference carries whole.
-  const answered = TOOL_SPECS.filter((tool) => tool.answer !== undefined);
-  assert.deepEqual(
-    answered.map((tool) => tool.name),
-    [
-      'project_settings',
-      'project_import',
-      'project_test',
-      'scene_node',
-      'editor_launch',
-      'editor_run',
-      'editor_output',
-      'editor_status',
-      'editor_rescan',
-      'editor_capture',
-      'runtime_inspect',
-      'runtime_input',
-      'runtime_wait',
-    ],
-    'the tools whose answers are described apart from their description',
-  );
-  for (const tool of answered) {
+  for (const tool of TOOL_SPECS) {
     assert.ok(
-      reference.includes(`The answer: ${withSharedParagraphsLinked(tool.answer ?? '')}`),
+      reference.includes(`The answer: ${withSharedParagraphsLinked(tool.answer)}`),
       `${tool.name}'s answer is in the reference`,
     );
   }
   // A paragraph several tools share is written once, under its own heading, and each tool links to
   // it. Counted whole, so a copy left behind in one tool's text fails as surely as a missing one.
-  for (const { heading, text } of SHARED_PARAGRAPHS) {
+  for (const { heading, text, detail } of SHARED_PARAGRAPHS) {
     assert.equal(
       reference.split(text).length - 1,
       1,
       `the paragraph under ${heading} is in the reference exactly once`,
     );
     assert.ok(reference.includes(`## ${heading}\n\n${text}\n`), `and it is under ${heading}`);
-    const linkedFrom = TOOL_SPECS.filter((tool) =>
-      `${tool.description}${tool.answer ?? ''}`.includes(text),
-    ).length;
+    assert.ok(reference.includes(`\n\n${detail}\n`), `with what ${heading} adds`);
+    const linkedFrom = TOOL_SPECS.filter((tool) => `${tool.description}${tool.answer}`.includes(text)).length;
     assert.ok(linkedFrom >= 2, `${heading} is shared by ${linkedFrom} tools`);
     assert.equal(
       reference.split(`(#${heading.toLowerCase().replaceAll(' ', '-')}) applies.`).length - 1,

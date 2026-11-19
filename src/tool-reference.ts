@@ -113,11 +113,25 @@ export function headlessSection(): string[] {
  *
  * The tool list a client loads has no headings, so each description there carries the paragraph
  * whole. On this page it would be the same paragraph three or four times, so each copy becomes a
- * link to the one here.
+ * link to the one here. `detail` is what the section adds that the list has no room for.
  */
-export const SHARED_PARAGRAPHS: readonly { readonly heading: string; readonly text: string }[] = [
-  { heading: 'Editor or headless engine', text: WITHOUT_AN_EDITOR },
-  { heading: 'What a scene write also saves', text: ALSO_SAVED },
+export const SHARED_PARAGRAPHS: readonly {
+  readonly heading: string;
+  readonly text: string;
+  readonly detail: string;
+}[] = [
+  {
+    heading: 'Editor or headless engine',
+    text: WITHOUT_AN_EDITOR,
+    detail:
+      'The headless engine runs every script of the file, where the editor runs only tool scripts. What a script changes as the file loads or as a property is set is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused with nothing written. Each file the written one refers to is named by its uid, as the editor names it. A file the uid cache has no uid for yet, such as one made since the last scan, is named by path and listed under namedByPath with the call that scans it. An editor of the project that is running and has not reached this server yet is waited for.',
+  },
+  {
+    heading: 'What a scene write also saves',
+    text: ALSO_SAVED,
+    detail:
+      'One property can set others as it loads: anchors_preset gives a centred Control both grow directions. alsoSaved lists each line as {node, property, was, saved}, with no was where the file set nothing and no saved where it now sets nothing, on any node the scene held, those inside an instance included. What a set moved on its own node is under alsoChanged instead. A node the call adds and the format lines (header uid, load_steps, unique_id, an ext_resource uid) are not listed. The scene loads as it did, and only its text changed.',
+  },
 ];
 
 function anchorOf(heading: string): string {
@@ -134,7 +148,14 @@ export function withSharedParagraphsLinked(text: string): string {
 }
 
 function sharedSections(): string[] {
-  return SHARED_PARAGRAPHS.flatMap(({ heading, text }) => [`## ${heading}`, '', text, '']);
+  return SHARED_PARAGRAPHS.flatMap(({ heading, text, detail }) => [
+    `## ${heading}`,
+    '',
+    text,
+    '',
+    detail,
+    '',
+  ]);
 }
 
 /**
@@ -203,10 +224,9 @@ function toolSection(tool: ToolSpec): string[] {
     '',
     withSharedParagraphsLinked(tool.description),
     '',
+    `The answer: ${withSharedParagraphsLinked(tool.answer)}`,
+    '',
   ];
-  if (tool.answer !== undefined) {
-    lines.push(`The answer: ${withSharedParagraphsLinked(tool.answer)}`, '');
-  }
 
   const operations = Object.entries(tool.operations ?? {});
   if (operations.length > 0) {
