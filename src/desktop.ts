@@ -59,6 +59,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Text;
 using System.Threading;
 
@@ -154,6 +155,18 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern bool MoveFileExW(string from, string to, uint flags);
   const uint ReplaceExisting = 0x1;
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern uint GetFullPathNameW(string name, uint size, StringBuilder full, IntPtr part);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern uint GetFileAttributesW(string name);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+  static extern SafeFileHandle CreateFileHandle(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+  const uint NoAttributes = 0xFFFFFFFF;
+  const uint DirectoryAttribute = 0x10;
+  const uint ShareRead = 0x1;
+  const uint CreateAlways = 2;
+  const int MaxPath = 260;
+  const int LongestPath = 32767;
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle, uint code);
   [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessAffinityMask(IntPtr process, UIntPtr mask);
@@ -468,7 +481,7 @@ public static class GdharnessDesktop {
       Step(step, "reading its spec");
       return RunSpec(spec);
     } catch (Exception e) {
-      File.WriteAllText(error, e.Message);
+      WriteText(error, e.Message);
       return 1;
     }
   }
@@ -505,9 +518,10 @@ public static class GdharnessDesktop {
   // One line a request, read until the served process closes its end or ends: "start id spec error
   // step" runs a start on a thread of its own and answers "made id pid began" once its process
   // exists, "started id pid job" once it runs and "ended id code" once it has ended. "kill id" ends
-  // a start's process. "adopt id pid job stop killed" waits for a process a helper before this one
-  // started, ends it once its stop file (base64, empty for none) appears or at once when killed is
-  // 1, and answers its end. "release pid began" ends the process of a start a helper before this one made
+  // a start's process. "adopt id pid began job stop killed" waits for a process a helper before this
+  // one started, ends it once its stop file (base64, empty for none) appears or at once when killed
+  // is 1, and answers its end. A process under pid that began at another time is not it, and is
+  // answered as ended. "release pid began" ends the process of a start a helper before this one made
   // but never answered. The engines of starts still running end with this process when they are in
   // a job that ends them, and run on when they are not.
   static int Serve(int servedPid) {
@@ -539,18 +553,19 @@ public static class GdharnessDesktop {
             TerminateProcess(process, 1);
           }
         }
-      } else if (parts[0] == "adopt" && parts.Length == 6) {
+      } else if (parts[0] == "adopt" && parts.Length == 7) {
         string id = parts[1];
         uint pid = uint.Parse(parts[2]);
-        IntPtr copy = new IntPtr(long.Parse(parts[3]));
-        string stopFile = Decoded(parts[4]);
+        long began = long.Parse(parts[3]);
+        IntPtr copy = new IntPtr(long.Parse(parts[4]));
+        string stopFile = Decoded(parts[5]);
         // Opened before the next request is read, so a "kill" that follows finds it.
-        IntPtr process = OpenProcess(ProcessTerminate | ProcessQueryLimited | Synchronize, false, pid);
+        IntPtr process = OpenTheOne(pid, began, ProcessTerminate | Synchronize);
         if (process != IntPtr.Zero) {
           lock (running) {
             processes[id] = process;
             // A stop the dead helper was asked for and may never have acted on.
-            if (parts[5] == "1") {
+            if (parts[6] == "1") {
               stopped.Add(id);
               TerminateProcess(process, 1);
             }
@@ -634,7 +649,7 @@ public static class GdharnessDesktop {
     if (process != IntPtr.Zero) {
       bool ended = false;
       while (WaitForSingleObject(process, 100) == TimedOut) {
-        if (!ended && stopFile.Length > 0 && File.Exists(stopFile)) {
+        if (!ended && stopFile.Length > 0 && FileExists(stopFile)) {
           TerminateProcess(process, 1);
           ended = true;
         }
@@ -654,26 +669,39 @@ public static class GdharnessDesktop {
   // wherever it is, since the served process was never told it. A pid is that process's only while
   // the process there began when the helper said it did.
   static void Release(uint pid, long began) {
-    IntPtr process = OpenProcess(ProcessTerminate | ProcessQueryLimited, false, pid);
+    IntPtr process = OpenTheOne(pid, began, ProcessTerminate);
     if (process == IntPtr.Zero) {
       return;
     }
-    long created, exited, kernel, user;
-    if (GetProcessTimes(process, out created, out exited, out kernel, out user) && created == began) {
-      IntPtr job = OpenJobObjectW(JobQuery, false, JobNamePrefix + pid);
-      bool member = false;
-      if (job != IntPtr.Zero && !IsProcessInJob(process, job, out member)) {
-        member = false;
-      }
-      if (member) {
-        CloseCopies(job);
-      }
-      TerminateProcess(process, 1);
-      if (job != IntPtr.Zero) {
-        CloseHandle(job);
-      }
+    IntPtr job = OpenJobObjectW(JobQuery, false, JobNamePrefix + pid);
+    bool member = false;
+    if (job != IntPtr.Zero && !IsProcessInJob(process, job, out member)) {
+      member = false;
+    }
+    if (member) {
+      CloseCopies(job);
+    }
+    TerminateProcess(process, 1);
+    if (job != IntPtr.Zero) {
+      CloseHandle(job);
     }
     CloseHandle(process);
+  }
+
+  // A handle with access to the process under pid, or none where nothing runs there or what does
+  // began at another time than began, since Windows hands a pid to a later process once its owner
+  // has gone.
+  static IntPtr OpenTheOne(uint pid, long began, uint access) {
+    IntPtr process = OpenProcess(access | ProcessQueryLimited, false, pid);
+    if (process == IntPtr.Zero) {
+      return process;
+    }
+    long created, exited, kernel, user;
+    if (GetProcessTimes(process, out created, out exited, out kernel, out user) && created == began) {
+      return process;
+    }
+    CloseHandle(process);
+    return IntPtr.Zero;
   }
 
   // Closes every handle the served process holds to job. A copy left there would keep the job's name
@@ -772,7 +800,7 @@ public static class GdharnessDesktop {
         access = FileAppendData;
         disposition = OpenAlways;
       }
-      IntPtr handle = CreateFileW(path, access, ShareAll, ref security, disposition, 0, IntPtr.Zero);
+      IntPtr handle = CreateFileW(Lengthened(path), access, ShareAll, ref security, disposition, 0, IntPtr.Zero);
       if (handle == new IntPtr(-1)) {
         throw Failure(Marshal.GetLastWin32Error(), "CreateFileW " + path);
       }
@@ -840,7 +868,7 @@ public static class GdharnessDesktop {
   // is ended too, with the box said on this process's output as a marker line, since nobody can
   // press it there.
   public static int RunSpec(string specFile) {
-    string[] lines = File.ReadAllLines(specFile);
+    string[] lines = ReadLines(specFile);
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
     string affinity = field(7);
     string exitFile = field(8);
@@ -887,14 +915,67 @@ public static class GdharnessDesktop {
   // Written under a temporary name and renamed, so a reader never sees half of it.
   static void WriteLane(string laneFile, string lane, int processId) {
     string temporary = laneFile + ".tmp";
-    File.WriteAllText(temporary, "{\\"lane\\": " + lane + ", \\"pid\\": " + processId + "}\\n");
-    if (!MoveFileExW(temporary, laneFile, ReplaceExisting)) {
+    WriteText(temporary, "{\\"lane\\": " + lane + ", \\"pid\\": " + processId + "}\\n");
+    if (!MoveFileExW(Lengthened(temporary), Lengthened(laneFile), ReplaceExisting)) {
       throw Failure(Marshal.GetLastWin32Error(), "MoveFileExW " + laneFile);
     }
   }
 
   static void Step(string stepFile, string step) {
-    File.WriteAllText(stepFile, step);
+    WriteText(stepFile, step);
+  }
+
+  // The path as the system's file calls take it. One of MAX_PATH or more is made whole and given the
+  // prefix that lifts that limit, since the .NET Framework's own file calls here read such a path as
+  // absent. The prefix also turns off the system's tidying of the path, which making it whole does
+  // first. A shorter path is left as it is.
+  static string Lengthened(string path) {
+    StringBuilder full = new StringBuilder(LongestPath);
+    uint length = path.Length == 0 ? 0 : GetFullPathNameW(path, (uint)full.Capacity, full, IntPtr.Zero);
+    if (length < MaxPath || length >= full.Capacity) {
+      return path;
+    }
+    string whole = full.ToString();
+    string slashes = new string((char)92, 2);
+    if (whole.StartsWith(slashes + "?" + (char)92) || whole.StartsWith(slashes + "." + (char)92)) {
+      return whole;
+    }
+    if (whole.StartsWith(slashes)) {
+      return slashes + "?" + (char)92 + "UNC" + whole.Substring(1);
+    }
+    return slashes + "?" + (char)92 + whole;
+  }
+
+  // Whether a file, and not a folder, is there.
+  static bool FileExists(string path) {
+    uint attributes = GetFileAttributesW(Lengthened(path));
+    return attributes != NoAttributes && (attributes & DirectoryAttribute) == 0;
+  }
+
+  static FileStream Opened(string path, uint access, uint disposition) {
+    SafeFileHandle handle = CreateFileHandle(Lengthened(path), access, ShareRead, IntPtr.Zero, disposition, 0, IntPtr.Zero);
+    if (handle.IsInvalid) {
+      throw Failure(Marshal.GetLastWin32Error(), "CreateFileW " + path);
+    }
+    return new FileStream(handle, access == GenericRead ? FileAccess.Read : FileAccess.Write);
+  }
+
+  // As File.WriteAllText writes it: UTF-8 with no byte order mark, over whatever was there.
+  static void WriteText(string path, string text) {
+    byte[] bytes = new UTF8Encoding(false).GetBytes(text);
+    using (FileStream file = Opened(path, GenericWrite, CreateAlways)) {
+      file.Write(bytes, 0, bytes.Length);
+    }
+  }
+
+  static string[] ReadLines(string path) {
+    List<string> lines = new List<string>();
+    using (StreamReader reader = new StreamReader(Opened(path, GenericRead, OpenExisting), Encoding.UTF8)) {
+      for (string line = reader.ReadLine(); line != null; line = reader.ReadLine()) {
+        lines.Add(line);
+      }
+    }
+    return lines.ToArray();
   }
 
   // The process starts suspended, inside a job of its own that ends it once this process has gone.
@@ -1033,7 +1114,7 @@ public static class GdharnessDesktop {
       }
     }
     ResumeThread(started.thread);
-    File.WriteAllText(pidFile, started.processId.ToString());
+    WriteText(pidFile, started.processId.ToString());
     // A process meant to outlive its starter is let go only now. A helper that ends before this
     // still ends it, and one that ends before the answer below leaves the next one to end it.
     if (birth != IntPtr.Zero) {
@@ -1055,7 +1136,7 @@ public static class GdharnessDesktop {
     uint lastOwner = 0;
     DateTime lookAgain = DateTime.UtcNow;
     while (WaitForSingleObject(started.process, 100) == TimedOut) {
-      if (!stopped && stopFile.Length > 0 && File.Exists(stopFile)) {
+      if (!stopped && stopFile.Length > 0 && FileExists(stopFile)) {
         TerminateProcess(started.process, 1);
         stopped = true;
       }
@@ -1095,9 +1176,9 @@ public static class GdharnessDesktop {
       // A file that cannot be written leaves the parent the code this exits with, which says less
       // but still says it.
       try {
-        File.WriteAllText(exitFile, code.ToString());
+        WriteText(exitFile, code.ToString());
       } catch (IOException) {
-      } catch (UnauthorizedAccessException) {
+      } catch (Win32Exception) {
       }
     }
     return unchecked((int)code);

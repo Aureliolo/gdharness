@@ -16,6 +16,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { PassThrough, type Writable } from 'node:stream';
 import { alive } from './alive.js';
+import { startTimesOf } from './process-children.js';
 import { type ChildProcess, RelayedChild, spawnHidden } from './spawn.js';
 
 /**
@@ -42,6 +43,21 @@ function answerMs(): number {
 
 /** How often the engine of a helper that has gone is looked for. */
 const WATCH_MS = 250;
+
+/** 1970 in the helper's start times, which count 100 ns steps from 1601. */
+const UNIX_EPOCH_TICKS = 116_444_736_000_000_000n;
+
+/**
+ * When the engine began, in the milliseconds `startTimesOf` gives, from the helper's "pid began" in
+ * [param made]. Undefined where the helper gave none.
+ */
+function engineBeganMs(made: string | undefined): number | undefined {
+  const ticks = made?.split(' ')[1];
+  if (ticks === undefined || !/^\d+$/.test(ticks)) {
+    return undefined;
+  }
+  return Number((BigInt(ticks) - UNIX_EPOCH_TICKS) / 10_000n);
+}
 
 /** What a stream of a start is: closed to the engine, or read here. */
 export type StreamKind = 'ignore' | 'pipe';
@@ -98,6 +114,10 @@ export class HelpedChild extends RelayedChild {
   private killRequested = false;
   /** How this process ended the engine itself, where no helper was left to. */
   private endedHere: 'kill' | 'stop' | null = null;
+  /** Whether a look at the engine's start time is under way. */
+  private ending = false;
+  /** Whether the process under the engine's pid began at another time, so the engine has gone. */
+  private notTheEngine = false;
   private watchdog: NodeJS.Timeout | undefined;
   private watching: NodeJS.Timeout | undefined;
   private abort: (() => void) | undefined;
@@ -293,38 +313,60 @@ export class HelpedChild extends RelayedChild {
     if (!this.adopted && adopt(this)) {
       return;
     }
-    const engine = this.enginePid;
     this.watching = setInterval(() => {
-      if (!alive(engine)) {
-        // Told as a helper tells the same stop: code 1 for the stop file, SIGTERM for a kill.
-        if (this.endedHere === 'stop') {
-          this.finish(1, null);
-        } else {
-          this.finish(null, this.endedHere === 'kill' ? 'SIGTERM' : 'SIGKILL');
-        }
-        return;
-      }
-      if (this.endedHere === null && this.killRequested) {
-        this.endByPid('kill');
-      } else if (this.endedHere === null && this.stopFile !== undefined && existsSync(this.stopFile)) {
-        this.endByPid('stop');
-      }
+      this.watch();
     }, WATCH_MS);
+  }
+
+  /** One look at the engine of a start no helper holds. */
+  private watch(): void {
+    if (this.notTheEngine || !alive(this.enginePid)) {
+      // Told as a helper tells the same stop: code 1 for the stop file, SIGTERM for a kill.
+      if (this.endedHere === 'stop') {
+        this.finish(1, null);
+      } else {
+        this.finish(null, this.endedHere === 'kill' ? 'SIGTERM' : 'SIGKILL');
+      }
+      return;
+    }
+    if (this.endedHere !== null || this.ending) {
+      return;
+    }
+    if (this.killRequested) {
+      void this.endByPid('kill');
+    } else if (this.stopFile !== undefined && existsSync(this.stopFile)) {
+      void this.endByPid('stop');
+    }
   }
 
   /**
    * Ends the engine by its pid, where no helper is left to end it through its handle. A pid can name
-   * a later process once the engine has gone, so it is used only just after it was seen alive.
+   * a later process once the engine has gone, so it is ended only while the process there began
+   * when the helper said the engine did. A look that gets no start time decides nothing, and the
+   * next look asks again.
    */
-  private endByPid(how: 'kill' | 'stop'): void {
-    this.endedHere = how;
-    if (this.enginePid === undefined) {
+  private async endByPid(how: 'kill' | 'stop'): Promise<void> {
+    const pid = this.enginePid;
+    const began = engineBeganMs(this.madeProcess);
+    if (pid === undefined || began === undefined) {
       return;
     }
+    this.ending = true;
     try {
-      process.kill(this.enginePid);
+      const now = (await startTimesOf([pid])).get(pid);
+      if (now === undefined) {
+        return;
+      }
+      this.endedHere = how;
+      if (now !== began) {
+        this.notTheEngine = true;
+        return;
+      }
+      process.kill(pid);
     } catch {
       // It ended on its own meanwhile, which the next look tells.
+    } finally {
+      this.ending = false;
     }
   }
 
@@ -336,7 +378,9 @@ export class HelpedChild extends RelayedChild {
     this.helper = helper;
     this.adopted = true;
     const stop = Buffer.from(this.stopFile ?? '', 'utf8').toString('base64');
-    return `${String(this.enginePid)} ${this.copy} ${stop} ${this.killRequested ? '1' : '0'}`;
+    // An answered start was made first, so the start time is known. -1 matches no process.
+    const made = this.madeProcess ?? `${String(this.enginePid)} -1`;
+    return `${made} ${this.copy} ${stop} ${this.killRequested ? '1' : '0'}`;
   }
 
   /** Ends the start with [param reason] where the helper's error file would have said it. */

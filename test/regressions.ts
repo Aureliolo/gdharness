@@ -138,7 +138,7 @@ import {
   throughHelper,
   windowsCommandLine,
 } from '../src/desktop.js';
-import { ServedHelper } from '../src/desktop-process.js';
+import { HelpedChild, helperFor, ServedHelper } from '../src/desktop-process.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import {
   docCacheCrash,
@@ -20987,8 +20987,15 @@ async function testAStartAfterItsHelperDiedIsStillStopped(): Promise<void> {
     const first = await runningThroughTheHelper(root, 'first', true);
     engines.push(first.engine);
     await killTheHelper(first.helper);
-    // Until this process has heard the exit: a start given to a helper that is dying fails.
-    await delay(500);
+    // Until this process has heard the exit, which hands the first run to a new helper: a start
+    // given to a helper that is dying fails.
+    assert.ok(
+      await answeredWithin(
+        () => (helperFor(helperAssembly()).process.pid === first.helper ? undefined : true),
+        30_000,
+      ),
+      'the dead helper is replaced',
+    );
     const second = await runningThroughTheHelper(root, 'second', true);
     engines.push(second.engine);
     assert.notEqual(second.helper, first.helper, 'the second start has a new helper');
@@ -21101,6 +21108,138 @@ async function testARunNoHelperCanTakeOverIsStillStopped(): Promise<void> {
       const ended = await endWithin(run.start.child, 5000);
       assert.equal(ended, hidden ? '1/null' : 'null/SIGTERM', `the ${name} run is stopped`);
       assert.equal(alive(run.engine), false, `and its ${name} engine has gone`);
+    }
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * Starts a stand-in in [param root], gives it a start time that is not its own, kills its helper,
+ * stops the run as [param how] says and checks the stand-in is left running. [param adopted] says
+ * whether a new helper can take the run over. The stand-in's pid is added to [param engines].
+ */
+async function stoppingAProcessThatOnlySharesThePid(
+  root: string,
+  adopted: boolean,
+  how: 'stop' | 'kill',
+  engines: number[],
+): Promise<void> {
+  const name = `${adopted ? 'adopted' : 'none'}-${how}`;
+  const assembly = join(root, `${name}-helper.exe`);
+  cpSync(helperAssembly(), assembly);
+  const run = await runningThroughTheHelper(root, name, true, assembly);
+  engines.push(run.engine);
+  const child = run.start.child;
+  assert.ok(child instanceof HelpedChild, 'the start is a helped child');
+  child.made(run.engine, '1');
+  if (!adopted) {
+    // A running program can be renamed but not removed, so the next helper of this path cannot start.
+    renameSync(assembly, `${assembly}.gone`);
+  }
+  // In one turn, so a kill reaches only a helper that is already being ended.
+  process.kill(run.helper);
+  if (how === 'stop') {
+    run.start.stop();
+  } else {
+    child.kill();
+  }
+  assert.ok(await endWithin(child, 10_000), `the ${name} run ends`);
+  // Several looks of the watch, and of an adopting helper's.
+  await delay(1000);
+  assert.ok(alive(run.engine), `the ${name} process is left running`);
+}
+
+/**
+ * A process under a dead helper's engine pid that began at another time than the helper said is
+ * not the engine, so a stop leaves it running: through the stop file and through a kill, whether
+ * a new helper takes the run over or none can. The stand-in plays such a process by being given a
+ * start time that is not its own.
+ */
+async function testAProcessThatOnlySharesTheEnginesPidIsNeverEnded(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-pid-'));
+  const engines: number[] = [];
+  try {
+    for (const adopted of [true, false]) {
+      for (const how of ['stop', 'kill'] as const) {
+        await stoppingAProcessThatOnlySharesThePid(root, adopted, how, engines);
+      }
+    }
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stop file whose path is longer than MAX_PATH still stops a run on the hidden desktop, by its
+ * live helper and by one that took the run over from a dead one.
+ */
+async function testAStopFileWithALongPathStillStopsTheRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-stop-'));
+  const engines: number[] = [];
+  try {
+    let deep = root;
+    while (deep.length < 300) {
+      deep = join(deep, 'a-folder-name-that-makes-the-path-long');
+    }
+    mkdirSync(deep, { recursive: true });
+    for (const adopted of [false, true]) {
+      const name = adopted ? 'adopted' : 'live';
+      const scratch = join(deep, name);
+      mkdirSync(scratch);
+      const stop = join(deep, `${name}-stop`);
+      const output = join(deep, `${name}-output`);
+      const start = spawnOnDesktop(
+        {
+          desktop: HIDDEN_DESKTOP,
+          stop,
+          exit: join(deep, `${name}-exit`),
+          directory: root,
+          scratch,
+          outputFile: output,
+        },
+        process.execPath,
+        ['-e', 'console.log("up"); setInterval(() => undefined, 1000)'],
+        { stdio: ['ignore', 'ignore', 'ignore'] },
+      );
+      const engine = await answeredWithin(() => start.pid(), 60_000);
+      assert.ok(engine !== undefined, `the ${name} helper reads a long spec and names the engine`);
+      engines.push(engine);
+      if (adopted) {
+        const helper = start.child.pid;
+        assert.ok(helper !== undefined, 'the start names its helper');
+        await killTheHelper(helper);
+      }
+      const said = (): true | undefined =>
+        (existsSync(output) && readFileSync(output, 'utf8').startsWith('up')) || undefined;
+      assert.ok(await answeredWithin(said, 30_000), `the ${name} engine's output reaches its file`);
+      assert.ok(stop.length > 300, `the stop path is long: ${String(stop.length)} characters`);
+      start.stop();
+      assert.equal(await endWithin(start.child, 5000), '1/null', `the ${name} run is stopped`);
+      assert.equal(alive(engine), false, `and its ${name} engine has gone`);
+      if (!adopted) {
+        assert.equal(
+          readFileSync(join(deep, 'live-exit'), 'utf8'),
+          '1',
+          'the live helper writes the exit code',
+        );
+      }
     }
   } finally {
     for (const engine of engines.filter((pid) => alive(pid))) {
@@ -119728,6 +119867,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOnTheDesktopInUseIsStoppedAfterItsHelperDied,
   testATimedOutRunWhoseHelperDiedEndsWithinTheStopWait,
   testARunNoHelperCanTakeOverIsStillStopped,
+  testAProcessThatOnlySharesTheEnginesPidIsNeverEnded,
+  testAStopFileWithALongPathStillStopsTheRun,
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
