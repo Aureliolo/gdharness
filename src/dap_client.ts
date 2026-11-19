@@ -287,7 +287,6 @@ export class GodotDAPClient {
         // The dial's own error handler speaks for a socket that never connected, and would clear
         // the held socket on a later error, which the close then finds is no longer its own.
         socket.off('error', handleError);
-        socket.off('close', handleLetGo);
         this.connected = true;
         this.requests = connection.requests;
 
@@ -322,7 +321,8 @@ export class GodotDAPClient {
         );
       };
 
-      // A socket [abandon] destroys before it connects sees no error, only its close.
+      // A socket [abandon] destroys before it connects sees no error, only its close. Past the
+      // connect a close rejects nothing, since the dial has already settled.
       const handleLetGo = (): void => {
         clearTimeout(connectTimeout);
         reject(new Error('The DAP connection was let go before it opened'));
