@@ -1,7 +1,7 @@
 extends RefCounted
 ## Godot values as JSON can carry them, and JSON back into the values the engine wants.
 ##
-## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon,
+## This file is the one beside the operations, and the build copies it into each addon,
 ## because an addon is installed as a directory and cannot preload out of one. The copies are
 ## byte for byte this file and a fixture says so. Three spellings of one value is what there was
 ## before: the same Vector2 came back three ways depending on which tool was asked, and a caller

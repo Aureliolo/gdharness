@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * The GDScript helpers that live beside the operations and again inside each addon, copied from
  * the one that is the original.
@@ -8,22 +7,35 @@
  * copies drift, and the call that finds out is the one that went to the copy nobody edited: the
  * same value came back three ways depending on which tool was asked.
  *
- * So the original is the one beside the operations and this writes the rest, byte for byte.
- * `test/regressions.ts` compares them and names this script when they differ, which is what makes
- * an edit to a copy a failure rather than a surprise later.
+ * So the original is the one beside the operations and the build and every suite that reads the
+ * source addons write the rest, byte for byte. Git ignores the copies. Only the original is
+ * tracked.
  *
- * A `.uid` is written only when there is none. Godot writes one beside every script and reads it
- * back so a reference survives a rename, so an identity is permanent once it exists: rewriting one
- * would re-identify the file in every project that already holds it. New ones are derived from the
- * path rather than drawn at random, so two machines generate the same id for the same file.
+ * A copy that differs from its original and holds no text the sync wrote was edited by hand.
+ * The sync stops there and names the original, because overwriting it would lose the edit and
+ * leaving it would test the wrong text. Each text it wrote is kept as an empty file named by its
+ * hash in `written-helpers` in gdharness's cache folder, which no tree holds and no package carries.
+ * Every tree on the machine shares it, so a `godot` folder copied from another tree is judged by
+ * what any sync here wrote. A file there is created once and never changed, so syncs running together
+ * cannot undo each other. The folder gains one empty file per edit of an original and is not pruned,
+ * since removing a hash a copy still holds would refuse that copy. Deleting the whole folder is safe.
+ * File times judge nothing, since a copy that keeps its source's time or two syncs at once make
+ * them lie. Without the folder, as on a machine no sync ran on, or with one that cannot be written, a
+ * differing copy is taken for stale.
+ * Each file is written to a temporary name and renamed, so a suite starting beside another reads
+ * a whole copy.
+ *
+ * A `.uid` is never written here. Godot writes one beside every script and reads it back so a
+ * reference survives a rename, so an identity is permanent once it exists and every game holding
+ * an addon keeps the value it shipped with. Each copy's `.uid` is a tracked file.
  */
 
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { cacheHome } from '../src/cache-home.js';
 
-const OPERATIONS = join('src', 'godot', 'operations');
-const ADDONS = join('src', 'godot', 'addons');
+const GODOT = join('src', 'godot');
 
 /** Which helpers are shared, and which addons hold a copy of each. */
 export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
@@ -41,48 +53,97 @@ export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
   'value_shapes.gd': ['gdharness_editor', 'gdharness_runtime'],
 };
 
-/** Every copy of the shared helpers, as [original, copy] pairs. */
-export function sharedCopies(): { original: string; copy: string }[] {
+/** Every copy of the shared helpers under a `godot` folder, as [original, copy] pairs. */
+export function sharedCopies(godot: string = GODOT): { original: string; copy: string }[] {
   return Object.entries(SHARED_GDSCRIPT).flatMap(([file, addons]) =>
-    addons.map((addon) => ({ original: join(OPERATIONS, file), copy: join(ADDONS, addon, file) })),
+    addons.map((addon) => ({
+      original: join(godot, 'operations', file),
+      copy: join(godot, 'addons', addon, file),
+    })),
   );
+}
+
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+/** The folder of what any sync on this machine wrote, in the cache so it never ships or enters a digest. */
+export function syncRecordPath(): string {
+  return join(cacheHome(), 'written-helpers');
+}
+
+/** Replaces a file in one step, so a process reading it sees the old text or the new and never half. */
+function writeWhole(path: string, text: string): void {
+  const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(temporary, text);
+  // Windows refuses a rename onto a file another process has open for a moment.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(temporary, path);
+      return;
+    } catch (error) {
+      if (attempt >= 50) {
+        rmSync(temporary, { force: true });
+        throw error;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+}
+
+/** Notes that the sync wrote or found this text. A file already there is the same note, so it is kept. */
+function noteWritten(folder: string, text: string): void {
+  try {
+    writeFileSync(join(folder, sha256(text)), '', { flag: 'wx' });
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+  }
 }
 
 /**
- * A uid for a file that has none, out of its path.
+ * Writes each missing or outdated copy and answers the copies it wrote.
  *
- * Godot's own are base-36-ish text after `uid://`, and nothing but the format and uniqueness is
- * asked of them, so a hash of the path satisfies both and is the same answer every time.
+ * A copy that differs from its original is stale when the sync wrote its text, and edited by hand
+ * otherwise, which stops the sync before any copy is written. With no folder of what was written, or
+ * one that cannot be written, a copy that differs is taken for stale. A text is noted before any copy holds it and a note is never
+ * rewritten or removed, so no process can undo another's.
  */
-function identityFor(path: string): string {
-  const digest = createHash('sha256').update(path.replaceAll('\\', '/')).digest('hex');
-  return `uid://c${BigInt(`0x${digest.slice(0, 16)}`)
-    .toString(36)
-    .slice(0, 12)}`;
-}
-
-export function syncSharedGdscript(): string[] {
-  const written: string[] = [];
-  for (const { original, copy } of sharedCopies()) {
-    const wanted = readFileSync(original, 'utf8');
-    if (!existsSync(copy) || readFileSync(copy, 'utf8') !== wanted) {
-      writeFileSync(copy, wanted);
-      written.push(copy);
-    }
-    const beside = `${copy}.uid`;
-    if (!existsSync(beside)) {
-      writeFileSync(beside, `${identityFor(copy)}\n`);
-      written.push(beside);
+export function syncSharedGdscript(godot: string = GODOT): string[] {
+  const folder = syncRecordPath();
+  const pairs = sharedCopies(godot).map(({ original, copy }) => ({
+    original,
+    copy,
+    wanted: readFileSync(original, 'utf8'),
+    held: existsSync(copy) ? readFileSync(copy, 'utf8') : null,
+  }));
+  const existed = existsSync(folder);
+  const judged =
+    noteAll(
+      folder,
+      pairs.map(({ wanted }) => wanted),
+    ) && existed;
+  const due = pairs.filter(({ held, wanted }) => held !== wanted);
+  for (const { original, copy, held } of due) {
+    if (held !== null && judged && !existsSync(join(folder, sha256(held)))) {
+      throw new Error(
+        `${copy} was changed after it was written. It is a copy of ${original}: make the change there, then delete the copy.`,
+      );
     }
   }
-  return written;
+  for (const { copy, wanted } of due) writeWhole(copy, wanted);
+  return due.map(({ copy }) => copy);
 }
 
-if (import.meta.main) {
-  const written = syncSharedGdscript();
-  console.log(
-    written.length === 0
-      ? 'shared GDScript already matches'
-      : `wrote ${written.length}: ${written.join(', ')}`,
-  );
+/**
+ * Notes every text the copies are about to hold, answering whether the record took them all.
+ *
+ * A record that cannot be written, as under a read-only home, cannot be kept current either, so it
+ * judges nothing and the sync falls back to taking a differing copy for stale.
+ */
+function noteAll(folder: string, texts: readonly string[]): boolean {
+  try {
+    mkdirSync(folder, { recursive: true });
+    for (const text of texts) noteWritten(folder, text);
+    return true;
+  } catch {
+    return false;
+  }
 }

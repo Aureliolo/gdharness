@@ -3,6 +3,7 @@
 import { chmod, cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSyncHidden } from '../src/spawn.js';
+import { syncSharedGdscript } from './sync-shared-gd.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.join(root, 'src');
@@ -79,6 +80,8 @@ for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
   }
 }
 
+// The addon copies of the shared helpers are not tracked, so the bundle is whole only after this.
+syncSharedGdscript(path.join(sourceRoot, 'godot'));
 await cp(path.join(sourceRoot, 'godot'), path.join(buildRoot, 'godot'), { recursive: true });
 
 // node, though the bundles are built by Bun and neither of them touches a Bun-only API. The
