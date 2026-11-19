@@ -90278,13 +90278,13 @@ function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
     }
     const copies = sharedCopies(godot);
     assert.equal(copies.length, 17);
-    const text = (path: string): string => readFileSync(path, 'utf8');
+    const held = (path: string): string => readFileSync(path, 'utf8');
     const copyOf = (addon: string, file: string): string => join(godot, 'addons', addon, file);
 
     // Every copy is written, byte for byte, and no identity comes with it.
     assert.deepEqual(syncSharedGdscript(godot).toSorted(), copies.map(({ copy }) => copy).toSorted());
     for (const { original, copy } of copies) {
-      assert.equal(text(copy), text(original), `${copy} should equal ${original}`);
+      assert.equal(held(copy), held(original), `${copy} should equal ${original}`);
     }
     const uids = readdirSync(join(godot, 'addons'), { recursive: true }).filter((entry) =>
       String(entry).endsWith('.uid'),
@@ -90301,14 +90301,14 @@ function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
 
     // An original edited later is copied again, and only into its own copies.
     const reading = join(godot, 'operations', 'reading.gd');
-    writeFileSync(reading, `${text(reading)}# edited\n`);
+    writeFileSync(reading, `${held(reading)}# edited\n`);
     const later = new Date(statSync(copyOf('gdharness_editor', 'reading.gd')).mtimeMs + 10_000);
     utimesSync(reading, later, later);
     assert.deepEqual(
       syncSharedGdscript(godot).toSorted(),
       [copyOf('gdharness_editor', 'reading.gd'), copyOf('gdharness_runtime', 'reading.gd')].toSorted(),
     );
-    assert.equal(text(copyOf('gdharness_editor', 'reading.gd')), text(reading));
+    assert.equal(held(copyOf('gdharness_editor', 'reading.gd')), held(reading));
 
     // A copy edited by hand is refused and kept, with the original named.
     const edited = copyOf('gdharness_editor', 'reading.gd');
@@ -90323,17 +90323,17 @@ function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
         error.message.includes(reading) &&
         error.message.includes('make the change there'),
     );
-    assert.equal(text(edited), 'extends RefCounted\n# by hand\n');
+    assert.equal(held(edited), 'extends RefCounted\n# by hand\n');
     rmSync(edited);
     assert.deepEqual(syncSharedGdscript(godot), [edited]);
-    assert.equal(text(edited), text(reading));
+    assert.equal(held(edited), held(reading));
 
     // An identity is never written over.
     const runtimeReading = copyOf('gdharness_runtime', 'reading.gd');
     rmSync(runtimeReading);
     writeFileSync(`${runtimeReading}.uid`, 'uid://kept');
     assert.deepEqual(syncSharedGdscript(godot), [runtimeReading]);
-    assert.equal(text(`${runtimeReading}.uid`), 'uid://kept');
+    assert.equal(held(`${runtimeReading}.uid`), 'uid://kept');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -90483,9 +90483,9 @@ function testEveryHelperCopyInAnAddonIsListed(): void {
  * copies a tree it is handed, so it too has to write them first.
  */
 function testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst(): void {
-  const readsTheAddons = (text: string): boolean =>
-    text.includes("from '../src/setup.js'") ||
-    /cpSync\(\s*(?:'src\/godot\/addons'|join\('src', 'godot', 'addons')/.test(text);
+  const readsTheAddons = (source: string): boolean =>
+    source.includes("from '../src/setup.js'") ||
+    /cpSync\(\s*(?:'src\/godot\/addons'|join\('src', 'godot', 'addons')/.test(source);
   const readers = readdirSync('test')
     .filter((name) => name.endsWith('.ts'))
     .filter((name) => readsTheAddons(readFileSync(join('test', name), 'utf8')))
