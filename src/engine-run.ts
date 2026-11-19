@@ -38,7 +38,7 @@ import {
   START_WINDOW_MS,
 } from './start-race.js';
 import { windowsStatusOf } from './suite-judge.js';
-import { holdExit } from './whole-exit.js';
+import { holdChildExit } from './whole-exit.js';
 
 export interface EngineRun {
   /** Both streams, finished. */
@@ -316,7 +316,7 @@ function runStarted(
     }
     const { child, files, scratch } = launched;
     belowNormal(child);
-    const whole = holdExit(child.pid);
+    const whole = holdChildExit(child);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
     const engineAt = (): number | undefined => (files === null ? child.pid : helperPid(files.pid));
     // The lock names this process, and what the engine starts runs on its slot only when it names

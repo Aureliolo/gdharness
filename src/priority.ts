@@ -1,5 +1,5 @@
 import { constants, getPriority, setPriority } from 'node:os';
-import type { ChildProcess } from './spawn.js';
+import { type ChildProcess, RelayedChild } from './spawn.js';
 
 /**
  * Puts [param child], an engine this server started, below normal priority. On a machine running
@@ -7,7 +7,8 @@ import type { ChildProcess } from './spawn.js';
  * timed out. What the engine starts, such as a game an editor plays, inherits the lower class.
  */
 export function belowNormal(child: ChildProcess): void {
-  if (child.pid === undefined) {
+  // A start through the desktop helper is begun below normal by the helper, whose own pid this is.
+  if (child.pid === undefined || child instanceof RelayedChild) {
     return;
   }
   try {
