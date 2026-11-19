@@ -337,9 +337,18 @@ export function keptSlotsOf(count: number): number {
 
 /**
  * How long a one-off take, neither a gate's nor a game's, waits before it stands with gate work in
- * the line ({@link SlotLine}). Its wait changes its place there, never which slots it may take.
+ * the line ({@link SlotLine}). A store-class one counts from it always, any other only while no
+ * store-class taker waits. Its wait changes its place there, never which slots it may take.
  */
 const ONE_OFF_AGED_MS = 120_000;
+
+/**
+ * How long store-class side work may hold an ordinary one-off back: while a store-class taker waits,
+ * a one-off of another repository goes after every store-class one until it has waited this long,
+ * then stands as one past {@link ONE_OFF_AGED_MS} does. The other side of the scheme names it
+ * `ONE_OFF_HELD`.
+ */
+const ONE_OFF_HELD_MS = 600_000;
 
 /**
  * How long a take leaves a free slot to a taker waiting longer that may take it, past which it takes
@@ -464,10 +473,19 @@ function markNames(marks: string): string[] {
  * The live waiter the mark file [param mark] in [param marks] names, which read as [param content],
  * or null when it names none.
  */
+/**
+ * When the file of [param stats] was last written, in whole milliseconds rounded down. It is read
+ * from the nanoseconds, since `mtimeMs` is a double that rounds a time ending in .9999 ms up to the
+ * next millisecond.
+ */
+export function fileTimeMs(stats: { readonly mtimeNs: bigint }): number {
+  return Number(stats.mtimeNs / 1_000_000n);
+}
+
 function waiterOfMark(marks: string, mark: string, content: string | null): SlotWaiter | null {
   let madeAt: number;
   try {
-    madeAt = statSync(join(marks, mark)).mtimeMs;
+    madeAt = fileTimeMs(statSync(join(marks, mark), { bigint: true }));
   } catch {
     return null;
   }
@@ -482,7 +500,7 @@ function waiterOfMark(marks: string, mark: string, content: string | null): Slot
   }
   let seen = madeAt;
   try {
-    seen = statSync(join(marks, seenNoteOf(mark))).mtimeMs;
+    seen = fileTimeMs(statSync(join(marks, seenNoteOf(mark)), { bigint: true }));
   } catch {
     // No look written: the wait has only its mark's time to show it is alive.
   }
@@ -529,7 +547,7 @@ export function slotsClaimed(
  * A take's place among those waiting for the machine's slots: it leaves each free slot to the takers
  * waiting longer that may take it, in the order they began to wait, so a one-off waiting its hour is
  * never overtaken by the next taker to look, whichever wakes first as a lock goes. A gate's engine
- * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} stands with gate work. A timing,
+ * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} can stand with gate work. A timing,
  * whose turn the queue already gave it, leaves nothing. Agent runs of one game waited 38 to 80
  * minutes for one slot while runs of seconds took turns on it with no order among them.
  */
@@ -567,20 +585,33 @@ export class SlotLine {
 
   /**
    * The takers of [param waiters] ahead of this one, the first first, in three groups. The first
-   * holds every taker that is no one-off and the one-offs that have waited {@link ONE_OFF_AGED_MS}.
-   * The second holds the younger one-offs of the store class, and a game past that age, which never
-   * stands with gate work. The third holds the other younger one-offs. Each group goes in the order
-   * it began to wait. The class moves a place in line only, never what a taker may take.
+   * holds every taker that is no one-off and the store-class one-offs that have waited
+   * {@link ONE_OFF_AGED_MS}, games excepted. The second holds the other store-class one-offs. The
+   * third holds every other one-off younger than {@link ONE_OFF_HELD_MS} while a store-class taker
+   * waits, since a store-stage game's engine calls go before other side work, and younger than
+   * {@link ONE_OFF_AGED_MS} while none waits. Past that, an ordinary one-off stands with gate work, so
+   * neither gates nor store work arriving all day keep it waiting for good, and a game goes second,
+   * never with gate work. Each group goes in the order it began to wait. The class moves a place in
+   * line only, never what a taker may take.
    */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
     const now = this.clock();
+    // A store-class waiter holds others back only while it looks, which every looker reads alike
+    // from its mark. A taker held back stops looking, and so stops holding the takers behind it.
+    const storeWaits = this.store || waiters.some((one) => one.store && now - one.seen < SLOT_YIELD_MS);
     // The age is read from the exact seconds the order compares, as the other side of the scheme reads it.
+    const waited = (since: number, ms: number): boolean => now / 1000 - since >= ms / 1000;
     const groupOf = (taker: SlotTaker, game: boolean, store: boolean, since: number): number => {
       if (taker !== 'other') {
         return 0;
       }
-      const aged = now / 1000 - since >= ONE_OFF_AGED_MS / 1000;
-      return aged && !game ? 0 : store || aged ? 1 : 2;
+      if (store) {
+        return waited(since, ONE_OFF_AGED_MS) && !game ? 0 : 1;
+      }
+      if (!waited(since, storeWaits ? ONE_OFF_HELD_MS : ONE_OFF_AGED_MS)) {
+        return 2;
+      }
+      return game ? 1 : 0;
     };
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
     const own = {
@@ -2452,31 +2483,78 @@ export function slotWaitSaid(
   if (drawn.limit === 'starved') {
     return `${so}: ${drawn.heldFor}. The engine starts once that measurement has run.`;
   }
+  const allLeft = allLeftSaid(drawn, directory, false);
+  if (allLeft !== '') {
+    return `${so}: ${allLeft}`;
+  }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
-  const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
-  const named = holdersNamed(taking, holders);
+  const using = inUseOf(drawn, taking);
+  const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'is' : 'are'} in use`;
+  const named = holdersNamed(using, holders);
   const waiting = `${so}: ${slots}`;
-  const back = `the engine starts when ${taking === 1 ? 'it' : 'one'} is given back`;
+  const back = `the engine starts when ${using === 1 ? 'it' : 'one'} is given back`;
   const starts = drawn.limit === 'kept' || drawn.limit === 'games' ? `${back} or no gate is queued` : back;
   const said =
     named.length === 0
       ? `${waiting}, by a gate or another tool, and ${starts}.`
-      : taking === 1
+      : using === 1
         ? `${waiting}, by ${named.join(', ')}, and ${starts}.`
         : `${waiting}: ${listed(named)}. ${starts.charAt(0).toUpperCase()}${starts.slice(1)}.`;
   return `${said}${leftSaid(drawn)}`;
 }
 
-/** What a take says of the free slots of [param drawn] it leaves, or [param past] left, to takers waiting longer. */
+/** Slot numbers [param slots] as a reader names them: "slot 2", "slots 1 and 2". */
+function slotsNamed(slots: readonly number[]): string {
+  return slots.length === 1 ? `slot ${String(slots[0])}` : `slots ${listed(slots.map(String))}`;
+}
+
+/**
+ * What a take says when every slot of [param drawn] it may take is free and left to takers ahead of
+ * it, or was when it first waited ([param past]). Empty when any of them is in use.
+ */
+function allLeftSaid(drawn: SlotsDrawn, directory: string, past: boolean): string {
+  const left = drawn.left ?? [];
+  if (left.length === 0 || drawn.numbers.some((slot) => !left.includes(slot))) {
+    return '';
+  }
+  const one = left.length === 1;
+  const may = `${one ? 'the one slot' : `the ${String(left.length)} slots`} it ${past ? 'could' : 'may'} take`;
+  const free = past ? (one ? 'was' : 'were') : one ? 'is' : 'are';
+  const said = `${may} on this machine (${directory}), ${slotsNamed(left)}, ${free} free and left to takers ahead of it in line`;
+  return past ? `${said}.` : `${said}, which go first.`;
+}
+
+/** The slots of [param drawn] a take may try and does not leave free to a taker ahead, lowest first. */
+function notLeftOf(drawn: SlotsDrawn): number[] {
+  const left = drawn.left ?? [];
+  return drawn.numbers.filter((slot) => !left.includes(slot)).toSorted((a, b) => a - b);
+}
+
+/** How many of the [param taking] slots of [param drawn] are in use: all, or those it does not leave free. */
+function inUseOf(drawn: SlotsDrawn, taking: number): number {
+  return (drawn.left?.length ?? 0) === 0 ? taking : notLeftOf(drawn).length;
+}
+
+/**
+ * The slots of [param drawn] in use, of the [param taking] of [param count] a take may use: all of
+ * them, or by number where it leaves some of them free.
+ */
+function slotsInUseSaid(drawn: SlotsDrawn, count: number, directory: string, taking: number): string {
+  const all = slotsSaid(taking, count, directory, drawn.limit);
+  return (drawn.left?.length ?? 0) === 0
+    ? all
+    : `${slotsNamed(notLeftOf(drawn))} of ${all.replace(/^all /u, 'the ')}`;
+}
+
+/** What a take says of the free slots of [param drawn] it leaves, or [param past] left, to takers ahead of it. */
 function leftSaid(drawn: SlotsDrawn, past = false): string {
   const left = drawn.left ?? [];
   if (left.length === 0) {
     return '';
   }
-  const slots = left.length === 1 ? `slot ${String(left[0])}` : `slots ${listed(left.map(String))}`;
   return past
-    ? ` It left free ${slots} to takers that had begun waiting before it, which go first.`
-    : ` It leaves free ${slots} to takers that began waiting before it, which go first.`;
+    ? ` It left free ${slotsNamed(left)} to takers ahead of it in line.`
+    : ` It leaves free ${slotsNamed(left)} to takers ahead of it in line, which go first.`;
 }
 
 /**
@@ -2512,13 +2590,18 @@ export function slotWaitedSaid(
   if (drawn.limit === 'starved') {
     return `${waited} When it first waited, it was ${drawn.heldFor}.`;
   }
+  const allLeft = allLeftSaid(drawn, directory, true);
+  if (allLeft !== '') {
+    return `${waited} When it first waited, ${allLeft}`;
+  }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
-  const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
-  const named = holdersNamed(taking, holders);
+  const using = inUseOf(drawn, taking);
+  const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'was' : 'were'} in use`;
+  const named = holdersNamed(using, holders);
   const said =
     named.length === 0
       ? `${waited} When it first waited, ${slots}, by a gate or another tool.`
-      : taking === 1
+      : using === 1
         ? `${waited} When it first waited, ${slots}, by ${named.join(', ')}.`
         : `${waited} When it first waited, ${slots}: ${listed(named)}.`;
   return `${said}${leftSaid(drawn, true)}`;
