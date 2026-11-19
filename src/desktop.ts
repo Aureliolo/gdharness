@@ -141,6 +141,7 @@ public static class GdharnessDesktop {
   const uint ExtendedStartupInfoPresent = 0x00080000;
   const uint CreateUnicodeEnvironment = 0x00000400;
   const int HandleListAttribute = 0x20002;
+  const int JobListAttribute = 0x2000D;
   const uint DuplicateSameAccess = 0x2;
   const uint DuplicateCloseSource = 0x1;
   const uint ProcessDuplicateHandle = 0x40;
@@ -548,7 +549,7 @@ public static class GdharnessDesktop {
         uint pid = uint.Parse(parts[1]);
         long began = long.Parse(parts[2]);
         // Counted as a start being made, so that the served process ending meanwhile does not end
-        // this one before the engine, which may be in no job yet, is ended.
+        // this one before the engine is ended.
         lock (running) {
           creating++;
         }
@@ -586,8 +587,8 @@ public static class GdharnessDesktop {
   }
 
   // Called with the lock held. This process ends once its starter has gone, no start meant to outlive
-  // it runs and none is between creating its process and putting it in a job, which would be left
-  // suspended and in no job.
+  // it runs and none is between creating its process and handing it over. Such a process is still in
+  // the job it was made in, which would end it with this process.
   static void ExitWhenIdle() {
     if (leaving && kept == 0 && creating == 0) {
       Environment.Exit(0);
@@ -878,15 +879,17 @@ public static class GdharnessDesktop {
     File.WriteAllText(stepFile, step);
   }
 
-  // The process starts suspended. With an affinity it is held to those processors before its first
-  // thread runs, so every thread it starts afterwards is held to them as well. It then joins a job
-  // named after its own pid, made before it runs so that what it starts is counted in the job too,
-  // and a name already taken ends it unrun. With endsWithThis that job ends it once this process
-  // has gone, however it went. A runner's own job ends this helper with the runner, and the process
-  // breaks away from that job, so an engine of a runner that was killed ran on with no parent and
-  // held its run's folder. Without it the job only counts, so a process meant to outlive whatever
-  // started it keeps its lifetime. Nested jobs need Windows 8, and a job that forbids one fails the
-  // assignment, which ends the process unrun with the cause.
+  // The process starts suspended, inside a job of its own that ends it once this process has gone.
+  // So a failure or the end of this process, at any point before it is handed over, ends it unrun.
+  // With an affinity it is held to those processors before its first thread runs, so every thread
+  // it starts afterwards is held to them as well. It then joins a job named after its own pid, made
+  // before it runs so that what it starts is counted in the job too, and a name already taken ends
+  // it unrun. With endsWithThis that job ends it once this process has gone, however it went. A
+  // runner's own job ends this helper with the runner, and the process breaks away from that job, so
+  // an engine of a runner that was killed ran on with no parent and held its run's folder. Without
+  // it the job only counts, so a process meant to outlive whatever started it keeps its lifetime.
+  // Both jobs nest in whatever job this process is in. That needs Windows 8, and a job that forbids
+  // it fails the start with the cause. Making a process in a job needs Windows 10.
   static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis, Stdio io, string environment, string laneFile, string lane) {
     StartupInfoEx extended = new StartupInfoEx();
     extended.startup.cb = Marshal.SizeOf(typeof(StartupInfoEx));
@@ -915,6 +918,7 @@ public static class GdharnessDesktop {
     if (noActivate) {
       LockSetForegroundWindow(LockForeground);
     }
+    IntPtr birth = IntPtr.Zero;
     IntPtr job = IntPtr.Zero;
     IntPtr copy = IntPtr.Zero;
     bool counted = false;
@@ -923,6 +927,11 @@ public static class GdharnessDesktop {
     try {
     try {
     Step(stepFile, "starting the process");
+    birth = CreateJobObjectW(IntPtr.Zero, null);
+    limits.flags = KillOnJobClose;
+    if (birth == IntPtr.Zero || !SetInformationJobObject(birth, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)))) {
+      throw Failure(Marshal.GetLastWin32Error(), "a job to make the process in");
+    }
     // The process gets a console that is never shown, so a console program it starts joins that one
     // and opens no window of its own. A process with no console at all gives each such child a new
     // console, which Windows Terminal shows on the desktop in use, whichever desktop the process is on.
@@ -934,11 +943,10 @@ public static class GdharnessDesktop {
       creating++;
       creatingHeld = true;
     }
-    Create(commandLine, ref creation, directory, environment, io, ref extended, out started);
+    Create(commandLine, ref creation, directory, environment, io, birth, ref extended, out started);
     lock (running) {
       // A start that was in flight when the process it serves ended, which Leave could not see yet.
       if (leaving && endsWithThis) {
-        TerminateProcess(started.process, 1);
         throw new Win32Exception(0, "the process that started this one has ended");
       }
       if (requestId != null) {
@@ -947,8 +955,9 @@ public static class GdharnessDesktop {
     }
     if (requestId != null) {
       // Said before the served process is handed a copy of the job, which it learns of only from the
-      // answer. A helper that ends before it answers leaves the next one the engine to end and the
-      // copy to close. The time the process began tells it from a later one given the same pid.
+      // answer. A helper that ends after the copy and before it answers leaves the next one the
+      // engine to end and the copy to close. The time the process began tells it from a later one
+      // given the same pid.
       long began, exited, kernel, user;
       GetProcessTimes(started.process, out began, out exited, out kernel, out user);
       Reply("made " + requestId + " " + started.processId + " " + began);
@@ -956,9 +965,7 @@ public static class GdharnessDesktop {
     if (affinity != 0) {
       Step(stepFile, "holding the process to its processors");
       if (!SetProcessAffinityMask(started.process, new UIntPtr(affinity))) {
-        int error = Marshal.GetLastWin32Error();
-        TerminateProcess(started.process, 1);
-        throw Failure(error, "SetProcessAffinityMask " + affinity);
+        throw Failure(Marshal.GetLastWin32Error(), "SetProcessAffinityMask " + affinity);
       }
     }
     Step(stepFile, "putting the process in its job");
@@ -969,7 +976,6 @@ public static class GdharnessDesktop {
     job = CreateJobObjectW(IntPtr.Zero, jobName);
     int made = Marshal.GetLastWin32Error();
     if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
-      TerminateProcess(started.process, 1);
       // A name already taken says it all itself: the system's text for that code speaks of a file.
       throw job == IntPtr.Zero
         ? Failure(made, "CreateJobObjectW " + jobName)
@@ -978,9 +984,11 @@ public static class GdharnessDesktop {
     limits.flags = endsWithThis ? KillOnJobClose : 0u;
     if ((endsWithThis && !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits))))
         || !AssignProcessToJobObject(job, started.process)) {
-      int error = Marshal.GetLastWin32Error();
-      TerminateProcess(started.process, 1);
-      throw Failure(error, "a job for the process named " + jobName);
+      throw Failure(Marshal.GetLastWin32Error(), "a job for the process named " + jobName);
+    }
+    // From here the named job ends the process with this one, until the served process holds a copy.
+    if (endsWithThis) {
+      LetGo(ref birth, "the job the process was made in");
     }
     if (endsWithThis && served != IntPtr.Zero) {
       DuplicateHandle(GetCurrentProcess(), job, served, out copy, 0, false, DuplicateSameAccess);
@@ -1008,6 +1016,11 @@ public static class GdharnessDesktop {
     }
     ResumeThread(started.thread);
     File.WriteAllText(pidFile, started.processId.ToString());
+    // A process meant to outlive its starter is let go only now. A helper that ends before this
+    // still ends it, and one that ends before the answer below leaves the next one to end it.
+    if (birth != IntPtr.Zero) {
+      LetGo(ref birth, "the job the process was made in");
+    }
     if (requestId != null) {
       Reply("started " + requestId + " " + started.processId + " " + copy.ToInt64());
     }
@@ -1086,6 +1099,9 @@ public static class GdharnessDesktop {
       if (job != IntPtr.Zero) {
         CloseHandle(job);
       }
+      if (birth != IntPtr.Zero) {
+        CloseHandle(birth);
+      }
       ReleaseCopy(copy);
       lock (running) {
         if (creatingHeld) {
@@ -1099,8 +1115,19 @@ public static class GdharnessDesktop {
     }
   }
 
-  // Starts the process with only the handles of io inherited, and with the environment when there is one.
-  static void Create(string commandLine, ref uint creation, string directory, string environment, Stdio io, ref StartupInfoEx extended, out Started started) {
+  // Lifts the limit of a job that ends its processes with this one, and closes it.
+  static void LetGo(ref IntPtr job, string what) {
+    JobLimits none = new JobLimits();
+    if (!SetInformationJobObject(job, ExtendedLimitInformation, ref none, Marshal.SizeOf(typeof(JobLimits)))) {
+      throw Failure(Marshal.GetLastWin32Error(), "letting go of " + what);
+    }
+    CloseHandle(job);
+    job = IntPtr.Zero;
+  }
+
+  // Starts the process in job, with only the handles of io inherited, and with the environment when
+  // there is one.
+  static void Create(string commandLine, ref uint creation, string directory, string environment, Stdio io, IntPtr job, ref StartupInfoEx extended, out Started started) {
     List<IntPtr> inherited = new List<IntPtr>();
     foreach (IntPtr handle in new IntPtr[] { io.input, io.output, io.error }) {
       if (handle != IntPtr.Zero && handle != new IntPtr(-1) && !inherited.Contains(handle)) {
@@ -1109,17 +1136,22 @@ public static class GdharnessDesktop {
     }
     IntPtr attributes = IntPtr.Zero;
     IntPtr table = IntPtr.Zero;
+    IntPtr jobs = Marshal.AllocHGlobal(IntPtr.Size);
     IntPtr block = IntPtr.Zero;
     bool ready = false;
     try {
+      IntPtr size = IntPtr.Zero;
+      InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
+      attributes = Marshal.AllocHGlobal(size);
+      if (!InitializeProcThreadAttributeList(attributes, 2, 0, ref size)) {
+        throw Failure(Marshal.GetLastWin32Error(), "InitializeProcThreadAttributeList");
+      }
+      ready = true;
+      Marshal.WriteIntPtr(jobs, job);
+      if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(JobListAttribute), jobs, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) {
+        throw Failure(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute");
+      }
       if (inherited.Count > 0) {
-        IntPtr size = IntPtr.Zero;
-        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
-        attributes = Marshal.AllocHGlobal(size);
-        if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref size)) {
-          throw Failure(Marshal.GetLastWin32Error(), "InitializeProcThreadAttributeList");
-        }
-        ready = true;
         table = Marshal.AllocHGlobal(IntPtr.Size * inherited.Count);
         for (int index = 0; index < inherited.Count; index++) {
           Marshal.WriteIntPtr(table, index * IntPtr.Size, inherited[index]);
@@ -1127,8 +1159,8 @@ public static class GdharnessDesktop {
         if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(HandleListAttribute), table, new IntPtr(IntPtr.Size * inherited.Count), IntPtr.Zero, IntPtr.Zero)) {
           throw Failure(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute");
         }
-        extended.attributes = attributes;
       }
+      extended.attributes = attributes;
       if (environment.Length > 0) {
         block = Marshal.StringToHGlobalUni(environment);
         creation |= CreateUnicodeEnvironment;
@@ -1146,6 +1178,7 @@ public static class GdharnessDesktop {
       if (table != IntPtr.Zero) {
         Marshal.FreeHGlobal(table);
       }
+      Marshal.FreeHGlobal(jobs);
       if (block != IntPtr.Zero) {
         Marshal.FreeHGlobal(block);
       }

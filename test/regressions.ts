@@ -21261,6 +21261,97 @@ async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne():
 }
 
 /**
+ * A helper killed after it made an engine and before it said so leaves no engine behind, for a start
+ * that ends with its starter and for a kept one. This copy of the helper stops for good at that
+ * point. The start fails with the helper's end as its reason and closes.
+ */
+async function testAHelperKilledBeforeItSaysItMadeTheEngineLeavesNone(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unsaid-'));
+  const stopped = HELPER_SOURCE.replace('Reply("made "', 'Thread.Sleep(Timeout.Infinite); Reply("made "');
+  assert.notEqual(
+    stopped,
+    HELPER_SOURCE,
+    'the helper says it made the engine in the place this test reaches',
+  );
+  const copy = new CompiledHelper('unsaid helper', 'gdharness-unsaid', stopped, true);
+  const engines: number[] = [];
+  try {
+    assert.equal(await copy.ensure(root), null, 'the copy compiles');
+    for (const endsWithHelper of [true, false]) {
+      await helperKilledBeforeItSaysItMadeTheEngine(root, copy.assembly(root), endsWithHelper, engines);
+      await retireHelper();
+    }
+  } finally {
+    for (const engine of engines) {
+      if (alive(engine)) {
+        process.kill(engine);
+      }
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * One start through [param assembly], a helper that stops after it made the engine, whose pid goes
+ * into [param engines]. The helper is killed there, and the start and its engine checked.
+ */
+async function helperKilledBeforeItSaysItMadeTheEngine(
+  root: string,
+  assembly: string,
+  endsWithHelper: boolean,
+  engines: number[],
+): Promise<void> {
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  const label = endsWithHelper ? 'ending with its starter' : 'kept';
+  const scratch = join(root, label);
+  mkdirSync(scratch);
+  const marker = `gdharness-unsaid-${String(process.pid)}-${String(endsWithHelper)}`;
+  const start = spawnOnDesktop(
+    { directory: root, endsWithHelper, scratch, exit: join(scratch, 'exit') },
+    process.execPath,
+    ['-e', `setTimeout(() => {}, 600000) // ${marker}`],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+    assembly,
+  );
+  start.child.stdout?.resume();
+  const closed = new Promise<void>((settle) => {
+    start.child.on('close', () => {
+      settle();
+    });
+  });
+  let engine: number | undefined;
+  for (let waited = 0; engine === undefined && waited < 60_000; waited += 250) {
+    engine = (await pidsWithCommandLine('bun', marker))[0];
+    if (engine === undefined) {
+      await delay(250);
+    }
+  }
+  assert.ok(engine !== undefined, `${label}: the helper made the engine`);
+  const made = engine;
+  engines.push(made);
+  const helper = start.child.pid;
+  assert.ok(helper !== undefined && alive(helper), `${label}: its helper runs`);
+  process.kill(helper);
+  assert.ok(await exitedWithin(start.child, 60_000), `${label}: the start ends`);
+  assert.equal(start.child.exitCode, 1, `${label}: as a start that failed`);
+  assert.match(
+    helperFailure(start.files.error) ?? '',
+    /desktop helper ended/u,
+    `${label}: with the helper's end as its reason`,
+  );
+  assert.equal(
+    await answeredWithin(() => (alive(made) ? undefined : true), 10_000),
+    true,
+    `${label}: its engine is ended`,
+  );
+  assert.ok(await settledWithin(closed, 60_000), `${label}: and the start closes`);
+}
+
+/**
  * A process that started engines and is killed takes its helper with it, and with the helper every
  * engine that was to end with it. An engine kept past its starter runs on. No scratch folder of
  * the helper's is left.
@@ -21390,8 +21481,8 @@ async function testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine(): Promise
   }
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inflight-'));
   const slowed = HELPER_SOURCE.replace(
-    'Create(commandLine, ref creation, directory, environment, io, ref extended, out started);',
-    'Create(commandLine, ref creation, directory, environment, io, ref extended, out started); Thread.Sleep(3000);',
+    'Create(commandLine, ref creation, directory, environment, io, birth, ref extended, out started);',
+    'Create(commandLine, ref creation, directory, environment, io, birth, ref extended, out started); Thread.Sleep(3000);',
   );
   assert.notEqual(slowed, HELPER_SOURCE, 'the helper makes its engine in the place this test reaches');
   const copy = new CompiledHelper('in-flight helper', 'gdharness-inflight', slowed, true);
@@ -118669,6 +118760,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHelperThatCannotBeRunLeavesNoScratchFolder,
   testStartsMadeAtOnceWaitOnNoOthersEngine,
   testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne,
+  testAHelperKilledBeforeItSaysItMadeTheEngineLeavesNone,
   testAKilledStarterTakesItsHelperAndItsEnginesButNotAKeptOne,
   testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine,
   testAnEngineOutlivingAHelperThatCannotBeRunStillEndsItsStart,
