@@ -94521,7 +94521,7 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
 }
 
 /** How many "`tool op` with `argument`" phrases the skill and the docs hold today, as a floor. */
-const ARGUMENT_MENTIONS = 11;
+const ARGUMENT_MENTIONS = 17;
 
 /**
  * Every argument the skill names for an op is one that op takes.
@@ -94564,7 +94564,7 @@ function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
 }
 
 /** How many files the prose gate below reads today, as a floor under its walk. */
-const PROSE_FILES_READ = 216;
+const PROSE_FILES_READ = 387;
 
 /**
  * The two dashes, by code point, so this file holds neither character: an editor or a tool that
@@ -94760,7 +94760,7 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1389;
+const TOOL_NAME_MENTIONS = 1482;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
 const TOOL_OP_MENTIONS = 59;
