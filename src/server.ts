@@ -121,6 +121,7 @@ import {
   isBoxVerdict,
   spawnOnDesktop,
 } from './desktop.js';
+import { HelpedChild } from './desktop-process.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { howTheEditorEnded, readEditorExit } from './editor-end.js';
@@ -420,7 +421,7 @@ import {
   shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
-import { RelayedChild, type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
+import { type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
@@ -1291,6 +1292,19 @@ async function untilGone(pids: readonly number[], withinMs = stopWaitMs()): Prom
     await delay(50);
   }
   return gone();
+}
+
+/**
+ * Waits until the engine of [param run], which was stopped, has gone. A signal is not an exit: the
+ * engine still holds its log in the user data directory while it goes, and removing that directory
+ * would find it there. Through the desktop helper the run's pid can be the helper's, which serves
+ * every start and outlives this one, so the pid waited on is the engine's that the helper reported.
+ */
+export async function untilStoppedEngineGone(run: Pick<SpawnedGame, 'process' | 'pid'>): Promise<void> {
+  const engine = run.process instanceof HelpedChild ? run.process.engine : (run.pid ?? undefined);
+  if (engine !== undefined) {
+    await untilGone([engine]);
+  }
 }
 
 /**
@@ -10348,14 +10362,8 @@ class GodotServer {
       whenEnded(run, ended);
     });
     clearInterval(reporting);
-    // A signal is not an exit: the engine still holds its log in the user data directory while it
-    // goes, and the removal below would find it there. The pid waited on is the engine's own. A start
-    // through the desktop helper has the helper's pid, and the helper serves every start and outlives
-    // this one.
-    const enginePid =
-      run.process instanceof RelayedChild && run.pid === run.process.pid ? undefined : (run.pid ?? undefined);
-    if ((timedOut || stopped.for !== null) && enginePid !== undefined) {
-      await untilGone([enginePid]);
+    if (timedOut || stopped.for !== null) {
+      await untilStoppedEngineGone(run);
     }
     await run.settled;
     await keeping;
@@ -15584,7 +15592,7 @@ class GodotServer {
       const end = (): void => {
         if (child.exitCode === null && child.signalCode === null) {
           this.logDebug(
-            `The call waiting on pid ${child.pid ?? 'unknown'} was cancelled, so it is being ended.`,
+            `The call waiting on pid ${(helped === null ? child.pid : helped.pid()) ?? 'unknown'} was cancelled, so it is being ended.`,
           );
           stop();
         }

@@ -648,6 +648,7 @@ import {
   transcriptNote,
   uidsLeftNote,
   unmodelledAnswer,
+  untilStoppedEngineGone,
   windowedNeeds,
   windowNoteFor,
   withoutUidUnder,
@@ -20745,6 +20746,113 @@ async function testAHelperThatNeverRanHasEnded(): Promise<void> {
     start.child.on('error', () => undefined);
     assert.ok(await settled(retireHelper()), 'retiring a helper that never ran returns');
   } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stand-in engine that holds the file named by its first argument open, as an engine holds its
+ * log, then writes the file named by its second and runs until it is ended.
+ */
+function heldLogEngineScript(): string {
+  return [
+    "const fs = require('node:fs');",
+    'const [log, ready] = process.argv.slice(1);',
+    "fs.openSync(log, 'w');",
+    "fs.writeFileSync(ready, '');",
+    'setInterval(() => undefined, 1000);',
+  ].join('\n');
+}
+
+/**
+ * A stopped test run started through the desktop helper is waited on until its engine has gone,
+ * and no longer. The run's process stands for the helper, which serves every start and outlives
+ * this one, so a wait on its pid lasts the whole stop wait.
+ */
+async function testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stopped-helped-'));
+  const log = join(root, 'godot.log');
+  const ready = join(root, 'ready');
+  let start: DesktopStart | undefined;
+  try {
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    // As a headless test run is started on Windows, on the desktop in use.
+    start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, separateErrors: true, scratch: root },
+      process.execPath,
+      ['-e', heldLogEngineScript(), log, ready],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    const begun = start;
+    const engine = await answeredWithin(() => begun.pid(), 60_000);
+    assert.ok(engine !== undefined, `the helper names the engine: ${helperStep(begun.files.step)}`);
+    assert.ok(await answeredWithin(() => existsSync(ready) || undefined, 60_000), 'the engine runs');
+    // The run's pid is the engine's, read from the helper's file, as a test run's is.
+    const run = { process: begun.child, pid: engine };
+    begun.stop();
+    const began = Date.now();
+    await untilStoppedEngineGone(run);
+    const waited = Date.now() - began;
+    assert.equal(alive(engine), false, 'the engine has gone when the wait returns');
+    assert.ok(begun.child.pid !== undefined && alive(begun.child.pid), 'and the helper still runs');
+    assert.ok(waited < 5000, `the wait ends with the engine, not at the stop wait: ${String(waited)} ms`);
+  } finally {
+    start?.stop();
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stopped test run on the hidden desktop knows only the helper's pid. The wait still lasts until
+ * the engine the helper reported has gone, since the engine holds its log until then, and the
+ * removal of its user data directory after the wait would meet it.
+ */
+async function testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stopped-hidden-'));
+  const kept = join(root, 'kept');
+  const scratch = join(root, 'scratch');
+  const user = join(root, 'user');
+  mkdirSync(kept);
+  mkdirSync(scratch);
+  mkdirSync(user);
+  const ready = join(root, 'ready');
+  let start: DesktopStart | undefined;
+  try {
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    start = spawnOnDesktop(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: join(kept, 'stop'),
+        exit: join(kept, 'exit'),
+      },
+      process.execPath,
+      ['-e', heldLogEngineScript(), join(user, 'godot.log'), ready],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    const begun = start;
+    const engine = await answeredWithin(() => begun.pid(), 60_000);
+    assert.ok(engine !== undefined, `the helper names the engine: ${helperStep(begun.files.step)}`);
+    assert.ok(await answeredWithin(() => existsSync(ready) || undefined, 60_000), 'the engine runs');
+    // A run on the hidden desktop is given no other pid than its child's, which is the helper's.
+    const run = { process: begun.child, pid: begun.child.pid ?? null };
+    assert.notEqual(run.pid, engine, 'the pid the run holds is not the engine');
+    begun.stop();
+    await untilStoppedEngineGone(run);
+    assert.equal(alive(engine), false, 'the engine has gone when the wait returns');
+    rmSync(user, { recursive: true });
+    assert.equal(existsSync(user), false, 'and its user data directory can be removed');
+  } finally {
+    start?.stop();
     await retireHelper();
     sweep(root);
   }
@@ -118838,6 +118946,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheDesktopHelperIsCompiledOnce,
   testADesktopStartIsOneCall,
   testAHelperThatNeverRanHasEnded,
+  testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine,
+  testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine,
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,

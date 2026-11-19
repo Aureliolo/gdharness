@@ -210,6 +210,11 @@ export class HelpedChild extends RelayedChild {
     this.emit('spawn');
   }
 
+  /** The engine's own pid once the helper has said it runs. The child's pid is the helper's. */
+  get engine(): number | undefined {
+    return this.enginePid;
+  }
+
   /** The helper says the engine's process exists, suspended, and when it began. */
   made(pid: number, began: string): void {
     this.madeProcess = `${String(pid)} ${began}`;
