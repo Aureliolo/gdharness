@@ -25,7 +25,8 @@ shape.
 ## Shared modules and packaging
 
 The modules listed in `scripts/sync-shared-gd.ts` are edited in `src/godot/operations/` only.
-`bun run sync:gd` writes the copies inside the addons. A regression fails on a copy that has drifted.
+The build and every suite write the copies inside the addons, and git ignores them. A copy changed by
+hand stops both. Nothing writes a copy's `.gd.uid`, which stays tracked.
 
 Commit the `.gd.uid` Godot writes beside every new addon script. Add a new operations module to the
 list in `test/packaging-consistency.ts`. `test:packaging` checks both, on Linux and macOS only. From

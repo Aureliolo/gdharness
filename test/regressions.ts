@@ -37,7 +37,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { headingIdsOf } from '../scripts/doc-slug.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
-import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import { sharedCopies, syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
 import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
@@ -90264,22 +90264,244 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
  * the editor or of the file and the two answers compared: spelled one way here and another there,
  * they would read as a disagreement about a value the two sides agree about.
  *
- * `bun run sync:gd` writes the copies, so what this asks is that somebody ran it.
+ * Git does not track the copies. The build and every suite that reads the source addons write them,
+ * so what this asks is that the writer makes each one equal to its original, in the source tree, in
+ * the bundle and in an install, and that it leaves every `.uid` and every edit alone.
  */
-function testTheCopiedHelperReadsTheSameEverywhere(): void {
-  const copies = sharedCopies();
-  assert.ok(copies.length >= 4, `only ${copies.length} copies were listed, so this proved little`);
+function testTheHelperCopiesAreWrittenFromTheirOriginals(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-copies-'));
+  try {
+    const godot = join(scratch, 'godot');
+    cpSync(join('src', 'godot', 'operations'), join(godot, 'operations'), { recursive: true });
+    for (const addon of ['gdharness_editor', 'gdharness_runtime']) {
+      mkdirSync(join(godot, 'addons', addon), { recursive: true });
+    }
+    const copies = sharedCopies(godot);
+    assert.equal(copies.length, 17);
+    const text = (path: string): string => readFileSync(path, 'utf8');
+    const copyOf = (addon: string, file: string): string => join(godot, 'addons', addon, file);
 
-  // Line endings as the repository keeps them, LF: gdformat on Windows wrote CRLF, and a copy the
-  // formatter touched while the original was checked out again read as drifted with nothing changed.
+    // Every copy is written, byte for byte, and no identity comes with it.
+    assert.deepEqual(syncSharedGdscript(godot).toSorted(), copies.map(({ copy }) => copy).toSorted());
+    for (const { original, copy } of copies) {
+      assert.equal(text(copy), text(original), `${copy} should equal ${original}`);
+    }
+    const uids = readdirSync(join(godot, 'addons'), { recursive: true }).filter((entry) =>
+      String(entry).endsWith('.uid'),
+    );
+    assert.deepEqual(uids, [], 'the sync should write no .uid');
+
+    // A tree that is whole gets no write, which a suite starting on a built tree relies on.
+    const before = copies.map(({ copy }) => statSync(copy).mtimeMs);
+    assert.deepEqual(syncSharedGdscript(godot), []);
+    assert.deepEqual(
+      copies.map(({ copy }) => statSync(copy).mtimeMs),
+      before,
+    );
+
+    // An original edited later is copied again, and only into its own copies.
+    const reading = join(godot, 'operations', 'reading.gd');
+    writeFileSync(reading, `${text(reading)}# edited\n`);
+    const later = new Date(statSync(copyOf('gdharness_editor', 'reading.gd')).mtimeMs + 10_000);
+    utimesSync(reading, later, later);
+    assert.deepEqual(
+      syncSharedGdscript(godot).toSorted(),
+      [copyOf('gdharness_editor', 'reading.gd'), copyOf('gdharness_runtime', 'reading.gd')].toSorted(),
+    );
+    assert.equal(text(copyOf('gdharness_editor', 'reading.gd')), text(reading));
+
+    // A copy edited by hand is refused and kept, with the original named.
+    const edited = copyOf('gdharness_editor', 'reading.gd');
+    writeFileSync(edited, 'extends RefCounted\n# by hand\n');
+    const newer = new Date(statSync(reading).mtimeMs + 10_000);
+    utimesSync(edited, newer, newer);
+    assert.throws(
+      () => syncSharedGdscript(godot),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.includes(edited) &&
+        error.message.includes(reading) &&
+        error.message.includes('make the change there'),
+    );
+    assert.equal(text(edited), 'extends RefCounted\n# by hand\n');
+    rmSync(edited);
+    assert.deepEqual(syncSharedGdscript(godot), [edited]);
+    assert.equal(text(edited), text(reading));
+
+    // An identity is never written over.
+    const runtimeReading = copyOf('gdharness_runtime', 'reading.gd');
+    rmSync(runtimeReading);
+    writeFileSync(`${runtimeReading}.uid`, 'uid://kept');
+    assert.deepEqual(syncSharedGdscript(godot), [runtimeReading]);
+    assert.equal(text(`${runtimeReading}.uid`), 'uid://kept');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
+  // The repository's own tree, which the suites copy addons out of and the typed gate reads. The
+  // suite wrote it at its start. Line endings as the repository keeps them, LF: gdformat on Windows
+  // wrote CRLF, and a copy the formatter touched read as drifted with nothing changed.
+  const repository = sharedCopies();
+  assert.ok(repository.length >= 17, `only ${repository.length} copies were listed, so this proved little`);
   const committed = (path: string): string => readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
-  for (const { original, copy } of copies) {
+  for (const { original, copy } of repository) {
     const wanted = committed(original);
     assert.match(wanted, /^(?:static )?func /m, `${original} should hold the code this compares`);
     assert.ok(wanted.split('\n').length >= 30, `${original} is ${wanted.split('\n').length} lines`);
-    assert.equal(committed(copy), wanted, `${copy} has drifted from ${original}: run bun run sync:gd`);
+    assert.equal(committed(copy), wanted, `${copy} has drifted from ${original}`);
     assert.ok(existsSync(`${copy}.uid`), `${copy} ships without the .uid that names it`);
   }
+
+  // The bundle, which the package is cut from.
+  const bundle = join('build', 'godot');
+  assert.ok(existsSync(bundle), 'build/godot is missing: run bun run build first');
+  for (const { original, copy } of sharedCopies(bundle)) {
+    assert.equal(committed(copy), committed(original), `${copy} should equal ${original}`);
+    assert.equal(
+      readFileSync(`${copy}.uid`, 'utf8'),
+      readFileSync(`${join('src', 'godot', relative(bundle, copy))}.uid`, 'utf8'),
+      `${copy}.uid should be the tracked one`,
+    );
+  }
+
+  // An install from either tree puts every copy and its identity into the project.
+  for (const [from, godot] of [
+    [undefined, join('src', 'godot')],
+    [join(bundle, 'addons'), bundle],
+  ] as const) {
+    const project = mkdtempSync(join(tmpdir(), 'gdharness-helper-install-'));
+    try {
+      if (from === undefined) installAddons(project);
+      else installAddons(project, from);
+      for (const { original, copy } of sharedCopies(godot)) {
+        const installed = join(project, 'addons', relative(join(godot, 'addons'), copy));
+        assert.equal(committed(installed), committed(original), `${installed} should equal ${original}`);
+        assert.ok(existsSync(`${installed}.uid`), `${installed} should arrive with its .uid`);
+      }
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }
+}
+
+/** The same environment with the variables a git hook exports removed, so git reads the working directory. */
+function gitEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env['GIT_DIR'];
+  delete env['GIT_WORK_TREE'];
+  delete env['GIT_INDEX_FILE'];
+  return env;
+}
+
+/**
+ * The copies are build output, so git neither tracks them nor reports them, and the identity beside
+ * each stays tracked.
+ *
+ * A copy left tracked would go on being committed with an edit nobody made in the original. A
+ * missing ignore line stops the release build on an untracked file, and a pattern wide enough to
+ * take a `.uid` along would let a lost identity pass.
+ */
+function testNoHelperCopyIsTracked(): void {
+  const copies = sharedCopies().map(({ copy }) => copy.replaceAll('\\', '/'));
+  const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
+    spawnSyncHidden('git', gitArgs, { encoding: 'utf8', timeout: 60000, env: gitEnvironment() });
+  const lines = (run: SpawnSyncReturns<string>): string[] =>
+    run.stdout.split('\n').filter((line) => line !== '');
+
+  const tracked = lines(git('ls-files', '--', 'src/godot/addons'));
+  assert.deepEqual(
+    copies.filter((copy) => tracked.includes(copy)),
+    [],
+    'a helper copy is tracked',
+  );
+  assert.deepEqual(
+    copies.filter((copy) => !tracked.includes(`${copy}.uid`)),
+    [],
+    'a helper copy has no tracked .uid',
+  );
+
+  assert.deepEqual(
+    lines(git('check-ignore', '--no-index', ...copies)).toSorted(),
+    copies.toSorted(),
+    'every copy should be ignored',
+  );
+  assert.deepEqual(
+    lines(git('check-ignore', '--no-index', ...copies.map((copy) => `${copy}.uid`))),
+    [],
+    'no .uid should be ignored',
+  );
+
+  // The release leg's own check, after the suite wrote the copies.
+  const status = lines(git('status', '--porcelain', '--untracked-files=all', '--', 'src/godot'));
+  assert.deepEqual(
+    status.filter((line) => copies.some((copy) => line.endsWith(copy))),
+    [],
+    'git should not report a helper copy',
+  );
+}
+
+/** The `.gd` files of an addon that share a name with a module beside the operations and are not a listed copy. */
+function unlistedHelperCopies(godot: string): { unlisted: string[]; sameName: number } {
+  const modules = new Set(readdirSync(join(godot, 'operations')).filter((name) => name.endsWith('.gd')));
+  const listed = new Set(sharedCopies(godot).map(({ copy }) => copy));
+  const found = readdirSync(join(godot, 'addons'), { recursive: true })
+    .map((entry) => join(godot, 'addons', String(entry)))
+    .filter((path) => path.endsWith('.gd') && modules.has(basename(path)));
+  return { unlisted: found.filter((path) => !listed.has(path)), sameName: found.length };
+}
+
+/**
+ * A helper copied into an addon by hand is on the list.
+ *
+ * A copy nobody listed is never written again, so it drifts from its original, and one left behind
+ * when its addon leaves the list is ignored by nothing.
+ */
+function testEveryHelperCopyInAnAddonIsListed(): void {
+  const here = unlistedHelperCopies(join('src', 'godot'));
+  assert.deepEqual(here.unlisted, []);
+  assert.equal(here.sameName, 17);
+
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-listed-'));
+  try {
+    mkdirSync(join(scratch, 'operations'), { recursive: true });
+    mkdirSync(join(scratch, 'addons', 'gdharness_runtime'), { recursive: true });
+    writeFileSync(join(scratch, 'operations', 'file_walk.gd'), 'extends RefCounted\n');
+    const planted = join(scratch, 'addons', 'gdharness_runtime', 'file_walk.gd');
+    writeFileSync(planted, 'extends RefCounted\n');
+    writeFileSync(join(scratch, 'addons', 'gdharness_runtime', 'own_script.gd'), 'extends RefCounted\n');
+    assert.deepEqual(unlistedHelperCopies(scratch).unlisted, [planted]);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Every suite that reads the source addons writes the copies before it does.
+ *
+ * Git does not hold them, so a suite on a fresh clone reads a tree without them: an install that
+ * cannot parse, a digest that differs from the bundle's, a typed gate short of scripts. The build
+ * copies a tree it is handed, so it too has to write them first.
+ */
+function testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst(): void {
+  const readsTheAddons = (text: string): boolean =>
+    text.includes("from '../src/setup.js'") ||
+    /cpSync\(\s*(?:'src\/godot\/addons'|join\('src', 'godot', 'addons')/.test(text);
+  const readers = readdirSync('test')
+    .filter((name) => name.endsWith('.ts'))
+    .filter((name) => readsTheAddons(readFileSync(join('test', name), 'utf8')))
+    .toSorted();
+  assert.deepEqual(readers, ['bridge.ts', 'editor.ts', 'engine-gdscript.ts', 'fuzz.ts', 'regressions.ts']);
+  for (const name of readers) {
+    assert.ok(
+      readFileSync(join('test', name), 'utf8').includes('syncSharedGdscript('),
+      `test/${name} reads the source addons and does not write the helper copies first`,
+    );
+  }
+
+  const build = readFileSync(join('scripts', 'build-release.ts'), 'utf8');
+  const synced = build.indexOf('syncSharedGdscript(');
+  const copied = build.indexOf("cp(path.join(sourceRoot, 'godot')");
+  assert.ok(synced !== -1 && copied !== -1 && synced < copied, 'the build copies godot before it is whole');
 }
 
 /**
@@ -117631,7 +117853,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
   testEveryShippedAddonIsInstalled,
   testEveryAddonScriptKeepsItsIdentity,
-  testTheCopiedHelperReadsTheSameEverywhere,
+  testTheHelperCopiesAreWrittenFromTheirOriginals,
+  testNoHelperCopyIsTracked,
+  testEveryHelperCopyInAnAddonIsListed,
+  testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst,
   testEveryReservedPortIsItsOwn,
   testEveryToolNamedInProseIsATool,
   testShippedProseHasNoDashStandInsOrHabitPhrases,
@@ -118632,6 +118857,7 @@ const TESTS: (() => void | Promise<void>)[] = [
  * fixture can be run on its own while it is being written.
  */
 async function main(): Promise<void> {
+  syncSharedGdscript();
   trackTimers();
   const named = regressionsNamedOnTheCommandLine();
   if (named === null) {
