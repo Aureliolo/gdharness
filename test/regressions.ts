@@ -90463,7 +90463,7 @@ async function testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal(): 
     syncSharedGdscript(godot);
     assert.equal(readFileSync(copy, 'utf8'), `${older}# text A\n`);
     const names = sharedCopies(godot).map((entry) => relative(godot, entry.copy));
-    const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
+    const sha = (value: string): string => createHash('sha256').update(value).digest('hex');
     writeFileSync(
       join(scratch, '.shared-gd-hashes.json'),
       JSON.stringify(Object.fromEntries(names.map((name) => [name, sha(older)]))),

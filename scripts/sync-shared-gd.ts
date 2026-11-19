@@ -92,7 +92,7 @@ function noteWritten(folder: string, text: string): void {
   try {
     writeFileSync(join(folder, sha256(text)), '', { flag: 'wx' });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
   }
 }
 
