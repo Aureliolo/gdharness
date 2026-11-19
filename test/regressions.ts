@@ -24413,6 +24413,175 @@ async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> 
   }
 }
 
+/** A project in [param root] that holds [param scripts], each run as a scene tree script by name. */
+function aProjectOfScripts(root: string, scripts: Readonly<Record<string, string>>): string {
+  const project = join(root, 'project');
+  mkdirSync(project, { recursive: true });
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="kept"\n');
+  for (const [name, source] of Object.entries(scripts)) {
+    writeFileSync(join(project, name), source);
+  }
+  return project;
+}
+
+/** The note of the run at [param project], read again until it says the game has exited, or null. */
+async function noteOfAnEndedRun(project: string, runtime: string): Promise<unknown> {
+  const note = runRecordPath(project, runtime);
+  return await answeredWithin(() => {
+    const record: unknown = existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null;
+    return get(record, 'endedAt') === undefined && get(record, 'endingAt') === undefined ? undefined : record;
+  }, 60_000);
+}
+
+/** How many lines a game prints in one frame, and the most that takes. Each line cost 1.5 ms through a file. */
+const FRAME_BURST_LINES = 200;
+const FRAME_BURST_LIMIT_MS = 50;
+
+/**
+ * A game a keeper holds prints a burst of lines in one frame without waiting on its transcript, and
+ * the transcript holds every line in order, the last ones before the exit is noted.
+ *
+ * On Windows an engine flushes a file to disk after every write, so a game given the transcript
+ * itself spent about 1.5 ms on each line (0.3 s for the burst) and the keeper must give it a pipe.
+ * The game reports the time it took, so the measure is the game's own.
+ */
+async function testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('kept burst regression skipped (Godot not found)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-burst-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  try {
+    const project = aProjectOfScripts(scratch, {
+      'burst.gd': [
+        'extends SceneTree',
+        '',
+        'func _initialize() -> void:',
+        '\tvar from := Time.get_ticks_usec()',
+        `\tfor line in range(${String(FRAME_BURST_LINES)}):`,
+        '\t\tprint("burst line %d" % line)',
+        '\tprint("burst took %d us" % (Time.get_ticks_usec() - from))',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    });
+    const transcript = join(scratch, 'run.log');
+    const launched = launchedThroughTheKeeper(join(scratch, 'run'), runtime, {
+      command: godotPath,
+      args: ['--headless', '--path', project, '-s', 'res://burst.gd'],
+      run: { transcript, startedAt: Date.now(), projectPath: project },
+    });
+    assert.ok(typeof get(launched, 'pid') === 'number', `the game starts: ${JSON.stringify(launched)}`);
+    const noted = await noteOfAnEndedRun(project, runtime);
+    assert.ok(noted !== undefined, 'the game exits and its exit is noted');
+    const printed = readFileSync(transcript, 'utf8').split(/\r?\n/);
+    assert.deepEqual(
+      printed.filter((line) => line.startsWith('burst line ')),
+      Array.from({ length: FRAME_BURST_LINES }, (_, line) => `burst line ${String(line)}`),
+      'the transcript holds every line in order by the time the exit is noted',
+    );
+    const took = printed.find((line) => line.startsWith('burst took '))?.match(/(\d+) us/)?.[1];
+    assert.ok(
+      took !== undefined,
+      `the game's last line reached the transcript: ${printed.slice(-5).join(' | ')}`,
+    );
+    if (process.platform === 'win32') {
+      assert.ok(
+        Number(took) < FRAME_BURST_LIMIT_MS * 1000,
+        `${String(FRAME_BURST_LINES)} lines took the game ${took} us, over ${String(FRAME_BURST_LIMIT_MS)} ms`,
+      );
+    }
+  } finally {
+    await endEnginesUnder(scratch);
+    sweep(scratch);
+  }
+}
+
+/**
+ * A game whose keeper is killed runs on and is not held up by a transcript nobody is reading: its
+ * output goes to a pipe the keeper served, and a write to a pipe with no reader fails at once.
+ */
+async function testAKeptGameRunsOnWhenItsKeeperIsKilled(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('kept game without its keeper regression skipped (Godot not found)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-orphan-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  try {
+    const project = aProjectOfScripts(scratch, {
+      'orphan.gd': [
+        'extends SceneTree',
+        '',
+        'var frames := 0',
+        'var progress := ""',
+        'var go := ""',
+        '',
+        'func _initialize() -> void:',
+        '\tvar paths := OS.get_cmdline_user_args()',
+        '\tprogress = paths[0]',
+        '\tgo = paths[1]',
+        '',
+        'func _process(_delta: float) -> bool:',
+        '\tframes += 1',
+        '\tprint("frame %d" % frames)',
+        '\tprinterr("error line %d" % frames)',
+        '\tif frames % 5 == 0:',
+        '\t\tvar file := FileAccess.open(progress, FileAccess.WRITE)',
+        '\t\tfile.store_string(str(frames))',
+        '\t\tfile.close()',
+        '\treturn FileAccess.file_exists(go)',
+        '',
+      ].join('\n'),
+    });
+    const progress = join(scratch, 'progress');
+    const go = join(scratch, 'go');
+    const launched = launchedThroughTheKeeper(join(scratch, 'run'), runtime, {
+      command: godotPath,
+      args: ['--headless', '--path', project, '-s', 'res://orphan.gd', '--', progress, go],
+      run: { transcript: join(scratch, 'run.log'), startedAt: Date.now(), projectPath: project },
+    });
+    const pid = get(launched, 'pid');
+    const keeper = get(launched, 'keeperPid');
+    assert.ok(
+      typeof pid === 'number' && typeof keeper === 'number',
+      `the game starts: ${JSON.stringify(launched)}`,
+    );
+    const frames = (): number => (existsSync(progress) ? Number(readFileSync(progress, 'utf8')) || 0 : 0);
+    assert.ok(
+      await answeredWithin(() => (frames() >= 10 ? true : undefined), 60_000),
+      'the game runs frames',
+    );
+    process.kill(keeper);
+    assert.ok(await answeredWithin(() => (alive(keeper) ? undefined : true), 30_000), 'the keeper is killed');
+    const before = frames();
+    assert.ok(
+      await answeredWithin(() => (frames() >= before + 60 ? true : undefined), 30_000),
+      `the game goes on printing after its keeper has gone, past frame ${String(before)}`,
+    );
+    assert.ok(alive(pid), 'and is still running');
+    writeFileSync(go, '');
+    assert.ok(
+      await answeredWithin(() => (alive(pid) ? undefined : true), 30_000),
+      'the game ends when it is told to',
+    );
+  } finally {
+    await endEnginesUnder(scratch);
+    sweep(scratch);
+  }
+}
+
 /** What a run reads when the engine on the hidden desktop could not create a renderer, lines included. */
 const NO_RENDERER_VERDICT =
   /the windowed engine could not create a renderer on the hidden desktop.*Can't initialize an EGL display.*Failed to create ANGLE OpenGL window.*headless/s;
@@ -58760,12 +58929,12 @@ async function saidOfAPendingCall(
 }
 
 /**
- * How long a step that raises 25 errors is given. On Windows the engine flushes its output file to
- * disk after every write, and an error is several writes. Locally that costs 5 ms an error, the
- * same as a bare engine writing into a file, against 0.1 ms writing into a pipe. A Windows runner
- * once spent about 20 s on 26 errors, so ten seconds is too short there.
+ * How long a step that raises 25 errors is given. The game writes its output into a pipe, so an
+ * error costs about 0.1 ms in the engine. Measured locally on Windows: the call took 220 to 285 ms
+ * and the read 115 to 170 ms, a round trip through the server included. Five seconds is about 17
+ * times the slowest of those.
  */
-const NOISY_STEP_MS = 30_000;
+const NOISY_STEP_MS = 5000;
 
 /** The answer of a step given [param NOISY_STEP_MS], or the error saying where its time went. */
 async function noisyAnswer(game: ReadingGame, said: string, sentAt: number, what: string): Promise<unknown> {
@@ -121241,6 +121410,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
   testAHiddenRunIsHeldByItsKeeperFromStartToClose,
+  testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript,
+  testAKeptGameRunsOnWhenItsKeeperIsKilled,
   testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds,
   testATestEngineThatMakesNoRendererEnds,
   testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
