@@ -74781,7 +74781,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     assert.deepEqual(late.drawn.left, [1], 'saying which it leaves');
     assert.match(
       slotWaitSaid(3000, 2, directory, late.holders(), late.drawn),
-      /It leaves free slot 1 to takers that began waiting before it, which go first\.$/,
+      /It leaves free slot 1 to takers ahead of it in line, which go first\.$/,
     );
 
     const line = new SlotLine('other');
@@ -75003,54 +75003,70 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
 }
 
 /**
- * A store-class waiter that a take has passed over leaves the line before the order is read. It
- * holds no ordinary one-off back, as the games' tools read the same marks.
+ * A store-class waiter holds other one-offs back only while it looks. Once its look is older than
+ * {@link SLOT_YIELD_MS}, every looker reads the line without it alike, whatever each has left it,
+ * as the games' tools read the same marks. Two lookers then never both go first.
  */
-async function testAStoreWaiterPassedOverHoldsNoOtherOneOffBack(): Promise<void> {
+async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-passed-'));
   const marks = join(directory, WAITING_FOLDER);
   mkdirSync(marks, { recursive: true });
   const realNow = Date.now;
+  const marked = (name: string, body: object, looked: number): string => {
+    writeFileSync(join(marks, `${name}.json`), JSON.stringify(body));
+    const seen = join(marks, `${name}.seen`);
+    writeFileSync(seen, '');
+    utimesSync(seen, looked / 1000, looked / 1000);
+    return seen;
+  };
   try {
     const me = { pid: process.pid, started: await ownStart() };
     const now = Date.now();
-    // Past 120 s it stands with gate work and goes first, so the first look leaves it the one slot.
-    const store = join(marks, 's-200.json');
-    writeFileSync(
-      store,
-      JSON.stringify({ ...me, taker: 'other', class: 'store', since: (now - 200_000) / 1000 }),
-    );
-    // Its taker last looked a minute ago, so once passed over it is gone from the line.
-    const storeSeen = join(marks, 's-200.seen');
-    writeFileSync(storeSeen, '');
-    utimesSync(storeSeen, (now - 60_000) / 1000, (now - 60_000) / 1000);
-    writeFileSync(
-      join(marks, 'g-10.json'),
-      JSON.stringify({ ...me, taker: 'gate', since: (now - 10_000) / 1000 }),
-    );
-    const gate = join(marks, 'g-10.seen');
-    writeFileSync(gate, '');
-    const slots = new EngineSlots(directory, 1, me, undefined, () => 'other');
-    let offset = -300_000;
-    const line = new SlotLine('other', false, () => Date.now() + offset);
-    offset = 0;
+    marked('s-30', { ...me, taker: 'other', class: 'store', since: (now - 30_000) / 1000 }, now);
+    const gateSeen = marked('g-10', { ...me, taker: 'gate', since: (now - 10_000) / 1000 }, now);
+    const ownSeen = marked('o-300', { ...me, taker: 'other', since: (now - 300_000) / 1000 }, now);
+    const lineOf = (taker: 'gate' | 'other', waited: number, mark: string): SlotLine => {
+      let offset = -waited;
+      const line = new SlotLine(taker, false, () => Date.now() + offset);
+      offset = 0;
+      line.mark = mark;
+      return line;
+    };
+    const ordinary = new EngineSlots(directory, 1, me, undefined, () => 'other');
+    const own = lineOf('other', 300_000, 'o-300.json');
     assert.equal(
-      await slots.takeFree(false, line),
+      await ordinary.takeFree(false, own),
       null,
-      'a one-off of 300 s leaves the slot to the store waiter',
+      'a one-off of 300 s waits behind a store taker that looks',
     );
-    assert.deepEqual(slots.drawn.left, [0], 'which is ahead of it');
-    // Counted from after the first look, which passed the store waiter over as it ended.
-    const later = Date.now() + SLOT_YIELD_MS + 100;
-    // The gate's taker is still looking.
-    utimesSync(gate, later / 1000, later / 1000);
-    Date.now = () => later;
+    assert.deepEqual(ordinary.drawn.left, [0], 'leaving it the slot');
     assert.equal(
-      await slots.takeFree(false, line),
-      join(directory, '0.lock'),
-      `then, with the store waiter passed over, it stands with the gate work it began before: drew ${JSON.stringify(slots.drawn)}`,
+      slotWaitSaid(300_000, 1, directory, ordinary.holders(), ordinary.drawn),
+      `Waiting 300 s so far for an engine: the one engine slot on this machine (${directory}) is free and left to takers ahead of it in line, which go first.`,
+      'and its wait says the slot is free, never that it is in use or that the taker ahead began first',
     );
-    slots.releaseAll();
+    assert.equal(
+      slotWaitedSaid(300_000, 1, directory, ordinary.holders(), ordinary.drawn),
+      `This call waited 300 s for an engine slot in all. When it first waited, the one engine slot on this machine (${directory}) was free and left to takers ahead of it in line, which went first.`,
+      'and so does its answer',
+    );
+    // The store taker stops looking. The gate's and the one-off's takers go on.
+    const later = Date.now() + SLOT_YIELD_MS + 100;
+    utimesSync(gateSeen, later / 1000, later / 1000);
+    utimesSync(ownSeen, later / 1000, later / 1000);
+    Date.now = () => later;
+    const gate = new EngineSlots(directory, 1, me, undefined, () => 'gate');
+    assert.equal(
+      await gate.takeFree(false, lineOf('gate', 10_000, 'g-10.json')),
+      null,
+      `gate work that never left the store taker a slot sees the one-off it began after ahead: drew ${JSON.stringify(gate.drawn)}`,
+    );
+    assert.equal(
+      await ordinary.takeFree(false, own),
+      join(directory, '0.lock'),
+      `and the one-off stands with gate work and takes the slot: drew ${JSON.stringify(ordinary.drawn)}`,
+    );
+    ordinary.releaseAll();
   } finally {
     Date.now = realNow;
     rmSync(directory, { recursive: true, force: true });
@@ -121816,7 +121832,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
   testAStoreClassTakerGoesBeforeEarlierYoungSideWork,
-  testAStoreWaiterPassedOverHoldsNoOtherOneOffBack,
+  testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
   testAWaitingMarkNamesTheStoreClass,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
   testATakeForAListedRepositoryMarksItsWaitWithTheStoreClass,

@@ -578,9 +578,8 @@ export class SlotLine {
    * The takers of [param waiters] ahead of this one, the first first, in three groups. The first
    * holds every taker that is no one-off and the store-class one-offs that have waited
    * {@link ONE_OFF_AGED_MS}, games excepted. The second holds the other store-class one-offs. The
-   * third holds every
-   * other one-off younger than {@link ONE_OFF_HELD_MS} while a store-class taker waits, since a
-   * store-stage game's engine calls go before other side work, and younger than
+   * third holds every other one-off younger than {@link ONE_OFF_HELD_MS} while a store-class taker
+   * waits, since a store-stage game's engine calls go before other side work, and younger than
    * {@link ONE_OFF_AGED_MS} while none waits. Past that, an ordinary one-off stands with gate work, so
    * neither gates nor store work arriving all day keep it waiting for good, and a game goes second,
    * never with gate work. Each group goes in the order it began to wait. The class moves a place in
@@ -588,7 +587,9 @@ export class SlotLine {
    */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
     const now = this.clock();
-    const storeWaits = this.store || waiters.some((one) => one.store);
+    // A store-class waiter holds others back only while it looks, which every looker reads alike
+    // from its mark. A taker held back stops looking, and so stops holding the takers behind it.
+    const storeWaits = this.store || waiters.some((one) => one.store && now - one.seen < SLOT_YIELD_MS);
     // The age is read from the exact seconds the order compares, as the other side of the scheme reads it.
     const waited = (since: number, ms: number): boolean => now / 1000 - since >= ms / 1000;
     const groupOf = (taker: SlotTaker, game: boolean, store: boolean, since: number): number => {
@@ -1682,11 +1683,9 @@ export class EngineSlots {
         this.passedOver.delete(mark);
       }
     }
-    // A waiter passed over leaves the line before the order is read, so a store-class one holds no
-    // other one-off back, as the other side of the scheme reads it.
-    const ahead = placed.ahead(
-      waiting.filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS),
-    );
+    const ahead = placed
+      .ahead(waiting)
+      .filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS);
     const claims = await this.claimedAhead(ahead, queued);
     for (const mark of claims.values()) {
       if (!this.passedOver.has(mark)) {
@@ -2476,6 +2475,9 @@ export function slotWaitSaid(
     return `${so}: ${drawn.heldFor}. The engine starts once that measurement has run.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  if ((drawn.left?.length ?? 0) >= taking) {
+    return `${so}: ${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} free and left to takers ahead of it in line, which go first.`;
+  }
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
   const named = holdersNamed(taking, holders);
   const waiting = `${so}: ${slots}`;
@@ -2498,8 +2500,8 @@ function leftSaid(drawn: SlotsDrawn, past = false): string {
   }
   const slots = left.length === 1 ? `slot ${String(left[0])}` : `slots ${listed(left.map(String))}`;
   return past
-    ? ` It left free ${slots} to takers that had begun waiting before it, which go first.`
-    : ` It leaves free ${slots} to takers that began waiting before it, which go first.`;
+    ? ` It left free ${slots} to takers ahead of it in line, which go first.`
+    : ` It leaves free ${slots} to takers ahead of it in line, which go first.`;
 }
 
 /**
@@ -2536,6 +2538,9 @@ export function slotWaitedSaid(
     return `${waited} When it first waited, it was ${drawn.heldFor}.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  if ((drawn.left?.length ?? 0) >= taking) {
+    return `${waited} When it first waited, ${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} free and left to takers ahead of it in line, which went first.`;
+  }
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
   const named = holdersNamed(taking, holders);
   const said =
