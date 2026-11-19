@@ -473,10 +473,19 @@ function markNames(marks: string): string[] {
  * The live waiter the mark file [param mark] in [param marks] names, which read as [param content],
  * or null when it names none.
  */
+/**
+ * When the file of [param stats] was last written, in whole milliseconds rounded down. It is read
+ * from the nanoseconds, since `mtimeMs` is a double that rounds a time ending in .9999 ms up to the
+ * next millisecond.
+ */
+export function fileTimeMs(stats: { readonly mtimeNs: bigint }): number {
+  return Number(stats.mtimeNs / 1_000_000n);
+}
+
 function waiterOfMark(marks: string, mark: string, content: string | null): SlotWaiter | null {
   let madeAt: number;
   try {
-    madeAt = statSync(join(marks, mark)).mtimeMs;
+    madeAt = fileTimeMs(statSync(join(marks, mark), { bigint: true }));
   } catch {
     return null;
   }
@@ -491,7 +500,7 @@ function waiterOfMark(marks: string, mark: string, content: string | null): Slot
   }
   let seen = madeAt;
   try {
-    seen = statSync(join(marks, seenNoteOf(mark))).mtimeMs;
+    seen = fileTimeMs(statSync(join(marks, seenNoteOf(mark)), { bigint: true }));
   } catch {
     // No look written: the wait has only its mark's time to show it is alive.
   }
@@ -2474,34 +2483,78 @@ export function slotWaitSaid(
   if (drawn.limit === 'starved') {
     return `${so}: ${drawn.heldFor}. The engine starts once that measurement has run.`;
   }
-  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
-  if ((drawn.left?.length ?? 0) >= taking) {
-    return `${so}: ${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} free and left to takers ahead of it in line, which go first.`;
+  const allLeft = allLeftSaid(drawn, directory, false);
+  if (allLeft !== '') {
+    return `${so}: ${allLeft}`;
   }
-  const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
-  const named = holdersNamed(taking, holders);
+  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const using = inUseOf(drawn, taking);
+  const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'is' : 'are'} in use`;
+  const named = holdersNamed(using, holders);
   const waiting = `${so}: ${slots}`;
-  const back = `the engine starts when ${taking === 1 ? 'it' : 'one'} is given back`;
+  const back = `the engine starts when ${using === 1 ? 'it' : 'one'} is given back`;
   const starts = drawn.limit === 'kept' || drawn.limit === 'games' ? `${back} or no gate is queued` : back;
   const said =
     named.length === 0
       ? `${waiting}, by a gate or another tool, and ${starts}.`
-      : taking === 1
+      : using === 1
         ? `${waiting}, by ${named.join(', ')}, and ${starts}.`
         : `${waiting}: ${listed(named)}. ${starts.charAt(0).toUpperCase()}${starts.slice(1)}.`;
   return `${said}${leftSaid(drawn)}`;
 }
 
-/** What a take says of the free slots of [param drawn] it leaves, or [param past] left, to takers waiting longer. */
+/** Slot numbers [param slots] as a reader names them: "slot 2", "slots 1 and 2". */
+function slotsNamed(slots: readonly number[]): string {
+  return slots.length === 1 ? `slot ${String(slots[0])}` : `slots ${listed(slots.map(String))}`;
+}
+
+/**
+ * What a take says when every slot of [param drawn] it may take is free and left to takers ahead of
+ * it, or was when it first waited ([param past]). Empty when any of them is in use.
+ */
+function allLeftSaid(drawn: SlotsDrawn, directory: string, past: boolean): string {
+  const left = drawn.left ?? [];
+  if (left.length === 0 || drawn.numbers.some((slot) => !left.includes(slot))) {
+    return '';
+  }
+  const one = left.length === 1;
+  const may = `${one ? 'the one slot' : `the ${String(left.length)} slots`} it ${past ? 'could' : 'may'} take`;
+  const free = past ? (one ? 'was' : 'were') : one ? 'is' : 'are';
+  const said = `${may} on this machine (${directory}), ${slotsNamed(left)}, ${free} free and left to takers ahead of it in line`;
+  return past ? `${said}.` : `${said}, which go first.`;
+}
+
+/** The slots of [param drawn] a take may try and does not leave free to a taker ahead, lowest first. */
+function notLeftOf(drawn: SlotsDrawn): number[] {
+  const left = drawn.left ?? [];
+  return drawn.numbers.filter((slot) => !left.includes(slot)).toSorted((a, b) => a - b);
+}
+
+/** How many of the [param taking] slots of [param drawn] are in use: all, or those it does not leave free. */
+function inUseOf(drawn: SlotsDrawn, taking: number): number {
+  return (drawn.left?.length ?? 0) === 0 ? taking : notLeftOf(drawn).length;
+}
+
+/**
+ * The slots of [param drawn] in use, of the [param taking] of [param count] a take may use: all of
+ * them, or by number where it leaves some of them free.
+ */
+function slotsInUseSaid(drawn: SlotsDrawn, count: number, directory: string, taking: number): string {
+  const all = slotsSaid(taking, count, directory, drawn.limit);
+  return (drawn.left?.length ?? 0) === 0
+    ? all
+    : `${slotsNamed(notLeftOf(drawn))} of ${all.replace(/^all /u, 'the ')}`;
+}
+
+/** What a take says of the free slots of [param drawn] it leaves, or [param past] left, to takers ahead of it. */
 function leftSaid(drawn: SlotsDrawn, past = false): string {
   const left = drawn.left ?? [];
   if (left.length === 0) {
     return '';
   }
-  const slots = left.length === 1 ? `slot ${String(left[0])}` : `slots ${listed(left.map(String))}`;
   return past
-    ? ` It left free ${slots} to takers ahead of it in line, which go first.`
-    : ` It leaves free ${slots} to takers ahead of it in line, which go first.`;
+    ? ` It left free ${slotsNamed(left)} to takers ahead of it in line.`
+    : ` It leaves free ${slotsNamed(left)} to takers ahead of it in line, which go first.`;
 }
 
 /**
@@ -2537,16 +2590,18 @@ export function slotWaitedSaid(
   if (drawn.limit === 'starved') {
     return `${waited} When it first waited, it was ${drawn.heldFor}.`;
   }
-  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
-  if ((drawn.left?.length ?? 0) >= taking) {
-    return `${waited} When it first waited, ${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} free and left to takers ahead of it in line, which went first.`;
+  const allLeft = allLeftSaid(drawn, directory, true);
+  if (allLeft !== '') {
+    return `${waited} When it first waited, ${allLeft}`;
   }
-  const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
-  const named = holdersNamed(taking, holders);
+  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const using = inUseOf(drawn, taking);
+  const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'was' : 'were'} in use`;
+  const named = holdersNamed(using, holders);
   const said =
     named.length === 0
       ? `${waited} When it first waited, ${slots}, by a gate or another tool.`
-      : taking === 1
+      : using === 1
         ? `${waited} When it first waited, ${slots}, by ${named.join(', ')}.`
         : `${waited} When it first waited, ${slots}: ${listed(named)}.`;
   return `${said}${leftSaid(drawn, true)}`;
