@@ -9,6 +9,7 @@ import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory, notAGodotProject, resolveWithinProject } from './paths.js';
+import { numbering, PendingRequests } from './pending-requests.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 import { Turns } from './turns.js';
@@ -16,16 +17,15 @@ import { Turns } from './turns.js';
 /** What an editor serves the language server on when nothing has moved it. */
 export const DEFAULT_LSP_PORT = 6005;
 
-interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  timer: NodeJS.Timeout;
-}
-
-interface DiagnosticsWaiter {
-  resolve: (diagnostics: unknown[]) => void;
-  reject: (reason?: unknown) => void;
-  timer: NodeJS.Timeout;
+/**
+ * One socket and the requests that went out on it. A request is ended by the socket it went out
+ * on alone: an earlier socket's late close must not end one on its successor.
+ */
+interface Connection {
+  readonly socket: Socket;
+  readonly requests: PendingRequests<number, unknown>;
+  /** Asks for the diagnostics of a file, by the file's key. */
+  readonly diagnostics: PendingRequests<string, unknown[]>;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -157,16 +157,17 @@ export class GodotLSPClient {
   /** Public so a caller can tell when the editor it is following has moved to another one. */
   readonly port: number;
   private host: string;
-  private requestId = 0;
-  private pendingRequests: Map<number, PendingRequest>;
-  private reader = new FrameReader();
+  /** Ids run on across connections, so a request's number names it for the client's life. */
+  private readonly nextRequestId = numbering();
+  /** The held connection's tables, beside its `socket`. */
+  private requests = new PendingRequests<number, unknown>();
+  private diagnostics = new PendingRequests<string, unknown[]>();
 
   private connectPromise: Promise<void> | null = null;
   private initialized = false;
   private rootPath: string | null = null;
   /** The project the server named as its own while answering the last initialize, or null. */
   private servedWorkspace: string | null = null;
-  private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
   /** The last ask queued on each file, which the next one waits behind. See [withDocument]. */
   private documentTurns = new Turns<string>();
@@ -190,7 +191,6 @@ export class GodotLSPClient {
     this.host = host;
     this.timeouts = timeouts;
     this.servedHere = servedHere;
-    this.pendingRequests = new Map<number, PendingRequest>();
   }
 
   /**
@@ -231,10 +231,19 @@ export class GodotLSPClient {
     this.connectPromise = new Promise<void>((resolveConnect, rejectConnect) => {
       let settled = false;
 
-      const socket = createConnection({ port: this.port, host: this.host }, () => {
+      const socket = createConnection({ port: this.port, host: this.host });
+      const connection: Connection = {
+        socket,
+        requests: new PendingRequests<number, unknown>(),
+        diagnostics: new PendingRequests<string, unknown[]>(),
+      };
+      const reader = new FrameReader();
+
+      socket.once('connect', () => {
         this.socket = socket;
+        this.requests = connection.requests;
+        this.diagnostics = connection.diagnostics;
         this.connected = true;
-        this.reader = new FrameReader();
 
         if (!settled) {
           settled = true;
@@ -245,10 +254,10 @@ export class GodotLSPClient {
       socket.on('data', (chunk: Buffer) => {
         let frames: ReturnType<FrameReader['push']>;
         try {
-          frames = this.reader.push(chunk);
+          frames = reader.push(chunk);
         } catch (error) {
           if (error instanceof OversizedStreamError) {
-            this.failOversizedStream(error.message);
+            this.failOversizedStream(connection, error.message);
             return;
           }
           throw error;
@@ -260,22 +269,22 @@ export class GodotLSPClient {
             );
             continue;
           }
-          this.handleMessage(received.value);
+          this.handleMessage(connection, received.value);
         }
       });
 
       socket.on('error', (error: Error) => {
-        if (!settled && !this.connected) {
+        if (!settled) {
           settled = true;
           rejectConnect(
             new Error(`Failed to connect to Godot LSP at ${this.host}:${this.port}: ${error.message}`),
           );
         }
-        this.handleSocketFailure(error);
+        this.endConnection(connection, new Error(`Godot LSP connection error: ${error.message}`));
       });
 
       socket.on('close', () => {
-        this.handleSocketClose();
+        this.endConnection(connection, new Error('Godot LSP socket closed'));
       });
     });
 
@@ -295,6 +304,9 @@ export class GodotLSPClient {
     }
 
     const socketToClose = this.socket;
+    // The closing connection's own tables. A request sent on a connection made during the close
+    // wait is not this call's to end.
+    const { requests, diagnostics } = this;
     this.socket = null;
     this.connected = false;
     this.initialized = false;
@@ -316,8 +328,8 @@ export class GodotLSPClient {
     });
 
     const disconnected = new Error('Disconnected from Godot LSP');
-    this.rejectAllPending(disconnected);
-    this.rejectAllDiagnosticsWaiters(disconnected);
+    requests.drop(disconnected);
+    diagnostics.drop(disconnected);
   }
 
   private async ensureConnected(): Promise<void> {
@@ -342,50 +354,26 @@ export class GodotLSPClient {
   ): Promise<unknown> {
     await this.ensureConnected();
 
-    if (!this.socket) {
+    const { socket, requests } = this;
+    if (!socket) {
       throw new Refusal('Not connected to Godot LSP');
     }
 
-    this.requestId += 1;
-    const id = this.requestId;
-
-    const payload = {
+    const id = this.nextRequestId();
+    const framed = frame({
       jsonrpc: '2.0',
       id,
       method,
       params,
-    };
-
-    const framed = frame(payload);
-
-    return await new Promise<unknown>((resolveRequest, rejectRequest) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        rejectRequest(new LSPTimeout(method, timeoutMs));
-      }, timeoutMs);
-
-      this.pendingRequests.set(id, {
-        resolve: resolveRequest,
-        reject: rejectRequest,
-        timer,
-      });
-
-      const socket = this.socket;
-      if (!socket) {
-        clearTimeout(timer);
-        this.pendingRequests.delete(id);
-        rejectRequest(new Error(`Not connected while sending LSP request ${method}`));
-        return;
-      }
-
-      socket.write(framed, (error?: Error | null) => {
-        if (error) {
-          clearTimeout(timer);
-          this.pendingRequests.delete(id);
-          rejectRequest(new Error(`Failed to send LSP request ${method}: ${error.message}`));
-        }
-      });
     });
+
+    const reply = requests.wait(id, timeoutMs, () => new LSPTimeout(method, timeoutMs));
+    socket.write(framed, (error?: Error | null) => {
+      if (error) {
+        requests.fail(id, new Error(`Failed to send LSP request ${method}: ${error.message}`));
+      }
+    });
+    return await reply;
   }
 
   private sendNotification(method: string, params?: unknown): void {
@@ -402,13 +390,15 @@ export class GodotLSPClient {
     this.socket.write(frame(payload));
   }
 
-  private handleMessage(message: unknown): void {
+  private handleMessage(connection: Connection, message: unknown): void {
     if (!isRecord(message)) {
       return;
     }
 
-    if (typeof message['id'] === 'number') {
-      this.settleRequest(message['id'], message);
+    // A message with a method is the server's own request or notification. Its id is from the
+    // server's count, which Godot starts at 0, and answers nothing of ours.
+    if (typeof message['id'] === 'number' && typeof message['method'] !== 'string') {
+      this.settleRequest(connection, message['id'], message);
     }
 
     if (message['method'] === 'gdscript_client/changeWorkspace') {
@@ -417,33 +407,30 @@ export class GodotLSPClient {
     }
 
     if (message['method'] === 'textDocument/publishDiagnostics') {
-      this.settleDiagnosticsWaiter(message['params']);
+      this.settleDiagnosticsWaiter(connection, message['params']);
     }
   }
 
   /** Answers the request [param id] with [param message], as its result or as its error. */
-  private settleRequest(id: number, message: Record<string, unknown>): void {
-    const pending = this.pendingRequests.get(id);
-    if (!pending) {
-      return;
-    }
-    clearTimeout(pending.timer);
-    this.pendingRequests.delete(id);
-
+  private settleRequest(connection: Connection, id: number, message: Record<string, unknown>): void {
     const errorPayload = message['error'];
+    let settled: boolean;
     if (errorPayload && typeof errorPayload === 'object') {
       const errorObject = asRecord(errorPayload);
       const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
       const messageText =
         typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
-      pending.reject(new Error(`LSP error (${code}): ${messageText}`));
+      settled = connection.requests.fail(id, new Error(`LSP error (${code}): ${messageText}`));
     } else {
-      pending.resolve(message['result']);
+      settled = connection.requests.answer(id, message['result']);
+    }
+    if (!settled) {
+      console.error(`[GodotLSP] Discarding an answer to request ${id}, which nothing waits for`);
     }
   }
 
   /** Resolves whoever waits for the diagnostics that [param params] publish. */
-  private settleDiagnosticsWaiter(params: unknown): void {
+  private settleDiagnosticsWaiter(connection: Connection, params: unknown): void {
     const paramsObject = isRecord(params) ? params : null;
     const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
     const diagnostics =
@@ -452,12 +439,8 @@ export class GodotLSPClient {
         : [];
     if (typeof uri === 'string') {
       const key = diagnosticsKey(uri);
-      const waiter = this.diagnosticsWaiters.get(key);
-      if (waiter) {
-        clearTimeout(waiter.timer);
-        this.diagnosticsWaiters.delete(key);
-        waiter.resolve(diagnostics);
-      }
+      // Godot publishes a list unasked as well, so a list nobody waits for is not worth a line.
+      connection.diagnostics.answer(key, diagnostics);
     }
   }
 
@@ -467,37 +450,27 @@ export class GodotLSPClient {
    * Nothing downstream can recover from a stream this far out of step, and waiting quietly
    * for the rest of a body that is never coming is indistinguishable from an idle server.
    */
-  private failOversizedStream(detail: string): void {
-    const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    this.initialized = false;
-    this.reader = new FrameReader();
-    socket?.destroy();
-
-    const overflow = new Error(`Godot LSP ${detail}. The connection was dropped.`);
-    this.rejectAllPending(overflow);
-    this.rejectAllDiagnosticsWaiters(overflow);
+  private failOversizedStream(connection: Connection, detail: string): void {
+    connection.socket.destroy();
+    this.endConnection(connection, new Error(`Godot LSP ${detail}. The connection was dropped.`));
   }
 
-  private handleSocketFailure(error: Error): void {
+  /**
+   * Ends every request that went out on [param connection] with [param error]. The client's own
+   * state is the held connection's, so it changes only when [param connection] is still the held one.
+   * Fail every waiter for diagnostics too, for the same reason the timeout does: a lost connection
+   * is not a file without problems, and resolving [] would report one as the other.
+   */
+  private endConnection(connection: Connection, error: Error): void {
+    connection.requests.drop(error);
+    connection.diagnostics.drop(error);
+    if (this.socket !== connection.socket) {
+      return;
+    }
+    this.socket = null;
     this.connected = false;
     this.initialized = false;
-    this.socket = null;
     this.forgetOpenDocuments();
-    const failure = new Error(`Godot LSP connection error: ${error.message}`);
-    this.rejectAllPending(failure);
-    this.rejectAllDiagnosticsWaiters(failure);
-  }
-
-  private handleSocketClose(): void {
-    this.connected = false;
-    this.initialized = false;
-    this.socket = null;
-    this.forgetOpenDocuments();
-    const closed = new Error('Godot LSP socket closed');
-    this.rejectAllPending(closed);
-    this.rejectAllDiagnosticsWaiters(closed);
   }
 
   /**
@@ -512,26 +485,6 @@ export class GodotLSPClient {
    */
   private forgetOpenDocuments(): void {
     this.documentVersions.clear();
-  }
-
-  private rejectAllPending(error: Error): void {
-    this.pendingRequests.forEach((pending, id) => {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-      this.pendingRequests.delete(id);
-    });
-  }
-
-  /**
-   * Fail every waiter, for the same reason the timeout does: a lost connection is not a
-   * file without problems, and resolving [] here reports one as the other.
-   */
-  private rejectAllDiagnosticsWaiters(error: Error): void {
-    this.diagnosticsWaiters.forEach((waiter, uri) => {
-      clearTimeout(waiter.timer);
-      waiter.reject(error);
-      this.diagnosticsWaiters.delete(uri);
-    });
   }
 
   private toFileUri(filePath: string): string {
@@ -681,42 +634,23 @@ export class GodotLSPClient {
     return await this.withDocument(filePath, async () => {
       const key = diagnosticsKey(this.toFileUri(filePath));
 
-      const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
-        const timer = setTimeout(() => {
-          this.diagnosticsWaiters.delete(key);
+      const opened = this.syncDocument(filePath, content);
+      try {
+        // Nothing awaits between the open and the wait, so no publish can arrive before it.
+        return await this.diagnostics.wait(
+          key,
+          DIAGNOSTICS_TIMEOUT_MS,
           // Not an empty array. Godot publishes an empty diagnostics list for a file that
           // really is clean, so resolving [] here makes a broken language server look
           // exactly like healthy code, and the caller has no way to tell the two apart.
-          rejectDiagnostics(
+          () =>
             new NoDiagnosticsPublished(
               `Godot published no diagnostics for ${key} within ${DIAGNOSTICS_TIMEOUT_MS}ms. ` +
                 'The language server may not be running, or may not have this file in its workspace.',
             ),
-          );
-        }, DIAGNOSTICS_TIMEOUT_MS);
-
-        this.diagnosticsWaiters.set(key, {
-          resolve: resolveDiagnostics,
-          reject: rejectDiagnostics,
-          timer,
-        });
-      });
-
-      let opened: string | null = null;
-      try {
-        opened = this.syncDocument(filePath, content);
-        return await diagnosticsPromise;
-      } catch (error) {
-        const waiter = this.diagnosticsWaiters.get(key);
-        if (waiter) {
-          clearTimeout(waiter.timer);
-          this.diagnosticsWaiters.delete(key);
-        }
-        throw error;
+        );
       } finally {
-        if (opened !== null) {
-          this.closeDocument(opened);
-        }
+        this.closeDocument(opened);
       }
     });
   }

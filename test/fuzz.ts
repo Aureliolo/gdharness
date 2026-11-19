@@ -33,6 +33,7 @@ import fc from 'fast-check';
 import { extract } from '../scripts/install-godot.js';
 import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { declaredClasses, declaredClassLines } from '../src/class-cache.js';
+import { GodotDAPClient } from '../src/dap_client.js';
 import { openTheEditor } from '../src/editor-open.js';
 import { EngineSlots, ownStart, takenOverUnderSteal } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
@@ -48,7 +49,9 @@ import {
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { listenForTheServer } from '../src/keeper-channel.js';
+import { GodotLSPClient, LSPTimeout, normalizeLSPError } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
 import { startTimesOf } from '../src/process-children.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
@@ -3636,6 +3639,7 @@ interface BridgeStep {
     | 'tick'
     | 'drop'
     | 'quiet'
+    | 'fault'
     | 'staleClose'
     | 'idle';
   key: number;
@@ -3660,6 +3664,7 @@ const bridgeStep: fc.Arbitrary<BridgeStep> = fc.record({
     'drop' as const,
     'quiet' as const,
     'quiet' as const,
+    'fault' as const,
     'staleClose' as const,
     'staleClose' as const,
     'idle' as const,
@@ -3680,9 +3685,11 @@ function bridgeOutcome(error: unknown): string {
   const said = error instanceof Error ? error.message : String(error);
   const known: Record<string, string> = {
     'Godot is not connected': 'not-connected',
-    'Godot disconnected during request': 'dropped',
     'GodotBridge stopped': 'stopped',
   };
+  if (said.startsWith('Godot disconnected during request')) {
+    return 'dropped';
+  }
   if (said.startsWith('The editor answered')) {
     return 'unreadable';
   }
@@ -3822,11 +3829,25 @@ function connectBridgeSocket(model: BridgeModel): void {
 }
 
 function dropBridgeSocket(model: BridgeModel): void {
+  endBridgeSocket(model, (sock) => {
+    sock.terminate();
+  });
+}
+
+/** The socket errors as it closes, which ws does when the peer resets it. */
+function faultBridgeSocket(model: BridgeModel): void {
+  endBridgeSocket(model, (sock) => {
+    sock.readyState = 2;
+    sock.emit('error', new Error('read ECONNRESET'));
+  });
+}
+
+function endBridgeSocket(model: BridgeModel, end: (sock: StandInEditor) => void): void {
   const sock = model.holds;
   if (sock === null) {
     return;
   }
-  sock.terminate();
+  end(sock);
   // A call held when an editor that wrote its idle record goes was turned away, not run.
   const outcome = model.greeted && model.idle ? 'closing' : 'dropped';
   for (const call of model.calls) {
@@ -3891,6 +3912,7 @@ const BRIDGE_STEPS: Record<BridgeStep['kind'], (model: BridgeModel, step: Bridge
   tick: tickBridge,
   drop: dropBridgeSocket,
   quiet: goQuiet,
+  fault: faultBridgeSocket,
   staleClose: closeAReplacedSocket,
   idle: writeIdleRecord,
 };
@@ -3904,9 +3926,13 @@ async function checkBridgeModel(model: BridgeModel): Promise<void> {
     assert.equal(wire.has(call.tag), call.wasSent, `request ${String(call.tag)} is sent exactly when served`);
     assert.equal(call.got, call.state === 'settled' ? call.expected : null, `request ${String(call.tag)}`);
   }
-  const pending: unknown = Reflect.get(model.bridge, 'pendingRequests');
-  assert.ok(pending instanceof Map);
-  assert.equal(pending.size, model.calls.filter((call) => call.state === 'sent').length, 'pending requests');
+  const pending: unknown = Reflect.get(model.bridge, 'pending');
+  assert.ok(pending instanceof PendingRequests);
+  assert.equal(
+    pending.waiting().length,
+    model.calls.filter((call) => call.state === 'sent').length,
+    'pending requests',
+  );
   assert.equal(model.bridge.isConnected(), bridgeConnected(model));
 }
 
@@ -3956,6 +3982,473 @@ async function everyBridgeRequestSettlesOnceWithItsOwnAnswer(): Promise<void> {
     );
   } finally {
     jest.useRealTimers();
+    quiet.mockRestore();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The language server and debug adapter clients
+// ---------------------------------------------------------------------------------------------
+
+type FramedKind = 'lsp' | 'dap';
+
+/** A request is long enough to outlast a run, so only an end the model draws settles it. */
+const FRAMED_WAIT_MS = 60_000;
+/** A request the peer is never going to answer. */
+const FRAMED_SHORT_WAIT_MS = 60;
+
+interface FramedStep {
+  kind:
+    | 'request'
+    | 'answer'
+    | 'late'
+    | 'stray'
+    | 'serverRequest'
+    | 'unanswered'
+    | 'close'
+    | 'reset'
+    | 'oversized'
+    | 'clientClose'
+    | 'answerAsLetGo'
+    | 'stopAsLetGo'
+    | 'dialLetGo';
+  at: number;
+  how: 'ok' | 'fail';
+}
+
+const framedStep: fc.Arbitrary<FramedStep> = fc.record({
+  kind: fc.constantFrom(
+    'request' as const,
+    'request' as const,
+    'request' as const,
+    'answer' as const,
+    'answer' as const,
+    'late' as const,
+    'stray' as const,
+    'serverRequest' as const,
+    'unanswered' as const,
+    'close' as const,
+    'reset' as const,
+    'oversized' as const,
+    'clientClose' as const,
+    'answerAsLetGo' as const,
+    'stopAsLetGo' as const,
+    'dialLetGo' as const,
+  ),
+  at: fc.nat(),
+  how: fc.constantFrom('ok' as const, 'fail' as const),
+});
+
+/** A listener that records which connection each request came in on and says nothing unasked. */
+interface FramedPeer {
+  readonly port: number;
+  readonly connections: Socket[];
+  /** Where each request, by the name it was sent under, came in and under which number. */
+  readonly seen: Map<string, { readonly connection: number; readonly id: number }>;
+  stop(): Promise<void>;
+}
+
+/** The name and number a frame asks under, or null for one that asks nothing. */
+function requestIn(heard: Frame): { name: string; id: number } | null {
+  if (heard.kind !== 'message' || !isRecord(heard.value)) {
+    return null;
+  }
+  const name = heard.value['method'] ?? heard.value['command'];
+  const id = heard.value['id'] ?? heard.value['seq'];
+  return typeof name === 'string' && typeof id === 'number' ? { name, id } : null;
+}
+
+async function framedPeer(): Promise<FramedPeer> {
+  const connections: Socket[] = [];
+  const seen = new Map<string, { readonly connection: number; readonly id: number }>();
+  const server = createServer((socket) => {
+    const connection = connections.length;
+    connections.push(socket);
+    const reader = new FrameReader();
+    socket.on('error', () => undefined);
+    socket.on('data', (chunk: Buffer) => {
+      for (const heard of reader.push(chunk)) {
+        const asked = requestIn(heard);
+        if (asked !== null) {
+          seen.set(asked.name, { connection, id: asked.id });
+        }
+      }
+    });
+  });
+  await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening));
+  const address = server.address();
+  return {
+    port: typeof address === 'object' && address !== null ? address.port : 0,
+    connections,
+    seen,
+    stop: () =>
+      new Promise<void>((stopped) => {
+        for (const socket of connections) {
+          socket.destroy();
+        }
+        server.close(() => {
+          stopped();
+        });
+      }),
+  };
+}
+
+/** What a client of either protocol is asked, through the one call both build their requests with. */
+interface FramedClient {
+  ask(name: string, waitMs: number): Promise<unknown>;
+  close(): Promise<void>;
+  /** The socket the client holds, or null. */
+  held(): unknown;
+  /** Whether the client takes the game to be stopped, which only a debug adapter can. */
+  knowsAStop(): boolean;
+  /** How many requests the held connection's table is waiting on. */
+  waiting(): number;
+}
+
+function framedClient(kind: FramedKind, port: number): FramedClient {
+  const client =
+    kind === 'lsp' ? new GodotLSPClient(port, '127.0.0.1') : new GodotDAPClient(port, '127.0.0.1');
+  const send: unknown = Reflect.get(client, 'sendRequest');
+  assert.ok(typeof send === 'function', 'both clients build a request in sendRequest');
+  return {
+    ask: async (name, waitMs) => (await Reflect.apply(send, client, [name, {}, waitMs])) as unknown,
+    close: () => (client instanceof GodotLSPClient ? client.disconnect() : client.abandon()),
+    held: () => Reflect.get(client, 'socket') as unknown,
+    knowsAStop: () => client instanceof GodotDAPClient && client.whereItStopped() !== null,
+    waiting: () => {
+      const table: unknown = Reflect.get(client, 'requests');
+      assert.ok(table instanceof PendingRequests);
+      return table.waiting().length;
+    },
+  };
+}
+
+interface FramedRequest {
+  readonly tag: number;
+  readonly name: string;
+  connection: number;
+  id: number;
+  state: 'waiting' | 'settled';
+  expected: string;
+  got: string | null;
+}
+
+interface FramedModel {
+  readonly kind: FramedKind;
+  readonly peer: FramedPeer;
+  readonly client: FramedClient;
+  readonly requests: FramedRequest[];
+}
+
+/**
+ * The way a request of either client ended, in the words the model draws its ends in. A language
+ * server's end is read as its tools word it, so an end that names no next step is not a close.
+ */
+function framedOutcome(kind: FramedKind, error: unknown): string {
+  const said = error instanceof Error ? error.message : String(error);
+  if (error instanceof LSPTimeout || said.startsWith('DAP request timed out')) {
+    return 'timeout';
+  }
+  if (kind === 'lsp') {
+    const told = normalizeLSPError(error, 0);
+    if (told.startsWith('Godot LSP is unavailable on port')) {
+      return 'closed';
+    }
+  }
+  const name = kind === 'lsp' ? 'LSP' : 'DAP';
+  if (said === 'DAP connection closed') {
+    return 'closed';
+  }
+  if (said === 'The DAP connection was let go before it opened') {
+    return 'unopened';
+  }
+  if (said.startsWith(`Godot ${name} connection error: `) || said.startsWith('DAP connection error: ')) {
+    return 'reset';
+  }
+  if (said.startsWith(`Godot ${name} stream exceeded`)) {
+    return 'oversized';
+  }
+  const failed = /no (\d+)$/.exec(said);
+  return failed?.[1] === undefined ? `other: ${said}` : `fail:${failed[1]}`;
+}
+
+/** What the peer writes to answer request [param id], or a number nothing asked with. */
+function framedAnswer(kind: FramedKind, request: { name: string; id: number }, how: 'ok' | 'fail'): Buffer {
+  const tag = Number(request.name.slice(1));
+  if (kind === 'lsp') {
+    return frame(
+      how === 'ok'
+        ? { jsonrpc: '2.0', id: request.id, result: { tag } }
+        : { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: `no ${String(tag)}` } },
+    );
+  }
+  return frame({
+    seq: 1,
+    type: 'response',
+    request_seq: request.id,
+    command: request.name,
+    success: how === 'ok',
+    ...(how === 'ok' ? { body: { tag } } : { message: `no ${String(tag)}` }),
+  });
+}
+
+function settleFramed(request: FramedRequest, outcome: string): void {
+  request.state = 'settled';
+  request.expected = outcome;
+}
+
+/** Sends request [param name] and returns once the peer has it, so the connection it went out on is known. */
+async function askFramed(model: FramedModel, waitMs: number): Promise<FramedRequest> {
+  const request = sendFramed(model, waitMs);
+  await arrivedFramed(model, request);
+  return request;
+}
+
+/** Sends a request and returns at once, before the client has dialled. */
+function sendFramed(model: FramedModel, waitMs: number): FramedRequest {
+  const tag = model.requests.length;
+  const request: FramedRequest = {
+    tag,
+    name: `m${String(tag)}`,
+    connection: -1,
+    id: -1,
+    state: 'waiting',
+    expected: '',
+    got: null,
+  };
+  model.requests.push(request);
+  model.client.ask(request.name, waitMs).then(
+    (value) => {
+      assert.equal(request.got, null, 'a request settles once');
+      request.got = `ok:${JSON.stringify(value)}`;
+    },
+    (error: unknown) => {
+      assert.equal(request.got, null, 'a request settles once');
+      request.got = framedOutcome(model.kind, error);
+    },
+  );
+  return request;
+}
+
+/** Waits for the peer to have [param request], and notes the connection it went out on. */
+async function arrivedFramed(model: FramedModel, request: FramedRequest): Promise<void> {
+  await eventually(() => model.peer.seen.has(request.name));
+  const arrived = model.peer.seen.get(request.name);
+  assert.ok(arrived !== undefined);
+  request.connection = arrived.connection;
+  request.id = arrived.id;
+}
+
+function framedWaiting(model: FramedModel): FramedRequest[] {
+  return model.requests.filter((request) => request.state === 'waiting');
+}
+
+/** The connection the client holds: the newest one the peer still has open, or undefined with none. */
+function framedHeldBy(model: FramedModel): { socket: Socket; number: number } | undefined {
+  const number = model.peer.connections.length - 1;
+  const socket = model.peer.connections[number];
+  return socket === undefined || socket.destroyed ? undefined : { socket, number };
+}
+
+function framedAnswers(model: FramedModel, step: FramedStep): Promise<void> {
+  const waiting = framedWaiting(model);
+  const request = waiting[step.at % Math.max(waiting.length, 1)];
+  if (request !== undefined) {
+    answerFramed(model, request, step.how);
+  }
+  return Promise.resolve();
+}
+
+/** The peer answers [param request] on the connection it came in on. */
+function answerFramed(model: FramedModel, request: FramedRequest, how: 'ok' | 'fail'): void {
+  model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, how));
+  settleFramed(
+    request,
+    how === 'ok' ? `ok:${JSON.stringify({ tag: request.tag })}` : `fail:${String(request.tag)}`,
+  );
+}
+
+function framedAnswersAgain(model: FramedModel, step: FramedStep): Promise<void> {
+  const answered = model.requests.filter(
+    (request) =>
+      request.state === 'settled' && model.peer.connections[request.connection]?.destroyed === false,
+  );
+  const request = answered[step.at % Math.max(answered.length, 1)];
+  if (request !== undefined) {
+    model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, step.how));
+  }
+  return Promise.resolve();
+}
+
+function framedAnswersNothingAsked(model: FramedModel, step: FramedStep): Promise<void> {
+  framedHeldBy(model)?.socket.write(framedAnswer(model.kind, { name: 'm-1', id: 900_000 + step.at }, 'ok'));
+  return Promise.resolve();
+}
+
+/** The language server's own request, which carries a number of its own count: one a waiting request may share. */
+function framedServerAsks(model: FramedModel, step: FramedStep): Promise<void> {
+  const waiting = framedWaiting(model);
+  const request = waiting[step.at % Math.max(waiting.length, 1)];
+  if (request === undefined || model.kind !== 'lsp') {
+    return Promise.resolve();
+  }
+  model.peer.connections[request.connection]?.write(
+    frame({ jsonrpc: '2.0', id: request.id, method: 'workspace/applyEdit', params: {} }),
+  );
+  return Promise.resolve();
+}
+
+async function framedAsksOnce(model: FramedModel): Promise<void> {
+  await askFramed(model, FRAMED_WAIT_MS);
+}
+
+async function framedWaitsOut(model: FramedModel): Promise<void> {
+  settleFramed(await askFramed(model, FRAMED_SHORT_WAIT_MS), 'timeout');
+}
+
+/** Ends the connection the client holds from the peer's side, which every request on it is told of. */
+function framedPeerEnds(end: 'closed' | 'reset' | 'oversized'): (model: FramedModel) => Promise<void> {
+  return async (model) => {
+    const held = framedHeldBy(model);
+    if (held === undefined) {
+      return;
+    }
+    for (const request of framedWaiting(model)) {
+      if (request.connection === held.number) {
+        settleFramed(request, end);
+      }
+    }
+    if (end === 'closed') {
+      held.socket.destroy();
+    } else if (end === 'reset') {
+      held.socket.resetAndDestroy();
+    } else {
+      held.socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+    }
+    await eventually(() => model.client.held() === null);
+  };
+}
+
+/**
+ * The client lets go of its connection and a request is made beside it. The peer closes its half
+ * when the client ends, so a request still waiting reads as a close.
+ */
+async function framedClientCloses(model: FramedModel): Promise<void> {
+  const closing = model.client.close();
+  for (const request of framedWaiting(model)) {
+    settleFramed(request, 'closed');
+  }
+  await askFramed(model, FRAMED_WAIT_MS);
+  await closing;
+}
+
+/**
+ * The client lets go of its connection, and the peer answers a request on it before it reads the
+ * end, as a busy Godot does. That answer still reaches its request.
+ */
+async function framedAnswerAsLetGo(model: FramedModel, step: FramedStep): Promise<void> {
+  const held = framedHeldBy(model);
+  const onHeld = framedWaiting(model).filter((request) => request.connection === held?.number);
+  const request = onHeld[step.at % Math.max(onHeld.length, 1)];
+  if (request === undefined || model.client.held() === null) {
+    return;
+  }
+  const closing = model.client.close();
+  answerFramed(model, request, step.how);
+  for (const other of framedWaiting(model)) {
+    settleFramed(other, 'closed');
+  }
+  await closing;
+}
+
+/**
+ * The held debug adapter connection says the game stopped as the client lets go of it. The client
+ * reads it during the close, and the connection it dials next was never told of that stop.
+ */
+async function framedStopAsLetGo(model: FramedModel): Promise<void> {
+  const held = framedHeldBy(model);
+  if (model.kind === 'dap' && held !== undefined && model.client.held() !== null) {
+    held.socket.write(
+      frame({ seq: 1, type: 'event', event: 'stopped', body: { reason: 'breakpoint', threadId: 1 } }),
+    );
+  }
+  await framedClientCloses(model);
+  assert.equal(model.client.knowsAStop(), false, 'a stop the let-go connection said is not kept');
+}
+
+/** The client lets go while it dials, and the next request opens a connection of its own. */
+async function framedDialLetGo(model: FramedModel): Promise<void> {
+  if (model.client.held() !== null) {
+    return;
+  }
+  const dialling = sendFramed(model, FRAMED_WAIT_MS);
+  await model.client.close();
+  if (model.kind === 'dap') {
+    settleFramed(dialling, 'unopened');
+  } else {
+    // A language server client has no socket until it connects, so there is nothing to let go of.
+    await arrivedFramed(model, dialling);
+  }
+  await askFramed(model, FRAMED_WAIT_MS);
+}
+
+const FRAMED_STEPS: Record<FramedStep['kind'], (model: FramedModel, step: FramedStep) => Promise<void>> = {
+  request: framedAsksOnce,
+  answer: framedAnswers,
+  late: framedAnswersAgain,
+  stray: framedAnswersNothingAsked,
+  serverRequest: framedServerAsks,
+  unanswered: framedWaitsOut,
+  close: framedPeerEnds('closed'),
+  reset: framedPeerEnds('reset'),
+  oversized: framedPeerEnds('oversized'),
+  clientClose: framedClientCloses,
+  answerAsLetGo: framedAnswerAsLetGo,
+  stopAsLetGo: framedStopAsLetGo,
+  dialLetGo: framedDialLetGo,
+};
+
+/** Waits for every request the model has settled to have settled, then holds each to its own end. */
+async function checkFramedModel(model: FramedModel): Promise<void> {
+  await eventually(() =>
+    model.requests.every((request) => request.state === 'waiting' || request.got !== null),
+  );
+  for (const request of model.requests) {
+    assert.equal(
+      request.got,
+      request.state === 'settled' ? request.expected : null,
+      `request ${String(request.tag)}`,
+    );
+  }
+  assert.equal(model.client.waiting(), framedWaiting(model).length, 'requests the client waits on');
+}
+
+async function everyFramedRequestSettlesOnceWithItsOwnAnswer(kind: FramedKind): Promise<void> {
+  const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    await fc.assert(
+      fc.asyncProperty(fc.array(framedStep, { maxLength: 15 }), async (steps) => {
+        const peer = await framedPeer();
+        const model: FramedModel = { kind, peer, client: framedClient(kind, peer.port), requests: [] };
+        try {
+          for (const step of steps) {
+            await FRAMED_STEPS[step.kind](model, step);
+            await checkFramedModel(model);
+          }
+          await model.client.close();
+          for (const request of framedWaiting(model)) {
+            settleFramed(request, 'closed');
+          }
+          await checkFramedModel(model);
+          assert.equal(model.client.waiting(), 0, 'nothing waits once the client is closed');
+        } finally {
+          await model.client.close();
+          await peer.stop();
+        }
+      }),
+      { numRuns: 25 },
+    );
+  } finally {
     quiet.mockRestore();
   }
 }
@@ -4730,6 +5223,8 @@ await noMoreThanFourConnectionsWaitForOneGame();
 await aLateWaitEndsAfterHalfAnHour();
 await aProcessStartIsReadAgainOnlyAfterTenSeconds();
 await everyBridgeRequestSettlesOnceWithItsOwnAnswer();
+await everyFramedRequestSettlesOnceWithItsOwnAnswer('lsp');
+await everyFramedRequestSettlesOnceWithItsOwnAnswer('dap');
 aMoveLeavesEveryFileAtOnePath();
 await aSequenceOfRenamesKeepsEveryReference();
 theClassesFollowEveryChangeOfTheScripts();

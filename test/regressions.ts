@@ -25,7 +25,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { createConnection, createServer, type Server, type Socket } from 'node:net';
+import { createConnection, createServer, type Server, Socket } from 'node:net';
 import { availableParallelism, constants, homedir, setPriority, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
@@ -132,10 +132,13 @@ import {
   helperExit,
   helperFailure,
   helperStep,
+  helperPid as pidTheHelperWrote,
+  retireHelper,
   spawnOnDesktop,
   throughHelper,
   windowsCommandLine,
 } from '../src/desktop.js';
+import { HelpedChild, helperFor, ServedHelper } from '../src/desktop-process.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import {
   docCacheCrash,
@@ -313,6 +316,8 @@ import {
   CONNECT_WINDOW_MS,
   closeReason,
   createBridge,
+  EDITOR_REQUEST_BYTES,
+  EditorClosing,
   GodotBridge,
   greetingFaults,
   mayYetConnect,
@@ -408,6 +413,7 @@ import {
   handleLSPTool,
   LSPTimeout,
   narrowedCompletions,
+  normalizeLSPError,
   typedBefore,
 } from '../src/lsp_client.js';
 import {
@@ -452,6 +458,7 @@ import {
   sameEntry,
   sameIdentity,
 } from '../src/paths.js';
+import { numbering, PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
@@ -645,6 +652,7 @@ import {
   transcriptNote,
   uidsLeftNote,
   unmodelledAnswer,
+  untilStoppedEngineGone,
   windowedNeeds,
   windowNoteFor,
   withoutUidUnder,
@@ -9571,6 +9579,1268 @@ async function testAReplyOfTheWrongShapeIsRefusedAtOnce(): Promise<void> {
   );
   assert.ok(Date.now() - began < 5000, 'without waiting for the timeout');
   assert.deepEqual(bridge.getStatus().pendingRequests, 0, 'and nothing is left waiting');
+}
+
+/** The tool calls a fake editor has been sent, in order. */
+function invocationsOn(socket: FakeSocket): { id: string; tool: string }[] {
+  return socket.sent
+    .map((payload) => JSON.parse(String(payload)) as unknown)
+    .filter((payload) => get(payload, 'type') === 'tool_invoke')
+    .map((payload) => ({ id: asString(get(payload, 'id')), tool: asString(get(payload, 'tool')) }));
+}
+
+/** The fake editor answers the [param nth] call it was sent. */
+function answersCall(socket: FakeSocket, nth: number, fields: Record<string, unknown>): void {
+  const id = invocationsOn(socket)[nth]?.id;
+  assert.ok(id !== undefined, `the editor was sent call ${String(nth)}`);
+  socket.emit('message', Buffer.from(JSON.stringify({ type: 'tool_result', id, ...fields })));
+}
+
+/** What a call that must fail failed with. */
+async function endedWith(asked: Promise<unknown>): Promise<unknown> {
+  try {
+    await asked;
+  } catch (error) {
+    return error;
+  }
+  return assert.fail('the call was answered');
+}
+
+/** A bridge with a greeted fake editor on it. */
+function bridgeWithAnEditor(): { bridge: GodotBridge; socket: FakeSocket } {
+  const bridge = createBridge(0, 20_000, '127.0.0.1');
+  const socket = new FakeSocket('editor');
+  connectFake(bridge, socket);
+  saysHello(socket, process.cwd());
+  return { bridge, socket };
+}
+
+/**
+ * A request waiting on a peer settles once, on its answer, a failure, its deadline or a drop, and a
+ * reply for one that is not waiting changes nothing. The bridge and both framed clients wait here.
+ */
+async function testAWaitingRequestSettlesOnce(): Promise<void> {
+  const table = new PendingRequests<number, string, string>();
+  let lateCalls = 0;
+  const late = (): Error => {
+    lateCalls += 1;
+    return new Error('late');
+  };
+
+  const first = table.wait(1, 10_000, late);
+  assert.equal(table.answer(1, 'a'), true);
+  assert.equal(await first, 'a');
+  assert.deepEqual(table.waiting(), [], 'an answered wait is gone');
+  assert.equal(lateCalls, 0, 'and its deadline is not left running');
+  assert.equal(table.answer(1, 'b'), false, 'a second answer finds nothing waiting');
+  assert.equal(table.fail(1, new Error('after')), false, 'and so does a failure');
+  assert.equal(await first, 'a', 'the first answer is kept');
+
+  const refused = new Error('no');
+  const second = table.wait(2, 10_000, late);
+  assert.equal(table.fail(2, refused), true);
+  await assert.rejects(second, (error: unknown) => error === refused);
+  assert.deepEqual(table.waiting(), []);
+
+  const began = Date.now();
+  const third = table.wait(3, 40, () => new Error('late 3'));
+  await assert.rejects(third, /late 3/);
+  assert.ok(Date.now() - began >= 30, 'the deadline error is made when the deadline comes');
+  assert.deepEqual(table.waiting(), []);
+  assert.equal(table.answer(3, 'x'), false, 'an answer after the deadline finds nothing waiting');
+
+  const dropped = new Error('dropped');
+  const ended: string[] = [];
+  const outcomes = ['d', 'e', 'f'].map((tag, at) =>
+    table.wait(4 + at, 10_000, late, tag).catch((error: unknown) => {
+      assert.equal(error, dropped, 'every wait is dropped with the one error');
+      ended.push(tag);
+    }),
+  );
+  assert.deepEqual(table.waiting(), ['d', 'e', 'f'], 'the tags, oldest first');
+  table.drop(dropped);
+  await Promise.all(outcomes);
+  assert.deepEqual(ended, ['d', 'e', 'f'], 'rejected oldest first');
+  assert.deepEqual(table.waiting(), []);
+  const seventh = table.wait(7, 10_000, late);
+  assert.equal(table.answer(7, 'again'), true, 'a table is usable after a drop');
+  assert.equal(await seventh, 'again');
+
+  const eighth = table.wait(8, 10_000, late);
+  assert.throws(() => table.wait(8, 10_000, late), /already waiting/);
+  assert.deepEqual(table.waiting().length, 1, 'the first wait stays waiting');
+  assert.equal(table.answer(8, 'kept'), true);
+  assert.equal(await eighth, 'kept');
+  assert.equal(lateCalls, 0, 'no deadline came but the one that was waited for');
+
+  const count = numbering();
+  assert.deepEqual([count(), count(), count()], [1, 2, 3]);
+  assert.equal(numbering()(), 1, 'a count starts again with each');
+  assert.equal(numbering(5)(), 5);
+}
+
+/**
+ * Every way a call to the editor ends says what happened: a call that could not be sent, one the
+ * socket's error ended, one the socket's close ended, a stop, and each reply the editor gives.
+ */
+async function testEveryEndOfAnEditorCallIsSaid(): Promise<void> {
+  const oversized = bridgeWithAnEditor();
+  const tooBig = await endedWith(
+    oversized.bridge.invokeTool('scene_tree', { text: 'x'.repeat(EDITOR_REQUEST_BYTES) }),
+  );
+  assert.match(errorMessage(tooBig), /^The request is \d+ bytes, .* so it was not sent\.$/);
+  assert.deepEqual(invocationsOn(oversized.socket), [], 'nothing was sent');
+  assert.equal(oversized.bridge.getStatus().pendingRequests, 0, 'and no wait is left behind');
+
+  const faulted = bridgeWithAnEditor();
+  const hit = endedWith(faulted.bridge.invokeTool('scene_tree', {}));
+  faulted.socket.readyState = 2;
+  faulted.socket.emit('error', new Error('read ECONNRESET'));
+  assert.equal(errorMessage(await hit), 'Godot disconnected during request: read ECONNRESET');
+  assert.equal(faulted.bridge.isConnected(), false);
+  assert.equal(faulted.bridge.getStatus().pendingRequests, 0);
+
+  const closed = bridgeWithAnEditor();
+  const counted = endedWith(closed.bridge.invokeTool('scene_tree', {}));
+  const uncounted = endedWith(closed.bridge.invokeTool('scene_info', {}, { counted: false }));
+  const inFlight = closed.bridge.requestsInFlight();
+  assert.deepEqual(
+    inFlight.map((call) => call.tool),
+    ['scene_tree'],
+    'only the counted call is in flight',
+  );
+  assert.equal(typeof inFlight[0]?.startedAt, 'number');
+  closed.socket.emit('close', 1006, Buffer.from(''));
+  assert.equal(errorMessage(await counted), 'Godot disconnected during request');
+  assert.equal(errorMessage(await uncounted), 'Godot disconnected during request');
+
+  const stopped = bridgeWithAnEditor();
+  const held = endedWith(stopped.bridge.invokeTool('scene_tree', {}));
+  await stopped.bridge.stop();
+  assert.equal(errorMessage(await held), 'GodotBridge stopped');
+
+  const early = createBridge(0, 1000, '127.0.0.1');
+  const quietSocket = new FakeSocket('early');
+  connectFake(early, quietSocket);
+  assert.equal(errorMessage(await endedWith(early.invokeTool('scene_tree', {}))), 'Godot is not connected');
+  assert.deepEqual(invocationsOn(quietSocket), [], 'a call before the greeting sends nothing');
+
+  const replies = bridgeWithAnEditor();
+  const busy = replies.bridge.invokeTool('scene_tree', {});
+  answersCall(replies.socket, 0, { success: false, busy: true, busyWith: 'scanning its files' });
+  assert.equal(
+    await cameTrue(() => invocationsOn(replies.socket).length === 2),
+    true,
+    'a busy editor is asked again',
+  );
+  answersCall(replies.socket, 1, { success: true, result: { second: true } });
+  assert.deepEqual(await busy, { second: true }, 'and the second reply is the answer');
+
+  const quitting = endedWith(replies.bridge.invokeTool('scene_tree', {}));
+  answersCall(replies.socket, 2, { success: false, closing: true });
+  const closing = await quitting;
+  assert.ok(closing instanceof EditorClosing, String(closing));
+  assert.equal(errorMessage(closing), 'The editor is quitting, so scene_tree was not run.');
+
+  const refusedByTheEditor = endedWith(replies.bridge.invokeTool('scene_tree', {}));
+  answersCall(replies.socket, 3, { success: false, error: 'no such node' });
+  assert.equal(errorMessage(await refusedByTheEditor), 'no such node');
+
+  const failedWithNoWord = endedWith(replies.bridge.invokeTool('scene_tree', {}));
+  answersCall(replies.socket, 4, { success: false });
+  assert.equal(errorMessage(await failedWithNoWord), 'Tool scene_tree failed');
+}
+
+/** What a peer of the two framed clients was asked, and on which of its connections. */
+interface HeardByAPeer {
+  readonly message: Record<string, unknown>;
+  readonly socket: Socket;
+  readonly connection: number;
+}
+
+interface RecordingPeer {
+  readonly sockets: Socket[];
+  readonly heard: HeardByAPeer[];
+  readonly onMessage: FramedPeerHandler;
+  readonly onConnect: (socket: Socket) => void;
+}
+
+/** A framed peer that keeps what it heard and which connection each came in on, and answers as [param behave] says. */
+function recordingPeer(
+  behave: (heard: HeardByAPeer) => void,
+  holdsOpen: (connection: number) => boolean = () => false,
+): RecordingPeer {
+  const sockets: Socket[] = [];
+  const heard: HeardByAPeer[] = [];
+  return {
+    sockets,
+    heard,
+    onConnect: (socket) => {
+      sockets.push(socket);
+      // A socket nobody reads from never sees its peer's end, so it stays open from this side.
+      if (holdsOpen(sockets.length - 1)) {
+        socket.pause();
+      }
+    },
+    onMessage: (message, socket) => {
+      const one = { message, socket, connection: sockets.indexOf(socket) };
+      heard.push(one);
+      behave(one);
+    },
+  };
+}
+
+/** The last request the peer was asked under [param name]. */
+function askedOf(peer: RecordingPeer, name: string): HeardByAPeer {
+  const found = peer.heard.findLast((one) => (one.message['method'] ?? one.message['command']) === name);
+  assert.ok(found !== undefined, `the peer was asked ${name}`);
+  return found;
+}
+
+/** What a client of either protocol answers to [param name], reached through the call both build their requests with. */
+function askedBy(client: GodotLSPClient | GodotDAPClient, name: string, waitMs: number): Promise<unknown> {
+  const send: unknown = Reflect.get(client, 'sendRequest');
+  assert.ok(typeof send === 'function', 'both clients build a request in sendRequest');
+  const pending: unknown = Reflect.apply(send, client, [name, {}, waitMs]);
+  assert.ok(pending instanceof Promise, 'sendRequest answers with a promise');
+  return pending;
+}
+
+/** Runs [param work] with what the process says on stderr kept in the lines it is handed. */
+async function heardOnStderr<T>(work: (lines: string[]) => Promise<T>): Promise<T> {
+  const lines: string[] = [];
+  const error = console.error;
+  console.error = (...said: unknown[]): void => {
+    lines.push(said.map(String).join(' '));
+  };
+  try {
+    return await work(lines);
+  } finally {
+    console.error = error;
+  }
+}
+
+/** The socket [param client] holds, with its writes failing as a broken pipe does until the returned call mends it. */
+function breakTheWrites(client: GodotLSPClient | GodotDAPClient): () => void {
+  const socket: unknown = Reflect.get(client, 'socket');
+  assert.ok(socket instanceof Socket, 'the client holds a socket');
+  Reflect.set(socket, 'write', (_chunk: unknown, done?: (error?: Error | null) => void): boolean => {
+    done?.(new Error('EPIPE'));
+    return true;
+  });
+  return () => {
+    Reflect.deleteProperty(socket, 'write');
+  };
+}
+
+/** A language server stand-in that answers each request by the name it comes under. */
+function languageServerPeer(
+  publishing: { onOpen: 'publish' | 'close' | 'late' | 'never' },
+  holdsOpen?: (connection: number) => boolean,
+): RecordingPeer {
+  return recordingPeer((one) => {
+    const { message, socket } = one;
+    const say = (body: Record<string, unknown>): void => {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], ...body }));
+    };
+    const answerOk = (): void => {
+      say({ result: { capabilities: {}, answered: 'ok', answeredOn: one.connection + 1 } });
+    };
+    const publish = (): void => {
+      const uri = get(message['params'], 'textDocument', 'uri');
+      socket.write(
+        frameJsonRpc({
+          jsonrpc: '2.0',
+          method: 'textDocument/publishDiagnostics',
+          params: { uri, diagnostics: [{ message: 'seen', severity: 1 }] },
+        }),
+      );
+    };
+    const opened = new Map<string, () => void>([
+      ['publish', publish],
+      ['close', () => socket.destroy()],
+      ['late', () => void setTimeout(publish, 1400)],
+    ]);
+    const behaviours = new Map<string, () => void>([
+      ['ok', answerOk],
+      ['initialize', answerOk],
+      [
+        'notFound',
+        () => {
+          say({ error: { code: -32601, message: 'Method not found' } });
+        },
+      ],
+      [
+        'bare',
+        () => {
+          say({ error: {} });
+        },
+      ],
+      ['oversize', () => socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'))],
+      ['reset', () => socket.resetAndDestroy()],
+      ['close', () => socket.destroy()],
+      ['textDocument/didOpen', () => opened.get(publishing.onOpen)?.()],
+    ]);
+    behaviours.get(String(message['method']))?.();
+  }, holdsOpen);
+}
+
+/**
+ * Every way a language server request ends says what happened, whether the client's own call, the
+ * peer, a late answer or the close of the connection it went out on.
+ */
+async function testEveryEndOfALanguageServerRequestIsSaid(): Promise<void> {
+  await heardOnStderr(async (stderr) => {
+    const publishing = { onOpen: 'publish' as 'publish' | 'close' | 'late' };
+    let holding = false;
+    const peer = languageServerPeer(publishing, () => holding);
+    await withFramedPeer(
+      peer.onMessage,
+      async (port) => {
+        const idle = new GodotLSPClient(port, '127.0.0.1');
+        Reflect.set(idle, 'ensureConnected', () => Promise.resolve());
+        await assert.rejects(askedBy(idle, 'ok', 1000), /Not connected to Godot LSP/);
+        assert.equal(peer.sockets.length, 0, 'a request before any connection dials nothing');
+
+        const client = new GodotLSPClient(port, '127.0.0.1');
+        assert.deepEqual(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok');
+        await assert.rejects(
+          askedBy(client, 'notFound', 5000),
+          /^Error: LSP error \(-32601\): Method not found$/,
+        );
+        await assert.rejects(
+          askedBy(client, 'bare', 5000),
+          /^Error: LSP error \(unknown\): Unknown LSP error$/,
+        );
+
+        await assert.rejects(
+          askedBy(client, 'hold', 200),
+          (error: unknown) => error instanceof LSPTimeout && error.method === 'hold' && error.seconds === 0.2,
+        );
+        const gone = askedOf(peer, 'hold');
+        gone.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: gone.message['id'], result: 1 }));
+        const goneLine = `Discarding an answer to request ${String(gone.message['id'])}, which nothing waits for`;
+        assert.equal(
+          await cameTrue(() => stderr.some((line) => line.includes(goneLine))),
+          true,
+          'a late answer is said once',
+        );
+        assert.equal(
+          get(await askedBy(client, 'ok', 5000), 'answered'),
+          'ok',
+          'the next request is answered',
+        );
+
+        let settled = false;
+        const waiting = askedBy(client, 'wait', 10_000).finally(() => {
+          settled = true;
+        });
+        assert.equal(
+          await cameTrue(() => peer.heard.some((one) => one.message['method'] === 'wait')),
+          true,
+          'the peer hears the request',
+        );
+        const held = askedOf(peer, 'wait');
+        held.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: 9999, result: 1 }));
+        assert.equal(
+          await cameTrue(() => stderr.some((line) => line.includes('request 9999,'))),
+          true,
+          'a stray answer is said',
+        );
+        assert.equal(settled, false, 'and settles nothing');
+        const before = stderr.length;
+        held.socket.write(
+          frameJsonRpc({ jsonrpc: '2.0', id: held.message['id'], method: 'workspace/applyEdit', params: {} }),
+        );
+        await delay(100);
+        assert.equal(settled, false, "the server's own request carrying this id settles nothing");
+        assert.equal(stderr.length, before, 'and is not said');
+        held.socket.write(
+          frameJsonRpc({
+            jsonrpc: '2.0',
+            method: 'textDocument/publishDiagnostics',
+            params: { uri: 'file:///nobody-asked.gd', diagnostics: [] },
+          }),
+        );
+        await delay(100);
+        assert.equal(settled, false, 'a list nobody asked for settles nothing');
+        assert.equal(stderr.length, before, 'and is not said');
+        held.socket.write(frameJsonRpc({ jsonrpc: '2.0', id: held.message['id'], result: { own: true } }));
+        assert.deepEqual(await waiting, { own: true }, 'its own answer settles it');
+
+        const mend = breakTheWrites(client);
+        await assert.rejects(askedBy(client, 'ok', 5000), /^Error: Failed to send LSP request ok: EPIPE$/);
+        mend();
+        const connectionsBefore = peer.sockets.length;
+        assert.equal(get(await askedBy(client, 'ok', 5000), 'answered'), 'ok');
+        assert.equal(peer.sockets.length, connectionsBefore, 'on the same connection');
+
+        const closedOn = await endedWith(askedBy(client, 'close', 5000));
+        assert.equal(errorMessage(closedOn), 'Godot LSP socket closed');
+        assert.match(normalizeLSPError(closedOn, port), /^Godot LSP is unavailable on port/);
+        await assert.rejects(askedBy(client, 'reset', 5000), /^Error: Godot LSP connection error: /);
+
+        const script = join(tmpdir(), 'gdharness-lsp-ends', 'ends.gd');
+        const remembered: unknown = Reflect.get(client, 'documentVersions');
+        assert.ok(remembered instanceof Map, 'the client remembers its open documents in a map');
+        const versions: Map<unknown, unknown> = remembered;
+        versions.set(pathToFileURL(resolve(script)).href, 1);
+        await assert.rejects(
+          askedBy(client, 'oversize', 5000),
+          /^Error: Godot LSP stream exceeded the 33554432 byte ceiling.* The connection was dropped\.$/,
+        );
+        assert.equal(versions.size, 0, 'a dropped connection leaves no document remembered as open');
+        assert.equal((await client.getDiagnostics(script, 'extends Node\n')).length, 1);
+        assert.equal(
+          askedOf(peer, 'textDocument/didOpen').message['method'],
+          'textDocument/didOpen',
+          'the first ask on a new connection opens the document',
+        );
+
+        publishing.onOpen = 'close';
+        await assert.rejects(
+          client.getDiagnostics(script, 'extends Node\n'),
+          /^Error: Godot LSP socket closed$/,
+        );
+        publishing.onOpen = 'publish';
+
+        const heldCount = (name: string): number =>
+          peer.heard.filter((one) => one.message['method'] === name).length;
+        await client.connect();
+        const disconnectedWith = endedWith(askedBy(client, 'hold', 5000));
+        await cameTrue(() => heldCount('hold') === 2);
+        await client.disconnect();
+        assert.equal(errorMessage(await disconnectedWith), 'Godot LSP socket closed');
+
+        // A peer that never reads its side sees no end, so the socket is destroyed after a second.
+        holding = true;
+        const dialled = peer.sockets.length;
+        const kept = endedWith(askedBy(client, 'hold-open', 5000));
+        await cameTrue(() => peer.sockets.length > dialled);
+        await delay(100);
+        await client.disconnect();
+        assert.equal(errorMessage(await kept), 'Disconnected from Godot LSP');
+        holding = false;
+      },
+      peer.onConnect,
+    );
+  });
+}
+
+/** A debug adapter stand-in that answers each request by the command it comes under. */
+function debugAdapterPeer(): RecordingPeer {
+  return recordingPeer((one) => {
+    const { message, socket } = one;
+    const respond = (success: boolean, fields: Record<string, unknown>): void => {
+      socket.write(
+        frameJsonRpc({ seq: 1, type: 'response', request_seq: message['seq'], success, ...fields }),
+      );
+    };
+    const command = String(message['command']);
+    const behaviours = new Map<string, () => void>([
+      [
+        'body',
+        () => {
+          respond(true, { command, body: { answered: 'body' } });
+        },
+      ],
+      [
+        'bare',
+        () => {
+          respond(true, { command });
+        },
+      ],
+      [
+        'refused',
+        () => {
+          respond(false, { command, message: 'no such thing' });
+        },
+      ],
+      [
+        'unsaid',
+        () => {
+          respond(false, { command });
+        },
+      ],
+      [
+        'unnamed',
+        () => {
+          respond(false, {});
+        },
+      ],
+      ['oversize', () => socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'))],
+      ['reset', () => socket.resetAndDestroy()],
+      ['close', () => socket.destroy()],
+      ['hold-open', () => socket.pause()],
+    ]);
+    behaviours.get(command)?.();
+  });
+}
+
+/** Every way a debug adapter request ends says what happened. */
+async function testEveryEndOfADebugAdapterRequestIsSaid(): Promise<void> {
+  await heardOnStderr(async (stderr) => {
+    const peer = debugAdapterPeer();
+    await withFramedPeer(
+      peer.onMessage,
+      async (port) => {
+        const idle = new GodotDAPClient(port, '127.0.0.1');
+        Reflect.set(idle, 'ensureConnected', () => Promise.resolve());
+        await assert.rejects(askedBy(idle, 'body', 1000), /^Error: DAP socket is not available$/);
+        assert.equal(peer.sockets.length, 0, 'a request before any connection dials nothing');
+
+        const client = new GodotDAPClient(port, '127.0.0.1');
+        assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+        assert.deepEqual(await askedBy(client, 'bare', 5000), {}, 'a success with no body is an empty one');
+        await assert.rejects(askedBy(client, 'refused', 5000), /^Error: no such thing$/);
+        await assert.rejects(askedBy(client, 'unsaid', 5000), /^Error: DAP request failed: unsaid$/);
+        await assert.rejects(
+          askedBy(client, 'unnamed', 5000),
+          /^Error: DAP request failed: unknown command$/,
+        );
+
+        await assert.rejects(askedBy(client, 'hold', 60), /^Error: DAP request timed out: hold$/);
+        const gone = askedOf(peer, 'hold');
+        const respondTo = (seq: unknown): void => {
+          gone.socket.write(
+            frameJsonRpc({ seq: 1, type: 'response', request_seq: seq, command: 'hold', success: true }),
+          );
+        };
+        respondTo(gone.message['seq']);
+        respondTo(9999);
+        const said = (id: unknown): boolean =>
+          stderr.some((line) =>
+            line.includes(`Discarding an answer to request ${String(id)}, which nothing waits for`),
+          );
+        assert.equal(
+          await cameTrue(() => said(gone.message['seq']) && said(9999)),
+          true,
+          'each is said once',
+        );
+        assert.deepEqual(
+          await askedBy(client, 'body', 5000),
+          { answered: 'body' },
+          'the next request is answered',
+        );
+
+        const mend = breakTheWrites(client);
+        await assert.rejects(
+          askedBy(client, 'body', 5000),
+          /^Error: Failed to send DAP request 'body': EPIPE$/,
+        );
+        mend();
+        assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+        assert.equal(peer.sockets.length, 1, 'on the same connection');
+
+        await assert.rejects(askedBy(client, 'close', 5000), /^Error: DAP connection closed$/);
+        await assert.rejects(askedBy(client, 'reset', 5000), /^Error: DAP connection error: /);
+        await assert.rejects(
+          askedBy(client, 'oversize', 5000),
+          /^Error: Godot DAP stream exceeded the 33554432 byte ceiling.* The connection was dropped\.$/,
+        );
+
+        const abandoned = endedWith(askedBy(client, 'hold', 5000));
+        await cameTrue(() => peer.heard.filter((one) => one.message['command'] === 'hold').length === 2);
+        await client.abandon();
+        assert.equal(errorMessage(await abandoned), 'DAP connection closed');
+
+        const heldOpen = endedWith(askedBy(client, 'hold-open', 5000));
+        await cameTrue(() => peer.heard.some((one) => one.message['command'] === 'hold-open'));
+        await client.abandon();
+        assert.equal(errorMessage(await heldOpen), 'DAP connection closed');
+      },
+      peer.onConnect,
+    );
+  });
+}
+
+/**
+ * A request is ended by the connection it went out on and by no other. A connection let go of
+ * closes after the next has been dialled, and a late close ended the request waiting on its successor.
+ */
+async function testARequestBelongsToTheConnectionItWentOutOn(): Promise<void> {
+  const script = join(tmpdir(), 'gdharness-lsp-belongs', 'belongs.gd');
+  const afterTheFirstClose = new Map<Socket, ReturnType<typeof setTimeout>>();
+  const later = languageServerPeer({ onOpen: 'publish' });
+  await withFramedPeer(
+    (message, socket) => {
+      if (message['method'] === 'initialize' && later.sockets.indexOf(socket) > 0) {
+        afterTheFirstClose.set(
+          socket,
+          setTimeout(() => {
+            socket.write(
+              frameJsonRpc({
+                jsonrpc: '2.0',
+                id: message['id'],
+                result: { capabilities: {}, answeredOn: 2 },
+              }),
+            );
+          }, 400),
+        );
+        return;
+      }
+      later.onMessage(message, socket);
+    },
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      await client.connect();
+      const closing = client.disconnect();
+      const result = await client.initialize(tmpdir());
+      assert.equal(get(result, 'answeredOn'), 2, 'the second connection answers its own request');
+      await closing;
+      assert.equal((await client.getDiagnostics(script, 'extends Node\n')).length, 1);
+      assert.equal(
+        askedOf(later, 'textDocument/didOpen').connection,
+        1,
+        'and the next ask goes out on it too',
+      );
+      await client.disconnect();
+    },
+    later.onConnect,
+  );
+
+  const publishing = { onOpen: 'late' as const };
+  const slow = languageServerPeer(publishing, (connection) => connection === 0);
+  await withFramedPeer(
+    slow.onMessage,
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      await client.connect();
+      const closing = client.disconnect();
+      const published = await client.getDiagnostics(script, 'extends Node\n');
+      assert.equal(
+        published.length,
+        1,
+        'a diagnostics ask on the second connection outlives the first one closing',
+      );
+      await closing;
+      await client.disconnect();
+    },
+    slow.onConnect,
+  );
+
+  let connections = 0;
+  const adapter = recordingPeer((one) => {
+    const { message, socket } = one;
+    if (one.connection === 0) {
+      socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+      return;
+    }
+    socket.write(
+      frameJsonRpc({
+        seq: 1,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: { answeredOn: one.connection + 1 },
+      }),
+    );
+  });
+  await withFramedPeer(
+    adapter.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      await assert.rejects(client.initialize(), /exceeded the 33554432 byte ceiling/);
+      const second = await client.initialize();
+      assert.equal(
+        get(second, 'answeredOn'),
+        2,
+        'a call straight after the dropped stream is answered on a new connection',
+      );
+      await delay(300);
+      assert.equal(client.isConnected(), true, 'the first connection closing late leaves the second held');
+      connections = adapter.sockets.length;
+      await client.abandon();
+    },
+    adapter.onConnect,
+  );
+  assert.equal(connections, 2, 'the third call used the second connection');
+  for (const timer of afterTheFirstClose.values()) {
+    clearTimeout(timer);
+  }
+}
+
+/** Two asks at once on a closed debug adapter client dial one socket, and both are answered on it. */
+async function testTwoDebugAdapterAsksAtOnceShareOneConnection(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      const answers = await Promise.all([askedBy(client, 'body', 5000), askedBy(client, 'body', 5000)]);
+      assert.deepEqual(answers, [{ answered: 'body' }, { answered: 'body' }], 'both are answered');
+      await delay(50);
+      assert.equal(peer.sockets.length, 1, 'on one connection');
+      await client.abandon();
+    },
+    peer.onConnect,
+  );
+}
+
+/** Drops [param editor] and waits until [param server] reports no editor connected. */
+async function untilTheEditorIsGone(server: ServerProcess, editor: WebSocket): Promise<void> {
+  editor.terminate();
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    if (get(status, 'editor', 'connected') === false) {
+      return;
+    }
+    await delay(100);
+  }
+  throw new Error('the server still shows the editor connected');
+}
+
+/** A call whose connection dropped says the connection was lost, since the editor answered nothing. */
+async function testALostConnectionIsNotSaidToBeTheEditorsAnswer(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lost-connection-'));
+  const bridgePort = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const asked = (): Promise<JsonRpcMessage> =>
+      server.request(
+        'tools/call',
+        {
+          name: 'resource_edit',
+          arguments: { projectPath: project, resourcePath: 'res://ui.tres', op: 'modify', properties: {} },
+        },
+        30_000,
+      );
+
+    // editor_status asks the editor too, so it is the greeting that must be answered.
+    let dropping = false;
+    editor = await greetAsAStandInEditor(server, bridgePort, project, (socket, id) => {
+      if (dropping) {
+        socket.terminate();
+      } else {
+        socket.send(JSON.stringify({ type: 'tool_result', id, success: true, result: { ok: true } }));
+      }
+    });
+    dropping = true;
+    const lost = textOf(await asked()) ?? '';
+    assert.match(
+      lost,
+      /^The connection to the editor was lost during resource_edit modify: Godot disconnected/,
+      lost,
+    );
+    assert.doesNotMatch(lost, /answered/, 'a dropped connection is not an answer');
+
+    await untilTheEditorIsGone(server, editor);
+    editor = await greetAsAStandInEditor(server, bridgePort, project, (socket, id) => {
+      socket.send(JSON.stringify({ type: 'tool_result', id, success: false, error: 'no such node' }));
+    });
+    assert.match(
+      textOf(await asked()) ?? '',
+      /^The editor answered resource_edit modify with an error: no such node/,
+      'an error the editor sent is its answer',
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** Two calls at once over a move of the language server port end with one live client, and neither fails. */
+async function testTwoCallsOverAPortMoveEndWithOneLiveClient(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-port-move-'));
+  const before = languageServerPeer({ onOpen: 'publish' });
+  const after = languageServerPeer({ onOpen: 'publish' });
+  const editors: WebSocket[] = [];
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'probe.gd'), 'class_name Probe\nextends Node\n');
+    await withFramedPeer(
+      before.onMessage,
+      async (beforePort) => {
+        await withFramedPeer(
+          after.onMessage,
+          async (afterPort) => {
+            const bridgePort = await reservePort();
+            const server = new ServerProcess({
+              env: {
+                GDHARNESS_BRIDGE_PORT: String(bridgePort),
+                GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+              },
+            });
+            try {
+              await server.initialize('regression-test');
+              const diagnosed = async (): Promise<unknown> =>
+                parseTextContent(
+                  await server.request(
+                    'tools/call',
+                    {
+                      name: 'script_diagnostics',
+                      arguments: { projectPath: project, scriptPath: 'probe.gd' },
+                    },
+                    30_000,
+                  ),
+                );
+              const first = await greetAsAStandInEditor(server, bridgePort, project, undefined, {
+                lsp_port: beforePort,
+              });
+              editors.push(first);
+              assert.equal(get(await diagnosed(), 'errors'), 1, 'the first port answers');
+              assert.equal(before.sockets.length, 1);
+              await untilTheEditorIsGone(server, first);
+              editors.push(
+                await greetAsAStandInEditor(server, bridgePort, project, undefined, { lsp_port: afterPort }),
+              );
+              const answers = await Promise.all([diagnosed(), diagnosed()]);
+              assert.deepEqual(
+                answers.map((answer) => get(answer, 'errors')),
+                [1, 1],
+                `both calls are answered on the moved port: ${JSON.stringify(answers)}`,
+              );
+              assert.equal(after.sockets.length, 1, 'over one connection to the moved port');
+            } finally {
+              await server.stop();
+            }
+          },
+          after.onConnect,
+        );
+      },
+      before.onConnect,
+    );
+  } finally {
+    for (const editor of editors) {
+      editor.terminate();
+    }
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** What a language server does once the client ends its connection. */
+type LanguageServerEnd = 'closes' | 'answers' | 'stays silent';
+
+/** The scripts a language server stand-in was told of on one connection, and the requests it was asked. */
+interface HeardByALanguageServer {
+  readonly openedUris: unknown[];
+  readonly asked: unknown[];
+}
+
+/** Answers initialize at once, and keeps every other request and each script opened for the end. */
+function hearAsALanguageServer(message: unknown, socket: Socket, heard: HeardByALanguageServer): void {
+  if (!isRecord(message)) {
+    return;
+  }
+  if (message['method'] === 'initialize') {
+    socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], result: { capabilities: {} } }));
+  } else if (message['method'] === 'textDocument/didOpen') {
+    heard.openedUris.push(get(message['params'], 'textDocument', 'uri'));
+  } else if (typeof message['id'] === 'number') {
+    heard.asked.push(message['id']);
+  }
+}
+
+/** Ends a language server stand-in's connection as [param atItsEnd] says, once the client has ended it. */
+function endAsALanguageServer(
+  atItsEnd: LanguageServerEnd,
+  socket: Socket,
+  heard: HeardByALanguageServer,
+): void {
+  if (atItsEnd === 'stays silent') {
+    return;
+  }
+  if (atItsEnd === 'answers') {
+    const seen = { message: 'seen', severity: 1 };
+    for (const uri of heard.openedUris) {
+      socket.write(
+        frameJsonRpc({
+          jsonrpc: '2.0',
+          method: 'textDocument/publishDiagnostics',
+          params: { uri, diagnostics: [seen, seen] },
+        }),
+      );
+    }
+    for (const id of heard.asked) {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id, result: { answered: 'as it closed' } }));
+    }
+  }
+  socket.end();
+}
+
+/**
+ * Runs [param work] with a language server that answers initialize and nothing else until the
+ * client ends the connection. It then closes its half, or first publishes two errors for each
+ * script opened and answers each request heard, or stays open and silent. Godot answers what it
+ * read before it notices that the peer has gone, so a busy one answers as it closes.
+ */
+async function withALanguageServerThatEnds<T>(
+  atItsEnd: LanguageServerEnd,
+  work: (port: number, heardAnOpen: () => boolean) => Promise<T>,
+): Promise<T> {
+  const heard: HeardByALanguageServer[] = [];
+  const sockets: Socket[] = [];
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
+    sockets.push(socket);
+    const onThis: HeardByALanguageServer = { openedUris: [], asked: [] };
+    heard.push(onThis);
+    let buffer: Buffer = Buffer.alloc(0);
+    socket.on('error', () => {});
+    socket.on('data', (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      for (let taken = takeByteFrame(buffer); taken !== null; taken = takeByteFrame(buffer)) {
+        buffer = taken.rest;
+        hearAsALanguageServer(JSON.parse(taken.body), socket, onThis);
+      }
+    });
+    socket.on('end', () => {
+      endAsALanguageServer(atItsEnd, socket, onThis);
+    });
+  });
+  await listenOnAReservedPort(server);
+  try {
+    return await work(portOf(server), () => heard.some((one) => one.openedUris.length > 0));
+  } finally {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((closed) =>
+      server.close(() => {
+        closed();
+      }),
+    );
+  }
+}
+
+/**
+ * A language server request the client lets go of ends as its server does: on the close, on the
+ * answer the server sent as it closed, or as let go once the client stops waiting for the close.
+ * Node, which runs the published server, reads each the same as Bun.
+ */
+async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-let-go-'));
+  try {
+    const probe = join(scratch, 'let-go.mjs');
+    writeFileSync(
+      probe,
+      [
+        `import { GodotLSPClient } from ${JSON.stringify(pathToFileURL(resolve('build', 'lsp_client.js')).href)};`,
+        `const client = new GodotLSPClient(Number(process.argv[2]), '127.0.0.1');`,
+        'await client.connect();',
+        `const asked = client.sendRequest('ask', {}, 5000).then(`,
+        `  (answer) => 'answered: ' + JSON.stringify(answer),`,
+        `  (error) => 'ended: ' + error.message,`,
+        ');',
+        // Once the request is written, so the server reads it before the end.
+        'await new Promise((written) => setTimeout(written, 50));',
+        'await client.disconnect();',
+        'console.log(await asked);',
+      ].join('\n'),
+    );
+    const ends: [LanguageServerEnd, string][] = [
+      ['closes', 'ended: Godot LSP socket closed'],
+      ['answers', 'answered: {"answered":"as it closed"}'],
+      ['stays silent', 'ended: Disconnected from Godot LSP'],
+    ];
+    for (const [end, expected] of ends) {
+      for (const [runtime, program] of [
+        ['Bun', process.execPath],
+        ['Node', 'node'],
+      ] as const) {
+        await withALanguageServerThatEnds(end, async (port) => {
+          const { stdout } = await runHidden(program, [probe, String(port)], { timeout: 30_000 });
+          assert.equal(stdout.trim(), expected, `${runtime}, with a server that ${end}`);
+        });
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What a script_diagnostics call waiting on an editor's language server says once the editor
+ * leaves the bridge and the server lets go of that language server, which then [param atItsEnd].
+ * With [param moves], another editor serves its language server on a new port, and a second
+ * script_diagnostics both lets go and is answered there as [param again]. Without, script_info on
+ * a missing script lets go. It dials no default port, where another editor on this machine may listen.
+ */
+async function aCallInFlightWhenItsEditorGoes(
+  atItsEnd: LanguageServerEnd,
+  moves: boolean,
+): Promise<{ readonly said: string; readonly port: number; readonly again: string }> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-goes-in-flight-'));
+  const after = languageServerPeer({ onOpen: 'publish' });
+  const editors: WebSocket[] = [];
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'probe.gd'), 'class_name Probe\nextends Node\n');
+    return await withALanguageServerThatEnds(
+      atItsEnd,
+      async (beforePort, heardAnOpen) =>
+        await withFramedPeer(
+          after.onMessage,
+          async (afterPort) => {
+            const bridgePort = await reservePort();
+            const server = new ServerProcess({
+              env: {
+                GDHARNESS_BRIDGE_PORT: String(bridgePort),
+                GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+              },
+            });
+            try {
+              await server.initialize('regression-test');
+              const diagnosed = (): Promise<JsonRpcMessage> =>
+                server.request(
+                  'tools/call',
+                  { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath: 'probe.gd' } },
+                  30_000,
+                );
+              const first = await greetAsAStandInEditor(server, bridgePort, project, undefined, {
+                lsp_port: beforePort,
+              });
+              editors.push(first);
+              const inFlight = diagnosed();
+              assert.equal(await cameTrue(heardAnOpen, 10_000), true, "the call waits on the editor's port");
+              await untilTheEditorIsGone(server, first);
+              let again = '';
+              if (moves) {
+                editors.push(
+                  await greetAsAStandInEditor(server, bridgePort, project, undefined, {
+                    lsp_port: afterPort,
+                  }),
+                );
+                again = textOf(await diagnosed()) ?? '';
+              } else {
+                const moving =
+                  textOf(
+                    await server.request(
+                      'tools/call',
+                      {
+                        name: 'script_info',
+                        arguments: { op: 'symbols', projectPath: project, scriptPath: 'absent.gd' },
+                      },
+                      30_000,
+                    ),
+                  ) ?? '';
+                assert.match(moving, /^Script file does not exist: res:\/\/absent\.gd/u, moving);
+              }
+              return { said: textOf(await inFlight) ?? '', port: beforePort, again };
+            } finally {
+              await server.stop();
+            }
+          },
+          after.onConnect,
+        ),
+    );
+  } finally {
+    for (const editor of editors) {
+      editor.terminate();
+    }
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** The answer a call waiting on a language server gets for each way that server ends, given its port. */
+const CALLS_IN_FLIGHT_END: readonly [LanguageServerEnd, (port: number) => RegExp][] = [
+  [
+    'closes',
+    (port) =>
+      new RegExp(
+        `^Diagnostics unavailable: Godot LSP is unavailable on port ${String(port)}\\. Start the Godot editor`,
+        'u',
+      ),
+  ],
+  ['answers', () => /^\{[\s\S]*"errors": 2,[\s\S]*"checkedBy": "language server"/u],
+  ['stays silent', () => /^Diagnostics unavailable: Disconnected from Godot LSP(?! )/u],
+];
+
+/** A call waiting on the language server when the editor moves its port ends as the old server does, and calling again is answered on the moved port. */
+async function testACallInFlightOverAPortMoveEndsAsTheOldServerDoes(): Promise<void> {
+  for (const [end, expected] of CALLS_IN_FLIGHT_END) {
+    const { said, port, again } = await aCallInFlightWhenItsEditorGoes(end, true);
+    assert.match(said, expected(port), `with an old server that ${end}: ${said}`);
+    assert.match(again, /"errors": 1,/u, `calling again is answered on the moved port: ${again}`);
+  }
+}
+
+/** A call waiting on the language server when its editor leaves the bridge ends as that server does. */
+async function testACallInFlightWhenTheEditorLeavesEndsAsItsServerDoes(): Promise<void> {
+  for (const [end, expected] of CALLS_IN_FLIGHT_END) {
+    const { said, port } = await aCallInFlightWhenItsEditorGoes(end, false);
+    assert.match(said, expected(port), `with a server that ${end}: ${said}`);
+  }
+}
+
+/** What a debug adapter peer writes to say [param event] with [param body]. */
+function adapterEvent(event: string, body: Record<string, unknown>): Buffer {
+  return frameJsonRpc({ seq: 1, type: 'event', event, body });
+}
+
+/** A debug adapter client abandoned while it dials holds nothing, and the next call connects anew. */
+async function testADebugAdapterDialAbandonedLeavesTheNextCallAnswered(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      const dialled = client.connect().then(
+        () => 'opened',
+        (error: unknown) => errorMessage(error),
+      );
+      await client.abandon();
+      const next = askedBy(client, 'body', 5000);
+      assert.equal(await dialled, 'The DAP connection was let go before it opened');
+      assert.ok(
+        client.isConnected() || Reflect.get(client, 'dialling') !== null,
+        'the ended dial settling leaves the dial the next call began',
+      );
+      const beside = askedBy(client, 'body', 5000);
+      assert.deepEqual(
+        await Promise.all([next, beside]),
+        [{ answered: 'body' }, { answered: 'body' }],
+        'the next calls are answered',
+      );
+      const answeredOn = new Set(
+        peer.heard.filter((one) => one.message['command'] === 'body').map((one) => one.socket),
+      );
+      assert.equal(answeredOn.size, 1, 'on one connection');
+      await client.abandon();
+    },
+    peer.onConnect,
+  );
+}
+
+/** A stop the old debug adapter connection says while it closes is not kept, while its console lines are. */
+async function testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      const heldOpen = endedWith(askedBy(client, 'hold-open', 5000));
+      await cameTrue(() => peer.heard.some((one) => one.message['command'] === 'hold-open'));
+      const abandoning = client.abandon();
+      const old = askedOf(peer, 'hold-open').socket;
+      old.write(adapterEvent('stopped', { reason: 'breakpoint', threadId: 1 }));
+      old.write(adapterEvent('output', { output: 'said while closing\n' }));
+      assert.equal(
+        await cameTrue(() => client.getOutput().includes('said while closing')),
+        true,
+        'the console lines of the closing connection are kept',
+      );
+      await abandoning;
+      assert.equal(errorMessage(await heldOpen), 'DAP connection closed');
+      assert.equal(client.holdIsKnown(), false, 'a stop the closing connection said is not known');
+      assert.equal(client.whereItStopped(), null);
+    },
+    peer.onConnect,
+  );
+}
+
+/**
+ * A breakpoint the editor says it removed while the old connection closes is let go of and
+ * reported, so the next server does not put it back.
+ */
+async function testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      const reported: string[] = [];
+      client.setBreakpointsSink((held) => reported.push(JSON.stringify(held)));
+      client.holdBreakpoints([{ scriptPath: 'res://player.gd', lines: [3] }]);
+      assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+      const old = askedOf(peer, 'body').socket;
+      const abandoning = client.abandon();
+      // Written before the peer hears the end, so the client reads it during its close wait.
+      old.write(
+        adapterEvent('breakpoint', {
+          reason: 'removed',
+          breakpoint: { line: 3, source: { path: 'res://player.gd' } },
+        }),
+      );
+      old.write(adapterEvent('output', { output: 'after the removal\n' }));
+      assert.equal(
+        await cameTrue(() => client.getOutput().includes('after the removal')),
+        true,
+        'the closing connection was heard',
+      );
+      await abandoning;
+      assert.deepEqual(client.breakpointsHeld(), [], 'the removed breakpoint is not held');
+      assert.deepEqual(reported, ['[]'], 'and the removal is reported');
+    },
+    peer.onConnect,
+  );
+}
+
+/**
+ * A call made while an abandon waits for the old connection to close is answered on a connection
+ * of its own, which outlives the abandon. The abandon lets go of what was held when it was called.
+ */
+async function testACallDuringADebugAdapterAbandonKeepsItsOwnConnection(): Promise<void> {
+  const peer = debugAdapterPeer();
+  await withFramedPeer(
+    peer.onMessage,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+      const old = askedOf(peer, 'body').socket;
+      const abandoning = client.abandon();
+      // Written before the peer hears the end, so the client reads them during its close wait.
+      old.write(adapterEvent('stopped', { reason: 'breakpoint', threadId: 1 }));
+      old.write(adapterEvent('output', { output: 'old connection\n' }));
+      // Dialled before the old connection's close can be heard.
+      const during = askedBy(client, 'body', 5000);
+      assert.deepEqual(await during, { answered: 'body' }, 'a call during the wait is answered');
+      const fresh = askedOf(peer, 'body').socket;
+      assert.notEqual(fresh, old, 'on a connection of its own');
+      await abandoning;
+      assert.equal(
+        await cameTrue(() => client.getOutput().includes('old connection')),
+        true,
+        'the old connection was heard',
+      );
+      assert.equal(client.holdIsKnown(), false, 'a stop the old connection said is not the new one');
+      assert.equal(client.isConnected(), true, 'the new connection outlives the abandon');
+      fresh.write(adapterEvent('stopped', { reason: 'step', threadId: 1 }));
+      assert.equal(await cameTrue(() => client.holdIsKnown()), true, 'and what it says is kept');
+      assert.equal(client.whereItStopped()?.reason, 'step');
+      assert.deepEqual(await askedBy(client, 'body', 5000), { answered: 'body' });
+      assert.equal(peer.sockets.length, 2, 'the next call goes out on it too');
+      await client.abandon();
+    },
+    peer.onConnect,
+  );
+}
+
+/** Every request to a peer waits in `PendingRequests`, and the three clients keep no table of their own. */
+function testEveryRequestWaitsInTheOneTable(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => ({ entry: entry.replaceAll('\\', '/'), text: readFileSync(join('src', entry), 'utf8') }));
+  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
+  for (const gone of [
+    'interface PendingRequest',
+    'interface DiagnosticsWaiter',
+    'rejectAllPending',
+    'failPendingRequests',
+  ]) {
+    assert.deepEqual(
+      files.filter((file) => file.text.includes(gone)).map((file) => file.entry),
+      [],
+      `no client keeps ${gone} of its own`,
+    );
+  }
+  assert.deepEqual(
+    files
+      .filter((file) => file.text.includes('new PendingRequests<'))
+      .map((file) => file.entry)
+      .toSorted(),
+    ['dap_client.ts', 'godot-bridge.ts', 'lsp_client.ts'],
+    'the three clients wait in the one table',
+  );
 }
 
 /**
@@ -20849,6 +22119,636 @@ async function testADesktopStartIsOneCall(): Promise<void> {
         process.kill(pid);
       }
     }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A helper whose program is not there tells only its error, never an exit. Its end still arrives,
+ * so retiring it, and the wait of a start it failed, do not hang.
+ */
+async function testAHelperThatNeverRanHasEnded(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-never-ran-'));
+  const settled = async (what: Promise<void>): Promise<boolean> => {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((settle) => {
+      timer = setTimeout(() => {
+        settle(false);
+      }, 5000);
+    });
+    const done = await Promise.race([what.then(() => true), late]);
+    clearTimeout(timer);
+    return done;
+  };
+  try {
+    const missing = join(root, 'no-helper');
+    const helper = new ServedHelper(missing);
+    const failed = new Promise<void>((settle) => {
+      helper.process.once('error', () => {
+        settle();
+      });
+    });
+    assert.ok(await settled(failed), 'a helper that is not there fails to start');
+    assert.ok(await settled(helper.ended), 'a helper that never ran has ended');
+
+    const start = spawnOnDesktop(
+      { directory: root, scratch: root },
+      process.execPath,
+      ['-e', ''],
+      { stdio: 'ignore' },
+      missing,
+    );
+    start.child.on('error', () => undefined);
+    assert.ok(await settled(retireHelper()), 'retiring a helper that never ran returns');
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stand-in engine that holds the file named by its first argument open, as an engine holds its
+ * log, then writes the file named by its second and runs until it is ended.
+ */
+function heldLogEngineScript(): string {
+  return [
+    "const fs = require('node:fs');",
+    'const [log, ready] = process.argv.slice(1);',
+    "fs.openSync(log, 'w');",
+    "fs.writeFileSync(ready, '');",
+    'setInterval(() => undefined, 1000);',
+  ].join('\n');
+}
+
+/**
+ * A stopped test run started through the desktop helper is waited on until its engine has gone,
+ * and no longer. The run's process stands for the helper, which serves every start and outlives
+ * this one, so a wait on its pid lasts the whole stop wait.
+ */
+async function testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stopped-helped-'));
+  const log = join(root, 'godot.log');
+  const ready = join(root, 'ready');
+  let start: DesktopStart | undefined;
+  try {
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    // As a headless test run is started on Windows, on the desktop in use.
+    start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, separateErrors: true, scratch: root },
+      process.execPath,
+      ['-e', heldLogEngineScript(), log, ready],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    const begun = start;
+    const engine = await answeredWithin(() => begun.pid(), 60_000);
+    assert.ok(engine !== undefined, `the helper names the engine: ${helperStep(begun.files.step)}`);
+    assert.ok(await answeredWithin(() => existsSync(ready) || undefined, 60_000), 'the engine runs');
+    // The run's pid is the engine's, read from the helper's file, as a test run's is.
+    const run = { process: begun.child, pid: engine };
+    begun.stop();
+    const began = Date.now();
+    await untilStoppedEngineGone(run);
+    const waited = Date.now() - began;
+    assert.equal(alive(engine), false, 'the engine has gone when the wait returns');
+    assert.ok(begun.child.pid !== undefined && alive(begun.child.pid), 'and the helper still runs');
+    assert.ok(waited < 5000, `the wait ends with the engine, not at the stop wait: ${String(waited)} ms`);
+  } finally {
+    start?.stop();
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stopped test run on the hidden desktop knows only the helper's pid. The wait still lasts until
+ * the engine the helper reported has gone, since the engine holds its log until then, and the
+ * removal of its user data directory after the wait would meet it.
+ */
+async function testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stopped-hidden-'));
+  const kept = join(root, 'kept');
+  const scratch = join(root, 'scratch');
+  const user = join(root, 'user');
+  mkdirSync(kept);
+  mkdirSync(scratch);
+  mkdirSync(user);
+  const ready = join(root, 'ready');
+  let start: DesktopStart | undefined;
+  try {
+    assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+    start = spawnOnDesktop(
+      {
+        desktop: HIDDEN_DESKTOP,
+        directory: root,
+        scratch,
+        stop: join(kept, 'stop'),
+        exit: join(kept, 'exit'),
+      },
+      process.execPath,
+      ['-e', heldLogEngineScript(), join(user, 'godot.log'), ready],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    const begun = start;
+    const engine = await answeredWithin(() => begun.pid(), 60_000);
+    assert.ok(engine !== undefined, `the helper names the engine: ${helperStep(begun.files.step)}`);
+    assert.ok(await answeredWithin(() => existsSync(ready) || undefined, 60_000), 'the engine runs');
+    // A run on the hidden desktop is given no other pid than its child's, which is the helper's.
+    const run = { process: begun.child, pid: begun.child.pid ?? null };
+    assert.notEqual(run.pid, engine, 'the pid the run holds is not the engine');
+    begun.stop();
+    const began = Date.now();
+    await untilStoppedEngineGone(run);
+    const waited = Date.now() - began;
+    assert.equal(alive(engine), false, 'the engine has gone when the wait returns');
+    assert.ok(waited < 5000, `the wait ends with the engine, not at the stop wait: ${String(waited)} ms`);
+    rmSync(user, { recursive: true });
+    assert.equal(existsSync(user), false, 'and its user data directory can be removed');
+  } finally {
+    start?.stop();
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** A stand-in engine started through the helper in [param root], once the helper has said it runs. */
+async function runningThroughTheHelper(
+  root: string,
+  name: string,
+  hidden: boolean,
+  assembly = helperAssembly(),
+): Promise<{ start: DesktopStart; engine: number; helper: number }> {
+  const scratch = join(root, name);
+  mkdirSync(scratch);
+  const how = hidden
+    ? { desktop: HIDDEN_DESKTOP, stop: join(root, `${name}-stop`), exit: join(root, `${name}-exit`) }
+    : { endsWithHelper: true, separateErrors: true, exit: join(root, `${name}-exit`) };
+  const start = spawnOnDesktop(
+    { ...how, directory: root, scratch },
+    process.execPath,
+    ['-e', 'setInterval(() => undefined, 1000)'],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+    assembly,
+  );
+  start.child.stdout?.resume();
+  start.child.stderr?.resume();
+  const engine = await answeredWithin(() => start.pid(), 60_000);
+  assert.ok(engine !== undefined, `the helper names the engine: ${helperStep(start.files.step)}`);
+  const helper = start.child.pid;
+  assert.ok(helper !== undefined, 'the start names its helper');
+  return { start, engine, helper };
+}
+
+/** Kills [param helper], and waits until it has gone. */
+async function killTheHelper(helper: number): Promise<void> {
+  process.kill(helper);
+  assert.ok(await answeredWithin(() => (alive(helper) ? undefined : true), 30_000), 'the helper is killed');
+}
+
+/** How [param child] ended, or null when it has not within [param ms]. */
+async function endWithin(child: DesktopStart['child'], ms: number): Promise<string | null> {
+  if (!(await exitedWithin(child, ms))) {
+    return null;
+  }
+  return `${String(child.exitCode)}/${String(child.signalCode)}`;
+}
+
+/**
+ * A run on the hidden desktop whose helper died after it started the engine is still stopped by its
+ * stop file, and ends as one its own helper stopped, with the engine's code 1.
+ */
+async function testARunOnTheHiddenDesktopIsStoppedAfterItsHelperDied(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-stop-'));
+  let engine: number | undefined;
+  try {
+    const run = await runningThroughTheHelper(root, 'one', true);
+    engine = run.engine;
+    await killTheHelper(run.helper);
+    await delay(500);
+    assert.ok(alive(engine), 'the engine runs on after its helper died');
+    run.start.stop();
+    assert.equal(
+      await endWithin(run.start.child, 5000),
+      '1/null',
+      'the stopped run ends within the stop wait',
+    );
+    assert.equal(alive(engine), false, 'and its engine has gone');
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stop asked of a helper that dies before it acts on it still ends the run, through the stop file
+ * on the hidden desktop and through the request on the desktop in use.
+ */
+async function testAStopTheDeadHelperNeverActedOnStillEndsTheRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-asked-'));
+  const engines: number[] = [];
+  try {
+    const hidden = await runningThroughTheHelper(root, 'hidden', true);
+    engines.push(hidden.engine);
+    hidden.start.stop();
+    await killTheHelper(hidden.helper);
+    assert.equal(await endWithin(hidden.start.child, 5000), '1/null', 'the hidden run ends');
+    assert.equal(alive(hidden.engine), false, 'and its engine has gone');
+
+    const inUse = await runningThroughTheHelper(root, 'inuse', false);
+    engines.push(inUse.engine);
+    // In one turn, so the request reaches only a helper that is already being ended.
+    process.kill(inUse.helper);
+    inUse.start.stop();
+    assert.equal(
+      await endWithin(inUse.start.child, 5000),
+      'null/SIGTERM',
+      'the run on the desktop in use ends',
+    );
+    assert.equal(alive(inUse.engine), false, 'and its engine has gone');
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** The helper that takes over a dead one's run still starts and stops runs of its own. */
+async function testAStartAfterItsHelperDiedIsStillStopped(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-next-'));
+  const engines: number[] = [];
+  try {
+    const first = await runningThroughTheHelper(root, 'first', true);
+    engines.push(first.engine);
+    await killTheHelper(first.helper);
+    // Until this process has heard the exit, which hands the first run to a new helper: a start
+    // given to a helper that is dying fails.
+    assert.ok(
+      await answeredWithin(
+        () => (helperFor(helperAssembly()).process.pid === first.helper ? undefined : true),
+        30_000,
+      ),
+      'the dead helper is replaced',
+    );
+    const second = await runningThroughTheHelper(root, 'second', true);
+    engines.push(second.engine);
+    assert.notEqual(second.helper, first.helper, 'the second start has a new helper');
+    second.start.stop();
+    assert.equal(await endWithin(second.start.child, 5000), '1/null', 'the second run is stopped');
+    assert.equal(alive(second.engine), false, 'and its engine has gone');
+    first.start.stop();
+    assert.equal(await endWithin(first.start.child, 5000), '1/null', 'the first run is stopped too');
+    assert.equal(alive(first.engine), false, 'and its engine has gone');
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** On the desktop in use a run whose helper died is stopped by the helper that took it over. */
+async function testARunOnTheDesktopInUseIsStoppedAfterItsHelperDied(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-inuse-'));
+  let engine: number | undefined;
+  try {
+    const run = await runningThroughTheHelper(root, 'one', false);
+    engine = run.engine;
+    await killTheHelper(run.helper);
+    await delay(500);
+    assert.ok(alive(engine), 'the engine runs on after its helper died');
+    run.start.stop();
+    assert.equal(await endWithin(run.start.child, 5000), 'null/SIGTERM', 'the stopped run ends');
+    assert.equal(alive(engine), false, 'and its engine has gone');
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A test run cut off by its limit after its helper died is stopped, waited on and settled as a
+ * timed-out test run is, within the stop wait, and leaves no engine.
+ */
+async function testATimedOutRunWhoseHelperDiedEndsWithinTheStopWait(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-timed-'));
+  let engine: number | undefined;
+  try {
+    const { start, engine: pid, helper } = await runningThroughTheHelper(root, 'one', true);
+    engine = pid;
+    await killTheHelper(helper);
+    const child = start.child;
+    const closed = [child.stdout, child.stderr].map(
+      (stream) =>
+        new Promise<void>((settle) => {
+          stream?.once('close', settle);
+        }),
+    );
+    const settled = Promise.all([exitedWithin(child, 60_000), ...closed]);
+    // The run's limit, then what a timed-out test run does: stop, wait for the engine, settle.
+    await delay(1000);
+    const began = Date.now();
+    start.stop();
+    await untilStoppedEngineGone({ process: child, pid: child.pid ?? null });
+    assert.ok(await settledWithin(settled, 3000), 'the run settles once its engine has gone');
+    const took = Date.now() - began;
+    assert.equal(alive(engine), false, 'no engine is left');
+    assert.ok(took < 5000, `the stopped run ends well within the 10 s stop wait: ${String(took)} ms`);
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A run whose helper died where no helper can take it over is still stopped, by the engine's pid
+ * the dead helper reported.
+ */
+async function testARunNoHelperCanTakeOverIsStillStopped(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-none-'));
+  const engines: number[] = [];
+  try {
+    for (const hidden of [true, false]) {
+      const name = hidden ? 'hidden' : 'inuse';
+      const assembly = join(root, `${name}-helper.exe`);
+      cpSync(helperAssembly(), assembly);
+      const run = await runningThroughTheHelper(root, name, hidden, assembly);
+      engines.push(run.engine);
+      // A running program can be renamed but not removed, so the next helper of this path cannot start.
+      renameSync(assembly, `${assembly}.gone`);
+      await killTheHelper(run.helper);
+      await delay(500);
+      assert.ok(alive(run.engine), `the ${name} engine runs on with no helper`);
+      run.start.stop();
+      const ended = await endWithin(run.start.child, 5000);
+      assert.equal(ended, hidden ? '1/null' : 'null/SIGTERM', `the ${name} run is stopped`);
+      assert.equal(alive(run.engine), false, `and its ${name} engine has gone`);
+    }
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * Starts a stand-in in [param root], gives it a start time that is not its own, kills its helper,
+ * stops the run as [param how] says and checks the stand-in is left running. [param adopted] says
+ * whether a new helper can take the run over. The stand-in's pid is added to [param engines].
+ */
+async function stoppingAProcessThatOnlySharesThePid(
+  root: string,
+  adopted: boolean,
+  how: 'stop' | 'kill',
+  engines: number[],
+): Promise<void> {
+  const name = `${adopted ? 'adopted' : 'none'}-${how}`;
+  const assembly = join(root, `${name}-helper.exe`);
+  cpSync(helperAssembly(), assembly);
+  const run = await runningThroughTheHelper(root, name, true, assembly);
+  engines.push(run.engine);
+  const child = run.start.child;
+  assert.ok(child instanceof HelpedChild, 'the start is a helped child');
+  child.made(run.engine, '1');
+  if (!adopted) {
+    // A running program can be renamed but not removed, so the next helper of this path cannot start.
+    renameSync(assembly, `${assembly}.gone`);
+  }
+  // In one turn, so a kill reaches only a helper that is already being ended.
+  process.kill(run.helper);
+  if (how === 'stop') {
+    run.start.stop();
+  } else {
+    child.kill();
+  }
+  assert.ok(await endWithin(child, 10_000), `the ${name} run ends`);
+  // Several looks of the watch, and of an adopting helper's.
+  await delay(1000);
+  assert.ok(alive(run.engine), `the ${name} process is left running`);
+}
+
+/**
+ * A process under a dead helper's engine pid that began at another time than the helper said is
+ * not the engine, so a stop leaves it running: through the stop file and through a kill, whether
+ * a new helper takes the run over or none can. The stand-in plays such a process by being given a
+ * start time that is not its own.
+ */
+async function testAProcessThatOnlySharesTheEnginesPidIsNeverEnded(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-dead-helper-pid-'));
+  const engines: number[] = [];
+  try {
+    for (const adopted of [true, false]) {
+      for (const how of ['stop', 'kill'] as const) {
+        await stoppingAProcessThatOnlySharesThePid(root, adopted, how, engines);
+      }
+    }
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A stop file whose path is longer than MAX_PATH still stops a run on the hidden desktop, by its
+ * live helper and by one that took the run over from a dead one.
+ */
+async function testAStopFileWithALongPathStillStopsTheRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-stop-'));
+  const engines: number[] = [];
+  try {
+    const deep = aLongFolder(root);
+    for (const adopted of [false, true]) {
+      const name = adopted ? 'adopted' : 'live';
+      const scratch = join(deep, name);
+      mkdirSync(scratch);
+      const stop = join(deep, `${name}-stop`);
+      const output = join(deep, `${name}-output`);
+      const start = spawnOnDesktop(
+        {
+          desktop: HIDDEN_DESKTOP,
+          stop,
+          exit: join(deep, `${name}-exit`),
+          directory: root,
+          scratch,
+          outputFile: output,
+        },
+        process.execPath,
+        ['-e', 'console.log("up"); setInterval(() => undefined, 1000)'],
+        { stdio: ['ignore', 'ignore', 'ignore'] },
+      );
+      const engine = await answeredWithin(() => start.pid(), 60_000);
+      assert.ok(engine !== undefined, `the ${name} helper reads a long spec and names the engine`);
+      engines.push(engine);
+      if (adopted) {
+        const helper = start.child.pid;
+        assert.ok(helper !== undefined, 'the start names its helper');
+        await killTheHelper(helper);
+      }
+      const said = (): true | undefined =>
+        (existsSync(output) && readFileSync(output, 'utf8').startsWith('up')) || undefined;
+      assert.ok(await answeredWithin(said, 30_000), `the ${name} engine's output reaches its file`);
+      assert.ok(stop.length > 300, `the stop path is long: ${String(stop.length)} characters`);
+      start.stop();
+      assert.equal(await endWithin(start.child, 5000), '1/null', `the ${name} run is stopped`);
+      assert.equal(alive(engine), false, `and its ${name} engine has gone`);
+      if (!adopted) {
+        assert.equal(
+          readFileSync(join(deep, 'live-exit'), 'utf8'),
+          '1',
+          'the live helper writes the exit code',
+        );
+      }
+    }
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** A folder under [param root] whose path is longer than MAX_PATH, made. */
+function aLongFolder(root: string): string {
+  let deep = root;
+  while (deep.length < 300) {
+    deep = join(deep, 'a-folder-name-that-makes-the-path-long');
+  }
+  mkdirSync(deep, { recursive: true });
+  return deep;
+}
+
+/**
+ * The helper writes a start's lane file, and the reason a start failed, at paths longer than
+ * MAX_PATH.
+ */
+async function testTheHelperWritesItsLaneAndErrorFilesThroughLongPaths(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-files-'));
+  let engine: number | undefined;
+  try {
+    const deep = aLongFolder(root);
+    const lane = join(deep, 'lane.json');
+    const laned = join(deep, 'laned');
+    mkdirSync(laned);
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: laned, lane: { file: lane, number: 1 } },
+      process.execPath,
+      ['-e', 'setInterval(() => undefined, 1000)'],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    engine = await answeredWithin(() => start.pid(), 60_000);
+    assert.ok(
+      engine !== undefined,
+      `the helper names the engine: ${String(helperFailure(start.files.error))}`,
+    );
+    assert.deepEqual(JSON.parse(readFileSync(lane, 'utf8')), { lane: 1, pid: engine }, 'the lane file');
+    start.stop();
+    assert.ok(await endWithin(start.child, 5000), 'the run is stopped');
+
+    const failing = join(deep, 'failing');
+    mkdirSync(failing);
+    const failed = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: failing },
+      join(root, 'no-such-program.exe'),
+      [],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    failed.child.on('error', () => undefined);
+    assert.equal(await endWithin(failed.child, 30_000), '1/null', 'the start fails');
+    assert.match(
+      helperFailure(failed.files.error) ?? '',
+      /CreateProcessW/u,
+      'and says why in its error file',
+    );
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * An exit file the helper cannot write leaves the run its engine's own code, as the helper's exit
+ * says it.
+ */
+async function testAnExitFileThatCannotBeWrittenStillLeavesTheEnginesCode(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unwritable-exit-'));
+  try {
+    const scratch = join(root, 'scratch');
+    mkdirSync(scratch);
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch, exit: join(root, 'missing', 'exit') },
+      process.execPath,
+      ['-e', 'process.exit(3)'],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    assert.equal(await endWithin(start.child, 30_000), '3/null', 'the run ends with the engine code');
+  } finally {
+    await retireHelper();
     sweep(root);
   }
 }
@@ -20948,6 +22848,7 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
     if (start !== undefined) {
       assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends with its engine');
     }
+    await retireHelper();
     sweep(root);
   }
 }
@@ -20970,10 +22871,11 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     const compiled = await copy.ensure(root);
     assert.equal(compiled, null, 'the copy compiles');
     const ranMarker = join(root, 'ran');
+    const marker = `gdharness-taken-${String(process.pid)}`;
     const start = spawnOnDesktop(
       { directory: root, endsWithHelper: true, scratch: root },
       process.execPath,
-      ['-e', "require('node:fs').writeFileSync(process.argv[1], 'ran')", ranMarker],
+      ['-e', `require('node:fs').writeFileSync(process.argv[1], 'ran') // ${marker}`, ranMarker],
       { stdio: ['ignore', 'ignore', 'ignore'] },
       copy.assembly(root),
     );
@@ -20989,7 +22891,16 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     assert.equal(start.pid(), undefined, 'no pid is given out');
     await delay(1000);
     assert.equal(existsSync(ranMarker), false, 'and the engine was ended before it ran');
+    // The helper still runs here, so only the closed birth handle can have ended the suspended engine.
+    const { pidsWithCommandLine } = await import('./support/windows.js');
+    let left = await pidsWithCommandLine('bun', marker);
+    for (let waited = 0; left.length > 0 && waited < 10_000; waited += 500) {
+      await delay(500);
+      left = await pidsWithCommandLine('bun', marker);
+    }
+    assert.deepEqual(left, [], 'and no process of it is left while the helper runs');
   } finally {
+    await retireHelper();
     held.close();
     sweep(root);
   }
@@ -21181,6 +23092,850 @@ async function testAKeptStartOutlivesAKilledStarter(): Promise<void> {
 }
 
 /**
+ * A kept engine runs on when its helper is killed. The engine leaves the helper's kill-on-close
+ * job once the start is said to be made, so the helper's end takes nothing with it.
+ */
+async function testAKeptStartOutlivesItsKilledHelper(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-helper-killed-'));
+  let engine: number | undefined;
+  try {
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: false, scratch: root },
+      process.execPath,
+      ['-e', 'setTimeout(() => undefined, 600000)'],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+    );
+    engine = await answeredWithin(() => pidTheHelperWrote(start.files.pid), 60_000);
+    assert.ok(engine !== undefined, 'the kept engine started');
+    assert.ok(alive(engine), 'and runs');
+    const helper = start.child.pid;
+    assert.ok(helper !== undefined && alive(helper), 'the helper runs');
+    process.kill(helper);
+    assert.ok(await answeredWithin(() => (alive(helper) ? undefined : true), 30_000), 'the helper is killed');
+    await delay(2000);
+    assert.ok(alive(engine), 'the kept engine runs on after its helper was killed');
+  } finally {
+    if (engine !== undefined && alive(engine)) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** An engine that prints one line, waits [param ms] and exits with [param code]. */
+function lineThenExit(index: number, ms: number, code: number): string[] {
+  return [
+    '-e',
+    `console.log('engine ${String(index)}'); setTimeout(() => process.exit(${String(code)}), ${String(ms)})`,
+  ];
+}
+
+/** A start of [param command] through the helper in a folder of its own under [param root], its output collected. */
+function collectedStart(
+  root: string,
+  name: string,
+  command: string,
+  args: readonly string[],
+  how: { desktop?: boolean; kept?: boolean } = {},
+): { start: DesktopStart; text: () => string; outputEnded: Promise<void> } {
+  const scratch = join(root, name);
+  mkdirSync(scratch);
+  const start = spawnOnDesktop(
+    {
+      ...(how.desktop === true ? { desktop: HIDDEN_DESKTOP } : {}),
+      directory: root,
+      ...(how.kept === true ? {} : { endsWithHelper: true }),
+      scratch,
+      exit: join(scratch, 'exit'),
+    },
+    command,
+    args,
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let collected = '';
+  const output = start.child.stdout;
+  output?.on('data', (chunk: Buffer) => {
+    collected += chunk.toString();
+  });
+  const outputEnded = new Promise<void>((settle) => {
+    if (output === null) {
+      settle();
+      return;
+    }
+    output.once('end', () => {
+      settle();
+    });
+  });
+  return { start, text: () => collected, outputEnded };
+}
+
+/** Whether [param promise] settles within [param ms]. */
+async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((settle) => {
+        timer = setTimeout(() => {
+          settle(false);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Starts made at once from several callers go to one helper and none waits on another's engine: a
+ * run's engines, a boot check and a played game start together while one engine runs for good. Each
+ * keeps its own lines and its own exit code.
+ */
+async function testStartsMadeAtOnceWaitOnNoOthersEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-starts-at-once-'));
+  const running = collectedStart(root, 'long', process.execPath, lineThenExit(0, 600_000, 1), {
+    desktop: true,
+  });
+  try {
+    const others = [1, 2, 3, 4, 5].map((index) =>
+      collectedStart(root, `start-${String(index)}`, process.execPath, lineThenExit(index, 0, 10 + index), {
+        desktop: index % 2 === 0,
+      }),
+    );
+    for (const [at, other] of others.entries()) {
+      const index = at + 1;
+      assert.ok(await exitedWithin(other.start.child, 60_000), `start ${String(index)} ends`);
+      assert.equal(other.start.child.exitCode, 10 + index, `start ${String(index)} has its own exit code`);
+      assert.equal(running.start.child.exitCode, null, 'while the long engine still runs');
+      // The output comes down a pipe of its own, which can end after the exit is told.
+      assert.ok(await settledWithin(other.outputEnded, 60_000), `start ${String(index)}'s output ends`);
+      assert.equal(
+        other.text().trim(),
+        `engine ${String(index)}`,
+        `start ${String(index)} has its own lines`,
+      );
+    }
+    const helpers = new Set([running, ...others].map((one) => one.start.child.pid));
+    assert.equal(helpers.size, 1, 'and one helper served them all');
+  } finally {
+    running.start.stop();
+    await exitedWithin(running.start.child, 60_000);
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A helper that is killed after it made an engine and handed this process a copy of its job, but
+ * before it answered, fails that start with a reason. The engine is ended and the copy closed, as the
+ * job would have ended it with the helper, so the start's close follows its exit. The engines it had
+ * answered run on with their jobs and their ends reported. The next start gets a new helper.
+ */
+async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const { holdFile } = await import('./support/held-file.js');
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-killed-'));
+  let engine: number | undefined;
+  let made: number | undefined;
+  let letGo: (() => void) | undefined;
+  try {
+    const running = collectedStart(root, 'running', process.execPath, lineThenExit(0, 600_000, 1));
+    engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
+    assert.ok(engine !== undefined, 'the first engine runs');
+    const helper = running.start.child.pid;
+    assert.ok(helper !== undefined && alive(helper), 'its helper runs');
+    // The helper writes the lane file after the copy of the job and before its answer. Held, that
+    // write waits, which keeps the helper in that gap until it is killed.
+    const lane = join(root, 'lane.json');
+    letGo = holdFile(`${lane}.tmp`);
+    const scratch = join(root, 'in-flight');
+    mkdirSync(scratch);
+    const marker = `gdharness-in-flight-${String(process.pid)}`;
+    const inFlight = spawnOnDesktop(
+      {
+        directory: root,
+        endsWithHelper: true,
+        scratch,
+        exit: join(scratch, 'exit'),
+        lane: { file: lane, number: 1 },
+      },
+      process.execPath,
+      ['-e', `setTimeout(() => {}, 600000) // ${marker}`],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    inFlight.child.stdout?.resume();
+    const events: string[] = [];
+    const closed = new Promise<void>((settle) => {
+      inFlight.child.on('close', (code: number | null) => {
+        events.push(`close ${String(code)}`);
+        settle();
+      });
+    });
+    inFlight.child.on('exit', (code: number | null) => {
+      events.push(`exit ${String(code)}`);
+    });
+    for (let waited = 0; made === undefined && waited < 60_000; waited += 250) {
+      made = (await pidsWithCommandLine('bun', marker))[0];
+      if (made === undefined) {
+        await delay(250);
+      }
+    }
+    assert.ok(made !== undefined, 'the helper made the engine in flight');
+    const pid = made;
+    const jobNamed = (): boolean => {
+      const job = openJob(engineJobName(pid));
+      job?.close();
+      return job !== null;
+    };
+    assert.equal(await answeredWithin(() => (jobNamed() ? true : undefined), 60_000), true, 'and its job');
+    // The copy follows the job at once, and the held write after it never returns.
+    await delay(500);
+    assert.equal(inFlight.child.exitCode, null, 'and has not answered');
+    process.kill(helper);
+    letGo();
+    assert.ok(await exitedWithin(inFlight.child, 60_000), 'the start in flight ends');
+    assert.equal(inFlight.child.exitCode, 1, 'as a start that failed');
+    assert.match(
+      helperFailure(inFlight.files.error) ?? '',
+      /desktop helper ended/u,
+      "with the helper's end as its reason",
+    );
+    assert.ok(await settledWithin(closed, 60_000), 'and closes');
+    assert.deepEqual(events, ['exit 1', 'close 1'], 'once each, the exit first');
+    assert.equal(
+      await answeredWithin(() => (alive(pid) ? undefined : true), 10_000),
+      true,
+      'its engine is ended',
+    );
+    assert.equal(
+      await answeredWithin(() => (jobNamed() ? undefined : true), 10_000),
+      true,
+      'and no copy of its job is left holding its name',
+    );
+    assert.ok(alive(engine), 'the engine that was running runs on');
+    const job = openJob(engineJobName(engine));
+    assert.ok(job !== null, 'and its job is there');
+    assert.ok(job.holds(engine), 'holding it');
+    job.close();
+    const next = collectedStart(root, 'next', process.execPath, lineThenExit(2, 0, 7));
+    assert.ok(await exitedWithin(next.start.child, 60_000), 'the next start ends');
+    assert.equal(next.start.child.exitCode, 7, 'with its own code');
+    assert.notEqual(next.start.child.pid, helper, 'through a new helper');
+    process.kill(engine);
+    assert.ok(
+      await exitedWithin(running.start.child, 60_000),
+      "and the first engine's end is still reported",
+    );
+  } finally {
+    letGo?.();
+    for (const pid of [engine, made]) {
+      if (pid !== undefined && alive(pid)) {
+        process.kill(pid);
+      }
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A helper killed after it made an engine and before it said so leaves no engine behind, for a start
+ * that ends with its starter and for a kept one. This copy of the helper stops for good at that
+ * point. The start fails with the helper's end as its reason and closes.
+ */
+async function testAHelperKilledBeforeItSaysItMadeTheEngineLeavesNone(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unsaid-'));
+  const stopped = HELPER_SOURCE.replace('Reply("made "', 'Thread.Sleep(Timeout.Infinite); Reply("made "');
+  assert.notEqual(
+    stopped,
+    HELPER_SOURCE,
+    'the helper says it made the engine in the place this test reaches',
+  );
+  const copy = new CompiledHelper('unsaid helper', 'gdharness-unsaid', stopped, true);
+  const engines: number[] = [];
+  try {
+    assert.equal(await copy.ensure(root), null, 'the copy compiles');
+    for (const endsWithHelper of [true, false]) {
+      await helperKilledBeforeItSaysItMadeTheEngine(root, copy.assembly(root), endsWithHelper, engines);
+      await retireHelper();
+    }
+  } finally {
+    for (const engine of engines) {
+      if (alive(engine)) {
+        process.kill(engine);
+      }
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * One start through [param assembly], a helper that stops after it made the engine, whose pid goes
+ * into [param engines]. The helper is killed there, and the start and its engine checked.
+ */
+async function helperKilledBeforeItSaysItMadeTheEngine(
+  root: string,
+  assembly: string,
+  endsWithHelper: boolean,
+  engines: number[],
+): Promise<void> {
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  const label = endsWithHelper ? 'ending with its starter' : 'kept';
+  const scratch = join(root, label);
+  mkdirSync(scratch);
+  const marker = `gdharness-unsaid-${String(process.pid)}-${String(endsWithHelper)}`;
+  const start = spawnOnDesktop(
+    { directory: root, endsWithHelper, scratch, exit: join(scratch, 'exit') },
+    process.execPath,
+    ['-e', `setTimeout(() => {}, 600000) // ${marker}`],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+    assembly,
+  );
+  start.child.stdout?.resume();
+  const closed = new Promise<void>((settle) => {
+    start.child.on('close', () => {
+      settle();
+    });
+  });
+  let engine: number | undefined;
+  for (let waited = 0; engine === undefined && waited < 60_000; waited += 250) {
+    engine = (await pidsWithCommandLine('bun', marker))[0];
+    if (engine === undefined) {
+      await delay(250);
+    }
+  }
+  assert.ok(engine !== undefined, `${label}: the helper made the engine`);
+  const made = engine;
+  engines.push(made);
+  const helper = start.child.pid;
+  assert.ok(helper !== undefined && alive(helper), `${label}: its helper runs`);
+  process.kill(helper);
+  assert.ok(await exitedWithin(start.child, 60_000), `${label}: the start ends`);
+  assert.equal(start.child.exitCode, 1, `${label}: as a start that failed`);
+  assert.match(
+    helperFailure(start.files.error) ?? '',
+    /desktop helper ended/u,
+    `${label}: with the helper's end as its reason`,
+  );
+  assert.equal(
+    await answeredWithin(() => (alive(made) ? undefined : true), 10_000),
+    true,
+    `${label}: its engine is ended`,
+  );
+  assert.ok(await settledWithin(closed, 60_000), `${label}: and the start closes`);
+}
+
+/**
+ * A process that started engines and is killed takes its helper with it, and with the helper every
+ * engine that was to end with it. An engine kept past its starter runs on. No scratch folder of
+ * the helper's is left.
+ */
+async function testAKilledStarterTakesItsHelperAndItsEnginesButNotAKeptOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-owner-killed-'));
+  const own = join(root, 'temp');
+  mkdirSync(own);
+  const owner = spawnHidden(
+    process.execPath,
+    [join(process.cwd(), 'test', 'support', 'helper-owner.ts'), root],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, TEMP: own, TMP: own },
+    },
+  );
+  let said = '';
+  owner.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString();
+  });
+  try {
+    const line = await answeredWithin(() => said.split('\n').find((one) => one.startsWith('{')), 120_000);
+    assert.ok(line !== undefined, `the owner started its engines: ${said}`);
+    const pids: unknown = JSON.parse(line);
+    const [helper, engine] = [Number(get(pids, 'helper')), Number(get(pids, 'engine'))];
+    assert.ok(alive(helper) && alive(engine), 'both run');
+    owner.kill();
+    assert.ok(await answeredWithin(() => (alive(helper) ? undefined : true), 30_000), 'the helper ends');
+    assert.ok(await answeredWithin(() => (alive(engine) ? undefined : true), 30_000), 'and its engine');
+    assert.deepEqual(
+      readdirSync(own).filter((name) => name.startsWith('gdharness-desktop-') && !name.endsWith('.exe')),
+      [],
+      'no scratch folder is left',
+    );
+  } finally {
+    owner.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * A start's piped output that nobody reads still closes once the engine has ended, as a child
+ * process's does, with and without output.
+ */
+async function testAnUnreadOutputStreamStillCloses(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unread-'));
+  try {
+    for (const [name, script] of [
+      ['silent', 'process.exit(3)'],
+      ['chatty', "console.log('x'.repeat(2000)); process.exit(3)"],
+    ] as const) {
+      const scratch = join(root, name);
+      mkdirSync(scratch);
+      const start = spawnOnDesktop(
+        { directory: root, scratch, endsWithHelper: true, exit: join(scratch, 'exit') },
+        process.execPath,
+        ['-e', script],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      const closed = await Promise.race([
+        new Promise<number | null>((settle) => {
+          start.child.once('close', (code: number | null) => {
+            settle(code);
+          });
+        }),
+        delay(30_000).then(() => 'no close in 30 s'),
+      ]);
+      assert.equal(closed, 3, `${name}: an unread start closes with its code`);
+    }
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * An engine that outlives its helper, when no helper can be run any more, still ends its start once
+ * the engine ends, and does not use the processor meanwhile. The program is moved away, which Node
+ * reports as an event after the start of a new helper, and denied to run, which it reports at once.
+ */
+function testAnEngineOutlivingAHelperThatCannotBeRunStillEndsItsStart(): void {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-lost-'));
+  try {
+    for (const [runtimeName, interpreter, how] of [
+      ['Node', 'node', 'move'],
+      ['Node', 'node', 'acl'],
+      ['Bun', process.execPath, 'acl'],
+    ] as const) {
+      const own = join(root, `${runtimeName}-${how}`);
+      mkdirSync(own);
+      const ran = spawnSyncHidden(
+        interpreter,
+        [join(process.cwd(), 'test', 'support', 'helper-lost-owner.ts'), own, how],
+        { encoding: 'utf8', timeout: 240_000, env: { ...process.env, TEMP: own, TMP: own } },
+      );
+      const said: unknown = JSON.parse(ran.stdout.trim().split('\n').pop() ?? 'null');
+      const label = `${runtimeName}, ${how}: ${ran.stdout}${ran.stderr}`;
+      const end = get(said, 'end');
+      assert.ok(typeof end === 'object', `the start ends: ${label}`);
+      assert.ok(get(end, 'code') === 4 || get(end, 'signal') === 'SIGKILL', `by the engine's end: ${label}`);
+      assert.ok(Number(get(said, 'cpuMs')) < 6000, `without pinning the processor: ${label}`);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A start in flight when its starter is killed leaves no engine behind. This copy of the helper
+ * waits after it has made the engine, before the engine is in its job, which is the moment the
+ * starter is killed, so the engine would otherwise stay suspended and in no job.
+ */
+async function testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inflight-'));
+  const slowed = HELPER_SOURCE.replace(
+    'Create(commandLine, ref creation, directory, environment, io, birth, ref extended, out started);',
+    'Create(commandLine, ref creation, directory, environment, io, birth, ref extended, out started); Thread.Sleep(3000);',
+  );
+  assert.notEqual(slowed, HELPER_SOURCE, 'the helper makes its engine in the place this test reaches');
+  const copy = new CompiledHelper('in-flight helper', 'gdharness-inflight', slowed, true);
+  const marker = `gdharness-inflight-${String(process.pid)}`;
+  const strays = (): string => {
+    const read = spawnSyncHidden(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `@(Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='bun.exe'" | Where-Object { $_.CommandLine -like '*setTimeout(() => undefined, 600000)*${marker}*' -and $_.ProcessId -ne $PID }).Count`,
+      ],
+      { encoding: 'utf8', timeout: 120_000 },
+    );
+    return read.stdout.trim();
+  };
+  let owner: ChildProcess | undefined;
+  try {
+    assert.equal(await copy.ensure(root), null, 'the copy compiles');
+    const started = spawnHidden(
+      process.execPath,
+      [join(process.cwd(), 'test', 'support', 'inflight-owner.ts'), root, copy.assembly(root), marker],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    owner = started;
+    let said = '';
+    started.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+    assert.ok(
+      await answeredWithin(() => (said.includes('begun') ? true : undefined), 60_000),
+      'a start begins',
+    );
+    await delay(1200);
+    assert.equal(strays(), '1', 'the engine is made and waits for its job');
+    started.kill();
+    assert.ok(
+      await answeredWithin(() => (strays() === '0' ? true : undefined), 30_000),
+      `no engine is left once the starter has gone: ${strays()}`,
+    );
+  } finally {
+    owner?.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * An engine's whole exit code and its end are reported while the helper serves other starts: an
+ * access violation's code, 0xC0000005, ends one start as others run and begin.
+ */
+async function testAnEnginesWholeExitIsToldWhileTheHelperServesOthers(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exit-while-serving-'));
+  const busy = collectedStart(root, 'busy', process.execPath, lineThenExit(0, 600_000, 1));
+  try {
+    const crashed = collectedStart(root, 'crashed', 'cmd.exe', ['/c', 'exit', '/b', '3221225477']);
+    const later = collectedStart(root, 'later', process.execPath, lineThenExit(1, 0, 4));
+    assert.ok(await exitedWithin(crashed.start.child, 60_000), 'the crashed start ends');
+    assert.equal(crashed.start.child.exitCode, 0xc0000005, 'with its whole code');
+    assert.equal(busy.start.child.exitCode, null, 'as the first engine runs on');
+    assert.ok(await exitedWithin(later.start.child, 60_000), 'and a later start ends');
+    assert.equal(later.start.child.exitCode, 4, 'with its own code');
+  } finally {
+    busy.start.stop();
+    await exitedWithin(busy.start.child, 60_000);
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * An engine that outlives its helper still ends with its whole exit code: the next helper waits on
+ * it through a handle opened while it runs. The stand-in is a Windows PowerShell that exits with an
+ * access violation's code after the helper has been killed.
+ */
+async function testAnEngineThatOutlivesItsHelperStillEndsWithItsWholeCode(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-outlives-helper-'));
+  try {
+    const running = collectedStart(root, 'running', 'powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Start-Sleep -Seconds 8; exit -1073741819',
+    ]);
+    const engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
+    const helper = running.start.child.pid;
+    assert.ok(engine !== undefined && helper !== undefined, 'the engine runs');
+    process.kill(helper);
+    assert.ok(await exitedWithin(running.start.child, 120_000), 'its end is reported');
+    assert.equal(running.start.child.exitCode, 0xc0000005, 'with the code the engine itself exited with');
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A start asked to end before the helper has answered, by `kill()` and by an aborted signal, ends by
+ * SIGTERM with its engine gone, and the abort also tells the caller as an AbortError.
+ */
+async function testAStartEndedBeforeTheHelperAnswersEndsBySigterm(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-early-end-'));
+  const waiting = ['-e', 'setInterval(() => undefined, 1000)'];
+  try {
+    for (const how of ['kill', 'abort'] as const) {
+      const scratch = join(root, how);
+      mkdirSync(scratch);
+      const controller = new AbortController();
+      const start = spawnOnDesktop(
+        { directory: root, scratch, endsWithHelper: true, exit: join(scratch, 'exit') },
+        process.execPath,
+        waiting,
+        { stdio: ['ignore', 'ignore', 'ignore'], signal: controller.signal },
+      );
+      let told: Error | undefined;
+      start.child.on('error', (error: Error) => {
+        told = error;
+      });
+      if (how === 'kill') {
+        start.child.kill();
+      } else {
+        controller.abort();
+      }
+      assert.ok(await exitedWithin(start.child, 60_000), `${how}: the start ends`);
+      assert.equal(start.child.exitCode, null, `${how}: with no exit code`);
+      assert.equal(start.child.signalCode, 'SIGTERM', `${how}: by SIGTERM`);
+      assert.equal(
+        told?.name,
+        how === 'abort' ? 'AbortError' : undefined,
+        `${how}: the caller is told as a child is`,
+      );
+      const engine = pidTheHelperWrote(start.files.pid);
+      assert.ok(
+        engine === undefined || (await answeredWithin(() => (alive(engine) ? undefined : true), 30_000)),
+        `${how}: its engine is gone`,
+      );
+    }
+  } finally {
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A start's output closes when its own engine ends, while a later engine still runs. An engine that
+ * inherited another start's pipe would hold that output open until the later engine ended.
+ */
+async function testAStartsOutputClosesWhileALaterEngineStillRuns(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pipe-inherit-'));
+  const first = collectedStart(root, 'first', process.execPath, lineThenExit(0, 500, 0));
+  let later: ReturnType<typeof collectedStart> | undefined;
+  try {
+    const closed = new Promise<void>((settle) => {
+      first.start.child.once('close', () => {
+        settle();
+      });
+    });
+    await delay(300);
+    later = collectedStart(root, 'later', process.execPath, lineThenExit(1, 12_000, 0));
+    const began = Date.now();
+    const settled = await Promise.race([closed.then(() => true), delay(10_000).then(() => false)]);
+    assert.ok(settled, 'the first start closes before the later engine has ended');
+    assert.equal(later.start.child.exitCode, null, 'while the later engine still runs');
+    assert.ok(Date.now() - began < 8000, `and promptly (${String(Date.now() - began)} ms)`);
+  } finally {
+    later?.start.stop();
+    if (later !== undefined) {
+      await exitedWithin(later.start.child, 60_000);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * An engine gdharness stops past its timeout ends by SIGTERM with no exit code, under either runtime,
+ * and the sentence says so. An engine that exits 1 by itself keeps its exit code 1 and no signal.
+ */
+async function testAStoppedEngineEndsBySigtermAndNotByExitCodeOne(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stopped-engine-'));
+  try {
+    for (const [runtimeName, interpreter] of [
+      ['Bun', process.execPath],
+      ['Node', 'node'],
+    ] as const) {
+      const ran = spawnSyncHidden(
+        interpreter,
+        [join(process.cwd(), 'test', 'support', 'stopped-engine.ts'), resolve('build')],
+        {
+          encoding: 'utf8',
+          timeout: 120_000,
+          env: {
+            ...process.env,
+            GODOT_ENGINE_SLOTS: join(root, 'slots'),
+            XDG_CACHE_HOME: join(root, 'cache'),
+          },
+        },
+      );
+      const said: unknown = JSON.parse(ran.stdout.trim().split('\n').pop() ?? 'null');
+      const stopped = get(said, 'stopped');
+      assert.equal(
+        get(stopped, 'exitCode'),
+        null,
+        `${runtimeName}: no exit code: ${ran.stdout}${ran.stderr}`,
+      );
+      assert.equal(get(stopped, 'exitSignal'), 'SIGTERM', `${runtimeName}: ended by SIGTERM`);
+      assert.match(
+        String(get(stopped, 'said')),
+        /^ended by SIGTERM, because it ran past its 1\.5 s timeout/u,
+        `${runtimeName}: the sentence names the signal`,
+      );
+      const exits = get(said, 'exits');
+      assert.equal(get(exits, 'exitCode'), 1, `${runtimeName}: an engine's own code 1 stays`);
+      assert.equal(get(exits, 'exitSignal'), null, `${runtimeName}: with no signal`);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A process that has run an engine through the helper ends on its own once the start is over, under
+ * Bun as under Node: the helper it keeps for the next start does not hold it open.
+ */
+async function testAProcessThatRanAnEngineEndsOnItsOwn(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const script = join(process.cwd(), 'test', 'support', 'run-engine-and-leave.ts');
+  const ran = spawnSyncHidden(process.execPath, [script], { encoding: 'utf8', timeout: 90_000 });
+  assert.equal(ran.error, undefined, `the process ended by itself: ${ran.error?.message ?? ''}`);
+  assert.match(ran.stdout, /"exitCode":0/u, `and the start reported its code: ${ran.stdout}${ran.stderr}`);
+}
+
+/**
+ * A helper that never answers is given up on after its limit: the start fails with that as its
+ * reason, the helper is ended, and the next start gets a new one. The limit is shortened for the test.
+ */
+async function testAHelperThatNeverAnswersFailsTheStartAndIsEnded(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-helper-'));
+  const silent = new CompiledHelper(
+    'silent helper',
+    'gdharness-silent',
+    'public static class Silent { public static void Main() { System.Threading.Thread.Sleep(600000); } }',
+    true,
+  );
+  const limit = process.env['GDHARNESS_HELPER_ANSWER_MS'];
+  try {
+    assert.equal(await silent.ensure(root), null, 'the stand-in compiles');
+    process.env['GDHARNESS_HELPER_ANSWER_MS'] = '1500';
+    const scratch = join(root, 'start');
+    mkdirSync(scratch);
+    const start = spawnOnDesktop(
+      { directory: root, scratch },
+      process.execPath,
+      ['-e', ''],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      silent.assembly(root),
+    );
+    const helper = start.child.pid;
+    assert.ok(await exitedWithin(start.child, 60_000), 'the start ends');
+    assert.match(helperFailure(start.files.error) ?? '', /gave no answer within 1500 ms/u, 'with the reason');
+    assert.ok(helper !== undefined, 'a helper served it');
+    assert.ok(
+      await answeredWithin(() => (alive(helper) ? undefined : true), 30_000),
+      'and the helper is ended',
+    );
+  } finally {
+    if (limit === undefined) {
+      delete process.env['GDHARNESS_HELPER_ANSWER_MS'];
+    } else {
+      process.env['GDHARNESS_HELPER_ANSWER_MS'] = limit;
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * The helper starts with no window and a console that has none, and opens none for any start it
+ * serves, a failed one included. Read from the system: the helper and everything it started that is
+ * still running own no visible window.
+ */
+async function testTheHelperOpensNoWindowForAnyStart(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper compiles');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-windows-'));
+  const running = collectedStart(root, 'running', process.execPath, lineThenExit(0, 600_000, 1), {
+    desktop: true,
+  });
+  try {
+    const refused = collectedStart(root, 'refused', join(root, 'missing.exe'), []);
+    assert.ok(await exitedWithin(refused.start.child, 60_000), 'a start that fails ends');
+    // The stand-in reports whether it has a console and whether that console has a window.
+    const reported = join(root, 'console.json');
+    const probed = collectedStart(root, 'probe', await consoleProbe(), [reported], { desktop: true });
+    assert.ok(await exitedWithin(probed.start.child, 60_000), 'the stand-in ends');
+    assert.deepEqual(
+      await answeredWithin(() => {
+        try {
+          return JSON.parse(readFileSync(reported, 'utf8')) as unknown;
+        } catch {
+          return undefined;
+        }
+      }, 60_000),
+      { console: true, window: false },
+      'an engine the helper serves has a console with no window',
+    );
+    const engine = await answeredWithin(() => pidTheHelperWrote(running.start.files.pid), 60_000);
+    const helper = running.start.child.pid;
+    assert.ok(engine !== undefined && helper !== undefined, 'the helper and an engine run');
+    const script = [
+      `$family = @(${String(helper)}, ${String(engine)})`,
+      `$family += (Get-CimInstance Win32_Process -Filter "ParentProcessId=${String(helper)}").ProcessId`,
+      '$shown = Get-Process -Id $family -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }',
+      '@($shown).Count',
+    ].join('; ');
+    const read = spawnSyncHidden('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.equal(
+      read.stdout.trim(),
+      '0',
+      `no window of the helper's own or its engine's: ${read.stdout}${read.stderr}`,
+    );
+  } finally {
+    running.start.stop();
+    await exitedWithin(running.start.child, 60_000);
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
  * Every engine the helper starts has a console that has no window, so a console program the engine
  * starts joins that console and opens no window of its own. A process with no console at all gives
  * each such child a new one, which Windows Terminal shows on the desktop in use. The stand-in
@@ -21224,7 +23979,7 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
         assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
       },
       'a kept start': async (file, scratch) => {
-        const start = spawnOnDesktop({ directory: root, scratch, outlivesStarter: true }, probe, [file], {
+        const start = spawnOnDesktop({ directory: root, scratch }, probe, [file], {
           stdio: ['ignore', 'ignore', 'ignore'],
         });
         assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends');
@@ -21246,6 +24001,7 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
       );
     }
   } finally {
+    await retireHelper();
     sweep(root);
   }
 }
@@ -21319,8 +24075,12 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
       spawnSyncHidden: (file) => Promise.resolve(spawnSyncHidden(probe, [file])),
     };
     const offered = Object.entries(await import('../src/spawn.js'))
-      // `unstartedChild` makes an object and starts nothing.
-      .filter(([name, value]) => typeof value === 'function' && name !== 'unstartedChild')
+      // `unstartedChild` makes an object and starts nothing, and `RelayedChild` is the class of a
+      // process another process started.
+      .filter(
+        ([name, value]) =>
+          typeof value === 'function' && name !== 'unstartedChild' && name !== 'RelayedChild',
+      )
       .map(([name]) => name)
       .toSorted();
     assert.deepEqual(
@@ -21656,6 +24416,153 @@ async function quitsAtOnceOnItsOwnDesktop(project: string, runtime: string): Pro
   );
 }
 
+/**
+ * A stand-in game in [param folder] that prints a line, then exits 3 once a file named `go` is there.
+ */
+function gameThatExitsThreeOnGo(folder: string): string[] {
+  return [
+    '-e',
+    [
+      "const go = require('node:path').join(process.argv.at(-1), 'go');",
+      "console.log('the hidden game started');",
+      "setInterval(() => { if (require('node:fs').existsSync(go)) process.exit(3); }, 100);",
+    ].join(' '),
+    '--',
+    folder,
+  ];
+}
+
+/** What a launch of [param spec] through the launcher and keeper the server uses answers. */
+function launchedThroughTheKeeper(folder: string, runtime: string, spec: object): unknown {
+  mkdirSync(folder, { recursive: true });
+  const answer = join(folder, 'answer.json');
+  const launcher = join(folder, 'launch.mjs');
+  writeFileSync(
+    launcher,
+    [
+      `import { writeFileSync } from 'node:fs';`,
+      `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+      `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+      `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+    ].join('\n'),
+  );
+  const ran = spawnSyncHidden(process.execPath, [launcher], {
+    encoding: 'utf8',
+    env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    timeout: 90_000,
+  });
+  return existsSync(answer)
+    ? JSON.parse(readFileSync(answer, 'utf8'))
+    : { noAnswer: `${String(ran.error ?? '')} ${ran.stdout} ${ran.stderr}` };
+}
+
+/** Whether [param file] holds [param line] within 30 seconds. */
+async function printedWithin(file: string, line: string): Promise<boolean> {
+  const printed = await answeredWithin(
+    () => (existsSync(file) && readFileSync(file, 'utf8').includes(line) ? true : undefined),
+    30_000,
+  );
+  return printed === true;
+}
+
+/**
+ * A run on a desktop of its own, held by its keeper from start to close: what the game prints reaches
+ * the transcript, the keeper answers a request for the run's debugger, and the run's note gains the
+ * game's own exit code once it has gone. The keeper starts the game through a helper of its own,
+ * which carries the game's output to the transcript and tells the keeper how the game ended.
+ *
+ * A launch with no run, as an editor's is, has its output carried to the file it names and its exit
+ * code written to its exit note. The game exits 3, whose low byte is that of the code Windows reads
+ * off a process still running (259). The helper outlives the game, so a code read off the helper
+ * rather than the game is 259. A launch the helper cannot start answers why, rather than waiting.
+ */
+async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('hidden keeper run regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-hidden-keeper-run-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  const transcript = join(scratch, 'run.log');
+  const desktop = (): string => `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`;
+  try {
+    const launched = launchedThroughTheKeeper(join(scratch, 'run'), runtime, {
+      command: process.execPath,
+      args: gameThatExitsThreeOnGo(scratch),
+      run: { transcript, startedAt: Date.now(), projectPath: scratch },
+      desktop: desktop(),
+    });
+    const pid = get(launched, 'pid');
+    assert.ok(
+      typeof pid === 'number',
+      `the launch should answer the game's pid: ${JSON.stringify(launched)}`,
+    );
+    assert.ok(
+      await printedWithin(transcript, 'the hidden game started'),
+      'what the game prints reaches the run transcript',
+    );
+    const note = runRecordPath(scratch, runtime);
+    const keeper = text(get(existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null, 'keeper'));
+    assert.ok(keeper.length > 0, 'the note names the keeper holding the run');
+    const asked = await askTheKeepersDebugger(keeper, { op: 'output' }, 10_000);
+    assert.ok(Array.isArray(get(asked, 'output')), `the keeper answers a request: ${JSON.stringify(asked)}`);
+    assert.ok(alive(pid), 'the game runs until it is told to go');
+    writeFileSync(join(scratch, 'go'), '');
+    let record: unknown = null;
+    for (let waited = 0; waited < 20_000 && get(record, 'endedAt') === undefined; waited += 200) {
+      await delay(200);
+      record = existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null;
+    }
+    assert.equal(get(record, 'exitCode'), 3, `the note gains the game's own code: ${JSON.stringify(record)}`);
+    assert.equal(alive(pid), false, 'the game has gone');
+    const after = await askTheKeeperToStop(keeper, 2_000);
+    assert.ok(
+      typeof after === 'object' && 'unreached' in after,
+      `and so has its keeper: ${JSON.stringify(after)}`,
+    );
+
+    const editor = join(scratch, 'editor');
+    const output = join(editor, 'output.log');
+    const exitNote = join(editor, 'exit');
+    const opened = launchedThroughTheKeeper(editor, runtime, {
+      command: process.execPath,
+      args: gameThatExitsThreeOnGo(editor),
+      output,
+      exitNote,
+      desktop: desktop(),
+    });
+    const editorPid = get(opened, 'pid');
+    assert.ok(typeof editorPid === 'number', `a launch with no run starts: ${JSON.stringify(opened)}`);
+    assert.ok(await printedWithin(output, 'the hidden game started'), 'its output reaches the file it names');
+    writeFileSync(join(editor, 'go'), '');
+    assert.ok(
+      await printedWithin(exitNote, `${String(editorPid)} `),
+      'and its exit is noted once it has gone',
+    );
+    assert.equal(readFileSync(exitNote, 'utf8'), `${String(editorPid)} 3`, "with the game's own code");
+
+    const refused = launchedThroughTheKeeper(join(scratch, 'refused'), runtime, {
+      command: join(scratch, 'no such engine.exe'),
+      args: [],
+      run: {
+        transcript: join(scratch, 'refused.log'),
+        startedAt: Date.now(),
+        projectPath: join(scratch, 'refused'),
+      },
+      desktop: desktop(),
+    });
+    assert.match(
+      text(get(refused, 'error')),
+      /could not be started on the .* desktop/,
+      `a start the helper cannot make answers why: ${JSON.stringify(refused)}`,
+    );
+  } finally {
+    await endEnginesUnder(scratch);
+    sweep(scratch);
+  }
+}
+
 /** What a run reads when the engine on the hidden desktop could not create a renderer, lines included. */
 const NO_RENDERER_VERDICT =
   /the windowed engine could not create a renderer on the hidden desktop.*Can't initialize an EGL display.*Failed to create ANGLE OpenGL window.*headless/s;
@@ -21685,6 +24592,7 @@ async function testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds(): Promise<
     assert.match(run.failure ?? '', NO_RENDERER_VERDICT, `the failure names the renderer: ${run.failure}`);
     assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it ends at once');
   } finally {
+    await retireHelper();
     sweep(scratch);
   }
 }
@@ -21898,6 +24806,7 @@ async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Prom
   } finally {
     start.stop();
     await exitedWithin(start.child, 60_000);
+    await retireHelper();
     sweep(scratch);
   }
 }
@@ -22148,6 +25057,7 @@ async function testAHelperWatchingNoBoxUsesNoProcessorTime(): Promise<void> {
   } finally {
     start.stop();
     await exitedWithin(start.child, 60_000);
+    await retireHelper();
     sweep(scratch);
   }
 }
@@ -23587,6 +26497,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     sweep(run.decoyProject);
     await run.first.stop().catch(() => undefined);
     await run.second?.stop();
+    await retireHelper();
     sweep(project);
     sweep(runtime);
   }
@@ -34868,6 +37779,10 @@ async function greetAsAStandInEditor(
   server: ServerProcess,
   bridgePort: number,
   project: string,
+  onInvoke: (editor: WebSocket, id: unknown) => void = (editor, id) => {
+    editor.send(JSON.stringify({ type: 'tool_result', id, success: false, error: 'a stand-in' }));
+  },
+  greeted: Readonly<Record<string, unknown>> = {},
 ): Promise<WebSocket> {
   const editor = new WebSocket(`ws://127.0.0.1:${bridgePort}/godot`);
   await new Promise<void>((settle, reject) => {
@@ -34879,12 +37794,10 @@ async function greetAsAStandInEditor(
   editor.on('message', (raw: Buffer) => {
     const message: unknown = JSON.parse(String(raw));
     if (isRecord(message) && message['type'] === 'tool_invoke') {
-      editor.send(
-        JSON.stringify({ type: 'tool_result', id: message['id'], success: false, error: 'a stand-in' }),
-      );
+      onInvoke(editor, message['id']);
     }
   });
-  editor.send(JSON.stringify(greeting(project)));
+  editor.send(JSON.stringify(greeting(project, greeted)));
   let status: unknown = null;
   for (let waited = 0; waited < 10_000; waited += 100) {
     status = parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
@@ -45583,11 +48496,15 @@ async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> 
         'config_version=5\n\n[application]\nconfig/name="Denied"\nrun/main_scene="res://main.tscn"\n',
       'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
     });
+    // A server keeps its helper running, so one that was started before the program was made
+    // unrunnable still serves. The refusal is met by the servers started after it.
     await withStdioServer(
       async (call) => {
-        const check = async (): Promise<string> =>
-          await call('editor_run', { projectPath: project, op: 'check', frames: 10 }, ENGINE_CALL_TIMEOUT_MS);
-        const first = await check();
+        const first = await call(
+          'editor_run',
+          { projectPath: project, op: 'check', frames: 10 },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
         assert.match(first, /"booted": true/u, `the first start runs, and compiles the helper: ${first}`);
         const program = helper();
         assert.ok(
@@ -45598,6 +48515,13 @@ async function testAHelperThatCannotBeRunLeavesNoScratchFolder(): Promise<void> 
           encoding: 'utf8',
         });
         assert.equal(acl.status, 0, `the helper is made unrunnable: ${acl.stdout}${acl.stderr}`);
+      },
+      { GODOT_PATH: engine, TEMP: temp, TMP: temp },
+    );
+    await withStdioServer(
+      async (call) => {
+        const check = async (): Promise<string> =>
+          await call('editor_run', { projectPath: project, op: 'check', frames: 10 }, ENGINE_CALL_TIMEOUT_MS);
         // A system that refuses to run a program, as a policy allowing only some would, is no
         // defect of the server's: the start failed, and the answer says so and why.
         const refused = await check();
@@ -118421,6 +121345,22 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProcessTurnedAwayRaisesNoConnection,
   testAFrameFromASocketBeingClosedLeavesTheLiveEditor,
   testAReplyOfTheWrongShapeIsRefusedAtOnce,
+  testAWaitingRequestSettlesOnce,
+  testEveryEndOfAnEditorCallIsSaid,
+  testEveryEndOfALanguageServerRequestIsSaid,
+  testEveryEndOfADebugAdapterRequestIsSaid,
+  testARequestBelongsToTheConnectionItWentOutOn,
+  testTwoDebugAdapterAsksAtOnceShareOneConnection,
+  testALostConnectionIsNotSaidToBeTheEditorsAnswer,
+  testTwoCallsOverAPortMoveEndWithOneLiveClient,
+  testALanguageServerRequestLetGoEndsAsItsServerDoes,
+  testACallInFlightOverAPortMoveEndsAsTheOldServerDoes,
+  testACallInFlightWhenTheEditorLeavesEndsAsItsServerDoes,
+  testADebugAdapterDialAbandonedLeavesTheNextCallAnswered,
+  testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept,
+  testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo,
+  testACallDuringADebugAdapterAbandonKeepsItsOwnConnection,
+  testEveryRequestWaitsInTheOneTable,
   testTheStatusCountsTheResourcesWithCallsQueued,
   testACommandIsTakenWhenTheThreadItWentToAnswers,
   testATurnedAwayEditorLeavesTheServerUp,
@@ -118490,6 +121430,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
+  testAHiddenRunIsHeldByItsKeeperFromStartToClose,
   testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds,
   testATestEngineThatMakesNoRendererEnds,
   testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
@@ -118511,16 +121452,45 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
   testADesktopStartIsOneCall,
+  testAHelperThatNeverRanHasEnded,
+  testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine,
+  testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine,
+  testARunOnTheHiddenDesktopIsStoppedAfterItsHelperDied,
+  testAStopTheDeadHelperNeverActedOnStillEndsTheRun,
+  testAStartAfterItsHelperDiedIsStillStopped,
+  testARunOnTheDesktopInUseIsStoppedAfterItsHelperDied,
+  testATimedOutRunWhoseHelperDiedEndsWithinTheStopWait,
+  testARunNoHelperCanTakeOverIsStillStopped,
+  testAProcessThatOnlySharesTheEnginesPidIsNeverEnded,
+  testAStopFileWithALongPathStillStopsTheRun,
+  testTheHelperWritesItsLaneAndErrorFilesThroughLongPaths,
+  testAnExitFileThatCannotBeWrittenStillLeavesTheEnginesCode,
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,
+  testAKeptStartOutlivesItsKilledHelper,
   testAServersBootCheckEngineRunsInANamedJobAndEndsWithItsCut,
   testAHelperFailureIsAnsweredAtOnceWithItsReasonByABootCheck,
   testATestRunsEngineThatCannotBeStartedIsAnsweredAtOnce,
   testAHelperThatCannotBeRunLeavesNoScratchFolder,
+  testStartsMadeAtOnceWaitOnNoOthersEngine,
+  testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne,
+  testAHelperKilledBeforeItSaysItMadeTheEngineLeavesNone,
+  testAKilledStarterTakesItsHelperAndItsEnginesButNotAKeptOne,
+  testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine,
+  testAnEngineOutlivingAHelperThatCannotBeRunStillEndsItsStart,
+  testAnUnreadOutputStreamStillCloses,
+  testAStartEndedBeforeTheHelperAnswersEndsBySigterm,
+  testAnEnginesWholeExitIsToldWhileTheHelperServesOthers,
+  testTheHelperOpensNoWindowForAnyStart,
+  testAnEngineThatOutlivesItsHelperStillEndsWithItsWholeCode,
+  testAHelperThatNeverAnswersFailsTheStartAndIsEnded,
+  testAProcessThatRanAnEngineEndsOnItsOwn,
+  testAStoppedEngineEndsBySigtermAndNotByExitCodeOne,
+  testAStartsOutputClosesWhileALaterEngineStillRuns,
   testAnEngineStartedInsideAParentJobStillGetsItsJob,
   testAnEngineStartedUnderAUiLimitedParentJobStillRuns,
   testEveryEngineTheHelperStartsHasAConsoleWithNoWindow,

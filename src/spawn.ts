@@ -38,6 +38,12 @@ export type {
   SpawnSyncReturns,
 } from 'node:child_process';
 
+/**
+ * A process some other process started, which its starter reports on: a start through the desktop
+ * helper, whose events and streams `desktop-process.ts` fills in.
+ */
+export class RelayedChild extends ChildProcess {}
+
 /** A child that was never started: no pid and no streams, for the answer to a start that could not be made. */
 export function unstartedChild(): ChildProcess {
   return new ChildProcess();

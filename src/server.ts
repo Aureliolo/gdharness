@@ -121,6 +121,7 @@ import {
   isBoxVerdict,
   spawnOnDesktop,
 } from './desktop.js';
+import { HelpedChild } from './desktop-process.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { howTheEditorEnded, readEditorExit } from './editor-end.js';
@@ -193,6 +194,7 @@ import {
   anEditorIsStillComing,
   BridgeTimeout,
   EditorClosing,
+  EditorDisconnected,
   type GodotBridge,
   getDefaultBridge,
   theEditorHasComeBack,
@@ -492,7 +494,7 @@ import {
 } from './tool-definitions.js';
 import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
-import { holdExit } from './whole-exit.js';
+import { holdChildExit } from './whole-exit.js';
 import { inTurnFor } from './write-turns.js';
 
 /**
@@ -1291,6 +1293,19 @@ async function untilGone(pids: readonly number[], withinMs = stopWaitMs()): Prom
     await delay(50);
   }
   return gone();
+}
+
+/**
+ * Waits until the engine of [param run], which was stopped, has gone. A signal is not an exit: the
+ * engine still holds its log in the user data directory while it goes, and removing that directory
+ * would find it there. Through the desktop helper the run's pid can be the helper's, which serves
+ * every start and outlives this one, so the pid waited on is the engine's that the helper reported.
+ */
+export async function untilStoppedEngineGone(run: Pick<SpawnedGame, 'process' | 'pid'>): Promise<void> {
+  const engine = run.process instanceof HelpedChild ? run.process.engine : (run.pid ?? undefined);
+  if (engine !== undefined) {
+    await untilGone([engine]);
+  }
 }
 
 /**
@@ -10348,10 +10363,8 @@ class GodotServer {
       whenEnded(run, ended);
     });
     clearInterval(reporting);
-    // A signal is not an exit: the engine still holds its log in the user data directory while it
-    // goes, and the removal below would find it there.
-    if ((timedOut || stopped.for !== null) && run.process.pid !== undefined) {
-      await untilGone([run.process.pid]);
+    if (timedOut || stopped.for !== null) {
+      await untilStoppedEngineGone(run);
     }
     await run.settled;
     await keeping;
@@ -12066,9 +12079,12 @@ class GodotServer {
   /** The client for the language server of the editor this server follows, on the port it serves. */
   private async lsp(): Promise<GodotLSPClient> {
     const port = this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT);
-    if (this.lspClient !== null && this.lspClient.port !== port) {
-      await this.lspClient.disconnect();
+    const moved = this.lspClient;
+    if (moved !== null && moved.port !== port) {
+      // Let go before the wait, so a call arriving during it builds on the client already made
+      // for the new port instead of finding the old one and tearing the new one down.
       this.lspClient = null;
+      await moved.disconnect();
     }
     this.lspClient ??= new GodotLSPClient(port, undefined, undefined, () => {
       const status = this.godotBridge.getStatus();
@@ -15565,7 +15581,7 @@ class GodotServer {
           })
         : helped.child;
     belowNormal(child);
-    const whole = holdExit(child.pid);
+    const whole = holdChildExit(child);
     const stop = (): void => {
       if (helped === null) {
         child.kill();
@@ -15580,7 +15596,7 @@ class GodotServer {
       const end = (): void => {
         if (child.exitCode === null && child.signalCode === null) {
           this.logDebug(
-            `The call waiting on pid ${child.pid ?? 'unknown'} was cancelled, so it is being ended.`,
+            `The call waiting on pid ${(helped === null ? child.pid : helped.pid()) ?? 'unknown'} was cancelled, so it is being ended.`,
           );
           stop();
         }
@@ -21123,6 +21139,12 @@ class GodotServer {
       return this.createErrorResponse(error.message, ['editor_status says which addon the editor holds']);
     }
     const message = errorMessage(error);
+    if (error instanceof EditorDisconnected) {
+      return this.createErrorResponse(
+        `The connection to the editor was lost during ${callName}: ${message}`,
+        ['editor_status says whether the editor is connected'],
+      );
+    }
     // The bridge sends nothing to another release's addon, and this server's has every command, so
     // one lacking a command did not load all of itself: a script of it that fails to compile in this
     // engine leaves the commands it holds unregistered.
