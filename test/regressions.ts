@@ -77264,10 +77264,12 @@ async function checksTheCommandWaitsBehindTheSlotHeld(fixture: MachineSlotFixtur
     });
   });
   // Looked for rather than waited out: on a machine busy with other engines the command took more
-  // than three seconds to start and reach its wait.
+  // than three seconds to start and reach its wait. Looked for by its final name, since the mark is
+  // staged under a `.writing` name first and a count of two stopped on that.
+  const mark = `${WAITING_FOLDER}/${String(classes.pid)}-1.json`;
   for (
     let looked = 0;
-    looked < 600 && classes.exitCode === null && leftInSlots(slots).length < 2;
+    looked < 600 && classes.exitCode === null && !leftInSlots(slots).includes(mark);
     looked += 1
   ) {
     await delay(100);
@@ -77279,7 +77281,7 @@ async function checksTheCommandWaitsBehindTheSlotHeld(fixture: MachineSlotFixtur
       // Without the note beside the mark that says the command still looks.
       leftInSlots(slots).filter((name) => !name.endsWith('.seen')),
     ],
-    [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
+    [null, process.pid, ['0.lock', mark]],
     `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
   );
   // From the command's own start of its wait, which comes after it has found its engine.
