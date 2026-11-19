@@ -337,8 +337,8 @@ export function keptSlotsOf(count: number): number {
 
 /**
  * How long a one-off take, neither a gate's nor a game's, waits before it stands with gate work in
- * the line ({@link SlotLine}) while no store-class taker waits. Its wait changes its place there,
- * never which slots it may take.
+ * the line ({@link SlotLine}). A store-class one counts from it always, any other only while no
+ * store-class taker waits. Its wait changes its place there, never which slots it may take.
  */
 const ONE_OFF_AGED_MS = 120_000;
 
@@ -577,7 +577,8 @@ export class SlotLine {
   /**
    * The takers of [param waiters] ahead of this one, the first first, in three groups. The first
    * holds every taker that is no one-off and the store-class one-offs that have waited
-   * {@link ONE_OFF_AGED_MS}. The second holds the younger store-class one-offs. The third holds every
+   * {@link ONE_OFF_AGED_MS}, games excepted. The second holds the other store-class one-offs. The
+   * third holds every
    * other one-off younger than {@link ONE_OFF_HELD_MS} while a store-class taker waits, since a
    * store-stage game's engine calls go before other side work, and younger than
    * {@link ONE_OFF_AGED_MS} while none waits. Past that, an ordinary one-off stands with gate work, so
@@ -595,7 +596,7 @@ export class SlotLine {
         return 0;
       }
       if (store) {
-        return waited(since, ONE_OFF_AGED_MS) ? 0 : 1;
+        return waited(since, ONE_OFF_AGED_MS) && !game ? 0 : 1;
       }
       if (!waited(since, storeWaits ? ONE_OFF_HELD_MS : ONE_OFF_AGED_MS)) {
         return 2;
@@ -1681,9 +1682,11 @@ export class EngineSlots {
         this.passedOver.delete(mark);
       }
     }
-    const ahead = placed
-      .ahead(waiting)
-      .filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS);
+    // A waiter passed over leaves the line before the order is read, so a store-class one holds no
+    // other one-off back, as the other side of the scheme reads it.
+    const ahead = placed.ahead(
+      waiting.filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS),
+    );
     const claims = await this.claimedAhead(ahead, queued);
     for (const mark of claims.values()) {
       if (!this.passedOver.has(mark)) {

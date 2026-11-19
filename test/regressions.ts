@@ -74868,9 +74868,10 @@ function lineWaiter(
 }
 
 /**
- * A one-off of the store class goes before every other one-off of any age, and before gate work only
- * once it has waited 120 s. With no store-class taker waiting, an ordinary one-off past 120 s stands
- * with gate work, and a game past 120 s goes after gate work and before young one-offs.
+ * A one-off of the store class goes before every other one-off younger than 600 s, and stands with
+ * gate work once it has waited 120 s, unless it is a game. With no store-class taker waiting, an
+ * ordinary one-off past 120 s stands with gate work, and a game past 120 s goes after gate work and
+ * before young one-offs.
  */
 function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
   const now = Date.now();
@@ -74985,6 +74986,75 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
     ['late-store.json', 'aged-game.json'],
     'a game past 120 s goes after a store-class waiter that came later',
   );
+  const storeGame = lineWaiter('store-game.json', 'other', now, 3_600_000, { game: true, store: true });
+  assert.deepEqual(
+    marksOf(new SlotLine('gate', false, () => now), [storeGame]),
+    [],
+    'a store-class game waiting an hour never stands with later gate work',
+  );
+  let at = now - 3_600_000;
+  const storeGameLine = new SlotLine('other', true, () => at, true);
+  at = now;
+  assert.deepEqual(
+    marksOf(storeGameLine, [lineWaiter('gate.json', 'gate', now, 10_000)]),
+    ['gate.json'],
+    'and sees that gate work ahead of it',
+  );
+}
+
+/**
+ * A store-class waiter that a take has passed over leaves the line before the order is read. It
+ * holds no ordinary one-off back, as the games' tools read the same marks.
+ */
+async function testAStoreWaiterPassedOverHoldsNoOtherOneOffBack(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-passed-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  const realNow = Date.now;
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    const now = Date.now();
+    // Past 120 s it stands with gate work and goes first, so the first look leaves it the one slot.
+    const store = join(marks, 's-200.json');
+    writeFileSync(
+      store,
+      JSON.stringify({ ...me, taker: 'other', class: 'store', since: (now - 200_000) / 1000 }),
+    );
+    // Its taker last looked a minute ago, so once passed over it is gone from the line.
+    const storeSeen = join(marks, 's-200.seen');
+    writeFileSync(storeSeen, '');
+    utimesSync(storeSeen, (now - 60_000) / 1000, (now - 60_000) / 1000);
+    writeFileSync(
+      join(marks, 'g-10.json'),
+      JSON.stringify({ ...me, taker: 'gate', since: (now - 10_000) / 1000 }),
+    );
+    const gate = join(marks, 'g-10.seen');
+    writeFileSync(gate, '');
+    const slots = new EngineSlots(directory, 1, me, undefined, () => 'other');
+    let offset = -300_000;
+    const line = new SlotLine('other', false, () => Date.now() + offset);
+    offset = 0;
+    assert.equal(
+      await slots.takeFree(false, line),
+      null,
+      'a one-off of 300 s leaves the slot to the store waiter',
+    );
+    assert.deepEqual(slots.drawn.left, [0], 'which is ahead of it');
+    // Counted from after the first look, which passed the store waiter over as it ended.
+    const later = Date.now() + SLOT_YIELD_MS + 100;
+    // The gate's taker is still looking.
+    utimesSync(gate, later / 1000, later / 1000);
+    Date.now = () => later;
+    assert.equal(
+      await slots.takeFree(false, line),
+      join(directory, '0.lock'),
+      `then, with the store waiter passed over, it stands with the gate work it began before: drew ${JSON.stringify(slots.drawn)}`,
+    );
+    slots.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /** What a waiting mark of a take says about its class, and what a reader makes of the marks. */
@@ -75433,26 +75503,25 @@ async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Prom
       ['a-earlier.json'],
       'a mark begun a fraction of a millisecond later is behind it, whatever its name, and an earlier one ahead',
     );
-    // The 120 s age reads the exact seconds too: a mark half a millisecond short of it is young
-    // and stands behind a store-class take, and one half a millisecond past it is ahead of it.
+    // Both ages read the exact seconds too. A mark half a millisecond short of one is young and
+    // stands behind the looker, and one half a millisecond past it is ahead of it.
     rmSync(join(marks, 'a-later.json'));
     rmSync(join(marks, 'a-earlier.json'));
+    const atAge = (line: SlotLine, ms: number): string[] => {
+      writeFileSync(
+        join(marks, 'short.json'),
+        JSON.stringify({ ...me, taker: 'other', since: (began - ms) / 1000 }),
+      );
+      return line.ahead(slotWaiters(directory)).map((one) => one.mark);
+    };
+    const gate = new SlotLine('gate', false, () => began);
+    gate.mark = 'z-gate.json';
+    assert.deepEqual(atAge(gate, 119_999.5), [], 'half a millisecond short of 120 s is young');
+    assert.deepEqual(atAge(gate, 120_000.5), ['short.json'], 'and half a millisecond past it is aged');
     const store = new SlotLine('other', false, () => began, true);
     store.mark = 'z-store.json';
-    writeFileSync(
-      join(marks, 'short.json'),
-      JSON.stringify({ ...me, taker: 'other', since: (began - 119_999.5) / 1000 }),
-    );
-    assert.deepEqual(store.ahead(slotWaiters(directory)), [], 'half a millisecond short of 120 s is young');
-    writeFileSync(
-      join(marks, 'short.json'),
-      JSON.stringify({ ...me, taker: 'other', since: (began - 120_000.5) / 1000 }),
-    );
-    assert.deepEqual(
-      store.ahead(slotWaiters(directory)).map((one) => one.mark),
-      ['short.json'],
-      'and half a millisecond past it is aged',
-    );
+    assert.deepEqual(atAge(store, 599_999.5), [], 'half a millisecond short of 600 s is held by store work');
+    assert.deepEqual(atAge(store, 600_000.5), ['short.json'], 'and half a millisecond past it is let go');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -121747,6 +121816,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
   testAStoreClassTakerGoesBeforeEarlierYoungSideWork,
+  testAStoreWaiterPassedOverHoldsNoOtherOneOffBack,
   testAWaitingMarkNamesTheStoreClass,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
   testATakeForAListedRepositoryMarksItsWaitWithTheStoreClass,

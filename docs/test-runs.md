@@ -896,12 +896,15 @@ Take in the order you began to wait. At each look, read every live mark but your
 ones.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited two minutes or more. The second is `other` takers of the store class (below) and
-  games that have waited two minutes or more. The third is every other `other` taker. The wait and
-  the class change only the place in line, never which slots a taker may take.
+  and have waited long enough. A store-class taker waits two minutes. Any other waits two minutes
+  while no store-class taker is in line, and ten minutes while one is. The second group is the
+  other store-class takers and games that have waited as long. The third is every other `other`
+  taker. The wait and the class change only the place in line, never which slots a taker may take.
+- A store-class taker is in line when you are one, or when a live store-class mark you have not
+  stopped leaving slots to is (below).
 - Each group is ahead of the next. Within each group, those whose `since` is earlier are ahead of
-  you, the earliest first. A store-class taker passes another `other` taker only in that taker's
-  first two minutes, so a stream of them delays it by two minutes at most.
+  you, the earliest first. A stream of store-class takers delays another `other` taker by ten
+  minutes at most.
 - A mark may hold `class` `store`, written by an `other` taker that has the class and by no other.
   A mark with no class, or any other, has none.
 - A taker has the class where `<directory>/store.json` lists the repository of the Godot project
