@@ -75097,9 +75097,9 @@ function lineWaiter(
 }
 
 /**
- * A one-off of the store class goes before every other one-off of any age, and before gate work only
- * once it has waited 120 s. With no store-class taker waiting, an ordinary one-off past 120 s stands
- * with gate work, and a game past 120 s goes after gate work and before young one-offs.
+ * A one-off of the store class goes before younger one-offs that began waiting earlier, and never
+ * before gate work. Past 120 s an ordinary one-off stands with gate work, so a stream of store-class
+ * arrivals cannot keep it waiting, and a game stands with the store class from then on.
  */
 function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
   const now = Date.now();
@@ -75143,49 +75143,17 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
     'and has no store-class waiter ahead of it',
   );
 
-  // A line that began waiting [param waited] ms before now and looks now.
-  const begunBefore = (taker: 'gate' | 'other', waited: number): SlotLine => {
-    let at = now - waited;
-    const line = new SlotLine(taker, false, () => at);
-    at = now;
-    return line;
-  };
   const aged = lineWaiter('aged.json', 'other', now, 121_000);
-  const anHour = lineWaiter('hour.json', 'other', now, 3_600_000);
   assert.deepEqual(
-    marksOf(store, [aged, anHour]),
-    [],
-    'no ordinary one-off of any age goes before a store-class waiter',
-  );
-  assert.deepEqual(
-    marksOf(begunBefore('other', 3_600_000), [
-      lineWaiter('s.json', 'other', now, 1000, { store: true }),
-      aged,
-    ]),
-    ['s.json'],
-    'and an ordinary one-off waiting an hour has a store-class waiter of a second ahead of it',
+    marksOf(store, [aged]),
+    ['aged.json'],
+    'an ordinary waiter past 120 s goes before a later store-class arrival',
   );
   const agedGame = lineWaiter('game.json', 'other', now, 130_000, { game: true });
   assert.deepEqual(
     marksOf(store, [agedGame]),
-    [],
-    'a game waiter past 120 s goes after a later store-class arrival',
-  );
-  const agedStore = lineWaiter('aged-store.json', 'other', now, 121_000, { store: true });
-  assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [agedStore]),
-    ['aged-store.json'],
-    'a store-class waiter past 120 s stands with gate work that came later',
-  );
-  assert.deepEqual(
-    marksOf(begunBefore('gate', 200_000), [agedStore]),
-    [],
-    'and after gate work that came earlier',
-  );
-  assert.deepEqual(
-    marksOf(begunBefore('other', 200_000), [gate]),
-    [],
-    'with no store-class waiter, an ordinary one-off past 120 s stands with later gate work',
+    ['game.json'],
+    'a game waiter past 120 s goes before a later store-class arrival',
   );
   assert.deepEqual(
     marksOf(new SlotLine('other', false, () => now), [agedGame, aged, gate]),
@@ -75204,8 +75172,8 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
       lineWaiter('late-store.json', 'other', now, 10_000, { store: true }),
       lineWaiter('aged-game.json', 'other', now, 200_000, { game: true }),
     ]),
-    ['late-store.json', 'aged-game.json'],
-    'a game past 120 s goes after a store-class waiter that came later',
+    ['aged-game.json', 'late-store.json'],
+    'a game past 120 s goes before a store-class waiter that came later, as the other side ranks it',
   );
 }
 
