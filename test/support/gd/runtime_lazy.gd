@@ -17,6 +17,14 @@ const AT_START: PackedStringArray = [
 var node: Runtime
 var failures: Array[String] = []
 var watch: LoadsBesideAThread = LoadsBesideAThread.new()
+## What the checks watch the loading thread compile, read once a frame by [method _next_frame]: the
+## modules not compiled at the first frame, less those a check compiles itself.
+var waiting: PackedStringArray = []
+var seen: Dictionary = {}
+var frames: int = 0
+var timeline: Array[String] = []
+var cached_before: PackedStringArray = []
+var threaded_before: String = ""
 
 
 func _init() -> void:
@@ -81,9 +89,7 @@ func _compiling_usec(file: String) -> int:
 	return Time.get_ticks_usec() - from
 
 
-func _check_every_module_was_seen(
-	waiting: PackedStringArray, seen: Dictionary, frames: int, timeline: Array[String]
-) -> void:
+func _check_every_module_was_seen() -> void:
 	if not _every_module_loaded():
 		failures.append("a served game compiles every module: %s" % ", ".join(_loaded()))
 	for file: String in waiting:
@@ -96,7 +102,43 @@ func _check_every_module_was_seen(
 			)
 
 
+## Waits one frame. The thread runs beside this code, so the cache is read once a frame and each
+## reading is compared with the last. Two readings would let a module become ready between them.
+func _next_frame() -> void:
+	if not threaded_before.is_empty():
+		var counted: int = seen.get(threaded_before, 0)
+		seen[threaded_before] = counted + 1
+	await process_frame
+	frames += 1
+	var cached_after: PackedStringArray = _loaded()
+	var threaded_after: String = _on_a_thread()
+	# A module another one preloads compiles inside that one's load, on the same thread. The
+	# runtime may ask for that one after this check in the same frame, so either end counts.
+	for file: String in waiting:
+		if not cached_before.has(file) and cached_after.has(file):
+			timeline.append(
+				"frame %d: %s ready, %s to %s" % [frames, file, threaded_before, threaded_after]
+			)
+			if not threaded_before.is_empty() or not threaded_after.is_empty():
+				var pulled_in: int = seen.get(file, 0)
+				seen[file] = pulled_in + 1
+	cached_before = cached_after
+	threaded_before = threaded_after
+
+
+## A check compiles [param file] itself, so no thread is left to be seen compiling it.
+func _compiled_by_the_check(file: String) -> void:
+	var at: int = waiting.find(file)
+	if at >= 0:
+		waiting.remove_at(at)
+
+
 func _run() -> void:
+	for file: String in Runtime.MODULES:
+		if not ResourceLoader.has_cached(Runtime.ADDON_DIR + file):
+			var _added: bool = waiting.push_back(file)
+	cached_before = _loaded()
+	threaded_before = _on_a_thread()
 	await _check_a_module_asked_for_beside_a_loading_thread()
 	await _check_a_compiled_module_asked_for_beside_a_loading_thread()
 	await _check_the_last_module_asked_for_early()
@@ -112,18 +154,18 @@ func _in_progress(path: String) -> bool:
 
 func _check_no_load_beside_a_thread() -> void:
 	if not watch.seen.is_empty():
-		var seen: String = "; ".join(watch.seen)
-		failures.append("a module was compiled while a loading thread compiled another: %s" % seen)
+		var beside: String = "; ".join(watch.seen)
+		failures.append("a module was compiled beside a loading thread's compile: %s" % beside)
 		watch.seen.clear()
 
 
 ## A module asked for while the loading thread compiles another is compiled only once the thread's
 ## module is taken, so the loader has one caller at a time.
 func _check_a_module_asked_for_beside_a_loading_thread() -> void:
-	await process_frame
+	await _next_frame()
 	var until: int = Time.get_ticks_msec() + 20000
 	while not _in_progress(node._in_flight) and Time.get_ticks_msec() < until:
-		await process_frame
+		await _next_frame()
 	var busy: String = node._in_flight
 	var target: String = ""
 	# Modules built with the values module would take the loading thread's module for it when it is
@@ -136,6 +178,7 @@ func _check_a_module_asked_for_beside_a_loading_thread() -> void:
 	if busy.is_empty() or target.is_empty():
 		failures.append("a module was compiling and another was waiting: %s, %s" % [busy, target])
 		return
+	_compiled_by_the_check(target)
 	var _made: Object = node._module(target)
 	if not node._modules.has(target):
 		failures.append("%s is loaded when asked for beside a loading thread" % target)
@@ -148,11 +191,11 @@ func _check_a_module_asked_for_beside_a_loading_thread() -> void:
 func _check_a_compiled_module_asked_for_beside_a_loading_thread() -> void:
 	# Built at their own command by the checks that follow.
 	var left_to_them: PackedStringArray = [Runtime.VALUES, Runtime.QUERIES, Runtime.ACCESSIBILITY]
-	var cached_before: PackedStringArray = _loaded()
+	var cached_earlier: PackedStringArray = _loaded()
 	var busy_before: String = node._in_flight
 	var until: int = Time.get_ticks_msec() + 20000
 	while Time.get_ticks_msec() < until:
-		await process_frame
+		await _next_frame()
 		var busy: String = node._in_flight
 		if busy != busy_before and _in_progress(busy):
 			for file: String in Runtime.MODULES:
@@ -161,7 +204,7 @@ func _check_a_compiled_module_asked_for_beside_a_loading_thread() -> void:
 					path == busy
 					or left_to_them.has(file)
 					or node._modules.has(file)
-					or not cached_before.has(file)
+					or not cached_earlier.has(file)
 				):
 					continue
 				var _made: Object = node._module(file)
@@ -173,7 +216,7 @@ func _check_a_compiled_module_asked_for_beside_a_loading_thread() -> void:
 						]
 					)
 				return
-		cached_before = _loaded()
+		cached_earlier = _loaded()
 		busy_before = busy
 	failures.append("a module was compiled already while the loading thread compiled another")
 
@@ -187,17 +230,18 @@ func _check_the_last_module_asked_for_early() -> void:
 	# The last module the thread compiles, asked for before it has: finished in this frame, which
 	# the frame time leaves out, and the frame after it is timed as usual.
 	# Two frames first, so the runtime is timing frames and there is a frame to leave out.
-	await process_frame
-	await process_frame
+	await _next_frame()
+	await _next_frame()
 	if ResourceLoader.has_cached(Runtime.ADDON_DIR + Runtime.ACCESSIBILITY):
 		failures.append("the last module is still compiling two frames in")
 	var timed_before: int = node._frames.usec.size()
+	_compiled_by_the_check(Runtime.ACCESSIBILITY)
 	var _refused: Dictionary = await node._execute_command("get_accessibility", {})
 	if not node._modules.has(Runtime.ACCESSIBILITY):
 		failures.append("get_accessibility loads its module in its own frame")
-	await process_frame
+	await _next_frame()
 	var timed_over: int = node._frames.usec.size()
-	await process_frame
+	await _next_frame()
 	var timed_after: int = node._frames.usec.size()
 	if timed_over != timed_before or timed_after != timed_before + 1:
 		failures.append(
@@ -212,43 +256,15 @@ func _check_the_modules_compile_beside_frames() -> void:
 	# The rest come over the frames that follow, each compiling on a thread while the frames go on.
 	# Seen from here, which runs on the main thread: a module compiled in a frame is never caught
 	# part done. Frame times cannot tell it, since a macOS runner's idle frames reached 67 ms.
-	var waiting: PackedStringArray = []
-	for file: String in Runtime.MODULES:
-		if not ResourceLoader.has_cached(Runtime.ADDON_DIR + file):
-			var _added: bool = waiting.push_back(file)
-	var seen: Dictionary = {}
-	var frames: int = 0
 	var until: int = Time.get_ticks_msec() + 20000
-	var timeline: Array[String] = []
-	# The thread runs beside this code, so the cache is read once a frame and each frame's reading
-	# is compared with the last one. Two readings would let a module become ready between them.
-	var cached_before: PackedStringArray = _loaded()
-	var threaded_before: String = _on_a_thread()
+	var frames_from: int = frames
 	while (
 		not waiting.is_empty()
 		and Array(waiting).any(func(file: String) -> bool: return not cached_before.has(file))
 		and Time.get_ticks_msec() < until
 	):
-		if not threaded_before.is_empty():
-			var counted: int = seen.get(threaded_before, 0)
-			seen[threaded_before] = counted + 1
-		await process_frame
-		frames += 1
-		var cached_after: PackedStringArray = _loaded()
-		var threaded_after: String = _on_a_thread()
-		# A module another one preloads compiles inside that one's load, on the same thread. The
-		# runtime may ask for that one after this check in the same frame, so either end counts.
-		for file: String in waiting:
-			if not cached_before.has(file) and cached_after.has(file):
-				timeline.append(
-					"frame %d: %s ready, %s to %s" % [frames, file, threaded_before, threaded_after]
-				)
-				if not threaded_before.is_empty() or not threaded_after.is_empty():
-					var pulled_in: int = seen.get(file, 0)
-					seen[file] = pulled_in + 1
-		cached_before = cached_after
-		threaded_before = threaded_after
-	_check_every_module_was_seen(waiting, seen, frames, timeline)
+		await _next_frame()
+	_check_every_module_was_seen()
 
 	# A module's first command, once the thread has it, holds the frame for no compile.
 	var held_from: int = Time.get_ticks_usec()
@@ -264,7 +280,7 @@ func _check_the_modules_compile_beside_frames() -> void:
 		)
 	var readings: Dictionary = metrics.get("data", {})
 	var timed: int = readings.get("frames_timed", 0)
-	if timed < mini(frames, Frames.FRAMES_TIMED):
+	if timed < mini(frames - frames_from, Frames.FRAMES_TIMED):
 		failures.append(
 			"the first get_metrics covers the frames before it: %s" % JSON.stringify(metrics)
 		)
@@ -302,30 +318,35 @@ func _check_the_modules_compile_beside_frames() -> void:
 	quit(1)
 
 
-## Records each module the runtime compiles on the main thread while its loading thread still
-## compiles one, since two loads at once have deadlocked Godot's loader. A loader first in line is
-## asked about every load as it starts, and a cache hit starts none.
+## Records each runtime script loaded on one thread while a module's threaded load runs on another,
+## since two loads at once have deadlocked Godot's loader. A loader first in line is asked about
+## every load as it starts, on the thread that runs it, and a cache hit starts none. A module's
+## own preloads compile inside its load on its thread, so they are not beside it. A load can run on
+## the main thread when it waits for a module, and that is the module's one load.
 class LoadsBesideAThread:
 	extends ResourceFormatLoader
 
 	var seen: Array[String] = []
+	## The thread that last started a load of each runtime script.
+	var _threads: Dictionary = {}
+	var _lock: Mutex = Mutex.new()
 
 	func _recognize_path(path: String, _type: StringName) -> bool:
-		if OS.get_thread_caller_id() != OS.get_main_thread_id() or not _runtime_compiles():
-			return false
-		for file: String in Runtime.MODULES:
-			var status: ResourceLoader.ThreadLoadStatus = ResourceLoader.load_threaded_get_status(
-				Runtime.ADDON_DIR + file
-			)
-			if status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
-				seen.append("%s beside %s" % [path.get_file(), file])
+		if path.begins_with(Runtime.ADDON_DIR) and path.ends_with(".gd"):
+			_note(path)
 		return false
 
-	## Whether the runtime started this load to compile a module itself. Waiting for its thread's
-	## module can run that load here on the main thread, which is one load, not two.
-	static func _runtime_compiles() -> bool:
-		for trace: ScriptBacktrace in Engine.capture_script_backtraces():
-			for index: int in trace.get_frame_count():
-				if trace.get_frame_file(index).get_file() == "runtime_autoload.gd":
-					return trace.get_frame_function(index) == "_loaded"
-		return false
+	func _note(path: String) -> void:
+		var thread: int = OS.get_thread_caller_id()
+		_lock.lock()
+		_threads[path] = thread
+		for file: String in Runtime.MODULES:
+			var other: String = Runtime.ADDON_DIR + file
+			var status: int = ResourceLoader.load_threaded_get_status(other)
+			if (
+				other != path
+				and status == ResourceLoader.THREAD_LOAD_IN_PROGRESS
+				and _threads.get(other, -1) != thread
+			):
+				seen.append("%s beside %s" % [path.get_file(), file])
+		_lock.unlock()

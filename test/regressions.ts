@@ -55790,8 +55790,10 @@ async function testTwoPathsInOneRequestKeepBothSetsOfErrors(): Promise<void> {
 }
 
 /**
- * What a call left pending says about where the time went: when its late reply came, or that it
- * never did, and how many of its error lines the run held at the timeout.
+ * What a call left pending says about where the time went: when its late answer came and what it
+ * said, or that none did, and how many of its error lines the run held at the timeout. Only a
+ * `pending: true` answer keeps the poll going. Words in place of JSON are a refusal or a lost
+ * game, which no later poll changes.
  */
 async function saidOfAPendingCall(
   { ask, stderr, errorOutput }: ReadingGame,
@@ -55799,22 +55801,22 @@ async function saidOfAPendingCall(
   requestId: number,
 ): Promise<string> {
   const steps = JSON.stringify(await errorOutput()).match(/noisy step/g)?.length ?? 0;
-  let cameAfter = 'never';
+  let cameAfter = 'never came';
   for (let waited = 0; waited < 60_000; waited += 500) {
     const late = await ask('runtime_invoke', { op: 'result', requestId });
-    let pending = true;
+    let pending = false;
     try {
       pending = get(JSON.parse(late), 'pending') === true;
     } catch {
-      // A refusal in words is still pending.
+      // Words in place of JSON end the poll.
     }
     if (!pending) {
-      cameAfter = `${Date.now() - sentAt} ms after it was sent`;
+      cameAfter = `came after ${Date.now() - sentAt} ms: ${late.slice(0, 300)}`;
       break;
     }
     await delay(500);
   }
-  return `the late reply came: ${cameAfter}. The run held ${steps} 'noisy step' lines at the timeout. Server stderr tail:\n${stderr().slice(-2000)}`;
+  return `the late answer ${cameAfter}. The run held ${steps} 'noisy step' lines at the timeout. Server stderr tail:\n${stderr().slice(-2000)}`;
 }
 
 /** The errors of the call itself come first, and a cut counts what it leaves out. */
