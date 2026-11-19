@@ -49,7 +49,7 @@ import {
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { listenForTheServer } from '../src/keeper-channel.js';
-import { GodotLSPClient, LSPTimeout } from '../src/lsp_client.js';
+import { GodotLSPClient, LSPTimeout, normalizeLSPError } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
@@ -4131,18 +4131,27 @@ interface FramedModel {
   readonly requests: FramedRequest[];
 }
 
-/** The way a request of either client ended, in the words the model draws its ends in. */
+/**
+ * The way a request of either client ended, in the words the model draws its ends in. A language
+ * server's end is read as its tools answer it, where the peer closing and the client letting go
+ * name different next steps.
+ */
 function framedOutcome(kind: FramedKind, error: unknown): string {
   const said = error instanceof Error ? error.message : String(error);
-  const name = kind === 'lsp' ? 'LSP' : 'DAP';
   if (error instanceof LSPTimeout || said.startsWith('DAP request timed out')) {
     return 'timeout';
   }
-  if (
-    said === `Godot ${name} socket closed` ||
-    said === 'DAP connection closed' ||
-    said === 'Disconnected from Godot LSP'
-  ) {
+  if (kind === 'lsp') {
+    const told = normalizeLSPError(error, 0);
+    if (told.startsWith('Godot LSP is unavailable on port')) {
+      return 'closed';
+    }
+    if (told.startsWith('This server closed its connection to Godot LSP')) {
+      return 'let go';
+    }
+  }
+  const name = kind === 'lsp' ? 'LSP' : 'DAP';
+  if (said === 'DAP connection closed') {
     return 'closed';
   }
   if (said.startsWith(`Godot ${name} connection error: `) || said.startsWith('DAP connection error: ')) {
@@ -4297,11 +4306,16 @@ function framedPeerEnds(end: 'closed' | 'reset' | 'oversized'): (model: FramedMo
   };
 }
 
+/** How a request ends when its client lets go of the connection. The debug adapter's reads as a close. */
+function framedLetGo(kind: FramedKind): string {
+  return kind === 'lsp' ? 'let go' : 'closed';
+}
+
 /** The client lets go of its connection and a request is made beside it. */
 async function framedClientCloses(model: FramedModel): Promise<void> {
   const closing = model.client.close();
   for (const request of framedWaiting(model)) {
-    settleFramed(request, 'closed');
+    settleFramed(request, framedLetGo(model.kind));
   }
   await askFramed(model, FRAMED_WAIT_MS);
   await closing;
@@ -4349,7 +4363,7 @@ async function everyFramedRequestSettlesOnceWithItsOwnAnswer(kind: FramedKind): 
           }
           await model.client.close();
           for (const request of framedWaiting(model)) {
-            settleFramed(request, 'closed');
+            settleFramed(request, framedLetGo(kind));
           }
           await checkFramedModel(model);
           assert.equal(model.client.waiting(), 0, 'nothing waits once the client is closed');

@@ -249,9 +249,15 @@ export class GodotDAPClient {
       return;
     }
 
-    this.dialling ??= this.dial().finally(() => {
-      this.dialling = null;
-    });
+    if (this.dialling === null) {
+      const dialling = this.dial().finally(() => {
+        // A dial let go by [abandon] may end after a newer one has begun.
+        if (this.dialling === dialling) {
+          this.dialling = null;
+        }
+      });
+      this.dialling = dialling;
+    }
     await this.dialling;
   }
 
@@ -281,6 +287,7 @@ export class GodotDAPClient {
         // The dial's own error handler speaks for a socket that never connected, and would clear
         // the held socket on a later error, which the close then finds is no longer its own.
         socket.off('error', handleError);
+        socket.off('close', handleLetGo);
         this.connected = true;
         this.requests = connection.requests;
 
@@ -315,8 +322,15 @@ export class GodotDAPClient {
         );
       };
 
+      // A socket [abandon] destroys before it connects sees no error, only its close.
+      const handleLetGo = (): void => {
+        clearTimeout(connectTimeout);
+        reject(new Error('The DAP connection was let go before it opened'));
+      };
+
       socket.once('connect', handleConnect);
       socket.once('error', handleError);
+      socket.once('close', handleLetGo);
     });
   }
 
@@ -337,7 +351,7 @@ export class GodotDAPClient {
         console.error('[GodotDAP] Discarding a message that is not a request, a response or an event');
         continue;
       }
-      this.handleMessage(connection.requests, message);
+      this.handleMessage(connection, message);
     }
   }
 
@@ -372,8 +386,14 @@ export class GodotDAPClient {
     }
 
     // Let go before the wait, so a call made during it dials a connection of its own rather than
-    // writing to a socket that has been ended.
+    // writing to a socket that has been ended, or joining a dial that is being ended.
+    const opening = !this.connected;
     this.forgetConnection();
+    this.dialling = null;
+    if (opening) {
+      socket.destroy();
+      return;
+    }
     await new Promise<void>((resolve) => {
       const forced = setTimeout(() => {
         if (!socket.destroyed) {
@@ -443,7 +463,8 @@ export class GodotDAPClient {
     return await reply;
   }
 
-  private handleMessage(requests: PendingRequests<number, DAPBody>, message: ReceivedMessage): void {
+  private handleMessage(connection: Connection, message: ReceivedMessage): void {
+    const { requests } = connection;
     if (message.type === 'response') {
       const requestSeq = message.request_seq;
       if (typeof requestSeq !== 'number') {
@@ -464,15 +485,23 @@ export class GodotDAPClient {
         console.error(`[GodotDAP] Discarding an answer to request ${requestSeq}, which nothing waits for`);
       }
     } else if (message.type === 'event') {
-      this.handleEvent(message);
+      this.handleEvent(message, this.socket === connection.socket);
     }
   }
 
-  private handleEvent(event: ReceivedMessage): void {
+  /**
+   * A connection let go of can still speak during its close. Its console lines are the game's and
+   * are kept. What it says about the session describes a connection this client no longer holds.
+   */
+  private handleEvent(event: ReceivedMessage, held: boolean): void {
+    if (event.event === 'output') {
+      this.handleOutputEvent(event);
+      return;
+    }
+    if (!held) {
+      return;
+    }
     switch (event.event ?? '') {
-      case 'output':
-        this.handleOutputEvent(event);
-        return;
       case 'stopped':
         this.handleStoppedEvent(event);
         return;
