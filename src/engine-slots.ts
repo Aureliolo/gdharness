@@ -337,7 +337,8 @@ export function keptSlotsOf(count: number): number {
 
 /**
  * How long a one-off take, neither a gate's nor a game's, waits before it stands with gate work in
- * the line ({@link SlotLine}). Its wait changes its place there, never which slots it may take.
+ * the line ({@link SlotLine}), which an ordinary one-off does only while no store-class taker waits.
+ * Its wait changes its place there, never which slots it may take.
  */
 const ONE_OFF_AGED_MS = 120_000;
 
@@ -529,7 +530,7 @@ export function slotsClaimed(
  * A take's place among those waiting for the machine's slots: it leaves each free slot to the takers
  * waiting longer that may take it, in the order they began to wait, so a one-off waiting its hour is
  * never overtaken by the next taker to look, whichever wakes first as a lock goes. A gate's engine
- * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} stands with gate work. A timing,
+ * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} can stand with gate work. A timing,
  * whose turn the queue already gave it, leaves nothing. Agent runs of one game waited 38 to 80
  * minutes for one slot while runs of seconds took turns on it with no order among them.
  */
@@ -567,20 +568,30 @@ export class SlotLine {
 
   /**
    * The takers of [param waiters] ahead of this one, the first first, in three groups. The first
-   * holds every taker that is no one-off and the one-offs that have waited {@link ONE_OFF_AGED_MS}.
-   * The second holds the younger one-offs of the store class, and a game past that age, which never
-   * stands with gate work. The third holds the other younger one-offs. Each group goes in the order
-   * it began to wait. The class moves a place in line only, never what a taker may take.
+   * holds every taker that is no one-off and the store-class one-offs that have waited
+   * {@link ONE_OFF_AGED_MS}. The second holds the younger store-class one-offs. The third holds every
+   * other one-off, whatever its age, while a store-class taker waits, since a store-stage game's
+   * engine calls go before all other side work. With none waiting, an ordinary one-off past that age
+   * stands with gate work, so gates arriving all day never keep it waiting, and a game past that age
+   * goes second, never with gate work. Each group goes in the order it began to wait. The class moves
+   * a place in line only, never what a taker may take.
    */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
     const now = this.clock();
+    const storeWaits = this.store || waiters.some((one) => one.store);
     // The age is read from the exact seconds the order compares, as the other side of the scheme reads it.
     const groupOf = (taker: SlotTaker, game: boolean, store: boolean, since: number): number => {
       if (taker !== 'other') {
         return 0;
       }
       const aged = now / 1000 - since >= ONE_OFF_AGED_MS / 1000;
-      return aged && !game ? 0 : store || aged ? 1 : 2;
+      if (store) {
+        return aged ? 0 : 1;
+      }
+      if (storeWaits || !aged) {
+        return 2;
+      }
+      return game ? 1 : 0;
     };
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
     const own = {
