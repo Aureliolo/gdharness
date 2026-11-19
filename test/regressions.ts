@@ -10504,12 +10504,22 @@ async function testADebugAdapterDialAbandonedLeavesTheNextCallAnswered(): Promis
         (error: unknown) => errorMessage(error),
       );
       await client.abandon();
-      assert.deepEqual(
-        await askedBy(client, 'body', 5000),
-        { answered: 'body' },
-        'the next call is answered',
-      );
+      const next = askedBy(client, 'body', 5000);
       assert.equal(await dialled, 'The DAP connection was let go before it opened');
+      assert.ok(
+        client.isConnected() || Reflect.get(client, 'dialling') !== null,
+        'the ended dial settling leaves the dial the next call began',
+      );
+      const beside = askedBy(client, 'body', 5000);
+      assert.deepEqual(
+        await Promise.all([next, beside]),
+        [{ answered: 'body' }, { answered: 'body' }],
+        'the next calls are answered',
+      );
+      const answeredOn = new Set(
+        peer.heard.filter((one) => one.message['command'] === 'body').map((one) => one.socket),
+      );
+      assert.equal(answeredOn.size, 1, 'on one connection');
       await client.abandon();
     },
     peer.onConnect,
