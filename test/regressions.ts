@@ -96385,37 +96385,12 @@ async function withAShaderProject(
   }
 }
 
-/** The shader these cases read: it calls `lit()`, which the include it names may or may not hold. */
-const SHADER_CALLING_LIT =
-  'shader_type canvas_item;\n#include "res://inc.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n';
-
 /** What a read of the shader says of its compile, as `[compiles, messages]`. */
 function compileOf(answer: unknown): [unknown, unknown[]] {
   return [
     get(answer, 'compiles'),
     asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message'))),
   ];
-}
-
-/**
- * With no editor, a shader reads as compiling against its include as the file is now: a function
- * the include gains makes the next read compile, and one it loses makes the next read fail.
- */
-async function testAShaderReadSeesItsIncludeAsItIsNow(): Promise<void> {
-  await withAShaderProject(
-    { 'a.gdshader': SHADER_CALLING_LIT, 'inc.gdshaderinc': 'float other() { return 1.0; }\n' },
-    async (read, write) => {
-      const missing = compileOf(await read('res://a.gdshader'));
-      assert.equal(missing[0], false, JSON.stringify(missing));
-      assert.match(String(missing[1][0]), /No matching function found for: 'lit'/);
-      write('inc.gdshaderinc', 'float lit() { return 1.0; }\n');
-      assert.deepEqual(compileOf(await read('res://a.gdshader')), [true, []]);
-      write('inc.gdshaderinc', 'float other() { return 1.0; }\n');
-      const lost = compileOf(await read('res://a.gdshader'));
-      assert.equal(lost[0], false, JSON.stringify(lost));
-      assert.match(String(lost[1][0]), /No matching function found for: 'lit'/);
-    },
-  );
 }
 
 /** An include that is not there is answered as the engine answers it. */
@@ -122489,7 +122464,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteReadsWhatThePropertyDeclares,
   testAResourceWriteWithNoEditorSaysWhatStoppedIt,
   testAShaderWithNoTypeAndATranslationWithNoEditor,
-  testAShaderReadSeesItsIncludeAsItIsNow,
   testAShaderReadWithAMissingIncludeSaysWhatTheEngineSays,
   testAShaderReadWithNoIncludeIsUnchanged,
   testATestRunTakesTheCasesNamed,

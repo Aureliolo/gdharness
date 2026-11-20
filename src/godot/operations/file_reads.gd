@@ -900,28 +900,23 @@ static func _cache_includes_from_disk(
 	file: String, set_aside: Dictionary, seen: Dictionary = {}
 ) -> void:
 	# The engine cannot list the includes: ResourceLoader.get_dependencies answers an empty list for
-	# a
-	# shader that includes files, and loading the shader again in any cache mode compiles it against
-	# the include copy the cache holds. So the include lines are read from the text here.
+	# a shader that includes files, and loading the shader again in any cache mode compiles it
+	# against the include copy the cache holds. So the include lines are read from the text here.
 	var finder: RegEx = RegEx.create_from_string('(?m)^\\s*#\\s*include\\s+"([^"\\n]+)"')
 	for found: RegExMatch in finder.search_all(FileAccess.get_file_as_string(file)):
-		var named: String = found.get_string(1)
-		var included: String = named
-		if not named.begins_with("res://"):
-			included = file.get_base_dir().path_join(named).simplify_path()
-		if seen.has(included) or not FileAccess.file_exists(included):
+		var included: String = _include_path(found.get_string(1), file)
+		if included.is_empty() or seen.has(included) or not FileAccess.file_exists(included):
 			continue
 		seen[included] = true
-		if ResourceLoader.has_cached(included):
-			var held: ShaderInclude = (
-				ResourceLoader.load(included, "ShaderInclude", ResourceLoader.CACHE_MODE_REUSE)
-				as ShaderInclude
-			)
+		# Only a cached include is stale. Anything else the cache holds under that path, such as the
+		# shader itself, is left alone, and loading it as an include would only log a refusal.
+		var held: ShaderInclude = ResourceLoader.get_cached_ref(included) as ShaderInclude
+		if held != null:
 			var current: ShaderInclude = (
 				ResourceLoader.load(included, "ShaderInclude", ResourceLoader.CACHE_MODE_IGNORE)
 				as ShaderInclude
 			)
-			if held != null and current != null:
+			if current != null:
 				set_aside[included] = [held, current]
 				# A load that skips the cache still names its path, which makes take_over_path a
 				# no-op, so both copies give the path up first.
@@ -929,6 +924,17 @@ static func _cache_includes_from_disk(
 				current.resource_path = ""
 				current.take_over_path(included)
 		_cache_includes_from_disk(included, set_aside, seen)
+
+
+## The res:// path of an include written as [param named] in [param file], in the one spelling the
+## cache keys it by, or an empty string for a uid nothing is registered under.
+static func _include_path(named: String, file: String) -> String:
+	if named.begins_with("uid://"):
+		var id: int = ResourceUID.text_to_id(named)
+		return ResourceUID.get_id_path(id).simplify_path() if ResourceUID.has_id(id) else ""
+	if named.begins_with("res://"):
+		return named.simplify_path()
+	return file.get_base_dir().path_join(named).simplify_path()
 
 
 ## Whether [param code] opens with its shader_type statement, past any comments, as the shader

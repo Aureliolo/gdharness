@@ -6834,6 +6834,10 @@ async function runEveryCase(godotPath: string, projectDir: string): Promise<void
     'relative_lost_fails',
     'relative_held_copy_kept',
     'missing_include_answered_by_the_engine',
+    'odd_spelling_gained_compiles',
+    'odd_spelling_held_copy_kept',
+    'uid_include_gained_compiles',
+    'self_include_loads_nothing_as_an_include',
   ]) {
     assert.equal(get(included, claim), true, `${claim}: ${JSON.stringify(included)}`);
   }

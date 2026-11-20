@@ -15,6 +15,12 @@ const REL_SHADER: String = "res://shi_sub/r.gdshader"
 const REL_INCLUDE: String = "res://shi_sub/shi_rel.gdshaderinc"
 const OTHER: String = "float other() { return 1.0; }\n"
 const LIT: String = "float lit() { return 1.0; }\n"
+const DOT_SHADER: String = "res://shi_dot.gdshader"
+const DOT_INCLUDE: String = "res://shi_dot.gdshaderinc"
+const UID_SHADER: String = "res://shi_uid.gdshader"
+const UID_INCLUDE: String = "res://shi_uid.gdshaderinc"
+const SELF_SHADER: String = "res://shi_self.gdshader"
+const CALLS_LIT: String = "\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n"
 
 
 func _initialize() -> void:
@@ -35,17 +41,22 @@ func _initialize() -> void:
 		load(INNER) == held_inner and held_inner.resource_path == INNER and held_inner.code == OTHER
 	)
 
-	# The held include carries an edit nobody has saved. The read answers from the file and leaves
-	# the edit where it is.
+	# The held inner include carries an unsaved edit that adds the function, which the file lacks.
+	# The read answers from the file and leaves the edit where it is.
 	_write(INNER, OTHER)
-	held_include.code = "#include \"%s\"\n// unsaved\n" % INNER
-	var unsaved_text: String = held_include.code
+	held_inner.code = LIT + "// unsaved\n"
+	var unsaved_text: String = held_inner.code
 	var lost: Array[Dictionary] = GdhFileReads.shader_errors(SHADER)
 	var kept_after_unsaved: bool = (
-		load(INCLUDE) == held_include
-		and held_include.resource_path == INCLUDE
-		and held_include.code == unsaved_text
+		load(INNER) == held_inner
+		and held_inner.resource_path == INNER
+		and held_inner.code == unsaved_text
+		and load(INCLUDE) == held_include
 	)
+
+	var spelled: Dictionary = _odd_spelling_findings()
+	var by_uid: bool = _uid_include_compiles()
+	var self_refusals: int = _refusals_reading_a_shader_that_includes_itself()
 
 	# An include written relative to its shader, in a folder of its own, is judged the same way.
 	var relative: Dictionary = _relative_include_findings()
@@ -69,9 +80,25 @@ func _initialize() -> void:
 		"relative_lost_fails": relative["lost"],
 		"relative_held_copy_kept": relative["kept"],
 		"missing_include_answered_by_the_engine": str(missing_include).contains("Unknown char"),
+		"odd_spelling_gained_compiles": spelled["gained"],
+		"odd_spelling_held_copy_kept": spelled["kept"],
+		"uid_include_gained_compiles": by_uid,
+		"self_include_loads_nothing_as_an_include": self_refusals == 0,
 	}
 	print(JSON.stringify(findings))
-	for path: String in [SHADER, INCLUDE, INNER, MISSING_SHADER, REL_SHADER, REL_INCLUDE]:
+	for path: String in [
+		SHADER,
+		INCLUDE,
+		INNER,
+		MISSING_SHADER,
+		REL_SHADER,
+		REL_INCLUDE,
+		DOT_SHADER,
+		DOT_INCLUDE,
+		UID_SHADER,
+		UID_INCLUDE,
+		SELF_SHADER,
+	]:
 		var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	var _dir_removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(REL_DIR))
 	quit()
@@ -101,7 +128,75 @@ func _relative_include_findings() -> Dictionary:
 	}
 
 
+## An include written with a ".." and a doubled slash is judged by its file, and the held copy stays
+## the one the cache answers for its path.
+func _odd_spelling_findings() -> Dictionary:
+	var named: String = "res://operations/..//shi_dot.gdshaderinc"
+	_write(DOT_SHADER, "shader_type canvas_item;\n#include \"%s\"\n%s" % [named, CALLS_LIT])
+	_write(DOT_INCLUDE, OTHER)
+	var _before: Array[Dictionary] = GdhFileReads.shader_errors(DOT_SHADER)
+	var held: ShaderInclude = load(DOT_INCLUDE) as ShaderInclude
+	_write(DOT_INCLUDE, LIT)
+	var gained: Array[Dictionary] = GdhFileReads.shader_errors(DOT_SHADER)
+	return {
+		"gained": gained.is_empty(),
+		"kept": load(DOT_INCLUDE) == held and held.resource_path == DOT_INCLUDE,
+	}
+
+
+## An include named by its uid is judged by its file too.
+func _uid_include_compiles() -> bool:
+	_write(UID_INCLUDE, OTHER)
+	var id: int = ResourceUID.create_id()
+	ResourceUID.add_id(id, UID_INCLUDE)
+	var uid: String = ResourceUID.id_to_text(id)
+	_write(UID_SHADER, "shader_type canvas_item;\n#include \"%s\"\n%s" % [uid, CALLS_LIT])
+	var before: Array[Dictionary] = GdhFileReads.shader_errors(UID_SHADER)
+	var _held: ShaderInclude = load(UID_INCLUDE) as ShaderInclude
+	_write(UID_INCLUDE, LIT)
+	var gained: Array[Dictionary] = GdhFileReads.shader_errors(UID_SHADER)
+	ResourceUID.remove_id(id)
+	return not before.is_empty() and gained.is_empty()
+
+
+## How many loads the read of a cached shader that includes itself refused.
+func _refusals_reading_a_shader_that_includes_itself() -> int:
+	_write(SELF_SHADER, "shader_type canvas_item;\n#include \"%s\"\n" % SELF_SHADER)
+	var _held: Shader = load(SELF_SHADER) as Shader
+	var refusals: Refusals = Refusals.new()
+	OS.add_logger(refusals)
+	var _errors: Array[Dictionary] = GdhFileReads.shader_errors(SELF_SHADER)
+	OS.remove_logger(refusals)
+	return refusals.count
+
+
 func _write(path: String, text: String) -> void:
 	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
 	var _stored: bool = file.store_string(text)
 	file.close()
+
+
+## Counts the engine's refusals to load a resource, which a read must not provoke.
+class Refusals:
+	extends Logger
+
+	var count: int = 0
+
+	func _log_message(_message: String, _error: bool) -> void:
+		pass
+
+	# The engine's own signature for a Logger, eight parameters and not this project's to shape.
+	# gdstyle:ignore=quality/max-parameters
+	func _log_error(
+		_function: String,
+		_file: String,
+		_line: int,
+		code: String,
+		rationale: String,
+		_editor_notify: bool,
+		_error_type: int,
+		_script_backtraces: Array[ScriptBacktrace],
+	) -> void:
+		var said: String = code + " " + rationale
+		if said.contains("No loader found") or said.contains("Error loading resource"):
+			count += 1
