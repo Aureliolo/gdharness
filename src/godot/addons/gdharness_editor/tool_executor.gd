@@ -192,8 +192,7 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	if not node.has_method(method):
 		return { "ok": false, "error": "Tool method not found: %s.%s" % [node.name, method] }
 
-	GdhSceneFile.also_saved.clear()
-	GdhSceneFile.unmade_note = ""
+	GdhSceneFile.clear_call_notes()
 	# Awaited for the tools that give the editor frames.
 	var result: Variant = await node.call(method, args)
 	if result is Dictionary:
@@ -201,9 +200,9 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 		if not GdhSceneFile.also_saved.is_empty():
 			answered["alsoSaved"] = GdhSceneFile.also_saved.duplicate(true)
 			GdhSceneFile.also_saved.clear()
-		if not GdhSceneFile.unmade_note.is_empty():
-			answered["unmadeConnections"] = GdhSceneFile.unmade_note
-			GdhSceneFile.unmade_note = ""
+		var unmade: String = GdhSceneFile.take_unmade_note()
+		if not unmade.is_empty():
+			answered["unmadeConnections"] = unmade
 		return answered
 
 	return { "ok": false, "error": "Invalid tool result from: " + tool_name }

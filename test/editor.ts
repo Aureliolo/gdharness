@@ -2680,6 +2680,49 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
 }
 
 /**
+ * A script the editor holds and a rescan reloads is left saved, and so is the addon's own code. Each
+ * was left marked as changed in the editor, so its next scene save wrote the editor's copy of every
+ * one back to disk: over an edit made to the file outside the editor since, and 412 scripts long in
+ * this suite, which held the save for ten seconds on Windows.
+ */
+async function testAReloadedScriptIsNotWrittenBackByTheNextSave({ call, project }: Editor): Promise<void> {
+  const script = join(project, 'resaved', 'held.gd');
+  const addon = join(project, 'addons', 'gdharness_editor', 'scene_file.gd');
+  mkdirSync(join(project, 'resaved'), { recursive: true });
+  writeFileSync(script, 'extends Node2D\n\nfunc ring() -> int:\n\treturn 1\n');
+  writeFileSync(
+    join(project, 'resaved', 'held.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://resaved/held.gd" id="1_held"]\n\n' +
+      '[node name="Held" type="Node2D"]\nscript = ExtResource("1_held")\n',
+  );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    // Open, so the editor holds the script the reload goes through.
+    await hook(project, { op: 'open', path: 'res://resaved/held.tscn' });
+    const reloaded = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://resaved/held.gd',
+    });
+    assert.equal(get(reloaded, 'reloadProblem'), undefined, text(reloaded));
+
+    const edited = 'extends Node2D\n\nfunc ring() -> int:\n\treturn 2\n';
+    writeFileSync(script, edited);
+    const addonWritten = statSync(addon).mtimeMs;
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      fileText(project, 'resaved/held.gd'),
+      edited,
+      'the save kept the edit made outside the editor',
+    );
+    assert.equal(statSync(addon).mtimeMs, addonWritten, "the save left the addon's own script alone");
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'resaved'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * An unset through the editor drops a built-in ShaderMaterial's parameter line, the null one and
  * one at a value, as the inspector's revert arrow does. The editor's renderer runs headless here
  * and gives a parameter it was never given null, which its save wrote as a line.
@@ -9568,6 +9611,7 @@ async function main(): Promise<void> {
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAReloadedScriptIsNotWrittenBackByTheNextSave', testAReloadedScriptIsNotWrittenBackByTheNextSave],
     ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
