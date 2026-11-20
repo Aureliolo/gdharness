@@ -872,7 +872,8 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 		var pair: Array = set_aside[included]
 		var held: ShaderInclude = pair[0]
 		var fresh: ShaderInclude = pair[1]
-		fresh.resource_path = ""
+		if fresh != null:
+			fresh.resource_path = ""
 		held.take_over_path(included)
 	if headless:
 		printerr("[gdharness] resumed")
@@ -905,12 +906,18 @@ static func _cache_includes_from_disk(
 	var finder: RegEx = RegEx.create_from_string('(?m)^\\s*#\\s*include\\s+"([^"\\n]+)"')
 	for found: RegExMatch in finder.search_all(FileAccess.get_file_as_string(file)):
 		var included: String = _include_path(found.get_string(1), file)
-		if included.is_empty() or seen.has(included) or not FileAccess.file_exists(included):
+		if included.is_empty() or seen.has(included):
 			continue
 		seen[included] = true
 		# Only a cached include is stale. Anything else the cache holds under that path, such as the
 		# shader itself, is left alone, and loading it as an include would only log a refusal.
 		var held: ShaderInclude = ResourceLoader.get_cached_ref(included) as ShaderInclude
+		if not FileAccess.file_exists(included):
+			# The file is gone, so the compile must not find the copy the editor still holds.
+			if held != null:
+				set_aside[included] = [held, null]
+				held.resource_path = ""
+			continue
 		if held != null:
 			var current: ShaderInclude = (
 				ResourceLoader.load(included, "ShaderInclude", ResourceLoader.CACHE_MODE_IGNORE)
@@ -926,13 +933,14 @@ static func _cache_includes_from_disk(
 		_cache_includes_from_disk(included, set_aside, seen)
 
 
-## The res:// path of an include written as [param named] in [param file], in the one spelling the
-## cache keys it by, or an empty string for a uid nothing is registered under.
+## The path of an include written as [param named] in [param file], in the one spelling the cache
+## keys it by, or an empty string for a uid nothing is registered under.
 static func _include_path(named: String, file: String) -> String:
 	if named.begins_with("uid://"):
 		var id: int = ResourceUID.text_to_id(named)
 		return ResourceUID.get_id_path(id).simplify_path() if ResourceUID.has_id(id) else ""
-	if named.begins_with("res://"):
+	# res://, user:// and a path from the root of the disk name the file whatever includes it.
+	if named.is_absolute_path():
 		return named.simplify_path()
 	return file.get_base_dir().path_join(named).simplify_path()
 

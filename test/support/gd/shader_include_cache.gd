@@ -20,6 +20,10 @@ const DOT_INCLUDE: String = "res://shi_dot.gdshaderinc"
 const UID_SHADER: String = "res://shi_uid.gdshader"
 const UID_INCLUDE: String = "res://shi_uid.gdshaderinc"
 const SELF_SHADER: String = "res://shi_self.gdshader"
+const USER_SHADER: String = "res://shi_user.gdshader"
+const USER_INCLUDE: String = "user://shi_user.gdshaderinc"
+const DELETED_SHADER: String = "res://shi_deleted.gdshader"
+const DELETED_INCLUDE: String = "res://shi_deleted.gdshaderinc"
 const CALLS_LIT: String = "\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n"
 
 
@@ -57,6 +61,8 @@ func _initialize() -> void:
 	var spelled: Dictionary = _odd_spelling_findings()
 	var by_uid: bool = _uid_include_compiles()
 	var self_refusals: int = _refusals_reading_a_shader_that_includes_itself()
+	var in_user: bool = _user_include_compiles()
+	var deleted: Dictionary = _deleted_include_findings()
 
 	# An include written relative to its shader, in a folder of its own, is judged the same way.
 	var relative: Dictionary = _relative_include_findings()
@@ -84,6 +90,9 @@ func _initialize() -> void:
 		"odd_spelling_held_copy_kept": spelled["kept"],
 		"uid_include_gained_compiles": by_uid,
 		"self_include_loads_nothing_as_an_include": self_refusals == 0,
+		"user_include_gained_compiles": in_user,
+		"deleted_include_fails": deleted["fails"],
+		"deleted_held_copy_kept": deleted["kept"],
 	}
 	print(JSON.stringify(findings))
 	for path: String in [
@@ -98,6 +107,9 @@ func _initialize() -> void:
 		UID_SHADER,
 		UID_INCLUDE,
 		SELF_SHADER,
+		USER_SHADER,
+		USER_INCLUDE,
+		DELETED_SHADER,
 	]:
 		var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	var _dir_removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(REL_DIR))
@@ -157,6 +169,35 @@ func _uid_include_compiles() -> bool:
 	var gained: Array[Dictionary] = GdhFileReads.shader_errors(UID_SHADER)
 	ResourceUID.remove_id(id)
 	return not before.is_empty() and gained.is_empty()
+
+
+## An include written as a user:// path is judged by its file too.
+func _user_include_compiles() -> bool:
+	_write(USER_INCLUDE, OTHER)
+	_write(USER_SHADER, "shader_type canvas_item;\n#include \"%s\"\n%s" % [USER_INCLUDE, CALLS_LIT])
+	var before: Array[Dictionary] = GdhFileReads.shader_errors(USER_SHADER)
+	var _held: ShaderInclude = load(USER_INCLUDE) as ShaderInclude
+	_write(USER_INCLUDE, LIT)
+	var gained: Array[Dictionary] = GdhFileReads.shader_errors(USER_SHADER)
+	return not before.is_empty() and gained.is_empty()
+
+
+## An include deleted on disk fails the read while a copy of it is still held, and the held copy
+## stays the one the cache answers for its path.
+func _deleted_include_findings() -> Dictionary:
+	_write(DELETED_INCLUDE, LIT)
+	_write(
+		DELETED_SHADER,
+		"shader_type canvas_item;\n#include \"%s\"\n%s" % [DELETED_INCLUDE, CALLS_LIT],
+	)
+	var before: Array[Dictionary] = GdhFileReads.shader_errors(DELETED_SHADER)
+	var held: ShaderInclude = load(DELETED_INCLUDE) as ShaderInclude
+	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(DELETED_INCLUDE))
+	var gone: Array[Dictionary] = GdhFileReads.shader_errors(DELETED_SHADER)
+	return {
+		"fails": before.is_empty() and not gone.is_empty(),
+		"kept": ResourceLoader.get_cached_ref(DELETED_INCLUDE) == held,
+	}
 
 
 ## How many loads the read of a cached shader that includes itself refused.
