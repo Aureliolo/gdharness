@@ -10526,6 +10526,27 @@ function probeRunFailure(error: unknown): string {
 }
 
 /**
+ * A connection to a language server that nobody answers is given up after three seconds, not left
+ * to the operating system's own wait of 21 seconds on Windows or about two minutes on Linux. The
+ * address is one reserved for documentation, which nothing on a network answers. A network that
+ * refuses it at once ends sooner, which is also not a wait on the system.
+ */
+async function testALanguageServerConnectNobodyAnswersIsGivenUp(): Promise<void> {
+  const client = new GodotLSPClient(6005, '192.0.2.1');
+  const started = Date.now();
+  const said = await client.connect().then(
+    () => 'connected',
+    (error: unknown) => errorMessage(error),
+  );
+  const took = Date.now() - started;
+  await client.disconnect();
+  assert.ok(took < 5000, `given up in ${took} ms: ${said}`);
+  if (took >= 2900) {
+    assert.match(said, /: nothing answered the connection in 3s$/);
+  }
+}
+
+/**
  * A language server request the client lets go of ends as its server does: on the close, on the
  * answer the server sent as it closed, or as let go once the client stops waiting for the close.
  * Node, which runs the published server, reads each the same as Bun.
@@ -122809,6 +122830,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALostConnectionIsNotSaidToBeTheEditorsAnswer,
   testTwoCallsOverAPortMoveEndWithOneLiveClient,
   testALanguageServerRequestLetGoEndsAsItsServerDoes,
+  testALanguageServerConnectNobodyAnswersIsGivenUp,
   testACallInFlightOverAPortMoveEndsAsTheOldServerDoes,
   testACallInFlightWhenTheEditorLeavesEndsAsItsServerDoes,
   testADebugAdapterDialAbandonedLeavesTheNextCallAnswered,
