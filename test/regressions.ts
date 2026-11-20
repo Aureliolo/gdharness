@@ -22872,6 +22872,82 @@ async function testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone(): Promise<vo
 }
 
 /**
+ * The engine of a start whose helper died after making it, and before answering it, is ended by the
+ * next helper this process runs where none could run as the helper died. The engine stays suspended
+ * meanwhile. Without that it was left suspended, holding its job name, for as long as this process
+ * ran.
+ */
+async function testAnEngineMadeButNeverAnsweredIsEndedByTheNextHelper(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const { holdFile } = await import('./support/held-file.js');
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-never-answered-'));
+  const assembly = join(root, 'dying-helper.exe');
+  cpSync(helperAssembly(), assembly);
+  const lane = join(root, 'lane.json');
+  // Held, so the helper stops between making the engine and answering it.
+  let letGo: (() => void) | undefined = holdFile(`${lane}.tmp`);
+  const marker = `gdharness-never-answered-${String(process.pid)}`;
+  let made: number | undefined;
+  try {
+    mkdirSync(join(root, 'scratch'));
+    const start = spawnOnDesktop(
+      {
+        directory: root,
+        endsWithHelper: true,
+        scratch: join(root, 'scratch'),
+        lane: { file: lane, number: 1 },
+      },
+      process.execPath,
+      ['-e', `setTimeout(() => undefined, 600000) // ${marker}`],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      assembly,
+    );
+    for (let waited = 0; made === undefined && waited < 60_000; waited += 250) {
+      made = (await pidsWithCommandLine('bun', marker))[0];
+      if (made === undefined) {
+        await delay(250);
+      }
+    }
+    assert.ok(made !== undefined, 'the helper makes the engine');
+    const engine = made;
+    const named = (): boolean => {
+      const job = openJob(engineJobName(engine));
+      job?.close();
+      return job !== null;
+    };
+    assert.ok(await answeredWithin(() => (named() ? true : undefined), 60_000), 'in a job of its name');
+    assert.equal(start.pid(), undefined, 'and has not answered the start');
+    renameSync(assembly, `${assembly}.gone`);
+    const helper = start.child.pid;
+    assert.ok(helper !== undefined, 'the start names its helper');
+    await killTheHelper(helper);
+    letGo();
+    letGo = undefined;
+    assert.ok(await exitedWithin(start.child, 30_000), 'the start fails with its helper');
+    await delay(2000);
+    assert.ok(alive(engine), 'the engine waits while no helper can run');
+    helperFor(helperAssembly());
+    assert.ok(
+      await answeredWithin(() => (alive(engine) ? undefined : true), 30_000),
+      'the next helper this process runs ends it',
+    );
+    assert.ok(await answeredWithin(() => (named() ? undefined : true), 10_000), 'and frees its name');
+  } finally {
+    letGo?.();
+    if (made !== undefined && alive(made)) {
+      process.kill(made);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
  * A process that ran one start, whose helper died, waits before it ends until a helper has let go of
  * the ended engine's job, so what the engine started runs on. Its copy of the job can be closed only
  * while it lives. A process that ended at once killed what the engine left running.
@@ -121761,6 +121837,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
   testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone,
   testAProcessEndingAfterItsRunWaitsForTheLetGo,
+  testAnEngineMadeButNeverAnsweredIsEndedByTheNextHelper,
   testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain,
   testAHelperTakingOverAnEndedStartClosesOnlyThatEnginesJob,
   testAWholeExitCodeArrivesThroughAHeadlessStart,
