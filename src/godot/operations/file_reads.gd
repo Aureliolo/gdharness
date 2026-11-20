@@ -967,7 +967,11 @@ static func _hashed_note(file: String) -> String:
 ## The file whose import wrote [param file], named by the sidecar beside it, or "" when none does.
 static func _imported_from(file: String) -> String:
 	var folder: String = file.get_base_dir()
-	for name: String in DirAccess.get_files_at(folder):
+	# DirAccess.open answers null quietly for a folder that is gone, where get_files_at prints.
+	var at: DirAccess = DirAccess.open(folder)
+	if at == null:
+		return ""
+	for name: String in at.get_files():
 		if not name.ends_with(".import"):
 			continue
 		var sidecar: ConfigFile = ConfigFile.new()

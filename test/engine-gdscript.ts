@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync,
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -20,6 +21,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -4389,6 +4391,65 @@ function testTheRunnerListsNoFileOfANestedProject(godotPath: string): void {
   }
 }
 
+/**
+ * The test runner's walks of res:// pass a folder that lists but does not open without an engine
+ * error. Another engine of the same gate can make and remove a folder while a walk is under way,
+ * and the gate counts an engine error outside every suite against the run. A link whose target is
+ * gone stands for that folder on Windows, and a folder nobody may enter elsewhere.
+ */
+function testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath: string): void {
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GDUNIT4_PATH names no gdUnit4.');
+    }
+    console.log('runner walk check skipped (GDUNIT4_PATH names no gdUnit4)');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-runner-walks-'));
+  const shut = join(dir, 'scripts', 'shut');
+  try {
+    cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
+    writeTreeAt(dir, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="GdharnessRunnerWalks"\n',
+      'scripts/visible.gd': 'extends Node\n',
+    });
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180000,
+    });
+    assert.equal(imported.status, 0, `${imported.stdout}${imported.stderr}`);
+    if (process.platform === 'win32') {
+      const target = join(dir, 'gone_target');
+      mkdirSync(target);
+      symlinkSync(target, shut, 'junction');
+      rmSync(target, { recursive: true });
+    } else {
+      mkdirSync(shut);
+      chmodSync(shut, 0o000);
+    }
+    cpSync(join('test', 'support', 'gd', 'runner_walks.gd'), join(dir, 'runner_walks.gd'));
+    const run = runScript(godotPath, dir, join(dir, 'runner_walks.gd'), [
+      '--',
+      resolve(join('src', 'godot', 'tests', 'listed.gd')),
+    ]);
+    const output = `${run.stdout}${run.stderr}`;
+    assert.equal(run.status, 0, output);
+    const walked = lastJsonLine(run.stdout, 'runner_walks');
+    assert.ok(
+      asArray(get(walked, 'scripts')).includes('res://scripts/visible.gd'),
+      `the walks still reach the project's scripts: ${output}`,
+    );
+    assert.ok(asArray(get(walked, 'files')).includes('res://scripts/visible.gd'), `and its files: ${output}`);
+    assert.doesNotMatch(output, /Couldn't open directory/, 'no walk printed an engine error');
+  } finally {
+    if (process.platform !== 'win32' && existsSync(shut)) {
+      chmodSync(shut, 0o755);
+    }
+    sweep(dir);
+  }
+}
+
 /** Writes [param files] under [param root], each folder made as it is needed. */
 function writeTreeAt(root: string, files: Readonly<Record<string, string>>): void {
   for (const [path, content] of Object.entries(files)) {
@@ -6658,6 +6719,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   nestedProject: testANestedProjectStopsTheWalk,
   nestedProjectListed: (godotPath) => {
     testTheRunnerListsNoFileOfANestedProject(godotPath);
+  },
+  runnerWalks: (godotPath) => {
+    testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath);
   },
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
