@@ -22705,6 +22705,16 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
   }
 }
 
+/**
+ * A copy of the helper that names every job [param name]. The helper names a job after its engine's
+ * pid, which no test can know before the start.
+ */
+function helperNamingEveryJob(name: string): CompiledHelper {
+  const fixed = HELPER_SOURCE.replace('JobNamePrefix + started.processId', JSON.stringify(name));
+  assert.notEqual(fixed, HELPER_SOURCE, 'the helper names its job in the place this test reaches');
+  return new CompiledHelper('collision helper', 'gdharness-collision', fixed, true);
+}
+
 /** A job name that is taken fails the start with the cause, and the engine never runs. */
 async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -22713,11 +22723,7 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
   const { createJob } = await import('./support/job-objects.js');
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-taken-'));
   const name = `gdharness-engine-taken-${String(process.pid)}`;
-  // The helper names its job after the engine's pid, which no test can know before the start, so
-  // this copy names every job the same.
-  const fixed = HELPER_SOURCE.replace('JobNamePrefix + started.processId', JSON.stringify(name));
-  assert.notEqual(fixed, HELPER_SOURCE, 'the helper names its job in the place this test reaches');
-  const copy = new CompiledHelper('collision helper', 'gdharness-collision', fixed, true);
+  const copy = helperNamingEveryJob(name);
   const held = createJob(name);
   try {
     const compiled = await copy.ensure(root);
@@ -22755,6 +22761,447 @@ async function testATakenJobNameFailsTheStartAndTheEngineNeverRuns(): Promise<vo
     await retireHelper();
     held.close();
     sweep(root);
+  }
+}
+
+/**
+ * An engine that starts a process of its own outside the test runner's job, so that only the
+ * engine's job can end that process, started through a copy of the helper in [param root]. The
+ * engine ends once [param release] exists. [param pids] gets the engine's pid and its process's.
+ */
+async function anEngineWithAProcessOfItsOwn(
+  root: string,
+  name: string,
+  release: string,
+  pids: number[],
+): Promise<{ start: DesktopStart; assembly: string; engine: number; child: number; helper: number }> {
+  const startedFile = join(root, `${name}-started`);
+  const engineScript =
+    `const fs = require('node:fs'); ${HIDDEN_SPAWN_PRELUDE}` +
+    "const c = spawnHidden(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore', detached: true });" +
+    'c.unref(); fs.writeFileSync(process.argv[2], String(c.pid));' +
+    'setInterval(() => fs.existsSync(process.argv[1]) && process.exit(0), 50);';
+  const assembly = join(root, `${name}-helper.exe`);
+  cpSync(helperAssembly(), assembly);
+  mkdirSync(join(root, name));
+  const start = spawnOnDesktop(
+    { directory: root, endsWithHelper: true, scratch: join(root, name) },
+    process.execPath,
+    ['-e', engineScript, release, startedFile],
+    { stdio: ['ignore', 'ignore', 'ignore'] },
+    assembly,
+  );
+  const engine = await answeredWithin(() => start.pid(), 60_000);
+  assert.ok(engine !== undefined, `the ${name} engine starts: ${helperFailure(start.files.error) ?? ''}`);
+  pids.push(engine);
+  const child = await answeredWithin(
+    () => (existsSync(startedFile) ? Number(readFileSync(startedFile, 'utf8')) : undefined),
+    30_000,
+  );
+  assert.ok(child !== undefined, `the ${name} engine starts a process of its own`);
+  pids.push(child);
+  const helper = start.child.pid;
+  assert.ok(helper !== undefined, 'the start names its helper');
+  return { start, assembly, engine, child, helper };
+}
+
+/**
+ * The job of an engine whose helper died gives up its name once the engine has gone, and what the
+ * engine started runs on, as after an end its own helper saw. This process holds a copy of the job
+ * that only a helper can close. A helper that takes the start over closes it. Where none can run as
+ * the engine goes, the next helper this process runs closes it. Left open, the name stayed taken for
+ * as long as this process ran, and a later engine given the same pid could not be started.
+ */
+async function testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-let-go-'));
+  const named = (pid: number): boolean => {
+    const job = openJob(engineJobName(pid));
+    job?.close();
+    return job !== null;
+  };
+  const pids: number[] = [];
+  try {
+    const release = join(root, 'release-none');
+    const none = await anEngineWithAProcessOfItsOwn(root, 'none', release, pids);
+    // A running program can be renamed but not removed, so no helper of this path can start again.
+    renameSync(none.assembly, `${none.assembly}.gone`);
+    await killTheHelper(none.helper);
+    // A helper this process runs while the engine still runs leaves the job alone, so the engine
+    // still ends with this process.
+    await delay(1000);
+    helperFor(helperAssembly());
+    await delay(1000);
+    assert.ok(alive(none.engine), 'an engine no helper took over runs on');
+    assert.ok(named(none.engine), 'and its job keeps its name while the engine runs, with a helper running');
+    writeFileSync(release, '');
+    assert.ok(await exitedWithin(none.start.child, 10_000), 'the engine ends with no helper left');
+    assert.equal(alive(none.engine), false, 'and has gone');
+    await delay(1000);
+    assert.ok(named(none.engine), 'its job keeps its name while no helper can be run');
+    helperFor(helperAssembly());
+    assert.ok(
+      await answeredWithin(() => (named(none.engine) ? undefined : true), 10_000),
+      'the next helper this process runs frees the name',
+    );
+    assert.ok(alive(none.child), 'and what the engine started runs on');
+    await retireHelper();
+
+    const releaseTaken = join(root, 'release-taken');
+    const taken = await anEngineWithAProcessOfItsOwn(root, 'taken', releaseTaken, pids);
+    await killTheHelper(taken.helper);
+    await delay(1000);
+    assert.ok(alive(taken.engine), 'an engine a helper took over runs on');
+    writeFileSync(releaseTaken, '');
+    assert.ok(await exitedWithin(taken.start.child, 10_000), 'and ends');
+    assert.ok(
+      await answeredWithin(() => (named(taken.engine) ? undefined : true), 10_000),
+      'its job gives up its name',
+    );
+    assert.ok(alive(taken.child), 'and what the engine started runs on');
+  } finally {
+    for (const pid of pids.filter((each) => alive(each))) {
+      process.kill(pid);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * The engine of a start whose helper died after making it, and before answering it, is ended by the
+ * next helper this process runs where none could run as the helper died. The engine stays suspended
+ * meanwhile. Without that it was left suspended, holding its job name, for as long as this process
+ * ran.
+ */
+async function testAnEngineMadeButNeverAnsweredIsEndedByTheNextHelper(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const { holdFile } = await import('./support/held-file.js');
+  const { pidsWithCommandLine } = await import('./support/windows.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-never-answered-'));
+  const assembly = join(root, 'dying-helper.exe');
+  cpSync(helperAssembly(), assembly);
+  const lane = join(root, 'lane.json');
+  // Held, so the helper stops between making the engine and answering it.
+  let letGo: (() => void) | undefined = holdFile(`${lane}.tmp`);
+  const marker = `gdharness-never-answered-${String(process.pid)}`;
+  let made: number | undefined;
+  try {
+    mkdirSync(join(root, 'scratch'));
+    const start = spawnOnDesktop(
+      {
+        directory: root,
+        endsWithHelper: true,
+        scratch: join(root, 'scratch'),
+        lane: { file: lane, number: 1 },
+      },
+      process.execPath,
+      ['-e', `setTimeout(() => undefined, 600000) // ${marker}`],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      assembly,
+    );
+    for (let waited = 0; made === undefined && waited < 60_000; waited += 250) {
+      made = (await pidsWithCommandLine('bun', marker))[0];
+      if (made === undefined) {
+        await delay(250);
+      }
+    }
+    assert.ok(made !== undefined, 'the helper makes the engine');
+    const engine = made;
+    const named = (): boolean => {
+      const job = openJob(engineJobName(engine));
+      job?.close();
+      return job !== null;
+    };
+    assert.ok(await answeredWithin(() => (named() ? true : undefined), 60_000), 'in a job of its name');
+    assert.equal(start.pid(), undefined, 'and has not answered the start');
+    renameSync(assembly, `${assembly}.gone`);
+    const helper = start.child.pid;
+    assert.ok(helper !== undefined, 'the start names its helper');
+    await killTheHelper(helper);
+    letGo();
+    letGo = undefined;
+    assert.ok(await exitedWithin(start.child, 30_000), 'the start fails with its helper');
+    await delay(2000);
+    assert.ok(alive(engine), 'the engine waits while no helper can run');
+    helperFor(helperAssembly());
+    assert.ok(
+      await answeredWithin(() => (alive(engine) ? undefined : true), 30_000),
+      'the next helper this process runs ends it',
+    );
+    assert.ok(await answeredWithin(() => (named() ? undefined : true), 10_000), 'and frees its name');
+  } finally {
+    letGo?.();
+    if (made !== undefined && alive(made)) {
+      process.kill(made);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/**
+ * A process that ran one start, whose helper died, waits before it ends until a helper has let go of
+ * the ended engine's job, so what the engine started runs on. Its copy of the job can be closed only
+ * while it lives. A process that ended at once killed what the engine left running.
+ */
+async function testAProcessEndingAfterItsRunWaitsForTheLetGo(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-one-shot-'));
+  const grandchild = join(root, 'grandchild');
+  const pids: number[] = [];
+  const engineScript =
+    `const fs = require('node:fs'); ${HIDDEN_SPAWN_PRELUDE}` +
+    "const c = spawnHidden(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore', detached: true });" +
+    'c.unref(); fs.writeFileSync(process.argv[2], String(c.pid));' +
+    'setInterval(() => fs.existsSync(process.argv[1]) && process.exit(0), 50);';
+  const oneShot = join(root, 'one-shot.mjs');
+  writeFileSync(
+    oneShot,
+    [
+      "import { cpSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      `import { spawnOnDesktop, helperAssembly } from ${JSON.stringify(pathToFileURL(resolve('build', 'desktop.js')).href)};`,
+      'const [root, engineScript] = process.argv.slice(2);',
+      'const until = async (read) => { for (let i = 0; i < 1200; i++) { const v = read(); if (v !== undefined) return v; await new Promise((r) => setTimeout(r, 50)); } };',
+      "const assembly = join(root, 'one-shot-helper.exe');",
+      'cpSync(helperAssembly(), assembly);',
+      "mkdirSync(join(root, 'scratch'));",
+      "const release = join(root, 'release');",
+      "const start = spawnOnDesktop({ directory: root, endsWithHelper: true, scratch: join(root, 'scratch') }, process.execPath, ['-e', engineScript, release, join(root, 'grandchild')], { stdio: ['ignore', 'ignore', 'ignore'] }, assembly);",
+      'const engine = await until(() => start.pid());',
+      "await until(() => (existsSync(join(root, 'grandchild')) ? true : undefined));",
+      "writeFileSync(join(root, 'engine'), String(engine));",
+      // Renamed so that no helper takes the start over, then back, so the let-go finds one.
+      "renameSync(assembly, assembly + '.gone');",
+      'const helper = start.child.pid;',
+      'process.kill(helper);',
+      'await until(() => { try { process.kill(helper, 0); return undefined; } catch { return true; } });',
+      'await new Promise((r) => setTimeout(r, 1000));',
+      "renameSync(assembly + '.gone', assembly);",
+      // A later start that has ended leaves its helper running and idle, which is then the helper
+      // told to let go.
+      "if (process.argv[4] === 'idle') {",
+      "  mkdirSync(join(root, 'scratch-later'));",
+      "  const later = spawnOnDesktop({ directory: root, endsWithHelper: true, scratch: join(root, 'scratch-later') }, process.execPath, ['-e', 'undefined'], { stdio: ['ignore', 'ignore', 'ignore'] }, assembly);",
+      '  await until(() => (later.child.exitCode === null ? undefined : true));',
+      '  await new Promise((r) => setTimeout(r, 1000));',
+      '}',
+      "writeFileSync(release, '');",
+    ].join('\n'),
+  );
+  try {
+    for (const helper of ['started for the let-go', 'idle']) {
+      rmSync(grandchild, { force: true });
+      rmSync(join(root, 'release'), { force: true });
+      rmSync(join(root, 'scratch'), { recursive: true, force: true });
+      rmSync(join(root, 'scratch-later'), { recursive: true, force: true });
+      const run = spawnSyncHidden(process.execPath, [oneShot, root, engineScript, helper], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.equal(
+        run.status,
+        0,
+        `${helper}: the process runs its start and ends: ${run.stdout} ${run.stderr}`,
+      );
+      const child = Number(readFileSync(grandchild, 'utf8'));
+      pids.push(child, Number(readFileSync(join(root, 'engine'), 'utf8')));
+      assert.ok(
+        alive(child),
+        `${helper}: what the engine started runs on after the process that ran it has ended`,
+      );
+    }
+  } finally {
+    for (const pid of pids.filter((each) => each > 0 && alive(each))) {
+      process.kill(pid);
+    }
+    sweep(root);
+  }
+}
+
+/**
+ * An engine's job gives up its name while the helper still holds the engine's process, whether that
+ * helper started the engine or took it over from one that died. Windows hands a pid to a later
+ * process once the last handle to its owner is closed, and a job name still taken then fails that
+ * process's start.
+ */
+async function testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { openJob } = await import('./support/job-objects.js');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-freed-'));
+  const own = join(root, 'holding-own');
+  const taken = join(root, 'holding-taken');
+  const adopting = join(root, 'adopting');
+  // The moment a helper lets go of an ended engine's process is over in microseconds, so this copy
+  // says when it is there and stays until the test has looked, for a minute at most.
+  const held = (file: string): string =>
+    `WriteText(${JSON.stringify(file)}, "holding");\n` +
+    `for (int waited = 0; waited < 1200 && !File.Exists(${JSON.stringify(`${file}-seen`)}); waited++) { Thread.Sleep(50); }\n`;
+  const adopts = 'static void Adopt(';
+  let slowed = withAddedBefore(HELPER_SOURCE, '', 'CloseHandle(started.process);', held(own));
+  slowed = withAddedBefore(slowed, adopts, 'CloseHandle(process);', held(taken));
+  slowed = withAddedBefore(
+    slowed,
+    adopts,
+    'uint code = 1;',
+    `WriteText(${JSON.stringify(adopting)}, "adopting");\n`,
+  );
+  const copy = new CompiledHelper('slow close helper', 'gdharness-slow-close', slowed, true);
+  const engines: number[] = [];
+  /** A stand-in engine that ends once [param release] exists, started through the copy. */
+  const started = async (name: string, release: string): Promise<{ start: DesktopStart; pid: number }> => {
+    mkdirSync(join(root, name));
+    const start = spawnOnDesktop(
+      { directory: root, endsWithHelper: true, scratch: join(root, name) },
+      process.execPath,
+      [
+        '-e',
+        "const fs = require('node:fs'); setInterval(() => fs.existsSync(process.argv[1]) && process.exit(0), 50)",
+        release,
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore'] },
+      copy.assembly(root),
+    );
+    const pid = await answeredWithin(() => start.pid(), 60_000);
+    assert.ok(pid !== undefined, `the ${name} engine starts`);
+    engines.push(pid);
+    return { start, pid };
+  };
+  /** Whether the job of [param pid] still has its name while a helper holds the ended process, which [param holding] says. */
+  const namedWhileHeld = async (pid: number, holding: string): Promise<boolean> => {
+    const reached = await answeredWithin(() => (existsSync(holding) ? true : undefined), 60_000);
+    assert.ok(reached, `the helper comes to let go of the ended engine ${String(pid)}`);
+    const job = openJob(engineJobName(pid));
+    job?.close();
+    writeFileSync(`${holding}-seen`, '');
+    return job !== null;
+  };
+  const named = (pid: number): boolean => {
+    const job = openJob(engineJobName(pid));
+    job?.close();
+    return job !== null;
+  };
+  try {
+    assert.equal(await copy.ensure(root), null, 'the copy compiles');
+    const first = await started('own', join(root, 'release-own'));
+    assert.ok(named(first.pid), 'a job has its name while its engine runs');
+    writeFileSync(join(root, 'release-own'), '');
+    assert.equal(
+      await namedWhileHeld(first.pid, own),
+      false,
+      'the name is free before the helper that started the engine lets go of its process',
+    );
+    await retireHelper();
+
+    const second = await started('taken', join(root, 'release-taken'));
+    const helper = second.start.child.pid;
+    assert.ok(helper !== undefined, 'the start names its helper');
+    await killTheHelper(helper);
+    assert.ok(
+      await answeredWithin(() => (existsSync(adopting) ? true : undefined), 60_000),
+      'the next helper takes the engine over',
+    );
+    assert.ok(alive(second.pid), 'which runs on');
+    assert.ok(named(second.pid), "with its job named still, through the served process's copy");
+    writeFileSync(join(root, 'release-taken'), '');
+    assert.equal(
+      await namedWhileHeld(second.pid, taken),
+      false,
+      'the name is free before the helper that took the engine over lets go of its process',
+    );
+  } finally {
+    for (const engine of engines.filter((pid) => alive(pid))) {
+      process.kill(engine);
+    }
+    await retireHelper();
+    sweep(root);
+  }
+}
+
+/** [param source] with [param added] put before the first [param anchor] that follows [param after]. */
+function withAddedBefore(source: string, after: string, anchor: string, added: string): string {
+  const from = source.indexOf(after);
+  const at = from === -1 ? -1 : source.indexOf(anchor, from);
+  assert.notEqual(at, -1, `the helper has ${anchor} after ${after === '' ? 'its start' : after}`);
+  return `${source.slice(0, at)}${added}${source.slice(at)}`;
+}
+
+/**
+ * A helper told to take over a start whose engine has gone closes the served process's copy of that
+ * engine's job and no other handle. The helper that died may have closed the copy already, and the
+ * served process may hold something else under the copy's number since.
+ */
+async function testAHelperTakingOverAnEndedStartClosesOnlyThatEnginesJob(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { createJob, openJob } = await import('./support/job-objects.js');
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  // No process began at -1, so the helper finds no engine under this pid to wait on.
+  const gone = process.pid;
+  const otherName = `gdharness-test-other-${String(process.pid)}-${String(Date.now())}`;
+  const other = createJob(otherName);
+  const its = createJob(engineJobName(gone));
+  const named = (name: string): boolean => {
+    const job = openJob(name);
+    job?.close();
+    return job !== null;
+  };
+  const helper = spawnHidden(helperAssembly(), ['--serve', String(process.pid)], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  let said = '';
+  helper.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString('utf8');
+  });
+  /** Has the helper take over the start [param id], whose job copy is said to be [param copy], and waits for its end. */
+  const takenOver = async (id: string, copy: bigint): Promise<boolean> => {
+    helper.stdin.write(`adopt ${id} ${String(gone)} -1 ${String(copy)}  0\n`);
+    const ended = await answeredWithin(() => (said.includes(`ended ${id} 1\n`) ? true : undefined), 60_000);
+    return ended === true;
+  };
+  try {
+    assert.ok(
+      named(otherName) && named(engineJobName(gone)),
+      'both jobs have their names before the helper acts',
+    );
+    assert.ok(await takenOver('other', other.value), `the helper answers the start as ended: ${said}`);
+    assert.ok(named(otherName), "a handle that is not the engine's job is left open");
+    assert.ok(await takenOver('its', its.value), `the helper answers the second start as ended: ${said}`);
+    assert.equal(
+      named(engineJobName(gone)),
+      false,
+      "the copy of the engine's job is closed, and its name is free",
+    );
+  } finally {
+    helper.stdin.end();
+    const ended = await answeredWithin(
+      () => (helper.exitCode !== null || helper.signalCode !== null ? true : undefined),
+      30_000,
+    );
+    if (ended !== true) {
+      helper.kill();
+    }
+    if (named(otherName)) {
+      other.close();
+    }
+    if (named(engineJobName(gone))) {
+      its.close();
+    }
   }
 }
 
@@ -121780,6 +122227,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryEngineRunsInAJobNamedForItsPid,
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
+  testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone,
+  testAProcessEndingAfterItsRunWaitsForTheLetGo,
+  testAnEngineMadeButNeverAnsweredIsEndedByTheNextHelper,
+  testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain,
+  testAHelperTakingOverAnEndedStartClosesOnlyThatEnginesJob,
   testAWholeExitCodeArrivesThroughAHeadlessStart,
   testAKeptStartOutlivesItsStarterInItsJob,
   testAKeptStartOutlivesAKilledStarter,

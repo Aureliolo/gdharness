@@ -250,15 +250,21 @@ export class HelpedChild extends RelayedChild {
       // Read once the helper has ended and all it said is heard, since a hung one can still say it
       // made the engine.
       const made = this.madeProcess;
-      if (made === undefined) {
-        return;
-      }
-      try {
-        helperFor(gone.assembly).release(made);
-      } catch {
-        // No helper can be run, so nothing can end the engine before this process does.
+      if (made !== undefined) {
+        tellAHelper(gone.assembly, `release ${made}`);
       }
     });
+  }
+
+  /**
+   * Has a helper close this process's copy of the job of an engine no helper took over, once the
+   * engine has gone. The copy keeps the job's name taken, and a later engine given the same pid
+   * could not be started.
+   */
+  private letGoOfTheJob(): void {
+    if (this.copy !== '0' && this.enginePid !== undefined && this.helper !== null) {
+      tellAHelper(this.helper.assembly, `letgo ${String(this.enginePid)} ${this.copy}`);
+    }
   }
 
   /** The helper says the engine runs, with its pid and the copy of its job this process holds. */
@@ -319,6 +325,7 @@ export class HelpedChild extends RelayedChild {
   /** One look at the engine of a start no helper holds. */
   private watch(): void {
     if (this.notTheEngine || !alive(this.enginePid)) {
+      this.letGoOfTheJob();
       // Told as a helper tells the same stop: code 1 for the stop file, SIGTERM for a kill.
       if (this.endedHere === 'stop') {
         this.finish(1, null);
@@ -466,6 +473,11 @@ export class ServedHelper {
   readonly assembly: string;
   private readonly starts = new Map<string, HelpedChild>();
   private readonly abandoned = new Map<string, HelpedChild>();
+  /**
+   * The requests owed for other starts that this helper was told and has not yet answered "heard"
+   * to, oldest first.
+   */
+  private readonly told: string[] = [];
   private open = true;
   private retiring = false;
   private holding = true;
@@ -507,12 +519,17 @@ export class ServedHelper {
       }
     });
     this.ended = new Promise((resolve) => {
+      // What it was told and never heard is owed again, for the next helper this process runs.
       this.process.once('exit', () => {
+        owed.push(...this.told.splice(0));
         resolve();
       });
-      // A helper whose spawn failed has no pid and tells only its error, never an exit.
+      // A helper whose spawn failed has no pid and tells only its error, never an exit. The system
+      // refuses a program that is not there only after the spawn has returned.
       this.process.once('error', () => {
         if (this.process.pid === undefined) {
+          owed.push(...this.told.splice(0));
+          this.hold(false);
           resolve();
         }
       });
@@ -545,6 +562,20 @@ export class ServedHelper {
       start?.started(Number(first), second ?? '0');
     } else if (word === 'ended') {
       start?.ended(Number(first), second === 'stopped');
+    } else if (word === 'heard') {
+      this.told.shift();
+      this.holdOnlyForWhatIsWith();
+    }
+  }
+
+  /**
+   * Lets this process end once the helper has no start and has heard every request it was told. A
+   * job copy is closed only while this process lives, so a process ending sooner kills what the
+   * engine left running.
+   */
+  private holdOnlyForWhatIsWith(): void {
+    if (this.starts.size === 0 && this.told.length === 0) {
+      this.hold(false);
     }
   }
 
@@ -555,13 +586,16 @@ export class ServedHelper {
     void child.deliver(this, request);
   }
 
-  /** Has the helper end the engine a helper before it made for a start that failed, named by [param made]. */
-  release(made: string): void {
-    this.write(`release ${made}`);
-    // A helper started only for this holds nothing this process waits on.
-    if (this.starts.size === 0) {
-      this.hold(false);
+  /** Has the helper act on [param line], a request owed for a start a helper before it held. */
+  tell(line: string): void {
+    if (!this.write(line)) {
+      owed.push(line);
+      return;
     }
+    this.told.push(line);
+    // An idle helper lets this process end. The helper usually reads the line within a millisecond,
+    // but a process ending first closes the job copy the line was about, ending what the engine left.
+    this.hold(true);
   }
 
   /** Keeps hearing what the helper says of [param child], a start that failed before the helper ended. */
@@ -572,7 +606,7 @@ export class ServedHelper {
   forget(child: HelpedChild): void {
     this.starts.delete(child.id);
     if (this.starts.size === 0) {
-      this.hold(false);
+      this.holdOnlyForWhatIsWith();
       if (this.retiring) {
         this.retire();
       }
@@ -655,6 +689,21 @@ export class ServedHelper {
 
 let current: ServedHelper | null = null;
 
+/** Requests owed for starts a dead helper held, which no helper could be run to hear yet. */
+const owed: string[] = [];
+
+/**
+ * Has a helper of [param assembly] act on [param line] now, or the next helper this process runs
+ * where none can be run now.
+ */
+function tellAHelper(assembly: string, line: string): void {
+  try {
+    helperFor(assembly).tell(line);
+  } catch {
+    owed.push(line);
+  }
+}
+
 /**
  * Ends the helper this process keeps once its starts have ended. A test that started it ends it, so
  * the run's own process is not left holding a helper no later test asked for.
@@ -668,10 +717,12 @@ export async function retireHelper(): Promise<void> {
 
 /** The helper running [param assembly], started when there is none. Throws [class HelperRefused] where the system will not run it. */
 export function helperFor(assembly: string): ServedHelper {
-  if (current?.running === true && current.assembly === assembly) {
-    return current;
+  if (current?.running !== true || current.assembly !== assembly) {
+    current?.retire();
+    current = new ServedHelper(assembly);
   }
-  current?.retire();
-  current = new ServedHelper(assembly);
+  for (const line of owed.splice(0)) {
+    current.tell(line);
+  }
   return current;
 }

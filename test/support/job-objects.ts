@@ -24,6 +24,11 @@ export class JobHandle {
     this.handle = handle;
   }
 
+  /** The handle's number in this process, as a process that is to act on it is told it. */
+  get value(): bigint {
+    return this.handle;
+  }
+
   /** Whether the process [param pid] is in this job, nested ones included. */
   holds(pid: number): boolean {
     const process = kernel32.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
