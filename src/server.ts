@@ -13795,20 +13795,6 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
-    // Refused before the run the editor holds is picked up or ended: that editor has another
-    // project open, and a start for this one picked up and ended its play, then had it play its
-    // own main scene under this project's name. The same rule as every other bridge call. A boot
-    // check is its own engine and never reaches the editor.
-    const open = this.godotBridge.isConnected() ? this.godotBridge.getStatus().projectPath : undefined;
-    if (op !== 'check' && open !== undefined && open !== '' && !isSameDirectory(open, project.value.path)) {
-      return this.createErrorResponse(
-        `This start names ${project.value.path}, and ${this.editorOnTheBridge()} has ${open} open.`,
-        [
-          "editor_status names the project this server's editor is showing",
-          'One server serves one editor: start a second server for the other project',
-        ],
-      );
-    }
     // Before the engine is looked for, so that a scene the server will not run is refused as
     // such rather than as a missing Godot.
     const suites = this.suitesToPlay(args, project.value.path);
@@ -13977,7 +13963,7 @@ class GodotServer {
     // is asked what it is playing first, as every answer about a run asks it: a replacement
     // server had no record of the game the editor was playing, so its start had the editor stop
     // that game and said nothing about it.
-    await this.pickUpWhatTheEditorIsPlaying();
+    await this.pickUpWhatTheEditorIsPlaying(project.value.path);
     let ended: EndedRun | null = null;
     const before = await this.currentRun();
     const going = before !== null && (await this.runStillGoing(before));
@@ -14224,12 +14210,31 @@ class GodotServer {
     }
   }
 
-  /** Whether the editor itself can play this start, with nothing it cannot be handed. */
+  /**
+   * Whether the editor on the bridge has a project open other than [param projectPath]. Such an
+   * editor plays only its own project, so a start for this one is a game of its own, and nothing is
+   * asked of the editor on its behalf.
+   */
+  private editorHasAnotherThan(projectPath: string): boolean {
+    const open = this.godotBridge.getStatus().projectPath;
+    return (
+      this.godotBridge.isConnected() &&
+      open !== undefined &&
+      open !== '' &&
+      !isSameDirectory(open, projectPath)
+    );
+  }
+
+  /**
+   * Whether the editor itself can play this start: it has this project open, and the start needs
+   * nothing it cannot be handed.
+   */
   private theEditorPlaysIt(run: RunPlayed): boolean {
     const { exported, given, flags, asked, otherGodot, editorWouldPlay, silentOnlyHere } = run;
     return (
       exported === null &&
       this.godotBridge.isConnected() &&
+      !this.editorHasAnotherThan(run.project.value.path) &&
       editorWouldPlay &&
       given.length === 0 &&
       flags.length === 0 &&
@@ -14249,6 +14254,9 @@ class GodotServer {
     const { exported, given, flags, asked, otherGodot, editorWouldPlay, silentOnlyHere } = run;
     if (exported !== null) {
       return ' An exported build is started without a debugger, since a release build quits when given one, so breakpoints and debug_state do not reach it.';
+    }
+    if (this.editorHasAnotherThan(run.project.value.path)) {
+      return ` This game was started here, since ${this.editorOnTheBridge()} has ${this.godotBridge.getStatus().projectPath} open and plays only that project.${OWN_DEBUGGER}`;
     }
     const editorWouldHaveIt = this.godotBridge.isConnected() && editorWouldPlay;
     if (editorWouldHaveIt && otherGodot !== undefined) {
@@ -15871,9 +15879,16 @@ class GodotServer {
    *
    * What it printed before the reconnect is gone: the adapter buffer went with the old server. The
    * answer says so rather than presenting a short log as the whole run.
+   *
+   * [param aboutProject] is the project the call is about, when it names one. An editor that has
+   * another project open plays only that one, so its play is nothing the call can be about, and
+   * taking it up would put it where a run of the named project belongs, or end a run held here.
    */
-  private async pickUpWhatTheEditorIsPlaying(): Promise<void> {
-    if (!this.godotBridge.isConnected()) {
+  private async pickUpWhatTheEditorIsPlaying(aboutProject?: string): Promise<void> {
+    if (
+      !this.godotBridge.isConnected() ||
+      (aboutProject !== undefined && this.editorHasAnotherThan(aboutProject))
+    ) {
       return;
     }
     const going = this.activeProcess;
@@ -16698,7 +16713,7 @@ class GodotServer {
    * profiler on here when nothing has.
    */
   private async handleRunProfile(args: OperationParams): Promise<ToolResponse> {
-    await this.pickUpWhatTheEditorIsPlaying();
+    await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
     const run = await this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -17058,7 +17073,7 @@ class GodotServer {
    * which of the two happened so that "still going" is never read as "ended and printed nothing".
    */
   private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
-    await this.pickUpWhatTheEditorIsPlaying();
+    await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
     const run = await this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -17482,7 +17497,7 @@ class GodotServer {
     if (readString(args, 'op') === 'editor') {
       return await this.handleEditorConsole(args);
     }
-    await this.pickUpWhatTheEditorIsPlaying();
+    await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
     const run = await this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -17899,7 +17914,7 @@ class GodotServer {
     // Before anything is picked to end. A reconnect leaves the editor-played run unrecorded, and
     // what would otherwise be adopted here is the last run this project spawned: a pid belonging
     // to something nobody asked about, offered to be killed while the run the caller means goes on.
-    await this.pickUpWhatTheEditorIsPlaying();
+    await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
     const stopped = await this.currentRun();
     const askedPid = readNumber(args, 'pid');
     if (askedPid !== undefined && this.isNotTheRunsGame(stopped, askedPid)) {
