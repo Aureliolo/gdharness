@@ -7290,6 +7290,396 @@ async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
   });
 }
 
+/** A project with a script that spins on line 7, which a breakpoint stops on. */
+function writeSpinningProject(prefix: string): string {
+  const path = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  writeFileSync(
+    join(path, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Beside"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(path, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tvar spent: int = 0\n\twhile true:\n\t\tspent += 1\n\t\tOS.delay_usec(1000)\n',
+  );
+  writeFileSync(
+    join(path, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  return path;
+}
+
+/** The debug adapter connections a fixture's server made, and what it sent down them. */
+interface AdapterTraffic {
+  connections: number;
+  sent: string;
+}
+
+/**
+ * A fixture for breakpoints of a project beside an editor of another: the editor has project A open
+ * and the calls name B. [param body] gets each call's parsed answer and the traffic the editor's
+ * adapter saw.
+ */
+async function withAnEditorBesideABreakpointProject(
+  body: (stage: {
+    readonly editorProject: string;
+    readonly otherProject: string;
+    readonly traffic: AdapterTraffic;
+    readonly toolsAsked: string[];
+    readonly call: (
+      name: string,
+      args: Record<string, unknown>,
+    ) => Promise<{ said: string; answer: unknown }>;
+  }) => Promise<void>,
+): Promise<void> {
+  const traffic: AdapterTraffic = { connections: 0, sent: '' };
+  const toolsAsked: string[] = [];
+  const otherProject = writeSpinningProject('gdharness-beside-other-');
+  try {
+    await withAPlayingEditor(
+      () => (tool) => {
+        toolsAsked.push(tool);
+        return { ok: true };
+      },
+      async ({ server, project }) => {
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Node\n\n\nfunc _ready() -> void:\n\tvar spent: int = 0\n\twhile true:\n\t\tspent += 1\n\t\tOS.delay_usec(1000)\n',
+        );
+        const call = async (
+          name: string,
+          args: Record<string, unknown>,
+        ): Promise<{ said: string; answer: unknown }> => {
+          const answered = await server.request(
+            'tools/call',
+            { name, arguments: args },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          return {
+            said: textOf(answered) ?? JSON.stringify(answered),
+            answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered),
+          };
+        };
+        toolsAsked.length = 0;
+        await body({ editorProject: project, otherProject, traffic, toolsAsked, call });
+      },
+      {
+        onAdapter: (socket) => {
+          traffic.connections += 1;
+          socket.on('data', (chunk: Buffer) => {
+            traffic.sent += chunk.toString('latin1');
+          });
+        },
+      },
+    );
+  } finally {
+    sweep(otherProject);
+  }
+}
+
+/**
+ * A breakpoint naming a project other than the connected editor's is held here, as with no editor.
+ * The editor refuses a path outside its own project with wrong_path, so it was asked and the set
+ * was answered with that refusal.
+ */
+async function testABreakpointOnAnotherProjectIsHeldBesideAnEditor(): Promise<void> {
+  await withAnEditorBesideABreakpointProject(async ({ otherProject, traffic, toolsAsked, call }) => {
+    const set = await call('debug_breakpoint', {
+      projectPath: otherProject,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 7,
+    });
+    assert.equal(get(set.answer, 'set'), true, set.said);
+    assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [7] }], set.said);
+    assert.equal(get(set.answer, 'setInEditor'), undefined, set.said);
+    assert.match(
+      text(get(set.answer, 'note')),
+      /^The connected editor has another project open \(.+\), so the breakpoints under held are kept here/,
+      set.said,
+    );
+    assert.deepEqual(
+      [traffic.connections, traffic.sent, toolsAsked],
+      [0, '', []],
+      'the editor was asked nothing',
+    );
+  });
+}
+
+/**
+ * A remove or a list naming a project other than the connected editor's acts on that project's
+ * held set, and a list naming the editor's project still asks the editor.
+ */
+async function testBreakpointRemoveAndListBesideAnEditorActOnTheNamedProject(): Promise<void> {
+  await withAnEditorBesideABreakpointProject(async ({ editorProject, otherProject, traffic, call }) => {
+    const on = (op: string, projectPath: string | undefined, extra: Record<string, unknown> = {}) =>
+      call('debug_breakpoint', {
+        ...(projectPath === undefined ? {} : { projectPath }),
+        op,
+        ...extra,
+      });
+    const line = { scriptPath: 'main.gd', line: 7 };
+    await on('set', otherProject, line);
+    const listed = await on('list', otherProject);
+    assert.deepEqual(get(listed.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [7] }], listed.said);
+    assert.equal(get(listed.answer, 'setInEditor'), undefined, listed.said);
+    const removed = await on('remove', otherProject, line);
+    assert.equal(get(removed.answer, 'removed'), true, removed.said);
+    assert.deepEqual(get(removed.answer, 'held'), [], removed.said);
+    const again = await on('remove', otherProject, line);
+    assert.equal(get(again.answer, 'removed'), false, again.said);
+    assert.match(
+      text(get(again.answer, 'why')),
+      /^No breakpoint was held on line 7 of res:\/\/main\.gd/,
+      again.said,
+    );
+    assert.equal(traffic.connections, 0, 'none of those reached the editor');
+
+    const mine = await on('list', editorProject);
+    assert.deepEqual(get(mine.answer, 'held'), [], mine.said);
+    assert.deepEqual(get(mine.answer, 'setInEditor'), [], `the editor's own set is listed: ${mine.said}`);
+  });
+}
+
+/**
+ * A set naming the editor's own project is handed to the editor's adapter, and so is a remove,
+ * with the project spelt in every way that names the same folder.
+ */
+async function testABreakpointOnTheEditorsProjectStillGoesToTheEditor(): Promise<void> {
+  await withAnEditorBesideABreakpointProject(async ({ editorProject, traffic, call }) => {
+    const spellings: string[] = [
+      editorProject,
+      editorProject.replaceAll('\\', '/'),
+      `${editorProject}${sep}`,
+    ];
+    if (process.platform === 'win32') {
+      spellings.push(editorProject.toUpperCase(), editorProject.toLowerCase());
+    }
+    for (const named of spellings) {
+      const before = traffic.sent.split('setBreakpoints').length;
+      const set = await call('debug_breakpoint', {
+        projectPath: named,
+        op: 'set',
+        scriptPath: 'main.gd',
+        line: 7,
+      });
+      const label = `${named}: ${set.said}`;
+      assert.notEqual(set.answer, null, label);
+      assert.ok(get(set.answer, 'setInEditor') !== undefined, label);
+      assert.ok(traffic.sent.split('setBreakpoints').length > before, `the adapter was asked for ${label}`);
+      const removed = await call('debug_breakpoint', {
+        projectPath: named,
+        op: 'remove',
+        scriptPath: 'main.gd',
+        line: 7,
+      });
+      assert.ok(get(removed.answer, 'setInEditor') !== undefined, `${named}: ${removed.said}`);
+    }
+  });
+}
+
+/**
+ * What a fixture with a real engine and a fake editor of another project is handed. The editor can
+ * be opened and closed while the server runs.
+ */
+interface EditorBesideStage {
+  readonly otherProject: string;
+  readonly editorProject: string;
+  readonly traffic: AdapterTraffic;
+  readonly call: (name: string, args: Record<string, unknown>) => Promise<{ said: string; answer: unknown }>;
+  readonly openEditor: () => Promise<void>;
+  readonly closeEditor: () => Promise<void>;
+}
+
+async function withAnEngineBesideAnEditorOfAnotherProject(
+  body: (stage: EditorBesideStage) => Promise<void>,
+): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('breakpoint beside an editor regression skipped (Godot not found)');
+    return;
+  }
+  const editorProject = writeSpinningProject('gdharness-beside-editor-');
+  const otherProject = writeSpinningProject('gdharness-beside-game-');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-beside-rt-'));
+  const port = await reservePort();
+  const traffic: AdapterTraffic = { connections: 0, sent: '' };
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_BRIDGE_PORT: String(port) },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    return {
+      said: textOf(answered) ?? JSON.stringify(answered),
+      answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered),
+    };
+  };
+  const editor: { socket: WebSocket | null } = { socket: null };
+  try {
+    await server.initialize('regression-test');
+    await withFramedPeer(
+      (message, socket) => {
+        socket.write(
+          frameJsonRpc({
+            seq: Number(message['seq']) + 1000,
+            type: 'response',
+            request_seq: message['seq'],
+            command: String(message['command']),
+            success: true,
+            body: message['command'] === 'threads' ? { threads: [] } : {},
+          }),
+        );
+      },
+      async (adapter) => {
+        const openEditor = async (): Promise<void> => {
+          const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+          editor.socket = socket;
+          socket.on('error', () => {});
+          await new Promise<void>((settle, reject) => {
+            socket.once('open', () => {
+              settle();
+            });
+            socket.once('error', reject);
+          });
+          socket.on('message', (raw: Buffer) => {
+            const message: unknown = JSON.parse(String(raw));
+            if (isRecord(message) && message['type'] === 'tool_invoke') {
+              socket.send(
+                JSON.stringify({
+                  type: 'tool_result',
+                  id: message['id'],
+                  success: true,
+                  result: { ok: true },
+                }),
+              );
+            }
+          });
+          socket.send(
+            JSON.stringify(greeting(editorProject, { dap_port: adapter, editor_pid: FAKE_EDITOR_PID })),
+          );
+          let greeted = false;
+          for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+            await delay(100);
+            const seen = parseTextContent(
+              await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+            );
+            greeted = text(get(seen, 'editor', 'projectPath')) === editorProject;
+          }
+          assert.ok(greeted, 'the fake editor should have been greeted');
+        };
+        const closeEditor = async (): Promise<void> => {
+          if (editor.socket !== null) {
+            await untilTheEditorIsGone(server, editor.socket);
+          }
+        };
+        await body({ otherProject, editorProject, traffic, call, openEditor, closeEditor });
+      },
+      (socket) => {
+        traffic.connections += 1;
+        socket.on('data', (chunk: Buffer) => {
+          traffic.sent += chunk.toString('latin1');
+        });
+      },
+    );
+  } finally {
+    editor.socket?.terminate();
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { projectPath: otherProject, op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await server.stop();
+    sweep(editorProject, otherProject, runtimeDir);
+  }
+}
+
+/** The stack of the held game, read until the game has stopped, or null. */
+async function stackOfTheHeldGame(
+  call: EditorBesideStage['call'],
+): Promise<{ said: string; answer: unknown }> {
+  let stopped = await call('debug_state', { op: 'stack' });
+  for (let waited = 0; waited < 15_000 && stopped.answer === null; waited += 250) {
+    await delay(250);
+    stopped = await call('debug_state', { op: 'stack' });
+  }
+  return stopped;
+}
+
+/**
+ * A breakpoint set on another project's script beside an editor is handed to the next game this
+ * server starts on that project, once the editor is gone, and stops it on its line.
+ */
+async function testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject(): Promise<void> {
+  await withAnEngineBesideAnEditorOfAnotherProject(async (stage) => {
+    await stage.openEditor();
+    const set = await stage.call('debug_breakpoint', {
+      projectPath: stage.otherProject,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 7,
+    });
+    assert.equal(get(set.answer, 'set'), true, set.said);
+    assert.equal(stage.traffic.connections, 0, 'the editor was asked nothing');
+    await stage.closeEditor();
+    const start = await stage.call('editor_run', {
+      projectPath: stage.otherProject,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 1000,
+    });
+    assert.equal(get(start.answer, 'started'), true, start.said);
+    assert.deepEqual(
+      get(start.answer, 'breakpoints'),
+      [{ scriptPath: 'res://main.gd', lines: [7] }],
+      start.said,
+    );
+    const stopped = await stackOfTheHeldGame(stage.call);
+    assert.deepEqual(
+      [get(stopped.answer, 'stack', 0, 'line'), get(stopped.answer, 'stack', 0, 'script')],
+      [7, 'res://main.gd'],
+      stopped.said,
+    );
+  });
+}
+
+/**
+ * A game of a project already running here through its keeper is told a breakpoint set on that
+ * project beside an editor of another, and stops on it.
+ */
+async function testABreakpointSetBesideAnEditorReachesTheRunningGameOfItsProject(): Promise<void> {
+  await withAnEngineBesideAnEditorOfAnotherProject(async (stage) => {
+    const start = await stage.call('editor_run', {
+      projectPath: stage.otherProject,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 1000,
+    });
+    assert.equal(get(start.answer, 'started'), true, start.said);
+    await stage.openEditor();
+    const set = await stage.call('debug_breakpoint', {
+      projectPath: stage.otherProject,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 7,
+    });
+    assert.equal(get(set.answer, 'set'), true, set.said);
+    assert.match(text(get(set.answer, 'runningGame')), /^Told to the running game/, set.said);
+    assert.equal(stage.traffic.connections, 0, 'the editor was asked nothing');
+    const stopped = await stackOfTheHeldGame(stage.call);
+    assert.deepEqual(
+      [get(stopped.answer, 'stack', 0, 'line'), get(stopped.answer, 'stack', 0, 'script')],
+      [7, 'res://main.gd'],
+      stopped.said,
+    );
+  });
+}
+
 /**
  * Held breakpoints belong to the project that set them. A list or a game start naming another
  * project answers that project's own note, in either order, and the first project's lines come
@@ -122576,6 +122966,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
   testHeldBreakpointsBelongToTheirProject,
+  testABreakpointOnAnotherProjectIsHeldBesideAnEditor,
+  testBreakpointRemoveAndListBesideAnEditorActOnTheNamedProject,
+  testABreakpointOnTheEditorsProjectStillGoesToTheEditor,
+  testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject,
+  testABreakpointSetBesideAnEditorReachesTheRunningGameOfItsProject,
   testTheBreakpointNoteIsTheProjects,
   testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace,
   testABreakpointNoteWithBackslashesCannotLeaveTheProject,
