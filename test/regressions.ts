@@ -96418,21 +96418,17 @@ async function testAShaderReadSeesItsIncludeAsItIsNow(): Promise<void> {
   );
 }
 
-/** A function lost or gained by an include that another include names is seen at the shader. */
-async function testAShaderReadSeesANestedIncludeAsItIsNow(): Promise<void> {
+/** An include that is not there is answered as the engine answers it. */
+async function testAShaderReadWithAMissingIncludeSaysWhatTheEngineSays(): Promise<void> {
   await withAShaderProject(
     {
-      'a.gdshader': SHADER_CALLING_LIT,
-      'inc.gdshaderinc': '#include "res://inner.gdshaderinc"\nfloat outer_one() { return 1.0; }\n',
-      'inner.gdshaderinc': 'float other() { return 1.0; }\n',
+      'gone.gdshader':
+        'shader_type canvas_item;\n#include "res://nowhere.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(1.0);\n}\n',
     },
-    async (read, write) => {
-      const missing = compileOf(await read('res://a.gdshader'));
-      assert.equal(missing[0], false, JSON.stringify(missing));
-      write('inner.gdshaderinc', 'float lit() { return 1.0; }\n');
-      assert.deepEqual(compileOf(await read('res://a.gdshader')), [true, []]);
-      write('inner.gdshaderinc', 'float other() { return 1.0; }\n');
-      assert.equal(compileOf(await read('res://a.gdshader'))[0], false);
+    async (read) => {
+      const answer = compileOf(await read('res://gone.gdshader'));
+      assert.equal(answer[0], false, JSON.stringify(answer));
+      assert.match(answer[1].join('\n'), /Tokenizer: Unknown character #35: '#'/);
     },
   );
 }
@@ -122494,7 +122490,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAResourceWriteWithNoEditorSaysWhatStoppedIt,
   testAShaderWithNoTypeAndATranslationWithNoEditor,
   testAShaderReadSeesItsIncludeAsItIsNow,
-  testAShaderReadSeesANestedIncludeAsItIsNow,
+  testAShaderReadWithAMissingIncludeSaysWhatTheEngineSays,
   testAShaderReadWithNoIncludeIsUnchanged,
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,

@@ -894,12 +894,15 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 
 ## Puts the file's own copy of each include of [param file], nested ones too, in the resource cache.
 ## [param set_aside] keeps the copy that was there and the file's, by path. The shader compiler
-## takes
-## an include from the cache, so one the editor loaded before the file changed compiled the shader
-## against its old text. Reloading it in place would drop edits the editor holds unsaved.
+## takes an include from the cache, so one the editor loaded before the file changed compiled the
+## shader against its old text. Reloading it in place would drop edits the editor holds unsaved.
 static func _cache_includes_from_disk(
 	file: String, set_aside: Dictionary, seen: Dictionary = {}
 ) -> void:
+	# The engine cannot list the includes: ResourceLoader.get_dependencies answers an empty list for
+	# a
+	# shader that includes files, and loading the shader again in any cache mode compiles it against
+	# the include copy the cache holds. So the include lines are read from the text here.
 	var finder: RegEx = RegEx.create_from_string('(?m)^\\s*#\\s*include\\s+"([^"\\n]+)"')
 	for found: RegExMatch in finder.search_all(FileAccess.get_file_as_string(file)):
 		var named: String = found.get_string(1)

@@ -2688,12 +2688,21 @@ async function testAShaderParameterIsUnsetInTheEditor({ call, refusal, project }
   }
 }
 
+/** The include text that defines `lit()`, which the shader of these cases calls. */
+const INCLUDE_WITH_LIT = 'float lit() { return 1.0; }\n';
+/** The include text that does not. */
+const INCLUDE_WITHOUT_LIT = 'float other() { return 1.0; }\n';
+
 /**
- * A shader read by an editor that has already compiled it compiles against its include as the file
- * is now: a function the include gains makes the next read compile, and one it loses makes the
- * next read fail with the engine's message, with no restart.
+ * Opens a scene whose material uses a shader that calls `lit()` and includes a file holding
+ * [param firstInclude], then hands [param body] a read of the shader and a way to rewrite the
+ * include. The scene stays open, so the editor holds the include as it was when it opened.
  */
-async function testAShaderReadSeesItsIncludeAsItIsNowInTheEditor({ call, project }: Editor): Promise<void> {
+async function withAShaderIncludeHeldByTheEditor(
+  { call, project }: Editor,
+  firstInclude: string,
+  body: (read: () => Promise<unknown>, writeInclude: (code: string) => void) => Promise<void>,
+): Promise<void> {
   mkdirSync(join(project, 'inc'), { recursive: true });
   const shader = join(project, 'inc', 'a.gdshader');
   const include = join(project, 'inc', 'lib.gdshaderinc');
@@ -2701,9 +2710,9 @@ async function testAShaderReadSeesItsIncludeAsItIsNowInTheEditor({ call, project
     shader,
     'shader_type canvas_item;\n#include "res://inc/lib.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n',
   );
-  writeFileSync(include, 'float other() { return 1.0; }\n');
-  // A scene whose material uses the shader keeps the include alive in the editor, which is what
-  // leaves a stale copy of it in the resource cache.
+  writeFileSync(include, firstInclude);
+  // A scene open in a tab, whose material uses the shader, keeps the include alive in the editor,
+  // which is what leaves a stale copy of it in the resource cache.
   writeFileSync(
     join(project, 'inc', 'holder.tscn'),
     '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://inc/a.gdshader" id="1_shader"]\n\n' +
@@ -2712,34 +2721,55 @@ async function testAShaderReadSeesItsIncludeAsItIsNowInTheEditor({ call, project
   );
   const read = async (): Promise<unknown> =>
     await call('resource_edit', { projectPath: project, op: 'read', resourcePath: 'res://inc/a.gdshader' });
-  const messages = (answer: unknown): string[] =>
-    asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message')));
   try {
     await call('editor_rescan', { projectPath: project });
-    await call('scene_node', {
-      projectPath: project,
-      scenePath: 'res://inc/holder.tscn',
-      op: 'get',
-      nodePath: '.',
+    await hook(project, { op: 'open', path: 'res://inc/holder.tscn' });
+    await body(read, (code) => {
+      writeFileSync(include, code);
     });
+  } finally {
+    rmSync(join(project, 'inc'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/** The messages of a shader read's compile errors. */
+function compileMessagesOf(answer: unknown): string[] {
+  return asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message')));
+}
+
+/**
+ * A shader read by an editor that has the include open compiles against the include as the file
+ * is now. A function the include gains makes the next read compile, with no restart.
+ */
+async function testAShaderReadSeesAGainedIncludeFunctionInTheEditor(editor: Editor): Promise<void> {
+  await withAShaderIncludeHeldByTheEditor(editor, INCLUDE_WITHOUT_LIT, async (read, writeInclude) => {
     const missing = await read();
     assert.deepEqual(
       [get(missing, 'readBy'), get(missing, 'compiles')],
       ['the editor', false],
       text(missing),
     );
-    assert.match(messages(missing).join('\n'), /No matching function found for: 'lit'/);
-    writeFileSync(include, 'float lit() { return 1.0; }\n');
+    assert.match(compileMessagesOf(missing).join('\n'), /No matching function found for: 'lit'/);
+    writeInclude(INCLUDE_WITH_LIT);
     const gained = await read();
-    assert.deepEqual([get(gained, 'compiles'), messages(gained)], [true, []], text(gained));
-    writeFileSync(include, 'float other() { return 1.0; }\n');
+    assert.deepEqual([get(gained, 'compiles'), compileMessagesOf(gained)], [true, []], text(gained));
+  });
+}
+
+/**
+ * The same, for a function the include loses: the next read fails with the engine's message naming
+ * it.
+ */
+async function testAShaderReadSeesALostIncludeFunctionInTheEditor(editor: Editor): Promise<void> {
+  await withAShaderIncludeHeldByTheEditor(editor, INCLUDE_WITH_LIT, async (read, writeInclude) => {
+    const present = await read();
+    assert.deepEqual([get(present, 'compiles'), compileMessagesOf(present)], [true, []], text(present));
+    writeInclude(INCLUDE_WITHOUT_LIT);
     const lost = await read();
     assert.equal(get(lost, 'compiles'), false, text(lost));
-    assert.match(messages(lost).join('\n'), /No matching function found for: 'lit'/);
-  } finally {
-    rmSync(join(project, 'inc'), { recursive: true, force: true });
-    await call('editor_rescan', { projectPath: project });
-  }
+    assert.match(compileMessagesOf(lost).join('\n'), /No matching function found for: 'lit'/);
+  });
 }
 
 /**
@@ -9582,7 +9612,14 @@ async function main(): Promise<void> {
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
     ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
-    ['testAShaderReadSeesItsIncludeAsItIsNowInTheEditor', testAShaderReadSeesItsIncludeAsItIsNowInTheEditor],
+    [
+      'testAShaderReadSeesAGainedIncludeFunctionInTheEditor',
+      testAShaderReadSeesAGainedIncludeFunctionInTheEditor,
+    ],
+    [
+      'testAShaderReadSeesALostIncludeFunctionInTheEditor',
+      testAShaderReadSeesALostIncludeFunctionInTheEditor,
+    ],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
