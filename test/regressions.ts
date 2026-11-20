@@ -58167,8 +58167,9 @@ function neighboursOfAPngByte(
  *
  * A gate's `godot --headless --path <main> --import` loaded the editor addon, which connected as
  * the editor, and for as long as the import ran a start for another project on the same server was
- * refused as "the editor on this bridge has <main> open" (#834). The engine hands an editor plugin
- * none of its options, so the server reads the process's command line. The closest thing to the
+ * answered as one made beside "the editor on this bridge", which had <main> open (#834). The engine
+ * hands an editor plugin none of its options, so the server reads the process's command line. The
+ * closest thing to the
  * target is an editor opened by hand, headless and unmarked as the one the editor leg runs, so it
  * is the one that must be served. The same editor told `--quit-after` is the one that must not. An
  * import can finish before it greets, so it is checked as well rather than instead.
@@ -58297,10 +58298,12 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
         ENGINE_CALL_TIMEOUT_MS,
       );
       const answered = textOf(start) ?? '';
+      // Said of a start made beside an editor that has another project open, so an import run
+      // taken for the editor would put it in the answer.
       assert.doesNotMatch(
         answered,
         /editor on this bridge/,
-        `a start for another project during an import: ${answered}`,
+        `a start for another project during an import is not made beside an editor: ${answered}`,
       );
       assert.equal(typeof get(parseTextContent(start), 'pid'), 'number', `and it starts: ${answered}`);
       await server.request(
@@ -98630,7 +98633,6 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   // asks the editor, and an editor cannot have open a folder holding no project.godot.
   const open = mkdtempSync(join(tmpdir(), 'gdharness-editor-has-this-'));
   writeFileSync(join(open, 'project.godot'), 'config_version=5\n');
-  // Made rather than only named, since the start below needs a project there to reach the check.
   const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-editor-has-not-'));
   let editor: WebSocket | null = null;
   try {
@@ -98692,24 +98694,6 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
       false,
       'and the editor was never asked about a project it cannot see',
     );
-
-    // A start for the other project, which played the editor's own main scene under that project's
-    // name, after picking up and ending whatever the editor was playing.
-    writeFileSync(
-      join(elsewhere, 'project.godot'),
-      'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n',
-    );
-    asked.length = 0;
-    const start = await server.request('tools/call', {
-      name: 'editor_run',
-      arguments: { projectPath: elsewhere },
-    });
-    const startRefused = textOf(start) ?? JSON.stringify(start);
-    assert.ok(
-      startRefused.includes(`the editor on this bridge (pid ${FAKE_EDITOR_PID}) has`),
-      `a start is refused too: ${startRefused}`,
-    );
-    assert.deepEqual(asked, [], `and the editor is not asked anything about its play: ${asked.join(', ')}`);
 
     // Beside it, the project the editor does have: the same call reaches the editor and comes back
     // with the editor's own answer. Without this the fixture is satisfied by a bridge that refuses
@@ -121807,6 +121791,691 @@ function testAnEngineRunsItsSuitesCheapestFirstInTheGame(): void {
   }
 }
 
+/** What the fake editor of another project has been asked, and whether it is playing its own game. */
+interface AnotherProjectsEditor {
+  playing: boolean;
+  readonly asked: string[];
+}
+
+/** What a fixture is handed by `withAnEditorOfAnotherProject`. */
+interface AnotherProjectsEditorStage {
+  readonly server: ServerProcess;
+  /** The project the fake editor has open. */
+  readonly editorProject: string;
+  /** A second project, whose game a start here plays. */
+  readonly otherProject: string;
+  readonly editor: AnotherProjectsEditor;
+  /** One tool call, answered as the text the server sent. */
+  readonly call: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /** A headless start naming the second project, parsed, whose game is ended with the fixture. */
+  readonly startOther: (extra?: Record<string, unknown>) => Promise<unknown>;
+  /** Where the server reads announced games and run records. */
+  readonly runtimeDir: string;
+}
+
+/** The sentence a start answers with when the editor on the bridge has another project open. */
+function startedBesideTheEditorNote(editorProject: string): string {
+  return (
+    ` This game was started here, since the editor on this bridge (pid ${FAKE_EDITOR_PID}) has ${editorProject} open and plays only that project.` +
+    ' Its debugger is the keeper holding it rather than the editor, so the debug_* tools answer for it all the same: breakpoints stop it, and debug_control pause breaks into it wherever it is, which the editor offers no way to do.'
+  );
+}
+
+/**
+ * A server whose editor has one project open, with a second project on disk and a real engine to
+ * play it, so a start naming the second one can be watched.
+ *
+ * The editor answers what it is playing and takes a play or a stop as the real one does, and
+ * records every tool it is sent. Its game is never a process: a case reads what it was asked
+ * instead, unless [param options.announced] has a stand-in announce itself as the editor's game.
+ * [param options.runtimeAddon] puts this release's runtime addon in the second project, so its game
+ * announces. [param options.stoppedInTheEditor] has the editor's debug adapter tell each connection
+ * it is stopped at a breakpoint, as it does when its own play hits one. Every game the fixture
+ * started is ended with it.
+ */
+async function withAnEditorOfAnotherProject(
+  options: {
+    playing?: boolean;
+    playsWindowed?: boolean;
+    runtimeAddon?: boolean;
+    announced?: boolean;
+    stoppedInTheEditor?: boolean;
+  },
+  body: (stage: AnotherProjectsEditorStage) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('start beside another project’s editor regression skipped (Godot not found)');
+    return;
+  }
+  const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-beside-editor-'));
+  const games: number[] = [];
+  // Idle until the fixture has greeted, since the status calls that wait for the greeting take up
+  // whatever the editor plays.
+  const editor: AnotherProjectsEditor = { playing: false, asked: [] };
+  const registered =
+    options.runtimeAddon === true
+      ? `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`
+      : '';
+  writeFileSync(
+    join(other, 'project.godot'),
+    // Headless run arguments of its own, so an editor that had this project open would play a
+    // headless start itself rather than leave it to be spawned.
+    `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Beside"\nrun/main_scene="res://main.tscn"\n${registered}\n[editor]\n\nrun/main_run_args="--headless"\n`,
+  );
+  writeFileSync(join(other, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  if (options.runtimeAddon === true) {
+    cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(other, 'addons', 'gdharness_runtime'), {
+      recursive: true,
+    });
+  }
+  try {
+    await withAPlayingEditor(
+      ({ adapter }) =>
+        (tool) => {
+          editor.asked.push(tool);
+          if (tool === 'play_scene') {
+            editor.playing = true;
+          }
+          if (tool === 'stop_playing') {
+            const wasPlaying = editor.playing;
+            editor.playing = false;
+            return { ok: true, wasPlaying, playing: false };
+          }
+          return { ok: true, playing: editor.playing, scenePath: 'res://main.tscn', debugPort: adapter };
+        },
+      async ({ server, project, runtimeDir }) => {
+        const call = async (name: string, args: Record<string, unknown>): Promise<string> => {
+          const response = await server.request(
+            'tools/call',
+            { name, arguments: args },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          return textOf(response) ?? JSON.stringify(response);
+        };
+        if (options.announced === true) {
+          const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+            stdio: 'ignore',
+          });
+          if (game.pid !== undefined) {
+            games.push(game.pid);
+          }
+          announceAPlayedGame(game, runtimeDir, project);
+        }
+        const startOther = async (extra: Record<string, unknown> = {}): Promise<unknown> => {
+          const started = jsonOf(
+            await call('editor_run', {
+              projectPath: other,
+              op: 'start',
+              headless: true,
+              runtimeWaitMs: 0,
+              ...extra,
+            }),
+            'editor_run start naming the second project',
+          );
+          const pid = get(started, 'pid');
+          if (typeof pid === 'number') {
+            games.push(pid);
+          }
+          return started;
+        };
+        editor.playing = options.playing === true;
+        await body({
+          server,
+          editorProject: project,
+          otherProject: other,
+          editor,
+          call,
+          startOther,
+          runtimeDir,
+        });
+      },
+      {
+        engine: godotPath,
+        ...(options.playsWindowed === true ? { playsWindowed: true } : {}),
+        ...(options.stoppedInTheEditor === true
+          ? {
+              onAdapter: (socket: Socket) => {
+                socket.write(
+                  frameJsonRpc({
+                    seq: 1,
+                    type: 'event',
+                    event: 'stopped',
+                    body: { reason: 'breakpoint', threadId: 1 },
+                  }),
+                );
+              },
+            }
+          : {}),
+      },
+    );
+  } finally {
+    for (const pid of games) {
+      if (alive(pid)) {
+        await killTheTree(pid);
+      }
+    }
+    sweep(other);
+  }
+}
+
+/**
+ * A start naming a project the editor does not have open is played here and never asked of the
+ * editor.
+ *
+ * A start for the second project picked up and ended whatever the editor was playing, then had the
+ * editor play its own main scene under the second project's name, so such a start was refused. The
+ * refusal left a server that had once been handed an editor of another worktree unable to start
+ * any game of its own project. Its answer says why the game was started here.
+ */
+async function testAStartForAnotherProjectIsPlayedHereBesideAnIdleEditor(): Promise<void> {
+  await withAnEditorOfAnotherProject({}, async ({ editor, editorProject, startOther }) => {
+    editor.asked.length = 0;
+    const started = await startOther();
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+    assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
+    assert.equal(
+      typeof get(started, 'pid'),
+      'number',
+      `the game is a process of its own: ${JSON.stringify(started)}`,
+    );
+    assert.equal(
+      get(started, 'message'),
+      `Use editor_output for what it prints and editor_run stop to end it.${startedBesideTheEditorNote(editorProject)}`,
+    );
+    assert.deepEqual(editor.asked, [], 'the editor was asked nothing: no play, stop, scan, save or wait');
+    assert.equal(editor.playing, false, 'and it plays nothing');
+  });
+}
+
+/**
+ * A start naming another project leaves the game the editor is playing alone.
+ *
+ * The editor's play was picked up as this server's run and then ended, so a bench the editor was
+ * playing stopped when a game of the second project was asked for.
+ */
+async function testAStartForAnotherProjectLeavesTheEditorsPlayAlone(): Promise<void> {
+  await withAnEditorOfAnotherProject(
+    { playing: true },
+    async ({ editor, editorProject, startOther, call }) => {
+      editor.asked.length = 0;
+      const started = await startOther();
+      assert.equal(get(started, 'started'), true, JSON.stringify(started));
+      assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
+      assert.equal(
+        get(started, 'endedPreviousRun'),
+        undefined,
+        `nothing was ended: ${JSON.stringify(started)}`,
+      );
+      assert.equal(
+        get(started, 'message'),
+        `Use editor_output for what it prints and editor_run stop to end it.${startedBesideTheEditorNote(editorProject)}`,
+      );
+      assert.deepEqual(editor.asked, [], 'the editor was asked nothing about its play');
+      assert.equal(editor.playing, true, 'and its play goes on');
+
+      // The run held is the new game, not the editor's play taken up beside it.
+      const status = jsonOf(await call('editor_status', {}), 'editor_status');
+      assert.equal(
+        get(status, 'game', 'run', 'pid'),
+        get(started, 'pid'),
+        JSON.stringify(get(status, 'game')),
+      );
+      assert.equal(get(status, 'game', 'run', 'adopted'), undefined, 'and it was not picked up');
+      assert.equal(
+        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+        false,
+        `a status call asks the editor what it plays and nothing else of it: ${editor.asked.join(', ')}`,
+      );
+      assert.equal(editor.playing, true);
+    },
+  );
+}
+
+/**
+ * A start naming another project, while this server holds a run of the editor's own, is answered
+ * as it always was: one server holds one run.
+ */
+async function testAStartForAnotherProjectWhileARunIsHeldKeepsTheOneRunAnswer(): Promise<void> {
+  const oneRun = (held: string, wanted: string, pid: number | undefined): string =>
+    `This server holds a run of ${held}${pid === undefined ? '' : ` (pid ${String(pid)})`}, and one server holds one run, so ${wanted} was not started and that run goes on.` +
+    `Next:\n- editor_run stop with projectPath ${held} ends it\n- Then ask for this start again`;
+  // The run the editor plays, picked up by a call about it.
+  await withAnEditorOfAnotherProject(
+    { playing: true },
+    async ({ editor, editorProject, otherProject, call }) => {
+      const output = await call('editor_output', {});
+      assert.match(output, /"through": ?"editor"/, `the editor's play is the run held: ${output}`);
+      editor.asked.length = 0;
+      const refused = await call('editor_run', {
+        projectPath: otherProject,
+        op: 'start',
+        headless: true,
+        runtimeWaitMs: 0,
+      });
+      assert.equal(refused, oneRun(editorProject, otherProject, undefined));
+      assert.equal(editor.playing, true, 'and the editor goes on playing');
+      assert.equal(
+        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+        false,
+        editor.asked.join(', '),
+      );
+    },
+  );
+  // A run started here, because the editor plays this project with a window.
+  await withAnEditorOfAnotherProject(
+    { playsWindowed: true },
+    async ({ editorProject, otherProject, call }) => {
+      const first = jsonOf(
+        await call('editor_run', {
+          projectPath: editorProject,
+          op: 'start',
+          headless: true,
+          runtimeWaitMs: 0,
+        }),
+        'editor_run start naming the editor project',
+      );
+      const pid = asNumber(get(first, 'pid'), 'a run of the editor project started here');
+      try {
+        const refused = await call('editor_run', {
+          projectPath: otherProject,
+          op: 'start',
+          headless: true,
+          runtimeWaitMs: 0,
+        });
+        assert.equal(refused, oneRun(editorProject, otherProject, pid));
+      } finally {
+        await call('editor_run', { op: 'stop', projectPath: editorProject });
+      }
+    },
+  );
+}
+
+/**
+ * A stop naming another project acts on the run started here, and leaves the editor's play alone
+ * when there is no such run.
+ */
+async function testAStopNamingAnotherProjectActsOnTheRunStartedHere(): Promise<void> {
+  const nothing = 'No game is running. Start one with editor_run.';
+  await withAnEditorOfAnotherProject(
+    // Its game has announced, which a call naming the second project is not about.
+    { playing: true, announced: true },
+    async ({ editor, otherProject, call, startOther }) => {
+      editor.asked.length = 0;
+      assert.equal(await call('editor_run', { op: 'stop', projectPath: otherProject }), nothing);
+      assert.equal(editor.playing, true, "the editor's play is left alone");
+      assert.equal(
+        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+        false,
+        editor.asked.join(', '),
+      );
+      const started = await startOther();
+      const stopped = jsonOf(
+        await call('editor_run', { op: 'stop', projectPath: otherProject }),
+        'editor_run stop',
+      );
+      assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+      assert.equal(get(stopped, 'through'), 'gdharness', JSON.stringify(stopped));
+      assert.equal(get(stopped, 'endedPid'), get(started, 'pid'), JSON.stringify(stopped));
+      assert.equal(editor.playing, true, 'and it is still left alone after the stop');
+      assert.equal(
+        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+        false,
+        editor.asked.join(', '),
+      );
+    },
+  );
+}
+
+/**
+ * A wait naming another project waits on the run started here, and leaves the editor's play alone
+ * when there is no such run.
+ */
+async function testAWaitNamingAnotherProjectActsOnTheRunStartedHere(): Promise<void> {
+  const nothing = 'No game is running. Start one with editor_run.';
+  await withAnEditorOfAnotherProject(
+    // Its game has announced, which a call naming the second project is not about.
+    { playing: true, announced: true },
+    async ({ editor, otherProject, call, startOther }) => {
+      editor.asked.length = 0;
+      assert.equal(
+        await call('editor_run', { op: 'wait', projectPath: otherProject, timeoutMs: 300 }),
+        nothing,
+      );
+      assert.equal(editor.playing, true, "the editor's play is left alone");
+      assert.equal(
+        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+        false,
+        editor.asked.join(', '),
+      );
+      const started = await startOther();
+      const waited = jsonOf(
+        await call('editor_run', { op: 'wait', projectPath: otherProject, timeoutMs: 300 }),
+        'editor_run wait',
+      );
+      assert.equal(get(waited, 'running'), true, JSON.stringify(waited));
+      assert.equal(get(waited, 'pid'), get(started, 'pid'), JSON.stringify(waited));
+      assert.equal(editor.playing, true);
+    },
+  );
+}
+
+/**
+ * A profile naming another project reads the run started here, and leaves the editor's play alone
+ * when there is no such run.
+ */
+async function testAProfileNamingAnotherProjectActsOnTheRunStartedHere(): Promise<void> {
+  const nothing = 'No game is running. Start one with editor_run.';
+  await withAnEditorOfAnotherProject(
+    // Its game has announced, which a call naming the second project is not about.
+    { playing: true, announced: true },
+    async ({ editor, otherProject, call, startOther }) => {
+      editor.asked.length = 0;
+      assert.equal(await call('editor_run', { op: 'profile', projectPath: otherProject }), nothing);
+      assert.equal(editor.playing, true, "the editor's play is left alone");
+      assert.equal(
+        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+        false,
+        editor.asked.join(', '),
+      );
+      await startOther();
+      // Started without the profiler, so the answer that reaches this run is the one about that.
+      assert.match(
+        await call('editor_run', { op: 'profile', projectPath: otherProject }),
+        /^This run was started without profile: true/,
+      );
+      assert.equal(editor.playing, true);
+    },
+  );
+}
+
+/**
+ * A call naming another project, with a run of that project recorded by another server, names that
+ * run and the project this server serves. Answering "No game is running" sent the caller to start a
+ * second game beside it.
+ */
+async function testACallNamingAnotherProjectNamesItsRunRecordedElsewhere(): Promise<void> {
+  await withAnEditorOfAnotherProject({}, async ({ editorProject, otherProject, call, runtimeDir }) => {
+    const had = process.env['GDHARNESS_RUNTIME_DIR'];
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+    try {
+      const transcript = join(runtimeDir, 'runs', 'elsewhere.log');
+      mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+      writeFileSync(transcript, 'played elsewhere\n');
+      // A live pid, which no call here may end.
+      writeRunRecord({
+        pid: process.pid,
+        transcript,
+        startedAt: Date.now() - 60_000,
+        startedBy: Date.now() - 60_000,
+        projectPath: otherProject,
+        arguments: ['--headless'],
+        command: process.execPath,
+      });
+    } finally {
+      if (had === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = had;
+      }
+    }
+    const recorded =
+      `No game of this server's is running. A run started from ${otherProject} is recorded on this` +
+      ` machine, and this server serves ${editorProject}, so it is not this server's to answer for or` +
+      ' to end. Start one with editor_run.';
+    for (const args of [{ op: 'stop' }, { op: 'wait', timeoutMs: 300 }, { op: 'profile' }] as Record<
+      string,
+      unknown
+    >[]) {
+      assert.equal(
+        await call('editor_run', { ...args, projectPath: otherProject }),
+        recorded,
+        String(args['op']),
+      );
+    }
+    assert.equal(await call('editor_output', { projectPath: otherProject }), recorded, 'editor_output');
+  });
+}
+
+/**
+ * A start of another project beside an editor whose own game has announced does not list the
+ * editor's game as one of its project's left running, nor say to end it.
+ */
+async function testAStartBesideAnEditorsAnnouncedGameLeavesItOutOfAlsoRunning(): Promise<void> {
+  await withAnEditorOfAnotherProject({ playing: true, announced: true }, async ({ editor, startOther }) => {
+    editor.asked.length = 0;
+    const started = await startOther();
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+    assert.equal(get(started, 'alsoRunning'), undefined, JSON.stringify(started));
+    assert.doesNotMatch(String(get(started, 'message')), /already running/, JSON.stringify(started));
+    assert.equal(editor.playing, true, "the editor's play is left alone");
+  });
+}
+
+/**
+ * Beside an editor of another project, the answers that name a game of the called project this
+ * server did not start say how to stop it, and that stop ends it. A stop naming no project looked
+ * for the pid among the editor's project's games and refused.
+ */
+async function testAStopByPidReachesTheCalledProjectsGameBesideAnEditor(): Promise<void> {
+  await withAnEditorOfAnotherProject({}, async ({ otherProject, call, startOther, runtimeDir }) => {
+    const godotPath = resolveGodotPath();
+    assert.ok(godotPath, 'the fixture runs only with an engine');
+    const game = spawnHidden(godotPath, ['--headless', '--path', otherProject], { stdio: 'ignore' });
+    const pid = game.pid ?? 0;
+    try {
+      // Announced after it started, as a game announces from its first frames.
+      await delay(500);
+      announceAPlayedGame(game, runtimeDir, otherProject);
+      const stopIt = `editor_run stop with pid ${String(pid)} and projectPath ${otherProject} ends it`;
+      const nothing = await call('editor_run', { op: 'stop', projectPath: otherProject });
+      assert.ok(nothing.includes(`${stopIt}.`), nothing);
+      const started = await startOther();
+      assert.deepEqual(get(started, 'alsoRunning'), [pid], JSON.stringify(started));
+      const message = String(get(started, 'message'));
+      assert.ok(message.includes(`${stopIt} and leaves this run going.`), message);
+      const stopped = await call('editor_run', { op: 'stop', pid, projectPath: otherProject });
+      assert.ok(
+        await answeredWithin(() => (alive(pid) ? undefined : true), 15_000),
+        `the stop ends it: ${stopped}`,
+      );
+    } finally {
+      if (alive(pid)) {
+        await killTheTree(pid);
+      }
+    }
+  });
+}
+
+/**
+ * A run of another project stopped here is still read by a call naming that project after a call
+ * naming none has taken up the editor's play.
+ */
+async function testAStoppedRunBesideAnEditorIsReadAfterTheEditorsPlayIsTakenUp(): Promise<void> {
+  await withAnEditorOfAnotherProject({ playing: true }, async ({ otherProject, call, startOther }) => {
+    const started = await startOther();
+    const stopped = await call('editor_run', { op: 'stop', projectPath: otherProject });
+    assert.equal(get(jsonOf(stopped, 'editor_run stop'), 'stopped'), true, stopped);
+    const status = await call('editor_status', {});
+    // The editor's play is the run it reports now, which has no pid here.
+    assert.equal(get(jsonOf(status, 'editor_status'), 'game', 'run', 'pid'), null, status);
+    const output = await call('editor_output', { projectPath: otherProject });
+    const read = jsonOf(output, 'editor_output');
+    assert.equal(get(read, 'running'), false, output);
+    assert.equal(get(read, 'pid'), get(started, 'pid'), output);
+  });
+}
+
+/**
+ * A game started here goes on being served when an editor of another project connects afterwards.
+ *
+ * A server serving two worktrees has the main checkout's idle editor reopened by a later call, and
+ * from then on every call about the worktree's game met the editor's project. The run is served
+ * while it goes and after a stop, and the editor's own play is not taken up in its place.
+ */
+async function testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor connecting after a start regression skipped (Godot not found)');
+    return;
+  }
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: godotPath } });
+  const open = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-connects-later-'));
+  const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-connects-later-other-'));
+  writeFileSync(join(open, 'project.godot'), 'config_version=5\n');
+  writeFileSync(
+    join(other, 'project.godot'),
+    'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(other, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  let editor: WebSocket | null = null;
+  let game: number | null = null;
+  const asked: string[] = [];
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+    textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+  try {
+    await server.initialize('regression-test');
+    const started = jsonOf(
+      await call('editor_run', { projectPath: other, op: 'start', headless: true, runtimeWaitMs: 0 }),
+      'editor_run start with no editor',
+    );
+    game = asNumber(get(started, 'pid'), 'the game started here');
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((settle, reject) => {
+      socket.once('open', () => {
+        settle();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      asked.push(String(message['tool']));
+      socket.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: message['id'],
+          success: true,
+          result: { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: 0 },
+        }),
+      );
+    });
+    socket.send(JSON.stringify(greeting(open, { editor_pid: FAKE_EDITOR_PID })));
+    let status: unknown = null;
+    for (let waited = 0; waited < 10_000 && get(status, 'editor', 'connected') !== true; waited += 100) {
+      await delay(100);
+      status = jsonOf(await call('editor_status', {}), 'editor_status');
+    }
+    assert.equal(get(status, 'editor', 'projectPath'), open, 'the editor of another project connected');
+    assert.equal(
+      get(status, 'game', 'run', 'pid'),
+      game,
+      `the status names the game started here: ${JSON.stringify(get(status, 'game'))}`,
+    );
+
+    const output = jsonOf(await call('editor_output', { projectPath: other }), 'editor_output');
+    assert.equal(get(output, 'running'), true, JSON.stringify(output));
+    const waited = jsonOf(
+      await call('editor_run', { op: 'wait', projectPath: other, timeoutMs: 300 }),
+      'editor_run wait',
+    );
+    assert.equal(get(waited, 'running'), true, JSON.stringify(waited));
+    const stopped = jsonOf(await call('editor_run', { op: 'stop', projectPath: other }), 'editor_run stop');
+    assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+    assert.equal(get(stopped, 'endedPid'), game, JSON.stringify(stopped));
+
+    // The run ended here is still the run held, and the editor's play does not take its place.
+    const after = jsonOf(await call('editor_output', { projectPath: other }), 'editor_output after the stop');
+    assert.equal(get(after, 'running'), false, JSON.stringify(after));
+    assert.equal(get(after, 'through'), 'gdharness', JSON.stringify(after));
+    assert.equal(
+      asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+      false,
+      `the editor was never asked to play or stop: ${asked.join(', ')}`,
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    if (game !== null && alive(game)) {
+      await killTheTree(game);
+    }
+    sweep(other);
+    sweep(open);
+  }
+}
+
+/**
+ * The calls that serve a game started here answer for it beside an editor of another project.
+ *
+ * Each names the second project, which the editor does not have open, and none needs the editor.
+ */
+async function testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject(): Promise<void> {
+  await withAnEditorOfAnotherProject(
+    { runtimeAddon: true },
+    async ({ editor, otherProject, call, startOther }) => {
+      const started = await startOther({ runtimeWaitMs: 60_000 });
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+      editor.asked.length = 0;
+      const refusal = /editor on this bridge/;
+
+      const output = await call('editor_output', { projectPath: otherProject });
+      assert.doesNotMatch(output, refusal, output);
+      assert.equal(get(jsonOf(output, 'editor_output'), 'running'), true, output);
+
+      const status = await call('editor_status', {});
+      assert.equal(get(jsonOf(status, 'editor_status'), 'game', 'run', 'pid'), get(started, 'pid'), status);
+
+      const tree = await call('runtime_inspect', { op: 'tree', depth: 1, projectPath: otherProject });
+      assert.equal(get(jsonOf(tree, 'runtime_inspect'), 'type'), 'tree', tree);
+
+      const stack = await call('debug_state', { op: 'stack', projectPath: otherProject });
+      assert.doesNotMatch(stack, refusal, stack);
+      assert.deepEqual(
+        editor.asked.filter((tool) => tool !== 'playing_status' && tool !== 'scan_status'),
+        [],
+        'and none of them asked the editor anything but what it plays and scans',
+      );
+    },
+  );
+}
+
+/**
+ * A start beside an editor of another project waits for its own game to announce while the editor's
+ * play is held at a breakpoint.
+ *
+ * The wait gave up the moment the editor's debug session was stopped. That stop is the editor's
+ * game, and the game started here is held by its keeper.
+ */
+async function testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame(): Promise<void> {
+  await withAnEditorOfAnotherProject(
+    { playing: true, runtimeAddon: true, stoppedInTheEditor: true },
+    async ({ editorProject, call, startOther }) => {
+      writeFileSync(join(editorProject, 'main.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n');
+      // Set in the editor's project, which opens this server's session with the editor's adapter,
+      // as a caller debugging the editor's game does.
+      const set = await call('debug_breakpoint', {
+        op: 'set',
+        projectPath: editorProject,
+        scriptPath: 'main.gd',
+        line: 5,
+      });
+      const started = await startOther({ runtimeWaitMs: 60_000 });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${JSON.stringify(started)} after ${set}`);
+    },
+  );
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
@@ -123098,6 +123767,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGatesRunFollowsItsLanesFile,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
   testAnEngineRunsItsSuitesCheapestFirstInTheGame,
+  testAStartForAnotherProjectIsPlayedHereBesideAnIdleEditor,
+  testAStartForAnotherProjectLeavesTheEditorsPlayAlone,
+  testAStartForAnotherProjectWhileARunIsHeldKeepsTheOneRunAnswer,
+  testAStopNamingAnotherProjectActsOnTheRunStartedHere,
+  testAWaitNamingAnotherProjectActsOnTheRunStartedHere,
+  testAProfileNamingAnotherProjectActsOnTheRunStartedHere,
+  testACallNamingAnotherProjectNamesItsRunRecordedElsewhere,
+  testAStartBesideAnEditorsAnnouncedGameLeavesItOutOfAlsoRunning,
+  testAStopByPidReachesTheCalledProjectsGameBesideAnEditor,
+  testAStoppedRunBesideAnEditorIsReadAfterTheEditorsPlayIsTakenUp,
+  testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
+  testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
+  testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
 ];
 
 /**
