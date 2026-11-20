@@ -113,6 +113,76 @@ export function writeProfileFile(path: string, file: ProfileFile): boolean {
   return writeWhole(path, JSON.stringify(file));
 }
 
+/** How often a profiled run's file is written at most while frames arrive. */
+const PROFILE_WRITE_MS = 500;
+
+/** How many times the write as the game exits is tried before what it carried is given up. */
+const LAST_WRITE_TRIES = 5;
+
+/** What {@link profileFileWriter} gives the keeper of a profiled run. */
+interface ProfileFileWriter {
+  /** The totals have changed while the game runs. */
+  readonly changed: (totals: ProfileTotals) => void;
+  /** The game has exited with [param last] as its totals, or null where the last given stand. */
+  readonly finish: (last: ProfileTotals | null) => void;
+}
+
+/**
+ * The writer of a profiled run's totals to [param path]: when the first arrive, at most every
+ * `PROFILE_WRITE_MS` while they change, and once more as the game exits. A server reading the file
+ * mid-run is at most that far behind, and one reading it after the exit has the lot.
+ *
+ * While the game runs, a reader holding the file is waited out on a timer and the thread never
+ * sleeps. On Windows every line the game prints waits for its keeper to read it, so a keeper asleep
+ * for a held file holds the game.
+ */
+export function profileFileWriter(path: string): ProfileFileWriter {
+  let latest: ProfileTotals | null = null;
+  let timer: NodeJS.Timeout | null = null;
+  // A write a reader held off past its wait is tried again later rather than dropped: the totals it
+  // carried are only rewritten when the next change arrives, and a game that has quit sends none.
+  const again = (written: boolean): void => {
+    if (!written) {
+      timer ??= setTimeout(write, PROFILE_WRITE_MS);
+    }
+  };
+  const write = (): void => {
+    timer = null;
+    if (latest !== null) {
+      // A refusal is answered like a held file: a throw nobody takes ends the keeper.
+      void writeWholeAsync(path, JSON.stringify({ ...latest, connected: true })).then(again, () => {
+        again(false);
+      });
+    }
+  };
+  return {
+    changed: (totals) => {
+      const first = latest === null;
+      latest = totals;
+      if (first) {
+        write();
+      } else {
+        timer ??= setTimeout(write, PROFILE_WRITE_MS);
+      }
+    },
+    finish: (last) => {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      latest = last ?? latest;
+      if (latest === null) {
+        return;
+      }
+      // The keeper exits after this, so there is no later write to fall back on, and the engine's
+      // own totals arrive only now. Each try waits out a held file for a while of its own.
+      let tries = 0;
+      while (!writeProfileFile(path, { ...latest, connected: true }) && tries < LAST_WRITE_TRIES) {
+        tries += 1;
+      }
+    },
+  };
+}
+
 /** The profile at [param path], or null where there is none or it cannot be read. */
 export function readProfileFile(path: string): ProfileFile | null {
   try {

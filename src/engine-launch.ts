@@ -15,7 +15,6 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs';
 import { availableParallelism, freemem, totalmem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -23,6 +22,7 @@ import process from 'node:process';
 import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
+import { copiedInto } from './copied-into.js';
 import {
   desktopBoxEnding,
   ensureHelperCompiled,
@@ -981,46 +981,6 @@ async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
     ...(peakBytes > 0 ? { peakBytes } : {}),
     ...(priority === undefined ? {} : { priority }),
   };
-}
-
-/**
- * How long the streams of an engine that has exited are drained for: a process it started and
- * handed them to holds them open, and the run would otherwise wait on that process.
- */
-const DRAIN_MS = 5000;
-
-/**
- * Writes everything [param streams] carry into [param output] as it arrives, and settles once all
- * have ended, or [param DRAIN_MS] after [param exited] settles for those still held open. A write
- * that fails stops the writing, not the reading, so the engine is never left blocked on a full pipe.
- */
-function copiedInto(output: number, streams: readonly Readable[], exited: Promise<unknown>): Promise<void> {
-  let writing = true;
-  const ended = streams.map(
-    (stream) =>
-      new Promise<void>((settle) => {
-        stream.on('data', (chunk: Buffer) => {
-          if (!writing) {
-            return;
-          }
-          try {
-            writeSync(output, chunk);
-          } catch {
-            // The log then ends short, and the run is judged on what it holds.
-            writing = false;
-          }
-        });
-        stream.once('close', settle);
-      }),
-  );
-  const all = Promise.all(ended).then(() => undefined);
-  const drained = exited.then(() => delay(DRAIN_MS, undefined, { ref: false }));
-  return Promise.race([all, drained]).then(() => {
-    writing = false;
-    for (const stream of streams) {
-      stream.destroy();
-    }
-  });
 }
 
 /** Ends [param child] and everything it started: Godot's console build is a wrapper around the engine. */
