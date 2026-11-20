@@ -107101,7 +107101,7 @@ async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
 
 /** The nodes a scene file holds, as "name<parent" in file order, "." for a child of the root. */
 function nodesFiled(file: string): string[] {
-  return [...file.matchAll(/^\[node name="([^"]+)"(?:[^\]]*? parent="([^"]*)")?[^\]]*\]$/gm)]
+  return [...file.matchAll(/^\[node name="([^"]+)"(?:.*? parent="([^"]*)")?.*\]$/gm)]
     .slice(1)
     .map((one) => `${one[1] ?? ''}<${one[2] ?? ''}`);
 }
@@ -107161,8 +107161,42 @@ async function testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo(): Promise<
       'freer.gd': movesOnLoad('\t\tget_node(^"Gone").free()'),
       'freer.tscn':
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://freer.gd" id="1_freer"]\n\n' +
-        '[node name="Freer" type="Node2D"]\nscript = ExtResource("1_freer")\n\n' +
-        '[node name="Gone" type="Node2D" parent="."]\nposition = Vector2(3, 4)\n\n[node name="Kept" type="Node2D" parent="."]\n',
+        '[node name="Freer" type="Node2D" unique_id=400]\nscript = ExtResource("1_freer")\n\n' +
+        '[node name="Gone" type="Node2D" parent="." unique_id=401 groups=["kept_group"]]\nunique_name_in_owner = true\nposition = Vector2(3, 4)\n\n' +
+        '[node name="GoneKid" type="Node2D" parent="Gone" unique_id=402]\nposition = Vector2(1, 1)\n\n' +
+        '[node name="Kept" type="Node2D" parent="." unique_id=403]\n\n' +
+        '[connection signal="visibility_changed" from="Gone" to="Kept" method="hide"]\n' +
+        '[connection signal="visibility_changed" from="Kept" to="Gone/GoneKid" method="show"]\n',
+      'quiet.gd': movesOnLoad('\t\tpass'),
+      'part.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n\n' +
+        '[node name="Part" type="Node2D" unique_id=600]\nscript = ExtResource("1_quiet")\n\n' +
+        '[node name="X" type="Node2D" parent="." unique_id=601]\n\n[node name="Y" type="Node2D" parent="." unique_id=602]\n',
+      'instfreer.gd': movesOnLoad('\t\tget_node(^"Inst").free()'),
+      'instfreer.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://instfreer.gd" id="1_freer"]\n' +
+        '[ext_resource type="PackedScene" path="res://part.tscn" id="2_part"]\n\n' +
+        '[node name="Host" type="Node2D" unique_id=500]\nscript = ExtResource("1_freer")\n\n' +
+        '[node name="Inst" parent="." unique_id=501 instance=ExtResource("2_part")]\nposition = Vector2(1, 2)\n\n' +
+        '[node name="Y" parent="Inst" unique_id=602]\nposition = Vector2(5, 6)\n\n' +
+        '[node name="Deep" type="Node2D" parent="Inst/X" unique_id=502]\n\n' +
+        '[node name="Plain" type="Node2D" parent="." unique_id=504]\n\n[editable path="Inst"]\n',
+      'reorder.gd': movesOnLoad('\t\tmove_child(get_node(^"C"), 0)'),
+      'reorder.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://reorder.gd" id="1_reorder"]\n\n' +
+        '[node name="Order" type="Node"]\nscript = ExtResource("1_reorder")\n\n' +
+        '[node name="A" type="Node" parent="."]\n\n[node name="B" type="Node" parent="."]\n\n[node name="C" type="Node" parent="."]\n',
+      'toolmap.gd': '@tool\nextends Control\n',
+      'toolscreen.tscn': movedByScriptScreen
+        .replace(
+          'id="1_screen"]\n',
+          'id="1_screen"]\n[ext_resource type="Script" path="res://toolmap.gd" id="2_map"]\n',
+        )
+        .replace(
+          '[node name="Map" type="Control" parent="."]\n',
+          '[node name="Map" type="Control" parent="."]\nscript = ExtResource("2_map")\n',
+        ),
+      'animscreen.tscn': `${movedByScriptScreen}\n[node name="Anim" type="AnimationPlayer" parent="Report"]\n`,
       'tooled.gd': '@tool\nextends Node\n\nvar seen: int = 0\n\n\nfunc _init() -> void:\n\tseen = 1\n',
       'tooled.tscn':
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://tooled.gd" id="1_tooled"]\n\n' +
@@ -107270,12 +107304,91 @@ async function testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo(): Promise<
       });
       soft.deepEqual(
         nodesFiled(fileOf('freer.tscn')),
-        ['Gone<.', 'New<Gone', 'Kept<.'],
+        ['Gone<.', 'GoneKid<Gone', 'New<Gone', 'Kept<.'],
         fileOf('freer.tscn'),
       );
+      // A second save, since a node made again with a new unique_id changes it on every save.
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'freer.tscn',
+        nodePath: 'Kept',
+        properties: { editor_description: 'again' },
+      });
+      for (const kept of [
+        /\[node name="Gone" type="Node2D" parent="\." unique_id=401 groups=\["kept_group"\]\]\nunique_name_in_owner = true\nposition = Vector2\(3, 4\)/,
+        /\[node name="GoneKid" type="Node2D" parent="Gone" unique_id=402\]\nposition = Vector2\(1, 1\)/,
+        /\[connection signal="visibility_changed" from="Gone" to="Kept" method="hide"\]/,
+        /\[connection signal="visibility_changed" from="Kept" to="Gone\/GoneKid" method="show"\]/,
+      ]) {
+        soft.match(fileOf('freer.tscn'), kept, 'a node a script freed');
+      }
+      // A freed instance keeps what the file changes inside it, adds to it and opens of it.
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'instfreer.tscn',
+        nodePath: 'Plain',
+        properties: { editor_description: 'edited' },
+      });
+      soft.deepEqual(
+        nodesFiled(fileOf('instfreer.tscn')),
+        ['Inst<.', 'Deep<Inst/X', 'Y<Inst', 'Plain<.'],
+        fileOf('instfreer.tscn'),
+      );
+      for (const kept of [
+        /\[node name="Inst" parent="\." unique_id=501 instance=ExtResource\("2_part"\)\]\nposition = Vector2\(1, 2\)/,
+        /\[node name="Y" parent="Inst"[^\n]*\]\nposition = Vector2\(5, 6\)/,
+        /\[node name="Deep" type="Node2D" parent="Inst\/X" [^\n]*unique_id=502\]/,
+        /\[editable path="Inst"\]/,
+      ]) {
+        soft.match(fileOf('instfreer.tscn'), kept, 'an instance a script freed');
+      }
+      // A script that reorders the root's children leaves the file's order.
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'reorder.tscn',
+        nodePath: 'A',
+        properties: { editor_description: 'edited' },
+      });
+      soft.deepEqual(nodesFiled(fileOf('reorder.tscn')), ['A<.', 'B<.', 'C<.'], 'reordered');
+      // The root's script is not a tool and a child's is, as an editor runs only the child's.
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'toolscreen.tscn',
+        nodeName: 'New',
+        nodeType: 'Node',
+        parentNodePath: 'Report',
+      });
+      soft.deepEqual(
+        nodesFiled(fileOf('toolscreen.tscn')).toSorted(),
+        sorted('New<Report'),
+        'a tool script on a child',
+      );
+      // The signal and animation tools look up and save the file's tree too.
+      put('screen.tscn', movedByScriptScreen);
+      await written('scene_signal', {
+        op: 'connect',
+        scenePath: 'screen.tscn',
+        sourceNodePath: 'Report',
+        signalName: 'visibility_changed',
+        targetNodePath: 'Map',
+        methodName: 'hide',
+      });
+      soft.deepEqual(nodesFiled(fileOf('screen.tscn')).toSorted(), sorted(), 'scene_signal');
       soft.match(
-        fileOf('freer.tscn'),
-        /\[node name="Gone" type="Node2D" parent="\."[^\]]*\]\nposition = Vector2\(3, 4\)/,
+        fileOf('screen.tscn'),
+        /\[connection signal="visibility_changed" from="Report" to="Map" method="hide"\]/,
+        'scene_signal',
+      );
+      await written('scene_animation', {
+        op: 'create',
+        scenePath: 'animscreen.tscn',
+        playerNodePath: 'Report/Anim',
+        animationName: 'idle',
+      });
+      soft.deepEqual(
+        nodesFiled(fileOf('animscreen.tscn')).toSorted(),
+        sorted('Anim<Report'),
+        'scene_animation',
       );
 
       // A scene with a tool script, and a scene with none.
@@ -107317,6 +107430,156 @@ async function testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo(): Promise<
         parentNodePath: 'B',
       });
       soft.deepEqual(nodesFiled(fileOf('inner.tscn')), ['A<.', 'B<.', 'New<B'], fileOf('inner.tscn'));
+    },
+  );
+  assert.deepEqual(failures, [], failures.join('\n'));
+}
+
+/** A scene file's text without the uids it names its files by, which each project gives anew. */
+function withoutFileUids(file: string): string {
+  return file.replaceAll(/ uid="uid:\/\/[a-z0-9]+"/g, '');
+}
+
+const QUIET_ON_LOAD =
+  'extends Node\n\n\nfunc _notification(what: int) -> void:\n\tif what == NOTIFICATION_SCENE_INSTANTIATED:\n\t\tpass\n';
+
+/** A scene whose root has [param root] as its script, instancing part.tscn and adding to it. */
+function sceneAddingToAPart(root: string): string {
+  const script = root === '' ? '' : `[ext_resource type="Script" path="res://${root}" id="2_root"]\n`;
+  return (
+    `[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://part.tscn" id="1_part"]\n${script}\n` +
+    `[node name="Host" type="Node2D" unique_id=300]\n${root === '' ? '' : 'script = ExtResource("2_root")\n'}\n` +
+    '[node name="Inst" parent="." unique_id=301 instance=ExtResource("1_part")]\n\n' +
+    '[node name="Deep" type="Node2D" parent="Inst/X" unique_id=302]\n\n' +
+    '[node name="Extra" type="Node2D" parent="Inst" unique_id=303 groups=["g1"]]\n\n' +
+    '[node name="ExtraKid" type="Node2D" parent="Inst/Extra" unique_id=304]\n\n' +
+    '[node name="Plain" type="Node2D" parent="." unique_id=305]\n\n' +
+    '[connection signal="visibility_changed" from="Inst/Extra" to="Inst/Extra/ExtraKid" method="show"]\n' +
+    '[connection signal="visibility_changed" from="Inst/X/Deep" to="Inst/Extra" method="hide"]\n\n' +
+    '[editable path="Inst"]\n'
+  );
+}
+
+/** What each scene of the case below saves as, read from an engine that put no tree back. */
+const SAVED_AS_FILED: Record<string, string> = {
+  'containers.tscn':
+    '[gd_scene format=3]\n\n' +
+    '[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n\n' +
+    '[node name="Screen" type="Control" unique_id=100]\nlayout_mode = 3\nanchors_preset = 0\nscript = ExtResource("1_quiet")\n\n' +
+    '[node name="Scroll" type="ScrollContainer" parent="." unique_id=101]\nlayout_mode = 0\n\n' +
+    '[node name="Tabs" type="TabContainer" parent="." unique_id=102]\nlayout_mode = 0\ncurrent_tab = 0\n\n' +
+    '[node name="Page" type="Control" parent="Tabs" unique_id=103]\nvisible = false\nlayout_mode = 2\nmetadata/_tab_index = 0\n\n' +
+    '[node name="Line" type="LineEdit" parent="." unique_id=104]\nlayout_mode = 0\n\n' +
+    '[node name="Spin" type="SpinBox" parent="." unique_id=105]\nlayout_mode = 0\n\n' +
+    '[node name="Plain" type="Control" parent="." unique_id=106]\neditor_description = "edited"\nanchors_preset = 0\n',
+  'bare.tscn':
+    '[gd_scene format=3]\n\n' +
+    '[ext_resource type="PackedScene" path="res://part.tscn" id="1_part"]\n\n' +
+    '[node name="Host" type="Node2D" unique_id=300]\n\n' +
+    '[node name="Inst" parent="." unique_id=301 instance=ExtResource("1_part")]\n\n' +
+    '[node name="Deep" type="Node2D" parent="Inst/X" parent_id_path=PackedInt32Array(301, 201) index="0" unique_id=302]\n\n' +
+    '[node name="Extra" type="Node2D" parent="Inst" unique_id=303 groups=["g1"]]\n\n' +
+    '[node name="ExtraKid" type="Node2D" parent="Inst/Extra" unique_id=304]\n\n' +
+    '[node name="Plain" type="Node2D" parent="." unique_id=305]\neditor_description = "edited"\n\n' +
+    '[connection signal="visibility_changed" from="Inst/X/Deep" to="Inst/Extra" method="hide"]\n[connection signal="visibility_changed" from="Inst/Extra" to="Inst/Extra/ExtraKid" method="show"]\n\n' +
+    '[editable path="Inst"]\n',
+  'inheriting.tscn':
+    '[gd_scene format=3]\n\n' +
+    '[ext_resource type="PackedScene" path="res://based.tscn" id="1_based"]\n\n' +
+    '[node name="Inheriting" unique_id=400 instance=ExtResource("1_based")]\n\n' +
+    '[node name="First" type="Node2D" parent="." index="0" unique_id=410]\neditor_description = "edited"\n',
+  'tool_kid.tscn':
+    '[gd_scene format=3]\n\n' +
+    '[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n[ext_resource type="Script" path="res://tool_kid.gd" id="2_kid"]\n\n' +
+    '[node name="Kids" type="Node2D" unique_id=500]\nscript = ExtResource("1_quiet")\n\n' +
+    '[node name="Map" type="Node2D" parent="." unique_id=501]\nposition = Vector2(7, 8)\nscript = ExtResource("2_kid")\n\n' +
+    '[node name="Plain" type="Node2D" parent="." unique_id=502]\neditor_description = "edited"\n',
+  'scripted.tscn':
+    '[gd_scene format=3]\n\n' +
+    '[ext_resource type="PackedScene" path="res://part.tscn" id="1_part"]\n[ext_resource type="Script" path="res://quiet.gd" id="2_root"]\n\n' +
+    '[node name="Host" type="Node2D" unique_id=300]\nscript = ExtResource("2_root")\n\n' +
+    '[node name="Inst" parent="." unique_id=301 instance=ExtResource("1_part")]\n\n' +
+    '[node name="Deep" type="Node2D" parent="Inst/X" parent_id_path=PackedInt32Array(301, 201) index="0" unique_id=302]\n\n' +
+    '[node name="Extra" type="Node2D" parent="Inst" unique_id=303 groups=["g1"]]\n\n' +
+    '[node name="ExtraKid" type="Node2D" parent="Inst/Extra" unique_id=304]\n\n' +
+    '[node name="Plain" type="Node2D" parent="." unique_id=305]\neditor_description = "edited"\n\n' +
+    '[connection signal="visibility_changed" from="Inst/X/Deep" to="Inst/Extra" method="hide"]\n[connection signal="visibility_changed" from="Inst/Extra" to="Inst/Extra/ExtraKid" method="show"]\n\n' +
+    '[editable path="Inst"]\n',
+};
+
+/**
+ * A scene whose scripts are not tools and change nothing of its tree saves as it did before its
+ * tree was put back: a node's engine children stay its own, the nodes a file adds inside an
+ * instance keep their places and unique_ids, an inherited scene's indices hold, and a tool script
+ * keeps what it sets.
+ */
+async function testAnEditOfAScriptedSceneSavesWhatTheFileHolds(): Promise<void> {
+  const failures: string[] = [];
+  const header = '[gd_scene format=3]\n\n';
+  await withASceneProject(
+    'scripted scene saved as filed',
+    {
+      'quiet.gd': QUIET_ON_LOAD,
+      'containers.tscn':
+        `${header}[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n\n` +
+        '[node name="Screen" type="Control" unique_id=100]\nscript = ExtResource("1_quiet")\n\n' +
+        '[node name="Scroll" type="ScrollContainer" parent="." unique_id=101]\n\n' +
+        '[node name="Tabs" type="TabContainer" parent="." unique_id=102]\n\n' +
+        '[node name="Page" type="Control" parent="Tabs" unique_id=103]\n\n' +
+        '[node name="Line" type="LineEdit" parent="." unique_id=104]\n\n' +
+        '[node name="Spin" type="SpinBox" parent="." unique_id=105]\n\n' +
+        '[node name="Plain" type="Control" parent="." unique_id=106]\n',
+      'part.tscn':
+        `${header}[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n\n` +
+        '[node name="Part" type="Node2D" unique_id=200]\nscript = ExtResource("1_quiet")\n\n' +
+        '[node name="X" type="Node2D" parent="." unique_id=201]\n\n[node name="Y" type="Node2D" parent="." unique_id=202]\n',
+      'bare.tscn': sceneAddingToAPart(''),
+      'scripted.tscn': sceneAddingToAPart('quiet.gd'),
+      'based.tscn':
+        `${header}[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n\n` +
+        '[node name="Based" type="Node2D" unique_id=400]\nscript = ExtResource("1_quiet")\n\n' +
+        '[node name="A" type="Node2D" parent="." unique_id=401]\n\n[node name="B" type="Node2D" parent="." unique_id=402]\n',
+      'inheriting.tscn':
+        `${header}[ext_resource type="PackedScene" path="res://based.tscn" id="1_based"]\n\n` +
+        '[node name="Inheriting" unique_id=400 instance=ExtResource("1_based")]\n\n' +
+        '[node name="First" type="Node2D" parent="." index="0" unique_id=410]\n',
+      'tool_kid.gd': '@tool\nextends Node2D\n\n\nfunc _init() -> void:\n\tposition = Vector2(7, 8)\n',
+      'tool_kid.tscn':
+        `${header}[ext_resource type="Script" path="res://quiet.gd" id="1_quiet"]\n` +
+        '[ext_resource type="Script" path="res://tool_kid.gd" id="2_kid"]\n\n' +
+        '[node name="Kids" type="Node2D" unique_id=500]\nscript = ExtResource("1_quiet")\n\n' +
+        '[node name="Map" type="Node2D" parent="." unique_id=501]\nscript = ExtResource("2_kid")\n\n' +
+        '[node name="Plain" type="Node2D" parent="." unique_id=502]\n',
+    },
+    async ({ written, fileOf }) => {
+      const soft = softly(failures);
+      const saved = async (scene: string, nodePath: string, note: string): Promise<string> => {
+        try {
+          await written('scene_node', {
+            op: 'set',
+            scenePath: scene,
+            nodePath,
+            properties: { editor_description: note },
+          });
+        } catch (error) {
+          failures.push(`${scene}: ${String(error).slice(0, 300)}`);
+        }
+        return withoutFileUids(fileOf(scene));
+      };
+      for (const [scene, nodePath] of [
+        ['containers.tscn', 'Plain'],
+        ['bare.tscn', 'Plain'],
+        ['inheriting.tscn', 'First'],
+        ['tool_kid.tscn', 'Plain'],
+      ] as const) {
+        soft.deepEqual(await saved(scene, nodePath, 'edited'), SAVED_AS_FILED[scene], scene);
+      }
+      await saved('scripted.tscn', 'Plain', 'first');
+      soft.deepEqual(
+        await saved('scripted.tscn', 'Plain', 'edited'),
+        SAVED_AS_FILED['scripted.tscn'],
+        'scripted.tscn saved twice',
+      );
     },
   );
   assert.deepEqual(failures, [], failures.join('\n'));
@@ -122835,6 +123098,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAServerThatDiesMidCallSaysHowItEnded,
   testASceneNodeIsWrittenAndReadWithNoEditor,
   testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo,
+  testAnEditOfAScriptedSceneSavesWhatTheFileHolds,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,

@@ -25,8 +25,8 @@ extends RefCounted
 ## anything is saved, and a write is refused when that does not hold. See [GdhHeadlessCheck].
 ##
 ## What those scripts do to the tree is put back too, as the scene opens: a node one moved goes
-## back under its parent in the file, one it freed is made again, and one it added goes. See
-## [GdhSceneStructure].
+## back where the file has it, one it freed is made again, and one it added that a save would keep
+## goes. See [GdhSceneStructure].
 
 const GdhHeadlessCheck = preload("headless_check.gd")
 ## How many times what scripts changed is put back before a write is refused for it.
@@ -109,6 +109,9 @@ var _opened_at: String = ""
 var _held_ids: Dictionary = {}
 ## The unique_id each node a change of type replaced had in the file, by the new node's object id.
 var _retyped_ids: Dictionary = {}
+## The unique_id each node a script freed as the scene loaded, made again, has in the file, by its
+## object id.
+var _remade_ids: Dictionary = {}
 ## The engine properties a put back did not take on a node, as "id:name": the engine derives them
 ## from where the node is, as it keeps layout_mode at Container under a container, and stores the
 ## same from an editor.
@@ -146,9 +149,9 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	if root == null:
 		return { "ok": false, "error": "Failed to instantiate " + path }
 	if not Engine.is_editor_hint():
-		var moved: String = GdhSceneStructure.new().put_back(root, packed.get_state())
-		if not moved.is_empty():
-			return refuse(("Nothing was written: " if for_writing else "Not read: ") + moved)
+		var structure: GdhSceneStructure = GdhSceneStructure.new()
+		structure.put_back(root, packed)
+		_remade_ids = structure.remade_ids
 		_unhold_placeholders()
 	_state = packed.get_state()
 	_base_paths = makers(_state)
@@ -280,14 +283,25 @@ func _typed_header(node: Node, type: String) -> String:
 	return header + ' parent="%s"' % str(root.get_path_to(node.get_parent())).c_escape()
 
 
-## The unique_id to write back on each placeholder put back as its instance and each node a change
-## of type replaced, by its entry's header, for those still in the scene.
+## The unique_id to write back on each placeholder put back as its instance, each node a change
+## of type replaced and each node made again as the scene opened, by its entry's header, for those
+## still in the scene.
 func _ids_to_keep() -> Dictionary:
 	var keep: Dictionary = {}
 	for key: Variant in _held_ids:
 		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
 		if node != null and root.is_ancestor_of(node):
 			keep[_header_of(root.get_path_to(node))] = _held_ids[key]
+	for key: Variant in _remade_ids:
+		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
+		if node == null or not root.is_ancestor_of(node):
+			continue
+		var header: String = (
+			_header_of(root.get_path_to(node))
+			if not node.scene_file_path.is_empty()
+			else _typed_header(node, node.get_class())
+		)
+		keep[header] = _remade_ids[key]
 	for key: Variant in _retyped_ids:
 		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
 		if node != null and (node == root or root.is_ancestor_of(node)):
@@ -1757,10 +1771,7 @@ func _failed_check(packed: PackedScene, check: Callable) -> String:
 	if saved == null:
 		return "The packed copy of %s did not instantiate, so nothing was written." % path
 	if not Engine.is_editor_hint():
-		var moved: String = GdhSceneStructure.new().put_back(saved, packed.get_state())
-		if not moved.is_empty():
-			saved.free()
-			return "Nothing was written: " + moved
+		GdhSceneStructure.new().put_back(saved, packed)
 	_checked_pack = packed
 	var missing: String = str(check.call(saved))
 	saved.free()

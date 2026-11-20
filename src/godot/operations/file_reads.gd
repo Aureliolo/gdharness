@@ -280,7 +280,7 @@ static func _lay(
 	laying.nodes = nodes
 	laying.within = within
 	laying.loaded = loaded
-	laying.ids = _unique_ids(state.get_path(), state.get_node_count())
+	laying.ids = unique_ids(state.get_path(), state.get_node_count())
 	for index: int in state.get_node_count():
 		var refused: String = _lay_node(laying, index)
 		if not refused.is_empty():
@@ -434,7 +434,7 @@ static func _editable_in(scene_path: String, given_scene: PackedScene = null) ->
 ## The unique_id of each node entry in the text scene at [param scene_path], in the order its state
 ## holds them, -1 where an entry has none. All -1 for a binary scene, and for a file whose entries
 ## do not number [param count], since SceneState does not give the ids to a script.
-static func _unique_ids(scene_path: String, count: int) -> Array[int]:
+static func unique_ids(scene_path: String, count: int) -> Array[int]:
 	var ids: Array[int] = []
 	var _sized: int = ids.resize(count)
 	ids.fill(-1)
