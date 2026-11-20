@@ -49,9 +49,10 @@ metadata:
 # gdharness
 
 An MCP server and four Godot addons. Together they answer about the editor that is open, the game
-that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`domain_verb\`.
+that is running, and the project on disk. ${TOOL_SPECS.length} tools, each named for its area and
+what it works on, such as \`scene_node\`.
 
-\`references/tools.md\` is every tool, op and argument.
+\`references/tools.md\` is every tool, op and argument, and what each answer's fields mean.
 
 ## Start here
 
@@ -69,8 +70,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   in your harness. A stale editor is asked nothing but to quit, and every other call to it is
   refused with the same note. A game's runtime addon is judged the same way, under each entry in
   \`runtimes\`, and a \`runtime_*\` call to a stale game is refused with its note.
-- Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
-  the \`debug_*\` tools reach its debugger. Its answer
+- Start the game with \`editor_run start\`, never by spawning an engine. Whether this server starts
+  it or the editor plays it, the \`debug_*\` tools reach its debugger. Its answer
   says under \`runtime\` whether the game can be talked to yet. When it cannot, \`mayYetAnnounce\`
   false is a runtime that is not coming and true is a game still on its way up.
 - Read \`editor_output\` after every run. Its entries carry the engine's errors and warnings with
