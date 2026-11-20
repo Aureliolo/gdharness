@@ -52,6 +52,26 @@ function fileKey(path: string): string {
   return process.platform === 'win32' ? path.replaceAll('\\', '/').toLowerCase() : path;
 }
 
+/** [held] without [line] of [scriptPath], in any spelling of the path, or null when it has none. */
+export function withoutBreakpoint(
+  held: readonly HeldBreakpoint[],
+  scriptPath: string,
+  line: number,
+): HeldBreakpoint[] | null {
+  const key = fileKey(scriptPath);
+  const holds = (one: HeldBreakpoint): boolean => fileKey(one.scriptPath) === key && one.lines.includes(line);
+  if (!held.some(holds)) {
+    return null;
+  }
+  return held.flatMap((one) => {
+    if (!holds(one)) {
+      return [one];
+    }
+    const lines = one.lines.filter((other) => other !== line);
+    return lines.length > 0 ? [{ scriptPath: one.scriptPath, lines }] : [];
+  });
+}
+
 /** A read of a held game refused for what it found, which starting a game would not change. */
 class ReadRefusal extends Refusal {}
 
@@ -224,6 +244,7 @@ export class GodotDAPClient {
   private inEditor = new Map<string, Set<number>>();
   /** Told whenever the set this side holds changes without a call: see [setBreakpointsSink]. */
   private onBreakpointsChanged: ((held: HeldBreakpoint[]) => void) | null = null;
+  private onRemovedNotHeld: ((scriptPath: string, line: number) => void) | null = null;
 
   /** How long a frame's scopes and values are waited for. See [SCOPES_TIMEOUT_MS]. */
   readonly scopesPatienceMs: number;
@@ -591,7 +612,7 @@ export class GodotDAPClient {
       this.spelled.set(key, path);
     }
     if (said(body, 'reason') === 'removed') {
-      this.forgetBreakpointHeld(key, line);
+      this.forgetBreakpointHeld(key, line, path);
       return;
     }
     const known = this.inEditor.get(key) ?? new Set<number>();
@@ -599,10 +620,11 @@ export class GodotDAPClient {
     this.inEditor.set(key, known);
   }
 
-  private forgetBreakpointHeld(key: string, line: number): void {
+  private forgetBreakpointHeld(key: string, line: number, path: string): void {
     this.inEditor.get(key)?.delete(line);
     const held = this.breakpoints.get(key);
     if (held?.delete(line) !== true) {
+      this.onRemovedNotHeld?.(path, line);
       return;
     }
     if (held.size === 0) {
@@ -849,6 +871,11 @@ export class GodotDAPClient {
     this.onBreakpointsChanged = sink;
   }
 
+  /** Where a line clicked off in the editor that this side does not hold is reported. */
+  setRemovedNotHeldSink(sink: (scriptPath: string, line: number) => void): void {
+    this.onRemovedNotHeld = sink;
+  }
+
   /** The breakpoints the editor has told this connection of that this side did not set. */
   breakpointsInEditor(): HeldBreakpoint[] {
     const theirs: HeldBreakpoint[] = [];
@@ -1084,10 +1111,11 @@ export class GodotDAPClient {
    * What [param expression] comes to at the frame [param frameId], or the innermost, worked out by
    * the game on the frame's instance.
    *
-   * The adapter answers an evaluate the way it answers an object's variables: the request that
-   * sends the expression to the game answers nothing, and one asked after the game's reply has come
-   * answers with it, once. An expression already sent is not sent again while it is waited on, so
-   * asking again runs it once.
+   * The adapter holds an evaluate, reading nothing after it, until the game's reply comes or its
+   * own request timeout passes, and then answers it with the value or a timeout. The value is
+   * given once: a request that reaches the adapter after it was given sends the expression to the
+   * game again. So each request is waited on for the whole patience, never dropped, and asked again
+   * only after a timeout, while the expression is still pending in the game.
    */
   async evaluate(
     expression: string,
@@ -1110,7 +1138,7 @@ export class GodotDAPClient {
         const answered = await this.sendRequest(
           'evaluate',
           { expression, frameId: frameNumber, context: 'watch' },
-          VARIABLES_POLL_TIMEOUT_MS,
+          Math.max(1, deadline - Date.now()),
         );
         const value = answered['result'];
         if (typeof value === 'string') {
@@ -1118,7 +1146,7 @@ export class GodotDAPClient {
           return { frame: frameNumber, value, ...(typeof type === 'string' ? { type } : {}) };
         }
       } catch {
-        // Unanswered: the game's reply has not reached the adapter yet.
+        // The adapter's own timeout: the game's reply has not reached it yet.
       }
       await delay(200);
     }

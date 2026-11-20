@@ -3033,7 +3033,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "A breakpoint set before editor_run is in place from the game's first frame. The set is kept in the project until removed. The addon turns on network/debug_adapter/sync_breakpoints. A game this server started does not stop on a script error.",
     answer: [
       "Every answer lists the whole set under held, and the ones set in the editor's gutter under setInEditor. A set on a line the engine never stops on is refused. The refusal names the next line it does stop on. A set on a script behind a link that leads out of the project is not read, so its line is not checked. lineNotChecked names the link.",
-      "With the editor connected a set goes through the editor's debug adapter. With none it is held here. editor_run start starts the game itself unless silent: false lets a connected editor play it.",
+      "With an editor of this project connected a set goes through the editor's debug adapter. With none, or with an editor that has another project open, it is held here. editor_run start starts the game itself unless silent: false lets a connected editor play it.",
       'A game this server started is handed every breakpoint held here as it starts, and one set while it runs reaches it too. The set answers once the game has taken it, which it does between frames. So a call made after the answer stops there (runningGame says so).',
       'A game this server started does not stop on a script error, so a run that meets one carries on past it. editor_output has the error with where it happened, and a breakpoint on that line stops the game before the line runs.',
       "The editor keeps a breakpoint set through its adapter for one play. So every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect. A breakpoint stays until it is removed here, whichever server set it. Setting one here never takes the ones set in the editor's gutter away.",
@@ -3056,7 +3056,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       list: {
         effect: 'read',
         summary:
-          'the breakpoints this server keeps, under held, and with the editor connected the ones in its gutter',
+          'the breakpoints held here under held, and with an editor of this project connected the ones set in its gutter under setInEditor',
         requires: [],
       },
     },
