@@ -122,6 +122,11 @@ public static class StackSampler {
       if (count % 20 == 0) {
         SymRefreshModuleList(process);
       }
+      // Asked to end between walks, since a kill landing inside one would leave the thread
+      // suspended for good.
+      if (File.Exists(output + ".stop")) {
+        return 0;
+      }
       count += 1;
       string ask = output + ".ask";
       if (File.Exists(ask)) {
@@ -325,6 +330,9 @@ export function describeStackSamples(samples: StackSample[], depth: number, sinc
   return lines.join('\n');
 }
 
+/** How long past one interval the sampler is given to end between walks before it is killed. */
+const STOP_GRACE_MS = 5_000;
+
 /**
  * The call stack of a Windows process's main thread every [param intervalMs], for a case that
  * fails on an engine that stopped answering. The sampler is compiled and started in the background,
@@ -337,7 +345,7 @@ export function sampleStacks(
   samples: () => StackSample[];
   why: () => string | null;
   allThreads: (withinMs: number) => Promise<string>;
-  stop: () => void;
+  stop: () => Promise<void>;
 } {
   const directory = mkdtempSync(join(tmpdir(), 'gdharness-stacks-'));
   const output = join(directory, 'samples.txt');
@@ -381,10 +389,22 @@ export function sampleStacks(
       }
       return existsSync(answer) ? readFileSync(answer, 'utf8') : '';
     },
-    stop: () => {
+    stop: async () => {
       running.stopped = true;
-      running.sampler?.kill();
-      // The sampler may still hold its file for a moment after the kill, and a temporary folder
+      const sampler = running.sampler;
+      if (sampler?.exitCode === null && sampler.signalCode === null) {
+        const ended = new Promise<boolean>((resolve) => {
+          sampler.once('exit', () => {
+            resolve(true);
+          });
+        });
+        writeFileSync(`${output}.stop`, '');
+        const inTime = await Promise.race([ended, delay(intervalMs + STOP_GRACE_MS).then(() => false)]);
+        if (!inTime) {
+          sampler.kill();
+        }
+      }
+      // The sampler may still hold its file for a moment after it ends, and a temporary folder
       // left behind costs nothing.
       try {
         rmSync(directory, { recursive: true, force: true });

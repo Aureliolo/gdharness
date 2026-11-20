@@ -1647,7 +1647,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     throw await editorFailure(failure, { editor, engineOutput, thread, server, atStall });
   } finally {
     noteStall = noStall;
-    thread.stop();
+    await thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_run', { op: 'stop' }).catch(() => undefined);
@@ -2715,6 +2715,47 @@ async function testAReloadedScriptIsNotWrittenBackByTheNextSave({ call, project 
       'the save kept the edit made outside the editor',
     );
     assert.equal(statSync(addon).mtimeMs, addonWritten, "the save left the addon's own script alone");
+
+    // A reload that fails puts the text the script was built from back in the editor.
+    writeFileSync(script, 'extends Node2D\n\nfunc ring( -> int:\n\treturn 3\n');
+    const broken = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://resaved/held.gd',
+    });
+    assert.notEqual(get(broken, 'reloadProblem'), undefined, text(broken));
+    const mended = 'extends Node2D\n\nfunc ring() -> int:\n\treturn 3\n';
+    writeFileSync(script, mended);
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      fileText(project, 'resaved/held.gd'),
+      mended,
+      'the save kept the edit made outside the editor after a failed reload',
+    );
+
+    // A write that keeps a connection the engine cannot make answers with a note, which the call
+    // hands back and empties.
+    writeFileSync(
+      join(project, 'resaved', 'quitting.tscn'),
+      '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
+        // Binds to a method the root lacks, which the engine refuses to make as the scene loads.
+        '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n',
+    );
+    await call('editor_rescan', { projectPath: project });
+    const relabelled = await call('scene_node', {
+      projectPath: project,
+      op: 'set',
+      scenePath: 'res://resaved/quitting.tscn',
+      nodePath: 'Quit',
+      properties: { text: 'Quit' },
+    });
+    assert.equal(typeof get(relabelled, 'unmadeConnections'), 'string', text(relabelled));
+    const afterNote = statSync(addon).mtimeMs;
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      statSync(addon).mtimeMs,
+      afterNote,
+      "the save after a note left the addon's own script alone",
+    );
   } finally {
     await hook(project, { op: 'open', path: 'res://main.tscn' });
     rmSync(join(project, 'resaved'), { recursive: true, force: true });

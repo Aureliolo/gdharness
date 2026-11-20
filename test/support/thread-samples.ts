@@ -31,14 +31,19 @@ interface Sample {
  */
 export function sampleThread(pid: number | undefined): {
   account: () => Promise<string>;
-  stop: () => void;
+  stop: () => Promise<void>;
 } {
   const samples: Sample[] = [];
   if (process.platform === 'win32' && pid !== undefined) {
     return sampleWindowsThread(pid);
   }
   if (process.platform !== 'linux' || pid === undefined) {
-    return { account: async () => await Promise.resolve(''), stop: () => undefined };
+    return {
+      account: async () => await Promise.resolve(''),
+      stop: async () => {
+        await Promise.resolve();
+      },
+    };
   }
   const started = Date.now();
   const timer = setInterval(() => {
@@ -54,8 +59,9 @@ export function sampleThread(pid: number | undefined): {
   timer.unref();
   return {
     account: async () => await Promise.resolve(describe(samples)),
-    stop: () => {
+    stop: async () => {
       clearInterval(timer);
+      await Promise.resolve();
     },
   };
 }
@@ -68,7 +74,10 @@ const STACK_DEPTH = 40;
 /** How long the account waits for the sampler to walk every thread. */
 const ALL_THREADS_MS = 10_000;
 
-function sampleWindowsThread(pid: number): { account: () => Promise<string>; stop: () => void } {
+function sampleWindowsThread(pid: number): {
+  account: () => Promise<string>;
+  stop: () => Promise<void>;
+} {
   const stacks = sampleStacks(pid, SAMPLE_MS);
   return {
     account: async () => {
