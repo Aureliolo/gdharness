@@ -15788,6 +15788,64 @@ function testTheFirstCallRulesAreInTheToolList(): void {
 }
 
 /**
+ * An object slot is emptied by the text null. The server refuses a JSON null as a missing value, so
+ * the tool list names the text the game reads as no object.
+ */
+function testAnObjectSlotIsEmptiedByTheTextNull(): void {
+  const value = listedText('runtime_invoke', 'value');
+  assert.match(value, /An object property takes a path to one the game holds, or the text null to empty it/);
+  assert.match(
+    readFileSync('src/godot/addons/gdharness_runtime/runtime_changes.gd', 'utf8'),
+    /str\(given\)\.strip_edges\(\) == "null"/,
+    'and the game reads that text as no object',
+  );
+}
+
+/**
+ * What editor_launch and editor_run do to the work around them, said where the call is chosen, and
+ * where each answer field is explained, said once at connect.
+ */
+function testTheLaunchAndRunWarningsAreInTheToolList(): void {
+  const launch = listedText('editor_launch');
+  assert.match(
+    launch,
+    /open and close save project\.godot, which drops a key set on purpose to its default value\./,
+  );
+  assert.match(launch, /A restart of an editor this server opened is a quit and then a launch\./);
+  assert.match(launch, /Ending this server between them, as a reconnect does, leaves no editor\./);
+  assert.match(launch, /rebind: end the connected editor's debug sessions/);
+  assert.match(listedText('editor_run'), /A start ends a run of the same project first\./);
+  assert.match(
+    serverInstructions(),
+    /The gdharness skill's tool reference and the site say what each answer field means\./,
+  );
+}
+
+/** create_tileset refuses a TileSet path that already exists, which its sources argument names. */
+function testATileSetRefusesAResourcePathThatExists(): void {
+  const sources = text(get(toolSpec('resource_edit')?.parameters['sources'], 'description'));
+  assert.match(sources, /A resourcePath that already exists is refused\./);
+  assert.match(
+    readFileSync('src/godot/addons/gdharness_editor/tools/tileset_tools.gd', 'utf8'),
+    /Give "\s*\+ "resourcePath a path nothing is at\./,
+    'and the TileSet path is what is refused',
+  );
+}
+
+/** An effect of the same class in the slot is kept with its settings, and only another class is replaced. */
+function testAnEffectOfTheSameClassKeepsItsSettings(): void {
+  assert.match(
+    listedText('project_settings', 'effectIndex'),
+    /an effect of another class is replaced and one of the same class stays with its settings\./,
+  );
+  assert.match(
+    readFileSync('src/godot/operations/audio_buses.gd', 'utf8'),
+    /kept = held\.get_class\(\) == effect\.get_class\(\)/,
+    'and the operation keeps one of the same class',
+  );
+}
+
+/**
  * Holds each argument of [spec] with a sentence of its description opening by naming ops, as
  * "check: ... wait: ...", to be taken by those ops, and one whose description opens so to declare
  * them. Answers how many it read.
@@ -49070,9 +49128,9 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       // to a frame, so none of them holds a frame the way the last look of the wait above did, which
       // is read whole. Read whole, every paced look held a frame that long, and a game logging its
       // own frame times saw a long frame every few dozen that came and went with the wait.
-      // The hold is wall time, so this takes the shortest of three waits' longest holds: on the
-      // macOS runner one slice of a lone wait held its frame for 37.6ms, a pause no node's reading
-      // takes. Read whole, each of the three holds a frame for the whole look.
+      // The hold is wall time, so this takes the middle of three waits' longest holds. One runner
+      // pause is absorbed: on the macOS runner one slice of a lone wait held its frame for 37.6ms, a
+      // pause no node's reading takes. Two waits holding a frame for the whole look still fail.
       const seasons: unknown[] = [];
       for (let week = 3; week <= 5; week += 1) {
         const [season] = await Promise.all([
@@ -49090,12 +49148,13 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
         seasons.push(season);
       }
       const whole = asNumber(get(outlasted, 'longest_hold_ms'), JSON.stringify(outlasted));
-      const sliced = Math.min(
-        ...seasons.map((season) => asNumber(get(season, 'longest_hold_ms'), JSON.stringify(season))),
-      );
+      const holds = seasons
+        .map((season) => asNumber(get(season, 'longest_hold_ms'), JSON.stringify(season)))
+        .toSorted((a, b) => a - b);
+      const sliced = holds[1] ?? 0;
       assert.ok(
         sliced > 0 && sliced < whole / 3,
-        `the paced looks held a frame for at least ${sliced}ms in each of three waits, against ${whole}ms for a look read whole: ${JSON.stringify({ seasons, outlasted })}`,
+        `the paced looks held a frame for ${sliced}ms in the middle of three waits, against ${whole}ms for a look read whole: ${JSON.stringify({ seasons, outlasted })}`,
       );
       await call('editor_run', { op: 'stop' });
     },
@@ -122521,6 +122580,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheToolListStaysSmall,
   testTheToolTextSaysWhatTheCodeDoes,
   testTheFirstCallRulesAreInTheToolList,
+  testAnObjectSlotIsEmptiedByTheTextNull,
+  testTheLaunchAndRunWarningsAreInTheToolList,
+  testATileSetRefusesAResourcePathThatExists,
+  testAnEffectOfTheSameClassKeepsItsSettings,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
   testInteractiveIsABooleanWhateverTheStreamsAre,

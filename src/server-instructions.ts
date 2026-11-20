@@ -9,7 +9,6 @@ import { projectPathSentence, THE_GAME_PICKED_IN_SHORT } from './tool-definition
 
 export function serverInstructions(): string {
   return [
-    'gdharness drives a Godot 4 project: the open editor, the running game and the files.',
     `${projectPathSentence()}.`,
     'A path inside the project is written either way, "scenes/main.tscn" or "res://scenes/main.tscn".',
     "Call editor_status first. It says whether an editor is connected and runs this server's addon.",
@@ -21,5 +20,6 @@ export function serverInstructions(): string {
     'Scene and resource writes go through the editor when one serves the project, else a headless engine.',
     'writtenBy says which, and alsoSaved lists lines changed on other nodes.',
     'A refusal names what would have worked.',
+    "The gdharness skill's tool reference and the site say what each answer field means.",
   ].join(' ');
 }

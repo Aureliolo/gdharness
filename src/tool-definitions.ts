@@ -428,7 +428,7 @@ const INPUT_EVENTS: JsonSchema = {
 
 const TILESET_SOURCES: JsonSchema = {
   type: 'array',
-  description: 'Atlas sources, one per texture. A path that already exists is refused.',
+  description: 'Atlas sources, one per texture. A resourcePath that already exists is refused.',
   items: {
     type: 'object',
     properties: {
@@ -615,7 +615,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       effectIndex: {
         type: 'number',
         ops: ['set_audio_bus_effect'],
-        description: 'Slot on the bus: the effect there is replaced, and one past the last adds one.',
+        description:
+          'Slot on the bus, where an effect of another class is replaced and one of the same class stays with its settings. One past the last adds one.',
       },
       effectType: {
         type: 'string',
@@ -1837,7 +1838,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_launch',
     title: 'Open, restart or close the editor, or bind its debug adapter again',
-    description: 'editor_status says which editor is connected.',
+    description:
+      'editor_status says which editor is connected. open and close save project.godot, which drops a key set on purpose to its default value. A restart of an editor this server opened is a quit and then a launch. Ending this server between them, as a reconnect does, leaves no editor.',
     answer: [
       'close answers settingsDropped, what its save took out of project.godot. It is left out when the save took nothing. settingsNote says when the file could not be read to tell. An editor stopped before it connected is answered with beforeConnecting.',
       'close and restart name under savedScenes the open scenes that had unsaved changes and were saved on the way out. The list is empty when none had. A scene that would not save refuses the close or restart and leaves the editor running. Both answer tookMs, how long the editor took to go or to come back.',
@@ -1883,7 +1885,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       rebind: {
         effect: 'destructive',
-        summary: "restart the connected editor's debug adapter in place",
+        summary: "end the connected editor's debug sessions and restart its debug adapter in place",
         requires: [],
       },
     },
@@ -1893,7 +1895,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_run',
     title: 'Run the game',
     description:
-      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. One server keeps one run.',
+      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. One server keeps one run. A start ends a run of the same project first.',
     parameters: {
       // start and check need telling which project. The ops about the run already going take it
       // too, because a call copied from the start carries it, and they check it rather than ignore
@@ -2512,7 +2514,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['set'],
         blank: true,
         description:
-          'The value, fitted to the property\'s type. Vectors are {"x": 140, "y": 300}, a colour may be "#ff8000", an enum takes its name or number. An object property takes a path to one the game holds, or null, and a resource its res:// path.',
+          'The value, fitted to the property\'s type. Vectors are {"x": 140, "y": 300}, a colour may be "#ff8000", an enum takes its name or number. An object property takes a path to one the game holds, or the text null to empty it, and a resource its res:// path.',
       },
       method: {
         type: 'string',
