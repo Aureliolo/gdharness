@@ -10512,6 +10512,20 @@ async function withALanguageServerThatEnds<T>(
 }
 
 /**
+ * What a probe run that failed printed and how it ended, for a failure message. A run killed at its
+ * timeout says so only in `killed` and `signal`, and its stdout is not in the error's message.
+ */
+function probeRunFailure(error: unknown): string {
+  const run = isRecord(error) ? error : {};
+  const fields = ['code', 'signal', 'killed'].map((name) => `${name} ${String(run[name])}`);
+  return [
+    fields.join(', '),
+    `stdout: ${JSON.stringify(run['stdout'])}`,
+    `stderr: ${JSON.stringify(run['stderr'])}`,
+  ].join('\n');
+}
+
+/**
  * A language server request the client lets go of ends as its server does: on the close, on the
  * answer the server sent as it closed, or as let go once the client stops waiting for the close.
  * Node, which runs the published server, reads each the same as Bun.
@@ -10520,12 +10534,18 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-let-go-'));
   try {
     const probe = join(scratch, 'let-go.mjs');
+    // Each step it reaches goes to stderr with the time since the probe started, so a run that
+    // stalls shows the step it stalled after.
+    const reached = (step: string): string =>
+      `process.stderr.write(\`\${Math.round(performance.now())} ms ${step}\\n\`);`;
     writeFileSync(
       probe,
       [
         `import { GodotLSPClient } from ${JSON.stringify(pathToFileURL(resolve('build', 'lsp_client.js')).href)};`,
+        reached('loaded'),
         `const client = new GodotLSPClient(Number(process.argv[2]), '127.0.0.1');`,
         'await client.connect();',
+        reached('connected'),
         `const asked = client.sendRequest('ask', {}, 5000).then(`,
         `  (answer) => 'answered: ' + JSON.stringify(answer),`,
         `  (error) => 'ended: ' + error.message,`,
@@ -10533,7 +10553,13 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
         // Once the request is written, so the server reads it before the end.
         'await new Promise((written) => setTimeout(written, 50));',
         'await client.disconnect();',
+        reached('disconnected'),
         'console.log(await asked);',
+        // A probe that printed and still runs says so, and under Node what holds it open. Bun
+        // lists nothing there. The timer itself holds nothing.
+        'setTimeout(() => {',
+        `  process.stderr.write(Math.round(performance.now()) + ' ms still running, held by ' + JSON.stringify(process.getActiveResourcesInfo()) + '\\n');`,
+        '}, 2000).unref();',
       ].join('\n'),
     );
     const ends: [LanguageServerEnd, string][] = [
@@ -10547,8 +10573,11 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
         ['Node', 'node'],
       ] as const) {
         await withALanguageServerThatEnds(end, async (port) => {
-          const { stdout } = await runHidden(program, [probe, String(port)], { timeout: 30_000 });
-          assert.equal(stdout.trim(), expected, `${runtime}, with a server that ${end}`);
+          const run = `${runtime}, with a server that ${end} on port ${port}`;
+          const { stdout, stderr } = await runHidden(program, [probe, String(port)], {
+            timeout: 30_000,
+          }).catch((error: unknown) => assert.fail(`${run}, the probe failed:\n${probeRunFailure(error)}`));
+          assert.equal(stdout.trim(), expected, `${run}. The probe's stderr:\n${stderr}`);
         });
       }
     }
