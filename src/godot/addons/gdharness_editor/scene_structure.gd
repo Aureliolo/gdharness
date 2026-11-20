@@ -443,7 +443,8 @@ func _within_remade(node: Node, top: Node) -> bool:
 
 ## The unique_id the file gives [param entry]'s node, or -1.
 func _id_of(entry: Dictionary) -> int:
-	var ids: Array[int] = _filed(entry["state"])["ids"]
+	var state: SceneState = entry["state"]
+	var ids: Array[int] = _filed(state)["ids"]
 	var index: int = entry["index"]
 	return ids[index] if index < ids.size() else -1
 
