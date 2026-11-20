@@ -451,7 +451,8 @@ clears the ones set by hand.
 Two projects, two harness sessions, two servers and two editors therefore work at once. A server
 `setup` wrote answers about its own project's game, not whichever game it finds announced. So
 `runtime_*` needs no `projectPath` on a machine running two. One server still serves one editor,
-because the bridge carries a single connection.
+because the bridge carries a single connection. A start naming another project than the editor's
+runs a game of its own in this server and never asks the editor to play, stop, scan or wait.
 
 ### Two servers on one project
 
