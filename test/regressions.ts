@@ -586,6 +586,7 @@ import {
   ProfileAggregate,
   type ProfileTotals,
   profiledFunctions,
+  profileFileWriter,
   profilerOn,
   propertyOf,
   queuedMessagesOf,
@@ -11097,6 +11098,41 @@ async function withALanguageServerThatEnds<T>(
 }
 
 /**
+ * What a probe run that failed printed and how it ended, for a failure message. A run killed at its
+ * timeout says so only in `killed` and `signal`, and its stdout is not in the error's message.
+ */
+function probeRunFailure(error: unknown): string {
+  const run = isRecord(error) ? error : {};
+  const fields = ['code', 'signal', 'killed'].map((name) => `${name} ${String(run[name])}`);
+  return [
+    fields.join(', '),
+    `stdout: ${JSON.stringify(run['stdout'])}`,
+    `stderr: ${JSON.stringify(run['stderr'])}`,
+  ].join('\n');
+}
+
+/**
+ * A connection to a language server that nobody answers is given up after three seconds, not left
+ * to the operating system's own wait of 21 seconds on Windows or about two minutes on Linux. The
+ * address is one reserved for documentation, which nothing on a network answers. A network that
+ * refuses it at once ends sooner, which is also not a wait on the system.
+ */
+async function testALanguageServerConnectNobodyAnswersIsGivenUp(): Promise<void> {
+  const client = new GodotLSPClient(6005, '192.0.2.1');
+  const started = Date.now();
+  const said = await client.connect().then(
+    () => 'connected',
+    (error: unknown) => errorMessage(error),
+  );
+  const took = Date.now() - started;
+  await client.disconnect();
+  assert.ok(took < 5000, `given up in ${took} ms: ${said}`);
+  if (took >= 2900) {
+    assert.match(said, /: nothing answered the connection in 3s$/);
+  }
+}
+
+/**
  * A language server request the client lets go of ends as its server does: on the close, on the
  * answer the server sent as it closed, or as let go once the client stops waiting for the close.
  * Node, which runs the published server, reads each the same as Bun.
@@ -11105,12 +11141,18 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-let-go-'));
   try {
     const probe = join(scratch, 'let-go.mjs');
+    // Each step it reaches goes to stderr with the time since the probe started, so a run that
+    // stalls shows the step it stalled after.
+    const reached = (step: string): string =>
+      `process.stderr.write(\`\${Math.round(performance.now())} ms ${step}\\n\`);`;
     writeFileSync(
       probe,
       [
         `import { GodotLSPClient } from ${JSON.stringify(pathToFileURL(resolve('build', 'lsp_client.js')).href)};`,
+        reached('loaded'),
         `const client = new GodotLSPClient(Number(process.argv[2]), '127.0.0.1');`,
         'await client.connect();',
+        reached('connected'),
         `const asked = client.sendRequest('ask', {}, 5000).then(`,
         `  (answer) => 'answered: ' + JSON.stringify(answer),`,
         `  (error) => 'ended: ' + error.message,`,
@@ -11118,7 +11160,13 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
         // Once the request is written, so the server reads it before the end.
         'await new Promise((written) => setTimeout(written, 50));',
         'await client.disconnect();',
+        reached('disconnected'),
         'console.log(await asked);',
+        // A probe that printed and still runs says so, and under Node what holds it open. Bun
+        // lists nothing there. The timer itself holds nothing.
+        'setTimeout(() => {',
+        `  process.stderr.write(Math.round(performance.now()) + ' ms still running, held by ' + JSON.stringify(process.getActiveResourcesInfo()) + '\\n');`,
+        '}, 2000).unref();',
       ].join('\n'),
     );
     const ends: [LanguageServerEnd, string][] = [
@@ -11132,8 +11180,11 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
         ['Node', 'node'],
       ] as const) {
         await withALanguageServerThatEnds(end, async (port) => {
-          const { stdout } = await runHidden(program, [probe, String(port)], { timeout: 30_000 });
-          assert.equal(stdout.trim(), expected, `${runtime}, with a server that ${end}`);
+          const run = `${runtime}, with a server that ${end} on port ${port}`;
+          const { stdout, stderr } = await runHidden(program, [probe, String(port)], {
+            timeout: 30_000,
+          }).catch((error: unknown) => assert.fail(`${run}, the probe failed:\n${probeRunFailure(error)}`));
+          assert.equal(stdout.trim(), expected, `${run}. The probe's stderr:\n${stderr}`);
         });
       }
     }
@@ -25440,6 +25491,175 @@ async function testAHiddenRunIsHeldByItsKeeperFromStartToClose(): Promise<void> 
       text(get(refused, 'error')),
       /could not be started on the .* desktop/,
       `a start the helper cannot make answers why: ${JSON.stringify(refused)}`,
+    );
+  } finally {
+    await endEnginesUnder(scratch);
+    sweep(scratch);
+  }
+}
+
+/** A project in [param root] that holds [param scripts], each run as a scene tree script by name. */
+function aProjectOfScripts(root: string, scripts: Readonly<Record<string, string>>): string {
+  const project = join(root, 'project');
+  mkdirSync(project, { recursive: true });
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="kept"\n');
+  for (const [name, source] of Object.entries(scripts)) {
+    writeFileSync(join(project, name), source);
+  }
+  return project;
+}
+
+/** The note of the run at [param project], read again until it says the game has exited, or null. */
+async function noteOfAnEndedRun(project: string, runtime: string): Promise<unknown> {
+  const note = runRecordPath(project, runtime);
+  return await answeredWithin(() => {
+    const record: unknown = existsSync(note) ? JSON.parse(readFileSync(note, 'utf8')) : null;
+    return get(record, 'endedAt') === undefined && get(record, 'endingAt') === undefined ? undefined : record;
+  }, 60_000);
+}
+
+/** How many lines a game prints in one frame, and the most that takes. Each line cost 1.5 ms through a file. */
+const FRAME_BURST_LINES = 200;
+const FRAME_BURST_LIMIT_MS = 50;
+
+/**
+ * A game a keeper holds prints a burst of lines in one frame without waiting on its transcript, and
+ * the transcript holds every line in order, the last ones before the exit is noted.
+ *
+ * On Windows an engine flushes a file to disk after every write, so a game given the transcript
+ * itself spent about 1.5 ms on each line (0.3 s for the burst) and the keeper must give it a pipe.
+ * The game reports the time it took, so the measure is the game's own.
+ */
+async function testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('kept burst regression skipped (Godot not found)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-burst-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  try {
+    const project = aProjectOfScripts(scratch, {
+      'burst.gd': [
+        'extends SceneTree',
+        '',
+        'func _initialize() -> void:',
+        '\tvar from := Time.get_ticks_usec()',
+        `\tfor line in range(${String(FRAME_BURST_LINES)}):`,
+        '\t\tprint("burst line %d" % line)',
+        '\tprint("burst took %d us" % (Time.get_ticks_usec() - from))',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    });
+    const transcript = join(scratch, 'run.log');
+    const launched = launchedThroughTheKeeper(join(scratch, 'run'), runtime, {
+      command: godotPath,
+      args: ['--headless', '--path', project, '-s', 'res://burst.gd'],
+      run: { transcript, startedAt: Date.now(), projectPath: project },
+    });
+    assert.ok(typeof get(launched, 'pid') === 'number', `the game starts: ${JSON.stringify(launched)}`);
+    const noted = await noteOfAnEndedRun(project, runtime);
+    assert.ok(noted !== undefined, 'the game exits and its exit is noted');
+    const printed = readFileSync(transcript, 'utf8').split(/\r?\n/);
+    assert.deepEqual(
+      printed.filter((line) => line.startsWith('burst line ')),
+      Array.from({ length: FRAME_BURST_LINES }, (_, line) => `burst line ${String(line)}`),
+      'the transcript holds every line in order by the time the exit is noted',
+    );
+    const took = printed.find((line) => line.startsWith('burst took '))?.match(/(\d+) us/)?.[1];
+    assert.ok(
+      took !== undefined,
+      `the game's last line reached the transcript: ${printed.slice(-5).join(' | ')}`,
+    );
+    if (process.platform === 'win32') {
+      assert.ok(
+        Number(took) < FRAME_BURST_LIMIT_MS * 1000,
+        `${String(FRAME_BURST_LINES)} lines took the game ${took} us, over ${String(FRAME_BURST_LIMIT_MS)} ms`,
+      );
+    }
+  } finally {
+    await endEnginesUnder(scratch);
+    sweep(scratch);
+  }
+}
+
+/**
+ * A game whose keeper is killed runs on and is not held up by a transcript nobody is reading: its
+ * output goes to a pipe the keeper served, and a write to a pipe with no reader fails at once.
+ */
+async function testAKeptGameRunsOnWhenItsKeeperIsKilled(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('kept game without its keeper regression skipped (Godot not found)');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-orphan-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  try {
+    const project = aProjectOfScripts(scratch, {
+      'orphan.gd': [
+        'extends SceneTree',
+        '',
+        'var frames := 0',
+        'var progress := ""',
+        'var go := ""',
+        '',
+        'func _initialize() -> void:',
+        '\tvar paths := OS.get_cmdline_user_args()',
+        '\tprogress = paths[0]',
+        '\tgo = paths[1]',
+        '',
+        'func _process(_delta: float) -> bool:',
+        '\tframes += 1',
+        '\tprint("frame %d" % frames)',
+        '\tprinterr("error line %d" % frames)',
+        '\tif frames % 5 == 0:',
+        '\t\tvar file := FileAccess.open(progress, FileAccess.WRITE)',
+        '\t\tfile.store_string(str(frames))',
+        '\t\tfile.close()',
+        '\treturn FileAccess.file_exists(go)',
+        '',
+      ].join('\n'),
+    });
+    const progress = join(scratch, 'progress');
+    const go = join(scratch, 'go');
+    const launched = launchedThroughTheKeeper(join(scratch, 'run'), runtime, {
+      command: godotPath,
+      args: ['--headless', '--path', project, '-s', 'res://orphan.gd', '--', progress, go],
+      run: { transcript: join(scratch, 'run.log'), startedAt: Date.now(), projectPath: project },
+    });
+    const pid = get(launched, 'pid');
+    const keeper = get(launched, 'keeperPid');
+    assert.ok(
+      typeof pid === 'number' && typeof keeper === 'number',
+      `the game starts: ${JSON.stringify(launched)}`,
+    );
+    const frames = (): number => (existsSync(progress) ? Number(readFileSync(progress, 'utf8')) || 0 : 0);
+    assert.ok(
+      await answeredWithin(() => (frames() >= 10 ? true : undefined), 60_000),
+      'the game runs frames',
+    );
+    process.kill(keeper);
+    assert.ok(await answeredWithin(() => (alive(keeper) ? undefined : true), 30_000), 'the keeper is killed');
+    const before = frames();
+    assert.ok(
+      await answeredWithin(() => (frames() >= before + 60 ? true : undefined), 30_000),
+      `the game goes on printing after its keeper has gone, past frame ${String(before)}`,
+    );
+    assert.ok(alive(pid), 'and is still running');
+    writeFileSync(go, '');
+    assert.ok(
+      await answeredWithin(() => (alive(pid) ? undefined : true), 30_000),
+      'the game ends when it is told to',
     );
   } finally {
     await endEnginesUnder(scratch);
@@ -56585,9 +56805,25 @@ async function testObjectSnapshotsShowWhatAnActionKept(): Promise<void> {
     assert.ok(counted('nodes') >= 3 && counted('refCounted') > 0, fresh.said);
     assert.ok(counted('objects') > counted('nodes') + counted('refCounted'), fresh.said);
 
-    await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'keep_items', args: [100] });
+    // A game that exits and one whose debugger frame is too large both read as a closed debugger
+    // connection, and only how the run ended tells them apart.
+    const told = async (said: string): Promise<string> => {
+      const output = await call('editor_output', {});
+      return `${said}\nThe run's output: ${output.said.slice(-3000)}\nServer stderr tail:\n${server.stderr.slice(-2000)}`;
+    };
+    const keptItems = await call('runtime_invoke', {
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'keep_items',
+      args: [100],
+    });
+    if (keptItems.answer === null) {
+      assert.fail(await told(keptItems.said));
+    }
     const kept = await call('debug_objects', { op: 'diff', before: 's1' });
-    assert.equal(get(kept.answer, 'after'), 's2', kept.said);
+    if (get(kept.answer, 'after') !== 's2') {
+      assert.fail(await told(kept.said));
+    }
     const changed = asArray(get(kept.answer, 'changed'));
     assert.deepEqual(
       changed.find((one) => get(one, 'class') === 'Item'),
@@ -59780,36 +60016,53 @@ async function saidOfAPendingCall(
   return `the late answer ${cameAfter}. The run held ${steps} 'noisy step' lines at the timeout. Server stderr tail:\n${stderr().slice(-2000)}`;
 }
 
+/**
+ * How long a step that raises 25 errors is given. The game writes its output into a pipe, so an
+ * error costs about 0.1 ms in the engine. Measured locally on Windows: the call took 220 to 285 ms
+ * and the read 115 to 170 ms, a round trip through the server included. Five seconds is about 17
+ * times the slowest of those.
+ */
+const NOISY_STEP_MS = 5000;
+
+/** The answer of a step given [param NOISY_STEP_MS], or the error saying where its time went. */
+async function noisyAnswer(game: ReadingGame, said: string, sentAt: number, what: string): Promise<unknown> {
+  let answer: unknown;
+  try {
+    answer = JSON.parse(said);
+  } catch {
+    throw new Error(`the ${what} was refused: ${said}`);
+  }
+  if (get(answer, 'pending') === true) {
+    const requestId = asNumber(get(answer, 'requestId'), `requestId of ${said}`);
+    throw new Error(`the ${what}: ${said}\n${await saidOfAPendingCall(game, sentAt, requestId)}`);
+  }
+  return answer;
+}
+
 /** The errors of the call itself come first, and a cut counts what it leaves out. */
 async function testWalkErrorsDoNotPushOutTheCallsOwn(): Promise<void> {
   await withAReadingGame('walk error cut regression', async (game) => {
     const { ask } = game;
     const sentAt = Date.now();
-    // The call checks the order of errors and the cut, not speed, and a slow runner spends seconds
-    // on the game's first request, so it waits for the work rather than the usual ten seconds.
     const said = await ask('runtime_invoke', {
       op: 'call',
       nodePath: '/root/Main',
       method: 'noisy25():fail',
-      timeoutMs: 30_000,
+      timeoutMs: NOISY_STEP_MS,
     });
-    let answer: unknown;
-    try {
-      answer = JSON.parse(said);
-    } catch {
-      throw new Error(`the call was refused: ${said}`);
-    }
-    if (get(answer, 'pending') === true) {
-      const requestId = asNumber(get(answer, 'requestId'), `requestId of ${said}`);
-      throw new Error(`${said}\n${await saidOfAPendingCall(game, sentAt, requestId)}`);
-    }
+    const answer = await noisyAnswer(game, said, sentAt, 'call');
     const errors = asArray(get(answer, 'errors'), `errors of ${JSON.stringify(answer)}`).map(text);
     assert.equal(errors[0], 'the game failed on its own', JSON.stringify(errors));
     assert.equal(errors.length, 20);
     assert.equal(get(answer, 'errors_not_shown'), 6, 'the game raised 26 and 20 are shown');
-    const read: unknown = JSON.parse(
-      await ask('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'noisy25():name' }),
-    );
+    const readAt = Date.now();
+    const readSaid = await ask('runtime_inspect', {
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'noisy25():name',
+      timeoutMs: NOISY_STEP_MS,
+    });
+    const read = await noisyAnswer(game, readSaid, readAt, 'read');
     assert.equal(asArray(get(read, 'errors'), `errors of ${JSON.stringify(read)}`).length, 20);
     assert.equal(get(read, 'errors_not_shown'), 5, 'a read that raised 25 shows 20');
   });
@@ -66368,6 +66621,27 @@ async function playUnderADebugger(options: {
   return said;
 }
 
+/** A process that opens [param path], says so, and keeps it open for [param ms]. */
+async function aReaderHolding(path: string, ms: number): Promise<ChildProcess> {
+  const holder = spawnHidden(
+    process.execPath,
+    [
+      '-e',
+      `const fs = require('fs'); const fd = fs.openSync(${JSON.stringify(path)}, 'r'); console.log('held'); setTimeout(() => fs.closeSync(fd), ${String(ms)});`,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  await new Promise<void>((settle, reject) => {
+    holder.stdout.once('data', () => {
+      settle();
+    });
+    holder.once('exit', () => {
+      reject(new Error('the holder exited before it held the file'));
+    });
+  });
+  return holder;
+}
+
 /**
  * A profile file is written over while another process has it open, and a write that cannot be
  * made is answered rather than thrown.
@@ -66391,26 +66665,7 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
     functions: {},
     unreadable: 0,
   });
-  // The holder opens the file, says so, and keeps it open for [param ms].
-  const heldFor = async (ms: number): Promise<ChildProcess> => {
-    const holder = spawnHidden(
-      process.execPath,
-      [
-        '-e',
-        `const fs = require('fs'); const fd = fs.openSync(${JSON.stringify(path)}, 'r'); console.log('held'); setTimeout(() => fs.closeSync(fd), ${String(ms)});`,
-      ],
-      { stdio: ['ignore', 'pipe', 'inherit'] },
-    );
-    await new Promise<void>((settle, reject) => {
-      holder.stdout.once('data', () => {
-        settle();
-      });
-      holder.once('exit', () => {
-        reject(new Error('the holder exited before it held the file'));
-      });
-    });
-    return holder;
-  };
+  const heldFor = async (ms: number): Promise<ChildProcess> => await aReaderHolding(path, ms);
   const finished = async (holder: ChildProcess): Promise<void> => {
     if (holder.exitCode === null) {
       await new Promise((settle) => holder.once('exit', settle));
@@ -66447,6 +66702,170 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
     );
   } finally {
     sweep(holding);
+  }
+}
+
+/**
+ * A profiled run's keeper never sleeps for a held profile file while its game runs.
+ *
+ * On Windows every line a kept game prints waits for its keeper to read it. A keeper that waited
+ * out a reader of the profile with its thread asleep held the game for up to a second a write. The
+ * thread's longest gap between two turns shows such a sleep. The totals a reader held off still
+ * reach the file, and the ones standing as the game exits are written before the keeper goes.
+ */
+async function testAProfiledRunsKeeperNeverSleepsForAHeldProfile(): Promise<void> {
+  const holding = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-writer-'));
+  const path = join(holding, 'profile.json');
+  const summed = (frames: number): Parameters<ReturnType<typeof profileFileWriter>['changed']>[0] => ({
+    startedAt: 1,
+    lastFrameAt: 2,
+    frames,
+    complete: false,
+    functions: {},
+    unreadable: 0,
+  });
+  const frames = (): unknown => get(readProfileFile(path), 'frames');
+  let longestGapMs = 0;
+  let turned = Date.now();
+  const beat = setInterval(() => {
+    longestGapMs = Math.max(longestGapMs, Date.now() - turned);
+    turned = Date.now();
+  }, 10);
+  try {
+    assert.equal(writeProfileFile(path, { connected: false, listeningSince: 1 }), true, 'the file is there');
+    const writer = profileFileWriter(path);
+    const reader = await aReaderHolding(path, 2500);
+    longestGapMs = 0;
+    turned = Date.now();
+    writer.changed(summed(3));
+    assert.ok(
+      await answeredWithin(() => (frames() === 3 ? true : undefined), 15_000),
+      'the totals a reader held off reach the file once it lets go',
+    );
+    assert.ok(
+      longestGapMs < 700,
+      `and the thread never slept for the held file: ${String(longestGapMs)}ms between two turns`,
+    );
+    if (reader.exitCode === null) {
+      await new Promise((settle) => reader.once('exit', settle));
+    }
+
+    writer.changed(summed(4));
+    writer.finish(null);
+    assert.equal(frames(), 4, 'totals still waiting for their write are written as the game exits');
+
+    const second = profileFileWriter(path);
+    second.changed(summed(6));
+    second.finish(summed(9));
+    assert.equal(frames(), 9, 'and the totals given as it exits are the ones the file ends on');
+    await delay(700);
+    assert.equal(frames(), 9, 'with no earlier ones written after them');
+  } finally {
+    clearInterval(beat);
+    sweep(holding);
+  }
+}
+
+/**
+ * A profiled game goes on printing while a reader holds its profile file.
+ *
+ * On Windows every line a kept game prints waits for its keeper to read it, so a keeper asleep for
+ * the held file stalls the game for as long as it sleeps. The game prints its clock every 10 ms in
+ * lines long enough to fill the pipe at once, and the longest gap between two lines shows a stall.
+ * Elsewhere the write goes through while the file is held, and the same gap stays short.
+ */
+async function testAProfiledGameIsNotHeldByAReaderOfItsProfile(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('profiled game beside a held profile regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profile-reader-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profile-reader-rt-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HeldProfile"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        'var line: String = "x".repeat(4000)',
+        'var started: int = 0',
+        'var printed: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tstarted = Time.get_ticks_msec()',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tvar now: int = Time.get_ticks_msec()',
+        '\tif now - printed >= 10:',
+        '\t\tprinted = now',
+        '\t\tprint("tick %d %s" % [now, line])',
+        '\tif now - started > 6000:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        ) ?? '';
+      const answer = await call({
+        op: 'start',
+        projectPath: project,
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(answer, /"started": true/, answer);
+      const transcript = text(get(JSON.parse(answer) as unknown, 'transcript'));
+      const path = profilePath(transcript);
+      assert.ok(
+        await answeredWithin(() => (readProfileFile(path)?.connected === true ? true : undefined), 30_000),
+        `the game's totals reach the profile: ${answer}`,
+      );
+      const reader = await aReaderHolding(path, 2500);
+      const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+      if (reader.exitCode === null) {
+        await new Promise((settle) => reader.once('exit', settle));
+      }
+      const ticks = [...readFileSync(transcript, 'utf8').matchAll(/^tick (\d+) /gmu)].map((m) =>
+        Number(m[1]),
+      );
+      assert.ok(ticks.length > 100, `the game printed as it ran: ${String(ticks.length)} lines`);
+      // The first half second is the engine starting, which no reader holds.
+      const settled = ticks.filter((tick) => tick - (ticks[0] ?? 0) >= 500);
+      const longest = Math.max(...settled.slice(1).map((tick, index) => tick - (settled[index] ?? tick)));
+      assert.ok(
+        longest < 700,
+        `the game never waited for the held file: ${String(longest)}ms between two lines`,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
   }
 }
 
@@ -122997,6 +123416,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALostConnectionIsNotSaidToBeTheEditorsAnswer,
   testTwoCallsOverAPortMoveEndWithOneLiveClient,
   testALanguageServerRequestLetGoEndsAsItsServerDoes,
+  testALanguageServerConnectNobodyAnswersIsGivenUp,
   testACallInFlightOverAPortMoveEndsAsTheOldServerDoes,
   testACallInFlightWhenTheEditorLeavesEndsAsItsServerDoes,
   testADebugAdapterDialAbandonedLeavesTheNextCallAnswered,
@@ -123074,6 +123494,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
   testAHiddenRunIsHeldByItsKeeperFromStartToClose,
+  testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript,
+  testAKeptGameRunsOnWhenItsKeeperIsKilled,
   testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds,
   testATestEngineThatMakesNoRendererEnds,
   testAWindowedSuiteWhoseEngineMakesNoRendererEnds,
@@ -123779,6 +124201,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunNamesItsLeaksAndItsUnusedIgnores,
   testATestRunsFlagsAreJudgedFirst,
   testAProfileIsWrittenPastAReader,
+  testAProfiledRunsKeeperNeverSleepsForAHeldProfile,
+  testAProfiledGameIsNotHeldByAReaderOfItsProfile,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
