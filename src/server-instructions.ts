@@ -13,7 +13,7 @@ export function serverInstructions(): string {
     'A path inside the project is written either way, "scenes/main.tscn" or "res://scenes/main.tscn".',
     "Call editor_status first. It says whether an editor is connected and runs this server's addon.",
     'Start the game with editor_run start, never by spawning an engine, and wait with editor_run wait.',
-    'Judge every run by editor_output. Its clean is true when no error was reported.',
+    'Judge every run by editor_output. Its clean is true when no error was reported. It is absent when the console was lost or an editor-played game left no runtime report.',
     'The runtime_* tools work on the running game, which needs the runtime addon.',
     'The debug_* tools work on its debugger, whether this server started the game or the editor plays it.',
     THE_GAME_PICKED_IN_SHORT,
