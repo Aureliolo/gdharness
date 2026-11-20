@@ -106,6 +106,7 @@ import {
   type HeldBreakpoint,
   handleDAPTool,
   type StoppedAt,
+  withoutBreakpoint,
 } from './dap_client.js';
 import {
   type DesktopStart,
@@ -12214,10 +12215,28 @@ class GodotServer {
       // The note follows the held set when it changes without a call: a breakpoint of this
       // server's clicked off in the editor's gutter, or a file the adapter would not take back
       // before a play. Without this the next server put back what the user had just removed.
-      this.dapClient.setBreakpointsSink((held) => {
-        const project = this.godotBridge.getStatus().projectPath ?? this.ownProject;
+      const client = this.dapClient;
+      // Into the note of the project whose set the client holds, which after a call naming
+      // another project is not the editor's.
+      client.setBreakpointsSink((held) => {
+        const project =
+          this.breakpointsSeededOn?.client === client
+            ? this.breakpointsSeededOn.project
+            : (this.godotBridge.getStatus().projectPath ?? this.ownProject);
         if (project !== null) {
           writeBreakpointNote(project, held);
+        }
+      });
+      // The gutter is the editor's project's, so a line clicked off there while the client holds
+      // another project's set is taken out of the editor project's note.
+      client.setRemovedNotHeldSink((scriptPath, line) => {
+        const project = this.godotBridge.getStatus().projectPath;
+        if (typeof project !== 'string') {
+          return;
+        }
+        const kept = withoutBreakpoint(readBreakpointNote(project), scriptPath, line);
+        if (kept !== null) {
+          writeBreakpointNote(project, kept);
         }
       });
     }

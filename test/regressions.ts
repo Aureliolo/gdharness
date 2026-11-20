@@ -6652,8 +6652,8 @@ function writeAdapterResponse(
  * An evaluate through the editor's adapter is asked only of a frame with an instance, and is asked
  * again until the game's answer has come (probe 159).
  *
- * Godot's adapter answers an evaluate the way it answers an object's variables: the request that
- * sends it to the game is never answered, and one after the game's reply answers with it. The game
+ * Godot's adapter answers an evaluate with its own timeout until the game's reply has come, and a
+ * request after the reply answers with it. The game
  * evaluates on the frame's instance and, in a frame with none, leaves its debug loop instead of
  * answering, which lets it run on. The stand-in answers the third evaluate, gives frame 1 no self,
  * and puts a for loop's compiler local beside frame 0's own. The third comes after the scopes'
@@ -6691,7 +6691,18 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
       answer({ variables: variablesOfAFrameOfTheStandIn(Number(get(args, 'variablesReference'))) });
     } else if (command === 'evaluate') {
       evaluated.push(Number(get(args, 'frameId')));
-      answerAnEvaluateOfTheStandIn(args, evaluated.length, answer);
+      answerAnEvaluateOfTheStandIn(args, evaluated.length, answer, () => {
+        socket.write(
+          frameJsonRpc({
+            seq: 1,
+            type: 'response',
+            request_seq: message['seq'],
+            command,
+            success: false,
+            message: 'timeout',
+          }),
+        );
+      });
     } else {
       answer({});
     }
@@ -6750,17 +6761,101 @@ function variablesOfAFrameOfTheStandIn(reference: number): readonly Record<strin
   return reference === 2 ? [{ name: 'self', value: 'Main' }] : [];
 }
 
-/** The stand-in adapter's answer to an evaluate: null for `missing`, the value from the third ask on, nothing before. */
+/** The stand-in adapter's answer to an evaluate: null for `missing`, the value from the third ask on, its own timeout before. */
 function answerAnEvaluateOfTheStandIn(
   args: unknown,
   asked: number,
   answer: (body: Record<string, unknown>) => void,
+  timedOut: () => void,
 ): void {
   if (get(args, 'expression') === 'missing') {
     answer({ result: '<null>', type: 'Nil', variablesReference: 0 });
   } else if (asked > 2) {
     answer({ result: '15', type: 'int', variablesReference: 0 });
+  } else {
+    timedOut();
   }
+}
+
+/**
+ * An evaluate whose value comes later than the old two-second poll is taken from the request that
+ * sent it, so the game runs the expression once.
+ *
+ * Godot's adapter holds an evaluate until the game replies or five seconds pass, and gives the
+ * value once. A request that reaches it after the value was given sends the expression to the game
+ * again. The stand-in does the same, holding each request behind the one before, and the game's
+ * value comes 2.5 seconds after the expression is sent.
+ */
+async function testAnEvaluateAnsweredLateRunsOnce(): Promise<void> {
+  let runs = 0;
+  // What the adapter knows of the expression: sent and not yet answered, or the game's value.
+  const game: { pending: boolean; stored: string | null } = { pending: false, stored: null };
+  let held: Promise<void> = Promise.resolve();
+  const evaluateLikeTheAdapter = async (
+    reply: (body: Record<string, unknown> | null) => void,
+  ): Promise<void> => {
+    if (game.stored === null && !game.pending) {
+      runs += 1;
+      game.pending = true;
+      setTimeout(() => {
+        game.pending = false;
+        game.stored = '15';
+      }, 2500);
+    }
+    const until = Date.now() + 5000;
+    while (game.stored === null && Date.now() < until) {
+      await delay(20);
+    }
+    const value = game.stored;
+    game.stored = null;
+    reply(value === null ? null : { result: value, type: 'int', variablesReference: 0 });
+  };
+  const adapter: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const reply = (body: Record<string, unknown> | null): void => {
+      socket.write(
+        frameJsonRpc({
+          seq: 1,
+          type: 'response',
+          request_seq: message['seq'],
+          command,
+          success: body !== null,
+          ...(body === null ? { message: 'timeout' } : { body }),
+        }),
+      );
+    };
+    const args = message['arguments'];
+    if (command === 'evaluate') {
+      held = held.then(() => evaluateLikeTheAdapter(reply));
+    } else if (command === 'threads') {
+      reply({ threads: [{ id: 1, name: 'Main' }] });
+    } else if (command === 'stackTrace') {
+      reply({ stackFrames: [{ id: 0, name: 'add', line: 11 }] });
+    } else if (command === 'scopes') {
+      reply({
+        scopes: [
+          { name: 'Locals', variablesReference: 1 },
+          { name: 'Members', variablesReference: 2 },
+        ],
+      });
+    } else if (command === 'variables') {
+      reply({ variables: variablesOfAFrameOfTheStandIn(Number(get(args, 'variablesReference'))) });
+    } else {
+      reply({});
+    }
+  };
+  await withFramedPeer(adapter, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 1500, evaluateMs: 9000 });
+    try {
+      const worked = await handleDAPTool(client, 'dap_evaluate', { expression: 'amount * 3' });
+      const said = textOf({ jsonrpc: '2.0', result: worked }) ?? '';
+      assert.notEqual(worked.isError, true, said);
+      assert.equal(get(JSON.parse(said) as unknown, 'value'), '15', said);
+      assert.equal(runs, 1, 'the game ran the expression once');
+    } finally {
+      await client.abandon();
+    }
+  });
 }
 
 /**
@@ -7671,6 +7766,84 @@ async function testABreakpointSetBesideAnEditorReachesTheRunningGameOfItsProject
       stopped.said,
     );
   });
+}
+
+/**
+ * A line clicked off in the editor's gutter leaves the editor project's note even after a
+ * breakpoint call named another project, whose own note keeps its line. Before, the client held
+ * the other project's set by then, and the line came back on the editor project's next play.
+ */
+async function testAGutterRemovalAfterACallOnAnotherProjectLeavesTheEditorsNote(): Promise<void> {
+  const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gutter-other-'));
+  writeFileSync(join(other, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Other"\n');
+  writeFileSync(
+    join(other, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n\tpass\n\tpass\n\tpass\n',
+  );
+  const adapters: Socket[] = [];
+  let sent = '';
+  try {
+    await withAPlayingEditor(
+      () => () => ({ ok: true }),
+      async ({ server, project }) => {
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n\tpass\n\tpass\n',
+        );
+        const call = async (args: Record<string, unknown>): Promise<unknown> => {
+          const answered = await server.request(
+            'tools/call',
+            { name: 'debug_breakpoint', arguments: args },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          return JSON.parse(textOf(answered) ?? '{}') as unknown;
+        };
+        await call({ projectPath: project, op: 'set', scriptPath: 'main.gd', line: 7 });
+        const spelled = /"source":\{"path":"((?:[^"\\]|\\.)*)"/.exec(sent)?.[1];
+        assert.ok(spelled !== undefined, `the adapter was sent a path: ${sent}`);
+        const path: unknown = JSON.parse(`"${spelled}"`);
+        assert.equal(typeof path, 'string', spelled);
+        await call({ projectPath: other, op: 'set', scriptPath: 'main.gd', line: 8 });
+        adapters.at(-1)?.write(
+          frameJsonRpc({
+            seq: 1,
+            type: 'event',
+            event: 'breakpoint',
+            body: {
+              reason: 'removed',
+              breakpoint: {
+                id: 7,
+                verified: true,
+                line: 7,
+                source: { path },
+              },
+            },
+          }),
+        );
+        await delay(1000);
+        assert.deepEqual(
+          get(await call({ projectPath: project, op: 'list' }), 'held'),
+          [],
+          'the editor project',
+        );
+        assert.deepEqual(
+          get(await call({ projectPath: other, op: 'list' }), 'held', 0, 'lines'),
+          [8],
+          'the other project keeps its line',
+        );
+      },
+      {
+        onAdapter: (socket) => {
+          adapters.push(socket);
+          socket.on('data', (chunk: Buffer) => {
+            sent += chunk.toString('utf8');
+          });
+        },
+      },
+    );
+  } finally {
+    sweep(other);
+  }
 }
 
 /**
@@ -123651,6 +123824,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,
+  testAnEvaluateAnsweredLateRunsOnce,
   testAStepAnswersWhereItLanded,
   testTheAdaptersConsoleSaysWhatItNoLongerHolds,
   testAStopIsKnownToTheConnectionItWasSentTo,
@@ -123664,6 +123838,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject,
   testABreakpointSetBesideAnEditorReachesTheRunningGameOfItsProject,
   testABreakpointIsNotToldToARunningGameOfAnotherProject,
+  testAGutterRemovalAfterACallOnAnotherProjectLeavesTheEditorsNote,
   testTheBreakpointNoteIsTheProjects,
   testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace,
   testABreakpointNoteWithBackslashesCannotLeaveTheProject,
