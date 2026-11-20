@@ -22989,18 +22989,39 @@ async function testAProcessEndingAfterItsRunWaitsForTheLetGo(): Promise<void> {
       'await until(() => { try { process.kill(helper, 0); return undefined; } catch { return true; } });',
       'await new Promise((r) => setTimeout(r, 1000));',
       "renameSync(assembly + '.gone', assembly);",
+      // A later start that has ended leaves its helper running and idle, which is then the helper
+      // told to let go.
+      "if (process.argv[4] === 'idle') {",
+      "  mkdirSync(join(root, 'scratch-later'));",
+      "  const later = spawnOnDesktop({ directory: root, endsWithHelper: true, scratch: join(root, 'scratch-later') }, process.execPath, ['-e', 'undefined'], { stdio: ['ignore', 'ignore', 'ignore'] }, assembly);",
+      '  await until(() => (later.child.exitCode === null ? undefined : true));',
+      '  await new Promise((r) => setTimeout(r, 1000));',
+      '}',
       "writeFileSync(release, '');",
     ].join('\n'),
   );
   try {
-    const run = spawnSyncHidden(process.execPath, [oneShot, root, engineScript], {
-      encoding: 'utf8',
-      timeout: 120_000,
-    });
-    assert.equal(run.status, 0, `the process runs its start and ends: ${run.stdout} ${run.stderr}`);
-    const child = Number(readFileSync(grandchild, 'utf8'));
-    pids.push(child, Number(readFileSync(join(root, 'engine'), 'utf8')));
-    assert.ok(alive(child), 'what the engine started runs on after the process that ran it has ended');
+    for (const helper of ['started for the let-go', 'idle']) {
+      rmSync(grandchild, { force: true });
+      rmSync(join(root, 'release'), { force: true });
+      rmSync(join(root, 'scratch'), { recursive: true, force: true });
+      rmSync(join(root, 'scratch-later'), { recursive: true, force: true });
+      const run = spawnSyncHidden(process.execPath, [oneShot, root, engineScript, helper], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.equal(
+        run.status,
+        0,
+        `${helper}: the process runs its start and ends: ${run.stdout} ${run.stderr}`,
+      );
+      const child = Number(readFileSync(grandchild, 'utf8'));
+      pids.push(child, Number(readFileSync(join(root, 'engine'), 'utf8')));
+      assert.ok(
+        alive(child),
+        `${helper}: what the engine started runs on after the process that ran it has ended`,
+      );
+    }
   } finally {
     for (const pid of pids.filter((each) => each > 0 && alive(each))) {
       process.kill(pid);

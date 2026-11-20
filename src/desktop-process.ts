@@ -593,6 +593,8 @@ export class ServedHelper {
       return;
     }
     this.told.push(line);
+    // An idle helper lets this process end. The helper usually reads the line within a millisecond,
+    // but a process ending first closes the job copy the line was about, ending what the engine left.
     this.hold(true);
   }
 
