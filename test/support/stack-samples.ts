@@ -278,7 +278,7 @@ export interface StackSample {
 }
 
 /** The samples in [param text], one a line, and the sampler's own failure if it wrote one. */
-export function parseStackSamples(text: string): { samples: StackSample[]; failed: string | null } {
+function parseStackSamples(text: string): { samples: StackSample[]; failed: string | null } {
   const samples: StackSample[] = [];
   let failed: string | null = null;
   for (const line of text.split(/\r?\n/)) {
@@ -304,7 +304,8 @@ export function describeStackSamples(samples: StackSample[], depth: number, sinc
   let beforeStack = '';
   for (const sample of samples) {
     const stack = sample.frames.slice(0, depth).join(' < ');
-    const used = before === undefined ? 0 : (sample.user - before.user + sample.kernel - before.kernel) / 10_000;
+    const used =
+      before === undefined ? 0 : (sample.user - before.user + sample.kernel - before.kernel) / 10_000;
     if (before !== undefined && stack === beforeStack && used === 0) {
       quiet += 1;
       before = sample;
@@ -341,21 +342,27 @@ export function sampleStacks(
   const directory = mkdtempSync(join(tmpdir(), 'gdharness-stacks-'));
   const output = join(directory, 'samples.txt');
   let why: string | null = null;
-  let stopped = false;
-  let sampler: ReturnType<typeof spawnHidden> | null = null;
+  // Read and written from the start below and from stop, which can come first.
+  const running: { stopped: boolean; sampler: ReturnType<typeof spawnHidden> | null } = {
+    stopped: false,
+    sampler: null,
+  };
   void (async () => {
     const refused = await HELPER.ensure();
     if (refused !== null) {
       why = refused;
       return;
     }
-    if (stopped) {
+    if (running.stopped) {
       return;
     }
-    sampler = spawnHidden(HELPER.assembly(), [String(pid), output, String(intervalMs)], { stdio: 'ignore' });
+    const sampler = spawnHidden(HELPER.assembly(), [String(pid), output, String(intervalMs)], {
+      stdio: 'ignore',
+    });
     sampler.once('error', (error: Error) => {
       why = `the stack sampler did not start: ${error.message}`;
     });
+    running.sampler = sampler;
   })().catch((error: unknown) => {
     why = errorMessage(error);
   });
@@ -375,8 +382,8 @@ export function sampleStacks(
       return existsSync(answer) ? readFileSync(answer, 'utf8') : '';
     },
     stop: () => {
-      stopped = true;
-      sampler?.kill();
+      running.stopped = true;
+      running.sampler?.kill();
       // The sampler may still hold its file for a moment after the kill, and a temporary folder
       // left behind costs nothing.
       try {

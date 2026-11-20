@@ -1509,7 +1509,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
         await noteStall();
         throw error;
       });
-    if (get(response, 'result', 'isError') === true && /did not answer within/.test(textOf(response) ?? '')) {
+    if (
+      get(response, 'result', 'isError') === true &&
+      (textOf(response) ?? '').includes('did not answer within')
+    ) {
       await noteStall();
     }
     return response;
@@ -1635,7 +1638,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     // A /proc that stopped answering would leave every later failure without its samples, unseen.
     if (process.platform === 'linux' || process.platform === 'win32') {
       const account = await thread.account();
-      assert.ok(account !== '' && !account.startsWith(NO_STACKS), `the editor's main thread was sampled: ${account}`);
+      assert.ok(
+        account !== '' && !account.startsWith(NO_STACKS),
+        `the editor's main thread was sampled: ${account}`,
+      );
     }
   } catch (failure) {
     throw await editorFailure(failure, { editor, engineOutput, thread, server, atStall });
