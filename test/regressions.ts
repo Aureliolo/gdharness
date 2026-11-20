@@ -7488,7 +7488,6 @@ interface EditorBesideStage {
   readonly traffic: AdapterTraffic;
   readonly call: (name: string, args: Record<string, unknown>) => Promise<{ said: string; answer: unknown }>;
   readonly openEditor: () => Promise<void>;
-  readonly closeEditor: () => Promise<void>;
 }
 
 async function withAnEngineBesideAnEditorOfAnotherProject(
@@ -7573,12 +7572,7 @@ async function withAnEngineBesideAnEditorOfAnotherProject(
           }
           assert.ok(greeted, 'the fake editor should have been greeted');
         };
-        const closeEditor = async (): Promise<void> => {
-          if (editor.socket !== null) {
-            await untilTheEditorIsGone(server, editor.socket);
-          }
-        };
-        await body({ otherProject, editorProject, traffic, call, openEditor, closeEditor });
+        await body({ otherProject, editorProject, traffic, call, openEditor });
       },
       (socket) => {
         traffic.connections += 1;
@@ -7613,7 +7607,7 @@ async function stackOfTheHeldGame(
 
 /**
  * A breakpoint set on another project's script beside an editor is handed to the next game this
- * server starts on that project, once the editor is gone, and stops it on its line.
+ * server starts on that project while the editor stays connected, and stops it on its line.
  */
 async function testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject(): Promise<void> {
   await withAnEngineBesideAnEditorOfAnotherProject(async (stage) => {
@@ -7626,7 +7620,6 @@ async function testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject(): 
     });
     assert.equal(get(set.answer, 'set'), true, set.said);
     assert.equal(stage.traffic.connections, 0, 'the editor was asked nothing');
-    await stage.closeEditor();
     const start = await stage.call('editor_run', {
       projectPath: stage.otherProject,
       op: 'start',

@@ -7545,15 +7545,10 @@ class GodotServer {
   /**
    * Whether the connected editor is the one to ask about [param projectPath]'s breakpoints. An
    * editor with another project open refuses a path outside its own, so a breakpoint of this
-   * project is held here as with no editor. One that has not said which project it has open is
-   * taken to have this one.
+   * project is held here as with no editor.
    */
   private editorHasProject(projectPath: string): boolean {
-    if (!this.godotBridge.isConnected()) {
-      return false;
-    }
-    const open = this.godotBridge.getStatus().projectPath;
-    return open === undefined || open === '' || isSameDirectory(open, projectPath);
+    return this.godotBridge.isConnected() && !this.editorHasAnotherThan(projectPath);
   }
 
   /** A breakpoint handed to the editor's adapter when it has the project open, and otherwise held here. */
