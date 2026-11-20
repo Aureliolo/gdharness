@@ -522,8 +522,9 @@ public static class GdharnessDesktop {
   // one started, ends it once its stop file (base64, empty for none) appears or at once when killed
   // is 1, and answers its end. A process under pid that began at another time is not it, and is
   // answered as ended. "release pid began" ends the process of a start a helper before this one made
-  // but never answered. The engines of starts still running end with this process when they are in
-  // a job that ends them, and run on when they are not.
+  // but never answered. "letgo pid job" closes the served process's copy of an ended engine's job,
+  // where no helper took its start over. The engines of starts still running end with this process
+  // when they are in a job that ends them, and run on when they are not.
   static int Serve(int servedPid) {
     servedId = (uint)servedPid;
     served = OpenProcess(ProcessDuplicateHandle, false, servedId);
@@ -574,6 +575,10 @@ public static class GdharnessDesktop {
         Thread adoption = new Thread(delegate() { Adopt(id, pid, process, copy, stopFile); });
         adoption.IsBackground = true;
         adoption.Start();
+      } else if (parts[0] == "letgo" && parts.Length == 3) {
+        // The engine of a start no helper could take over has ended, and the served process still
+        // holds its copy of the engine's job, which keeps the job's name taken.
+        ReleaseCopyOf(uint.Parse(parts[1]), new IntPtr(long.Parse(parts[2])));
       } else if (parts[0] == "release" && parts.Length == 3) {
         uint pid = uint.Parse(parts[1]);
         long began = long.Parse(parts[2]);
@@ -766,9 +771,10 @@ public static class GdharnessDesktop {
     }
   }
 
-  // Closes a copy a helper before this one made, where it still is the job named for pid. That
-  // helper may have closed it before it died, and the served process may hold something else under
-  // the number since, which is not this one's to close.
+  // Closes the copy of an ended engine's job that a helper before this one made, where it still is
+  // the job named for pid. That helper may have closed it before it died, and the served process may
+  // hold something else under the number since, which is not this one's to close. The job's limit is
+  // lifted first, so that what the engine started runs on, as after an end its own helper saw.
   static void ReleaseCopyOf(uint pid, IntPtr copy) {
     if (copy == IntPtr.Zero) {
       return;
@@ -779,11 +785,12 @@ public static class GdharnessDesktop {
     }
     IntPtr mine;
     if (DuplicateHandle(served, copy, GetCurrentProcess(), out mine, 0, false, DuplicateSameAccess)) {
-      bool same = CompareObjectHandles(mine, job);
-      CloseHandle(mine);
-      if (same) {
+      if (CompareObjectHandles(mine, job)) {
+        JobLimits none = new JobLimits();
+        SetInformationJobObject(mine, ExtendedLimitInformation, ref none, Marshal.SizeOf(typeof(JobLimits)));
         ReleaseCopy(copy);
       }
+      CloseHandle(mine);
     }
     CloseHandle(job);
   }
@@ -1100,15 +1107,6 @@ public static class GdharnessDesktop {
     string jobName = JobNamePrefix + started.processId;
     job = CreateJobObjectW(IntPtr.Zero, jobName);
     int made = Marshal.GetLastWin32Error();
-    if (job != IntPtr.Zero && made == ErrorAlreadyExists) {
-      // The pid is this process's now, so a job already named for it is one of an engine that has
-      // gone. The served process keeps its copy of such a job when the helper that made it died and
-      // none could take the start over. Closing that copy frees the name.
-      CloseCopies(job);
-      CloseHandle(job);
-      job = CreateJobObjectW(IntPtr.Zero, jobName);
-      made = Marshal.GetLastWin32Error();
-    }
     if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
       // A name already taken says it all itself: the system's text for that code speaks of a file.
       throw job == IntPtr.Zero
