@@ -63,7 +63,7 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
       {
         tool: 'editor_status',
         passes: [],
-        why: 'see whether an editor is connected and its addon matches. Without one the run is a game of its own, not a fault',
+        why: 'see whether an editor is connected and runs the addon this server ships. Without one the run is a game of its own, not a fault',
       },
       { tool: 'editor_run', op: 'start', passes: ['projectPath', 'scene'], why: 'start the run' },
       {
@@ -87,7 +87,7 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
       {
         tool: 'editor_status',
         passes: [],
-        why: 'see whether an editor is connected and, if one is, whether its addon matches. No editor is no fault in the project, so leave it out of what is wrong',
+        why: 'see whether an editor is connected and, if one is, whether it runs the addon this server ships. No editor is no fault in the project, so leave it out of what is wrong',
       },
       {
         tool: 'project_info',

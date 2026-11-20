@@ -835,14 +835,22 @@ import type { OperationParams } from '../src/tool-args.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
+  buildToolDefinitions,
   callsWithoutProjectPath,
   opTakes,
   projectPathSentence,
+  THE_GAME_PICKED_IN_SHORT,
   TOOL_SPECS,
   theGamePicked,
   toolSpec,
 } from '../src/tool-definitions.js';
-import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import {
+  argumentShape,
+  headlessSection,
+  namedType,
+  renderToolsMarkdown,
+  toolSection,
+} from '../src/tool-reference.js';
 import { Turns } from '../src/turns.js';
 import {
   encodedUidCache,
@@ -11358,17 +11366,17 @@ async function testAnEditorThatNeverSaidItHasNoWindowIsNotRestarted(): Promise<v
   assert.ok(accepted.asked.includes('restart_editor'), 'and hidden: false accepts a window');
 }
 
-/** The editor_launch description says what a restart of an editor opened elsewhere does. */
+/** The editor_launch reference says what a restart of an editor opened elsewhere does. */
 function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
   assert.match(
-    toolSpec('editor_launch')?.description ?? '',
+    toolSpec('editor_launch')?.answer ?? '',
     /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
   );
   assert.ok(
-    readFileSync('src/tool-definitions.ts', 'utf8').includes(
-      'One opened by hand comes back with a window, so hidden: true is refused there.',
+    readFileSync('src/server.ts', 'utf8').includes(
+      'This editor was opened by hand, and restarts itself as it was, so it cannot come back hidden.',
     ),
-    'and the hidden argument says the same of its own value',
+    'and the refusal of hidden: true says the same of its own value',
   );
 }
 
@@ -14138,6 +14146,48 @@ async function testAFolderNamedProjectGodotIsNoProject(): Promise<void> {
   }
 }
 
+/**
+ * A wait given neither nodePath nor says, or a signal wait given neither its node and signal nor a
+ * watch, is refused before any game is asked, and until says how to leave nodePath out. A wait that
+ * names its node goes on to the game, which judges the property and value.
+ */
+async function testAWaitMissingWhatItNeedsIsRefusedWithTheWayOut(): Promise<void> {
+  await withStdioServer(async (call) => {
+    for (const until of [
+      { op: 'until', property: 'hp', value: 1 },
+      { op: 'until' },
+      { op: 'until', says: '   ' },
+    ]) {
+      assert.equal(
+        await call('runtime_wait', until),
+        'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.' +
+          'Next:\n- With says instead of property, nodePath can be left out and the whole game is searched',
+        JSON.stringify(until),
+      );
+    }
+    for (const named of [
+      { op: 'until', nodePath: '/root/Main', property: 'hp' },
+      { op: 'until', nodePath: '/root/Main', says: '' },
+    ]) {
+      assert.doesNotMatch(
+        await call('runtime_wait', named),
+        /^runtime_wait until needs/,
+        JSON.stringify(named),
+      );
+    }
+    for (const signal of [
+      { op: 'signal', signal: 'pressed' },
+      { op: 'signal', nodePath: '/root/Main' },
+    ]) {
+      assert.equal(
+        await call('runtime_wait', signal),
+        'runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered.',
+        JSON.stringify(signal),
+      );
+    }
+  });
+}
+
 async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
   await withStdioServer(async (call) => {
     assert.match(
@@ -14336,6 +14386,18 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       await call('project_settings', { op: 'add_input_action', actionName: '' }),
       'project_settings add_input_action needs projectPath; actionName, which was given empty; events.',
     );
+    for (const call_ of [
+      { op: 'until', says: 'Start' },
+      { op: 'until', nodePath: '/root/Main', property: 'target', value: null },
+      { op: 'until', nodePath: '/root/Main', property: 'label', value: '' },
+      { op: 'signal', watch: 1 },
+    ]) {
+      assert.match(
+        await call('runtime_wait', call_),
+        /No game with the runtime addon is running/,
+        `${JSON.stringify(call_)} gives one whole set`,
+      );
+    }
 
     // The other half, or this passes against a server that refuses every op-specific argument.
     // Accepted means reaching the runtime and finding nothing there, which is one sentence. The
@@ -14423,8 +14485,8 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
   }
 }
 
-/** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 165;
+/** The arguments with a sentence opening by naming the ops that read them, as the table stands. */
+const READ_IN_WORDS = 24;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -15669,30 +15731,486 @@ function testAnArgumentScopedInWordsIsScopedInItsSchema(): void {
     }
     read += assertArgumentsScopedInWordsAreScoped(spec, ops);
   }
-  assert.equal(read, READ_IN_WORDS, 'the arguments whose descriptions open by naming their ops');
+  assert.equal(read, READ_IN_WORDS, 'the arguments with a sentence opening by naming their ops');
 }
 
-/** Holds each argument of [spec] whose description opens by naming ops to declare them. Answers how many it read. */
+/** The most characters the whole tool list may take, and one tool of it. */
+const MOST_LIST_CHARACTERS = 80_000;
+const MOST_TOOL_CHARACTERS = 6_500;
+
+/**
+ * The tool list a client is sent stays small. A client carries the whole list in every request, so
+ * its size is paid on every call of every session. What only a later call needs goes in `answer`.
+ */
+function testTheToolListStaysSmall(): void {
+  const sizes = buildToolDefinitions().map((tool) => ({
+    name: tool.name,
+    size: JSON.stringify(tool).length,
+  }));
+  const total = sizes.reduce((sum, { size }) => sum + size, 0);
+  assert.ok(
+    total <= MOST_LIST_CHARACTERS,
+    `the tool list is ${total} characters, past ${MOST_LIST_CHARACTERS}`,
+  );
+  const large = sizes
+    .filter(({ size }) => size > MOST_TOOL_CHARACTERS)
+    .map(({ name, size }) => `${name} ${size}`);
+  assert.deepEqual(large, [], `tools past ${MOST_TOOL_CHARACTERS} characters`);
+}
+
+/** The description of [argument] of [tool] in the tool list, or of the tool itself without one. */
+function listedText(tool: string, argument?: string): string {
+  const listed = buildToolDefinitions().find((entry) => entry.name === tool);
+  assert.ok(listed, `${tool} is in the tool list`);
+  if (argument === undefined) {
+    return listed.description ?? '';
+  }
+  const schema = get(listed.inputSchema, 'properties', argument);
+  assert.ok(schema, `${tool} takes ${argument}`);
+  return text(get(schema, 'description'));
+}
+
+/**
+ * Sentences of the tool text that once said something the code does not do, held against the code.
+ */
+function testTheToolTextSaysWhatTheCodeDoes(): void {
+  // add_autoload refuses enabled: false, so the argument says so rather than offering it.
+  assert.match(listedText('project_settings', 'enabled'), /add_autoload refuses false/);
+  assert.match(
+    readFileSync('src/godot/operations/project_config.gd', 'utf8'),
+    /An autoload cannot be added disabled/,
+    'and the operation is what refuses it',
+  );
+
+  // printed matches ignoring case, and is not limited to the ordinary lines.
+  const printed = listedText('project_test', 'printed');
+  assert.match(printed, /ignoring case/);
+  assert.doesNotMatch(printed, /ordinary/, 'printed matches error and warning lines too');
+
+  // scene_create has no read, so it has no readBy to name.
+  assert.equal(toolSpec('scene_create')?.operations?.['read'], undefined, 'scene_create has no read op');
+  assert.doesNotMatch(listedText('scene_create'), /readBy/);
+
+  // A TileSet source takes a texture, never a .tres resource.
+  const tileSet = toolSpec('resource_edit')?.parameters['sources'];
+  const texture = text(get(tileSet, 'items', 'properties', 'texture', 'description'));
+  assert.match(texture, /A texture file/, `the source's texture is a texture: ${texture}`);
+  assert.doesNotMatch(texture, /\.tres/);
+
+  // A scene that prints and quits is waited for with the op made for it.
+  assert.ok(toolSpec('editor_run')?.operations?.['wait'], 'editor_run has a wait op');
+  assert.match(listedText('editor_run'), /is start, then wait\./);
+
+  // Which runs the server starts: silent names every argument that makes it, each one editor_run
+  // takes, and debug_objects names the answer that says so rather than a partial list of its own.
+  const silent = listedText('editor_run', 'silent');
+  for (const spawning of ['args', 'engineArgs', 'env', 'savesIn', 'godot', 'executable']) {
+    assert.ok(silent.includes(spawning), `silent names ${spawning}: ${silent}`);
+    assert.ok(toolSpec('editor_run')?.parameters[spawning], `and editor_run takes ${spawning}`);
+  }
+  assert.match(silent, /cannot reach an executable/, 'an exported build has no debugger to reach');
+  assert.match(listedText('debug_objects'), /whose editor_run start answered through gdharness\./);
+  assert.match(
+    toolSpec('editor_run')?.answer ?? '',
+    /start answers through, gdharness for a game this server started/,
+  );
+
+  // The tool names are an area and what it works on, scene_node and editor_status among them.
+  for (const [where, page] of [
+    ['the reference', renderToolsMarkdown()],
+    ['the skill', skillFiles('0.0.0').get('SKILL.md') ?? ''],
+  ] as const) {
+    assert.doesNotMatch(page, /domain_verb/, `${where} names no domain_verb`);
+    assert.match(
+      page,
+      /each named for its area\s+and\s+what it works on/,
+      `${where} says how tools are named`,
+    );
+  }
+}
+
+/**
+ * What a first call of an op needs, in the tool list a client is sent, where it is read before the
+ * call rather than in a refusal after it.
+ */
+function testTheFirstCallRulesAreInTheToolList(): void {
+  const operations = (tool: string): string => {
+    const described = listedText(tool);
+    return described.slice(described.indexOf('Operations:'));
+  };
+  assert.match(
+    operations('scene_node'),
+    /add[^:;]*: a node of class nodeType, or an instance of the scene at instancePath/,
+  );
+  assert.match(
+    operations('runtime_input'),
+    /choose[^:]*: take an item out of a menu, by its words in text or its place in index/,
+  );
+  assert.match(
+    operations('runtime_wait'),
+    /signal \(needs nodePath and signal, or watch\): wait for the signal and answer with what it carried/,
+  );
+  assert.match(
+    operations('runtime_wait'),
+    /until[^:]*: wait for property to read as value, or for the words in says/,
+  );
+  assert.match(
+    listedText('runtime_inspect', 'timeoutMs'),
+    /requestId, which runtime_invoke op result collects/,
+  );
+  assert.match(listedText('scene_animation', 'track'), /add_track: the track to add/);
+  const track = toolSpec('scene_animation')?.parameters['track'];
+  assert.match(text(get(track, 'properties', 'type', 'description')), /add_track: property or method/);
+  assert.match(
+    listedText('project_export', 'outputPath'),
+    /add_preset, set_preset: the path the preset stores/,
+  );
+  for (const debug of ['debug_objects', 'debug_control']) {
+    const listed = `${listedText(debug)} ${JSON.stringify(buildToolDefinitions().find((entry) => entry.name === debug))}`;
+    assert.match(listed, /this server started/, `${debug} says which games it reaches`);
+  }
+}
+
+/**
+ * An object slot is emptied by the text null. The server refuses a JSON null as a missing value, so
+ * the tool list names the text the game reads as no object.
+ */
+function testAnObjectSlotIsEmptiedByTheTextNull(): void {
+  const value = listedText('runtime_invoke', 'value');
+  assert.match(value, /An object property takes a path to one the game holds, or the text null to empty it/);
+  assert.match(
+    readFileSync('src/godot/addons/gdharness_runtime/runtime_changes.gd', 'utf8'),
+    /str\(given\)\.strip_edges\(\) == "null"/,
+    'and the game reads that text as no object',
+  );
+}
+
+/**
+ * What editor_launch and editor_run do to the work around them, said where the call is chosen, and
+ * where each answer field is explained, said once at connect.
+ */
+function testTheLaunchAndRunWarningsAreInTheToolList(): void {
+  const launch = listedText('editor_launch');
+  assert.match(
+    launch,
+    /open and close save project\.godot, which drops a key set on purpose to its default value\./,
+  );
+  assert.match(launch, /A restart of an editor this server opened is a quit and then a launch\./);
+  assert.match(launch, /Ending this server between them, as a reconnect does, leaves no editor\./);
+  assert.match(launch, /rebind: end the connected editor's debug sessions/);
+  assert.match(launch, /close and restart save the open scenes\./);
+  assert.match(listedText('editor_run'), /A start ends a run of the same project first\./);
+  assert.match(
+    serverInstructions(),
+    /The gdharness skill's tool reference and the site say what each answer field means\./,
+  );
+}
+
+/**
+ * What a call does beyond its named target, and the forms a caller cannot guess, said in the tool
+ * list a client is sent, by tool and argument (none for the description, which holds the op lines).
+ */
+const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegExp])[] = [
+  ['editor_rescan', undefined, /A scan rewrites the class list in \.godot, writes missing \.uid files/],
+  ['editor_rescan', 'reloadScript', /One with unsaved edits in a script tab is reloaded from the file/],
+  ['script_edit', undefined, /ok false after a write leaves the files changed\./],
+  [
+    'script_edit',
+    undefined,
+    /create writes a \.uid and puts its class_name in the class list, and an open editor then scans/,
+  ],
+  ['script_edit', undefined, /A rename's lists past 300 lines go to a file under \.godot\./],
+  ['resource_edit', undefined, /A modify drops the lines read lists under notLoaded\./],
+  [
+    'resource_edit',
+    undefined,
+    /move with no editor writes \.uid and \.import files, and leaves paths in \.scn and \.res/,
+  ],
+  ['resource_edit', 'unset', /An editor's next save writes an unset shader parameter back\./],
+  ['resource_edit', 'controlType', /A name that is no class is set as a variation\./],
+  ['resource_edit', 'item', /with its base_type when it is a variation\./],
+  [
+    'scene_node',
+    undefined,
+    /A rename or a reparent rewrites the paths naming the node, here and in the scenes/,
+  ],
+  ['scene_node', undefined, /A delete rewrites none\./],
+  ['scene_node', 'properties', /\{"_type": "Vector2", "x": 1, "y": 2\}/],
+  ['scene_node', 'properties', /\{"_type": "Dictionary", "entries": \[\[key, value\]\]\}/],
+  ['scene_node', 'properties', /an enum takes its name/],
+  ['scene_node', 'properties', /A "metadata\/" key adds metadata, and null takes it off\./],
+  ['scene_node', 'properties', /2\^53 or more is \{"_type": "int", "value": "9007199254740993"\}/],
+  ['scene_node', 'properties', /"sources\/0\/0:0\/0\/probability" writes inside a built-in resource\./],
+  ['scene_animation', undefined, /create[^:]*: a new animation, and its library when the player lacks it/],
+  [
+    'scene_animation',
+    undefined,
+    /add_state[^:]*: a state playing an animation, written even when the player lacks it/,
+  ],
+  [
+    'scene_animation',
+    undefined,
+    /remove_track[^:]*: every matching track, or some of its keys, and a track left with no key goes/,
+  ],
+  [
+    'scene_animation',
+    undefined,
+    /remove[^:_]*: an animation, clearing the player's autoplay when it named it/,
+  ],
+  ['scene_animation', 'fromState', /One from Start sets the first state\./],
+  ['scene_animation', undefined, /Headless, it updates \.godot's class list and starts autoloads\./],
+  ['scene_tree', undefined, /Headless, it updates \.godot's class list and starts autoloads\./],
+  ['project_info', undefined, /Headless, it updates \.godot's class list/],
+  ['project_dependencies', undefined, /Headless, it updates \.godot's class list/],
+  ['editor_classes', undefined, /Headless, it updates \.godot's class list/],
+  ['script_diagnostics', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_create', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_node', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_signal', undefined, /Headless, it updates \.godot's class list/],
+  ['resource_edit', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_create', undefined, /create makes any missing folder of the path\./],
+  ['scene_signal', undefined, /A missing method is refused with binds or unbinds\./],
+  ['scene_signal', undefined, /A write puts back each connection the engine dropped on load/],
+  ['project_settings', 'parentBusIndex', /every later bus moves one along\./],
+  [
+    'project_settings',
+    'newBusName',
+    /every scene and resource line giving a node the old bus is rewritten\./,
+  ],
+  [
+    'project_settings',
+    undefined,
+    /remove_audio_bus[^:]*: remove a bus, sending what sent to it on to where it sent/,
+  ],
+  [
+    'project_settings',
+    'value',
+    /Infinity is \{"_type": "float", "value": "inf"\}, and "" writes an empty string\./,
+  ],
+  ['project_settings', 'enabled', /whether the effect is on, a kept one too\./],
+  ['project_export', 'exportFilter', /leave out a file named only in a string or by class_name\./],
+  ['project_export', undefined, /Removing the runnable preset makes the next of its platform runnable\./],
+  [
+    'project_import',
+    undefined,
+    /reimport and set_options import every file that is behind, not only resourcePath\./,
+  ],
+  ['project_import', undefined, /An open editor scans the project first\./],
+  ['project_import', 'options', /\{"opentype_features": \{"liga": 0\}\}/],
+  ['project_test', undefined, /It first updates \.godot's class list and imports what is behind\./],
+  [
+    'project_test',
+    undefined,
+    /The run's user:\/\/ is its own and is deleted after, but on macOS it is the player's\./,
+  ],
+  ['project_test', undefined, /A suite needing a window shows one on Linux and macOS\./],
+  ['editor_run', undefined, /start and check first import what changed on disk since its import\./],
+  ['editor_run', 'visible', /with --disable-vsync and --max-fps 60\./],
+  ['editor_run', 'scene', /A script is no scene: put it on a scene's root\./],
+  ['editor_run', 'engineArgs', /--fixed-fps lets a headless game run faster than the clock\./],
+  ['editor_run', 'suites', /Needs gdUnit4 and this release's tests addon in the project\./],
+  ['editor_launch', undefined, /close and restart save the open scenes\./],
+  [
+    'editor_launch',
+    undefined,
+    /close stops the process of an editor this server opened that has not connected yet\./,
+  ],
+  ['editor_launch', undefined, /A game a visible editor plays opens a window\./],
+  ['runtime_input', undefined, /A control hidden in a ScrollContainer is scrolled to first\./],
+  ['runtime_input', undefined, /After a lone wheel press, every click lands on the control that took it\./],
+  [
+    'runtime_input',
+    'action',
+    /A button whose Shortcut holds it is pressed too\. ui_cancel does not close an AcceptDialog\./,
+  ],
+  ['runtime_input', 'replace', /with text "" empties it/],
+  ['runtime_input', 'button', /wheel_down or a button number/],
+  [
+    'runtime_inspect',
+    'property',
+    /calls an engine method marked as only reading, with literal arguments, 'get_theme_constant\("separation"\)'/,
+  ],
+  [
+    'runtime_inspect',
+    'property',
+    /A negative index counts from the end, and a key holding a colon is quoted/,
+  ],
+  ['runtime_inspect', undefined, /or accessibility_support at Always Active/],
+  ['runtime_invoke', 'method', /"get_world_2d\(\):direct_space_state:intersect_point"/],
+  [
+    'runtime_wait',
+    'value',
+    /compared at its precision\. An enum takes a name or a number, and an object property the text null\./,
+  ],
+  ['runtime_wait', 'watch', /used up by the answer\./],
+  ['runtime_wait', undefined, /A game held by its debugger answers nothing until it resumes\./],
+  ['debug_breakpoint', undefined, /The set is kept in the project until removed\./],
+  ['debug_breakpoint', undefined, /The addon turns on network\/debug_adapter\/sync_breakpoints\./],
+  ['debug_breakpoint', undefined, /A game this server started does not stop on a script error\./],
+  [
+    'debug_breakpoint',
+    undefined,
+    /remove[^:]*: remove a breakpoint, whoever set it, the editor's gutter included/,
+  ],
+  ['debug_state', undefined, /evaluate[^:]*: [^;]*the first loading every global class/],
+  [
+    'runtime_inspect',
+    'property',
+    /It also calls a game method taking no arguments unless declared -> void, even one that changes the game, and runtime_wait until calls it every frame\./,
+  ],
+  [
+    'editor_run',
+    'visible',
+    /By default on Windows it goes on a desktop of its own.*On Linux and macOS the window shows either way\./,
+  ],
+  [
+    'editor_run',
+    'savesIn',
+    /whose path runtime\.userDir answers\. macOS ignores it, so the run writes the player's own saves\./,
+  ],
+  ['runtime_wait', undefined, /A call sent beside a wait can run during it, noted in ranAlongside\./],
+  [
+    'scene_animation',
+    'track.update',
+    /continuous for a whole float, vector, colour or transform property, else discrete, position:x too\./,
+  ],
+  ['scene_node', 'index', /Default last, or right after the original for a copy under its parent\./],
+  [
+    'resource_edit',
+    undefined,
+    /A relative path stays as written in text, tooltip_text, placeholder_text, resource_name, node names, groups, ; comment lines and \.import files\. A GDScript comment stays whole\./,
+  ],
+  ['script_edit', 'newScriptPath', /The paths naming it are rewritten as resource_edit move rewrites them\./],
+  [
+    'editor_output',
+    undefined,
+    /clean is absent when the console was lost, or when a game the editor played left no runtime report \(errorsUnread true\)\./,
+  ],
+  [
+    'scene_node',
+    undefined,
+    /bake_navigation[^:]*: [^;]*into the scene or the navigation resource's own file, which every scene using it shares/,
+  ],
+  ['scene_node', undefined, /That saves an animation library kept in a \.tres of its own\./],
+  ['scene_node', 'unset', /An editor's next save writes an unset shader parameter back\./],
+  [
+    'project_export',
+    undefined,
+    /set_preset writes one to \.godot\/export_credentials\.cfg, and remove_preset takes the preset's out of it\./,
+  ],
+  [
+    'project_settings',
+    'newBusName',
+    /A script naming it in a string is left as it is and listed under namedInScripts\./,
+  ],
+  [
+    'scene_animation',
+    'track.method',
+    /A missing method or args that do not fit are written too, with methodFound or argumentsFit false\./,
+  ],
+  [
+    'scene_signal',
+    undefined,
+    /A connect to a method the target lacks, or one that cannot take what the signal passes, is written, with methodFound or argumentsFit false\./,
+  ],
+  [
+    'script_edit',
+    'modifications.items.exportGroup',
+    /or "" for none\. Without it, an export joins the group open below the last variable\./,
+  ],
+  ['project_export', 'options', /An enum takes the name the dialog shows, or its number\./],
+  [
+    'editor_capture',
+    'inline',
+    /Default true, as a JPEG when smaller than the PNG and nothing is transparent\./,
+  ],
+  [
+    'runtime_capture',
+    'inline',
+    /Default true, as a JPEG when smaller than the PNG and nothing is transparent\./,
+  ],
+];
+
+/**
+ * Each hazard and working form of SAID_BEFORE_THE_CALL is in the tool list as tools/list sends it.
+ * An argument written "track.update" is a property of an object argument, and "items" steps into
+ * an array argument's items.
+ */
+async function testTheHazardsAndWorkingFormsAreInTheToolList(): Promise<void> {
+  await withStdioServer(async (_call, request) => {
+    const listed = asArray(get((await request('tools/list', {}, 30_000)).result, 'tools'));
+    const said = (tool: string, argument: string | undefined): string => {
+      const entry = listed.find((one) => get(one, 'name') === tool);
+      assert.ok(entry, `${tool} is in tools/list`);
+      return argument === undefined
+        ? text(get(entry, 'description'))
+        : text(
+            get(
+              entry,
+              'inputSchema',
+              ...argument.split('.').flatMap((name) => (name === 'items' ? [name] : ['properties', name])),
+              'description',
+            ),
+          );
+    };
+    for (const [tool, argument, form] of SAID_BEFORE_THE_CALL) {
+      assert.match(said(tool, argument), form, `${tool}${argument === undefined ? '' : `.${argument}`}`);
+    }
+  });
+}
+
+/** create_tileset refuses a TileSet path that already exists, which its sources argument names. */
+function testATileSetRefusesAResourcePathThatExists(): void {
+  const sources = text(get(toolSpec('resource_edit')?.parameters['sources'], 'description'));
+  assert.match(sources, /A resourcePath that already exists is refused\./);
+  assert.match(
+    readFileSync('src/godot/addons/gdharness_editor/tools/tileset_tools.gd', 'utf8'),
+    /Give "\s*\+ "resourcePath a path nothing is at\./,
+    'and the TileSet path is what is refused',
+  );
+}
+
+/** An effect of the same class in the slot is kept with its settings, and only another class is replaced. */
+function testAnEffectOfTheSameClassKeepsItsSettings(): void {
+  assert.match(
+    listedText('project_settings', 'effectIndex'),
+    /an effect of another class is replaced and one of the same class stays with its settings\./,
+  );
+  assert.match(
+    readFileSync('src/godot/operations/audio_buses.gd', 'utf8'),
+    /kept = held\.get_class\(\) == effect\.get_class\(\)/,
+    'and the operation keeps one of the same class',
+  );
+}
+
+/**
+ * Holds each argument of [spec] with a sentence of its description opening by naming ops, as
+ * "check: ... wait: ...", to be taken by those ops, and one whose description opens so to declare
+ * them. Answers how many it read.
+ */
 function assertArgumentsScopedInWordsAreScoped(
   spec: (typeof TOOL_SPECS)[number],
   ops: readonly string[],
 ): number {
   let read = 0;
+  const namedIn = (head: string | undefined): string[] =>
+    head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
   for (const [name, schema] of Object.entries(spec.parameters)) {
     const said = typeof schema['description'] === 'string' ? schema['description'] : '';
-    const head = /^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1];
-    const named = head?.split(/, and |, | and /).filter((word) => ops.includes(word)) ?? [];
+    const heads = [...said.matchAll(/(?:^|\. )([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/g)];
+    const named = heads.flatMap(([, head]) => namedIn(head));
     if (named.length === 0) {
       continue;
     }
     read += 1;
+    const opening = namedIn(/^([a-z_]+(?:(?:, | and |, and )[a-z_]+)*):/.exec(said)?.[1]);
     assert.ok(
-      schema.ops !== undefined,
-      `${spec.name}.${name} says it is for ${named.join(', ')} and every op takes it`,
+      opening.length === 0 || schema.ops !== undefined,
+      `${spec.name}.${name} says it is for ${opening.join(', ')} and every op takes it`,
     );
     for (const op of named) {
       assert.ok(
-        schema.ops.includes(op),
+        opTakes(spec, op, name),
         `${spec.name}.${name} says it is for ${op} and ${op} does not take it`,
       );
     }
@@ -18656,6 +19174,17 @@ function testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked(): void {
   const instructions = serverInstructions();
   for (const named of ['editor_status', 'editor_run start', 'editor_output', 'runtime_*', 'debug_*']) {
     assert.ok(instructions.includes(named), `the instructions name ${named}: ${instructions}`);
+  }
+  // What each tool of a family would otherwise repeat, said once here.
+  for (const said of [
+    "`projectPath`, the project folder's absolute path,",
+    '"scenes/main.tscn" or "res://scenes/main.tscn"',
+    'which needs the runtime addon',
+    'whether this server started the game or the editor plays it',
+    'writtenBy says which',
+    'alsoSaved',
+  ]) {
+    assert.ok(instructions.includes(said), `the instructions say ${said}: ${instructions}`);
   }
   assert.doesNotMatch(instructions, /\s{2}/, 'and read as plain sentences');
 
@@ -32823,7 +33352,7 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
     );
     assert.match(
       await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),
-      /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered/,
+      /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered\./,
     );
 
     const pidOf = /"pid": (\d+)/.exec(started)?.[1];
@@ -35366,7 +35895,11 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
  */
 function testTheCureIsWrittenWhole(): void {
   const rescan = toolSpec('editor_rescan')?.description ?? '';
-  assert.match(rescan, /Calling it again is the cure/, 'the tool that is the cure says so');
+  assert.match(
+    rescan,
+    /Call it again when another tool names a class_name under unseenByEditor/,
+    'the tool that is the cure says so',
+  );
   assert.match(rescan, /editor_launch restart/, 'and names the restart for when it is not enough');
 
   // What a caller receives, as it is written: every file of the installed skill, whole.
@@ -35415,7 +35948,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 50, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 48, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -35461,7 +35994,11 @@ function testEveryRemedyLeadsWithTheScan(): void {
   assert.ok(editing.length > 200, 'the Editing section is found and holds its paragraphs');
 
   const choosing: { where: string; text: string }[] = [
-    { where: 'script_diagnostics description', text: toolSpec('script_diagnostics')?.description ?? '' },
+    // The description names the scan alone, and the answer chooses between the remedies after it.
+    {
+      where: 'script_diagnostics description and answer',
+      text: `${toolSpec('script_diagnostics')?.description ?? ''} ${toolSpec('script_diagnostics')?.answer ?? ''}`,
+    },
     {
       where: 'staleAnalysisNote',
       text: staleAnalysisNote(
@@ -40576,7 +41113,7 @@ function assertTheGeneratedClauseIsCarriedUnaltered(without: readonly string[]):
   // "except , which take none", which would ship in the skill every agent reads.
   assert.equal(
     projectPathSentence([]),
-    'Every call takes `projectPath`',
+    "Every call takes `projectPath`, the project folder's absolute path",
     'with nothing to except, the sentence is the rule on its own',
   );
   assert.match(
@@ -40588,22 +41125,31 @@ function assertTheGeneratedClauseIsCarriedUnaltered(without: readonly string[]):
 
 /** The sentence about which game answers a call that names neither is the same in both renderings. */
 function assertTheGamePickIsCarriedUnaltered(): void {
-  // The other sentence both renderings share, and the schema with them: which game answers a
-  // call that names neither. It was written three times and said a different amount each time,
-  // which is how a session with a second project's game listed beside its own was left with
-  // "not needed with one game" and no way to tell what had answered it.
+  // The other sentence both renderings share: which game answers a call that names neither. It was
+  // written three times and said a different amount each time, which is how a session with a
+  // second project's game listed beside its own was left with "not needed with one game" and no
+  // way to tell what had answered it.
   const picked = theGamePicked();
   assert.ok(
     renderToolsMarkdown().includes(picked),
     'the tool reference carries the generated pick unaltered',
   );
   assert.ok((skillFiles('0.0.0').get('SKILL.md') ?? '').includes(picked), 'and so does the skill');
-  const schema = toolSpec('runtime_inspect')?.parameters['projectPath']?.['description'];
-  assert.equal(typeof schema, 'string', 'the running-game path still has a description');
+  // An agent that loads only the tool list still reads the server instructions, so the pick in
+  // short is said there once rather than in each running-game path.
   assert.ok(
-    text(schema).includes(picked.replaceAll('`', '')),
-    `and it carries the same pick, without the markup a schema has no use for: ${text(schema)}`,
+    serverInstructions().includes(THE_GAME_PICKED_IN_SHORT),
+    `the instructions state the pick: ${serverInstructions()}`,
   );
+  const picking = TOOL_SPECS.filter((spec) => spec.name.startsWith('runtime_')).map((spec) => spec.name);
+  assert.equal(picking.length, 5, `the running-game tools are found: ${picking.join(', ')}`);
+  for (const name of picking) {
+    const schema = text(toolSpec(name)?.parameters['projectPath']?.['description']);
+    assert.equal(schema, 'Which game, when several run: its project folder.', `${name} projectPath`);
+  }
+  for (const step of ['this server started or plays', 'the only game running']) {
+    assert.ok(THE_GAME_PICKED_IN_SHORT.includes(step), `the short pick names ${step}`);
+  }
 }
 
 /**
@@ -40679,29 +41225,82 @@ function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
   const classes = toolSpec('editor_classes');
   const exported = toolSpec('project_export');
   assert.ok(classes?.operations !== undefined && exported?.operations !== undefined);
-  assert.equal(section('editor_classes')[2], 'Changes nothing.');
+  assert.equal(section('editor_classes')[4], 'Changes nothing.');
   const destructive = Object.entries(exported.operations)
     .filter(([, op]) => op.effect === 'destructive')
     .map(([name]) => `\`${name}\``);
   assert.deepEqual(destructive, ['`run`', '`set_preset`', '`remove_preset`']);
   assert.equal(
-    section('project_export')[2],
-    'Can overwrite, remove or end what is there, through `run`, `set_preset` and `remove_preset`.',
+    section('project_export')[4],
+    'Can overwrite, remove or end what is there, through every op but `list` and `add_preset`.',
+    'the ops that spare what is there are named when they are the fewer',
   );
+  assert.equal(
+    section('scene_signal')[4],
+    'Can overwrite, remove or end what is there, through `disconnect`.',
+    'and the destructive ones when they are',
+  );
+  assert.equal(section('project_export')[6], 'Every op needs `projectPath`, and takes `preset`.');
   const query = classes.operations['query'];
   assert.equal(classes.defaultOperation, 'query');
   assert.ok(query !== undefined);
   assert.equal(
-    section('editor_classes').find((line) => line.startsWith('- `op: query`')),
-    `- \`op: query\` (default): ${query.summary}. Needs: \`projectPath\`. Takes: \`filter\`, \`category\`, \`instantiableOnly\`.`,
+    section('editor_classes').find((line) => line.startsWith('- `query`')),
+    `- \`query\` (default, takes \`filter\`, \`category\` and \`instantiableOnly\`): ${query.summary}.`,
+    'the op line has the tool list form, with projectPath said once for the tool',
   );
-  const remove = exported.operations['remove_preset'];
-  assert.ok(remove !== undefined);
   assert.equal(
-    section('project_export').find((line) => line.startsWith('- `op: remove_preset`')),
-    `- \`op: remove_preset\`: ${remove.summary}. Needs: \`projectPath\`, \`preset\`.`,
-    'an op that is not the default has no mark and no Takes when it takes nothing more',
+    exported.operations['remove_preset']?.summary,
+    '',
+    'remove_preset says nothing its name does not',
   );
+  assert.equal(
+    section('project_export').find((line) => line.startsWith('- `remove_preset`')),
+    '- `remove_preset` (needs `preset`).',
+    'an op that is not the default has no mark and takes nothing past what every op takes, and no gloss when it has none',
+  );
+  assert.ok(
+    section('scene_node').every((line) => !line.startsWith('- `') || !line.includes('needs `scenePath`')),
+    'an argument every op needs is said once, not on each op line',
+  );
+  assert.ok(section('scene_node').includes('Every op needs `projectPath` and `scenePath`.'));
+  // An op that needs one of two sets says both, so its arguments do not read as all optional.
+  for (const [op, needs, takes] of [
+    ['signal', '`nodePath` and `signal`, or `watch`', '`timeoutMs`'],
+    ['until', '`nodePath`, or `says`', '`property`, `value`, `compare`, `includeHidden` and `timeoutMs`'],
+  ]) {
+    assert.ok(
+      section('runtime_wait').some((line) =>
+        line.startsWith(`- \`${op}\` (needs ${needs}, takes ${takes}): `),
+      ),
+      `runtime_wait ${op} says what it needs: ${section('runtime_wait').join('\n')}`,
+    );
+  }
+
+  // The answer comes last, under a heading of its own, and the forms the reference used to print
+  // are gone.
+  const answerAt = section('scene_node').indexOf('### scene_node answer');
+  assert.ok(answerAt > section('scene_node').indexOf('Arguments:'), 'the answer follows the arguments');
+  const markdown = lines.join('\n');
+  for (const gone of ['The answer:', '`op: ', ' Needs: ', ' Takes: ', ') applies.']) {
+    assert.ok(!markdown.includes(gone), `the reference no longer prints ${gone}`);
+  }
+
+  // A tool with one op, which no tool has today: the op line carries only its gloss.
+  const single = toolSection({
+    name: 'only_tool',
+    title: 'One op',
+    description: 'One op.',
+    answer: '',
+    parameters: { projectPath: { type: 'string' }, size: { type: 'number' } },
+    requires: ['projectPath'],
+    operations: { only: { effect: 'read', summary: 'read it', requires: ['size'] } },
+  });
+  assert.ok(single.includes('Its op needs `projectPath` and `size`.'), single.join('\n'));
+  assert.ok(single.includes('- `only`: read it.'), single.join('\n'));
+  assert.ok(!single.some((line) => line.startsWith('### ')), 'an empty answer gets no heading');
+  // A tool whose ops share nothing past projectPath says nothing for the tool.
+  assert.ok(!section('editor_launch').some((line) => line.startsWith('Every op ')));
 }
 
 /**
@@ -58739,7 +59338,11 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
             ENGINE_CALL_TIMEOUT_MS,
           ),
         );
-        assert.match(unnamed ?? '', /needs nodePath to wait for a property/, unnamed ?? '');
+        assert.equal(
+          unnamed,
+          'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.' +
+            'Next:\n- With says instead of property, nodePath can be left out and the whole game is searched',
+        );
         const absent = await call('runtime_inspect', { op: 'find', says: 'GLOW\\nshines 4' });
         assert.deepEqual(
           asArray(get(absent, 'nodes')),
@@ -81324,10 +81927,12 @@ async function checksTheCommandWaitsBehindTheSlotHeld(fixture: MachineSlotFixtur
     });
   });
   // Looked for rather than waited out: on a machine busy with other engines the command took more
-  // than three seconds to start and reach its wait.
+  // than three seconds to start and reach its wait. Looked for by its final name, since the mark is
+  // staged under a `.writing` name first and a count of two stopped on that.
+  const mark = `${WAITING_FOLDER}/${String(classes.pid)}-1.json`;
   for (
     let looked = 0;
-    looked < 600 && classes.exitCode === null && leftInSlots(slots).length < 2;
+    looked < 600 && classes.exitCode === null && !leftInSlots(slots).includes(mark);
     looked += 1
   ) {
     await delay(100);
@@ -81339,7 +81944,7 @@ async function checksTheCommandWaitsBehindTheSlotHeld(fixture: MachineSlotFixtur
       // Without the note beside the mark that says the command still looks.
       leftInSlots(slots).filter((name) => !name.endsWith('.seen')),
     ],
-    [null, process.pid, ['0.lock', `${WAITING_FOLDER}/${String(classes.pid)}-1.json`]],
+    [null, process.pid, ['0.lock', mark]],
     `the command waits behind the slot held, takes no other, and marks its wait: ${said}`,
   );
   // From the command's own start of its wait, which comes after it has found its engine.
@@ -95445,7 +96050,7 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
 }
 
 /** How many "`tool op` with `argument`" phrases the skill and the docs hold today, as a floor. */
-const ARGUMENT_MENTIONS = 11;
+const ARGUMENT_MENTIONS = 17;
 
 /**
  * Every argument the skill names for an op is one that op takes.
@@ -95488,7 +96093,7 @@ function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
 }
 
 /** How many files the prose gate below reads today, as a floor under its walk. */
-const PROSE_FILES_READ = 216;
+const PROSE_FILES_READ = 387;
 
 /**
  * The two dashes, by code point, so this file holds neither character: an editor or a tool that
@@ -95684,10 +96289,10 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1488;
+const TOOL_NAME_MENTIONS = 1479;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 51;
+const TOOL_OP_MENTIONS = 59;
 
 /**
  * Every tool this server names in something it says is a tool it has.
@@ -123904,6 +124509,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
+  testAWaitMissingWhatItNeedsIsRefusedWithTheWayOut,
   testAFolderNamedProjectGodotIsNoProject,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
@@ -123953,6 +124559,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASeedNeverTakesPartOfACacheBeingSwapped,
   testProjectTestRunsAtOnceEachSeedFromTheKeptCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
+  testTheToolListStaysSmall,
+  testTheToolTextSaysWhatTheCodeDoes,
+  testTheFirstCallRulesAreInTheToolList,
+  testAnObjectSlotIsEmptiedByTheTextNull,
+  testTheLaunchAndRunWarningsAreInTheToolList,
+  testTheHazardsAndWorkingFormsAreInTheToolList,
+  testATileSetRefusesAResourcePathThatExists,
+  testAnEffectOfTheSameClassKeepsItsSettings,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
   testInteractiveIsABooleanWhateverTheStreamsAre,
