@@ -121009,11 +121009,20 @@ function startedBesideTheEditorNote(editorProject: string): string {
  *
  * The editor answers what it is playing and takes a play or a stop as the real one does, and
  * records every tool it is sent. Its game is never a process: a case reads what it was asked
- * instead. [param options.runtimeAddon] puts this release's runtime addon in the second project, so
- * its game announces. Every game the fixture started is ended with it.
+ * instead, unless [param options.announced] has a stand-in announce itself as the editor's game.
+ * [param options.runtimeAddon] puts this release's runtime addon in the second project, so its game
+ * announces. [param options.stoppedInTheEditor] has the editor's debug adapter tell each connection
+ * it is stopped at a breakpoint, as it does when its own play hits one. Every game the fixture
+ * started is ended with it.
  */
 async function withAnEditorOfAnotherProject(
-  options: { playing?: boolean; playsWindowed?: boolean; runtimeAddon?: boolean },
+  options: {
+    playing?: boolean;
+    playsWindowed?: boolean;
+    runtimeAddon?: boolean;
+    announced?: boolean;
+    stoppedInTheEditor?: boolean;
+  },
   body: (stage: AnotherProjectsEditorStage) => Promise<void>,
 ): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -121060,7 +121069,7 @@ async function withAnEditorOfAnotherProject(
           }
           return { ok: true, playing: editor.playing, scenePath: 'res://main.tscn', debugPort: adapter };
         },
-      async ({ server, project }) => {
+      async ({ server, project, runtimeDir }) => {
         const call = async (name: string, args: Record<string, unknown>): Promise<string> => {
           const response = await server.request(
             'tools/call',
@@ -121069,6 +121078,15 @@ async function withAnEditorOfAnotherProject(
           );
           return textOf(response) ?? JSON.stringify(response);
         };
+        if (options.announced === true) {
+          const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+            stdio: 'ignore',
+          });
+          if (game.pid !== undefined) {
+            games.push(game.pid);
+          }
+          announceAPlayedGame(game, runtimeDir, project);
+        }
         const startOther = async (extra: Record<string, unknown> = {}): Promise<unknown> => {
           const started = jsonOf(
             await call('editor_run', {
@@ -121092,6 +121110,20 @@ async function withAnEditorOfAnotherProject(
       {
         engine: godotPath,
         ...(options.playsWindowed === true ? { playsWindowed: true } : {}),
+        ...(options.stoppedInTheEditor === true
+          ? {
+              onAdapter: (socket: Socket) => {
+                socket.write(
+                  frameJsonRpc({
+                    seq: 1,
+                    type: 'event',
+                    event: 'stopped',
+                    body: { reason: 'breakpoint', threadId: 1 },
+                  }),
+                );
+              },
+            }
+          : {}),
       },
     );
   } finally {
@@ -121243,7 +121275,8 @@ async function testAStartForAnotherProjectWhileARunIsHeldKeepsTheOneRunAnswer():
 async function testAStopNamingAnotherProjectActsOnTheRunStartedHere(): Promise<void> {
   const nothing = 'No game is running. Start one with editor_run.';
   await withAnEditorOfAnotherProject(
-    { playing: true },
+    // Its game has announced, which a call naming the second project is not about.
+    { playing: true, announced: true },
     async ({ editor, otherProject, call, startOther }) => {
       editor.asked.length = 0;
       assert.equal(await call('editor_run', { op: 'stop', projectPath: otherProject }), nothing);
@@ -121278,7 +121311,8 @@ async function testAStopNamingAnotherProjectActsOnTheRunStartedHere(): Promise<v
 async function testAWaitNamingAnotherProjectActsOnTheRunStartedHere(): Promise<void> {
   const nothing = 'No game is running. Start one with editor_run.';
   await withAnEditorOfAnotherProject(
-    { playing: true },
+    // Its game has announced, which a call naming the second project is not about.
+    { playing: true, announced: true },
     async ({ editor, otherProject, call, startOther }) => {
       editor.asked.length = 0;
       assert.equal(
@@ -121310,7 +121344,8 @@ async function testAWaitNamingAnotherProjectActsOnTheRunStartedHere(): Promise<v
 async function testAProfileNamingAnotherProjectActsOnTheRunStartedHere(): Promise<void> {
   const nothing = 'No game is running. Start one with editor_run.';
   await withAnEditorOfAnotherProject(
-    { playing: true },
+    // Its game has announced, which a call naming the second project is not about.
+    { playing: true, announced: true },
     async ({ editor, otherProject, call, startOther }) => {
       editor.asked.length = 0;
       assert.equal(await call('editor_run', { op: 'profile', projectPath: otherProject }), nothing);
@@ -121468,6 +121503,32 @@ async function testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject()
         [],
         'and none of them asked the editor anything but what it plays and scans',
       );
+    },
+  );
+}
+
+/**
+ * A start beside an editor of another project waits for its own game to announce while the editor's
+ * play is held at a breakpoint.
+ *
+ * The wait gave up the moment the editor's debug session was stopped. That stop is the editor's
+ * game, and the game started here is held by its keeper.
+ */
+async function testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame(): Promise<void> {
+  await withAnEditorOfAnotherProject(
+    { playing: true, runtimeAddon: true, stoppedInTheEditor: true },
+    async ({ editorProject, call, startOther }) => {
+      writeFileSync(join(editorProject, 'main.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n');
+      // Set in the editor's project, which opens this server's session with the editor's adapter,
+      // as a caller debugging the editor's game does.
+      const set = await call('debug_breakpoint', {
+        op: 'set',
+        projectPath: editorProject,
+        scriptPath: 'main.gd',
+        line: 5,
+      });
+      const started = await startOther({ runtimeWaitMs: 60_000 });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${JSON.stringify(started)} after ${set}`);
     },
   );
 }
@@ -122762,6 +122823,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProfileNamingAnotherProjectActsOnTheRunStartedHere,
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
+  testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
 ];
 
 /**
