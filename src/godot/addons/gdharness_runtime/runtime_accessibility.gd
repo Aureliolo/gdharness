@@ -205,6 +205,18 @@ static func _note_reading(
 		)
 
 
+## Whether a read of a tree the engine was not asked to build found only what the system draws
+## round each window, such as its title bar, which no node made. [param unbuilt] is
+## [method _tree_unbuilt]'s answer.
+static func _only_the_frame(placing: GdhPlacing, reader: Dictionary, unbuilt: String) -> bool:
+	return (
+		not unbuilt.is_empty()
+		and reader.get("element_ids", true) != false
+		and placing.asked > 0
+		and placing.placed == 0
+	)
+
+
 ## Why the windows hold nothing because the engine was not asked to build the tree, or "" when it
 ## was. The command line's --accessibility is consumed by the engine and not handed on, so only
 ## the setting and a screen reader can say the tree is built. Otherwise an empty window is most
@@ -319,8 +331,8 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	if not took.is_empty():
 		result["tookMsBy"] = took
 	_note_reading(result, placing, answer, reader)
-	if elements <= windows.size():
-		var unbuilt: String = _tree_unbuilt(reader)
+	var unbuilt: String = _tree_unbuilt(reader)
+	if elements <= windows.size() or _only_the_frame(placing, reader, unbuilt):
 		if not unbuilt.is_empty():
 			return _refused(unbuilt)
 		result["_note"] = (

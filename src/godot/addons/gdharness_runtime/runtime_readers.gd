@@ -77,7 +77,7 @@ static class GdhReader
     }
 
     // One element's fields in the order they are set, a field set again keeping its place.
-    class Node
+    class GdhEntry
     {
         public List<string> Keys = new List<string>();
         public Dictionary<string, string> Values = new Dictionary<string, string>();
@@ -123,12 +123,12 @@ static class GdhReader
         return "";
     }
 
-    static Node Describe(AutomationElement element, double ox, double oy, int depth)
+    static GdhEntry Describe(AutomationElement element, double ox, double oy, int depth)
     {
         AutomationElement.AutomationElementInformation c = element.Current;
         string role = Regex.Replace(c.ControlType.ProgrammaticName, "^ControlType[.]", "");
         role = Regex.Replace(role, "(?<=[a-z])(?=[A-Z])", "_").ToLowerInvariant();
-        Node node = new Node();
+        GdhEntry node = new GdhEntry();
         node.Set("role", Quote(role));
         node.Set("name", Quote(c.Name));
         string description = FullDescription(element);
@@ -201,7 +201,7 @@ static class GdhReader
             AutomationElement child = TreeWalker.RawViewWalker.GetFirstChild(element);
             while (child != null)
             {
-                Node inner = Describe(child, ox, oy, depth + 1);
+                GdhEntry inner = Describe(child, ox, oy, depth + 1);
                 node.Count += inner.Count;
                 children.Add(inner.Json());
                 child = TreeWalker.RawViewWalker.GetNextSibling(child);
@@ -253,7 +253,7 @@ static class GdhReader
                 // its frame, and after it the client area inside it, so a corner read once placed everything
                 // by the frame's.
                 System.Windows.Rect r = root.Current.BoundingRectangle;
-                Node tree = Describe(root, r.X, r.Y, 0);
+                GdhEntry tree = Describe(root, r.X, r.Y, 0);
                 int last = tree.Count;
                 Mark("walked " + last);
                 // Walked again until two walks in a row agree, since the first question is what makes the
@@ -530,7 +530,8 @@ function run(argv) {
   const wanted = parseInt(argv[6], 10);
   let marks = '';
   const write = (path, text) => {
-    $(text).writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
+    $.NSString.stringWithString(text).writeToFileAtomicallyEncodingError(
+      path, true, $.NSUTF8StringEncoding, null);
   };
   const mark = (stage) => {
     marks += stage + ' ' + Date.now() + '\n';
