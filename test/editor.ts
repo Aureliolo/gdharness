@@ -56,7 +56,7 @@ import { type JsonRpcMessage, parseTextContent, textOf } from './support/json-rp
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
-import { sampleThread } from './support/thread-samples.js';
+import { NO_STACKS, sampleThread } from './support/thread-samples.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
@@ -1379,6 +1379,15 @@ function fileText(project: string, name: string): string {
   return readFileSync(join(project, name), 'utf8');
 }
 
+const noStall = async (): Promise<void> => {
+  await Promise.resolve();
+};
+/**
+ * Takes the account of the editor's main thread the first time the running editor leaves a call
+ * or the fixture hook unanswered, set by withEditor for the editor it started.
+ */
+let noteStall = noStall;
+
 /**
  * Has the fixture hook in the editor act as a person at the editor would, and waits for what it
  * says the editor holds afterwards. The answer can be read part-written, so a parse that fails is
@@ -1418,6 +1427,7 @@ async function hook(project: string, request: Record<string, unknown>): Promise<
     }
     await delay(100);
   }
+  await noteStall();
   throw new Error(`the fixture hook never answered ${JSON.stringify(request)}`);
 }
 
@@ -1490,8 +1500,23 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   };
   const server = new ServerProcess({ env: serverEnv });
 
-  const invoke = async (name: string, args: Record<string, unknown>) =>
-    await server.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS);
+  // No case expects the editor to leave a call unanswered, so the first time it does is the stall
+  // a failing case is about, and the editor's threads are read while it is still going on.
+  const invoke = async (name: string, args: Record<string, unknown>) => {
+    const response = await server
+      .request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS)
+      .catch(async (error: unknown) => {
+        await noteStall();
+        throw error;
+      });
+    if (
+      get(response, 'result', 'isError') === true &&
+      (textOf(response) ?? '').includes('did not answer within')
+    ) {
+      await noteStall();
+    }
+    return response;
+  };
 
   // A refusal comes back as a sentence rather than as JSON, so it is reported as the sentence
   // the server wrote instead of as a parse failure several frames from the call that caused it.
@@ -1584,6 +1609,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   editor.stdout?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   editor.stderr?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   const thread = sampleThread(editor.pid);
+  let atStall: string | null = null;
+  noteStall = async () => {
+    atStall ??= await thread.account();
+  };
 
   try {
     await server.initialize('editor-fixture');
@@ -1607,13 +1636,18 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       serverEnv,
     });
     // A /proc that stopped answering would leave every later failure without its samples, unseen.
-    if (process.platform === 'linux') {
-      assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
+    if (process.platform === 'linux' || process.platform === 'win32') {
+      const account = await thread.account();
+      assert.ok(
+        account !== '' && !account.startsWith(NO_STACKS),
+        `the editor's main thread was sampled: ${account}`,
+      );
     }
   } catch (failure) {
-    throw editorFailure(failure, { editor, engineOutput, thread, server });
+    throw await editorFailure(failure, { editor, engineOutput, thread, server, atStall });
   } finally {
-    thread.stop();
+    noteStall = noStall;
+    await thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_run', { op: 'stop' }).catch(() => undefined);
@@ -1658,16 +1692,17 @@ async function waitForTheBridge(running: {
 }
 
 /** The error for a case that failed in [param failure], carrying what the editor and server said. */
-function editorFailure(
+async function editorFailure(
   failure: unknown,
   running: {
     editor: ChildProcess;
     engineOutput: string[];
     thread: ReturnType<typeof sampleThread>;
     server: ServerProcess;
+    atStall: string | null;
   },
-): Error {
-  const { editor, engineOutput, thread, server } = running;
+): Promise<Error> {
+  const { editor, engineOutput, thread, server, atStall } = running;
   // What the engine said on its way to failing, which is the half of the evidence a tool
   // answer does not carry: a fixture that reports only its own assertion sends whoever reads
   // the run back to guessing about an editor that is no longer there to ask.
@@ -1681,9 +1716,15 @@ function editorFailure(
       : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
   // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
   // failed is the last thing in it.
-  const sampled = thread.account();
+  const sampled = await thread.account();
+  // Taken when a call first went unanswered, because the case's own clean-up waits on the editor
+  // too, and a stall can be over by the time the failure gets here.
+  const stalled =
+    atStall === null || atStall === ''
+      ? ''
+      : `\n\nThe editor's main thread up to when it first did not answer:\n${atStall}`;
   return new Error(
-    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${stalled}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
     { cause: failure },
   );
 }
@@ -2634,6 +2675,90 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
   } finally {
     await hook(project, { op: 'open', path: 'res://main.tscn' });
     rmSync(join(project, 'kin'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
+ * A script the editor holds and a rescan reloads is left saved, and so is the addon's own code. Each
+ * was left marked as changed in the editor, so its next scene save wrote the editor's copy of every
+ * one back to disk: over an edit made to the file outside the editor since, and 412 scripts long in
+ * this suite, which held the save for ten seconds on Windows.
+ */
+async function testAReloadedScriptIsNotWrittenBackByTheNextSave({ call, project }: Editor): Promise<void> {
+  const script = join(project, 'resaved', 'held.gd');
+  const addon = join(project, 'addons', 'gdharness_editor', 'scene_file.gd');
+  mkdirSync(join(project, 'resaved'), { recursive: true });
+  writeFileSync(script, 'extends Node2D\n\nfunc ring() -> int:\n\treturn 1\n');
+  writeFileSync(
+    join(project, 'resaved', 'held.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://resaved/held.gd" id="1_held"]\n\n' +
+      '[node name="Held" type="Node2D"]\nscript = ExtResource("1_held")\n',
+  );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    // Open, so the editor holds the script the reload goes through.
+    await hook(project, { op: 'open', path: 'res://resaved/held.tscn' });
+    const reloaded = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://resaved/held.gd',
+    });
+    assert.equal(get(reloaded, 'reloadProblem'), undefined, text(reloaded));
+
+    const edited = 'extends Node2D\n\nfunc ring() -> int:\n\treturn 2\n';
+    writeFileSync(script, edited);
+    const addonWritten = statSync(addon).mtimeMs;
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      fileText(project, 'resaved/held.gd'),
+      edited,
+      'the save kept the edit made outside the editor',
+    );
+    assert.equal(statSync(addon).mtimeMs, addonWritten, "the save left the addon's own script alone");
+
+    // A reload that fails puts the text the script was built from back in the editor.
+    writeFileSync(script, 'extends Node2D\n\nfunc ring( -> int:\n\treturn 3\n');
+    const broken = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://resaved/held.gd',
+    });
+    assert.notEqual(get(broken, 'reloadProblem'), undefined, text(broken));
+    const mended = 'extends Node2D\n\nfunc ring() -> int:\n\treturn 3\n';
+    writeFileSync(script, mended);
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      fileText(project, 'resaved/held.gd'),
+      mended,
+      'the save kept the edit made outside the editor after a failed reload',
+    );
+
+    // A write that keeps a connection the engine cannot make answers with a note, which the call
+    // hands back and empties.
+    writeFileSync(
+      join(project, 'resaved', 'quitting.tscn'),
+      '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
+        // Binds to a method the root lacks, which the engine refuses to make as the scene loads.
+        '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n',
+    );
+    await call('editor_rescan', { projectPath: project });
+    const relabelled = await call('scene_node', {
+      projectPath: project,
+      op: 'set',
+      scenePath: 'res://resaved/quitting.tscn',
+      nodePath: 'Quit',
+      properties: { text: 'Quit' },
+    });
+    assert.equal(typeof get(relabelled, 'unmadeConnections'), 'string', text(relabelled));
+    const afterNote = statSync(addon).mtimeMs;
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      statSync(addon).mtimeMs,
+      afterNote,
+      "the save after a note left the addon's own script alone",
+    );
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'resaved'), { recursive: true, force: true });
     await call('editor_rescan', { projectPath: project });
   }
 }
@@ -9527,6 +9652,7 @@ async function main(): Promise<void> {
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAReloadedScriptIsNotWrittenBackByTheNextSave', testAReloadedScriptIsNotWrittenBackByTheNextSave],
     ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
