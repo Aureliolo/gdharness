@@ -97944,6 +97944,95 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
 }
 
 /**
+ * A headless server for a project holding [param files], handed to [param body] with a way to read
+ * a resource and a way to write a file under the project. Skips where there is no engine.
+ */
+async function withAShaderProject(
+  files: Record<string, string>,
+  body: (
+    read: (resourcePath: string) => Promise<unknown>,
+    write: (name: string, text: string) => void,
+  ) => Promise<void>,
+): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('shader include regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-shader-inc-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-shader-inc-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="ShaderInclude"\n',
+  );
+  const write = (name: string, contents: string): void => {
+    writeFileSync(join(project, name), contents);
+  };
+  for (const [name, contents] of Object.entries(files)) {
+    write(name, contents);
+  }
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  try {
+    await server.initialize('regression-test');
+    await body(async (resourcePath) => {
+      const response = await server.request(
+        'tools/call',
+        { name: 'resource_edit', arguments: { projectPath: project, op: 'read', resourcePath } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const answer = parseTextContent(response);
+      assert.ok(answer !== null, `${resourcePath}: ${textOf(response) ?? JSON.stringify(response)}`);
+      return answer;
+    }, write);
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/** What a read of the shader says of its compile, as `[compiles, messages]`. */
+function compileOf(answer: unknown): [unknown, unknown[]] {
+  return [
+    get(answer, 'compiles'),
+    asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message'))),
+  ];
+}
+
+/** An include that is not there is answered as the engine answers it. */
+async function testAShaderReadWithAMissingIncludeSaysWhatTheEngineSays(): Promise<void> {
+  await withAShaderProject(
+    {
+      'gone.gdshader':
+        'shader_type canvas_item;\n#include "res://nowhere.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(1.0);\n}\n',
+    },
+    async (read) => {
+      const answer = compileOf(await read('res://gone.gdshader'));
+      assert.equal(answer[0], false, JSON.stringify(answer));
+      assert.match(answer[1].join('\n'), /Tokenizer: Unknown character #35: '#'/);
+    },
+  );
+}
+
+/** A shader with no include reads as it did: its own errors, and a clean compile. */
+async function testAShaderReadWithNoIncludeIsUnchanged(): Promise<void> {
+  await withAShaderProject(
+    {
+      'plain.gdshader': 'shader_type canvas_item;\n\nvoid fragment() {\n\tCOLOR = vec4(1.0);\n}\n',
+      'bad.gdshader': 'shader_type canvas_item;\n\nvoid fragment() {\n\tCOLOR = vec4(1.0)\n}\n',
+    },
+    async (read) => {
+      assert.deepEqual(compileOf(await read('res://plain.gdshader')), [true, []]);
+      assert.deepEqual(compileOf(await read('res://bad.gdshader')), [false, ["Expected a ';'."]]);
+    },
+  );
+}
+
+/**
  * With no editor, text that is no shader does not read as compiling, and a translation is stored
  * with the messages it was given.
  */
@@ -123985,6 +124074,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteReadsWhatThePropertyDeclares,
   testAResourceWriteWithNoEditorSaysWhatStoppedIt,
   testAShaderWithNoTypeAndATranslationWithNoEditor,
+  testAShaderReadWithAMissingIncludeSaysWhatTheEngineSays,
+  testAShaderReadWithNoIncludeIsUnchanged,
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,

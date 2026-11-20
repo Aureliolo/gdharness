@@ -316,6 +316,8 @@ const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
   ],
   // The parse error the refused reload is refused for.
   reload_script: [/^SCRIPT ERROR: Parse Error: Expected parameter name\.$/],
+  // One report for each shader compile the fixture makes fail.
+  shader_include_cache: [/^ERROR: Shader compilation failed\.$/],
 };
 
 const SHUT_PORT = 'GDHARNESS_TEST_SHUT_PORT';
@@ -6817,6 +6819,30 @@ async function runEveryCase(godotPath: string, projectDir: string): Promise<void
     'it_still_refuses',
   ]) {
     assert.equal(get(cached, claim), true, `${claim}: ${JSON.stringify(cached)}`);
+  }
+  // The cache holds an include the file has since changed and one with an unsaved edit, and the
+  // shader read judges the files while leaving both copies where they are.
+  const included = runFixture(godotPath, projectDir, 'shader_include_cache');
+  for (const claim of [
+    'missing_before',
+    'gained_compiles',
+    'held_copy_kept_after_gain',
+    'lost_fails',
+    'lost_names_the_function',
+    'unsaved_edit_kept',
+    'relative_gained_compiles',
+    'relative_lost_fails',
+    'relative_held_copy_kept',
+    'missing_include_answered_by_the_engine',
+    'odd_spelling_gained_compiles',
+    'odd_spelling_held_copy_kept',
+    'uid_include_gained_compiles',
+    'self_include_loads_nothing_as_an_include',
+    'user_include_gained_compiles',
+    'deleted_include_fails',
+    'deleted_held_copy_kept',
+  ]) {
+    assert.equal(get(included, claim), true, `${claim}: ${JSON.stringify(included)}`);
   }
   runFixture(godotPath, projectDir, 'runtime_serialize');
   runFixture(godotPath, projectDir, 'runtime_input');
