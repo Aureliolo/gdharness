@@ -523,7 +523,8 @@ public static class GdharnessDesktop {
   // is 1, and answers its end. A process under pid that began at another time is not it, and is
   // answered as ended. "release pid began" ends the process of a start a helper before this one made
   // but never answered. "letgo pid job" closes the served process's copy of an ended engine's job,
-  // where no helper took its start over. The engines of starts still running end with this process
+  // where no helper took its start over. Each of those two is answered "heard", in the order they
+  // came. The engines of starts still running end with this process
   // when they are in a job that ends them, and run on when they are not.
   static int Serve(int servedPid) {
     servedId = (uint)servedPid;
@@ -577,9 +578,15 @@ public static class GdharnessDesktop {
         adoption.Start();
       } else if (parts[0] == "letgo" && parts.Length == 3) {
         // The engine of a start no helper could take over has ended, and the served process still
-        // holds its copy of the engine's job, which keeps the job's name taken.
-        ReleaseCopyOf(uint.Parse(parts[1]), new IntPtr(long.Parse(parts[2])));
+        // holds its copy of the engine's job, which keeps the job's name taken. Heard once done,
+        // since the copy can be reached only while the served process lives.
+        try {
+          ReleaseCopyOf(uint.Parse(parts[1]), new IntPtr(long.Parse(parts[2])));
+        } finally {
+          Reply("heard");
+        }
       } else if (parts[0] == "release" && parts.Length == 3) {
+        Reply("heard");
         uint pid = uint.Parse(parts[1]);
         long began = long.Parse(parts[2]);
         // Counted as a start being made, so that the served process ending meanwhile does not end

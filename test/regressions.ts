@@ -22830,6 +22830,13 @@ async function testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone(): Promise<vo
     // A running program can be renamed but not removed, so no helper of this path can start again.
     renameSync(none.assembly, `${none.assembly}.gone`);
     await killTheHelper(none.helper);
+    // A helper this process runs while the engine still runs leaves the job alone, so the engine
+    // still ends with this process.
+    await delay(1000);
+    helperFor(helperAssembly());
+    await delay(1000);
+    assert.ok(alive(none.engine), 'an engine no helper took over runs on');
+    assert.ok(named(none.engine), 'and its job keeps its name while the engine runs, with a helper running');
     writeFileSync(release, '');
     assert.ok(await exitedWithin(none.start.child, 10_000), 'the engine ends with no helper left');
     assert.equal(alive(none.engine), false, 'and has gone');
@@ -22865,6 +22872,68 @@ async function testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone(): Promise<vo
 }
 
 /**
+ * A process that ran one start, whose helper died, waits before it ends until a helper has let go of
+ * the ended engine's job, so what the engine started runs on. Its copy of the job can be closed only
+ * while it lives. A process that ended at once killed what the engine left running.
+ */
+async function testAProcessEndingAfterItsRunWaitsForTheLetGo(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-engine-one-shot-'));
+  const grandchild = join(root, 'grandchild');
+  const pids: number[] = [];
+  const engineScript =
+    `const fs = require('node:fs'); ${HIDDEN_SPAWN_PRELUDE}` +
+    "const c = spawnHidden(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore', detached: true });" +
+    'c.unref(); fs.writeFileSync(process.argv[2], String(c.pid));' +
+    'setInterval(() => fs.existsSync(process.argv[1]) && process.exit(0), 50);';
+  const oneShot = join(root, 'one-shot.mjs');
+  writeFileSync(
+    oneShot,
+    [
+      "import { cpSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      `import { spawnOnDesktop, helperAssembly } from ${JSON.stringify(pathToFileURL(resolve('build', 'desktop.js')).href)};`,
+      'const [root, engineScript] = process.argv.slice(2);',
+      'const until = async (read) => { for (let i = 0; i < 1200; i++) { const v = read(); if (v !== undefined) return v; await new Promise((r) => setTimeout(r, 50)); } };',
+      "const assembly = join(root, 'one-shot-helper.exe');",
+      'cpSync(helperAssembly(), assembly);',
+      "mkdirSync(join(root, 'scratch'));",
+      "const release = join(root, 'release');",
+      "const start = spawnOnDesktop({ directory: root, endsWithHelper: true, scratch: join(root, 'scratch') }, process.execPath, ['-e', engineScript, release, join(root, 'grandchild')], { stdio: ['ignore', 'ignore', 'ignore'] }, assembly);",
+      'const engine = await until(() => start.pid());',
+      "await until(() => (existsSync(join(root, 'grandchild')) ? true : undefined));",
+      "writeFileSync(join(root, 'engine'), String(engine));",
+      // Renamed so that no helper takes the start over, then back, so the let-go finds one.
+      "renameSync(assembly, assembly + '.gone');",
+      'const helper = start.child.pid;',
+      'process.kill(helper);',
+      'await until(() => { try { process.kill(helper, 0); return undefined; } catch { return true; } });',
+      'await new Promise((r) => setTimeout(r, 1000));',
+      "renameSync(assembly + '.gone', assembly);",
+      "writeFileSync(release, '');",
+    ].join('\n'),
+  );
+  try {
+    const run = spawnSyncHidden(process.execPath, [oneShot, root, engineScript], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.equal(run.status, 0, `the process runs its start and ends: ${run.stdout} ${run.stderr}`);
+    const child = Number(readFileSync(grandchild, 'utf8'));
+    pids.push(child, Number(readFileSync(join(root, 'engine'), 'utf8')));
+    assert.ok(alive(child), 'what the engine started runs on after the process that ran it has ended');
+  } finally {
+    for (const pid of pids.filter((each) => each > 0 && alive(each))) {
+      process.kill(pid);
+    }
+    sweep(root);
+  }
+}
+
+/**
  * An engine's job gives up its name while the helper still holds the engine's process, whether that
  * helper started the engine or took it over from one that died. Windows hands a pid to a later
  * process once the last handle to its owner is closed, and a job name still taken then fails that
@@ -22879,11 +22948,11 @@ async function testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain(): Promise<
   const own = join(root, 'holding-own');
   const taken = join(root, 'holding-taken');
   const adopting = join(root, 'adopting');
-  const HELD_MS = 5000;
   // The moment a helper lets go of an ended engine's process is over in microseconds, so this copy
-  // says when it is there and stays for the test to look.
+  // says when it is there and stays until the test has looked, for a minute at most.
   const held = (file: string): string =>
-    `WriteText(${JSON.stringify(file)}, "holding");\nThread.Sleep(${String(HELD_MS)});\n`;
+    `WriteText(${JSON.stringify(file)}, "holding");\n` +
+    `for (int waited = 0; waited < 1200 && !File.Exists(${JSON.stringify(`${file}-seen`)}); waited++) { Thread.Sleep(50); }\n`;
   const adopts = 'static void Adopt(';
   let slowed = withAddedBefore(HELPER_SOURCE, '', 'CloseHandle(started.process);', held(own));
   slowed = withAddedBefore(slowed, adopts, 'CloseHandle(process);', held(taken));
@@ -22920,12 +22989,7 @@ async function testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain(): Promise<
     assert.ok(reached, `the helper comes to let go of the ended engine ${String(pid)}`);
     const job = openJob(engineJobName(pid));
     job?.close();
-    // From when the helper wrote the file, since a runner that looks late finds the process let go.
-    const sinceHeld = Date.now() - statSync(holding).mtimeMs;
-    assert.ok(
-      sinceHeld < HELD_MS - 1000,
-      `the look falls while the helper still holds the process: ${String(Math.round(sinceHeld))}ms after it began`,
-    );
+    writeFileSync(`${holding}-seen`, '');
     return job !== null;
   };
   const named = (pid: number): boolean => {
@@ -121696,6 +121760,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartThroughTheHelperNamesTheEnginesOwnPid,
   testATakenJobNameFailsTheStartAndTheEngineNeverRuns,
   testAJobNoHelperTookOverIsLetGoOnceItsEngineHasGone,
+  testAProcessEndingAfterItsRunWaitsForTheLetGo,
   testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain,
   testAHelperTakingOverAnEndedStartClosesOnlyThatEnginesJob,
   testAWholeExitCodeArrivesThroughAHeadlessStart,

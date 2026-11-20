@@ -473,7 +473,10 @@ export class ServedHelper {
   readonly assembly: string;
   private readonly starts = new Map<string, HelpedChild>();
   private readonly abandoned = new Map<string, HelpedChild>();
-  /** The requests owed for other starts that this helper was told. */
+  /**
+   * The requests owed for other starts that this helper was told and has not yet answered "heard"
+   * to, oldest first.
+   */
   private readonly told: string[] = [];
   private open = true;
   private retiring = false;
@@ -516,15 +519,17 @@ export class ServedHelper {
       }
     });
     this.ended = new Promise((resolve) => {
+      // What it was told and never heard is owed again, for the next helper this process runs.
       this.process.once('exit', () => {
+        owed.push(...this.told.splice(0));
         resolve();
       });
-      // A helper whose spawn failed has no pid and tells only its error, never an exit. What it was
-      // told is owed again, since the system refuses a program that is not there only after the
-      // spawn has returned.
+      // A helper whose spawn failed has no pid and tells only its error, never an exit. The system
+      // refuses a program that is not there only after the spawn has returned.
       this.process.once('error', () => {
         if (this.process.pid === undefined) {
           owed.push(...this.told.splice(0));
+          this.hold(false);
           resolve();
         }
       });
@@ -557,6 +562,20 @@ export class ServedHelper {
       start?.started(Number(first), second ?? '0');
     } else if (word === 'ended') {
       start?.ended(Number(first), second === 'stopped');
+    } else if (word === 'heard') {
+      this.told.shift();
+      this.holdOnlyForWhatIsWith();
+    }
+  }
+
+  /**
+   * Lets this process end once the helper has no start and has heard every request it was told. A
+   * job copy is closed only while this process lives, so a process ending sooner kills what the
+   * engine left running.
+   */
+  private holdOnlyForWhatIsWith(): void {
+    if (this.starts.size === 0 && this.told.length === 0) {
+      this.hold(false);
     }
   }
 
@@ -569,12 +588,12 @@ export class ServedHelper {
 
   /** Has the helper act on [param line], a request owed for a start a helper before it held. */
   tell(line: string): void {
-    this.told.push(line);
-    this.write(line);
-    // A helper started only for this holds nothing this process waits on.
-    if (this.starts.size === 0) {
-      this.hold(false);
+    if (!this.write(line)) {
+      owed.push(line);
+      return;
     }
+    this.told.push(line);
+    this.hold(true);
   }
 
   /** Keeps hearing what the helper says of [param child], a start that failed before the helper ended. */
@@ -585,7 +604,7 @@ export class ServedHelper {
   forget(child: HelpedChild): void {
     this.starts.delete(child.id);
     if (this.starts.size === 0) {
-      this.hold(false);
+      this.holdOnlyForWhatIsWith();
       if (this.retiring) {
         this.retire();
       }
