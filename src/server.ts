@@ -14006,7 +14006,8 @@ class GodotServer {
     // Games of this project that were here before the start and that ending the previous run did
     // not take with it. Read now rather than afterwards, because the game about to start announces
     // itself too and would otherwise be reported as something it left behind.
-    const wereHereFirst = this.everyRuntimeOfOurs();
+    const started = project.value.path;
+    const wereHereFirst = this.everyRuntimeOfOurs(this.editorHasAnotherThan(started) ? started : undefined);
 
     // The editor when it is there: a game it plays is a game its debugger is holding, and that
     // session is the only thing the debug tools can reach. A game started here as its own
@@ -16492,7 +16493,7 @@ class GodotServer {
         ' this game running as well.'
       );
     }
-    const mine = about ?? this.ourProject();
+    const mine = this.ourProject();
     const record =
       everyRunRecord().find((one) => mine === null || !isSameDirectory(one.projectPath, mine)) ?? null;
     if (record === null) {
@@ -16580,14 +16581,14 @@ class GodotServer {
    * Both lists, because what makes a game something a start leaves behind is that it is running and
    * not this server's, and being readable has nothing to do with it.
    */
-  private everyRuntimeOfOurs(): { pid: number; protocol: number | null }[] {
+  private everyRuntimeOfOurs(project?: string): { pid: number; protocol: number | null }[] {
     const announced = runtimesAnnounced();
     return [
-      ...this.allAnnouncedForOurProject(announced.running).map((one) => ({
+      ...this.allAnnouncedForOurProject(announced.running, project).map((one) => ({
         pid: one.pid,
         protocol: null,
       })),
-      ...this.allAnnouncedForOurProject(announced.unspoken).map((one) => ({
+      ...this.allAnnouncedForOurProject(announced.unspoken, project).map((one) => ({
         pid: one.pid,
         protocol: one.protocol,
       })),

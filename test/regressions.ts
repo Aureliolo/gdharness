@@ -120993,6 +120993,8 @@ interface AnotherProjectsEditorStage {
   readonly call: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** A headless start naming the second project, parsed, whose game is ended with the fixture. */
   readonly startOther: (extra?: Record<string, unknown>) => Promise<unknown>;
+  /** Where the server reads announced games and run records. */
+  readonly runtimeDir: string;
 }
 
 /** The sentence a start answers with when the editor on the bridge has another project open. */
@@ -121105,7 +121107,15 @@ async function withAnEditorOfAnotherProject(
           return started;
         };
         editor.playing = options.playing === true;
-        await body({ server, editorProject: project, otherProject: other, editor, call, startOther });
+        await body({
+          server,
+          editorProject: project,
+          otherProject: other,
+          editor,
+          call,
+          startOther,
+          runtimeDir,
+        });
       },
       {
         engine: godotPath,
@@ -121364,6 +121374,69 @@ async function testAProfileNamingAnotherProjectActsOnTheRunStartedHere(): Promis
       assert.equal(editor.playing, true);
     },
   );
+}
+
+/**
+ * A call naming another project, with a run of that project recorded by another server, names that
+ * run and the project this server serves. Answering "No game is running" sent the caller to start a
+ * second game beside it.
+ */
+async function testACallNamingAnotherProjectNamesItsRunRecordedElsewhere(): Promise<void> {
+  await withAnEditorOfAnotherProject({}, async ({ editorProject, otherProject, call, runtimeDir }) => {
+    const had = process.env['GDHARNESS_RUNTIME_DIR'];
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+    try {
+      const transcript = join(runtimeDir, 'runs', 'elsewhere.log');
+      mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+      writeFileSync(transcript, 'played elsewhere\n');
+      // A live pid, which no call here may end.
+      writeRunRecord({
+        pid: process.pid,
+        transcript,
+        startedAt: Date.now() - 60_000,
+        startedBy: Date.now() - 60_000,
+        projectPath: otherProject,
+        arguments: ['--headless'],
+        command: process.execPath,
+      });
+    } finally {
+      if (had === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = had;
+      }
+    }
+    const recorded =
+      `No game of this server's is running. A run started from ${otherProject} is recorded on this` +
+      ` machine, and this server serves ${editorProject}, so it is not this server's to answer for or` +
+      ' to end. Start one with editor_run.';
+    for (const args of [{ op: 'stop' }, { op: 'wait', timeoutMs: 300 }, { op: 'profile' }] as Record<
+      string,
+      unknown
+    >[]) {
+      assert.equal(
+        await call('editor_run', { ...args, projectPath: otherProject }),
+        recorded,
+        String(args['op']),
+      );
+    }
+    assert.equal(await call('editor_output', { projectPath: otherProject }), recorded, 'editor_output');
+  });
+}
+
+/**
+ * A start of another project beside an editor whose own game has announced does not list the
+ * editor's game as one of its project's left running, nor say to end it.
+ */
+async function testAStartBesideAnEditorsAnnouncedGameLeavesItOutOfAlsoRunning(): Promise<void> {
+  await withAnEditorOfAnotherProject({ playing: true, announced: true }, async ({ editor, startOther }) => {
+    editor.asked.length = 0;
+    const started = await startOther();
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+    assert.equal(get(started, 'alsoRunning'), undefined, JSON.stringify(started));
+    assert.doesNotMatch(String(get(started, 'message')), /already running/, JSON.stringify(started));
+    assert.equal(editor.playing, true, "the editor's play is left alone");
+  });
 }
 
 /**
@@ -122821,6 +122894,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopNamingAnotherProjectActsOnTheRunStartedHere,
   testAWaitNamingAnotherProjectActsOnTheRunStartedHere,
   testAProfileNamingAnotherProjectActsOnTheRunStartedHere,
+  testACallNamingAnotherProjectNamesItsRunRecordedElsewhere,
+  testAStartBesideAnEditorsAnnouncedGameLeavesItOutOfAlsoRunning,
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
   testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
