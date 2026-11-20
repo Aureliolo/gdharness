@@ -108190,6 +108190,221 @@ async function testAnEditOfAScriptedSceneSavesWhatTheFileHolds(): Promise<void> 
   assert.deepEqual(failures, [], failures.join('\n'));
 }
 
+/** The scene saved after one headless edit of [param nodePath], without its file uids. */
+async function savedAfterAnEdit(scenes: SceneWriteProject, scene: string, nodePath: string): Promise<string> {
+  await scenes.written('scene_node', {
+    op: 'set',
+    scenePath: scene,
+    nodePath,
+    properties: { editor_description: 'edited' },
+  });
+  return withoutFileUids(scenes.fileOf(scene));
+}
+
+const PUT_BACK_HEADER = '[gd_scene format=3]\n\n';
+
+/** A script that acts on its scene's nodes as the scene is instanced. */
+function onInstanced(body: string, tool = false): string {
+  return (
+    `${tool ? '@tool\n' : ''}extends Node2D\n\n\nfunc _notification(what: int) -> void:\n` +
+    `\tif what == NOTIFICATION_SCENE_INSTANTIATED:\n${body}\n`
+  );
+}
+
+/**
+ * A node an outer file hangs a child on keeps that child after its own scene renames it, found by
+ * the ids the file gives its parent as the engine finds it.
+ */
+async function testAChildOfANodeItsOwnSceneRenamedIsKept(): Promise<void> {
+  const failures: string[] = [];
+  await withASceneProject(
+    'child of a renamed node kept',
+    {
+      'quiet.gd': QUIET_ON_LOAD,
+      'part.tscn':
+        `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n\n` +
+        '[node name="Part" type="Node2D" unique_id=200]\nscript = ExtResource("1_q")\n\n' +
+        '[node name="X2" type="Node2D" parent="." unique_id=201]\n\n' +
+        '[node name="Y" type="Node2D" parent="." unique_id=202]\n',
+      'host.tscn':
+        `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n` +
+        '[ext_resource type="PackedScene" path="res://part.tscn" id="2_p"]\n\n' +
+        '[node name="Host" type="Node2D" unique_id=300]\nscript = ExtResource("1_q")\n\n' +
+        '[node name="Inst" parent="." unique_id=301 instance=ExtResource("2_p")]\n\n' +
+        '[node name="Deep" type="Node2D" parent="Inst/X" parent_id_path=PackedInt32Array(301, 201) unique_id=302]\n' +
+        'position = Vector2(7, 8)\n\n' +
+        '[node name="Plain" type="Node2D" parent="." unique_id=305]\n\n[editable path="Inst"]\n',
+      'based.tscn':
+        `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n\n` +
+        '[node name="Based" type="Node2D" unique_id=400]\nscript = ExtResource("1_q")\n\n' +
+        '[node name="A2" type="Node2D" parent="." unique_id=401]\n\n' +
+        '[node name="B" type="Node2D" parent="." unique_id=402]\n',
+      'inheriting.tscn':
+        `${PUT_BACK_HEADER}[ext_resource type="PackedScene" path="res://based.tscn" id="1_b"]\n\n` +
+        '[node name="Inheriting" unique_id=400 instance=ExtResource("1_b")]\n\n' +
+        '[node name="Kid" type="Node2D" parent="A" parent_id_path=PackedInt32Array(401) unique_id=410]\n' +
+        'position = Vector2(3, 3)\n\n' +
+        '[node name="Top" type="Node2D" parent="." unique_id=411]\n',
+    },
+    async (scenes) => {
+      const soft = softly(failures);
+      soft.deepEqual(
+        await savedAfterAnEdit(scenes, 'host.tscn', 'Plain'),
+        `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n` +
+          '[ext_resource type="PackedScene" path="res://part.tscn" id="2_p"]\n\n' +
+          '[node name="Host" type="Node2D" unique_id=300]\nscript = ExtResource("1_q")\n\n' +
+          '[node name="Inst" parent="." unique_id=301 instance=ExtResource("2_p")]\n\n' +
+          '[node name="Deep" type="Node2D" parent="Inst/X2" parent_id_path=PackedInt32Array(301, 201) index="0" unique_id=302]\n' +
+          'position = Vector2(7, 8)\n\n' +
+          '[node name="Plain" type="Node2D" parent="." unique_id=305]\neditor_description = "edited"\n\n' +
+          '[editable path="Inst"]\n',
+        'host.tscn',
+      );
+      soft.deepEqual(
+        await savedAfterAnEdit(scenes, 'inheriting.tscn', 'Top'),
+        `${PUT_BACK_HEADER}[ext_resource type="PackedScene" path="res://based.tscn" id="1_b"]\n\n` +
+          '[node name="Inheriting" unique_id=400 instance=ExtResource("1_b")]\n\n' +
+          '[node name="Kid" type="Node2D" parent="A2" parent_id_path=PackedInt32Array(401) index="0" unique_id=410]\n' +
+          'position = Vector2(3, 3)\n\n' +
+          '[node name="Top" type="Node2D" parent="." index="2" unique_id=411]\neditor_description = "edited"\n',
+        'inheriting.tscn',
+      );
+    },
+  );
+  assert.deepEqual(failures, [], failures.join('\n'));
+}
+
+/** A tool script on the root moves a node, and the save keeps it where the editor would. */
+async function testWhatAToolRootMovesStaysMoved(): Promise<void> {
+  const mover =
+    '\t\tvar report: Node = get_node(^"Report")\n\t\tremove_child(report)\n\t\tget_node(^"Head").add_child(report)';
+  await withASceneProject(
+    'tool root move kept',
+    {
+      'quiet.gd': QUIET_ON_LOAD,
+      'mover.gd': onInstanced(mover, true),
+      'screen.tscn':
+        `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://mover.gd" id="1_m"]\n` +
+        '[ext_resource type="Script" path="res://quiet.gd" id="2_q"]\n\n' +
+        '[node name="Screen" type="Node2D" unique_id=100]\nscript = ExtResource("1_m")\n\n' +
+        '[node name="Head" type="Node2D" parent="." unique_id=101]\n\n' +
+        '[node name="Map" type="Node2D" parent="." unique_id=102]\nscript = ExtResource("2_q")\n\n' +
+        '[node name="Report" type="Node2D" parent="." unique_id=103]\n',
+    },
+    async (scenes) => {
+      assert.equal(
+        await savedAfterAnEdit(scenes, 'screen.tscn', 'Map'),
+        `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://mover.gd" id="1_m"]\n` +
+          '[ext_resource type="Script" path="res://quiet.gd" id="2_q"]\n\n' +
+          '[node name="Screen" type="Node2D" unique_id=100]\nscript = ExtResource("1_m")\n\n' +
+          '[node name="Head" type="Node2D" parent="." unique_id=101]\n\n' +
+          '[node name="Report" type="Node2D" parent="Head" unique_id=103]\n\n' +
+          '[node name="Map" type="Node2D" parent="." unique_id=102]\neditor_description = "edited"\n' +
+          'script = ExtResource("2_q")\n',
+      );
+    },
+  );
+}
+
+/** A node a script freed is made again with the node paths it holds pointing at the same nodes. */
+async function testANodeMadeAgainKeepsTheNodesItHolds(): Promise<void> {
+  const kid =
+    'extends Node2D\n\n@export var speed: float = 1.0\n@export var target: Node\n@export var many: Array[Node] = []\n';
+  const gone =
+    '[node name="Gone" type="Node2D" parent="." unique_id=501 node_paths=PackedStringArray("target", "many")]\n' +
+    'script = ExtResource("2_k")\nspeed = 5.0\ntarget = NodePath("../After")\n' +
+    'many = [NodePath("../After"), NodePath("..")]\n\n';
+  const scene = (note: string): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://freer.gd" id="1_f"]\n` +
+    '[ext_resource type="Script" path="res://kid.gd" id="2_k"]\n\n' +
+    '[node name="KidFreed" type="Node2D" unique_id=500]\nscript = ExtResource("1_f")\n\n' +
+    gone +
+    `[node name="After" type="Node2D" parent="." unique_id=502]\n${note}`;
+  await withASceneProject(
+    'remade node keeps its node paths',
+    { 'freer.gd': onInstanced('\t\tget_node(^"Gone").free()'), 'kid.gd': kid, 'freed.tscn': scene('') },
+    async (scenes) => {
+      assert.equal(
+        await savedAfterAnEdit(scenes, 'freed.tscn', 'After'),
+        scene('editor_description = "edited"\n'),
+      );
+    },
+  );
+}
+
+/** A placeholder a script freed is made again as a placeholder of the same scene. */
+async function testAPlaceholderAScriptFreedIsMadeAgain(): Promise<void> {
+  const scene = (note: string): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://freer.gd" id="1_f"]\n\n` +
+    '[node name="PhFreed" type="Node2D" unique_id=600]\nscript = ExtResource("1_f")\n\n' +
+    '[node name="Ph" parent="." unique_id=601 instance_placeholder="res://child.tscn"]\n\n' +
+    `[node name="After" type="Node2D" parent="." unique_id=602]\n${note}`;
+  await withASceneProject(
+    'freed placeholder made again',
+    {
+      'freer.gd': onInstanced('\t\tget_node(^"Ph").free()'),
+      'child.tscn': `${PUT_BACK_HEADER}[node name="Child" type="Node2D"]\n`,
+      'placeholder.tscn': scene(''),
+    },
+    async (scenes) => {
+      assert.equal(
+        await savedAfterAnEdit(scenes, 'placeholder.tscn', 'After'),
+        scene('editor_description = "edited"\n'),
+      );
+    },
+  );
+}
+
+/**
+ * A script moves a node away and adds one of its own under the same name: the file's node comes
+ * back under its own name, and the script's node, which no scene owns, is not saved.
+ */
+async function testANodeMovedBackKeepsItsNameOverAScriptsNamesake(): Promise<void> {
+  const shadow =
+    '\t\tvar report: Node = get_node(^"Report")\n\t\tremove_child(report)\n\t\tget_node(^"Head").add_child(report)\n' +
+    '\t\tvar stand: Node = Node.new()\n\t\tstand.name = "Report"\n\t\tadd_child(stand)';
+  const scene = (note: string): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://shadow.gd" id="1_s"]\n\n` +
+    '[node name="Shadow" type="Node2D" unique_id=700]\nscript = ExtResource("1_s")\n\n' +
+    `[node name="Head" type="Node2D" parent="." unique_id=701]\n${note}\n` +
+    '[node name="Report" type="Node2D" parent="." unique_id=702]\n\n' +
+    '[node name="Kid" type="Node2D" parent="Report" unique_id=703]\n';
+  await withASceneProject(
+    'moved node keeps its name',
+    { 'shadow.gd': onInstanced(shadow), 'shadow.tscn': scene('') },
+    async (scenes) => {
+      assert.equal(
+        await savedAfterAnEdit(scenes, 'shadow.tscn', 'Head'),
+        scene('editor_description = "edited"\n'),
+      );
+    },
+  );
+}
+
+/**
+ * An edit of a scene with 12,000 siblings finds each node by its name, so its time grows with the
+ * node count rather than its square. A walk of every sibling for each took twenty times longer.
+ */
+async function testAnEditOfAWideSceneTakesLinearTime(): Promise<void> {
+  const count = 12_000;
+  let scene = `${PUT_BACK_HEADER}[node name="Flat" type="Node2D"]\n\n`;
+  for (let index = 0; index < count; index++) {
+    scene += `[node name="N${index}" type="Node2D" parent="."]\n\n`;
+  }
+  await withASceneProject('wide scene edited in linear time', { 'flat.tscn': scene }, async (scenes) => {
+    const started = Date.now();
+    const saved = await savedAfterAnEdit(scenes, 'flat.tscn', `N${count - 1}`);
+    const took = Date.now() - started;
+    assert.equal(saved.match(/^\[node name="N\d+" type="Node2D" parent="\."/gm)?.length, count);
+    assert.match(
+      saved,
+      /\[node name="N11999" type="Node2D" parent="\." unique_id=\d+\]\neditor_description = "edited"\n/,
+    );
+    assert.ok(took < 20_000, `the edit took ${took} ms, past 20,000 ms`);
+    console.log(`wide scene edit took ${took} ms`);
+  });
+}
+
 /**
  * A connection is written whether or not what the signal passes can reach the method, and the
  * answer says when it cannot.
@@ -123704,6 +123919,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASceneNodeIsWrittenAndReadWithNoEditor,
   testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo,
   testAnEditOfAScriptedSceneSavesWhatTheFileHolds,
+  testAChildOfANodeItsOwnSceneRenamedIsKept,
+  testWhatAToolRootMovesStaysMoved,
+  testANodeMadeAgainKeepsTheNodesItHolds,
+  testAPlaceholderAScriptFreedIsMadeAgain,
+  testANodeMovedBackKeepsItsNameOverAScriptsNamesake,
+  testAnEditOfAWideSceneTakesLinearTime,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,

@@ -37,8 +37,13 @@ var _ordered: Dictionary = {}
 var _deferred: Array[Dictionary] = []
 ## Each scene put back, as {top, state}, for the connections of the nodes made again.
 var _levels: Array[Dictionary] = []
-## The unique_ids of each scene file's entries, by its path, read once a node of it is made again.
-var _ids: Dictionary = {}
+## The unique_ids and parent_id_paths of each scene file's entries, by its path, read once, as
+## {ids, parents}.
+var _filed_by_path: Dictionary = {}
+## Each node in the scene by its name, as arrays, for finding a node a script moved away. A node
+## renamed or freed since stays listed, so each use checks the node again.
+var _by_name: Dictionary = {}
+var _indexed: bool = false
 var _editable: PackedStringArray = []
 
 
@@ -76,7 +81,7 @@ func _level(top: Node, state: SceneState, kept: bool) -> Dictionary:
 		var parent: Node = _parent_of(top, at, entry)
 		if parent == null:
 			continue
-		var node: Node = _node_of(top, parent, entry) if putting else _child_named(parent, entry)
+		var node: Node = _node_of(top, parent, entry) if putting else _unclaimed(parent, entry)
 		if node == null:
 			continue
 		_claimed[node.get_instance_id()] = true
@@ -166,27 +171,86 @@ static func _scripts_of(state: SceneState, into: Array[Script]) -> void:
 				into.append(script)
 
 
-## The parent the file gives [param entry], from the nodes of the scene found so far, or null.
-static func _parent_of(top: Node, at: Dictionary, entry: Dictionary) -> Node:
-	var held: Variant = at.get(str(entry["parent"]))
+## The parent the file gives [param entry], from the nodes of the scene found so far, or null. A
+## parent gone from its path, such as a node its own scene renamed, is found by the unique ids the
+## file also gives it, as the engine finds it.
+func _parent_of(top: Node, at: Dictionary, entry: Dictionary) -> Node:
+	var found: Node = _at_path(top, at, str(entry["parent"]))
+	if found != null:
+		return found
+	var recovered: String = _recovered_parent(entry)
+	return null if recovered.is_empty() else _at_path(top, at, recovered)
+
+
+static func _at_path(top: Node, at: Dictionary, path: String) -> Node:
+	var held: Variant = at.get(path)
 	if held is Node:
 		var found: Node = held
 		return found
-	return top.get_node_or_null(NodePath(str(entry["parent"])))
+	return top.get_node_or_null(NodePath(path))
 
 
-## The child of [param parent] named as [param entry] names its node, or null.
-func _child_named(parent: Node, entry: Dictionary) -> Node:
-	var named: String = str(entry["name"])
-	for child: Node in parent.get_children():
-		if str(child.name) == named and not _claimed.has(child.get_instance_id()):
-			return child
-	return null
+## The path from the top of [param entry]'s scene to the parent its parent_id_path names, or "".
+## Each id is looked for in the state reached so far, then in the scenes it inherits, and each id
+## before the last names an instance whose own state holds the next, as SceneState walks them.
+func _recovered_parent(entry: Dictionary) -> String:
+	var state: SceneState = entry["state"]
+	var index: int = entry["index"]
+	var parents: Array[PackedInt32Array] = _filed(state)["parents"]
+	if index >= parents.size() or parents[index].is_empty():
+		return ""
+	var id_path: PackedInt32Array = parents[index]
+	var at: SceneState = state
+	var path: String = ""
+	for step: int in id_path.size():
+		var found: int = -1
+		while at != null:
+			var ids: Array[int] = _filed(at)["ids"]
+			found = ids.find(id_path[step])
+			if found >= 0:
+				break
+			at = at.get_base_scene_state()
+		if at == null:
+			return ""
+		path = _key(path, _plain(str(at.get_node_path(found))))
+		if step < id_path.size() - 1:
+			var placed: PackedScene = at.get_node_instance(found)
+			if placed == null:
+				return ""
+			at = placed.get_state()
+	return path
+
+
+## The child of [param parent] named as [param entry] names its node, unless an entry has it.
+func _unclaimed(parent: Node, entry: Dictionary) -> Node:
+	var child: Node = _child_called(parent, str(entry["name"]))
+	return null if child == null or _claimed.has(child.get_instance_id()) else child
+
+
+## The child of [param parent] called [param named], found by name since siblings' names differ.
+## A name a node path would read as more than one name is matched child by child.
+static func _child_called(parent: Node, named: String) -> Node:
+	if not _one_name(named):
+		for child: Node in parent.get_children():
+			if str(child.name) == named:
+				return child
+		return null
+	var found: Node = parent.get_node_or_null(NodePath(named))
+	# A node no scene owns may be one the parent keeps for itself, which get_children leaves out.
+	if found != null and found.owner == null and not parent.get_children().has(found):
+		return null
+	return found
+
+
+static func _one_name(named: String) -> bool:
+	if named.is_empty() or named == "." or named == ".." or named.begins_with("%"):
+		return false
+	return not (named.contains("/") or named.contains(":"))
 
 
 ## The node of [param entry] under [param parent], moved back there or made again.
 func _node_of(top: Node, parent: Node, entry: Dictionary) -> Node:
-	var direct: Node = _child_named(parent, entry)
+	var direct: Node = _unclaimed(parent, entry)
 	if direct != null and _fits(direct, entry):
 		return direct
 	var elsewhere: Node = _owned_named(top, entry)
@@ -200,11 +264,15 @@ func _node_of(top: Node, parent: Node, entry: Dictionary) -> Node:
 
 ## A node [param top] owns anywhere in the scene that [param entry] could name, or null.
 func _owned_named(top: Node, entry: Dictionary) -> Node:
+	if not _indexed:
+		_indexed = true
+		_index(_root)
 	var named: String = str(entry["name"])
-	var pending: Array[Node] = [_root]
-	while not pending.is_empty():
-		var node: Node = pending.pop_back()
-		pending.append_array(node.get_children())
+	var listed: Array = _by_name.get(named, [])
+	for held: Variant in listed:
+		if not is_instance_valid(held):
+			continue
+		var node: Node = held
 		if (
 			node.owner == top
 			and str(node.name) == named
@@ -213,6 +281,17 @@ func _owned_named(top: Node, entry: Dictionary) -> Node:
 		):
 			return node
 	return null
+
+
+## Lists [param from] and every node under it in [member _by_name], in the order a walk from the
+## scene's root meets them.
+func _index(from: Node) -> void:
+	var pending: Array[Node] = [from]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		pending.append_array(node.get_children())
+		var listed: Array = _by_name.get_or_add(str(node.name), [])
+		listed.append(node)
 
 
 static func _fits(node: Node, entry: Dictionary) -> bool:
@@ -227,14 +306,14 @@ static func _fits(node: Node, entry: Dictionary) -> bool:
 ## Frees the name [param named] under [param parent] for [param node]: a node a script added there
 ## goes if a scene put back owns it, else takes another name.
 func _make_room(parent: Node, named: String, node: Node) -> void:
-	for child: Node in parent.get_children():
-		if str(child.name) != named or child == node:
-			continue
-		if _strippable(child):
-			parent.remove_child(child)
-			child.free()
-		else:
-			child.name = StringName("%sAddedByScript%d" % [named, child.get_instance_id()])
+	var child: Node = _child_called(parent, named)
+	if child == null or child == node:
+		return
+	if _strippable(child):
+		parent.remove_child(child)
+		child.free()
+	else:
+		child.name = StringName("%sAddedByScript%d" % [named, child.get_instance_id()])
 
 
 ## The node of [param entry] made again under [param parent] as the file holds it, or null when its
@@ -249,6 +328,8 @@ func _remake(top: Node, parent: Node, entry: Dictionary) -> Node:
 	_make_room(parent, named, made)
 	parent.add_child(made)
 	made.owner = top
+	if _indexed:
+		_index(made)
 	var state: SceneState = entry["state"]
 	var index: int = entry["index"]
 	for group: String in state.get_node_groups(index):
@@ -362,13 +443,46 @@ func _within_remade(node: Node, top: Node) -> bool:
 
 ## The unique_id the file gives [param entry]'s node, or -1.
 func _id_of(entry: Dictionary) -> int:
-	var state: SceneState = entry["state"]
-	var file: String = state.get_path()
-	if not _ids.has(file):
-		_ids[file] = GdhFileReads.unique_ids(file, state.get_node_count())
-	var ids: Array[int] = _ids[file]
+	var ids: Array[int] = _filed(entry["state"])["ids"]
 	var index: int = entry["index"]
 	return ids[index] if index < ids.size() else -1
+
+
+## The unique_id and parent_id_path the text scene of [param state] gives each entry, in the order
+## its state holds them, as {ids, parents}. SceneState gives neither to a script. Both are empty
+## for a binary scene, and for a file whose entries do not number the state's.
+func _filed(state: SceneState) -> Dictionary:
+	var file: String = state.get_path()
+	if _filed_by_path.has(file):
+		return _filed_by_path[file]
+	var ids: Array[int] = []
+	var parents: Array[PackedInt32Array] = []
+	if file.ends_with(".tscn") and FileAccess.file_exists(file):
+		for line: String in FileAccess.get_file_as_string(file).split("\n"):
+			if line.begins_with("[node "):
+				ids.append(GdhFileReads.unique_id_of(line))
+				parents.append(_parent_ids_of(line))
+	if ids.size() != state.get_node_count():
+		ids.clear()
+		parents.clear()
+	var filed: Dictionary = { "ids": ids, "parents": parents }
+	_filed_by_path[file] = filed
+	return filed
+
+
+## The ids a text scene's entry [param line] gives its parent's path, empty where it gives none.
+static func _parent_ids_of(line: String) -> PackedInt32Array:
+	var ids: PackedInt32Array = []
+	var start: int = line.find(" parent_id_path=PackedInt32Array(")
+	if start < 0:
+		return ids
+	start = line.find("(", start) + 1
+	var end: int = line.find(")", start)
+	if end < 0:
+		return ids
+	for part: String in line.substr(start, end - start).split(",", false):
+		var _added: bool = ids.append(int(part.strip_edges()))
+	return ids
 
 
 ## Notes [param node] as the next child the file gives [param parent], moved to the index the file
