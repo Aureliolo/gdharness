@@ -12,6 +12,8 @@ const Readers = preload("res://addons/gdharness_runtime/runtime_readers.gd")
 const START_BOUND_MS: int = 5000
 ## A program that compiles and does nothing, for the cache cases.
 const TRIVIAL: String = "static class Trivial { static int Main() { return 0; } }"
+## How long the macOS client may take to answer an empty read before the case fails.
+const AX_WAIT_MS: int = 30000
 
 var node: Runtime
 
@@ -181,7 +183,7 @@ func _the_readers() -> Array[String]:
 		"Linux":
 			failures.append_array(_atspi_without_a_bus(dir))
 		"macOS":
-			failures.append_array(_ax_asked(dir))
+			failures.append_array(await _ax_asked(readers, dir))
 	_remove_all(dir)
 	return failures
 
@@ -272,31 +274,24 @@ func _atspi_without_a_bus(dir: String) -> Array[String]:
 	return failures
 
 
-## macOS: the client runs, and answers a read or names the missing Accessibility permission.
-func _ax_asked(dir: String) -> Array[String]:
+## macOS: the client started as a read starts it runs, and answers a read or names the missing
+## Accessibility permission. It is started by [method Readers.start] rather than OS.execute, whose
+## output capture runs the command through sh and so would expand the client's $(...) calls.
+func _ax_asked(readers: Readers, dir: String) -> Array[String]:
 	var failures: Array[String] = []
 	var is_made: Error = DirAccess.make_dir_recursive_absolute(dir)
 	var out: String = dir.path_join("answer.json")
-	var output: Array = []
-	var code: int = OS.execute(
-		"/usr/bin/osascript",
-		[
-			"-l",
-			"JavaScript",
-			"-e",
-			Readers.AX_CLIENT,
-			out,
-			out + ".progress",
-			"100",
-			"100",
-			"40",
-			str(OS.get_process_id()),
-			"0",
-		],
-		output,
-		true
-	)
-	var answer: Variant = JSON.parse_string(FileAccess.get_file_as_string(out))
+	var no_windows: Array[String] = []
+	var limits: Array[int] = [100, 100, 40]
+	var started: Dictionary = await readers.start(out, out + ".progress", no_windows, limits)
+	var pid: int = started.get("pid", 0)
+	var began: int = Time.get_ticks_msec()
+	while pid > 0 and OS.is_process_running(pid) and Time.get_ticks_msec() - began < AX_WAIT_MS:
+		await process_frame
+	var code: int = OS.get_process_exit_code(pid) if pid > 0 else -1
+	var answered: String = FileAccess.get_file_as_string(out)
+	var output: String = "%s, answered %s" % [JSON.stringify(started), answered]
+	var answer: Variant = JSON.parse_string(answered)
 	var shown: bool = false
 	if answer is Dictionary:
 		var held: Dictionary = answer

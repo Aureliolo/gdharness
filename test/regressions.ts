@@ -57911,9 +57911,9 @@ async function screenReaderDesktop(): Promise<{ env: Record<string, string>; sto
 }
 
 /**
- * A virtual display and a session bus for the Linux screen-reader read, or why this machine cannot
- * make them. The bus is one dbus-launch starts, which activates the accessibility bus on demand
- * from the system's service files. [stop] ends both.
+ * A virtual display with a window manager and a session bus for the Linux screen-reader read, or why
+ * this machine cannot make them. The bus is one dbus-launch starts, which activates the
+ * accessibility bus on demand from the system's service files. [stop] ends all three.
  */
 async function linuxScreenReaderDesktop(): Promise<
   { env: Record<string, string>; stop: () => void } | string
@@ -57935,7 +57935,24 @@ async function linuxScreenReaderDesktop(): Promise<
     process.kill(busPid);
     return 'Xvfb is not installed';
   }
-  return { env: { DISPLAY: display, DBUS_SESSION_BUS_ADDRESS: address }, stop };
+  // A display with no window manager gives no window the focus, and AccessKit includes a plain
+  // container only while it holds the focus of a focused window, so the Page would be left out.
+  const manager = spawnHidden('openbox', [], { stdio: 'ignore', env: { ...process.env, DISPLAY: display } });
+  const managed = await Promise.race([
+    once(manager, 'error').then(() => false),
+    delay(1000).then(() => true),
+  ]);
+  if (!managed || manager.exitCode !== null) {
+    stop();
+    return 'openbox is not installed';
+  }
+  return {
+    env: { DISPLAY: display, DBUS_SESSION_BUS_ADDRESS: address },
+    stop: () => {
+      manager.kill();
+      stop();
+    },
+  };
 }
 
 /**
