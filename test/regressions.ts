@@ -65681,6 +65681,109 @@ async function testAProfiledRunsKeeperNeverSleepsForAHeldProfile(): Promise<void
 }
 
 /**
+ * A profiled game goes on printing while a reader holds its profile file.
+ *
+ * On Windows every line a kept game prints waits for its keeper to read it, so a keeper asleep for
+ * the held file stalls the game for as long as it sleeps. The game prints its clock every 10 ms in
+ * lines long enough to fill the pipe at once, and the longest gap between two lines shows a stall.
+ * Elsewhere the write goes through while the file is held, and the same gap stays short.
+ */
+async function testAProfiledGameIsNotHeldByAReaderOfItsProfile(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('profiled game beside a held profile regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profile-reader-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profile-reader-rt-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HeldProfile"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        'var line: String = "x".repeat(4000)',
+        'var started: int = 0',
+        'var printed: int = 0',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tstarted = Time.get_ticks_msec()',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tvar now: int = Time.get_ticks_msec()',
+        '\tif now - printed >= 10:',
+        '\t\tprinted = now',
+        '\t\tprint("tick %d %s" % [now, line])',
+        '\tif now - started > 6000:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        ) ?? '';
+      const answer = await call({
+        op: 'start',
+        projectPath: project,
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(answer, /"started": true/, answer);
+      const transcript = text(get(JSON.parse(answer) as unknown, 'transcript'));
+      const path = profilePath(transcript);
+      assert.ok(
+        await answeredWithin(() => (readProfileFile(path)?.connected === true ? true : undefined), 30_000),
+        `the game's totals reach the profile: ${answer}`,
+      );
+      const reader = await aReaderHolding(path, 2500);
+      const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+      if (reader.exitCode === null) {
+        await new Promise((settle) => reader.once('exit', settle));
+      }
+      const ticks = [...readFileSync(transcript, 'utf8').matchAll(/^tick (\d+) /gmu)].map((m) =>
+        Number(m[1]),
+      );
+      assert.ok(ticks.length > 100, `the game printed as it ran: ${String(ticks.length)} lines`);
+      // The first half second is the engine starting, which no reader holds.
+      const settled = ticks.filter((tick) => tick - (ticks[0] ?? 0) >= 500);
+      const longest = Math.max(...settled.slice(1).map((tick, index) => tick - (settled[index] ?? tick)));
+      assert.ok(
+        longest < 700,
+        `the game never waited for the held file: ${String(longest)}ms between two lines`,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A run note is never read half-written while it is rewritten.
  *
  * Every server of a project reads its run note, and the keeper rewrites it as the run ends. Written
@@ -122341,6 +122444,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunsFlagsAreJudgedFirst,
   testAProfileIsWrittenPastAReader,
   testAProfiledRunsKeeperNeverSleepsForAHeldProfile,
+  testAProfiledGameIsNotHeldByAReaderOfItsProfile,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
