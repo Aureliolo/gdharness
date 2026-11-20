@@ -121440,6 +121440,60 @@ async function testAStartBesideAnEditorsAnnouncedGameLeavesItOutOfAlsoRunning():
 }
 
 /**
+ * Beside an editor of another project, the answers that name a game of the called project this
+ * server did not start say how to stop it, and that stop ends it. A stop naming no project looked
+ * for the pid among the editor's project's games and refused.
+ */
+async function testAStopByPidReachesTheCalledProjectsGameBesideAnEditor(): Promise<void> {
+  await withAnEditorOfAnotherProject({}, async ({ otherProject, call, startOther, runtimeDir }) => {
+    const godotPath = resolveGodotPath();
+    assert.ok(godotPath, 'the fixture runs only with an engine');
+    const game = spawnHidden(godotPath, ['--headless', '--path', otherProject], { stdio: 'ignore' });
+    const pid = game.pid ?? 0;
+    try {
+      // Announced after it started, as a game announces from its first frames.
+      await delay(500);
+      announceAPlayedGame(game, runtimeDir, otherProject);
+      const stopIt = `editor_run stop with pid ${String(pid)} and projectPath ${otherProject} ends it`;
+      const nothing = await call('editor_run', { op: 'stop', projectPath: otherProject });
+      assert.ok(nothing.includes(`${stopIt}.`), nothing);
+      const started = await startOther();
+      assert.deepEqual(get(started, 'alsoRunning'), [pid], JSON.stringify(started));
+      const message = String(get(started, 'message'));
+      assert.ok(message.includes(`${stopIt} and leaves this run going.`), message);
+      const stopped = await call('editor_run', { op: 'stop', pid, projectPath: otherProject });
+      assert.ok(
+        await answeredWithin(() => (alive(pid) ? undefined : true), 15_000),
+        `the stop ends it: ${stopped}`,
+      );
+    } finally {
+      if (alive(pid)) {
+        await killTheTree(pid);
+      }
+    }
+  });
+}
+
+/**
+ * A run of another project stopped here is still read by a call naming that project after a call
+ * naming none has taken up the editor's play.
+ */
+async function testAStoppedRunBesideAnEditorIsReadAfterTheEditorsPlayIsTakenUp(): Promise<void> {
+  await withAnEditorOfAnotherProject({ playing: true }, async ({ otherProject, call, startOther }) => {
+    const started = await startOther();
+    const stopped = await call('editor_run', { op: 'stop', projectPath: otherProject });
+    assert.equal(get(jsonOf(stopped, 'editor_run stop'), 'stopped'), true, stopped);
+    const status = await call('editor_status', {});
+    // The editor's play is the run it reports now, which has no pid here.
+    assert.equal(get(jsonOf(status, 'editor_status'), 'game', 'run', 'pid'), null, status);
+    const output = await call('editor_output', { projectPath: otherProject });
+    const read = jsonOf(output, 'editor_output');
+    assert.equal(get(read, 'running'), false, output);
+    assert.equal(get(read, 'pid'), get(started, 'pid'), output);
+  });
+}
+
+/**
  * A game started here goes on being served when an editor of another project connects afterwards.
  *
  * A server serving two worktrees has the main checkout's idle editor reopened by a later call, and
@@ -122896,6 +122950,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProfileNamingAnotherProjectActsOnTheRunStartedHere,
   testACallNamingAnotherProjectNamesItsRunRecordedElsewhere,
   testAStartBesideAnEditorsAnnouncedGameLeavesItOutOfAlsoRunning,
+  testAStopByPidReachesTheCalledProjectsGameBesideAnEditor,
+  testAStoppedRunBesideAnEditorIsReadAfterTheEditorsPlayIsTakenUp,
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
   testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,

@@ -1826,17 +1826,23 @@ export function uidsLeftNote(left: number): string {
  * The sentence a start adds for the games of its project that were already running and that it
  * did not end, because this server did not start them: each named, and the call that ends it.
  */
-export function leftRunningNote(stranded: readonly { pid: number; protocol: number | null }[]): string {
+export function leftRunningNote(
+  stranded: readonly { pid: number; protocol: number | null }[],
+  project?: string,
+): string {
   if (stranded.length === 0) {
     return '';
   }
   const pids = stranded
     .map((one) => (one.protocol === null ? `pid ${one.pid}` : `pid ${one.pid} on protocol ${one.protocol}`))
     .join(', ');
+  // A project the editor does not have open is named, since a stop naming none looks for the pid
+  // among the editor's project's games.
+  const withProject = project === undefined ? '' : ` and projectPath ${project}`;
   const [only] = stranded;
   return stranded.length === 1 && only !== undefined
-    ? ` A game of this project was already running and still is: ${pids}. Starting this one did not end it, because this server did not start it. editor_run stop with pid ${only.pid} ends it and leaves this run going.`
-    : ` ${stranded.length} games of this project were already running and still are: ${pids}. Starting this one did not end them, because this server did not start them. editor_run stop with the pid of each ends it and leaves this run going.`;
+    ? ` A game of this project was already running and still is: ${pids}. Starting this one did not end it, because this server did not start it. editor_run stop with pid ${only.pid}${withProject} ends it and leaves this run going.`
+    : ` ${stranded.length} games of this project were already running and still are: ${pids}. Starting this one did not end them, because this server did not start them. editor_run stop with the pid of each${withProject} ends it and leaves this run going.`;
 }
 
 /** The sentence a start adds to its message when it ended a run to happen. */
@@ -5666,6 +5672,9 @@ class GodotServer {
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;
+  // A run of a project the editor does not have open, which ended here and gave way to the
+  // editor's play. A call naming its project still reads it.
+  private endedBesideTheEditor: GodotProcess | null = null;
   // When this server last answered an editor_run check, whose run is kept nowhere afterwards.
   private lastCheckAt: number | null = null;
   private readonly updates = new UpdateCheck(SERVER_VERSION);
@@ -14339,7 +14348,10 @@ class GodotServer {
     const stranded = wereHereFirst.filter((one) => one.pid !== ended?.pid && alive(one.pid));
     // The set the game was started with: nothing has changed it since the launch read it.
     const handed = this.dapHoldingBreakpointsOf(project.value.path).breakpointsHeld();
-    const alsoRunning = leftRunningNote(stranded);
+    const alsoRunning = leftRunningNote(
+      stranded,
+      this.editorHasAnotherThan(project.value.path) ? project.value.path : undefined,
+    );
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
@@ -15946,6 +15958,9 @@ class GodotServer {
     // way the run that started it was. Without a number `running` stayed true after the game had
     // quit for as long as the record lasted, beside a status call taking the editor's word that
     // nothing was playing.
+    if (going !== null && going.projectPath !== null && this.editorHasAnotherThan(going.projectPath)) {
+      this.endedBesideTheEditor = going;
+    }
     this.activeProcess = editorPickedUpRun(project, note, playing.play);
     this.watchThePlayedConsole();
   }
@@ -16456,12 +16471,14 @@ class GodotServer {
     // project and no editor: `started: true` with a new pid, the announced game still running, and
     // nothing ended. The reading that a start replaces the game that is playing came from a game
     // the editor was playing, which is the one case this branch cannot be about.
+    // A stop naming no project looks for the pid among the editor's project's games.
+    const withProject = about === undefined ? '' : ` and projectPath ${about}`;
     const live = this.aRuntimeOfOursIsAnswering(about);
     if (live !== null) {
       return (
         `A game is running for ${live.project.path} and has announced its runtime on port ${live.port}, pid ${live.pid},` +
         ' but this server did not start it and cannot reach it through the editor, so editor_run and' +
-        ` editor_output have nothing to answer about. The runtime_* tools reach it now, and editor_run stop with pid ${live.pid} ends it.` +
+        ` editor_output have nothing to answer about. The runtime_* tools reach it now, and editor_run stop with pid ${live.pid}${withProject} ends it.` +
         ' A run started here is a separate process rather than a replacement, so starting one leaves' +
         ' this game running as well.'
       );
@@ -16488,7 +16505,7 @@ class GodotServer {
       return (
         `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
         ` ${unreadable.protocol}. This server speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
-        ` Until then the runtime_* tools cannot reach it, and editor_run stop with pid ${unreadable.pid} ends it.` +
+        ` Until then the runtime_* tools cannot reach it, and editor_run stop with pid ${unreadable.pid}${withProject} ends it.` +
         ' A run started here is a separate process rather than a replacement, so starting one leaves' +
         ' this game running as well.'
       );
@@ -16642,8 +16659,28 @@ class GodotServer {
    * server has no memory of having started anything, and the only sign that something is running
    * is the record the server before it left.
    */
-  private async currentRun(): Promise<GodotProcess | null> {
-    return this.activeProcess ?? (await this.adoptRecordedRun());
+  private async currentRun(aboutProject?: string): Promise<GodotProcess | null> {
+    return this.endedRunOf(aboutProject) ?? this.activeProcess ?? (await this.adoptRecordedRun());
+  }
+
+  /**
+   * The run of [param project] that ended here and gave way to the editor's play, when the call
+   * names that project and nothing held now is of it.
+   */
+  private endedRunOf(project: string | undefined): GodotProcess | null {
+    const ended = this.endedBesideTheEditor;
+    const held = this.activeProcess?.projectPath ?? null;
+    if (
+      project === undefined ||
+      ended?.projectPath === null ||
+      ended?.projectPath === undefined ||
+      !isSameDirectory(ended.projectPath, project) ||
+      !this.editorHasAnotherThan(project) ||
+      (held !== null && isSameDirectory(held, project))
+    ) {
+      return null;
+    }
+    return ended;
   }
 
   /**
@@ -16745,7 +16782,7 @@ class GodotServer {
    */
   private async handleRunProfile(args: OperationParams): Promise<ToolResponse> {
     await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
-    const run = await this.currentRun();
+    const run = await this.currentRun(readNonEmptyString(args, 'projectPath'));
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning(readNonEmptyString(args, 'projectPath')));
     }
@@ -17105,7 +17142,7 @@ class GodotServer {
    */
   private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
     await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
-    const run = await this.currentRun();
+    const run = await this.currentRun(readNonEmptyString(args, 'projectPath'));
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning(readNonEmptyString(args, 'projectPath')));
     }
@@ -17529,7 +17566,7 @@ class GodotServer {
       return await this.handleEditorConsole(args);
     }
     await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
-    const run = await this.currentRun();
+    const run = await this.currentRun(readNonEmptyString(args, 'projectPath'));
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning(readNonEmptyString(args, 'projectPath')));
     }
@@ -17946,7 +17983,7 @@ class GodotServer {
     // what would otherwise be adopted here is the last run this project spawned: a pid belonging
     // to something nobody asked about, offered to be killed while the run the caller means goes on.
     await this.pickUpWhatTheEditorIsPlaying(readNonEmptyString(args, 'projectPath'));
-    const stopped = await this.currentRun();
+    const stopped = await this.currentRun(readNonEmptyString(args, 'projectPath'));
     const askedPid = readNumber(args, 'pid');
     if (askedPid !== undefined && this.isNotTheRunsGame(stopped, askedPid)) {
       return await this.stopAnnouncedGame(askedPid, readBoolean(args, 'andChildren') === true, args);
@@ -18104,9 +18141,12 @@ class GodotServer {
     args: OperationParams,
   ): Promise<ToolResponse> {
     const announced = runtimesAnnounced();
+    // A stop naming a project the editor does not have open is about that project's games.
+    const asked = readNonEmptyString(args, 'projectPath');
+    const about = asked !== undefined && this.editorHasAnotherThan(asked) ? asked : undefined;
     const game = [
-      ...this.allAnnouncedForOurProject(announced.running),
-      ...this.allAnnouncedForOurProject(announced.unspoken),
+      ...this.allAnnouncedForOurProject(announced.running, about),
+      ...this.allAnnouncedForOurProject(announced.unspoken, about),
     ].find((one) => one.pid === pid);
     if (game !== undefined) {
       const elsewhere = this.anotherProjectsRun(game.project.path, args, 'signalled');
