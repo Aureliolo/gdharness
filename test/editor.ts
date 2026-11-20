@@ -56,7 +56,7 @@ import { type JsonRpcMessage, parseTextContent, textOf } from './support/json-rp
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
-import { sampleThread } from './support/thread-samples.js';
+import { NO_STACKS, sampleThread } from './support/thread-samples.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
@@ -1379,6 +1379,15 @@ function fileText(project: string, name: string): string {
   return readFileSync(join(project, name), 'utf8');
 }
 
+const noStall = async (): Promise<void> => {
+  await Promise.resolve();
+};
+/**
+ * Takes the account of the editor's main thread the first time the running editor leaves a call
+ * or the fixture hook unanswered, set by withEditor for the editor it started.
+ */
+let noteStall = noStall;
+
 /**
  * Has the fixture hook in the editor act as a person at the editor would, and waits for what it
  * says the editor holds afterwards. The answer can be read part-written, so a parse that fails is
@@ -1418,6 +1427,7 @@ async function hook(project: string, request: Record<string, unknown>): Promise<
     }
     await delay(100);
   }
+  await noteStall();
   throw new Error(`the fixture hook never answered ${JSON.stringify(request)}`);
 }
 
@@ -1490,8 +1500,20 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   };
   const server = new ServerProcess({ env: serverEnv });
 
-  const invoke = async (name: string, args: Record<string, unknown>) =>
-    await server.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS);
+  // No case expects the editor to leave a call unanswered, so the first time it does is the stall
+  // a failing case is about, and the editor's threads are read while it is still going on.
+  const invoke = async (name: string, args: Record<string, unknown>) => {
+    const response = await server
+      .request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS)
+      .catch(async (error: unknown) => {
+        await noteStall();
+        throw error;
+      });
+    if (get(response, 'result', 'isError') === true && /did not answer within/.test(textOf(response) ?? '')) {
+      await noteStall();
+    }
+    return response;
+  };
 
   // A refusal comes back as a sentence rather than as JSON, so it is reported as the sentence
   // the server wrote instead of as a parse failure several frames from the call that caused it.
@@ -1584,6 +1606,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   editor.stdout?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   editor.stderr?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   const thread = sampleThread(editor.pid);
+  let atStall: string | null = null;
+  noteStall = async () => {
+    atStall ??= await thread.account();
+  };
 
   try {
     await server.initialize('editor-fixture');
@@ -1607,12 +1633,14 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       serverEnv,
     });
     // A /proc that stopped answering would leave every later failure without its samples, unseen.
-    if (process.platform === 'linux') {
-      assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
+    if (process.platform === 'linux' || process.platform === 'win32') {
+      const account = await thread.account();
+      assert.ok(account !== '' && !account.startsWith(NO_STACKS), `the editor's main thread was sampled: ${account}`);
     }
   } catch (failure) {
-    throw editorFailure(failure, { editor, engineOutput, thread, server });
+    throw await editorFailure(failure, { editor, engineOutput, thread, server, atStall });
   } finally {
+    noteStall = noStall;
     thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
@@ -1658,16 +1686,17 @@ async function waitForTheBridge(running: {
 }
 
 /** The error for a case that failed in [param failure], carrying what the editor and server said. */
-function editorFailure(
+async function editorFailure(
   failure: unknown,
   running: {
     editor: ChildProcess;
     engineOutput: string[];
     thread: ReturnType<typeof sampleThread>;
     server: ServerProcess;
+    atStall: string | null;
   },
-): Error {
-  const { editor, engineOutput, thread, server } = running;
+): Promise<Error> {
+  const { editor, engineOutput, thread, server, atStall } = running;
   // What the engine said on its way to failing, which is the half of the evidence a tool
   // answer does not carry: a fixture that reports only its own assertion sends whoever reads
   // the run back to guessing about an editor that is no longer there to ask.
@@ -1681,9 +1710,15 @@ function editorFailure(
       : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
   // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
   // failed is the last thing in it.
-  const sampled = thread.account();
+  const sampled = await thread.account();
+  // Taken when a call first went unanswered, because the case's own clean-up waits on the editor
+  // too, and a stall can be over by the time the failure gets here.
+  const stalled =
+    atStall === null || atStall === ''
+      ? ''
+      : `\n\nThe editor's main thread up to when it first did not answer:\n${atStall}`;
   return new Error(
-    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${stalled}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
     { cause: failure },
   );
 }

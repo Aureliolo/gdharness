@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
+import { describeStackSamples, sampleStacks } from './stack-samples.js';
 
 /** A quarter second, so a stall of a second or more shows as several samples. */
 const SAMPLE_MS = 250;
@@ -22,12 +23,22 @@ interface Sample {
  * A thread computing has its user or system time growing. One blocked names the kernel function it
  * waits in (do_wait is a wait for a child, futex_wait a lock). Major faults climbing are its memory
  * paged back in. A gap between two samples wider than the interval is this process not getting
- * the processor either. Elsewhere it samples nothing and accounts for nothing.
+ * the processor either.
+ *
+ * On Windows it samples the thread's call stack instead (stack-samples.ts), and the account ends
+ * with every thread's stack as it stands when the account is asked for, which for a stall still
+ * going on is the stall itself. Elsewhere it samples nothing and accounts for nothing.
  */
-export function sampleThread(pid: number | undefined): { account: () => string; stop: () => void } {
+export function sampleThread(pid: number | undefined): {
+  account: () => Promise<string>;
+  stop: () => void;
+} {
   const samples: Sample[] = [];
+  if (process.platform === 'win32' && pid !== undefined) {
+    return sampleWindowsThread(pid);
+  }
   if (process.platform !== 'linux' || pid === undefined) {
-    return { account: () => '', stop: () => undefined };
+    return { account: async () => await Promise.resolve(''), stop: () => undefined };
   }
   const started = Date.now();
   const timer = setInterval(() => {
@@ -42,10 +53,51 @@ export function sampleThread(pid: number | undefined): { account: () => string; 
   }, SAMPLE_MS);
   timer.unref();
   return {
-    account: () => describe(samples),
+    account: async () => await Promise.resolve(describe(samples)),
     stop: () => {
       clearInterval(timer);
     },
+  };
+}
+
+/** How a Windows account that has no stacks begins, so a fixture can tell a sampler that never ran. */
+export const NO_STACKS = 'no stacks:';
+
+/** How many frames of each sample the account shows, which reaches from a wait up past the save. */
+const STACK_DEPTH = 40;
+/** How long the account waits for the sampler to walk every thread. */
+const ALL_THREADS_MS = 10_000;
+
+function sampleWindowsThread(pid: number): { account: () => Promise<string>; stop: () => void } {
+  const stacks = sampleStacks(pid, SAMPLE_MS);
+  return {
+    account: async () => {
+      const why = stacks.why();
+      if (why !== null) {
+        return `${NO_STACKS} ${why}`;
+      }
+      const since = Date.now() - KEPT * SAMPLE_MS;
+      const kept = stacks.samples().filter((sample) => sample.at >= since);
+      if (kept.length === 0) {
+        return `${NO_STACKS} the sampler took none in the last ${String((KEPT * SAMPLE_MS) / 1000)}s`;
+      }
+      const threads = await stacks.allThreads(ALL_THREADS_MS);
+      const every = threads
+        .split(/\r?\n/)
+        .filter((line) => line !== '')
+        .map((line) => {
+          const [id, user, kernel, ...frames] = line.split('|');
+          const used = (Number(user) + Number(kernel)) / 10_000;
+          return `thread ${id ?? ''}, cpu ${used.toFixed(0)}ms: ${frames.slice(0, STACK_DEPTH).join(' < ')}`;
+        });
+      return [
+        describeStackSamples(kept, STACK_DEPTH, since),
+        '',
+        every.length === 0 ? 'Every thread: the sampler did not answer.' : 'Every thread now:',
+        ...every,
+      ].join('\n');
+    },
+    stop: stacks.stop,
   };
 }
 
