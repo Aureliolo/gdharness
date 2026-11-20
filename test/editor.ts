@@ -2702,12 +2702,26 @@ async function testAShaderReadSeesItsIncludeAsItIsNowInTheEditor({ call, project
     'shader_type canvas_item;\n#include "res://inc/lib.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n',
   );
   writeFileSync(include, 'float other() { return 1.0; }\n');
+  // A scene whose material uses the shader keeps the include alive in the editor, which is what
+  // leaves a stale copy of it in the resource cache.
+  writeFileSync(
+    join(project, 'inc', 'holder.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://inc/a.gdshader" id="1_shader"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]\nshader = ExtResource("1_shader")\n\n' +
+      '[node name="Holder" type="Sprite2D"]\nmaterial = SubResource("ShaderMaterial_1")\n',
+  );
   const read = async (): Promise<unknown> =>
     await call('resource_edit', { projectPath: project, op: 'read', resourcePath: 'res://inc/a.gdshader' });
   const messages = (answer: unknown): string[] =>
     asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message')));
   try {
     await call('editor_rescan', { projectPath: project });
+    await call('scene_node', {
+      projectPath: project,
+      scenePath: 'res://inc/holder.tscn',
+      op: 'get',
+      nodePath: '.',
+    });
     const missing = await read();
     assert.deepEqual(
       [get(missing, 'readBy'), get(missing, 'compiles')],
