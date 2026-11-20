@@ -2916,7 +2916,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       list: {
         effect: 'read',
         summary:
-          'the breakpoints held here under held, and with the editor connected the ones set in its gutter under setInEditor',
+          'the breakpoints held here under held, and with an editor of this project connected the ones set in its gutter under setInEditor',
         requires: [],
       },
     },

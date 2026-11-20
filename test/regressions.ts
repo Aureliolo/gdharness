@@ -7674,6 +7674,36 @@ async function testABreakpointSetBesideAnEditorReachesTheRunningGameOfItsProject
 }
 
 /**
+ * A breakpoint set on one project is not told to a running game of another, which has a script of
+ * the same name and would stop on it.
+ */
+async function testABreakpointIsNotToldToARunningGameOfAnotherProject(): Promise<void> {
+  await withAnEngineBesideAnEditorOfAnotherProject(async (stage) => {
+    const start = await stage.call('editor_run', {
+      projectPath: stage.editorProject,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 1000,
+    });
+    assert.equal(get(start.answer, 'started'), true, start.said);
+    await stage.openEditor();
+    const set = await stage.call('debug_breakpoint', {
+      projectPath: stage.otherProject,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 7,
+    });
+    assert.equal(get(set.answer, 'set'), true, set.said);
+    assert.equal(get(set.answer, 'runningGame'), undefined, set.said);
+    await delay(1500);
+    const stack = await stage.call('debug_state', { op: 'stack', projectPath: stage.editorProject });
+    assert.equal(stack.answer, null, `the game of the editor's project runs on: ${stack.said}`);
+    const stopped = await stage.call('editor_run', { op: 'stop', projectPath: stage.editorProject });
+    assert.equal(get(stopped.answer, 'stopped'), true, stopped.said);
+  });
+}
+
+/**
  * Held breakpoints belong to the project that set them. A list or a game start naming another
  * project answers that project's own note, in either order, and the first project's lines come
  * back when it is named again.
@@ -123633,6 +123663,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointOnTheEditorsProjectStillGoesToTheEditor,
   testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject,
   testABreakpointSetBesideAnEditorReachesTheRunningGameOfItsProject,
+  testABreakpointIsNotToldToARunningGameOfAnotherProject,
   testTheBreakpointNoteIsTheProjects,
   testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace,
   testABreakpointNoteWithBackslashesCannotLeaveTheProject,

@@ -7601,7 +7601,14 @@ class GodotServer {
     // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
     const held = session.breakpointsHeld();
     await writeBreakpointNoteAsync(project.value.path, held);
-    const kept = this.keptRun();
+    // Only a game of this project takes the line: another project's game would stop on its own
+    // script of the same name.
+    const running = this.keptRun();
+    const kept =
+      running === null ||
+      (typeof running.projectPath === 'string' && !isSameDirectory(running.projectPath, project.value.path))
+        ? null
+        : running;
     const told =
       kept === null
         ? null
