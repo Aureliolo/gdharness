@@ -2689,6 +2689,46 @@ async function testAShaderParameterIsUnsetInTheEditor({ call, refusal, project }
 }
 
 /**
+ * A shader read by an editor that has already compiled it compiles against its include as the file
+ * is now: a function the include gains makes the next read compile, and one it loses makes the
+ * next read fail with the engine's message, with no restart.
+ */
+async function testAShaderReadSeesItsIncludeAsItIsNowInTheEditor({ call, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'inc'), { recursive: true });
+  const shader = join(project, 'inc', 'a.gdshader');
+  const include = join(project, 'inc', 'lib.gdshaderinc');
+  writeFileSync(
+    shader,
+    'shader_type canvas_item;\n#include "res://inc/lib.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n',
+  );
+  writeFileSync(include, 'float other() { return 1.0; }\n');
+  const read = async (): Promise<unknown> =>
+    await call('resource_edit', { projectPath: project, op: 'read', resourcePath: 'res://inc/a.gdshader' });
+  const messages = (answer: unknown): string[] =>
+    asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message')));
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const missing = await read();
+    assert.deepEqual(
+      [get(missing, 'readBy'), get(missing, 'compiles')],
+      ['the editor', false],
+      text(missing),
+    );
+    assert.match(messages(missing).join('\n'), /No matching function found for: 'lit'/);
+    writeFileSync(include, 'float lit() { return 1.0; }\n');
+    const gained = await read();
+    assert.deepEqual([get(gained, 'compiles'), messages(gained)], [true, []], text(gained));
+    writeFileSync(include, 'float other() { return 1.0; }\n');
+    const lost = await read();
+    assert.equal(get(lost, 'compiles'), false, text(lost));
+    assert.match(messages(lost).join('\n'), /No matching function found for: 'lit'/);
+  } finally {
+    rmSync(join(project, 'inc'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * A rename in a scene open in a tab, whose player plays a library kept in a file of its own. The
  * editor holds that library for the tab, the same copy the write edits, so a write that is then
  * refused puts its tracks back, and one that goes through saves them with the scene.
@@ -9528,6 +9568,7 @@ async function main(): Promise<void> {
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
     ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
+    ['testAShaderReadSeesItsIncludeAsItIsNowInTheEditor', testAShaderReadSeesItsIncludeAsItIsNowInTheEditor],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [

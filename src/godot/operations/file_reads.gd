@@ -858,6 +858,8 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 	if headless:
 		printerr("[gdharness] aside")
 	var caught: GdhShaderErrors = GdhShaderErrors.new()
+	var set_aside: Dictionary = {}
+	_cache_includes_from_disk(path, set_aside)
 	OS.add_logger(caught)
 	var shader: Shader = (
 		ResourceLoader.load(path, "Shader", ResourceLoader.CACHE_MODE_IGNORE) as Shader
@@ -865,6 +867,13 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 	if shader != null:
 		var _uniforms: Array = shader.get_shader_uniform_list()
 	OS.remove_logger(caught)
+	# Back in the cache before anything else reads it, so the editor keeps the copies it holds.
+	for included: String in set_aside:
+		var pair: Array = set_aside[included]
+		var held: ShaderInclude = pair[0]
+		var fresh: ShaderInclude = pair[1]
+		fresh.resource_path = ""
+		held.take_over_path(included)
 	if headless:
 		printerr("[gdharness] resumed")
 	# A headless engine's dummy renderer compiles nothing without a shader type, and says so as an
@@ -881,6 +890,42 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 			}
 		)
 	return caught.raised
+
+
+## Puts the file's own copy of each include of [param file], nested ones too, in the resource cache.
+## [param set_aside] keeps the copy that was there and the file's, by path. The shader compiler
+## takes
+## an include from the cache, so one the editor loaded before the file changed compiled the shader
+## against its old text. Reloading it in place would drop edits the editor holds unsaved.
+static func _cache_includes_from_disk(
+	file: String, set_aside: Dictionary, seen: Dictionary = {}
+) -> void:
+	var finder: RegEx = RegEx.create_from_string('(?m)^\\s*#\\s*include\\s+"([^"\\n]+)"')
+	for found: RegExMatch in finder.search_all(FileAccess.get_file_as_string(file)):
+		var named: String = found.get_string(1)
+		var included: String = named
+		if not named.begins_with("res://"):
+			included = file.get_base_dir().path_join(named).simplify_path()
+		if seen.has(included) or not FileAccess.file_exists(included):
+			continue
+		seen[included] = true
+		if ResourceLoader.has_cached(included):
+			var held: ShaderInclude = (
+				ResourceLoader.load(included, "ShaderInclude", ResourceLoader.CACHE_MODE_REUSE)
+				as ShaderInclude
+			)
+			var current: ShaderInclude = (
+				ResourceLoader.load(included, "ShaderInclude", ResourceLoader.CACHE_MODE_IGNORE)
+				as ShaderInclude
+			)
+			if held != null and current != null:
+				set_aside[included] = [held, current]
+				# A load that skips the cache still names its path, which makes take_over_path a
+				# no-op, so both copies give the path up first.
+				held.resource_path = ""
+				current.resource_path = ""
+				current.take_over_path(included)
+		_cache_includes_from_disk(included, set_aside, seen)
 
 
 ## Whether [param code] opens with its shader_type statement, past any comments, as the shader
