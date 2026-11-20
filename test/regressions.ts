@@ -14096,21 +14096,32 @@ async function testAFolderNamedProjectGodotIsNoProject(): Promise<void> {
 }
 
 /**
- * A wait given neither whole set of what it needs is refused with both, in the words the op line
- * prints, and until says how to leave nodePath out. signal keeps the sentence it has always had.
+ * A wait given neither nodePath nor says, or a signal wait given neither its node and signal nor a
+ * watch, is refused before any game is asked, and until says how to leave nodePath out. A wait that
+ * names its node goes on to the game, which judges the property and value.
  */
 async function testAWaitMissingWhatItNeedsIsRefusedWithTheWayOut(): Promise<void> {
   await withStdioServer(async (call) => {
     for (const until of [
-      { op: 'until', nodePath: '/root/Main', property: 'hp' },
-      { op: 'until', nodePath: '/root/Main', value: 1 },
       { op: 'until', property: 'hp', value: 1 },
+      { op: 'until' },
+      { op: 'until', says: '   ' },
     ]) {
       assert.equal(
         await call('runtime_wait', until),
-        'runtime_wait until needs nodePath, property and value, or says.' +
+        'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.' +
           'Next:\n- With says instead of property, nodePath can be left out and the whole game is searched',
         JSON.stringify(until),
+      );
+    }
+    for (const named of [
+      { op: 'until', nodePath: '/root/Main', property: 'hp' },
+      { op: 'until', nodePath: '/root/Main', says: '' },
+    ]) {
+      assert.doesNotMatch(
+        await call('runtime_wait', named),
+        /^runtime_wait until needs/,
+        JSON.stringify(named),
       );
     }
     for (const signal of [
@@ -15907,7 +15918,7 @@ const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegE
   ['scene_signal', undefined, /Headless, it updates \.godot's class list/],
   ['resource_edit', undefined, /Headless, it updates \.godot's class list/],
   ['scene_create', undefined, /create makes any missing folder of the path\./],
-  ['scene_signal', undefined, /but refused with binds or unbinds\./],
+  ['scene_signal', undefined, /A missing method is refused with binds or unbinds\./],
   ['scene_signal', undefined, /A write puts back each connection the engine dropped on load/],
   ['project_settings', 'parentBusIndex', /every later bus moves one along\./],
   [
@@ -15927,7 +15938,6 @@ const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegE
   ],
   ['project_settings', 'enabled', /whether the effect is on, a kept one too\./],
   ['project_export', 'exportFilter', /leave out a file named only in a string or by class_name\./],
-  ['project_export', 'options', /An enum takes the name the dialog shows\./],
   ['project_export', undefined, /Removing the runnable preset makes the next of its platform runnable\./],
   [
     'project_import',
@@ -15967,7 +15977,7 @@ const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegE
   [
     'runtime_inspect',
     'property',
-    /An engine one takes literal arguments, 'get_theme_constant\("separation"\)'/,
+    /calls an engine method marked as only reading, with literal arguments, 'get_theme_constant\("separation"\)'/,
   ],
   [
     'runtime_inspect',
@@ -15992,9 +16002,88 @@ const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegE
     /remove[^:]*: remove a breakpoint, whoever set it, the editor's gutter included/,
   ],
   ['debug_state', undefined, /evaluate[^:]*: [^;]*the first loading every global class/],
+  [
+    'runtime_inspect',
+    'property',
+    /It also calls a game method taking no arguments unless declared -> void, even one that changes the game, and runtime_wait until calls it every frame\./,
+  ],
+  [
+    'editor_run',
+    'visible',
+    /By default on Windows it goes on a desktop of its own.*On Linux and macOS the window shows either way\./,
+  ],
+  [
+    'editor_run',
+    'savesIn',
+    /as Godot\/app_userdata\/<project>\. macOS ignores it, so the run writes the player's own saves\./,
+  ],
+  [
+    'scene_animation',
+    'track.update',
+    /continuous for a whole float, vector, colour or transform property, else discrete, position:x too\./,
+  ],
+  ['scene_node', 'index', /Default last, or right after the original for a copy under its parent\./],
+  [
+    'resource_edit',
+    undefined,
+    /A relative path stays as written in text, tooltip_text, placeholder_text, resource_name, node names, groups, ; comment lines and \.import files\. A GDScript comment stays whole\./,
+  ],
+  ['script_edit', 'newScriptPath', /The paths naming it are rewritten as resource_edit move rewrites them\./],
+  [
+    'editor_output',
+    undefined,
+    /clean is absent when the console was lost, or when a game the editor played left no runtime report \(errorsUnread true\)\./,
+  ],
+  [
+    'scene_node',
+    undefined,
+    /bake_navigation[^:]*: [^;]*into the scene or the navigation resource's own file, which every scene using it shares/,
+  ],
+  ['scene_node', undefined, /That saves an animation library kept in a \.tres of its own\./],
+  ['scene_node', 'unset', /An editor's next save writes an unset shader parameter back\./],
+  [
+    'project_export',
+    undefined,
+    /set_preset writes one to \.godot\/export_credentials\.cfg, and remove_preset takes the preset's out of it\./,
+  ],
+  [
+    'project_settings',
+    'newBusName',
+    /A script naming it in a string is left as it is and listed under namedInScripts\./,
+  ],
+  [
+    'scene_animation',
+    'track.method',
+    /A missing method or args that do not fit are written too, with methodFound or argumentsFit false\./,
+  ],
+  [
+    'scene_signal',
+    undefined,
+    /A connect to a method the target lacks, or one that cannot take what the signal passes, is written, with methodFound or argumentsFit false\./,
+  ],
+  [
+    'script_edit',
+    'modifications.items.exportGroup',
+    /or "" for none\. Without it, an export joins the group open below the last variable\./,
+  ],
+  ['project_export', 'options', /An enum takes the name the dialog shows, or its number\./],
+  [
+    'editor_capture',
+    'inline',
+    /Default true, as a JPEG when smaller than the PNG and nothing is transparent\./,
+  ],
+  [
+    'runtime_capture',
+    'inline',
+    /Default true, as a JPEG when smaller than the PNG and nothing is transparent\./,
+  ],
 ];
 
-/** Each hazard and working form of SAID_BEFORE_THE_CALL is in the tool list as tools/list sends it. */
+/**
+ * Each hazard and working form of SAID_BEFORE_THE_CALL is in the tool list as tools/list sends it.
+ * An argument written "track.update" is a property of an object argument, and "items" steps into
+ * an array argument's items.
+ */
 async function testTheHazardsAndWorkingFormsAreInTheToolList(): Promise<void> {
   await withStdioServer(async (_call, request) => {
     const listed = asArray(get((await request('tools/list', {}, 30_000)).result, 'tools'));
@@ -16003,7 +16092,14 @@ async function testTheHazardsAndWorkingFormsAreInTheToolList(): Promise<void> {
       assert.ok(entry, `${tool} is in tools/list`);
       return argument === undefined
         ? text(get(entry, 'description'))
-        : text(get(entry, 'inputSchema', 'properties', argument, 'description'));
+        : text(
+            get(
+              entry,
+              'inputSchema',
+              ...argument.split('.').flatMap((name) => (name === 'items' ? [name] : ['properties', name])),
+              'description',
+            ),
+          );
     };
     for (const [tool, argument, form] of SAID_BEFORE_THE_CALL) {
       assert.match(said(tool, argument), form, `${tool}${argument === undefined ? '' : `.${argument}`}`);
@@ -40503,7 +40599,7 @@ function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
   // An op that needs one of two sets says both, so its arguments do not read as all optional.
   for (const [op, needs, takes] of [
     ['signal', '`nodePath` and `signal`, or `watch`', '`timeoutMs`'],
-    ['until', '`nodePath`, `property` and `value`, or `says`', '`compare`, `includeHidden` and `timeoutMs`'],
+    ['until', '`nodePath`, or `says`', '`property`, `value`, `compare`, `includeHidden` and `timeoutMs`'],
   ]) {
     assert.ok(
       section('runtime_wait').some((line) =>
@@ -49187,7 +49283,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
     async ({ server, project }) => {
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Control\n\nvar never: int = 0\nvar week: int = 2\nvar date: Label = Label.new()\n\n\n' +
+        'extends Control\n\nvar never: int = 0\nvar date: Label = Label.new()\n\n\n' +
           'func _ready() -> void:\n' +
           '\tvar small: Control = Control.new()\n\tsmall.name = "Small"\n\tadd_child(small)\n' +
           '\tvar large: Control = Control.new()\n\tlarge.name = "Large"\n\tadd_child(large)\n' +
@@ -49200,7 +49296,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
           '\t\tline.add_child(ColorRect.new())\n' +
           '\tdate.text = "Day 16"\n\tsmall.add_child(date)\n\n\n' +
           'func turn_the_day() -> void:\n\tdate.text = "Day 17"\n\n\n' +
-          'func turn_the_week() -> void:\n\tweek += 1\n\tdate.text = "Week %d" % week\n',
+          'func turn_the_week() -> void:\n\tdate.text = "Week 3"\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -49318,33 +49414,17 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       // to a frame, so none of them holds a frame the way the last look of the wait above did, which
       // is read whole. Read whole, every paced look held a frame that long, and a game logging its
       // own frame times saw a long frame every few dozen that came and went with the wait.
-      // The hold is wall time, so this takes the middle of three waits' longest holds. One runner
-      // pause is absorbed: on the macOS runner one slice of a lone wait held its frame for 37.6ms, a
-      // pause no node's reading takes. Two waits holding a frame for the whole look still fail.
-      const seasons: unknown[] = [];
-      for (let week = 3; week <= 5; week += 1) {
-        const [season] = await Promise.all([
-          call('runtime_wait', {
-            op: 'until',
-            nodePath: '/root/Main',
-            says: `Week ${week}`,
-            timeoutMs: 10_000,
-          }),
-          delay(500).then(() =>
-            call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_week' }),
-          ),
-        ]);
-        assert.equal(get(season, 'met'), true, JSON.stringify(season));
-        seasons.push(season);
-      }
+      const [season] = await Promise.all([
+        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Week 3', timeoutMs: 10_000 }),
+        delay(500).then(() =>
+          call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_week' }),
+        ),
+      ]);
       const whole = asNumber(get(outlasted, 'longest_hold_ms'), JSON.stringify(outlasted));
-      const holds = seasons
-        .map((season) => asNumber(get(season, 'longest_hold_ms'), JSON.stringify(season)))
-        .toSorted((a, b) => a - b);
-      const sliced = holds[1] ?? 0;
+      const sliced = asNumber(get(season, 'longest_hold_ms'), JSON.stringify(season));
       assert.ok(
-        sliced > 0 && sliced < whole / 3,
-        `the paced looks held a frame for ${sliced}ms in the middle of three waits, against ${whole}ms for a look read whole: ${JSON.stringify({ seasons, outlasted })}`,
+        get(season, 'met') === true && sliced > 0 && sliced < whole / 3,
+        `the paced looks held a frame for at most ${sliced}ms, against ${whole}ms for a look read whole: ${JSON.stringify({ season, outlasted })}`,
       );
       await call('editor_run', { op: 'stop' });
     },
@@ -58412,7 +58492,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
         );
         assert.equal(
           unnamed,
-          'runtime_wait until needs nodePath, property and value, or says.' +
+          'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.' +
             'Next:\n- With says instead of property, nodePath can be left out and the whole game is searched',
         );
         const absent = await call('runtime_inspect', { op: 'find', says: 'GLOW\\nshines 4' });

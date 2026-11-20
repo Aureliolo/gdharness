@@ -269,6 +269,9 @@ const SCRIPT_PATH: JsonSchema = {
   description: 'Script file inside the project, such as "scripts/player.gd".',
 };
 const RESOURCE_FILE = 'File inside the project, such as "sprites/hero.png" or "materials/steel.tres".';
+/** What a move of a file leaves unrewritten, said where resource_edit moves one. */
+const PATHS_LEFT =
+  'A relative path stays as written in text, tooltip_text, placeholder_text, resource_name, node names, groups, ; comment lines and .import files. A GDScript comment stays whole.';
 /** The platforms project_export add_preset takes, by the names export_presets.cfg gives them. */
 export const EXPORT_PLATFORMS: readonly string[] = [
   'Windows Desktop',
@@ -325,7 +328,7 @@ const ANIMATION_TRACK: JsonSchema = {
       type: 'string',
       enum: ['continuous', 'discrete', 'capture'],
       description:
-        'Default: as the RESET track, else continuous for a float, vector, colour or transform, else discrete.',
+        'Default: as the RESET track, else continuous for a whole float, vector, colour or transform property, else discrete, position:x too.',
     },
     interpolation: {
       type: 'string',
@@ -338,7 +341,8 @@ const ANIMATION_TRACK: JsonSchema = {
     },
     method: {
       type: 'string',
-      description: 'Method tracks: the method to call. remove_track: only the keys calling it.',
+      description:
+        'Method tracks: the method to call. A missing method or args that do not fit are written too, with methodFound or argumentsFit false. remove_track: only the keys calling it.',
     },
     keyframes: {
       type: 'array',
@@ -397,7 +401,8 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       },
       exportGroup: {
         type: 'string',
-        description: 'Variables: the inspector group, such as "Stats/Loot".',
+        description:
+          'Variables: the inspector group, such as "Stats/Loot", or "" for none. Without it, an export joins the group open below the last variable.',
       },
       isOnready: { type: 'boolean' },
       isStatic: { type: 'boolean' },
@@ -524,7 +529,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_settings',
     title: 'Project settings',
     description:
-      'Reads or writes project.godot (settings, autoloads, the main scene, input actions and plugins) and the audio bus layout. A write with an editor open on the project goes through the editor.',
+      'project.godot and the audio bus layout. A write with an editor open on the project goes through the editor.',
     answer: [
       "get answers exists, true for any setting the engine knows. at_default is true when the value is the engine's own default and so has no line in project.godot. default_value is that default, given when the value is not at it. overrides is the value each feature's override holds. Each setting under prefix carries at_default too, and default_value when it is not at it.",
       "get of a setting with no engine default, such as an input action the project added, has no at_default. An override answers override_of, its base setting. One project.godot does not set answers exists false with holds, the base setting's value. A setting an override file sets is answered with the project's value and overridden_in, the file and the value a run reads.",
@@ -609,7 +614,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['rename_audio_bus'],
         description:
-          'The name the bus takes. Buses sending to it follow, and every scene and resource line giving a node the old bus is rewritten.',
+          'The name the bus takes. Buses sending to it follow, and every scene and resource line giving a node the old bus is rewritten. A script naming it in a string is left as it is and listed under namedInScripts.',
       },
       sendTo: {
         type: 'string',
@@ -656,7 +661,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       // Neither is required because either will do, and which one is missing is a better refusal
       // than a list of both: the engine answers that, since it is what reads them.
       get: { effect: 'read', summary: 'read one setting, or every setting under prefix', requires: [] },
-      set: { effect: 'destructive', summary: 'write one setting', requires: ['setting', 'value'] },
+      set: { effect: 'destructive', summary: '', requires: ['setting', 'value'] },
       unset: {
         effect: 'destructive',
         summary: 'take a setting out, so the engine default holds',
@@ -664,13 +669,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       add_autoload: {
         effect: 'additive',
-        summary: 'register an autoload singleton',
+        summary: '',
         requires: ['name', 'path'],
       },
       remove_autoload: { effect: 'destructive', summary: '', requires: ['name'] },
       set_main_scene: {
         effect: 'destructive',
-        summary: 'choose the scene the game starts in',
+        summary: '',
         requires: ['scenePath'],
       },
       add_input_action: {
@@ -685,7 +690,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       enable_plugin: { effect: 'destructive', summary: '', requires: ['pluginName'] },
       disable_plugin: { effect: 'destructive', summary: '', requires: ['pluginName'] },
-      add_audio_bus: { effect: 'additive', summary: 'add a bus with that name', requires: ['busName'] },
+      add_audio_bus: { effect: 'additive', summary: '', requires: ['busName'] },
       remove_audio_bus: {
         effect: 'destructive',
         summary: 'remove a bus, sending what sent to it on to where it sent',
@@ -708,7 +713,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       set_audio_bus_send: {
         effect: 'destructive',
-        summary: 'choose the bus a bus sends to',
+        summary: '',
         requires: ['busIndex', 'sendTo'],
       },
     },
@@ -718,7 +723,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Search the project',
     effect: 'read',
     description:
-      'Searches text or a regular expression across project files and answers file paths with line numbers, one entry per matching line. It skips dot names, addons gdharness installed, and folders holding a .gdignore or their own project.godot.',
+      'Searches project files for text or a regular expression, one entry per matching line. It skips dot names, addons gdharness installed, and folders holding a .gdignore or their own project.godot.',
     answer:
       'total_matches counts the matching lines, however often each holds the query. Past maxResults truncated is true, and the summary still counts the whole search. A line cut to the 400 characters around its first match carries shownFrom, the column they start at. Its lineLength is the length of the whole line. not_searched names each skipped folder or link the search passed. Among them are a link out of the project and one to a folder the search is inside. A path naming a skipped folder is searched as asked, and note says the whole-project search steps over it. When no file searched has one of fileTypes, note names the extensions there are.',
     parameters: {
@@ -843,23 +848,23 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       status: {
         effect: 'read',
-        summary: 'which resources are outdated or failed, or one with resourcePath, each with its reason',
+        summary: 'which resources are outdated or failed, and why',
         requires: [],
       },
       options: { effect: 'read', summary: 'the import options of one resource', requires: ['resourcePath'] },
       set_options: {
         effect: 'destructive',
-        summary: 'change import options or the importer in the sidecar, then reimport that resource',
+        summary: 'change import options or the importer, then reimport',
         requires: ['resourcePath'],
       },
       reimport: {
         effect: 'destructive',
-        summary: 'reimport what status says is outdated or failed, or one resource with resourcePath',
+        summary: 'what status says is outdated or failed, or resourcePath',
         requires: [],
       },
       uid: {
         effect: 'read',
-        summary: 'the UID of one file and where it was read, null when it has none',
+        summary: 'the UID of one file, or null',
         requires: ['resourcePath'],
       },
       refresh_uids: {
@@ -878,7 +883,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_export',
     title: 'Export',
     description:
-      'A secret option is never answered. Removing the runnable preset makes the next of its platform runnable.',
+      "A secret option is never answered. set_preset writes one to .godot/export_credentials.cfg, and remove_preset takes the preset's out of it. Removing the runnable preset makes the next of its platform runnable.",
     answer:
       "add_preset writes the keys the editor's Project > Export writes for a new preset. It writes every option a new preset of its platform shows, at its default. It makes it the platform's runnable preset when the platform has none. set_preset answers under changed what each value held before and holds now, and under unchanged what already held the value given. saved is false when nothing changed, and nothing is written when any of it is refused. Option names are the exporter's own, as the Export dialog's Options tab shows them, such as binary_format/embed_pck. An enum takes the name the dialog shows or its number. Some options show only while another is on, such as codesign/identity behind codesign/enable. Such an option is taken when the preset has that one on or the same call turns it on. A secret option, such as a signing password, is written to .godot/export_credentials.cfg, where the editor keeps secrets out of the committed file. A file an option names that is not there is written and listed under missing_files, or for a secret under secretsNamingNoFile. " +
       "exportFilter's dependencies are what the engine counts as them. A file named only in a string, such as a scene path in an exported property, is left out of the export. So is a script reached only by its class_name, though project_dependencies lists both. " +
@@ -950,7 +955,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'object',
         ops: ['set_preset'],
         description:
-          'Platform options by name, such as {"binary_format/embed_pck": true}. An enum takes the name the dialog shows.',
+          'Platform options by name, such as {"binary_format/embed_pck": true}. An enum takes the name the dialog shows, or its number.',
       },
     },
     requires: ['projectPath'],
@@ -984,7 +989,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     effect: 'additive',
     changes: 'Writes under `.godot` and adds `.uid` files. Changes no script or scene.',
     description:
-      "Runs the project's gdUnit4 suites and answers with every case that did not pass, where it is and what its assertion said. Needs gdUnit4 under addons/gdUnit4. It first updates .godot's class list and imports what is behind. The run's user:// is its own and is deleted after, but on macOS it is the player's. A suite needing a window shows one on Linux and macOS.",
+      "Runs the project's gdUnit4 suites and answers with every case that did not pass. Needs gdUnit4 under addons/gdUnit4. It first updates .godot's class list and imports what is behind. The run's user:// is its own and is deleted after, but on macOS it is the player's. A suite needing a window shows one on Linux and macOS.",
     answer: [
       'passed is the verdict to read. failed has one entry per case that did not pass, with its first report as message and detail. failures counts the cases that failed an assertion, and errors the cases that hit an error. A case that did both counts in both. suites lists only the suites with something to say, and suitesPassed counts the rest.',
       'A case in failed with more than one report has them all under reports, in the order the case met them. A case can fail several assertions and then stop on a runtime error, which makes its status error. Identical reports fold into one with times. At most twenty different ones are kept, and reportsLeftOut counts the rest. Past a million characters the largest cases keep only their first message (failedWithoutDetail).',
@@ -1061,7 +1066,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_create',
     title: 'Create or save a scene',
-    description: `Creates a scene file where none is, saves one, or saves a copy under a new path. create makes any missing folder of the path. ${CLASSES_REBUILT}`,
+    description: `Scene files. create makes any missing folder of the path. ${CLASSES_REBUILT}`,
     answer:
       `${WITHOUT_AN_EDITOR} ${ALSO_SAVED} ` +
       "create names a folder it made under madeFolder. It names the root as scene_node get names a node. rootNodeType is its engine class, scriptClass its class_name, and script the script it carries. A root made from a class_name is made as that script's base with the script attached. With inherits, the root is an instance of that scene, so changes there reach it. The answer names the scene under inherits. A save of a scene open in the editor saves the editor's copy, unsaved changes included. save with from editor opens a closed scene in the editor, and gives its @tool scripts and layout their frames. It then saves and closes it, and says so under openedFirst, or stillOpen when it could not close it.",
@@ -1114,7 +1119,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'scene_tree',
     title: 'Scene tree',
     effect: 'read',
-    description: `The nodes of a scene file: names, classes and hierarchy, with properties when asked. A node instancing another scene names it under instanceOf. Needs no editor. For the nodes of a running game, runtime_inspect tree. ${CLASSES_REBUILT}`,
+    description: `The nodes of a scene file: names, classes and hierarchy, with properties when asked. Needs no editor. For the nodes of a running game, runtime_inspect tree. ${CLASSES_REBUILT}`,
     answer:
       'type is the engine class, and a node whose script declares a class_name names it under scriptClass. The nodes listed under an instance come from its file. Its editableChildren says whether this scene, or one it inherits, keeps values of its own for them. One saved as a placeholder answers placeholder true, with InstancePlaceholder as its type. The root of an inheriting scene names the scene under inherits. Every node that scene or one further down makes names its file under inheritedFrom. A node in any group answers groups, sorted, from this file and every scene it comes from. The engine stops reading at a node instancing a scene it cannot load, and notRead lists that node and every one after it. A node at the last level that has children says how many under childrenNotListed. With properties, defaultsLeftOut counts the defaults left out, and on a node another scene makes setHere names the properties this file sets. A TileMapLayer or TileMap whose cells the file sets answers cellCount and cellsListedBy, the scene_node get call that lists them. An editor serving the project answers and says whether it holds unsaved changes to the scene. With none, a headless engine reads the file without making its nodes, so no script of theirs runs.',
     parameters: {
@@ -1140,7 +1145,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_node',
     title: 'Scene nodes',
-    description: `One node in a scene file. A set with properties {"name": "Boss"} renames a node. A rename or a reparent rewrites the paths naming the node, here and in the scenes instancing or inheriting this one. A delete rewrites none. ${CLASSES_REBUILT}`,
+    description: `One node in a scene file. A set with properties {"name": "Boss"} renames a node. A rename or a reparent rewrites the paths naming the node, here and in the scenes instancing or inheriting this one. That saves an animation library kept in a .tres of its own. A delete rewrites none. ${CLASSES_REBUILT}`,
     answer: [
       WITHOUT_AN_EDITOR,
       "get answers nodeType, the node's engine class, with scriptClass when its script declares a class_name. nodePath is its path from the root however it was named, and setHere the properties this scene's own file sets on it. valuesFrom is the scene every value outside setHere comes from, when another scene makes the node. An instance of another scene also answers instanceOf, editableChildren and placeholder. groupsHere is the groups this file puts it in, when another scene puts it in others.",
@@ -1208,7 +1213,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         items: { type: 'string' },
         ops: ['set'],
         description:
-          'Properties to remove from this scene\'s file, such as "modulate". Each then takes the value its source gives.',
+          'Properties to remove from this scene\'s file, such as "modulate". Each then takes the value its source gives. An editor\'s next save writes an unset shader parameter back.',
       },
       editableChildren: {
         type: 'boolean',
@@ -1253,7 +1258,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 0,
         ops: ['add', 'duplicate', 'reparent'],
-        description: "Where the node goes among the parent's children, 0 for first. Default last.",
+        description:
+          "Where the node goes among the parent's children, 0 for first. Default last, or right after the original for a copy under its parent.",
       },
       includeDefaults: {
         type: 'boolean',
@@ -1312,7 +1318,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       bake_navigation: {
         effect: 'destructive',
-        summary: 'bake a NavigationRegion2D or 3D from the geometry under it',
+        summary:
+          "bake a NavigationRegion2D or 3D from the geometry under it, into the scene or the navigation resource's own file, which every scene using it shares",
         requires: ['nodePath'],
       },
     },
@@ -1320,7 +1327,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_signal',
     title: 'Scene signals',
-    description: `Signal connections in a scene file. A connect to a method the target lacks is written and answers methodFound false, but refused with binds or unbinds. A write puts back each connection the engine dropped on load, under unmadeConnections. ${CLASSES_REBUILT}`,
+    description: `Signal connections in a scene file. A connect to a method the target lacks, or one that cannot take what the signal passes, is written, with methodFound or argumentsFit false. A missing method is refused with binds or unbinds. A write puts back each connection the engine dropped on load, under unmadeConnections. ${CLASSES_REBUILT}`,
     answer:
       `${WITHOUT_AN_EDITOR} ${ALSO_SAVED} ` +
       'Each connection answers its flags as the number and as flagNames, binds and unbinds only when it has them. persist is on every connection, since a scene saves no other kind, and is added to flags either way. A read can name inherited, 32, on a connection an instanced scene makes. A connect of a pair already connected says alreadyConnected, and keeps what the call does not give. flagsBefore, bindsBefore and unbindsBefore show what it changed. Until a method a connect names exists, the signal fails each time it is emitted. A method may not take what the signal passes, with its unbinds, binds and appended source. Such a connection is written too, and answers argumentsFit false with misfit saying why. list gives each connection its methodFound, and misfit when it has one. It marks editable false on a connection a scene this one instances or inherits makes, and names that scene under madeIn. A file can hold a connection the engine loads the scene without. It binds to a missing method, or its source no longer declares its signal, or its node is gone. Any tool writing the scene, this one included, puts each back as the file held it and names it in its answer under unmadeConnections.',
@@ -1368,12 +1375,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       connect: {
         effect: 'additive',
-        summary: 'connect a signal to a method',
+        summary: '',
         requires: ['sourceNodePath', 'signalName', 'targetNodePath', 'methodName'],
       },
       disconnect: {
         effect: 'destructive',
-        summary: 'remove a connection',
+        summary: '',
         requires: ['sourceNodePath', 'signalName', 'targetNodePath', 'methodName'],
       },
       list: { effect: 'read', summary: 'every connection in the scene', requires: [] },
@@ -1535,12 +1542,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       connect_states: {
         effect: 'additive',
-        summary: 'a transition between two states',
+        summary: '',
         requires: ['animTreePath', 'fromState', 'toState'],
       },
       disconnect_states: {
         effect: 'destructive',
-        summary: 'a transition',
+        summary: '',
         requires: ['animTreePath', 'fromState', 'toState'],
       },
     },
@@ -1553,7 +1560,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'script_edit',
     title: 'Edit scripts',
     description:
-      "Creates a GDScript file, adds functions, variables, signals, constants and enums to one, or renames a class or member across the project. To change an existing line, edit the file's text. Read a rename's leftAlone before calling the rename done. create writes a .uid and puts its class_name in the class list, and an open editor then scans and reloads the changed scripts. ok false after a write leaves the files changed. A rename's lists past 300 lines go to a file under .godot.",
+      "GDScript files. To change an existing line, edit the file's text. Read a rename's leftAlone before calling the rename done. create writes a .uid and puts its class_name in the class list, and an open editor then scans and reloads the changed scripts. ok false after a write leaves the files changed. A rename's lists past 300 lines go to a file under .godot.",
     answer: [
       'Each write is loaded and answered with parses. modify makes every addition or none, and rename writes every file or none.',
       "create answers the extends and class_name the engine read (class_name null for a script declaring none). It writes the .uid beside the script and answers it under uid. A class_name is put in the project's class list, and registered says whether it is there. An editor serving the project scans for it (editorRescanned).",
@@ -1610,7 +1617,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['rename'],
         description:
-          'Also move the declaring script here, with its .uid. The paths that name it are rewritten.',
+          'Also move the declaring script here, with its .uid. The paths naming it are rewritten as resource_edit move rewrites them.',
       },
       preview: {
         type: 'boolean',
@@ -1622,10 +1629,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'scriptPath'],
     operations: {
       create: { effect: 'additive', summary: 'a new script file', requires: [] },
-      modify: { effect: 'additive', summary: 'add to an existing script', requires: ['modifications'] },
+      modify: {
+        effect: 'additive',
+        summary: 'add functions, variables, signals, constants or enums to an existing script',
+        requires: ['modifications'],
+      },
       rename: {
         effect: 'destructive',
-        summary: 'rename a class or a member wherever the engine uses it, across the project',
+        summary: 'rename a class or a member wherever the engine uses it',
         requires: ['symbol', 'newName'],
       },
     },
@@ -1634,7 +1645,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'script_info',
     title: 'Script info',
     description:
-      "What a script contains: its structure from the file, or symbols, completions and hover text from the editor's language server. It reads .gd files only. For where a class, member or signal is used, project_search.",
+      'What a script contains. It reads .gd files only. For where a class, member or signal is used, project_search.',
     answer:
       'structure gives each parameter\'s default as the source text after its =, so = null reads "null". A parameter with none gives null. Static variables are marked is_static. A variable written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does. An export in an inspector group names it under group, as "Stats/Loot" for a subgroup. Each enum has its members under values and their numbers under numbers, counted as the engine counts and left out from one given an expression. inner_classes gives each with its name, line and extends, and its own members in the same fields. It also answers class_name, extends, is_abstract and line_count. dependencies are the paths the script loads or preloads as written, by a constant too, and the paths it or an inner class extends by. Then come the scripts declaring each project class_name its code uses, which classes_used names with the class. autoloads_used names each autoload the code uses, with its script. A member or inner class with a ## comment directly above it carries the text as doc. The script\'s own comment above class_name or extends comes back as class_doc. With includeInherited each inherited member carries inherited_from, the file declaring it. The answer gains inherits_from, the chain walked, and a name the script overrides is listed at both its lines. ' +
       'symbols gives each symbol its kind, the line and column of its name, and lastLine, the end of its declaration. detail is the language server\'s own text, which writes a default through the engine (Callable() as "null::null") and leaves out a signal\'s argument types. completion is narrowed to the part of a name written before the position. symbols, completion and hover name under unseenByEditor each project class the editor cannot see yet, with unseenNote. The language server reads such a class as nothing. A completion after self. in a script extending one comes back empty. editor_rescan brings it in.',
@@ -1675,10 +1686,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       completion: {
         effect: 'read',
-        summary: 'completions at a position, at most 100',
+        summary: "the language server's completions at a position, at most 100",
         requires: ['line', 'character'],
       },
-      hover: { effect: 'read', summary: 'hover text at a position', requires: ['line', 'character'] },
+      hover: {
+        effect: 'read',
+        summary: "the language server's hover text at a position",
+        requires: ['line', 'character'],
+      },
     },
     defaultOperation: 'structure',
   },
@@ -1709,7 +1724,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'resource_edit',
     title: 'Edit resources',
-    description: `Resource files. create makes a .tres of any engine resource class, a Material class for a material. read answers in the form modify takes. A Theme item is a property named like \`Button/colors/font_color\`. move and read need no editor. A modify drops the lines read lists under notLoaded. move with no editor writes .uid and .import files, and leaves paths in .scn and .res files (leftAlone). ${CLASSES_REBUILT}`,
+    description: `Resource files. create makes a .tres of any engine resource class, a Material class for a material. read answers in the form modify takes. A Theme item is a property named like \`Button/colors/font_color\`. move and read need no editor. A modify drops the lines read lists under notLoaded. move with no editor writes .uid and .import files, and leaves paths in .scn and .res files (leftAlone). ${PATHS_LEFT} ${CLASSES_REBUILT}`,
     answer: [
       WITHOUT_AN_EDITOR,
       'create and modify answer each property given under properties as the file holds it once saved. modify answers each one unset under unset. A property given its default is left out of a .tres file and named under notStored. alsoChanged names what the engine changed in step with a given property. alsoSaved names what the save changed, added or dropped in the main resource, as {property, was, saved}.',
@@ -1810,7 +1825,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: ['projectPath', 'resourcePath'],
     operations: {
       read: { effect: 'read', summary: 'the properties a resource file sets', requires: [] },
-      create: { effect: 'destructive', summary: 'a new resource of any class', requires: ['resourceType'] },
+      create: { effect: 'destructive', summary: '', requires: ['resourceType'] },
       modify: {
         effect: 'destructive',
         summary: 'set or unset properties on an existing resource',
@@ -1839,7 +1854,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       move: {
         effect: 'destructive',
-        summary: 'move or rename a file or a directory, and every path in the project naming it',
+        summary: 'move or rename a file or a directory, and the paths in the project naming it',
         requires: ['newPath'],
       },
     },
@@ -1883,7 +1898,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       open: {
         effect: 'additive',
-        summary: 'open the editor on a project, answering once its process has started, before it connects',
+        summary: 'open the editor on a project, answering before it connects',
         requires: ['projectPath'],
       },
       restart: {
@@ -1893,7 +1908,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       close: {
         effect: 'destructive',
-        summary: 'save and quit the connected editor, and wait for it to go',
+        summary: 'quit the connected editor and wait for it to go',
         requires: [],
       },
       rebind: {
@@ -1952,7 +1967,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       visible: {
         type: 'boolean',
         ops: ['start'],
-        description: `Show the window on the desktop in use. By default it goes on a desktop of its own, with --disable-vsync and --max-fps ${String(HIDDEN_WINDOW_FPS)}.`,
+        description: `Show the window on the desktop in use. By default on Windows it goes on a desktop of its own, with --disable-vsync and --max-fps ${String(HIDDEN_WINDOW_FPS)}. On Linux and macOS the window shows either way.`,
       },
       silent: {
         type: 'boolean',
@@ -1974,7 +1989,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       savesIn: {
         type: 'string',
         ops: ['start', 'check'],
-        description: "An absolute directory for this run's user://.",
+        description:
+          "An absolute directory to hold this run's user://, as Godot/app_userdata/<project>. macOS ignores it, so the run writes the player's own saves.",
       },
       env: {
         type: 'object',
@@ -2075,7 +2091,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       profile: {
         effect: 'read',
-        summary: 'where the run spends its time by GDScript function, sorted by self time',
+        summary: 'where the run spends its time, by GDScript function',
         requires: [],
       },
     },
@@ -2121,7 +2137,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_output',
     title: 'Game and editor output',
     description:
-      'What a game or the editor has printed, as entries with a severity (error, warning or info). Op run also answers counts, and clean, true when no error was reported. A run that has quit still answers until the next one starts.',
+      'What a game or the editor has printed, each entry with a severity. Op run also answers counts, and clean, true when no error was reported. clean is absent when the console was lost, or when a game the editor played left no runtime report (errorsUnread true). A run that has quit still answers until the next one starts.',
     answer:
       "For a run the editor plays the reports come from the game itself, through the runtime addon. A played game without the runtime addon answers with its prints alone, with errorsUnread true and no clean. A run ended by a signal has no exit code, and exitSignal names the signal. endedBy says whether gdharness ended the run. A transcript that has stopped growing is a run between prints rather than a run that is over. startedAt is when the run began and elapsedMs how long it has been going. For a run that is over, endedAt is when it ended and elapsedMs how long it ran. Both are left out when nobody saw the end. running is asked of the operating system whenever there is a process to ask about. For an editor-played run that never announced, running is the editor's answer, which can lag.\n\n" +
       "An entry with lines under its headline has them as detail. When one of them names a project script, script, line and function say where. That is the at: line when it names one, otherwise the innermost frame of the backtrace that does. A push_error or push_warning has the engine's own push_error as its at: line, so its script and line are the game's call that raised it. Each entry's source says where it was read. transcript is a line of the run's transcript file, which holds both its streams and is how every run with one is read. stdout or stderr is a line of that stream of a run with no transcript. An example is an editor-played run picked up after a reconnect whose first server left no note. debugger is what the editor's debug adapter reported and the game never printed, such as the script error a game stopped on. A printerr line is info: it prints to stderr, and the engine reports no error for it.\n\n" +
@@ -2214,7 +2230,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     effect: 'additive',
     changes: 'Writes under `.godot` and adds `.uid` files. Changes no script or scene.',
     description:
-      'Makes the running editor scan the project filesystem, so files written outside it are picked up. Call it again when another tool names a class_name under unseenByEditor. editor_launch restart does it too. Needs the editor connected. A scan rewrites the class list in .godot, writes missing .uid files, and reloads scripts naming a class it brings in.',
+      'Makes the running editor scan for files written outside it. Call it again when another tool names a class_name under unseenByEditor. editor_launch restart does it too. Needs the editor connected. A scan rewrites the class list in .godot, writes missing .uid files, and reloads scripts naming a class it brings in.',
     answer: [
       'waitedMs is the whole call. waitedForEditorScanMs is the part spent waiting out a scan or an import already running, given only then. waitedForEditorAnswerMs is given when an idle editor took a second or more to say so, and is how long that took. Such an editor is busy on the thread that answers with an earlier request rather than scanning. So the time is added to timeoutMs rather than taken from it, and the note says so.',
       'stillWorking is true when a scan was still running at the end of the wait. The scan the call started is looked at once even when the wait has run out. So stillWorking is never said of a scan nothing looked at. A hidden editor imports on the thread that answers. So a large addon install can leave the rescan itself unanswered, and when the wait runs out first the answer is stillWorking.',
@@ -2277,7 +2293,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       inline: {
         type: 'boolean',
-        description: 'Send the picture back in the answer. Default true. false needs outputPath.',
+        description:
+          'Send the picture back in the answer. Default true, as a JPEG when smaller than the PNG and nothing is transparent. false needs outputPath.',
       },
     },
     requires: ['projectPath', 'scenePath'],
@@ -2285,7 +2302,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_classes',
     title: 'Engine classes',
-    description: `The engine's classes and those the project's scripts declare: find classes, read one in full, or walk an inheritance tree. info reads engine classes only, and script_info structure reads a project class. ${CLASSES_REBUILT}`,
+    description: `The engine's classes and those the project's scripts declare. info reads engine classes only, and script_info structure reads a project class. ${CLASSES_REBUILT}`,
     answer:
       "The project's classes are read from the scripts on disk, so one written a moment ago is there before any scan. query and inheritance answer them under project_classes, project_children and project_descendants, each with its path, what it extends and whether it is abstract. filtered_count, direct_children_count and all_descendants_count count the engine classes in the lists beside them. instantiableOnly leaves out an engine class that cannot be instantiated and a project class that is @abstract or built on one that cannot be, and keeps a class extending an @abstract one. info gives each property of a class that can be made its default, the value a new one holds. includeInherited gives one entry per ancestor, nearest first, with the names of what it declares, and member reads any inherited member in full, looked for on the class and every ancestor. The whole of Control is about a hundred thousand characters.",
     parameters: {
@@ -2336,7 +2353,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       query: {
         effect: 'read',
-        summary: "classes matching a filter or category, the engine's and the project's",
+        summary: 'classes matching a filter or category',
         requires: [],
       },
       info: {
@@ -2346,7 +2363,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       inheritance: {
         effect: 'read',
-        summary: 'ancestors and descendants of one class, an engine class or one a project script declares',
+        summary: 'ancestors and descendants of one class',
         requires: ['className'],
       },
     },
@@ -2388,7 +2405,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['property', 'find'],
         description:
-          'The property to read, or a script constant. A colon path reads through what a node holds: "_game:clock:speed", "_game:run:roster:0:traits", "size:x". A step written as a call, "get_viewport():gui_get_focus_owner()", calls a method that only reads. An engine one takes literal arguments, \'get_theme_constant("separation")\'. A negative index counts from the end, and a key holding a colon is quoted, \'stock:"base:water"\'.',
+          'The property to read, or a script constant. A colon path reads through what a node holds: "_game:clock:speed", "_game:run:roster:0:traits", "size:x". A step written as a call, "get_viewport():gui_get_focus_owner()", calls an engine method marked as only reading, with literal arguments, \'get_theme_constant("separation")\'. It also calls a game method taking no arguments unless declared -> void, even one that changes the game, and runtime_wait until calls it every frame. A negative index counts from the end, and a key holding a colon is quoted, \'stock:"base:water"\'.',
       },
       depth: {
         type: 'integer',
@@ -2565,12 +2582,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       set: {
         effect: 'destructive',
-        summary: 'set a property, on a node or on an object it holds',
+        summary: 'set a property',
         requires: ['nodePath', 'property', 'value'],
       },
       call: {
         effect: 'destructive',
-        summary: 'call a method, on a node or on an object it holds, and return its result',
+        summary: 'call a method and return its result',
         requires: ['nodePath', 'method'],
       },
       result: {
@@ -2631,7 +2648,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       inline: {
         type: 'boolean',
-        description: 'Send the picture back in the answer. Default true. false needs outputPath.',
+        description:
+          'Send the picture back in the answer. Default true, as a JPEG when smaller than the PNG and nothing is transparent. false needs outputPath.',
       },
     },
     requires: [],
@@ -2839,12 +2857,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       mouse_click: {
         effect: 'additive',
-        summary: 'click a mouse button at a position',
+        summary: '',
         requires: ['x', 'y'],
       },
       mouse_motion: {
         effect: 'additive',
-        summary: 'move the mouse to a position',
+        summary: '',
         requires: ['x', 'y'],
       },
       mouse_drag: {
@@ -2878,7 +2896,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_wait',
     title: 'Wait in the running game',
     description:
-      'Answers when something has happened in the running game. Arm a watch before the call that sets a change off, and send that call after the watch, not beside a wait. A watch records the change even if it is over before your next call. The client runs a call sent beside a wait only after the wait answers. A game held by its debugger answers nothing until it resumes.',
+      'Waits on the running game. Arm a watch, then send the call that sets a change off. A watch records a change over before your next call. A call sent beside a wait runs only after the wait answers. A game held by its debugger answers nothing until it resumes.',
     answer: [
       'until answers met, and value, the last reading of the property when the wait answered, whatever the wait asked for. A wait that was not met also answers waited_for, the value it compared against. elapsed_ms and frames say how long it waited.',
       'until with == or != answers outside_declared when the value waited for is not one the property declares. A number no value of an enum has, or one past an export range, is waited for all the same. A game may store one.',
@@ -2981,8 +2999,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       watch: {
         effect: 'read',
-        summary:
-          'start recording a signal or a property, and answer with its number, which signal or recorded takes as watch',
+        summary: 'record a signal or a property, answering the number signal or recorded takes as watch',
         // A signal or a property, which the declaration cannot say, so the handler asks.
         requires: ['nodePath'],
       },
@@ -2994,10 +3011,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       until: {
         effect: 'read',
         summary: 'wait for property to read as value, or for the words in says to appear under nodePath',
-        // A wait for words has a node to default to, and a wait for a property does not.
+        // A wait for words has a node to default to, and a wait for a property does not. The game
+        // refuses a property wait missing property or value.
         requires: [],
-        requiresOneOf: [['nodePath', 'property', 'value'], ['says']],
+        requiresOneOf: [['nodePath'], ['says']],
         unmet: {
+          said: 'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.',
           next: ['With says instead of property, nodePath can be left out and the whole game is searched'],
         },
       },
@@ -3028,7 +3047,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      set: { effect: 'additive', summary: 'set a breakpoint', requires: ['scriptPath', 'line'] },
+      set: { effect: 'additive', summary: '', requires: ['scriptPath', 'line'] },
       remove: {
         effect: 'destructive',
         summary: "remove a breakpoint, whoever set it, the editor's gutter included",
@@ -3119,7 +3138,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'what an expression evaluates to at a frame, run in the stopped game, the first loading every global class',
         requires: ['expression'],
       },
-      output: { effect: 'read', summary: 'console output captured through the debug adapter', requires: [] },
+      output: { effect: 'read', summary: 'console output from the debug adapter', requires: [] },
     },
     defaultOperation: 'stack',
   },
@@ -3127,7 +3146,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'debug_objects',
     title: 'Object snapshots',
     description:
-      'Counts the objects the running game holds by class, and compares two snapshots to show what an action kept alive. Each snapshot is kept under the id its answer names. Only for a game this server started, whose editor_run start answered through gdharness. Needs an engine with debug features.',
+      'Counts the objects the running game holds by class, and compares two snapshots to show what an action kept alive. Only for a game this server started, whose editor_run start answered through gdharness. Needs an engine with debug features.',
     answer:
       "A scripted object is counted under its script's class_name, or under the script's path when it declares none, with its engine class beside it. Objects of inner classes are counted under their native class, as the engine's profiler counts them, and note says how many. kind says whether a class is RefCounted, a Node or neither, and refCounted and nodes total them. The editor's ObjectDB Profiler takes every snapshot a game the editor plays sends, which is why it is only for a game this server started.",
     parameters: {
@@ -3146,7 +3165,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       snapshot: {
         effect: 'read',
-        summary: 'take a snapshot, keep it and answer its counts by class, most objects first',
+        summary: 'count the objects by class, most first, and keep the counts under an id',
         requires: [],
       },
       diff: {

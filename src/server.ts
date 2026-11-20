@@ -1066,18 +1066,10 @@ function errorsUnread(run: GodotProcess): boolean {
   return run.throughEditor && typeof run.errorReport !== 'string';
 }
 
-/**
- * Whether [args] gives [field] as one of an op's `requiresOneOf` sets asks. Blank is missing, as
- * for a required argument, unless the parameter is `blank`. Null is given for a parameter of no
- * declared type, which takes any value, such as the value runtime_wait until waits for.
- */
-function givenInASet(spec: ToolSpec, args: OperationParams, field: string): boolean {
+/** Whether [args] gives [field] as one of an op's `requiresOneOf` sets asks. Blank and null are missing. */
+function givenInASet(args: OperationParams, field: string): boolean {
   const value = Object.hasOwn(args, field) ? args[field] : undefined;
-  const parameter = spec.parameters[field];
-  if (value === undefined || (value === null && parameter?.['type'] !== undefined)) {
-    return false;
-  }
-  return !(typeof value === 'string' && value.trim() === '' && parameter?.blank !== true);
+  return value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '');
 }
 
 /**
@@ -6858,7 +6850,7 @@ class GodotServer {
     if (
       op !== null &&
       sets !== undefined &&
-      !sets.some((set) => set.every((field) => givenInASet(spec, args, field)))
+      !sets.some((set) => set.every((field) => givenInASet(args, field)))
     ) {
       const said = operation?.unmet?.said ?? `${spec.name} ${op} needs ${requiredSetsSaid(sets)}.`;
       return {
