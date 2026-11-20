@@ -1100,6 +1100,15 @@ public static class GdharnessDesktop {
     string jobName = JobNamePrefix + started.processId;
     job = CreateJobObjectW(IntPtr.Zero, jobName);
     int made = Marshal.GetLastWin32Error();
+    if (job != IntPtr.Zero && made == ErrorAlreadyExists) {
+      // The pid is this process's now, so a job already named for it is one of an engine that has
+      // gone. The served process keeps its copy of such a job when the helper that made it died and
+      // none could take the start over. Closing that copy frees the name.
+      CloseCopies(job);
+      CloseHandle(job);
+      job = CreateJobObjectW(IntPtr.Zero, jobName);
+      made = Marshal.GetLastWin32Error();
+    }
     if (job == IntPtr.Zero || made == ErrorAlreadyExists) {
       // A name already taken says it all itself: the system's text for that code speaks of a file.
       throw job == IntPtr.Zero
