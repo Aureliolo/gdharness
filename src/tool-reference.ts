@@ -10,8 +10,11 @@ import { isRecord } from './records.js';
 import {
   ALSO_SAVED,
   argumentsOf,
+  CLASSES_REBUILT,
   effectsOf,
+  listed,
   projectPathSentence,
+  requiredSetsSaid,
   TOOL_SPECS,
   type ToolSpec,
   theGamePicked,
@@ -86,10 +89,7 @@ export function headlessSection(): string[] {
     '',
     ...byTool.map((line) => `- ${line}`),
     '',
-    'Most of these still write to the project: `script_edit create` writes a file,',
-    '`project_settings set` rewrites `project.godot`, `project_import reimport` and `refresh_classes`',
-    'write under `.godot`, and `project_import refresh_uids` writes a `.uid` beside each script that',
-    "had none. A CI job checks with the reading ops. Each op's own summary below says which is which.",
+    'Most of these still write to the project, so a CI job checks with the reading ops.',
     '',
     '`scene_create`, `scene_node`, `scene_signal`, `scene_animation`, `scene_tree` and `resource_edit`',
     'go through the editor when one serves the project and through a headless engine when none does.',
@@ -113,28 +113,65 @@ export function headlessSection(): string[] {
  *
  * The tool list a client loads has no headings, so each description there carries the paragraph
  * whole. On this page it would be the same paragraph three or four times, so each copy becomes a
- * link to the one here.
+ * link to the one here. `detail` is what the section adds that the list has no room for.
  */
-export const SHARED_PARAGRAPHS: readonly { readonly heading: string; readonly text: string }[] = [
-  { heading: 'Editor or headless engine', text: WITHOUT_AN_EDITOR },
-  { heading: 'What a scene write also saves', text: ALSO_SAVED },
+export const SHARED_PARAGRAPHS: readonly {
+  readonly heading: string;
+  readonly text: string;
+  readonly detail: string;
+}[] = [
+  {
+    heading: 'Editor or headless engine',
+    text: WITHOUT_AN_EDITOR,
+    detail:
+      'The headless engine runs every script of the file, where the editor runs only tool scripts. What a script changes as the file loads or as a property is set is put back before anything is saved. A file where that cannot be done, such as a scene whose script does not compile, is refused with nothing written. Each file the written one refers to is named by its uid, as the editor names it. A file the uid cache has no uid for yet, such as one made since the last scan, is named by path. namedByPath lists it with the call that scans it. An editor of the project that is running and has not reached this server yet is waited for.',
+  },
+  {
+    heading: 'What a scene write also saves',
+    text: ALSO_SAVED,
+    detail:
+      'One property can set others as it loads: anchors_preset gives a centred Control both grow directions. alsoSaved lists each line as {node, property, was, saved}, on any node the scene held, those inside an instance included. It has no was where the file set nothing, and no saved where it now sets nothing. What a set moved on its own node is under alsoChanged instead. A node the call adds and the format lines (header uid, load_steps, unique_id, an ext_resource uid) are not listed. The scene loads as it did, and only its text changed.',
+  },
+  {
+    heading: 'What a headless engine also does',
+    text: CLASSES_REBUILT,
+    detail:
+      'classesRebuiltFirst names the classes added, and is left out when none was missing. The autoloads start once the call has answered.',
+  },
 ];
 
-function anchorOf(heading: string): string {
-  return heading.toLowerCase().replaceAll(' ', '-');
-}
-
-/** [text] with each shared paragraph in it replaced by a link to its section. */
-export function withSharedParagraphsLinked(text: string): string {
-  return SHARED_PARAGRAPHS.reduce(
-    (linked, { heading, text: shared }) =>
-      linked.replaceAll(shared, `[${heading}](#${anchorOf(heading)}) applies.`),
-    text,
+/** The tools whose description or answer carries [shared], by name. */
+function toolsSharing(shared: string): string[] {
+  return TOOL_SPECS.filter((tool) => `${tool.description}${tool.answer}`.includes(shared)).map(
+    (tool) => tool.name,
   );
 }
 
+/**
+ * [text] with each shared paragraph taken out, since its section says it once and names the tools
+ * it applies to. A link in its place was a sentence that said nothing.
+ */
+export function withoutSharedParagraphs(text: string): string {
+  return SHARED_PARAGRAPHS.reduce(
+    (left, { text: shared }) =>
+      left.replaceAll(`${shared} `, '').replaceAll(` ${shared}`, '').replaceAll(shared, ''),
+    text,
+  )
+    .replaceAll(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function sharedSections(): string[] {
-  return SHARED_PARAGRAPHS.flatMap(({ heading, text }) => [`## ${heading}`, '', text, '']);
+  return SHARED_PARAGRAPHS.flatMap(({ heading, text, detail }) => [
+    `## ${heading}`,
+    '',
+    `For ${coded(toolsSharing(text))}.`,
+    '',
+    text,
+    '',
+    detail,
+    '',
+  ]);
 }
 
 /**
@@ -148,16 +185,14 @@ function whatItCanChange(tool: ToolSpec): string {
   if (effectsOf(tool).every((effect) => effect === 'read')) {
     return 'Changes nothing.';
   }
-  const destroying = Object.entries(tool.operations ?? {})
-    .filter(([, op]) => op.effect === 'destructive')
-    .map(([name]) => `\`${name}\``);
-  return `Can overwrite, remove or end what is there, through ${listed(destroying)}.`;
-}
-
-/** [items] as prose: "a", "a and b", "a, b and c". */
-function listed(items: readonly string[]): string {
-  const last = items.at(-1) ?? '';
-  return items.length === 1 ? last : `${items.slice(0, -1).join(', ')} and ${last}`;
+  const operations = Object.entries(tool.operations ?? {});
+  const destroying = operations.filter(([, op]) => op.effect === 'destructive').map(([name]) => name);
+  const sparing = operations.filter(([, op]) => op.effect !== 'destructive').map(([name]) => name);
+  // Whichever list is shorter says the same, and thirteen ops of sixteen read as a wall of names.
+  if (sparing.length > 0 && sparing.length < destroying.length) {
+    return `Can overwrite, remove or end what is there, through every op but ${coded(sparing)}.`;
+  }
+  return `Can overwrite, remove or end what is there, through ${coded(destroying)}.`;
 }
 
 /**
@@ -171,12 +206,12 @@ export function renderToolsMarkdown(): string {
   const lines: string[] = [
     '# Tools',
     '',
-    `${TOOL_SPECS.length} tools, named \`domain_verb\`. A tool that does several related things takes an`,
-    '`op`. An unknown op or argument is refused with the valid set listed. Generated from the server.',
+    `${TOOL_SPECS.length} tools, each named for its area and what it works on, such as \`scene_node\`. A tool`,
+    'that does several related things takes an `op`. An unknown op or argument is refused with the',
+    'valid set listed. Generated from the server.',
     '',
     `${projectPathSentence()}. The \`debug_*\` calls among them answer about the game this server`,
-    'started or the editor is playing, and the `editor_*` ones about the editor on this server. A',
-    '`runtime_*` call takes `projectPath` only to pick a game.',
+    'started or the editor is playing, and the `editor_*` ones about the editor on this server.',
     '',
     theGamePicked(),
     '',
@@ -194,28 +229,31 @@ export function renderToolsMarkdown(): string {
   return lines.join('\n');
 }
 
-/** The markdown lines of one tool: what it can change, its description, its ops and its arguments. */
-function toolSection(tool: ToolSpec): string[] {
+/**
+ * The markdown lines of one tool: its description, what it can change, its ops, its arguments and
+ * then its answer, which a caller reads after the call rather than before it.
+ */
+export function toolSection(tool: ToolSpec): string[] {
+  const description = withoutSharedParagraphs(tool.description);
   const lines = [
     `## ${tool.name}`,
     '',
+    ...(description === '' ? [] : [description, '']),
     whatItCanChange(tool),
     '',
-    withSharedParagraphsLinked(tool.description),
-    '',
   ];
-  if (tool.answer !== undefined) {
-    lines.push(`The answer: ${withSharedParagraphsLinked(tool.answer)}`, '');
+  const shared = sharedArgumentsLine(tool);
+  if (shared !== '') {
+    lines.push(shared, '');
   }
 
   const operations = Object.entries(tool.operations ?? {});
   if (operations.length > 0) {
+    lines.push('Operations (`op`):', '');
     for (const [op, spec] of operations) {
       lines.push(operationLine(tool, op, spec));
     }
     lines.push('');
-  } else if (tool.requires.length > 0) {
-    lines.push(`Needs: ${tool.requires.map((name) => `\`${name}\``).join(', ')}.`, '');
   }
 
   const parameters = Object.entries(tool.parameters).filter(([name]) => name !== 'projectPath');
@@ -230,22 +268,89 @@ function toolSection(tool: ToolSpec): string[] {
     }
     lines.push('');
   }
+
+  const answer = withoutSharedParagraphs(tool.answer);
+  if (answer !== '') {
+    lines.push(`### ${tool.name} answer`, '', answer, '');
+  }
   return lines;
 }
 
-/** The bullet for op [param op] of [param tool], with what it needs and what else it takes. */
+/** [names] in backticks, as prose. */
+function coded(names: readonly string[]): string {
+  return listed(names.map((name) => `\`${name}\``));
+}
+
+/**
+ * What every op of [tool] needs, and what every op takes on top, said once for the tool so the op
+ * lines carry only what tells one op from another. A tool without ops says what its call needs.
+ */
+function sharedArgumentsLine(tool: ToolSpec): string {
+  const { needs, takes } = sharedArguments(tool);
+  const count = Object.keys(tool.operations ?? {}).length;
+  const subject = count === 0 ? 'The call' : count === 1 ? 'Its op' : 'Every op';
+  if (needs.length > 0 && takes.length > 0) {
+    return `${subject} needs ${coded(needs)}, and takes ${coded(takes)}.`;
+  }
+  if (needs.length > 0) {
+    return `${subject} needs ${coded(needs)}.`;
+  }
+  return takes.length > 0 ? `${subject} takes ${coded(takes)}.` : '';
+}
+
+/** The arguments every op of [tool] needs, and the others every op takes, in declared order. */
+function sharedArguments(tool: ToolSpec): { needs: string[]; takes: string[] } {
+  const ops = Object.values(tool.operations ?? {});
+  const neededByAll = (name: string): boolean =>
+    tool.requires.includes(name) || (ops.length > 0 && ops.every((op) => op.requires.includes(name)));
+  const names = [...new Set([...tool.requires, ...Object.keys(tool.parameters)])];
+  const needs = names.filter(neededByAll);
+  const takes =
+    ops.length === 0
+      ? []
+      : names.filter(
+          (name) =>
+            !needs.includes(name) &&
+            name !== 'projectPath' &&
+            Object.keys(tool.operations ?? {}).every((op) => argumentsOf(tool, op).includes(name)),
+        );
+  return { needs, takes };
+}
+
+/**
+ * The bullet for op [param op] of [param tool], in the tool list's own form: the op, then in
+ * brackets what it needs and what else it takes beyond what every op does, then its summary.
+ */
 function operationLine(
   tool: ToolSpec,
   op: string,
-  spec: { summary: string; requires: readonly string[] },
+  spec: { summary: string; requires: readonly string[]; requiresOneOf?: readonly (readonly string[])[] },
 ): string {
-  const needs = [...tool.requires, ...spec.requires];
-  const isDefault = tool.defaultOperation === op ? ' (default)' : '';
-  const wants = needs.length > 0 ? ` Needs: ${needs.map((name) => `\`${name}\``).join(', ')}.` : '';
+  const shared = sharedArguments(tool);
+  const needs = spec.requires.filter((name) => !shared.needs.includes(name));
+  const sets = spec.requiresOneOf ?? [];
   // What else the op will take, because an argument meant for another op is refused. The
   // list below says which ops each argument belongs to. This says it the way round somebody
   // writing one call wants it.
-  const spare = argumentsOf(tool, op).filter((name) => !needs.includes(name) && name !== 'projectPath');
-  const takes = spare.length > 0 ? ` Takes: ${spare.map((name) => `\`${name}\``).join(', ')}.` : '';
-  return `- \`op: ${op}\`${isDefault}: ${spec.summary}.${wants}${takes}`;
+  const spare = argumentsOf(tool, op).filter(
+    (name) =>
+      !needs.includes(name) &&
+      !sets.some((set) => set.includes(name)) &&
+      !shared.needs.includes(name) &&
+      !shared.takes.includes(name) &&
+      name !== 'projectPath',
+  );
+  const needed = [
+    ...(needs.length > 0 ? [coded(needs)] : []),
+    ...(sets.length > 0 ? [requiredSetsSaid(sets, (name) => `\`${name}\``)] : []),
+  ];
+  const marks = [
+    ...(tool.defaultOperation === op ? ['default'] : []),
+    ...(needed.length > 0 ? [`needs ${needed.join(', and ')}`] : []),
+    ...(spare.length > 0 ? [`takes ${coded(spare)}`] : []),
+  ];
+  // Commas, since the page is prose and the words needs and takes already part the lists.
+  const bracket = marks.length > 0 ? ` (${marks.join(', ')})` : '';
+  const what = spec.summary === '' ? '' : `: ${spec.summary}`;
+  return `- \`${op}\`${bracket}${what}.`;
 }

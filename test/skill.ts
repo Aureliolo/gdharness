@@ -23,7 +23,7 @@ import {
   writeSkill,
 } from '../src/skill.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
-import { SHARED_PARAGRAPHS, withSharedParagraphsLinked } from '../src/tool-reference.js';
+import { SHARED_PARAGRAPHS, withoutSharedParagraphs } from '../src/tool-reference.js';
 import { sweep } from './support/sweep.js';
 
 function project(): string {
@@ -91,51 +91,33 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   for (const tool of TOOL_SPECS) {
     assert.ok(reference.includes(`## ${tool.name}`), `${tool.name} is in the reference`);
   }
-  // What the description a client is sent leaves out for room, the reference carries whole.
-  const answered = TOOL_SPECS.filter((tool) => tool.answer !== undefined);
-  assert.deepEqual(
-    answered.map((tool) => tool.name),
-    [
-      'project_settings',
-      'project_import',
-      'project_test',
-      'scene_node',
-      'editor_launch',
-      'editor_run',
-      'editor_output',
-      'editor_status',
-      'editor_rescan',
-      'editor_capture',
-      'runtime_inspect',
-      'runtime_input',
-      'runtime_wait',
-    ],
-    'the tools whose answers are described apart from their description',
-  );
-  for (const tool of answered) {
+  // What the description a client is sent leaves out for room, the reference carries whole, under
+  // a heading of the tool's own.
+  for (const tool of TOOL_SPECS) {
     assert.ok(
-      reference.includes(`The answer: ${withSharedParagraphsLinked(tool.answer ?? '')}`),
+      reference.includes(`### ${tool.name} answer\n\n${withoutSharedParagraphs(tool.answer)}\n`),
       `${tool.name}'s answer is in the reference`,
     );
   }
-  // A paragraph several tools share is written once, under its own heading, and each tool links to
-  // it. Counted whole, so a copy left behind in one tool's text fails as surely as a missing one.
-  for (const { heading, text } of SHARED_PARAGRAPHS) {
+  // A paragraph several tools share is written once, under its own heading, which names every tool
+  // it applies to. Counted whole, so a copy left behind in one tool's text fails as surely as a
+  // missing one.
+  for (const { heading, text, detail } of SHARED_PARAGRAPHS) {
     assert.equal(
       reference.split(text).length - 1,
       1,
       `the paragraph under ${heading} is in the reference exactly once`,
     );
-    assert.ok(reference.includes(`## ${heading}\n\n${text}\n`), `and it is under ${heading}`);
-    const linkedFrom = TOOL_SPECS.filter((tool) =>
-      `${tool.description}${tool.answer ?? ''}`.includes(text),
-    ).length;
-    assert.ok(linkedFrom >= 2, `${heading} is shared by ${linkedFrom} tools`);
-    assert.equal(
-      reference.split(`(#${heading.toLowerCase().replaceAll(' ', '-')}) applies.`).length - 1,
-      linkedFrom,
-      `and every tool sharing it links to ${heading}`,
-    );
+    const sharing = TOOL_SPECS.filter((tool) => `${tool.description}${tool.answer}`.includes(text));
+    assert.ok(sharing.length >= 2, `${heading} is shared by ${sharing.length} tools`);
+    const at = reference.indexOf(`## ${heading}\n\nFor `);
+    assert.ok(at >= 0, `${heading} has a section naming its tools`);
+    const named: string = reference.slice(at).split('\n')[2] ?? '';
+    for (const tool of sharing) {
+      assert.ok(named.includes(`\`${tool.name}\``), `${heading} names ${tool.name}: ${named}`);
+    }
+    assert.ok(reference.includes(`${named}\n\n${text}\n`), `and its text is under ${heading}`);
+    assert.ok(reference.includes(`\n\n${detail}\n`), `with what ${heading} adds`);
   }
   assert.ok(
     reference.includes(String(TOOL_SPECS.length)),
