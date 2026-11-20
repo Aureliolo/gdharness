@@ -1732,7 +1732,9 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
   const child = resolve(import.meta.dir, 'support', 'keep-cache.ts');
   await fc.assert(
     fc.asyncProperty(
-      fc.array(fc.integer({ min: 1, max: 80 }), { minLength: 2, maxLength: 4 }),
+      // At least two files each, so every keep is larger than the first and takes the lock: a keep
+      // with nothing to add never looks at it, and the dead keep's lock would rightly stay.
+      fc.array(fc.integer({ min: 2, max: 80 }), { minLength: 2, maxLength: 4 }),
       async (counts) => {
         const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-keep-'));
         try {
