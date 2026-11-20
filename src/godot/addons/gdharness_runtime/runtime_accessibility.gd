@@ -333,6 +333,8 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	_note_reading(result, placing, answer, reader)
 	var unbuilt: String = _tree_unbuilt(reader)
 	if elements <= windows.size() or _only_the_frame(placing, reader, unbuilt):
+		if answer.has("reader_saw"):
+			result["reader_saw"] = answer["reader_saw"]
 		if not unbuilt.is_empty():
 			return _refused(unbuilt)
 		result["_note"] = (

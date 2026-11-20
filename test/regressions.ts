@@ -57721,6 +57721,7 @@ function checkTreeReadElsewhere(answered: JsonRpcMessage): void {
   assert.equal(get(window, 'role'), 'window', `one window: ${shown}`);
   const children = asArray(get(window, 'children'));
   const page = children.find((child) => get(child, 'name') === 'Page');
+  assert.ok(page !== undefined, `the Page is among the window's elements: ${shown}`);
   assert.deepEqual(
     asArray(get(page, 'children')).map((line) => get(line, 'name')),
     ['One', 'Two', ''],

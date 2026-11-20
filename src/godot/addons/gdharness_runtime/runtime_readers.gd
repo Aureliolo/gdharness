@@ -432,12 +432,16 @@ def describe(accessible, depth):
     if states.contains(State.SELECTABLE):
         actions.append('select')
         node['selected'] = states.contains(State.SELECTED)
+    text = accessible.get_text_iface()
     if nick in ('entry', 'text', 'password-text'):
-        text = accessible.get_text_iface()
         if text is not None:
             node['value'] = text.get_text(0, -1)
         if states.contains(State.EDITABLE):
             actions.append('set_value')
+    elif not node['name'] and text is not None:
+        # Static text carries its words as a value, which AT-SPI offers through the text interface
+        # rather than the name, and a screen reader speaks it from there.
+        node['name'] = text.get_text(0, -1) or ''
     value = accessible.get_value_iface()
     if value is not None:
         words = None
@@ -499,7 +503,21 @@ try:
                 break
             last = total
         windows.append(tree)
-    answer({'windows': windows})
+    seen = []
+    desktop = Atspi.get_desktop(0)
+    for at in range(desktop.get_child_count()):
+        app = desktop.get_child_at_index(at)
+        if app is not None:
+            seen.append([app.get_name(), app.get_process_id()])
+    # Said only to explain a tree that came back empty: the bus reached and who was on it.
+    answer({
+        'windows': windows,
+        'reader_saw': {
+            'bus': os.environ.get('DBUS_SESSION_BUS_ADDRESS', ''),
+            'game_pid': game_pid,
+            'applications': seen,
+        },
+    })
 except Exception as failure:
     answer({'error': '%s: %s' % (type(failure).__name__, failure)})
 """
