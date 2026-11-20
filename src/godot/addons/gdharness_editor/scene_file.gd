@@ -23,6 +23,10 @@ extends RefCounted
 ## script failed in [code]_init[/code] was saved without it. Outside the editor, then, what a node
 ## stores is put back to what the file holds wherever the tool did not ask for a change, before
 ## anything is saved, and a write is refused when that does not hold. See [GdhHeadlessCheck].
+##
+## What those scripts do to the tree is put back too, as the scene opens: a node one moved goes
+## back under its parent in the file, one it freed is made again, and one it added goes. See
+## [GdhSceneStructure].
 
 const GdhHeadlessCheck = preload("headless_check.gd")
 ## How many times what scripts changed is put back before a write is refused for it.
@@ -40,6 +44,7 @@ const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhSceneFile = preload("scene_file.gd")
+const GdhSceneStructure = preload("scene_structure.gd")
 const GdhSceneUids = preload("scene_uids.gd")
 ## How many links one path is followed through before it is taken to run in a ring.
 const MOST_LINKS: int = 40
@@ -141,6 +146,9 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	if root == null:
 		return { "ok": false, "error": "Failed to instantiate " + path }
 	if not Engine.is_editor_hint():
+		var moved: String = GdhSceneStructure.new().put_back(root, packed.get_state())
+		if not moved.is_empty():
+			return refuse(("Nothing was written: " if for_writing else "Not read: ") + moved)
 		_unhold_placeholders()
 	_state = packed.get_state()
 	_base_paths = makers(_state)
@@ -1748,6 +1756,11 @@ func _failed_check(packed: PackedScene, check: Callable) -> String:
 	var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 	if saved == null:
 		return "The packed copy of %s did not instantiate, so nothing was written." % path
+	if not Engine.is_editor_hint():
+		var moved: String = GdhSceneStructure.new().put_back(saved, packed.get_state())
+		if not moved.is_empty():
+			saved.free()
+			return "Nothing was written: " + moved
 	_checked_pack = packed
 	var missing: String = str(check.call(saved))
 	saved.free()

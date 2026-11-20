@@ -107099,6 +107099,229 @@ async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
   );
 }
 
+/** The nodes a scene file holds, as "name<parent" in file order, "." for a child of the root. */
+function nodesFiled(file: string): string[] {
+  return [...file.matchAll(/^\[node name="([^"]+)"(?:[^\]]*? parent="([^"]*)")?[^\]]*\]$/gm)]
+    .slice(1)
+    .map((one) => `${one[1] ?? ''}<${one[2] ?? ''}`);
+}
+
+const movedByScriptScreen =
+  '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://screen.gd" id="1_screen"]\n\n' +
+  '[node name="Screen" type="Control"]\nscript = ExtResource("1_screen")\n\n' +
+  '[node name="Head" type="Control" parent="."]\n\n[node name="Label" type="Label" parent="Head"]\n\n' +
+  '[node name="Map" type="Control" parent="."]\n\n[node name="Report" type="Control" parent="."]\n';
+
+/** The assertions of a case that records each one failing and goes on, to be read together. */
+function softly(failures: string[]): {
+  deepEqual: (actual: unknown, expected: unknown, message?: string) => void;
+  match: (actual: string, pattern: RegExp, message?: string) => void;
+} {
+  return {
+    deepEqual: (actual, expected, message) => {
+      try {
+        assert.deepEqual(actual, expected);
+      } catch {
+        failures.push(`${message ?? ''}: ${JSON.stringify(actual)}, not ${JSON.stringify(expected)}`);
+      }
+    },
+    match: (actual, pattern, message) => {
+      try {
+        assert.match(actual, pattern);
+      } catch {
+        failures.push(`${message ?? ''}: ${actual.slice(0, 300)} does not match ${String(pattern)}`);
+      }
+    },
+  };
+}
+
+/**
+ * A script that is not a tool moves, adds or frees nodes as a headless engine loads a scene. Every
+ * edit still sees and saves the file's own tree, the scenes it instances put back the same way,
+ * and a scene with a tool script or none is edited as before.
+ */
+async function testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo(): Promise<void> {
+  const failures: string[] = [];
+  const movesOnLoad = (body: string): string =>
+    `extends Node\n\n\nfunc _notification(what: int) -> void:\n\tif what == NOTIFICATION_SCENE_INSTANTIATED:\n${body}\n`;
+  await withASceneProject(
+    'scene put back by structure',
+    {
+      'screen.gd':
+        'extends Control\n\n\nfunc _notification(what: int) -> void:\n\tif what == NOTIFICATION_SCENE_INSTANTIATED:\n' +
+        '\t\tvar report: Node = get_node(^"Report")\n\t\tremove_child(report)\n\t\tget_node(^"Head").add_child(report)\n',
+      'screen.tscn': movedByScriptScreen,
+      'adder.gd':
+        'extends Node\n\n\nfunc _notification(what: int) -> void:\n\tif what == NOTIFICATION_SCENE_INSTANTIATED:\n' +
+        '\t\tvar added: Node = Node.new()\n\t\tadded.name = "Added"\n\t\tadd_child(added)\n\t\tadded.owner = self\n\n\n' +
+        'func _ready() -> void:\n\tvar ready_added: Node = Node.new()\n\tready_added.name = "ReadyAdded"\n\tadd_child(ready_added)\n\tready_added.owner = self\n',
+      'adder.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://adder.gd" id="1_adder"]\n\n' +
+        '[node name="Adder" type="Node"]\nscript = ExtResource("1_adder")\n\n[node name="First" type="Node" parent="."]\n',
+      'freer.gd': movesOnLoad('\t\tget_node(^"Gone").free()'),
+      'freer.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://freer.gd" id="1_freer"]\n\n' +
+        '[node name="Freer" type="Node2D"]\nscript = ExtResource("1_freer")\n\n' +
+        '[node name="Gone" type="Node2D" parent="."]\nposition = Vector2(3, 4)\n\n[node name="Kept" type="Node2D" parent="."]\n',
+      'tooled.gd': '@tool\nextends Node\n\nvar seen: int = 0\n\n\nfunc _init() -> void:\n\tseen = 1\n',
+      'tooled.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://tooled.gd" id="1_tooled"]\n\n' +
+        '[node name="Tooled" type="Node"]\nscript = ExtResource("1_tooled")\n\n[node name="First" type="Node" parent="."]\n',
+      'plain.tscn':
+        '[gd_scene format=3]\n\n[node name="Plain" type="Node"]\n\n[node name="First" type="Node" parent="."]\n',
+      'inner.gd': movesOnLoad(
+        '\t\tvar moved: Node = get_node(^"B")\n\t\tremove_child(moved)\n\t\tget_node(^"A").add_child(moved)',
+      ),
+      'inner.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://inner.gd" id="1_inner"]\n\n' +
+        '[node name="Inner" type="Node"]\nscript = ExtResource("1_inner")\n\n[node name="A" type="Node" parent="."]\n\n[node name="B" type="Node" parent="."]\n',
+      'host.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://inner.tscn" id="1_inner"]\n\n' +
+        '[node name="Host" type="Node"]\n\n[node name="Inst" parent="." instance=ExtResource("1_inner")]\n\n[node name="Plain" type="Node" parent="."]\n',
+      // The file changes B inside the instance, which the instance's script moves under A.
+      'open.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://inner.tscn" id="1_inner"]\n\n' +
+        '[node name="Open" type="Node"]\n\n[node name="Inst" parent="." instance=ExtResource("1_inner")]\n\n' +
+        '[node name="B" parent="Inst" index="1"]\nprocess_mode = 1\n\n[editable path="Inst"]\n',
+    },
+    async ({ written: write, fileOf, put }) => {
+      // Every case runs, so one run names each that fails.
+      const soft = softly(failures);
+      const written = async (name: string, args: Record<string, unknown>): Promise<void> => {
+        try {
+          await write(name, args);
+        } catch (error) {
+          failures.push(`${name} ${JSON.stringify(args)}: ${String(error).slice(0, 300)}`);
+        }
+      };
+      const base = ['Head<.', 'Label<Head', 'Map<.', 'Report<.'];
+      const edit = async (args: Record<string, unknown>): Promise<string[]> => {
+        put('screen.tscn', movedByScriptScreen);
+        await written('scene_node', { scenePath: 'screen.tscn', ...args });
+        return nodesFiled(fileOf('screen.tscn')).toSorted();
+      };
+      const sorted = (...more: string[]): string[] => [...base, ...more].toSorted();
+      // The issue's fixture: the script moves Report under Head, the file has it under the root.
+      soft.deepEqual(
+        await edit({ op: 'add', nodeName: 'New', nodeType: 'Node', parentNodePath: 'Report' }),
+        sorted('New<Report'),
+        'an add under a node the script moved',
+      );
+      soft.deepEqual(
+        await edit({ op: 'add', nodeName: 'New', nodeType: 'Node', parentNodePath: 'Map' }),
+        sorted('New<Map'),
+        'an add under a node the script does not move',
+      );
+      soft.deepEqual(
+        await edit({ op: 'set', nodePath: 'Report', properties: { visible: false } }),
+        sorted(),
+        'set',
+      );
+      soft.match(
+        fileOf('screen.tscn'),
+        /\[node name="Report" type="Control" parent="\."[^\]]*\]\nvisible = false/,
+      );
+      soft.deepEqual(
+        await edit({ op: 'set', nodePath: 'Report', properties: { name: 'Renamed' } }),
+        base.map((one) => one.replace('Report', 'Renamed')).toSorted(),
+        'rename',
+      );
+      soft.deepEqual(
+        await edit({ op: 'delete', nodePath: 'Map' }),
+        base.filter((one) => !one.startsWith('Map')).toSorted(),
+        'delete',
+      );
+      soft.deepEqual(
+        await edit({ op: 'reparent', nodePath: 'Report', newParentPath: 'Map' }),
+        base.map((one) => (one === 'Report<.' ? 'Report<Map' : one)).toSorted(),
+        'reparent',
+      );
+      soft.deepEqual(
+        await edit({ op: 'duplicate', nodePath: 'Report', newName: 'Copy' }),
+        sorted('Copy<.'),
+        'duplicate',
+      );
+      soft.deepEqual(
+        await edit({ op: 'change_type', nodePath: 'Map', nodeType: 'Node2D' }),
+        sorted(),
+        'change_type',
+      );
+      // The file keeps Report where it was: after Map, as the third child of the root.
+      put('screen.tscn', movedByScriptScreen);
+      await written('scene_node', {
+        scenePath: 'screen.tscn',
+        op: 'set',
+        nodePath: 'Map',
+        properties: { visible: false },
+      });
+      soft.deepEqual(nodesFiled(fileOf('screen.tscn')), base, "in the file's order");
+
+      // A node a script added on loading, in SCENE_INSTANTIATED or _ready, is not saved.
+      await written('scene_node', { op: 'add', scenePath: 'adder.tscn', nodeName: 'New', nodeType: 'Node' });
+      soft.deepEqual(nodesFiled(fileOf('adder.tscn')), ['First<.', 'New<.'], fileOf('adder.tscn'));
+
+      // A node a script freed is still found, and keeps what the file sets on it.
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'freer.tscn',
+        nodeName: 'New',
+        nodeType: 'Node',
+        parentNodePath: 'Gone',
+      });
+      soft.deepEqual(
+        nodesFiled(fileOf('freer.tscn')),
+        ['Gone<.', 'New<Gone', 'Kept<.'],
+        fileOf('freer.tscn'),
+      );
+      soft.match(
+        fileOf('freer.tscn'),
+        /\[node name="Gone" type="Node2D" parent="\."[^\]]*\]\nposition = Vector2\(3, 4\)/,
+      );
+
+      // A scene with a tool script, and a scene with none.
+      for (const scene of ['tooled.tscn', 'plain.tscn']) {
+        await written('scene_node', { op: 'add', scenePath: scene, nodeName: 'New', nodeType: 'Node' });
+        soft.deepEqual(nodesFiled(fileOf(scene)), ['First<.', 'New<.'], scene);
+      }
+
+      // An instanced scene's own script moves its nodes, and the instancing file holds none of them.
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'host.tscn',
+        nodeName: 'New',
+        nodeType: 'Node',
+        parentNodePath: 'Plain',
+      });
+      soft.deepEqual(
+        nodesFiled(fileOf('host.tscn')),
+        ['Inst<.', 'Plain<.', 'New<Plain'],
+        fileOf('host.tscn'),
+      );
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'open.tscn',
+        nodePath: 'Inst/B',
+        properties: { process_mode: 4 },
+      });
+      soft.deepEqual(nodesFiled(fileOf('open.tscn')), ['Inst<.', 'B<Inst'], fileOf('open.tscn'));
+      soft.match(
+        fileOf('open.tscn'),
+        /\[node name="B" parent="Inst"[^\]]*\]\nprocess_mode = 4/,
+        'the node of an instance a script moved takes the change',
+      );
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'inner.tscn',
+        nodeName: 'New',
+        nodeType: 'Node',
+        parentNodePath: 'B',
+      });
+      soft.deepEqual(nodesFiled(fileOf('inner.tscn')), ['A<.', 'B<.', 'New<B'], fileOf('inner.tscn'));
+    },
+  );
+  assert.deepEqual(failures, [], failures.join('\n'));
+}
+
 /**
  * A connection is written whether or not what the signal passes can reach the method, and the
  * answer says when it cannot.
@@ -122611,6 +122834,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReadWithNoEditorAnswersFromTheFile,
   testAServerThatDiesMidCallSaysHowItEnded,
   testASceneNodeIsWrittenAndReadWithNoEditor,
+  testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,
