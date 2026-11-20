@@ -16015,8 +16015,9 @@ const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegE
   [
     'editor_run',
     'savesIn',
-    /as Godot\/app_userdata\/<project>\. macOS ignores it, so the run writes the player's own saves\./,
+    /whose path runtime\.userDir answers\. macOS ignores it, so the run writes the player's own saves\./,
   ],
+  ['runtime_wait', undefined, /A call sent beside a wait can run during it, noted in ranAlongside\./],
   [
     'scene_animation',
     'track.update',

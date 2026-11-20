@@ -1990,7 +1990,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['start', 'check'],
         description:
-          "An absolute directory to hold this run's user://, as Godot/app_userdata/<project>. macOS ignores it, so the run writes the player's own saves.",
+          "An absolute directory to hold this run's user://, whose path runtime.userDir answers. macOS ignores it, so the run writes the player's own saves.",
       },
       env: {
         type: 'object',
@@ -2896,7 +2896,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_wait',
     title: 'Wait in the running game',
     description:
-      'Waits on the running game. Arm a watch, then send the call that sets a change off. A watch records a change over before your next call. A call sent beside a wait runs only after the wait answers. A game held by its debugger answers nothing until it resumes.',
+      'Waits on the running game. Arm a watch, then send the call that sets a change off. A watch records a change over before your next call. A call sent beside a wait can run during it, noted in ranAlongside. A game held by its debugger answers nothing until it resumes.',
     answer: [
       'until answers met, and value, the last reading of the property when the wait answered, whatever the wait asked for. A wait that was not met also answers waited_for, the value it compared against. elapsed_ms and frames say how long it waited.',
       'until with == or != answers outside_declared when the value waited for is not one the property declares. A number no value of an enum has, or one past an export range, is waited for all the same. A game may store one.',
