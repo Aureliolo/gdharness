@@ -6,6 +6,12 @@ extends SceneTree
 const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const Accessibility = preload("res://addons/gdharness_runtime/runtime_accessibility.gd")
+const Readers = preload("res://addons/gdharness_runtime/runtime_readers.gd")
+## What a client may take to begin on a cold cache, against the 9 to 22 s PowerShell took on a
+## loaded runner. Measured warm at about 0.1 s, so this is a bound a loaded machine stays under.
+const START_BOUND_MS: int = 5000
+## A program that compiles and does nothing, for the cache cases.
+const TRIVIAL: String = "static class Trivial { static int Main() { return 0; } }"
 
 var node: Runtime
 
@@ -107,6 +113,9 @@ func _run() -> void:
 	if deadlines != [46000, 55000, 63000]:
 		failures.append("a client is stopped at %s" % JSON.stringify(deadlines))
 
+	failures.append_array(_how_other_systems_are_said())
+	failures.append_array(await _the_readers())
+
 	node._cleanup()
 	# Not checked: the directory is gone either way by the time the fixture tears itself down.
 	var _removed: Error = DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
@@ -116,3 +125,196 @@ func _run() -> void:
 		return
 	printerr("\n".join(failures))
 	quit(1)
+
+
+## How a stopped client and the notes read for the systems whose clients are not PowerShell's.
+func _how_other_systems_are_said() -> Array[String]:
+	var failures: Array[String] = []
+	var linux: Dictionary = { "system": "AT-SPI", "starter": "The python3 process" }
+	var mac: Dictionary = {
+		"system": "the AX API", "starter": "The osascript process", "element_ids": false,
+	}
+	var said: Dictionary = {
+		Accessibility._reached("began 1100\nloaded 1600\n", 1000, 2000, linux):
+		(
+			"The python3 process began the client after 100 ms and loaded AT-SPI in 500 ms, and the"
+			+ " first walk of the windows had not ended"
+		),
+		Accessibility._reached("", 1000, 2000, mac):
+		"The osascript process had not begun the client",
+		Accessibility._stopped(45017, "x", 2, mac):
+		(
+			"The AX API had not read the tree after 45017 ms, so it was stopped: x. The game ran 2 "
+			+ "frames in that time."
+		),
+	}
+	for got: String in said:
+		if got != said[got]:
+			failures.append("a client of another system is said as: %s" % got)
+	var result: Dictionary = {}
+	Accessibility._note_reading(result, Accessibility.GdhPlacing.new(), {}, mac)
+	if not str(result.get("node_note", "")).begins_with("The AX API gives no element ids"):
+		failures.append("a system with no element ids says so: %s" % JSON.stringify(result))
+	if not Accessibility._tree_unbuilt(linux).begins_with("AT-SPI found nothing in the game's"):
+		failures.append("an unbuilt tree is named for the system that read it")
+	return failures
+
+
+## The clients on the system this runs on: its profile, and for Windows the compiled client's cache
+## and refusals, for Linux the refusal when no accessibility bus answers and for macOS that the
+## client runs and answers or names the permission.
+func _the_readers() -> Array[String]:
+	var failures: Array[String] = []
+	var readers: Readers = Readers.new(root)
+	var dir: String = OS.get_temp_dir().path_join("gdharness-readers-%d" % OS.get_process_id())
+	var profile: Dictionary = Readers.profile()
+	for key: String in ["system", "starter", "needs", "element_ids"]:
+		if not profile.has(key):
+			failures.append("%s has a reader with its %s: %s" % [OS.get_name(), key, profile])
+	var absent: String = dir.path_join("absent/csc.exe")
+	var missing: Dictionary = await readers.compile_client(dir, TRIVIAL, absent)
+	if not str(missing.get("error", "")).contains("absent/csc.exe is missing"):
+		failures.append("a compiler that is not there is named: %s" % JSON.stringify(missing))
+	match OS.get_name():
+		"Windows":
+			failures.append_array(await _compiled(readers, dir))
+		"Linux":
+			failures.append_array(_atspi_without_a_bus(dir))
+		"macOS":
+			failures.append_array(_ax_asked(dir))
+	_remove_all(dir)
+	return failures
+
+
+## Windows: the compiled client is made once, reused, made again when its source changes, refused
+## with the compiler's words when it does not compile, and starts and answers within the bound.
+func _compiled(readers: Readers, dir: String) -> Array[String]:
+	var failures: Array[String] = []
+	var csc: String = Readers.compiler()
+	var first: Dictionary = await readers.compile_client(dir, TRIVIAL, csc)
+	var exe: String = str(first.get("exe", ""))
+	var compile_ms: int = first.get("compile_ms", 0)
+	if exe.is_empty() or not FileAccess.file_exists(exe) or compile_ms <= 0:
+		failures.append("a client is compiled: %s" % JSON.stringify(first))
+		return failures
+	# The source written beside the client is the mark of a compile: a reuse writes nothing.
+	var written: String = exe.trim_suffix(".exe") + ".cs"
+	var _removed: Error = DirAccess.remove_absolute(written)
+	var again: Dictionary = await readers.compile_client(dir, TRIVIAL, csc)
+	var reused_ms: int = again.get("compile_ms", -1)
+	if again.get("exe") != exe or reused_ms != 0 or FileAccess.file_exists(written):
+		failures.append("an unchanged client is reused: %s" % JSON.stringify(again))
+	var changed: Dictionary = await readers.compile_client(dir, TRIVIAL + "\n// changed", csc)
+	var changed_exe: String = str(changed.get("exe", ""))
+	if (
+		changed_exe.is_empty()
+		or changed_exe == exe
+		or not FileAccess.file_exists(changed_exe)
+		or FileAccess.file_exists(exe)
+	):
+		failures.append("a changed client is compiled again: %s" % JSON.stringify(changed))
+	var broken: Dictionary = await readers.compile_client(dir, "this is not C#", csc)
+	if not str(broken.get("error", "")).contains("error CS"):
+		failures.append("a client that does not compile says why: %s" % JSON.stringify(broken))
+	var real: Dictionary = await readers.compile_client(dir, Readers.UIA_CLIENT, csc)
+	var real_exe: String = str(real.get("exe", ""))
+	if real_exe.is_empty():
+		failures.append("the UI Automation client compiles: %s" % JSON.stringify(real))
+		return failures
+	# No window handles: the client starts, loads UI Automation and answers an empty read.
+	var out: String = dir.path_join("answer.json")
+	var progress: String = out + ".progress"
+	var asked_at: int = int(Time.get_unix_time_from_system() * 1000.0)
+	var output: Array = []
+	var code: int = OS.execute(real_exe, [out, progress, "100", "100", "40"], output, true)
+	var done_at: int = int(Time.get_unix_time_from_system() * 1000.0)
+	var took: Dictionary = Accessibility._took(
+		FileAccess.get_file_as_string(progress), asked_at, done_at
+	)
+	if code != 0 or FileAccess.get_file_as_string(out) != '{"windows":[]}':
+		failures.append("the client answers an empty read: %d %s" % [code, output])
+	var began_ms: int = took.get("start", START_BOUND_MS + 1)
+	if began_ms > START_BOUND_MS:
+		failures.append("the client begins in %d ms: %s" % [START_BOUND_MS, JSON.stringify(took)])
+	return failures
+
+
+## Linux: with no session bus to reach, the client answers naming what it needs.
+func _atspi_without_a_bus(dir: String) -> Array[String]:
+	var failures: Array[String] = []
+	var is_made: Error = DirAccess.make_dir_recursive_absolute(dir)
+	var out: String = dir.path_join("answer.json")
+	var before: String = OS.get_environment("DBUS_SESSION_BUS_ADDRESS")
+	OS.set_environment("DBUS_SESSION_BUS_ADDRESS", "unix:path=" + dir.path_join("no-bus"))
+	var output: Array = []
+	var code: int = OS.execute(
+		"python3",
+		["-c", Readers.ATSPI_CLIENT, out, out + ".progress", "100", "100", "40", "0", "0"],
+		output,
+		true
+	)
+	if before.is_empty():
+		OS.unset_environment("DBUS_SESSION_BUS_ADDRESS")
+	else:
+		OS.set_environment("DBUS_SESSION_BUS_ADDRESS", before)
+	var answer: Variant = JSON.parse_string(FileAccess.get_file_as_string(out))
+	var said: String = ""
+	if answer is Dictionary:
+		var held: Dictionary = answer
+		said = str(held.get("error", ""))
+	if (
+		is_made != OK
+		or code != 0
+		or not said.contains("It needs python3 with the gi module")
+		or not (said.contains("no accessibility bus") or said.contains("cannot load AT-SPI"))
+	):
+		failures.append("no accessibility bus names what it needs: %d %s" % [code, output])
+	return failures
+
+
+## macOS: the client runs, and answers a read or names the missing Accessibility permission.
+func _ax_asked(dir: String) -> Array[String]:
+	var failures: Array[String] = []
+	var is_made: Error = DirAccess.make_dir_recursive_absolute(dir)
+	var out: String = dir.path_join("answer.json")
+	var output: Array = []
+	var code: int = OS.execute(
+		"/usr/bin/osascript",
+		[
+			"-l",
+			"JavaScript",
+			"-e",
+			Readers.AX_CLIENT,
+			out,
+			out + ".progress",
+			"100",
+			"100",
+			"40",
+			str(OS.get_process_id()),
+			"0",
+		],
+		output,
+		true
+	)
+	var answer: Variant = JSON.parse_string(FileAccess.get_file_as_string(out))
+	var shown: bool = false
+	if answer is Dictionary:
+		var held: Dictionary = answer
+		shown = (
+			held.has("windows")
+			or (
+				held.get("permission") == true
+				and str(held.get("error", "")).contains("Accessibility is not allowed")
+			)
+		)
+	if is_made != OK or code != 0 or not shown:
+		failures.append("the AX client answers or names the permission: %d %s" % [code, output])
+	return failures
+
+
+static func _remove_all(dir: String) -> void:
+	for file_name: String in DirAccess.get_files_at(dir):
+		var _file_removed: Error = DirAccess.remove_absolute(dir.path_join(file_name))
+	for sub: String in DirAccess.get_directories_at(dir):
+		_remove_all(dir.path_join(sub))
+	var _dir_removed: Error = DirAccess.remove_absolute(dir)

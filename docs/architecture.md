@@ -1039,20 +1039,33 @@ and never returns without a terminal.
 
 `runtime_inspect accessibility` is the one call that starts a process from inside the game. The
 engine builds the tree a screen reader reads only when something asks for it. It gives a script no
-way to read the tree back. Nothing on gdharness's desktop asks. A UI Automation client on the user's
+way to read the tree back. Nothing on gdharness's desktop asks. A screen-reader client on the user's
 desktop cannot reach a window on that desktop either.
 
-So the runtime starts the system's own PowerShell as its child, which lands on whatever desktop the
-game is on. The client's first question makes the engine build the tree. The game waits for it a
-frame at a time, since the client's questions are answered on the game's main thread. A blocking
-wait would hold both.
+So the runtime starts the system's own screen-reader client as its child, which lands on whatever
+desktop the game is on. The client's first question makes the engine build the tree. The game waits
+for it a frame at a time, since the client's questions are answered on the game's main thread. A
+blocking wait would hold both.
+
+Each system is asked through its own interface, with the client text in `runtime_readers.gd`:
+
+| System  | Interface     | Client                                                                                    |
+| ------- | ------------- | ----------------------------------------------------------------------------------------- |
+| Windows | UI Automation | C# compiled once by the .NET Framework's `csc.exe`, cached by a hash of its source        |
+| Linux   | AT-SPI        | python3 with `gi` and the Atspi typelib, over the accessibility bus                       |
+| macOS   | The AX API    | `osascript` with JavaScript for Automation, which needs Accessibility allowed for the app |
+
+The Windows client lives in the user's cache folder under `gdharness/readers`. A changed client has
+a new name and is compiled again, and the older ones are removed. Where a system lacks what its
+client needs, the answer names it: `csc.exe`, the python3 packages or an accessibility bus, or the
+Accessibility permission and where to grant it. The AX API gives no element ids, so on macOS an
+element's node is found by where it is drawn.
 
 ### When the engine builds the tree
 
 The engine builds the tree only with `--accessibility always`, which `engineArgs` takes, or with the
 project's setting at Always Active. The game cannot see the flag, because the engine consumes it. So
-the refusal judges by a window with nothing in it. UI Automation is Windows' own. On Linux and macOS
-the call says so.
+the refusal judges by a window with nothing in it.
 
 ## Finding a running game
 

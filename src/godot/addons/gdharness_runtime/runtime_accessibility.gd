@@ -1,192 +1,37 @@
 extends RefCounted
-## What the running game tells a screen reader: its accessibility tree, as UI Automation reads it.
+## What the running game tells a screen reader: its accessibility tree, as the system's own screen
+## reader interface reads it: UI Automation on Windows, AT-SPI on Linux and the AX API on macOS.
 ##
 ## The engine builds the tree only when something asks for it, and nothing on gdharness's desktop
 ## does, so a game's NOTIFICATION_ACCESSIBILITY_UPDATE never came and what its controls expose could
 ## not be checked. The engine offers no way to read the tree back, so the question is put the way a
-## screen reader puts it: a UI Automation client started by the game lands on the game's own
-## desktop, its first question makes the engine build the tree, and what it reads is what a screen
-## reader is told, names left empty included.
+## screen reader puts it: a client started by the game lands on the game's own desktop, its first
+## question makes the engine build the tree, and what it reads is what a screen reader is told,
+## names left empty included. The clients are in [code]runtime_readers.gd[/code].
 
 const GdhRead = preload("reading.gd")
 const GdhSays = preload("runtime_says.gd")
+const GdhReaders = preload("runtime_readers.gd")
 ## How long the client keeps walking the tree for it to settle: the engine answers the first
 ## question with its windows alone and fills them in over the next frames.
 const SETTLE_MS: int = 8000
 ## How long a window with nothing in it is walked before the client stops: a game building its tree
 ## fills the window within a few frames of being asked, and one building none never does.
 const EMPTY_MS: int = 4000
-## How long starting PowerShell, loading UI Automation and the client's other cold loads may take
-## before the client is stopped. It waits on the machine alone: a warm start takes under a second,
-## and a cold one on a loaded Windows
-## runner took the whole of a single 23 s budget meant for the walk as well.
+## How long starting the client and loading its interface may take before the client is stopped.
+## It waits on the machine alone: a warm start takes well under a second, and a cold one on a
+## loaded runner took the whole of a single 23 s budget meant for the walk as well.
 const START_MS: int = 45000
 ## How long the walks may take beyond [constant SETTLE_MS] a window once UI Automation is loaded,
 ## kept short since a walk that overruns is a window that does not answer.
 const WALK_SLACK_MS: int = 7000
 ## How often the progress file is read while the client runs.
 const LOOK_MS: int = 250
-## Deep enough for any interface a game builds, and inside the hundred levels ConvertTo-Json stops
-## at, which are two to a level of the tree.
+## Deep enough for any interface a game builds.
 const MOST_LEVELS: int = 40
 ## Where an element holds its node's instance id between matching and placing, removed before the
 ## answer goes.
 const NODE_ID: String = "_node_instance"
-## The client, as PowerShell, with $Handles, $Out, $Progress, $SettleMs, $EmptyMs and $MostLevels
-## set before it. Each element answers what UI Automation names its role, its name, its value where
-## it has one, its bounds in the window's pixels, and the actions a screen reader is offered on it.
-## Each stage it reaches is marked in $Progress as it is reached, with the time, so a client stopped
-## at the deadline still says how far it got.
-const WALK: String = r"""
-$ErrorActionPreference = 'Stop'
-function Answer($value) {
-  Mark 'answering'
-  [System.IO.File]::WriteAllText($Out, (ConvertTo-Json -InputObject $value -Depth 100 -Compress))
-  Mark 'answered'
-}
-function Mark($stage) {
-  [System.IO.File]::AppendAllText($Progress, "$stage $([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())`n")
-}
-try {
-  Mark 'began'
-  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-  Mark 'assemblies'
-  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
-  function Patterned($element, $name) {
-    $pattern = ("System.Windows.Automation.$($name)Pattern" -as [type])::Pattern
-    $found = $null
-    if ($element.TryGetCurrentPattern($pattern, [ref]$found)) { return $found }
-    return $null
-  }
-  # FullDescription is where the description is put, and the managed client refuses every property
-  # newer than itself, so it is asked through the core call the client makes for the rest.
-  $script:unread = $null
-  try {
-    $client = [System.Windows.Automation.AutomationElement]
-    $core = $client.Assembly.GetType('MS.Internal.Automation.UiaCoreApi')
-    $ask = $core.GetMethod('UiaGetPropertyValue', [System.Reflection.BindingFlags]'NonPublic,Public,Static')
-    $nodeField = $client.GetField('_hnode', [System.Reflection.BindingFlags]'NonPublic,Instance')
-    if ($null -eq $ask -or $null -eq $nodeField) {
-      $script:unread = 'this Windows has no UiaGetPropertyValue to ask it through'
-    }
-  } catch {
-    $script:unread = "$_"
-  }
-  # Serialised once here, since the first ConvertTo-Json loads its serialiser, and on a loaded
-  # machine that cold load belongs to the start's budget, not to the walks'.
-  $null = ConvertTo-Json -InputObject @{ warm = @(1) } -Depth 100 -Compress
-  Mark 'loaded'
-  function FullDescription($element) {
-    if ($null -ne $script:unread) { return '' }
-    try {
-      $asked = @($nodeField.GetValue($element), [int]30159, $null)
-      $null = $ask.Invoke($null, $asked)
-      if ($asked[2] -is [string]) { return $asked[2] }
-    } catch {
-      $script:unread = "$_"
-    }
-    return ''
-  }
-  function Describe($element, $ox, $oy, $depth) {
-    $c = $element.Current
-    $role = $c.ControlType.ProgrammaticName -replace '^ControlType[.]', ''
-    $role = ($role -creplace '(?<=[a-z])(?=[A-Z])', '_').ToLowerInvariant()
-    $node = [ordered]@{ role = $role; name = $c.Name }
-    $description = FullDescription $element
-    if ($description) { $node.description = $description }
-    if ($c.HelpText) { $node.placeholder = $c.HelpText }
-    # The element's own id, the last four parts of its runtime id, which the game reads back as the
-    # node that made it.
-    $runtime = $element.GetRuntimeId()
-    if ($null -ne $runtime -and $runtime.Length -ge 4) {
-      $node.element_id = @($runtime[-4], $runtime[-3], $runtime[-2], $runtime[-1])
-    }
-    $r = $c.BoundingRectangle
-    if (-not $r.IsEmpty) {
-      $node.bounds = [ordered]@{ x = [int]($r.X - $ox); y = [int]($r.Y - $oy) }
-      $node.bounds.width = [int]$r.Width
-      $node.bounds.height = [int]$r.Height
-    }
-    $actions = @()
-    if (Patterned $element 'Invoke') { $actions += 'click' }
-    $p = Patterned $element 'Toggle'
-    if ($p) { $actions += 'toggle'; $node.toggled = "$($p.Current.ToggleState)".ToLowerInvariant() }
-    $p = Patterned $element 'ExpandCollapse'
-    if ($p) {
-      $actions += 'expand_collapse'
-      $node.expanded = "$($p.Current.ExpandCollapseState)".ToLowerInvariant()
-    }
-    $p = Patterned $element 'SelectionItem'
-    if ($p) { $actions += 'select'; $node.selected = $p.Current.IsSelected }
-    $p = Patterned $element 'Value'
-    if ($p) {
-      $node.value = $p.Current.Value
-      if (-not $p.Current.IsReadOnly) { $actions += 'set_value' }
-    }
-    $p = Patterned $element 'RangeValue'
-    if ($p) {
-      # A reader speaks the Value pattern's words, such as "75%" for a slider whose game sets them,
-      # and the number would otherwise replace them.
-      if ($node.Contains('value') -and "$($node.value)") { $node.value_text = $node.value }
-      $node.value = $p.Current.Value
-      $node.range = @($p.Current.Minimum, $p.Current.Maximum)
-      if (-not $p.Current.IsReadOnly) { $actions += 'set_value' }
-    }
-    if (Patterned $element 'ScrollItem') { $actions += 'scroll_into_view' }
-    if ($c.IsKeyboardFocusable) { $actions += 'focus' }
-    $node.actions = $actions
-    if ($c.HasKeyboardFocus) { $node.focused = $true }
-    if (-not $c.IsEnabled) { $node.disabled = $true }
-    if ($c.IsOffscreen) { $node.offscreen = $true }
-    $children = @()
-    if ($depth -lt $MostLevels) {
-      $child = $walker.GetFirstChild($element)
-      while ($null -ne $child) {
-        $children += , (Describe $child $ox $oy ($depth + 1))
-        $child = $walker.GetNextSibling($child)
-      }
-    }
-    $node.children = $children
-    return $node
-  }
-  function Count($node) {
-    $n = 1
-    foreach ($child in $node.children) { $n += Count $child }
-    return $n
-  }
-  $windows = @()
-  foreach ($handle in $Handles) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$handle)
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($SettleMs)
-    $empty = [DateTime]::UtcNow.AddMilliseconds($EmptyMs)
-    # The window's corner is read on every walk: before the engine builds its tree the window is
-    # its frame, and after it the client area inside it, so a corner read once placed everything
-    # by the frame's.
-    $r = $root.Current.BoundingRectangle
-    $tree = Describe $root $r.X $r.Y 0
-    $last = Count $tree
-    Mark "walked $last"
-    # Walked again until two walks in a row agree, since the first question is what makes the
-    # engine build the tree, which arrives over the frames after it.
-    while ([DateTime]::UtcNow -lt $deadline) {
-      Start-Sleep -Milliseconds 150
-      $r = $root.Current.BoundingRectangle
-      $tree = Describe $root $r.X $r.Y 0
-      $count = Count $tree
-      Mark "walked $count"
-      if ($count -gt 1 -and $count -eq $last) { break }
-      if ($count -eq 1 -and [DateTime]::UtcNow -gt $empty) { break }
-      $last = $count
-    }
-    $windows += , $tree
-  }
-  $answer = @{ windows = $windows }
-  if ($null -ne $script:unread) { $answer.description_unread = $script:unread }
-  Answer $answer
-} catch {
-  Answer @{ error = "$_" }
-}
-"""
 
 var _host: Node
 
@@ -217,11 +62,11 @@ static func _unreadable_here() -> String:
 			)
 			% also
 		)
-	if OS.get_name() != "Windows":
+	if GdhReaders.profile().is_empty():
 		return (
 			(
-				"The tree is read through UI Automation, the interface a Windows screen reader "
-				+ "uses, and this game runs on %s, whose screen readers ask it through another"
+				"The tree is read through UI Automation on Windows, AT-SPI on Linux and the AX API "
+				+ "on macOS, and this game runs on %s, which has none of them"
 			)
 			% OS.get_name()
 		)
@@ -231,9 +76,12 @@ static func _unreadable_here() -> String:
 ## Waits out the client [param pid] walking [param windows] windows, a frame at a time rather than
 ## blocking: the client's questions are answered on the game's main thread, which a blocking wait
 ## would hold, and neither side would move. Two budgets, so a slow start is never charged to the
-## walk: one for PowerShell to begin and load UI Automation, and once it has, one for the walks.
-## Answers why it was stopped, or "" once the walk is done.
-func _walk_waited(pid: int, progress: String, windows: int, started_ms: int) -> String:
+## walk: one for the client to begin and load its interface, and once it has, one for the walks.
+## [param reader] is the system's [method GdhReaders.profile]. Answers why it was stopped, or ""
+## once the walk is done.
+func _walk_waited(
+	pid: int, progress: String, windows: int, started_ms: int, reader: Dictionary
+) -> String:
 	var began_at: int = Time.get_ticks_msec()
 	var deadline: int = _deadline(began_at, -1, windows)
 	var walking: bool = false
@@ -259,10 +107,11 @@ func _walk_waited(pid: int, progress: String, windows: int, started_ms: int) -> 
 			var reached: String = _reached(
 				FileAccess.get_file_as_string(progress),
 				started_ms,
-				int(Time.get_unix_time_from_system() * 1000.0)
+				int(Time.get_unix_time_from_system() * 1000.0),
+				reader
 			)
 			var _gone: Error = DirAccess.remove_absolute(progress)
-			return _stopped(now - began_at, reached, frames)
+			return _stopped(now - began_at, reached, frames, reader)
 		await _host.get_tree().process_frame
 		frames += 1
 	return ""
@@ -270,15 +119,38 @@ func _walk_waited(pid: int, progress: String, windows: int, started_ms: int) -> 
 
 ## Why a client stopped after [param waited_ms] at the stage [param reached] was stopped. The
 ## frames the game ran meanwhile tell a machine too starved to run anything from a client stuck
-## on its own while the game, at no higher a priority, kept running.
-static func _stopped(waited_ms: int, reached: String, frames: int) -> String:
+## on its own while the game, at no higher a priority, kept running. [param reader] is the system's
+## [method GdhReaders.profile], UI Automation's when empty.
+static func _stopped(
+	waited_ms: int, reached: String, frames: int, reader: Dictionary = {}
+) -> String:
 	return (
 		(
-			"UI Automation had not read the tree after %d ms, so it was stopped: %s. The game "
+			"%s had not read the tree after %d ms, so it was stopped: %s. The game "
 			+ "ran %d frame%s in that time."
 		)
-		% [waited_ms, reached, frames, "" if frames == 1 else "s"]
+		% [
+			_first_upper(_system(reader)),
+			waited_ms,
+			reached,
+			frames,
+			"" if frames == 1 else "s",
+		]
 	)
+
+
+## The interface [param reader] asks, UI Automation's when empty.
+static func _system(reader: Dictionary) -> String:
+	return str(reader.get("system", "UI Automation"))
+
+
+## What starts [param reader]'s client, said as a sentence's subject, PowerShell when empty.
+static func _starter(reader: Dictionary) -> String:
+	return str(reader.get("starter", "PowerShell"))
+
+
+static func _first_upper(words: String) -> String:
+	return words.left(1).to_upper() + words.substr(1)
 
 
 ## Gives each of [param windows] the id in [param ids] at its place, -1 past their end, and matches
@@ -293,22 +165,38 @@ func _match_windows(
 
 
 ## Notes in [param result] what [param placing] could not place and what [param answer], the
-## client's, could not read.
-static func _note_reading(result: Dictionary, placing: GdhPlacing, answer: Dictionary) -> void:
+## client's, could not read. [param reader] is the system's [method GdhReaders.profile].
+static func _note_reading(
+	result: Dictionary, placing: GdhPlacing, answer: Dictionary, reader: Dictionary
+) -> void:
 	if placing.tooltips > 0:
 		result["tooltip_note"] = (
-			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI "
-			+ "Automation, as AccessKit fills it in, has no property that carries it (measured on "
-			+ "4.7.2), so a screen reader on Windows is not told it. Say what a reader needs in "
-			+ "accessibility_description."
+			(
+				"tooltip is the node's tooltip_text, which the engine puts in the tree, and %s, "
+				+ "as AccessKit fills it in, has no property that carries it (measured on 4.7.2 "
+				+ "with UI Automation), so a screen reader is not told it. Say what a reader needs "
+				+ "in accessibility_description."
+			)
+			% _system(reader)
 		)
-	if placing.asked > 0 and placing.placed == 0:
+	if reader.get("element_ids", true) == false:
+		result["node_note"] = (
+			(
+				"%s gives no element ids, so no element could be matched to the node that made "
+				+ "it: part_of says which node is drawn around each element instead."
+			)
+			% _first_upper(_system(reader))
+		)
+	elif placing.asked > 0 and placing.placed == 0:
 		# Nothing at all matched: the element ids are not the engine's element RIDs any more, which
 		# an AccessKit that numbers its elements another way would do, and every node would read
 		# null.
 		result["node_note"] = (
-			"No element could be matched to the node that made it: UI Automation's runtime ids did "
-			+ "not carry the engine's element ids, so node and part_of are the windows' alone."
+			(
+				"No element could be matched to the node that made it: %s's element ids did "
+				+ "not carry the engine's element ids, so node and part_of are the windows' alone."
+			)
+			% _system(reader)
 		)
 	if answer.has("description_unread"):
 		result["description_note"] = (
@@ -321,7 +209,7 @@ static func _note_reading(result: Dictionary, placing: GdhPlacing, answer: Dicti
 ## was. The command line's --accessibility is consumed by the engine and not handed on, so only
 ## the setting and a screen reader can say the tree is built. Otherwise an empty window is most
 ## likely a game that builds none.
-static func _tree_unbuilt() -> String:
+static func _tree_unbuilt(reader: Dictionary) -> String:
 	var setting: String = _setting()
 	# 1 is a screen reader running, 0 none and -1 a platform that cannot say.
 	var read_aloud: bool = (
@@ -331,15 +219,33 @@ static func _tree_unbuilt() -> String:
 		return ""
 	return (
 		(
-			"UI Automation found nothing in the game's windows: the engine builds the "
+			"%s found nothing in the game's windows: the engine builds the "
 			+ "tree a screen reader reads only with "
 			+ "accessibility/general/accessibility_support at Always Active, or at "
 			+ "Auto with a screen reader running when it starts, and this project's "
 			+ "is %s. "
 			+ 'Start the run with engineArgs ["--accessibility", "always"].'
 		)
-		% setting
+		% [_first_upper(_system(reader)), setting]
 	)
+
+
+## Why the client's [param text], parsed as [param read], is no answer, or "" when it is one. A
+## client that did not run at all leaves nothing, so the message says what running it needs.
+static func _unanswered(text: String, read: Variant, reader: Dictionary) -> String:
+	var system: String = _first_upper(_system(reader))
+	if not read is Dictionary:
+		return (
+			"%s answered nothing readable: %s. Reading it needs %s."
+			% [system, text.left(500), reader["needs"]]
+		)
+	var answer: Dictionary = read
+	if not answer.has("error"):
+		return ""
+	var needs: String = ""
+	if answer.has("permission"):
+		needs = ". It needs %s" % reader["needs"]
+	return "%s could not read the game's windows: %s%s" % [system, str(answer["error"]), needs]
 
 
 ## The game's windows as a screen reader is told them, each a tree of elements.
@@ -347,11 +253,14 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var unread: String = _unreadable_here()
 	if not unread.is_empty():
 		return _refused(unread)
+	var reader: Dictionary = GdhReaders.profile()
 	var handles: Array[String] = []
 	var ids: Array[int] = []
 	for id: int in DisplayServer.get_window_list():
 		var handle: int = DisplayServer.window_get_native_handle(DisplayServer.WINDOW_HANDLE, id)
-		if handle != 0:
+		# Only UI Automation is asked by handle: AT-SPI and the AX API find the game's windows by
+		# its process, and a window with no handle of its own is still one.
+		if handle != 0 or OS.get_name() != "Windows":
 			handles.append(str(handle))
 			ids.append(id)
 
@@ -359,43 +268,14 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		"gdharness-accessibility-%d-%d.json" % [OS.get_process_id(), Time.get_ticks_usec()]
 	)
 	var progress: String = out + ".progress"
-	var script: String = (
-		(
-			(
-				"$Handles = @(%s)\n$Out = '%s'\n$Progress = '%s'\n$SettleMs = %d\n$EmptyMs = "
-				+ "%d\n$MostLevels = %d\n"
-			)
-			% [
-				", ".join(handles),
-				out.replace("'", "''"),
-				progress.replace("'", "''"),
-				SETTLE_MS,
-				EMPTY_MS,
-				MOST_LEVELS,
-			]
-		)
-		+ WALK
+	var launched: Dictionary = await GdhReaders.new(_host).start(
+		out, progress, handles, [SETTLE_MS, EMPTY_MS, MOST_LEVELS]
 	)
-	var started_ms: int = int(Time.get_unix_time_from_system() * 1000.0)
-	# The system's own PowerShell by its path, so a powershell.exe earlier on PATH is not what runs.
-	var shell: String = OS.get_environment("SystemRoot").path_join(
-		"System32/WindowsPowerShell/v1.0/powershell.exe"
-	)
-	var pid: int = (
-		OS
-		. create_process(
-			shell,
-			[
-				"-NoProfile",
-				"-NonInteractive",
-				"-EncodedCommand",
-				Marshalls.raw_to_base64(script.to_utf16_buffer()),
-			]
-		)
-	)
-	if pid <= 0:
-		return _refused("PowerShell could not be started from %s to read the tree" % shell)
-	var stopped: String = await _walk_waited(pid, progress, handles.size(), started_ms)
+	if launched.has("error"):
+		return _refused(str(launched["error"]))
+	var started_ms: int = launched["started_ms"]
+	var pid: int = launched["pid"]
+	var stopped: String = await _walk_waited(pid, progress, handles.size(), started_ms, reader)
 	if not stopped.is_empty():
 		return _refused(stopped)
 
@@ -405,17 +285,17 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 		started_ms,
 		int(Time.get_unix_time_from_system() * 1000.0)
 	)
+	var compile_ms: int = launched["compile_ms"]
+	if not took.is_empty() and compile_ms > 0:
+		took["compile"] = compile_ms
 	# Not checked: a file that is not there was never written, which the answer below says.
 	var _removed: Error = DirAccess.remove_absolute(out)
 	var _progress_removed: Error = DirAccess.remove_absolute(progress)
 	var read: Variant = GdhRead.json_or_null(text)
-	if not read is Dictionary:
-		return _refused("UI Automation answered nothing readable: %s" % text.left(500))
+	var unanswered: String = _unanswered(text, read, reader)
+	if not unanswered.is_empty():
+		return _refused(unanswered)
 	var answer: Dictionary = read
-	if answer.has("error"):
-		return _refused(
-			"UI Automation could not read the game's windows: %s" % str(answer["error"])
-		)
 
 	var windows: Array = answer.get("windows", [])
 	var made_by: Dictionary = {}
@@ -438,9 +318,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var result: Dictionary = { "windows": windows, "elements": elements }
 	if not took.is_empty():
 		result["tookMsBy"] = took
-	_note_reading(result, placing, answer)
+	_note_reading(result, placing, answer, reader)
 	if elements <= windows.size():
-		var unbuilt: String = _tree_unbuilt()
+		var unbuilt: String = _tree_unbuilt(reader)
 		if not unbuilt.is_empty():
 			return _refused(unbuilt)
 		result["_note"] = (
@@ -805,10 +685,15 @@ static func _marks(progress: String) -> Array:
 
 ## How far a client started at [param started_ms] and stopped at [param stopped_ms] got by the marks
 ## in [param progress], said for a caller whose read it stopped: the time went to starting
-## PowerShell, loading UI Automation's assemblies, setting up the rest of the client, the walks,
-## after the last walk, or writing the answer, and which tells a loaded machine from a window that
-## never answers.
-static func _reached(progress: String, started_ms: int, stopped_ms: int) -> String:
+## the client, loading its interface, setting up the rest of the client, the walks, after the last
+## walk, or writing the answer, and which tells a loaded machine from a window that never answers.
+## [param reader] is the system's [method GdhReaders.profile], PowerShell's UI Automation client
+## when empty.
+static func _reached(
+	progress: String, started_ms: int, stopped_ms: int, reader: Dictionary = {}
+) -> String:
+	var who: String = _starter(reader)
+	var system: String = _system(reader)
 	var marks: Array = _marks(progress)
 	var at: Dictionary = {}
 	var walks: int = 0
@@ -823,35 +708,37 @@ static func _reached(progress: String, started_ms: int, stopped_ms: int) -> Stri
 		elif not at.has(stage):
 			at[stage] = mark[1]
 	if not at.has("began"):
-		return "PowerShell had not begun the client"
+		return "%s had not begun the client" % who
 	var began: int = at["began"] - started_ms
 	if not at.has("loaded") and not at.has("assemblies"):
-		return "PowerShell began the client after %d ms and was still loading UI Automation" % began
+		return "%s began the client after %d ms and was still loading %s" % [who, began, system]
 	if not at.has("loaded"):
 		return (
 			(
-				"PowerShell began the client after %d ms and loaded UI Automation's assemblies in "
+				"%s began the client after %d ms and loaded %s's assemblies in "
 				+ "%d ms, and was still setting up the description reader and the JSON serialiser"
 			)
-			% [began, at["assemblies"] - at["began"]]
+			% [who, began, system, at["assemblies"] - at["began"]]
 		)
 	var loaded: int = at["loaded"] - at["began"]
 	if walks == 0:
 		return (
 			(
-				"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the"
+				"%s began the client after %d ms and loaded %s in %d ms, and the"
 				+ " first walk of the windows had not ended"
 			)
-			% [began, loaded]
+			% [who, began, system, loaded]
 		)
 	var walked: String = (
 		(
-			"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the "
+			"%s began the client after %d ms and loaded %s in %d ms, and the "
 			+ "windows were walked %d time%s, the last finding %s element%s and ending %d ms "
 			+ "before the client was stopped"
 		)
 		% [
+			who,
 			began,
+			system,
 			loaded,
 			walks,
 			"" if walks == 1 else "s",

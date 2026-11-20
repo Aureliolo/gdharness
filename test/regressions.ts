@@ -57264,8 +57264,11 @@ async function testARefusalIsSaidOnce(): Promise<void> {
  * count the one a screen reader would read as nothing. The same game started without the flag is
  * the contrast: it builds no tree, and the answer says how to make it build one.
  *
- * Windowed, since a headless run has no window to read. UI Automation is Windows' own, so on Linux
- * and macOS the case holds the refusal naming the platform instead.
+ * Windowed, since a headless run has no window to read. Each system is read through its own
+ * interface. On Windows the case checks every field. On Linux it starts a virtual display and a
+ * session bus of its own, reads over AT-SPI and checks the tree's shape, then reads again with no
+ * bus to see the refusal name it. On macOS the Accessibility permission decides: without it the
+ * answer must name the step that grants it, and with it the tree's shape is checked.
  */
 async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
   const engine = resolveGodotPath();
@@ -57276,9 +57279,10 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     console.log('accessibility regression skipped (Godot not found)');
     return;
   }
-  const refused = process.platform === 'win32' ? null : windowedRunRefused();
-  if (refused !== null) {
-    console.log(`accessibility regression skipped (${refused})`);
+  const onLinux = process.platform === 'linux';
+  const desktop = await screenReaderDesktop();
+  if (typeof desktop === 'string') {
+    console.log(`accessibility regression skipped (${desktop})`);
     return;
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-accessibility-'));
@@ -57371,7 +57375,12 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     ].join('\n'),
   );
   const server = new ServerProcess({
-    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    env: {
+      ...desktop.env,
+      GODOT_PATH: engine,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_PROJECT: project,
+    },
   });
   // What the game answered, read once it has drawn a frame or two.
   // Narrowed reads of the same game, asked after the whole one and before it stops.
@@ -57426,17 +57435,17 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     await server.initialize('regression-test');
     stopped = false;
     if (process.platform !== 'win32') {
-      const elsewhere = textOf(await readWith(['--accessibility', 'always'])) ?? '';
+      const elsewhere = await readWith(['--accessibility', 'always']);
       stopped = true;
-      assert.match(
-        elsewhere,
-        /The tree is read through UI Automation, the interface a Windows screen reader uses, and this game runs on (Linux|macOS)/,
-        elsewhere,
-      );
+      checkTreeReadElsewhere(elsewhere);
+      if (onLinux) {
+        await checkNoBusIsNamed(engine, project, runtimeDir, desktop.env);
+      }
       return;
     }
-    // The first read starts PowerShell cold. A Windows runner once took it past the client's whole
-    // deadline, so the time it took is printed beside the stages a slow one says it reached.
+    // The first read starts the compiled client cold. A Windows runner once took the PowerShell
+    // that did this past the client's whole deadline, so the time it took is printed beside the
+    // stages a slow one says it reached.
     const coldAt = Date.now();
     const unbuilt = textOf(await readWith([])) ?? '';
     console.log(
@@ -57637,7 +57646,141 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       );
     }
     await server.stop();
+    desktop.stop();
     sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * Where the screen-reader read runs: the environment its game needs and how to end it, or why the
+ * case is skipped. Windows and macOS read on the desktop they have. Linux gets a desktop of its
+ * own, and fails where the runner should have the stack rather than skipping.
+ */
+async function screenReaderDesktop(): Promise<{ env: Record<string, string>; stop: () => void } | string> {
+  const own = { env: {}, stop: () => undefined };
+  if (process.platform === 'win32') {
+    return own;
+  }
+  if (process.platform !== 'linux') {
+    return windowedRunRefused() ?? own;
+  }
+  if (!process.env['CI'] && !process.env['GDHARNESS_ALLOW_WINDOWS']) {
+    return 'windowed runs are left to CI, so no window opens on a desktop';
+  }
+  const made = await linuxScreenReaderDesktop();
+  if (typeof made === 'string' && process.env['GDHARNESS_REQUIRE_GODOT']) {
+    throw new Error(`the Linux screen-reader stack is missing: ${made}`);
+  }
+  return made;
+}
+
+/**
+ * A virtual display and a session bus for the Linux screen-reader read, or why this machine cannot
+ * make them. The bus is one dbus-launch starts, which activates the accessibility bus on demand
+ * from the system's service files. [stop] ends both.
+ */
+async function linuxScreenReaderDesktop(): Promise<
+  { env: Record<string, string>; stop: () => void } | string
+> {
+  const launched = spawnSyncHidden('dbus-launch', ['--sh-syntax'], { encoding: 'utf8' });
+  const address = /DBUS_SESSION_BUS_ADDRESS='([^']+)'/.exec(launched.stdout)?.[1];
+  const busPid = Number(/DBUS_SESSION_BUS_PID=(\d+)/.exec(launched.stdout)?.[1]);
+  if (address === undefined || !Number.isInteger(busPid)) {
+    return 'dbus-launch is not installed';
+  }
+  const display = `:${String(90 + (process.pid % 9))}`;
+  const xvfb = spawnHidden('Xvfb', [display, '-screen', '0', '1024x768x24'], { stdio: 'ignore' });
+  const stop = (): void => {
+    xvfb.kill();
+    process.kill(busPid);
+  };
+  const came = await Promise.race([once(xvfb, 'error').then(() => false), delay(1500).then(() => true)]);
+  if (!came || xvfb.exitCode !== null) {
+    process.kill(busPid);
+    return 'Xvfb is not installed';
+  }
+  return { env: { DISPLAY: display, DBUS_SESSION_BUS_ADDRESS: address }, stop };
+}
+
+/**
+ * What a system whose reader gives fewer fields than UI Automation must still answer: the tree of
+ * the game, or on macOS without the Accessibility permission the refusal that names the step which
+ * grants it.
+ */
+function checkTreeReadElsewhere(answered: JsonRpcMessage): void {
+  const shown = textOf(answered) ?? JSON.stringify(answered);
+  if (process.platform === 'darwin' && shown.includes('Accessibility is not allowed')) {
+    assert.match(shown, /System Settings, Privacy & Security, Accessibility/, shown);
+    console.log(
+      'accessibility: this macOS runner lacks the Accessibility permission, so the refusal was asserted',
+    );
+    return;
+  }
+  const tree = parseTextContent(answered);
+  const window = get(tree, 'windows', 0);
+  assert.equal(get(window, 'role'), 'window', `one window: ${shown}`);
+  const children = asArray(get(window, 'children'));
+  const page = children.find((child) => get(child, 'name') === 'Page');
+  assert.deepEqual(
+    asArray(get(page, 'children')).map((line) => get(line, 'name')),
+    ['One', 'Two', ''],
+    `the page with its lines: ${shown}`,
+  );
+  const label = children.find((child) => get(child, 'name') === 'Three');
+  assert.equal(get(label, 'role'), 'text', `the Label as static text: ${shown}`);
+  const split = ['start', 'load', 'walk'].map((stage) => get(tree, 'tookMsBy', stage));
+  assert.ok(
+    split.every((ms) => typeof ms === 'number' && ms >= 0),
+    `the read says where its time went: ${shown}`,
+  );
+}
+
+/**
+ * A game on a session with no accessibility bus: the read names the bus and what provides it, and
+ * does not hang. The bus address is one nothing listens on.
+ */
+async function checkNoBusIsNamed(
+  engine: string,
+  project: string,
+  runtimeDir: string,
+  desktop: Record<string, string>,
+): Promise<void> {
+  const server = new ServerProcess({
+    env: {
+      ...desktop,
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/gdharness-no-bus',
+      GODOT_PATH: engine,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_PROJECT: project,
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          op: 'start',
+          headless: false,
+          runtimeWaitMs: WINDOWED_BOOT_MS,
+          engineArgs: ['--accessibility', 'always'],
+        },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answered = await server.request(
+      'tools/call',
+      { name: 'runtime_inspect', arguments: { op: 'accessibility' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const shown = textOf(answered) ?? JSON.stringify(answered);
+    assert.match(shown, /accessibility bus/, `no bus is named as the missing part: ${shown}`);
+    assert.match(shown, /at-spi2-core/, `and the package that provides it: ${shown}`);
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
   }
 }
 

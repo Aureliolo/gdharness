@@ -2357,7 +2357,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 1,
         description:
-          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS. accessibility defaults to 75000 or that, whichever is longer, since a cold PowerShell on a loaded machine can take most of a minute to start.',
+          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS. accessibility defaults to 75000 or that, whichever is longer, since a client starting on a loaded machine can take most of a minute.',
       },
     },
     requires: [],
@@ -2401,7 +2401,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       accessibility: {
         effect: 'read',
         summary:
-          'what the game tells a screen reader, read through UI Automation as a Windows screen reader does, one tree per window. Needs a windowed Windows run started with engineArgs ["--accessibility", "always"] or accessibility_support at Always Active, since the engine builds the tree only when asked. Reading takes a second or two',
+          'what the game tells a screen reader, one tree per window, read through each system\'s own screen-reader interface: UI Automation on Windows (a small client compiled once with the .NET Framework compiler), AT-SPI on Linux (python3 with gi and the Atspi typelib, and an accessibility bus), the AX API on macOS (osascript, with Accessibility allowed for the app that runs the game). Needs a windowed run started with engineArgs ["--accessibility", "always"] or accessibility_support at Always Active, since the engine builds the tree only when asked. A system missing what its reader needs is refused with what to install or allow. Reading takes a second or two',
         requires: [],
       },
     },
