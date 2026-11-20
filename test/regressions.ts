@@ -586,6 +586,7 @@ import {
   ProfileAggregate,
   type ProfileTotals,
   profiledFunctions,
+  profileFileWriter,
   profilerOn,
   propertyOf,
   queuedMessagesOf,
@@ -65534,6 +65535,27 @@ async function playUnderADebugger(options: {
   return said;
 }
 
+/** A process that opens [param path], says so, and keeps it open for [param ms]. */
+async function aReaderHolding(path: string, ms: number): Promise<ChildProcess> {
+  const holder = spawnHidden(
+    process.execPath,
+    [
+      '-e',
+      `const fs = require('fs'); const fd = fs.openSync(${JSON.stringify(path)}, 'r'); console.log('held'); setTimeout(() => fs.closeSync(fd), ${String(ms)});`,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  await new Promise<void>((settle, reject) => {
+    holder.stdout.once('data', () => {
+      settle();
+    });
+    holder.once('exit', () => {
+      reject(new Error('the holder exited before it held the file'));
+    });
+  });
+  return holder;
+}
+
 /**
  * A profile file is written over while another process has it open, and a write that cannot be
  * made is answered rather than thrown.
@@ -65557,26 +65579,7 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
     functions: {},
     unreadable: 0,
   });
-  // The holder opens the file, says so, and keeps it open for [param ms].
-  const heldFor = async (ms: number): Promise<ChildProcess> => {
-    const holder = spawnHidden(
-      process.execPath,
-      [
-        '-e',
-        `const fs = require('fs'); const fd = fs.openSync(${JSON.stringify(path)}, 'r'); console.log('held'); setTimeout(() => fs.closeSync(fd), ${String(ms)});`,
-      ],
-      { stdio: ['ignore', 'pipe', 'inherit'] },
-    );
-    await new Promise<void>((settle, reject) => {
-      holder.stdout.once('data', () => {
-        settle();
-      });
-      holder.once('exit', () => {
-        reject(new Error('the holder exited before it held the file'));
-      });
-    });
-    return holder;
-  };
+  const heldFor = async (ms: number): Promise<ChildProcess> => await aReaderHolding(path, ms);
   const finished = async (holder: ChildProcess): Promise<void> => {
     if (holder.exitCode === null) {
       await new Promise((settle) => holder.once('exit', settle));
@@ -65612,6 +65615,67 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
       'leaving nothing half-written beside it',
     );
   } finally {
+    sweep(holding);
+  }
+}
+
+/**
+ * A profiled run's keeper never sleeps for a held profile file while its game runs.
+ *
+ * On Windows every line a kept game prints waits for its keeper to read it. A keeper that waited
+ * out a reader of the profile with its thread asleep held the game for up to a second a write. The
+ * thread's longest gap between two turns shows such a sleep. The totals a reader held off still
+ * reach the file, and the ones standing as the game exits are written before the keeper goes.
+ */
+async function testAProfiledRunsKeeperNeverSleepsForAHeldProfile(): Promise<void> {
+  const holding = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-profile-writer-'));
+  const path = join(holding, 'profile.json');
+  const summed = (frames: number): Parameters<ReturnType<typeof profileFileWriter>['changed']>[0] => ({
+    startedAt: 1,
+    lastFrameAt: 2,
+    frames,
+    complete: false,
+    functions: {},
+    unreadable: 0,
+  });
+  const frames = (): unknown => get(readProfileFile(path), 'frames');
+  let longestGapMs = 0;
+  let turned = Date.now();
+  const beat = setInterval(() => {
+    longestGapMs = Math.max(longestGapMs, Date.now() - turned);
+    turned = Date.now();
+  }, 10);
+  try {
+    assert.equal(writeProfileFile(path, { connected: false, listeningSince: 1 }), true, 'the file is there');
+    const writer = profileFileWriter(path);
+    const reader = await aReaderHolding(path, 2500);
+    longestGapMs = 0;
+    turned = Date.now();
+    writer.changed(summed(3));
+    assert.ok(
+      await answeredWithin(() => (frames() === 3 ? true : undefined), 15_000),
+      'the totals a reader held off reach the file once it lets go',
+    );
+    assert.ok(
+      longestGapMs < 700,
+      `and the thread never slept for the held file: ${String(longestGapMs)}ms between two turns`,
+    );
+    if (reader.exitCode === null) {
+      await new Promise((settle) => reader.once('exit', settle));
+    }
+
+    writer.changed(summed(4));
+    writer.finish(null);
+    assert.equal(frames(), 4, 'totals still waiting for their write are written as the game exits');
+
+    const second = profileFileWriter(path);
+    second.changed(summed(6));
+    second.finish(summed(9));
+    assert.equal(frames(), 9, 'and the totals given as it exits are the ones the file ends on');
+    await delay(700);
+    assert.equal(frames(), 9, 'with no earlier ones written after them');
+  } finally {
+    clearInterval(beat);
     sweep(holding);
   }
 }
@@ -122276,6 +122340,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunNamesItsLeaksAndItsUnusedIgnores,
   testATestRunsFlagsAreJudgedFirst,
   testAProfileIsWrittenPastAReader,
+  testAProfiledRunsKeeperNeverSleepsForAHeldProfile,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,

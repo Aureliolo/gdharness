@@ -52,7 +52,7 @@ import {
 import { discard, scratchDirectory } from './scratch.js';
 import {
   ProfileObserver,
-  type ProfileTotals,
+  profileFileWriter,
   profileFrameFunctions,
   withEngineArguments,
   writeProfileFile,
@@ -260,63 +260,19 @@ function copiedIntoFile(output: number, child: ChildProcess): Promise<void> {
   });
 }
 
-/** How often a profiled run's file is written at most while frames arrive. */
-const PROFILE_WRITE_MS = 500;
-
-/** How many times the write as the game exits is tried before what it carried is given up. */
-const LAST_WRITE_TRIES = 5;
-
-/**
- * The profiler of a profiled run, writing what it sums to [param path]: when the game connects, at
- * most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits, so a server
- * reading the file mid-run is at most that far behind and one reading it after the exit has the lot.
- */
+/** The profiler of a profiled run, writing what it sums to [param path] as the game runs and exits. */
 function profiledBy(
   path: string,
   projectPath: string,
   engineCalls: boolean,
 ): { observer: ProfileObserver; finish: () => void } {
-  let latest: ProfileTotals | null = null;
-  let timer: NodeJS.Timeout | null = null;
-  // A write a reader held off past its wait is tried again later rather than dropped: the totals it
-  // carried are only rewritten when the next frame arrives, and a game that has quit sends none.
-  const write = (): void => {
-    timer = null;
-    if (latest !== null && !writeProfileFile(path, { ...latest, connected: true })) {
-      timer = setTimeout(write, PROFILE_WRITE_MS);
-    }
-  };
-  const observer = new ProfileObserver(
-    (totals) => {
-      const first = latest === null;
-      latest = totals;
-      if (first) {
-        write();
-      } else {
-        timer ??= setTimeout(write, PROFILE_WRITE_MS);
-      }
-    },
-    profileFrameFunctions(projectPath),
-    engineCalls,
-  );
+  const writer = profileFileWriter(path);
+  const observer = new ProfileObserver(writer.changed, profileFrameFunctions(projectPath), engineCalls);
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     observer,
     finish: () => {
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
-      const last = observer.totals() ?? latest;
-      latest = last;
-      if (last === null) {
-        return;
-      }
-      // The keeper exits after this, so there is no later write to fall back on, and the engine's
-      // own totals arrive only now. Each try waits out a held file for a while of its own.
-      let tries = 0;
-      while (!writeProfileFile(path, { ...last, connected: true }) && tries < LAST_WRITE_TRIES) {
-        tries += 1;
-      }
+      writer.finish(observer.totals());
     },
   };
 }

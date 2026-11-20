@@ -780,11 +780,17 @@ the directory.
 On Linux and macOS the game writes the transcript file itself. A pipe with no reader fills and then
 blocks the writer, so a game writing into a pipe nobody reads would hang.
 
+### The transcript on Windows
+
 On Windows the game writes into a pipe, and the keeper copies it into the transcript. The engine
 flushes after every line there, and a flush to a file costs the game several milliseconds a line. A
 flush to a pipe waits only until the keeper has read the line. A keeper that dies closes the pipe:
 the game runs on, and its later output is lost. A keeper that is alive and not reading holds the
-game at its next line. So nothing on the keeper's loop may wait long while a game runs.
+game at its next line.
+
+So the keeper's repeated write, a profiled run's totals, waits out a reader of its file on a timer.
+Only the run note is written with the thread waiting, for a second at most. That happens at the
+start, at a restart and at the exit, and only while another server reads the note.
 
 ### No console windows
 
