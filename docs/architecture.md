@@ -778,8 +778,22 @@ Both of the game's streams go to a transcript under the runtime directory. Besid
 the process and the file. There is one note per project, because every server on the machine shares
 the directory.
 
-The output goes to a file rather than a pipe. A pipe with no reader fills and then blocks the
-writer, so a game writing into a pipe nobody reads would hang.
+On Linux and macOS the game writes the transcript file itself. A pipe with no reader fills and then
+blocks the writer, so a game writing into a pipe nobody reads would hang.
+
+### The transcript on Windows
+
+On Windows the game writes into a pipe, and the keeper copies it into the transcript. The engine
+flushes after every line there, and a flush to a file costs the game several milliseconds a line. A
+flush to a pipe waits only until the keeper has read the line. A keeper that dies closes the pipe:
+the game runs on, and its later output is lost. A keeper that is alive and not reading holds the
+game at its next line.
+
+So the keeper's repeated write, a profiled run's totals, waits out a reader of its file on a timer.
+Two writes wait with the thread asleep, each only while another server reads its file. The run note
+waits a second at most, at the start, at a restart and at the exit. A profiled run's last totals
+wait up to six seconds as the game exits. The keeper writes them only after it has copied all the
+game's output, so no game waits on them.
 
 ### No console windows
 
