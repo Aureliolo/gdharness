@@ -133,9 +133,10 @@ export const SHARED_PARAGRAPHS: readonly {
       'One property can set others as it loads: anchors_preset gives a centred Control both grow directions. alsoSaved lists each line as {node, property, was, saved}, on any node the scene held, those inside an instance included. It has no was where the file set nothing, and no saved where it now sets nothing. What a set moved on its own node is under alsoChanged instead. A node the call adds and the format lines (header uid, load_steps, unique_id, an ext_resource uid) are not listed. The scene loads as it did, and only its text changed.',
   },
   {
-    heading: 'Class list brought up to date',
+    heading: 'What a headless engine also does',
     text: CLASSES_REBUILT,
-    detail: 'classesRebuiltFirst is left out when no class was missing.',
+    detail:
+      'classesRebuiltFirst names the classes added, and is left out when none was missing. The autoloads start once the call has answered.',
   },
 ];
 

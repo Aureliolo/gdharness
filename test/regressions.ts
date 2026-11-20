@@ -14095,6 +14095,37 @@ async function testAFolderNamedProjectGodotIsNoProject(): Promise<void> {
   }
 }
 
+/**
+ * A wait given neither whole set of what it needs is refused with both, in the words the op line
+ * prints, and until says how to leave nodePath out. signal keeps the sentence it has always had.
+ */
+async function testAWaitMissingWhatItNeedsIsRefusedWithTheWayOut(): Promise<void> {
+  await withStdioServer(async (call) => {
+    for (const until of [
+      { op: 'until', nodePath: '/root/Main', property: 'hp' },
+      { op: 'until', nodePath: '/root/Main', value: 1 },
+      { op: 'until', property: 'hp', value: 1 },
+    ]) {
+      assert.equal(
+        await call('runtime_wait', until),
+        'runtime_wait until needs nodePath, property and value, or says.' +
+          'Next:\n- With says instead of property, nodePath can be left out and the whole game is searched',
+        JSON.stringify(until),
+      );
+    }
+    for (const signal of [
+      { op: 'signal', signal: 'pressed' },
+      { op: 'signal', nodePath: '/root/Main' },
+    ]) {
+      assert.equal(
+        await call('runtime_wait', signal),
+        'runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered.',
+        JSON.stringify(signal),
+      );
+    }
+  });
+}
+
 async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
   await withStdioServer(async (call) => {
     assert.match(
@@ -14292,15 +14323,6 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     assert.equal(
       await call('project_settings', { op: 'add_input_action', actionName: '' }),
       'project_settings add_input_action needs projectPath; actionName, which was given empty; events.',
-    );
-    // An op that needs one of two sets is refused with both, in the words the op line prints.
-    assert.equal(
-      await call('runtime_wait', { op: 'until', nodePath: '/root/Main', property: 'hp' }),
-      'runtime_wait until needs nodePath, property and value, or says.',
-    );
-    assert.equal(
-      await call('runtime_wait', { op: 'signal', signal: 'pressed' }),
-      'runtime_wait signal needs nodePath and signal, or watch.',
     );
     for (const call_ of [
       { op: 'until', says: 'Start' },
@@ -15814,11 +15836,179 @@ function testTheLaunchAndRunWarningsAreInTheToolList(): void {
   assert.match(launch, /A restart of an editor this server opened is a quit and then a launch\./);
   assert.match(launch, /Ending this server between them, as a reconnect does, leaves no editor\./);
   assert.match(launch, /rebind: end the connected editor's debug sessions/);
+  assert.match(launch, /close and restart save the open scenes\./);
   assert.match(listedText('editor_run'), /A start ends a run of the same project first\./);
   assert.match(
     serverInstructions(),
     /The gdharness skill's tool reference and the site say what each answer field means\./,
   );
+}
+
+/**
+ * What a call does beyond its named target, and the forms a caller cannot guess, said in the tool
+ * list a client is sent, by tool and argument (none for the description, which holds the op lines).
+ */
+const SAID_BEFORE_THE_CALL: readonly (readonly [string, string | undefined, RegExp])[] = [
+  ['editor_rescan', undefined, /A scan rewrites the class list in \.godot, writes missing \.uid files/],
+  ['editor_rescan', 'reloadScript', /One with unsaved edits in a script tab is reloaded from the file/],
+  ['script_edit', undefined, /ok false after a write leaves the files changed\./],
+  [
+    'script_edit',
+    undefined,
+    /create writes a \.uid and puts its class_name in the class list, and an open editor then scans/,
+  ],
+  ['script_edit', undefined, /A rename's lists past 300 lines go to a file under \.godot\./],
+  ['resource_edit', undefined, /A modify drops the lines read lists under notLoaded\./],
+  [
+    'resource_edit',
+    undefined,
+    /move with no editor writes \.uid and \.import files, and leaves paths in \.scn and \.res/,
+  ],
+  ['resource_edit', 'unset', /An editor's next save writes an unset shader parameter back\./],
+  ['resource_edit', 'controlType', /A name that is no class is set as a variation\./],
+  ['resource_edit', 'item', /with its base_type when it is a variation\./],
+  [
+    'scene_node',
+    undefined,
+    /A rename or a reparent rewrites the paths naming the node, here and in the scenes/,
+  ],
+  ['scene_node', undefined, /A delete rewrites none\./],
+  ['scene_node', 'properties', /\{"_type": "Vector2", "x": 1, "y": 2\}/],
+  ['scene_node', 'properties', /\{"_type": "Dictionary", "entries": \[\[key, value\]\]\}/],
+  ['scene_node', 'properties', /an enum takes its name/],
+  ['scene_node', 'properties', /A "metadata\/" key adds metadata, and null takes it off\./],
+  ['scene_node', 'properties', /2\^53 or more is \{"_type": "int", "value": "9007199254740993"\}/],
+  ['scene_node', 'properties', /"sources\/0\/0:0\/0\/probability" writes inside a built-in resource\./],
+  ['scene_animation', undefined, /create[^:]*: a new animation, and its library when the player lacks it/],
+  [
+    'scene_animation',
+    undefined,
+    /add_state[^:]*: a state playing an animation, written even when the player lacks it/,
+  ],
+  [
+    'scene_animation',
+    undefined,
+    /remove_track[^:]*: every matching track, or some of its keys, and a track left with no key goes/,
+  ],
+  [
+    'scene_animation',
+    undefined,
+    /remove[^:_]*: an animation, clearing the player's autoplay when it named it/,
+  ],
+  ['scene_animation', 'fromState', /One from Start sets the first state\./],
+  ['scene_animation', undefined, /Headless, it updates \.godot's class list and starts autoloads\./],
+  ['scene_tree', undefined, /Headless, it updates \.godot's class list and starts autoloads\./],
+  ['project_info', undefined, /Headless, it updates \.godot's class list/],
+  ['project_dependencies', undefined, /Headless, it updates \.godot's class list/],
+  ['editor_classes', undefined, /Headless, it updates \.godot's class list/],
+  ['script_diagnostics', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_create', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_node', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_signal', undefined, /Headless, it updates \.godot's class list/],
+  ['resource_edit', undefined, /Headless, it updates \.godot's class list/],
+  ['scene_create', undefined, /create makes any missing folder of the path\./],
+  ['scene_signal', undefined, /but refused with binds or unbinds\./],
+  ['scene_signal', undefined, /A write puts back each connection the engine dropped on load/],
+  ['project_settings', 'parentBusIndex', /every later bus moves one along\./],
+  [
+    'project_settings',
+    'newBusName',
+    /every scene and resource line giving a node the old bus is rewritten\./,
+  ],
+  [
+    'project_settings',
+    undefined,
+    /remove_audio_bus[^:]*: remove a bus, sending what sent to it on to where it sent/,
+  ],
+  [
+    'project_settings',
+    'value',
+    /Infinity is \{"_type": "float", "value": "inf"\}, and "" writes an empty string\./,
+  ],
+  ['project_settings', 'enabled', /whether the effect is on, a kept one too\./],
+  ['project_export', 'exportFilter', /leave out a file named only in a string or by class_name\./],
+  ['project_export', 'options', /An enum takes the name the dialog shows\./],
+  ['project_export', undefined, /Removing the runnable preset makes the next of its platform runnable\./],
+  [
+    'project_import',
+    undefined,
+    /reimport and set_options import every file that is behind, not only resourcePath\./,
+  ],
+  ['project_import', undefined, /An open editor scans the project first\./],
+  ['project_import', 'options', /\{"opentype_features": \{"liga": 0\}\}/],
+  ['project_test', undefined, /It first updates \.godot's class list and imports what is behind\./],
+  [
+    'project_test',
+    undefined,
+    /The run's user:\/\/ is its own and is deleted after, but on macOS it is the player's\./,
+  ],
+  ['project_test', undefined, /A suite needing a window shows one on Linux and macOS\./],
+  ['editor_run', undefined, /start and check first import what changed on disk since its import\./],
+  ['editor_run', 'visible', /with --disable-vsync and --max-fps 60\./],
+  ['editor_run', 'scene', /A script is no scene: put it on a scene's root\./],
+  ['editor_run', 'engineArgs', /--fixed-fps lets a headless game run faster than the clock\./],
+  ['editor_run', 'suites', /Needs gdUnit4 and this release's tests addon in the project\./],
+  ['editor_launch', undefined, /close and restart save the open scenes\./],
+  [
+    'editor_launch',
+    undefined,
+    /close stops the process of an editor this server opened that has not connected yet\./,
+  ],
+  ['editor_launch', undefined, /A game a visible editor plays opens a window\./],
+  ['runtime_input', undefined, /A control hidden in a ScrollContainer is scrolled to first\./],
+  ['runtime_input', undefined, /After a lone wheel press, every click lands on the control that took it\./],
+  [
+    'runtime_input',
+    'action',
+    /A button whose Shortcut holds it is pressed too\. ui_cancel does not close an AcceptDialog\./,
+  ],
+  ['runtime_input', 'replace', /with text "" empties it/],
+  ['runtime_input', 'button', /wheel_down or a button number/],
+  [
+    'runtime_inspect',
+    'property',
+    /An engine one takes literal arguments, 'get_theme_constant\("separation"\)'/,
+  ],
+  [
+    'runtime_inspect',
+    'property',
+    /A negative index counts from the end, and a key holding a colon is quoted/,
+  ],
+  ['runtime_inspect', undefined, /or accessibility_support at Always Active/],
+  ['runtime_invoke', 'method', /"get_world_2d\(\):direct_space_state:intersect_point"/],
+  [
+    'runtime_wait',
+    'value',
+    /compared at its precision\. An enum takes a name or a number, and an object property the text null\./,
+  ],
+  ['runtime_wait', 'watch', /used up by the answer\./],
+  ['runtime_wait', undefined, /A game held by its debugger answers nothing until it resumes\./],
+  ['debug_breakpoint', undefined, /The set is kept in the project until removed\./],
+  ['debug_breakpoint', undefined, /The addon turns on network\/debug_adapter\/sync_breakpoints\./],
+  ['debug_breakpoint', undefined, /A game this server started does not stop on a script error\./],
+  [
+    'debug_breakpoint',
+    undefined,
+    /remove[^:]*: remove a breakpoint, whoever set it, the editor's gutter included/,
+  ],
+  ['debug_state', undefined, /evaluate[^:]*: [^;]*the first loading every global class/],
+];
+
+/** Each hazard and working form of SAID_BEFORE_THE_CALL is in the tool list as tools/list sends it. */
+async function testTheHazardsAndWorkingFormsAreInTheToolList(): Promise<void> {
+  await withStdioServer(async (_call, request) => {
+    const listed = asArray(get((await request('tools/list', {}, 30_000)).result, 'tools'));
+    const said = (tool: string, argument: string | undefined): string => {
+      const entry = listed.find((one) => get(one, 'name') === tool);
+      assert.ok(entry, `${tool} is in tools/list`);
+      return argument === undefined
+        ? text(get(entry, 'description'))
+        : text(get(entry, 'inputSchema', 'properties', argument, 'description'));
+    };
+    for (const [tool, argument, form] of SAID_BEFORE_THE_CALL) {
+      assert.match(said(tool, argument), form, `${tool}${argument === undefined ? '' : `.${argument}`}`);
+    }
+  });
 }
 
 /** create_tileset refuses a TileSet path that already exists, which its sources argument names. */
@@ -32398,7 +32588,7 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
     );
     assert.match(
       await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),
-      /runtime_wait signal needs nodePath and signal, or watch\./,
+      /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered\./,
     );
 
     const pidOf = /"pid": (\d+)/.exec(started)?.[1];
@@ -58220,7 +58410,11 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
             ENGINE_CALL_TIMEOUT_MS,
           ),
         );
-        assert.equal(unnamed, 'runtime_wait until needs nodePath, property and value, or says.');
+        assert.equal(
+          unnamed,
+          'runtime_wait until needs nodePath, property and value, or says.' +
+            'Next:\n- With says instead of property, nodePath can be left out and the whole game is searched',
+        );
         const absent = await call('runtime_inspect', { op: 'find', says: 'GLOW\\nshines 4' });
         assert.deepEqual(
           asArray(get(absent, 'nodes')),
@@ -122528,6 +122722,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
+  testAWaitMissingWhatItNeedsIsRefusedWithTheWayOut,
   testAFolderNamedProjectGodotIsNoProject,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
@@ -122582,6 +122777,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheFirstCallRulesAreInTheToolList,
   testAnObjectSlotIsEmptiedByTheTextNull,
   testTheLaunchAndRunWarningsAreInTheToolList,
+  testTheHazardsAndWorkingFormsAreInTheToolList,
   testATileSetRefusesAResourcePathThatExists,
   testAnEffectOfTheSameClassKeepsItsSettings,
   testEveryToolTellsAClientWhatItCanChange,

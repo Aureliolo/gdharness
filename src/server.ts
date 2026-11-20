@@ -6853,15 +6853,17 @@ class GodotServer {
       const joined = fields.join(blank.length > 0 ? '; ' : ', ');
       return { ok: false, response: this.createErrorResponse(`${where} needs ${joined}.`) };
     }
-    const sets = op === null ? undefined : spec.operations?.[op]?.requiresOneOf;
+    const operation = op === null ? undefined : spec.operations?.[op];
+    const sets = operation?.requiresOneOf;
     if (
       op !== null &&
       sets !== undefined &&
       !sets.some((set) => set.every((field) => givenInASet(spec, args, field)))
     ) {
+      const said = operation?.unmet?.said ?? `${spec.name} ${op} needs ${requiredSetsSaid(sets)}.`;
       return {
         ok: false,
-        response: this.createErrorResponse(`${spec.name} ${op} needs ${requiredSetsSaid(sets)}.`),
+        response: this.createErrorResponse(said, [...(operation?.unmet?.next ?? [])]),
       };
     }
     return { ok: true, op };
