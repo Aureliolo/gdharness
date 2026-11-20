@@ -84,6 +84,12 @@ export class LSPTimeout extends Error {
  */
 const LANGUAGE_SERVER_START_MS = 30_000;
 const LANGUAGE_SERVER_RETRY_MS = 250;
+/**
+ * How long one connection attempt is given. A connect nobody answers otherwise waits for the
+ * operating system to give up, 21 seconds on Windows and about two minutes on Linux. The debug
+ * adapter client gives up after the same three seconds.
+ */
+const LANGUAGE_SERVER_CONNECT_MS = 3_000;
 
 /** The refusal for a port the connected editor names as its language server's, past the wait for it. */
 class LanguageServerNotListening extends Error {
@@ -238,8 +244,20 @@ export class GodotLSPClient {
         diagnostics: new PendingRequests<string, unknown[]>(),
       };
       const reader = new FrameReader();
+      const unanswered = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          socket.destroy();
+          rejectConnect(
+            new Error(
+              `Failed to connect to Godot LSP at ${this.host}:${this.port}: nothing answered the connection in ${String(LANGUAGE_SERVER_CONNECT_MS / 1000)}s`,
+            ),
+          );
+        }
+      }, LANGUAGE_SERVER_CONNECT_MS);
 
       socket.once('connect', () => {
+        clearTimeout(unanswered);
         this.socket = socket;
         this.requests = connection.requests;
         this.diagnostics = connection.diagnostics;
@@ -274,6 +292,7 @@ export class GodotLSPClient {
       });
 
       socket.on('error', (error: Error) => {
+        clearTimeout(unanswered);
         if (!settled) {
           settled = true;
           rejectConnect(
@@ -284,6 +303,7 @@ export class GodotLSPClient {
       });
 
       socket.on('close', () => {
+        clearTimeout(unanswered);
         this.endConnection(connection, new Error('Godot LSP socket closed'));
       });
     });
