@@ -789,8 +789,10 @@ the game runs on, and its later output is lost. A keeper that is alive and not r
 game at its next line.
 
 So the keeper's repeated write, a profiled run's totals, waits out a reader of its file on a timer.
-Only the run note is written with the thread waiting, for a second at most. That happens at the
-start, at a restart and at the exit, and only while another server reads the note.
+Two writes wait with the thread asleep, each only while another server reads its file. The run note
+waits a second at most, at the start, at a restart and at the exit. A profiled run's last totals
+wait up to six seconds as the game exits. The keeper writes them only after it has copied all the
+game's output, so no game waits on them.
 
 ### No console windows
 
