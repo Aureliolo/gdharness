@@ -296,9 +296,11 @@ func _ids_to_keep() -> Dictionary:
 		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
 		if node == null or not root.is_ancestor_of(node):
 			continue
+		# A node another scene owns is written here only as the values this file sets on it, under
+		# an entry that names no type.
 		var header: String = (
 			_header_of(root.get_path_to(node))
-			if not node.scene_file_path.is_empty()
+			if not node.scene_file_path.is_empty() or node.owner != root
 			else _typed_header(node, node.get_class())
 		)
 		keep[header] = _remade_ids[key]
@@ -358,7 +360,14 @@ static func _keep_ids(file_path: String, keep: Dictionary) -> Error:
 					lines[index] = lines[index].replace(
 						" unique_id=%d" % filed, " unique_id=" + str(keep[header])
 					)
-					changed = true
+				else:
+					# The engine writes no unique_id for a node it gave none, such as one made again
+					# inside an instance.
+					var closing: int = lines[index].rfind("]")
+					lines[index] = (
+						lines[index].left(closing) + " unique_id=" + str(keep[header]) + "]"
+					)
+				changed = true
 	if not changed:
 		return OK
 	var file: FileAccess = FileAccess.open(written_at(file_path), FileAccess.WRITE)

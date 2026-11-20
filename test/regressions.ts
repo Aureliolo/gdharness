@@ -108406,6 +108406,45 @@ async function testAnEditOfAWideSceneTakesLinearTime(): Promise<void> {
 }
 
 /**
+ * An instanced scene's own script frees the node an outer file with no script overrides and hangs
+ * a child on. The outer file saves as its twin does, whose instanced scene frees nothing.
+ */
+async function testAnOuterFileKeepsWhatItHangsOnANodeItsInstanceFrees(): Promise<void> {
+  const part = (script: string): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://${script}" id="1_s"]\n\n` +
+    '[node name="Part" type="Node2D" unique_id=200]\nscript = ExtResource("1_s")\n\n' +
+    '[node name="X" type="Node2D" parent="." unique_id=201]\n\n' +
+    '[node name="Y" type="Node2D" parent="." unique_id=202]\n';
+  const host = (scene: string): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="PackedScene" path="res://${scene}" id="1_p"]\n\n` +
+    '[node name="Host" type="Node2D" unique_id=300]\n\n' +
+    '[node name="Inst" parent="." unique_id=301 instance=ExtResource("1_p")]\n\n' +
+    '[node name="X" parent="Inst" unique_id=201]\nposition = Vector2(4, 4)\n\n' +
+    '[node name="Deep" type="Node2D" parent="Inst/X" unique_id=302]\nposition = Vector2(7, 8)\n\n' +
+    '[node name="DeepKid" type="Node2D" parent="Inst/X/Deep" unique_id=303]\n\n' +
+    '[node name="Plain" type="Node2D" parent="." unique_id=305]\n\n[editable path="Inst"]\n';
+  await withASceneProject(
+    'outer file kept over a freeing instance',
+    {
+      'quiet.gd': QUIET_ON_LOAD,
+      'freer.gd': onInstanced('\t\tget_node(^"X").free()'),
+      'quiet_part.tscn': part('quiet.gd'),
+      'freeing_part.tscn': part('freer.gd'),
+      'quiet_host.tscn': host('quiet_part.tscn'),
+      'freeing_host.tscn': host('freeing_part.tscn'),
+    },
+    async (scenes) => {
+      const twin = await savedAfterAnEdit(scenes, 'quiet_host.tscn', 'Plain');
+      assert.match(twin, /\[node name="Deep" type="Node2D" parent="Inst\/X"/);
+      assert.equal(
+        await savedAfterAnEdit(scenes, 'freeing_host.tscn', 'Plain'),
+        twin.replace('res://quiet_part.tscn', 'res://freeing_part.tscn'),
+      );
+    },
+  );
+}
+
+/**
  * A connection is written whether or not what the signal passes can reach the method, and the
  * answer says when it cannot.
  */
@@ -123925,6 +123964,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPlaceholderAScriptFreedIsMadeAgain,
   testANodeMovedBackKeepsItsNameOverAScriptsNamesake,
   testAnEditOfAWideSceneTakesLinearTime,
+  testAnOuterFileKeepsWhatItHangsOnANodeItsInstanceFrees,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,

@@ -12,9 +12,10 @@ extends RefCounted
 ## save keeps a node. Nothing else that exists is freed or made again: a node's own engine children,
 ## such as a container's scroll bars, are owned by no scene and held by the node.
 ##
-## An instanced scene is put back against its own state. A scene whose scripts are all tools, or
-## whose root's script is a tool, is left as it loads, as is every scene instanced inside one with
-## a tool root, since an editor runs those scripts too and saves what they leave.
+## An instanced scene is put back against its own state. A scene whose scripts, and those of the
+## scenes it instances, are all tools is left as it loads. So is one whose root's script is a tool,
+## and every scene instanced inside it, since an editor runs those scripts too and saves what they
+## leave.
 
 const GdhFileReads = preload("file_reads.gd")
 
@@ -44,6 +45,9 @@ var _filed_by_path: Dictionary = {}
 ## renamed or freed since stays listed, so each use checks the node again.
 var _by_name: Dictionary = {}
 var _indexed: bool = false
+## Whether each scene's scripts that are not tools, or those of a scene it instances, run as it
+## loads, by the state's instance id.
+var _untooled: Dictionary = {}
 var _editable: PackedStringArray = []
 
 
@@ -67,7 +71,7 @@ func put_back(top: Node, packed: PackedScene) -> void:
 ## from [param top]. [param kept] marks a scene inside one whose root's script is a tool.
 func _level(top: Node, state: SceneState, kept: bool) -> Dictionary:
 	var tool_root: bool = kept or _tool_at_root(state)
-	var putting: bool = not tool_root and _runs_untooled(state)
+	var putting: bool = not tool_root and _runs_untooled_within(state)
 	if putting:
 		_put_back[top.get_instance_id()] = true
 		_levels.append({ "top": top, "state": state })
@@ -110,6 +114,30 @@ static func _runs_untooled(state: SceneState) -> bool:
 		if not script.is_tool():
 			return true
 	return false
+
+
+## Whether [method _runs_untooled] holds for [param state] or for a scene it instances outside one
+## whose root's script is a tool. Such a script can free a node the outer file sets values on or
+## hangs its own nodes under.
+func _runs_untooled_within(state: SceneState) -> bool:
+	var key: int = state.get_instance_id()
+	if _untooled.has(key):
+		return _untooled[key]
+	_untooled[key] = false
+	var runs: bool = _runs_untooled(state)
+	var at: SceneState = state
+	while at != null and not runs:
+		for index: int in range(1, at.get_node_count()):
+			var placed: PackedScene = at.get_node_instance(index)
+			if placed == null:
+				continue
+			var inner: SceneState = placed.get_state()
+			if not _tool_at_root(inner) and _runs_untooled_within(inner):
+				runs = true
+				break
+		at = at.get_base_scene_state()
+	_untooled[key] = runs
+	return runs
 
 
 ## Whether the root of [param state], or of a scene it inherits, is given a tool script. That
@@ -443,7 +471,8 @@ func _within_remade(node: Node, top: Node) -> bool:
 
 ## The unique_id the file gives [param entry]'s node, or -1.
 func _id_of(entry: Dictionary) -> int:
-	var ids: Array[int] = _filed(entry["state"])["ids"]
+	var state: SceneState = entry["state"]
+	var ids: Array[int] = _filed(state)["ids"]
 	var index: int = entry["index"]
 	return ids[index] if index < ids.size() else -1
 
