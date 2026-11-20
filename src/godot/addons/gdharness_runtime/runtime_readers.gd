@@ -539,6 +539,15 @@ const ROLES = {
 };
 
 function run(argv) {
+  try {
+    read(argv);
+  } catch (failure) {
+    $.NSString.stringWithString(JSON.stringify({ error: String(failure) }))
+      .writeToFileAtomicallyEncodingError(argv[0], true, $.NSUTF8StringEncoding, null);
+  }
+}
+
+function read(argv) {
   const out = argv[0];
   const progressPath = argv[1];
   const settleMs = parseInt(argv[2], 10);
@@ -786,10 +795,34 @@ func start(
 		_:
 			return { "error": "There is no screen-reader client for %s" % OS.get_name() }
 	var started_ms: int = int(Time.get_unix_time_from_system() * 1000.0)
-	var pid: int = OS.create_process(program, args)
-	if pid <= 0:
+	if OS.get_name() == "Windows":
+		var pid: int = OS.create_process(program, args)
+		if pid <= 0:
+			return { "error": "%s could not be started to read the tree" % program }
+		return { "pid": pid, "started_ms": started_ms, "compile_ms": compile_ms }
+	# Piped, so what an interpreter prints when the client fails before it can answer reaches the
+	# refusal.
+	var piped: Dictionary = OS.execute_with_pipe(program, args, false)
+	var piped_pid: int = piped.get("pid", -1)
+	if piped_pid <= 0:
 		return { "error": "%s could not be started to read the tree" % program }
-	return { "pid": pid, "started_ms": started_ms, "compile_ms": compile_ms }
+	return {
+		"pid": piped_pid,
+		"started_ms": started_ms,
+		"compile_ms": compile_ms,
+		"stderr": piped.get("stderr"),
+		"stdio": piped.get("stdio"),
+	}
+
+
+## What the client started as [param launched] has printed on its error output, cut to 800
+## characters, or "" when it was not piped or printed nothing.
+static func said(launched: Dictionary) -> String:
+	var pipe: Variant = launched.get("stderr")
+	if not pipe is FileAccess:
+		return ""
+	var file: FileAccess = pipe
+	return file.get_buffer(800).get_string_from_utf8().strip_edges()
 
 
 ## The compiled Windows client for [param source] in [param dir], compiled with [param csc] when it

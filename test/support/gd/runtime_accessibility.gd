@@ -159,6 +159,19 @@ func _how_other_systems_are_said() -> Array[String]:
 		failures.append("a system with no element ids says so: %s" % JSON.stringify(result))
 	if not Accessibility._tree_unbuilt(linux).begins_with("AT-SPI found nothing in the game's"):
 		failures.append("an unbuilt tree is named for the system that read it")
+	var needing: Dictionary = { "system": "the AX API", "needs": "x allowed" }
+	var unanswered: Dictionary = {
+		Accessibility._unanswered("", null, needing, ""):
+		"The AX API answered nothing readable: . Reading it needs x allowed.",
+		Accessibility._unanswered("", null, needing, "Error: -2700"):
+		(
+			"The AX API answered nothing readable: . It printed: Error: -2700. Reading it needs x"
+			+ " allowed."
+		),
+	}
+	for got: String in unanswered:
+		if got != unanswered[got]:
+			failures.append("a client that answered nothing is said as: %s" % got)
 	return failures
 
 
@@ -182,8 +195,10 @@ func _the_readers() -> Array[String]:
 			failures.append_array(await _compiled(readers, dir))
 		"Linux":
 			failures.append_array(_atspi_without_a_bus(dir))
+			failures.append_array(await _error_output_read())
 		"macOS":
 			failures.append_array(await _ax_asked(readers, dir))
+			failures.append_array(await _error_output_read())
 	_remove_all(dir)
 	return failures
 
@@ -239,6 +254,20 @@ func _compiled(readers: Readers, dir: String) -> Array[String]:
 	if began_ms > START_BOUND_MS:
 		failures.append("the client begins in %d ms: %s" % [START_BOUND_MS, JSON.stringify(took)])
 	return failures
+
+
+## Linux and macOS: what a client started through a pipe prints on its error output is read once
+## it has ended.
+func _error_output_read() -> Array[String]:
+	var piped: Dictionary = OS.execute_with_pipe("/bin/sh", ["-c", "echo broken >&2"], false)
+	var pid: int = piped.get("pid", -1)
+	var began: int = Time.get_ticks_msec()
+	while pid > 0 and OS.is_process_running(pid) and Time.get_ticks_msec() - began < AX_WAIT_MS:
+		await process_frame
+	var said: String = Readers.said(piped)
+	if said != "broken":
+		return ["a client's error output is read as: %s" % JSON.stringify(said)]
+	return []
 
 
 ## Linux: with no session bus to reach, the client answers naming what it needs.

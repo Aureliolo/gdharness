@@ -243,13 +243,15 @@ static func _tree_unbuilt(reader: Dictionary) -> String:
 
 
 ## Why the client's [param text], parsed as [param read], is no answer, or "" when it is one. A
-## client that did not run at all leaves nothing, so the message says what running it needs.
-static func _unanswered(text: String, read: Variant, reader: Dictionary) -> String:
+## client that did not run at all leaves nothing, so the message says what running it needs, and
+## what the client printed on its error output, [param said], where it printed anything.
+static func _unanswered(text: String, read: Variant, reader: Dictionary, said: String) -> String:
 	var system: String = _first_upper(_system(reader))
 	if not read is Dictionary:
+		var printed: String = "" if said.is_empty() else " It printed: %s." % said
 		return (
-			"%s answered nothing readable: %s. Reading it needs %s."
-			% [system, text.left(500), reader["needs"]]
+			"%s answered nothing readable: %s.%s Reading it needs %s."
+			% [system, text.left(500), printed, reader["needs"]]
 		)
 	var answer: Dictionary = read
 	if not answer.has("error"):
@@ -304,7 +306,7 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var _removed: Error = DirAccess.remove_absolute(out)
 	var _progress_removed: Error = DirAccess.remove_absolute(progress)
 	var read: Variant = GdhRead.json_or_null(text)
-	var unanswered: String = _unanswered(text, read, reader)
+	var unanswered: String = _unanswered(text, read, reader, GdhReaders.said(launched))
 	if not unanswered.is_empty():
 		return _refused(unanswered)
 	var answer: Dictionary = read
