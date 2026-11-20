@@ -15,8 +15,10 @@
 import { appendFileSync, closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
+import { copiedInto } from './copied-into.js';
 import {
   ensureHelperCompiled,
   HelperRefused,
@@ -50,7 +52,7 @@ import {
 import { discard, scratchDirectory } from './scratch.js';
 import {
   ProfileObserver,
-  type ProfileTotals,
+  profileFileWriter,
   profileFrameFunctions,
   withEngineArguments,
   writeProfileFile,
@@ -58,6 +60,17 @@ import {
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { type ExitWatch, followSuccessor, watchExit } from './successor.js';
 import { holdChildExit, holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
+
+/**
+ * A started target: its process, its pid and its whole exit code. [param copied] settles once what
+ * the target wrote to its pipes is in the file, and is there only for a target given pipes.
+ */
+interface StartedGame {
+  readonly child: ChildProcess;
+  readonly pid: number;
+  readonly whole: WholeExit;
+  readonly copied?: Promise<void> | undefined;
+}
 
 /**
  * The target started detached, so it is in no job object and no process group of this process.
@@ -75,7 +88,7 @@ async function startDirectly(
   detached = true,
   errors: number | 'ignore' = output,
   directory: string = process.cwd(),
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
   return await new Promise((resolve) => {
     const child = (hidden ? spawnHidden : spawnShown)(spec.command, spec.args, {
       stdio: ['ignore', output, errors],
@@ -110,12 +123,12 @@ async function startDirectly(
  */
 async function startThroughHelper(
   spec: SentSpec,
-  outputFile: string | undefined,
+  output: number | 'ignore',
   stopFile: string,
   exitFile: string,
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
   try {
-    return await startedThroughHelper(spec, outputFile, stopFile, exitFile);
+    return await startedThroughHelper(spec, output, stopFile, exitFile);
   } catch (error) {
     // A system that will not run the helper program is a start that failed, and no defect.
     if (error instanceof HelperRefused) {
@@ -143,12 +156,20 @@ function spawnedOrEnded(child: ChildProcess): Promise<string | null> {
   });
 }
 
+/**
+ * [param output] is where the game's output is written, and 'ignore' where it has none. The game is
+ * given pipes for it and this process writes the file, since a game on Windows flushes a file to
+ * disk after every line it writes. This process owns [param output] from here and closes it once the
+ * pipes have ended.
+ */
 async function startedThroughHelper(
   spec: SentSpec,
-  outputFile: string | undefined,
+  output: number | 'ignore',
   stopFile: string,
   exitFile: string,
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
+  const piped = output !== 'ignore';
+  let copying = false;
   const scratch = scratchDirectory('desktop');
   const where =
     spec.desktop !== undefined
@@ -172,7 +193,6 @@ async function startedThroughHelper(
         ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
         ...(spec.noActivate === undefined ? {} : { noActivate: spec.noActivate }),
         directory: process.cwd(),
-        outputFile,
         scratch,
         stop: stopFile,
         exit: exitFile,
@@ -180,7 +200,7 @@ async function startedThroughHelper(
       spec.command,
       spec.args,
       {
-        stdio: ['ignore', 'ignore', 'ignore'],
+        stdio: ['ignore', piped ? 'pipe' : 'ignore', piped ? 'pipe' : 'ignore'],
         env: withChanges(process.env, spec.envChanges),
         cwd: tmpdir(),
       },
@@ -192,83 +212,67 @@ async function startedThroughHelper(
     if (spawned !== null) {
       return { error: spawned };
     }
-    for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
-      const pid = onDesktop.pid();
-      if (pid !== undefined) {
-        return { child, pid, whole };
-      }
-      if (child.exitCode !== null || child.signalCode !== null) {
-        const why = helperFailure(onDesktop.files.error) ?? 'it exited saying nothing';
-        return { error: `it could not be started ${where}: ${why}` };
-      }
-      await delay(50);
-    }
-    child.kill();
-    return {
-      error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(onDesktop.files.step)}`,
-    };
+    // Reading at once, since a game that fills the pipe's buffer waits for it to be read.
+    const copied = output === 'ignore' ? undefined : copiedIntoFile(output, child);
+    copying = copied !== undefined;
+    const named = await pidFromTheHelper(onDesktop, where);
+    return 'error' in named ? named : { child, pid: named.pid, whole, copied };
   } finally {
+    if (piped && !copying) {
+      closeSync(output);
+    }
     discard(scratch);
   }
 }
 
-/** How often a profiled run's file is written at most while frames arrive. */
-const PROFILE_WRITE_MS = 500;
+/** The pid the helper of [param onDesktop] writes for its target, or why none came within the start's time. */
+async function pidFromTheHelper(
+  onDesktop: ReturnType<typeof spawnOnDesktop>,
+  where: string,
+): Promise<{ pid: number } | { error: string }> {
+  const { child } = onDesktop;
+  for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
+    const pid = onDesktop.pid();
+    if (pid !== undefined) {
+      return { pid };
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      const why = helperFailure(onDesktop.files.error) ?? 'it exited saying nothing';
+      return { error: `it could not be started ${where}: ${why}` };
+    }
+    await delay(50);
+  }
+  child.kill();
+  return {
+    error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(onDesktop.files.step)}`,
+  };
+}
 
-/** How many times the write as the game exits is tried before what it carried is given up. */
-const LAST_WRITE_TRIES = 5;
+/** Whether [param stream] is one of a child's, which are null where the child was given none. */
+function isStream(stream: Readable | null): stream is Readable {
+  return stream !== null;
+}
 
-/**
- * The profiler of a profiled run, writing what it sums to [param path]: when the game connects, at
- * most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits, so a server
- * reading the file mid-run is at most that far behind and one reading it after the exit has the lot.
- */
+/** What [param child] writes to its pipes, written to [param output], which is closed once they end. */
+function copiedIntoFile(output: number, child: ChildProcess): Promise<void> {
+  return copiedInto(output, [child.stdout, child.stderr].filter(isStream), exitOf(child)).then(() => {
+    closeSync(output);
+  });
+}
+
+/** The profiler of a profiled run, writing what it sums to [param path] as the game runs and exits. */
 function profiledBy(
   path: string,
   projectPath: string,
   engineCalls: boolean,
 ): { observer: ProfileObserver; finish: () => void } {
-  let latest: ProfileTotals | null = null;
-  let timer: NodeJS.Timeout | null = null;
-  // A write a reader held off past its wait is tried again later rather than dropped: the totals it
-  // carried are only rewritten when the next frame arrives, and a game that has quit sends none.
-  const write = (): void => {
-    timer = null;
-    if (latest !== null && !writeProfileFile(path, { ...latest, connected: true })) {
-      timer = setTimeout(write, PROFILE_WRITE_MS);
-    }
-  };
-  const observer = new ProfileObserver(
-    (totals) => {
-      const first = latest === null;
-      latest = totals;
-      if (first) {
-        write();
-      } else {
-        timer ??= setTimeout(write, PROFILE_WRITE_MS);
-      }
-    },
-    profileFrameFunctions(projectPath),
-    engineCalls,
-  );
+  const writer = profileFileWriter(path);
+  const observer = new ProfileObserver(writer.changed, profileFrameFunctions(projectPath), engineCalls);
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     observer,
     finish: () => {
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
-      const last = observer.totals() ?? latest;
-      latest = last;
-      if (last === null) {
-        return;
-      }
-      // The keeper exits after this, so there is no later write to fall back on, and the engine's
-      // own totals arrive only now. Each try waits out a held file for a while of its own.
-      let tries = 0;
-      while (!writeProfileFile(path, { ...last, connected: true }) && tries < LAST_WRITE_TRIES) {
-        tries += 1;
-      }
+      writer.finish(observer.totals());
     },
   };
 }
@@ -294,10 +298,9 @@ async function startDetached(
   hidden: boolean,
   stopFile = '',
   exitFile = '',
-  outputFile?: string,
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
   return throughTheHelper(spec)
-    ? await startThroughHelper(spec, outputFile, stopFile, exitFile)
+    ? await startThroughHelper(spec, output, stopFile, exitFile)
     : await startDirectly(spec, output, hidden);
 }
 
@@ -488,10 +491,11 @@ async function startTheGame(
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
   try {
-    started = await startDetached(toStart, transcript, run === undefined, stopFile, exitFile, outputFile);
+    started = await startDetached(toStart, transcript, run === undefined, stopFile, exitFile);
   } finally {
-    // The game holds its own copy from here on.
-    if (transcript !== 'ignore') {
+    // The game holds its own copy from here on, unless it was given pipes and this process writes
+    // the file, which closes it.
+    if (transcript !== 'ignore' && !throughTheHelper(toStart)) {
       closeSync(transcript);
     }
   }
@@ -720,7 +724,7 @@ async function keep(): Promise<void> {
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
-  const { child, pid, whole } = started;
+  const { child, pid, whole, copied } = started;
   const watch = run === undefined ? undefined : watchExit(pid, spawnedAt);
   const record = startingNote(run, spec, pid, toStart.args);
   if (record !== null) {
@@ -735,6 +739,8 @@ async function keep(): Promise<void> {
   const slot = run?.slot;
   await handTheSlot(slot, keeperStarted, pid);
   const told = await exited;
+  // Before the exit is noted: whoever reads the note then reads a transcript with the game's last lines.
+  await copied;
   const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
   const exitedAt = Date.now();
   noteTheExit(spec.exitNote, pid, code);
