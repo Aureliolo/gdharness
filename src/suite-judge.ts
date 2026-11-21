@@ -18,7 +18,6 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import type { MemoryEnd } from './engine-memory.js';
 import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
 import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
 import { isRecord, isStringList } from './records.js';
@@ -664,8 +663,6 @@ export interface EngineEnd {
   readonly peakBytes?: number;
   /** The priority the engine's process was last read with while it ran, named as its platform names it. */
   readonly priority?: string;
-  /** Set when gdharness ended the engine for holding more than its memory ceiling. */
-  readonly memoryEnded?: MemoryEnd;
 }
 
 export interface EngineVerdict {

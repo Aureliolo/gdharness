@@ -42,7 +42,6 @@ import {
   engineNeed,
   gigabytes,
   MEMORY_PER_ENGINE,
-  type MemoryEnd,
   memoryEndedSaid,
   startRefusedSaid,
 } from './engine-memory.js';
@@ -629,7 +628,6 @@ async function engineWatchedOnce(
     outcome,
     peakBytes: watch.peakBytes,
     priority: watch.priority,
-    memoryEnded: watch.memoryEnded,
   });
 }
 
@@ -639,7 +637,6 @@ function guardTheEngine(watch: Watch): void {
     return;
   }
   watch.guard = engineMemory.guard(watch.pid, watch.ceiling, (end) => {
-    watch.memoryEnded = end;
     watch.outcome.ended ??= memoryEndedSaid(end);
     watch.started.stop();
   });
@@ -824,8 +821,6 @@ interface Watch {
   readonly ceiling: Ceiling;
   /** The engine's guard against its ceiling, once its pid is known. */
   guard: EngineGuard | undefined;
-  /** Set once the engine was ended for holding more than its ceiling. */
-  memoryEnded?: MemoryEnd;
 }
 
 /** One look at the engine: its pid, what it holds, whether it is past a limit and what the log has gained. */
@@ -1010,7 +1005,6 @@ interface EngineFinish {
   readonly outcome: { ended: string | null };
   readonly peakBytes: number;
   readonly priority: string | undefined;
-  readonly memoryEnded: MemoryEnd | undefined;
 }
 
 /** How much of a log is read for the helper's word on a message box: the lines before it and the one it ends on. */
@@ -1018,7 +1012,7 @@ const BOX_READ_BYTES = 64 * 1024;
 
 /** How the engine ended, once its process has exited and its streams are copied into the log. */
 async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
-  const { started, told, copied, output, log, outcome, peakBytes, priority, memoryEnded } = finish;
+  const { started, told, copied, output, log, outcome, peakBytes, priority } = finish;
   const { helper } = started;
   const code = helper === null ? told.code : helperExit(helper.exit, told.code);
   const { signal } = told;
@@ -1046,7 +1040,6 @@ async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
     ...(freeBytes === undefined ? {} : { freeBytes }),
     ...(peakBytes > 0 ? { peakBytes } : {}),
     ...(priority === undefined ? {} : { priority }),
-    ...(memoryEnded === undefined ? {} : { memoryEnded }),
   };
 }
 

@@ -120,11 +120,6 @@ export interface RunRecord {
    * nothing recorded, and settled the run as ended with no code.
    */
   readonly endingAt?: number;
-  /**
-   * What ended the run for its memory, written by a server that guarded a game it did not hold once
-   * the keeper had written the exit, so the server that picks the run up says why it ended.
-   */
-  readonly memoryEndedBy?: string;
 }
 
 /** A process that carried a run and restarted itself into the next one. */
@@ -470,29 +465,6 @@ export function amendRunRecord(record: RunRecord): boolean {
   return writeWhole(path, JSON.stringify(record, null, 2));
 }
 
-/** How long a server that ended a run it did not hold waits for the keeper to write the exit. */
-const KEEPER_EXIT_WAIT_MS = 10_000;
-
-/**
- * Writes [param endedBy] into the note of [param record], a run this server ended for its memory
- * without holding it. Written once the keeper has written the exit, since the keeper writes the
- * note whole from its own copy, and a field put in before would be lost. Nothing is written once
- * another run's note is there, or when the keeper never writes.
- */
-export async function noteTheMemoryEnd(record: RunRecord, endedBy: string): Promise<boolean> {
-  for (const until = Date.now() + KEEPER_EXIT_WAIT_MS; Date.now() < until; ) {
-    const there = recordAt(runRecordPath(record.projectPath));
-    if (there === null || !sameRun(there, record)) {
-      return false;
-    }
-    if (there.endedAt !== undefined) {
-      return amendRunRecord({ ...there, memoryEndedBy: endedBy });
-    }
-    await new Promise((done) => setTimeout(done, 100));
-  }
-  return false;
-}
-
 /**
  * The run of [param projectPath] a server left a note for, or null when there is none.
  *
@@ -604,14 +576,8 @@ function namedFields(
 /** The fields of a note that say how the run ended, each present only when the note holds it. */
 function endFields(
   fields: Record<string, unknown>,
-): Pick<
-  RunRecord,
-  'exitCode' | 'exitSignal' | 'endedAt' | 'exitNotTold' | 'restartedFrom' | 'endingAt' | 'memoryEndedBy'
-> {
+): Pick<RunRecord, 'exitCode' | 'exitSignal' | 'endedAt' | 'exitNotTold' | 'restartedFrom' | 'endingAt'> {
   return {
-    ...(typeof fields['memoryEndedBy'] === 'string' && fields['memoryEndedBy'] !== ''
-      ? { memoryEndedBy: fields['memoryEndedBy'] }
-      : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
     ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
     ...(typeof fields['endedAt'] === 'number' ? { endedAt: fields['endedAt'] } : {}),

@@ -162,7 +162,7 @@ import {
   ceilingFor,
   engineMemory,
   type MemoryEnd,
-  memoryEndedBy,
+  memoryCeilingSaid,
   memoryEndedSaid,
 } from './engine-memory.js';
 import {
@@ -354,7 +354,6 @@ import {
   type LatestRun,
   listeningPid,
   noteIsAbout,
-  noteTheMemoryEnd,
   openTranscript,
   type PeakTool,
   profileMarkPath,
@@ -5887,9 +5886,6 @@ class GodotServer {
       );
     });
     sweepAbandonedScratch();
-    void this.guardTheRunsLeftRunning().catch((error: unknown) => {
-      console.error(`[SERVER] The games left running could not be guarded: ${errorMessage(error)}`);
-    });
     // The helper a windowed run starts through and the process table, compiled now rather than
     // inside the first windowed start or listing, which on a slow machine took longer than either
     // is given. Once per machine and version. A server finding another already compiling goes on
@@ -10353,11 +10349,7 @@ class GodotServer {
     const attempt = await startedUntilItRuns(
       () => this.testEngineRan(prepared, onDesktop, autoloaded, seeded),
       callSignal(),
-      (one) =>
-        !one.timedOut &&
-        one.stopped.for === null &&
-        one.run.memoryEnd === undefined &&
-        diedAtStartOf(one.run),
+      (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
     );
     const { run, console, timedOut, silentForMs, saidAnything, stopped } = attempt;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
@@ -10639,7 +10631,7 @@ class GodotServer {
     const printedErrors =
       notCompiled !== null
         ? compileErrorsIn(run.log.all)
-        : endedEarly || exitCode !== 105
+        : timedOut || exitCode !== 105
           ? []
           : scriptErrorsPrinted(said);
     const declaring = await this.declaringOrigins(printedErrors, project.value.path, engine.value);
@@ -14311,7 +14303,7 @@ class GodotServer {
   private endForItsMemory(game: GodotProcess, end: MemoryEnd): void {
     const ending = (async (): Promise<void> => {
       if (this.activeProcess === game) {
-        await this.endActiveGame(memoryEndedBy(end), true, false);
+        await this.endActiveGame(`its memory ceiling: ${memoryCeilingSaid(end)}`, true, false);
       } else if (game.pid !== null) {
         try {
           process.kill(game.pid, 'SIGKILL');
@@ -14321,49 +14313,6 @@ class GodotServer {
       }
     })();
     this.memoryEndings.set(game, ending);
-  }
-
-  /**
-   * Guards every game a server before this one started and left running, so none runs unguarded
-   * until a call picks its run up. One this server holds by then is ended as its own. Any other is
-   * ended by its pid, and its note says why once its keeper has written the exit.
-   */
-  private async guardTheRunsLeftRunning(): Promise<void> {
-    for (const record of everyRunRecord()) {
-      if (
-        record.endedAt !== undefined ||
-        !alive(record.pid) ||
-        engineMemory.isGuarding(record.pid) ||
-        !(await couldStillBeTheRecordedRun(record))
-      ) {
-        continue;
-      }
-      let ceiling: Ceiling;
-      try {
-        ceiling = ceilingFor(record.projectPath);
-      } catch {
-        // A setting that is not a size refuses the next start, and this game is already running.
-        continue;
-      }
-      engineMemory.guard(
-        record.pid,
-        ceiling,
-        (end) => {
-          const held = this.activeProcess;
-          if (held?.pid === record.pid) {
-            this.endForItsMemory(held, end);
-            return;
-          }
-          try {
-            process.kill(record.pid, 'SIGKILL');
-          } catch {
-            // Gone already.
-          }
-          void noteTheMemoryEnd(record, memoryEndedBy(end));
-        },
-        { project: record.projectPath, tool: 'editor_run' },
-      );
-    }
   }
 
   /** Makes [param started] the run this server holds for a start spawned here. */
@@ -16648,7 +16597,6 @@ class GodotServer {
       pickedUp: true,
       ...(record.exported === true ? { exported: true as const } : {}),
       ...(record.restartedFrom === undefined ? {} : { restartedFrom: record.restartedFrom }),
-      ...(record.memoryEndedBy === undefined ? {} : { endedHere: record.memoryEndedBy }),
     };
   }
 
@@ -17005,7 +16953,7 @@ class GodotServer {
         return { boot: started, hung: hungUp };
       },
       callSignal(),
-      (one) => !one.hung && one.boot.memoryEnd === undefined && diedAtStartOf(one.boot),
+      (one) => !one.hung && diedAtStartOf(one.boot),
     );
 
     const errors = boot.log.count('error');
@@ -17021,7 +16969,7 @@ class GodotServer {
     const shown = printed.reduce((sum, entry) => sum + (entry.times ?? 1), 0);
     this.lastCheckAt = Date.now();
     return this.jsonTextResponse({
-      booted: !hung && boot.memoryEnd === undefined && boot.exitCode === 0 && errors === 0,
+      booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
       endedBy: boot.memoryEnd === undefined ? undefined : memoryEndedSaid(boot.memoryEnd),
       memoryEnded: boot.memoryEnd,

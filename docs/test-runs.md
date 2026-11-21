@@ -359,17 +359,10 @@ It takes its slot first and keeps it while it waits, so an engine memory admits 
 Every engine gdharness starts is read about once a second, with the processes it started. That
 covers a headless operation, `project_test`, a game from `editor_run start`, the boot of
 `editor_run check`, an editor from `editor_launch open` and the engines of a `gdharness test` run.
-A server also reads every game an earlier server left running, from the moment it starts. The
-figure is private bytes on Windows and resident memory on Linux and macOS.
-
-Two guards end an engine, with everything below it:
-
-- A runaway ends at its ceiling. The answer, the run's result and its printed line give the peak
-  and the ceiling and name how to raise it.
-- A machine running short ends the largest engine. Once free memory falls under 2 GiB or 5% of the
-  physical memory, whichever is larger, the server ends the engine it reads that holds the most.
-  It ends one a reading, never one under 1.5 GiB and never another server's. The answer gives the
-  free memory, the floor and what the engine held, and names the project setting that caps it.
+A game a server left running is read by the next server that picks up its run. The figure is
+private bytes on Windows and resident memory on Linux and macOS. An engine past its ceiling is
+ended with everything below it. The answer, the run's result and its printed line give the peak
+and the ceiling and name how to raise it.
 
 The ceiling is a quarter of the physical memory and at least 4 GiB. `GDHARNESS_ENGINE_MEMORY_CEILING_MB`
 sets it, in megabytes, for every engine. The project setting `gdharness/engine/memory_ceiling_mb` in
@@ -382,7 +375,7 @@ The memory of an engine is read in the same sample as its processor time, so an 
 both is read once for each tick.
 
 When an engine ends, its peak is kept for its project and tool in `runs/memory-<project>-<tool>.json`.
-The boot of `editor_run check` keeps its own, apart from the game's. An engine ended at its ceiling
+The boot of `editor_run check` keeps its own, apart from the game's. An engine ended for its memory
 keeps none. The next start of that tool in that project counts the larger of 1.5 GiB and the kept
 peak, up to the ceiling. It is refused when the free memory less the reserve does not cover it. The
 refusal says what the engine needs, what that comes from and how much is free. It then names how
