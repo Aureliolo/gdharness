@@ -108274,6 +108274,77 @@ async function testAChildOfANodeItsOwnSceneRenamedIsKept(): Promise<void> {
   assert.deepEqual(failures, [], failures.join('\n'));
 }
 
+/**
+ * A child whose parent the edit cannot find at its path is left where the engine hung it, so each
+ * scene saves as its twin whose scripts are tools, which nothing puts back.
+ */
+async function testAChildWhoseParentIsNotAtItsPathStaysWhereTheEngineHungIt(): Promise<void> {
+  const deep = (parent: string, ids: string): string =>
+    `[node name="Deep" type="Node2D" parent="${parent}"${ids} unique_id=302]\nposition = Vector2(7, 8)\n\n`;
+  const host = (name: string, child: string, extra = ''): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n` +
+    '[ext_resource type="PackedScene" path="res://part.tscn" id="2_p"]\n\n' +
+    `[node name="${name}" type="Node2D" unique_id=300]\nscript = ExtResource("1_q")\n\n` +
+    '[node name="Inst" parent="." unique_id=301 instance=ExtResource("2_p")]\n\n' +
+    child +
+    extra +
+    '[node name="Plain" type="Node2D" parent="." unique_id=305]\n\n[editable path="Inst"]\n';
+  const mover = '\t\tvar y: Node = get_node(^"Inst/Y")\n\t\ty.reparent(get_node(^"Inst/X2"))';
+  const files = (tool: boolean): Record<string, string> => ({
+    'quiet.gd': `${tool ? '@tool\n' : ''}${QUIET_ON_LOAD}`,
+    'mover.gd': onInstanced(mover, tool),
+    'part.tscn':
+      `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n\n` +
+      '[node name="Part" type="Node2D" unique_id=200]\nscript = ExtResource("1_q")\n\n' +
+      '[node name="X2" type="Node2D" parent="." unique_id=201]\n\n' +
+      '[node name="Y" type="Node2D" parent="." unique_id=202]\n',
+    'bare.tscn':
+      `${PUT_BACK_HEADER}[node name="Bare" type="Node2D" unique_id=600]\n\n` +
+      '[node name="X2" type="Node2D" parent="." unique_id=601]\n\n' +
+      '[node name="Y" type="Node2D" parent="." unique_id=602]\n',
+    'gone.tscn': host('Gone', deep('Inst/Lost', ' parent_id_path=PackedInt32Array(301, 299)')),
+    'unnumbered.tscn': host('Unnumbered', deep('Inst/Lost', '')),
+    'quoted.tscn': host(
+      'Quoted',
+      deep('Inst/X', ' parent_id_path=PackedInt32Array(301, 201)'),
+      '[node name="Note" type="Node2D" parent="." unique_id=306]\neditor_description = "a\n[node name=\\"Fake\\"]"\n\n',
+    ),
+    'moving.tscn':
+      `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://mover.gd" id="1_m"]\n` +
+      '[ext_resource type="PackedScene" path="res://bare.tscn" id="2_b"]\n\n' +
+      '[node name="Moving" type="Node2D" unique_id=700]\nscript = ExtResource("1_m")\n\n' +
+      '[node name="Inst" parent="." unique_id=701 instance=ExtResource("2_b")]\n\n' +
+      '[node name="Kid" type="Node2D" parent="Inst/Y" unique_id=702]\nposition = Vector2(4, 4)\n\n' +
+      '[node name="Plain" type="Node2D" parent="." unique_id=705]\n\n[editable path="Inst"]\n',
+  });
+  const scenes = ['gone.tscn', 'unnumbered.tscn', 'quoted.tscn', 'moving.tscn'];
+  const saved = async (tool: boolean): Promise<Record<string, string>> => {
+    const out: Record<string, string> = {};
+    await withASceneProject(
+      `unfound parent ${tool ? 'tool twin' : 'put back'}`,
+      files(tool),
+      async (project) => {
+        for (const scene of scenes) {
+          out[scene] = await savedAfterAnEdit(project, scene, 'Plain');
+        }
+      },
+    );
+    return out;
+  };
+  const putBack = await saved(false);
+  if (Object.keys(putBack).length === 0) {
+    return;
+  }
+  const twin = await saved(true);
+  const failures: string[] = [];
+  const soft = softly(failures);
+  for (const scene of scenes) {
+    soft.deepEqual(putBack[scene], twin[scene], scene);
+    soft.match(putBack[scene] ?? '', /position = Vector2\(/, `${scene} keeps the child`);
+  }
+  assert.deepEqual(failures, [], failures.join('\n'));
+}
+
 /** A tool script on the root moves a node, and the save keeps it where the editor would. */
 async function testWhatAToolRootMovesStaysMoved(): Promise<void> {
   const mover =
@@ -123920,6 +123991,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditSeesTheTreeTheFileHoldsWhateverItsScriptsDo,
   testAnEditOfAScriptedSceneSavesWhatTheFileHolds,
   testAChildOfANodeItsOwnSceneRenamedIsKept,
+  testAChildWhoseParentIsNotAtItsPathStaysWhereTheEngineHungIt,
   testWhatAToolRootMovesStaysMoved,
   testANodeMadeAgainKeepsTheNodesItHolds,
   testAPlaceholderAScriptFreedIsMadeAgain,
