@@ -78124,14 +78124,14 @@ async function testEveryOtherTakersWaitLinesStayAsTheyWere(): Promise<void> {
 
 /**
  * On 2 and 3 slots a game never takes the last kept slot, gate or none. On one slot, which is no
- * kept slot apart from the rest, a game takes it, gate or none.
+ * kept slot apart from the rest, a game takes it while no gate is queued, and nothing while one is.
  */
 async function testAGameRunsOnOneTwoAndThreeSlots(): Promise<void> {
   for (const [count, queued, taken] of [
     [1, false, [0]],
     [2, false, [0]],
     [3, false, [2, 0]],
-    [1, true, [0]],
+    [1, true, []],
     [2, true, []],
     [3, true, [2]],
   ] as const) {
@@ -78147,6 +78147,181 @@ async function testAGameRunsOnOneTwoAndThreeSlots(): Promise<void> {
     } finally {
       rmSync(folder.directory, { recursive: true, force: true });
     }
+  }
+}
+
+/**
+ * A game with no gate queued behind a waiter for three slots past its drain, which looks and never
+ * takes, on [param count] slots with every one held but the last kept slot, which a game never takes.
+ * [param freed] is freed at 10000 ms. The takes of the looks at [param steps].
+ */
+async function gameBehindAPassedWaiter(
+  count: number,
+  freed: number,
+  steps: readonly number[],
+): Promise<string[]> {
+  const last = count - keptSlotsOf(count);
+  const folder = await gameLineFolder(count, false);
+  try {
+    slotsHeld(
+      folder,
+      Array.from({ length: count }, (_, slot) => slot).filter((slot) => slot !== last),
+    );
+    return await takesInTurn(
+      folder,
+      [
+        { mark: 'wants.json', waited: 310_000, wants: 3, looksOnly: true },
+        { mark: 'game.json', waited: 200_000, game: true },
+      ],
+      steps,
+      (after) => {
+        if (after === 10_000) {
+          rmSync(join(folder.directory, `${String(freed)}.lock`));
+        }
+      },
+    );
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A waiter ahead passed for the last kept slot is given the slot freed next, which a game behind it
+ * then takes at the look {@link SLOT_YIELD_MS} after it was freed, on 12 slots and on 16.
+ */
+async function testAGameTakesTheSlotAWaiterPassedForTheLastKeptSlotIsGiven(): Promise<void> {
+  for (const [count, freed] of [
+    [12, 8],
+    [16, 11],
+  ] as const) {
+    assert.deepEqual(
+      await gameBehindAPassedWaiter(count, freed, looksEvery(10_000 + SLOT_YIELD_MS * 3)),
+      [`game.json took ${String(freed)} at ${String(10_000 + SLOT_YIELD_MS)}`],
+      `${String(count)} slots`,
+    );
+  }
+}
+
+/**
+ * With a gate queued, side work wanting three past its drain is passed for a free gate slot a call
+ * may not take, and given the kept slot freed next: the call takes that one at its yield.
+ */
+async function testACallTakesTheKeptSlotSideWorkPassedForAGateSlotIsGiven(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
+    const took = await takesInTurn(
+      folder,
+      [
+        { mark: 'side.json', waited: 310_000, taker: 'tier', wants: 3, looksOnly: true },
+        { mark: 'call.json', waited: 200_000 },
+      ],
+      looksEvery(10_000 + SLOT_YIELD_MS * 3),
+      (after) => {
+        if (after === 10_000) {
+          rmSync(join(folder.directory, '10.lock'));
+        }
+      },
+    );
+    assert.deepEqual(took, [`call.json took 10 at ${String(10_000 + SLOT_YIELD_MS)}`]);
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two takers of side work ahead, passed for the two gate slots they stand on, and the kept slot freed
+ * next: it falls to the first of them only after both are passed for their own, and to the second
+ * once the first is passed for it too. The call behind them takes it at its yield.
+ */
+async function testASlotGivenToEachTakerAheadInTurnIsTakenAtItsYield(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 9, 10, 11]);
+    const took = await takesInTurn(
+      folder,
+      [
+        { mark: 'first.json', waited: 320_000, taker: 'tier', wants: 3, looksOnly: true },
+        { mark: 'second.json', waited: 310_000, taker: 'tier', wants: 3, looksOnly: true },
+        { mark: 'call.json', waited: 200_000 },
+      ],
+      looksEvery(10_000 + SLOT_YIELD_MS * 3),
+      (after) => {
+        if (after === 10_000) {
+          rmSync(join(folder.directory, '10.lock'));
+        }
+      },
+    );
+    assert.deepEqual(took, [`call.json took 10 at ${String(10_000 + SLOT_YIELD_MS)}`]);
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Each free slot counts its own yield: a slot left 4 s before another is freed is taken at its own
+ * {@link SLOT_YIELD_MS}, and the other only at the end of its own.
+ */
+async function testEachFreeSlotCountsItsOwnYield(): Promise<void> {
+  const folder = await gameLineFolder(12, false);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
+    const took = await takesInTurn(
+      folder,
+      [
+        { mark: 'first.json', waited: 300_000, looksOnly: true },
+        { mark: 'second.json', waited: 290_000, looksOnly: true },
+        { mark: 'call.json', waited: 200_000 },
+      ],
+      looksEvery(4000 + SLOT_YIELD_MS * 2),
+      (after) => {
+        if (after === 4000) {
+          rmSync(join(folder.directory, '11.lock'));
+        }
+      },
+    );
+    assert.deepEqual(took, [
+      `call.json took 10 at ${String(SLOT_YIELD_MS)}`,
+      `call.json took 11 at ${String(4000 + SLOT_YIELD_MS)}`,
+    ]);
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The game behind a waiter passed for the last kept slot takes the slot freed next at the look
+ * {@link SLOT_YIELD_MS} after it was freed, and not at a look 1 ms before.
+ */
+async function testTheSlotAPassedWaiterIsGivenIsTakenAtItsYieldAndNotBefore(): Promise<void> {
+  const due = 10_000 + SLOT_YIELD_MS;
+  assert.deepEqual(await gameBehindAPassedWaiter(12, 8, looksEvery(due + 3000, due - 1)), [
+    `game.json took 8 at ${String(due)}`,
+  ]);
+}
+
+/**
+ * On a machine of one slot a game takes it with no gate queued. While a gate is queued it takes
+ * nothing, and says so as a game on two slots does.
+ */
+async function testAGameOnOneSlotTakesNothingWhileAGateIsQueued(): Promise<void> {
+  const folder = await gameLineFolder(1);
+  try {
+    const game = new EngineSlots(folder.directory, 1, folder.me, undefined, () => 'other');
+    assert.equal(await game.takeFree(true), null, 'a game finds no slot to take');
+    assert.equal(
+      slotWaitSaid(3000, 1, 'slots', game.holders(), game.drawn),
+      'Waiting 3 s so far for an engine: no game may run on this machine (slots) while a gate is queued, and the engine starts once no gate is queued.',
+    );
+    assert.equal(
+      slotWaitedSaid(3000, 1, 'slots', game.holders(), game.drawn),
+      'This call waited 3 s for an engine slot in all. When it first waited, no game could run on this machine (slots) while a gate was queued.',
+    );
+    rmSync(join(folder.directory, QUEUED_FOLDER, 'ticket.json'));
+    assert.equal(lockNumber(await game.takeFree(true)), 0, 'with no gate queued it takes slot 0');
+    game.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
   }
 }
 
@@ -125772,6 +125947,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGamesAnswerNamesTheKeptSlotsGamesMayTake,
   testEveryOtherTakersWaitLinesStayAsTheyWere,
   testAGameRunsOnOneTwoAndThreeSlots,
+  testAGameTakesTheSlotAWaiterPassedForTheLastKeptSlotIsGiven,
+  testACallTakesTheKeptSlotSideWorkPassedForAGateSlotIsGiven,
+  testASlotGivenToEachTakerAheadInTurnIsTakenAtItsYield,
+  testEachFreeSlotCountsItsOwnYield,
+  testTheSlotAPassedWaiterIsGivenIsTakenAtItsYieldAndNotBefore,
+  testAGameOnOneSlotTakesNothingWhileAGateIsQueued,
   testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
   testAWaitingMarkNamesTheStoreClass,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
