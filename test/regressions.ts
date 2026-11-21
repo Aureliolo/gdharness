@@ -630,6 +630,7 @@ import {
   noCodeWillCome,
   notRunNote,
   ourRunEnded,
+  outOfBounds,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
@@ -653,6 +654,7 @@ import {
   timedOutVerdict,
   transcriptNote,
   uidsLeftNote,
+  unfitValues,
   unmodelledAnswer,
   untilStoppedEngineGone,
   windowedNeeds,
@@ -14877,6 +14879,131 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     ]);
     assert.deepEqual(misshapen(open, { x: 'one' }, 'point'), ['point.x as number, not a string']);
 
+    // A field an object's schema requires is refused when left out or sent as null, before a
+    // reader takes its default. Two missing fields are one complaint.
+    assert.equal(
+      await call('scene_animation', {
+        op: 'add_track',
+        projectPath: '/p',
+        scenePath: 'a.tscn',
+        playerNodePath: 'Player',
+        animationName: 'spin',
+        track: { type: 'property', nodePath: '.', property: 'rotation', keyframes: [{ value: 1 }] },
+      }),
+      'scene_animation takes track.keyframes[0] with its time, which is missing.',
+    );
+    const pair = { ...open, required: ['x', 'y'] };
+    assert.deepEqual(misshapen(pair, {}, 'point'), ['point with its x, y, which are missing']);
+    assert.deepEqual(misshapen(pair, { x: 1, y: null }, 'point'), ['point with its y, which is missing']);
+    assert.deepEqual(misshapen(pair, { x: 1, y: 2 }, 'point'), []);
+    assert.deepEqual(misshapen({ type: ['object', 'string'], required: ['x'] }, 'red', 'point'), []);
+    assert.deepEqual(misshapen({ type: 'object', required: ['x'] }, {}, 'point'), [
+      'point with its x, which is missing',
+    ]);
+    // A missing field that takes one of a few values is named with them, and a track's node is
+    // asked for though the editor would aim a track naming none at the player's root.
+    assert.equal(
+      await call('scene_animation', {
+        op: 'add_track',
+        projectPath: '/p',
+        scenePath: 'a.tscn',
+        playerNodePath: 'Player',
+        animationName: 'spin',
+        track: { property: 'rotation', keyframes: [{ time: 0, value: 1 }] },
+      }),
+      'scene_animation takes track with its type (one of property, method, position_3d, rotation_3d, scale_3d, blend_shape, bezier, audio, animation), nodePath, which are missing.',
+    );
+    assert.equal(
+      await call('project_settings', {
+        op: 'add_input_action',
+        projectPath: '/p',
+        actionName: 'jump',
+        events: [{ keycode: 'Space' }],
+      }),
+      'project_settings takes events[0] with its type (one of key, mouse_button, joypad_button, joypad_motion), which is missing.',
+    );
+    // An argument the call's op does not take is not asked for its missing fields, nor is one
+    // beside an op the tool lacks: the caller who added them would be told that next.
+    assert.equal(
+      await call('project_settings', { op: 'get', projectPath: '/p', setting: 'a/b', events: [{}] }),
+      'project_settings get does not take events. get takes: projectPath, setting, from, prefix.',
+    );
+    assert.match(
+      await call('scene_animation', {
+        op: 'read',
+        projectPath: '/p',
+        scenePath: 'a.tscn',
+        playerNodePath: 'Player',
+        animationName: 'spin',
+        track: {},
+      }),
+      /^scene_animation read does not take track\. /,
+    );
+    assert.match(
+      await call('project_settings', { op: 'nope', projectPath: '/p', events: [{}] }),
+      /^project_settings has no op "nope"\. /,
+    );
+    assert.deepEqual(misshapen(pair, { x: 'one' }, 'point', false), ['point.x as number, not a string']);
+    assert.deepEqual(misshapen({ type: 'array', items: pair }, [{}], 'points', false), []);
+    // An infinity is refused as no number, so its range has nothing to add.
+    assert.deepEqual(
+      [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -1].map((held) =>
+        outOfBounds({ type: 'number', exclusiveMinimum: 0, maximum: 120 }, held, 'seconds'),
+      ),
+      [[], [], [], ['seconds above 0, not -1']],
+    );
+    // A schema that names no number type refuses no infinity, so its range still has to.
+    assert.deepEqual(
+      [
+        outOfBounds({ maximum: 120 }, Number.POSITIVE_INFINITY, 'seconds'),
+        outOfBounds({ minimum: 0 }, Number.NEGATIVE_INFINITY, 'seconds'),
+        outOfBounds({ type: ['number', 'null'], maximum: 120 }, Number.POSITIVE_INFINITY, 'seconds'),
+        outOfBounds({ type: 'integer', maximum: 120 }, Number.POSITIVE_INFINITY, 'seconds'),
+      ],
+      [
+        ['seconds of 120 or less, not Infinity'],
+        ['seconds of 0 or more, not -Infinity'],
+        ['seconds of 120 or less, not Infinity'],
+        [],
+      ],
+    );
+
+    // A list is held to the number of items its schema allows, at any depth. Only a pair is in a
+    // tool's schema today, so the other three shapes are handed in.
+    const numbers = { type: 'array', items: { type: 'number', minimum: 0 } };
+    assert.deepEqual(outOfBounds({ ...numbers, minItems: 2 }, [1], 'list'), [
+      'list with 2 items or more, not 1',
+    ]);
+    assert.deepEqual(outOfBounds({ ...numbers, maxItems: 2 }, [1, 2, 3], 'list'), [
+      'list with 2 items or fewer, not 3',
+    ]);
+    assert.deepEqual(outOfBounds({ ...numbers, minItems: 2, maxItems: 3 }, [], 'list'), [
+      'list with 2 to 3 items, not 0',
+    ]);
+    assert.deepEqual(outOfBounds({ ...numbers, minItems: 2, maxItems: 3 }, [1, 2, 3], 'list'), []);
+    assert.deepEqual(
+      [
+        outOfBounds({ ...numbers, minItems: 1 }, [], 'list'),
+        outOfBounds({ ...numbers, maxItems: 1 }, [1, 2], 'list'),
+        outOfBounds({ ...numbers, minItems: 1, maxItems: 1 }, [1, 2], 'list'),
+      ],
+      [
+        ['list with 1 item or more, not 0'],
+        ['list with 1 item or fewer, not 2'],
+        ['list with 1 item, not 2'],
+      ],
+    );
+    // A range on an element or a field is read as one on an argument is.
+    assert.deepEqual(outOfBounds(numbers, [1, -1], 'list'), ['list[1] of 0 or more, not -1']);
+    assert.deepEqual(
+      outOfBounds(
+        { type: 'object', properties: { x: { type: 'number', maximum: 4 } } },
+        { x: 5, y: 9 },
+        'point',
+      ),
+      ['point.x of 4 or less, not 5'],
+    );
+
     // project_info has no ops, and its preset and detail are read by one section of include. Sent
     // without it they were dropped and the answer had no validation in it to say so.
     assert.match(
@@ -15015,6 +15142,13 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       ['project_search', { query: 'extends', maxResults: -1 }, 'maxResults of 1 or more, not -1'],
       ['scene_tree', { scenePath: 'a.tscn', depth: -1 }, 'depth of 0 or more, not -1'],
       ['scene_tree', { scenePath: 'a.tscn', depth: 1.5 }, 'depth as integer, not 1.5'],
+      // A wait of no seconds reached the game, whose own check holds only the upper bound.
+      ['runtime_wait', { op: 'seconds', seconds: 0 }, 'seconds above 0, not 0'],
+      ['runtime_wait', { op: 'seconds', seconds: -5 }, 'seconds above 0, not -5'],
+      ['runtime_wait', { op: 'seconds', seconds: 200 }, 'seconds of 120 or less, not 200'],
+      // A point of three numbers was taken and its third dropped.
+      ['runtime_input', { op: 'mouse_drag', via: [[1, 2, 3]] }, 'via[0] with 2 items, not 3'],
+      ['runtime_input', { op: 'mouse_drag', via: [[1, 2], [1]] }, 'via[1] with 2 items, not 1'],
     ];
     for (const [tool, args, said] of outside) {
       const answer = await call(tool, args);
@@ -15025,11 +15159,14 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       ['runtime_inspect', { op: 'text', limit: 5000 }],
       ['runtime_wait', { op: 'frames', frames: 600 }],
       ['runtime_input', { op: 'action', action: 'jump', strength: 0 }],
+      ['runtime_wait', { op: 'seconds', seconds: 0.001 }],
+      ['runtime_input', { op: 'mouse_drag', x: 1, y: 1, toX: 9, toY: 9, frames: 2, via: [[1, 2]] }],
     ] as const) {
+      const answer = await call(tool, args);
       assert.match(
-        await call(tool, args),
+        answer,
         /No game with the runtime addon is running/,
-        `${tool} ${JSON.stringify(args)} is inside its range`,
+        `${tool} ${JSON.stringify(args)} is inside its range: ${answer}`,
       );
     }
   });
@@ -15069,6 +15206,175 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
       assert.ok(ops.has(op), `${spec.name}.${name} names op ${op}, which ${spec.name} has not`);
     }
   }
+}
+
+type ArgumentSchema = Readonly<Record<string, unknown>>;
+
+/** The keys of an argument's schema that hold no rule for its value, or one read with the op. */
+const NOT_A_VALUE_RULE: ReadonlySet<string> = new Set(['description', 'ops', 'blank']);
+
+/** The values a wrong type is picked from: the first that is none of the kinds a schema names. */
+const OF_EVERY_KIND: readonly [string, unknown][] = [
+  ['string', 'a'],
+  ['number', 7.5],
+  ['boolean', true],
+  ['array', []],
+  ['object', {}],
+];
+
+/** [param schema] as an argument's schema, or one asking nothing where it is none. */
+function schemaOf(schema: unknown): ArgumentSchema {
+  return isRecord(schema) ? schema : {};
+}
+
+/** A value [param schema] takes: the first it lists, its least number, its fewest items. */
+function aValueFor(schema: ArgumentSchema): unknown {
+  const listed = schema['enum'];
+  if (Array.isArray(listed)) {
+    return listed[0];
+  }
+  const declared = schema['type'];
+  switch (Array.isArray(declared) ? declared[0] : declared) {
+    case 'number':
+    case 'integer':
+      return leastNumber(schema);
+    case 'boolean':
+      return true;
+    case 'array':
+      return fittingList(schema, Math.max(1, Number(schema['minItems'] ?? 0)));
+    case 'object':
+      return Object.fromEntries(
+        requiredOf(schema).map((field) => [
+          field,
+          aValueFor(schemaOf(schemaOf(schema['properties'])[field])),
+        ]),
+      );
+    default:
+      return 'a';
+  }
+}
+
+function leastNumber(schema: ArgumentSchema): number {
+  if (typeof schema['exclusiveMinimum'] === 'number') {
+    return schema['exclusiveMinimum'] + 1;
+  }
+  if (typeof schema['minimum'] === 'number') {
+    return schema['minimum'];
+  }
+  return typeof schema['maximum'] === 'number' ? Math.min(0, schema['maximum']) : 0;
+}
+
+function fittingList(schema: ArgumentSchema, length: number): unknown[] {
+  return Array.from({ length }, () => aValueFor(schemaOf(schema['items'])));
+}
+
+function requiredOf(schema: ArgumentSchema): string[] {
+  const required = schema['required'];
+  return Array.isArray(required) ? required.map(String) : [];
+}
+
+/**
+ * For each rule [param schema] holds, at any depth, a value that breaks that rule alone, with the
+ * rule's keyword. A keyword with no entry here is one the argument check does not read.
+ */
+function breaking(schema: ArgumentSchema, at: string): [string, unknown][] {
+  return Object.keys(schema)
+    .filter((keyword) => !NOT_A_VALUE_RULE.has(keyword))
+    .flatMap((keyword) =>
+      breakingOne(schema, keyword, at).map((value): [string, unknown] => [keyword, value]),
+    );
+}
+
+function breakingOne(schema: ArgumentSchema, keyword: string, at: string): unknown[] {
+  const held = schema[keyword];
+  switch (keyword) {
+    case 'type': {
+      const wanted = new Set<unknown>(Array.isArray(held) ? held : [held]);
+      const numeric = wanted.has('number') || wanted.has('integer');
+      const other = OF_EVERY_KIND.find(([kind]) => !(wanted.has(kind) || (kind === 'number' && numeric)));
+      assert.ok(other !== undefined, `${at} takes every kind of value`);
+      return [other[1]];
+    }
+    case 'enum':
+      assert.ok(
+        Array.isArray(held) && held.every((one) => typeof one === 'string'),
+        `${at} lists values that are no strings, which the check does not read`,
+      );
+      return ['listed nowhere'];
+    case 'minimum':
+      return [Number(held) - 1];
+    case 'maximum':
+      return [Number(held) + 1];
+    case 'exclusiveMinimum':
+      return [Number(held)];
+    case 'minItems':
+      return Number(held) > 0 ? [fittingList(schema, Number(held) - 1)] : [];
+    case 'maxItems':
+      return [fittingList(schema, Number(held) + 1)];
+    case 'required':
+      // Left out, as a call's JSON can carry it, and not given as undefined.
+      return requiredOf(schema).map((field) =>
+        Object.fromEntries(Object.entries(schemaOf(aValueFor(schema))).filter(([name]) => name !== field)),
+      );
+    case 'additionalProperties':
+      assert.equal(
+        typeof held,
+        'boolean',
+        `${at} holds a schema for its other fields, which the check does not read`,
+      );
+      return held === false ? [{ ...schemaOf(aValueFor(schema)), 'named nowhere': 1 }] : [];
+    case 'items':
+      return breaking(schemaOf(held), `${at}[]`).map(([, value]) => [
+        value,
+        ...fittingList(schema, Math.max(0, Number(schema['minItems'] ?? 0) - 1)),
+      ]);
+    case 'properties':
+      return Object.entries(schemaOf(held)).flatMap(([field, inner]) =>
+        breaking(schemaOf(inner), `${at}.${field}`).map(([, value]) => ({
+          ...schemaOf(aValueFor(schema)),
+          [field]: value,
+        })),
+      );
+    default:
+      return assert.fail(
+        `${at} holds ${keyword}, which the argument check does not read: add the reader and its case here`,
+      );
+  }
+}
+
+/**
+ * Every rule a tool's schema holds for an argument's value is one the argument check reads.
+ *
+ * A client is shown the schema, so a rule in it that nothing reads is a promise to refuse that is
+ * not kept: a wait of 0 seconds passed, and a point of three numbers lost its third. Each rule is
+ * broken alone, in a value that otherwise fits, and has to be refused once.
+ */
+function testEveryRuleOfAnArgumentsSchemaIsChecked(): void {
+  let broken = 0;
+  for (const spec of TOOL_SPECS) {
+    for (const [name, schema] of Object.entries(spec.parameters)) {
+      const at = `${spec.name}.${name}`;
+      // The call names an op that takes the argument, since one that does not is not held to the
+      // fields its values lack.
+      const op = Object.keys(spec.operations ?? {}).find((held) => opTakes(spec, held, name));
+      const beside = name === 'op' || op === undefined ? {} : { op };
+      assert.deepEqual(
+        unfitValues(spec, { ...beside, [name]: aValueFor(schema) }),
+        [],
+        `${at} refuses a value its schema takes`,
+      );
+      for (const [keyword, value] of breaking(schema, at)) {
+        const said = unfitValues(spec, { ...beside, [name]: value });
+        assert.equal(
+          said.length,
+          1,
+          `${at}: ${JSON.stringify(value)} breaks ${keyword} alone: ${JSON.stringify(said)}`,
+        );
+        broken += 1;
+      }
+    }
+  }
+  assert.ok(broken > 400, `${broken} rules were broken, of the hundreds the schemas hold`);
 }
 
 /** The arguments with a sentence opening by naming the ops that read them, as the table stands. */
@@ -121887,8 +122193,13 @@ function placeholderFor(parameter: object | undefined): unknown {
     return choices[0];
   }
   switch (parameter === undefined ? undefined : Reflect.get(parameter, 'type')) {
-    case 'object':
-      return {};
+    case 'object': {
+      // With the fields its schema requires, which the argument check asks for first.
+      const fields = schemaOf(schemaOf(parameter)['properties']);
+      return Object.fromEntries(
+        requiredOf(schemaOf(parameter)).map((field) => [field, placeholderFor(schemaOf(fields[field]))]),
+      );
+    }
     case 'array':
       return [];
     case 'integer':
@@ -125241,6 +125552,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testObjectSnapshotsShowWhatAnActionKept,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
+  testEveryRuleOfAnArgumentsSchemaIsChecked,
   testAPipelineCacheIsCarriedToTheNextRun,
   testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
   testAVulkanPipelineCacheFileIsKeptAndSeededByteForByte,

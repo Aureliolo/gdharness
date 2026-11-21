@@ -2207,10 +2207,34 @@ function describeValue(value: unknown): string {
  * misspelt `vartype` was otherwise dropped and the variable written as a Variant.
  */
 function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
-  return Object.entries(args).flatMap(([name, value]) => misshapen(spec.parameters[name], value, name));
+  const op = opNamed(spec, args);
+  return Object.entries(args).flatMap(([name, value]) =>
+    misshapen(
+      spec.parameters[name],
+      value,
+      name,
+      op === null || (op !== undefined && opTakes(spec, op, name)),
+    ),
+  );
 }
 
-export function misshapen(schema: unknown, value: unknown, path: string): string[] {
+/** The op [param args] name or the tool's default, null for a tool with no ops, undefined for an op it lacks. */
+function opNamed(spec: ToolSpec, args: OperationParams): string | null | undefined {
+  if (!spec.operations) {
+    return null;
+  }
+  const requested = args['op'] ?? spec.defaultOperation;
+  return typeof requested === 'string' && Object.hasOwn(spec.operations, requested) ? requested : undefined;
+}
+
+/**
+ * What [param schema] refuses in the type and fields of [param value].
+ *
+ * [param whole] is false for an argument the call's op does not take, or whose op is unknown. Such
+ * a value is not asked for the fields it lacks, since the caller who added them would next be told
+ * the op takes no such argument.
+ */
+export function misshapen(schema: unknown, value: unknown, path: string, whole = true): string[] {
   if (!isRecord(schema) || value === undefined || value === null) {
     return [];
   }
@@ -2225,15 +2249,19 @@ export function misshapen(schema: unknown, value: unknown, path: string): string
     return [`${path} as ${wanted.join(' or ')}, not ${describeValue(value)}`];
   }
   if (Array.isArray(value)) {
-    return value.flatMap((element, index) => misshapen(schema['items'], element, `${path}[${index}]`));
+    return value.flatMap((element, index) => misshapen(schema['items'], element, `${path}[${index}]`, whole));
   }
-  const properties = schema['properties'];
-  if (!isRecord(properties) || !isRecord(value)) {
+  if (!isRecord(value)) {
     return [];
   }
-  return Object.entries(value).flatMap(([field, held]) => {
+  const lacking = whole ? lacked(schema, value, path) : [];
+  const properties = schema['properties'];
+  if (!isRecord(properties)) {
+    return lacking;
+  }
+  const unfit = Object.entries(value).flatMap(([field, held]) => {
     if (Object.hasOwn(properties, field)) {
-      return misshapen(properties[field], held, `${path}.${field}`);
+      return misshapen(properties[field], held, `${path}.${field}`, whole);
     }
     if (schema['additionalProperties'] !== false) {
       return [];
@@ -2244,6 +2272,34 @@ export function misshapen(schema: unknown, value: unknown, path: string): string
       `${path} with only the fields ${fields.join(', ')}, and ${field} is none of them${close.length === 0 ? '' : ` (the nearest is ${close[0]})`}`,
     ];
   });
+  return [...lacking, ...unfit];
+}
+
+/**
+ * The fields [param schema] requires of an object and [param value] lacks, as one complaint.
+ *
+ * A field left out reached a reader that took its default or refused it only after an engine had
+ * started, for a call the schema already rules out.
+ */
+function lacked(schema: Record<string, unknown>, value: Record<string, unknown>, path: string): string[] {
+  const required = schema['required'];
+  const missing = Array.isArray(required)
+    ? required.filter(
+        (field): field is string =>
+          typeof field === 'string' && (!Object.hasOwn(value, field) || (value[field] ?? null) === null),
+      )
+    : [];
+  if (missing.length === 0) {
+    return [];
+  }
+  // A field that takes one of a few values is named with them, as its own reader names them.
+  const properties = schema['properties'];
+  const said = missing.map((field) => {
+    const listed =
+      isRecord(properties) && isRecord(properties[field]) ? properties[field]['enum'] : undefined;
+    return Array.isArray(listed) ? `${field} (one of ${listed.join(', ')})` : field;
+  });
+  return [`${path} with its ${said.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} missing`];
 }
 
 /**
@@ -2292,30 +2348,74 @@ function outsideTheirLists(spec: ToolSpec, args: OperationParams): string[] {
 }
 
 /**
- * Which numbers fall outside the range their schema declares.
+ * Which numbers fall outside the range their schema declares, and which lists hold more or fewer
+ * items than it allows, named by where they sit.
  *
  * The quiet fault a range stops is the same one a list does: a number the call cannot mean reaches
  * a reader that takes it as absent and applies the default. A tree asked for at depth 0 answered
  * three levels, four megabytes over a router node, and `before: 0` carried three lines anyway.
  * Refused here, where the schema that says what a number may be is also what the client is shown.
+ *
+ * The walk follows the schema into the elements of a list and the fields of an object, as
+ * `unlistedValues` does, so a bound on either is read as a top-level one is.
  */
-function outsideTheirRanges(spec: ToolSpec, args: OperationParams): string[] {
-  const complaints: string[] = [];
-  for (const [name, value] of Object.entries(args)) {
-    const schema = spec.parameters[name];
-    if (typeof value !== 'number' || schema === undefined) {
-      continue;
-    }
-    const range = outsideRange(schema, value);
-    if (range !== undefined) {
-      complaints.push(`${name} ${range}, not ${value}`);
-    }
+export function outOfBounds(schema: unknown, value: unknown, path: string): string[] {
+  if (!isRecord(schema)) {
+    return [];
   }
-  return complaints;
+  if (typeof value === 'number') {
+    // A schema that names a number type refuses an infinity or a NaN as no number, which says all a
+    // range would. One that names none leaves the range as the only rule to hold it.
+    const refusedByType =
+      !Number.isFinite(value) && (schema['type'] === 'number' || schema['type'] === 'integer');
+    const range = refusedByType ? undefined : outsideRange(schema, value);
+    return range === undefined ? [] : [`${path} ${range}, not ${value}`];
+  }
+  if (Array.isArray(value)) {
+    const count = outsideCount(schema, value.length);
+    return [
+      ...(count === undefined ? [] : [`${path} with ${count}, not ${value.length}`]),
+      ...value.flatMap((element, index) => outOfBounds(schema['items'], element, `${path}[${index}]`)),
+    ];
+  }
+  const properties = schema['properties'];
+  if (isRecord(properties) && isRecord(value)) {
+    return Object.entries(value).flatMap(([field, held]) =>
+      Object.hasOwn(properties, field) ? outOfBounds(properties[field], held, `${path}.${field}`) : [],
+    );
+  }
+  return [];
+}
+
+function outsideTheirBounds(spec: ToolSpec, args: OperationParams): string[] {
+  return Object.entries(args).flatMap(([name, value]) => outOfBounds(spec.parameters[name], value, name));
+}
+
+/** What the schemas of [param spec] refuse in the values of [param args], each named by where it sits. */
+export function unfitValues(spec: ToolSpec, args: OperationParams): string[] {
+  return [...wrongTypes(spec, args), ...outsideTheirLists(spec, args), ...outsideTheirBounds(spec, args)];
+}
+
+/** How many items [param schema] lets a list hold, worded for a refusal, when it holds [param count]. */
+function outsideCount(schema: Record<string, unknown>, count: number): string | undefined {
+  const fewest = typeof schema['minItems'] === 'number' ? schema['minItems'] : undefined;
+  const most = typeof schema['maxItems'] === 'number' ? schema['maxItems'] : undefined;
+  if (!((fewest !== undefined && count < fewest) || (most !== undefined && count > most))) {
+    return undefined;
+  }
+  const items = (held: number | undefined): string => (held === 1 ? '1 item' : `${held} items`);
+  if (fewest !== undefined && most !== undefined) {
+    return fewest === most ? items(fewest) : `${fewest} to ${most} items`;
+  }
+  return fewest !== undefined ? `${items(fewest)} or more` : `${items(most)} or fewer`;
 }
 
 /** The range [param schema] declares, worded for a refusal, when [param value] falls outside it. */
 function outsideRange(schema: Record<string, unknown>, value: number): string | undefined {
+  const above = schema['exclusiveMinimum'];
+  if (typeof above === 'number' && value <= above) {
+    return `above ${above}`;
+  }
   const least = typeof schema['minimum'] === 'number' ? schema['minimum'] : undefined;
   const most = typeof schema['maximum'] === 'number' ? schema['maximum'] : undefined;
   if (!((least !== undefined && value < least) || (most !== undefined && value > most))) {
@@ -6755,11 +6855,7 @@ class GodotServer {
     spec: ToolSpec,
     args: OperationParams,
   ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
-    const wrong = [
-      ...wrongTypes(spec, args),
-      ...outsideTheirLists(spec, args),
-      ...outsideTheirRanges(spec, args),
-    ];
+    const wrong = unfitValues(spec, args);
     if (wrong.length > 0) {
       return { ok: false, response: this.createErrorResponse(`${spec.name} takes ${wrong.join('; ')}.`) };
     }
