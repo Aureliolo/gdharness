@@ -875,9 +875,11 @@ func _imported_sidecar_md5s() -> Dictionary:
 ## engine raises when the layout changes: 4.7.2 writes filesystem_cache10.
 static func _editor_cache_path() -> String:
 	var newest: int = -1
-	if not DirAccess.dir_exists_absolute(EDITOR_DIRECTORY):
+	# Opened rather than checked and then listed, so a folder removed in between prints nothing.
+	var at: DirAccess = DirAccess.open(EDITOR_DIRECTORY)
+	if at == null:
 		return ""
-	for name: String in DirAccess.get_files_at(EDITOR_DIRECTORY):
+	for name: String in at.get_files():
 		if (
 			name.begins_with(EDITOR_CACHE_PREFIX)
 			and name.trim_prefix(EDITOR_CACHE_PREFIX).is_valid_int()

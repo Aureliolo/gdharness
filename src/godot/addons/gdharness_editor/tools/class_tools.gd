@@ -118,9 +118,13 @@ func _reload(asked: String, listings: Dictionary) -> Dictionary:
 	# parse, such as a file open in an editor's language server. Compiling once with a line more
 	# makes the texts differ, which drops that parse and those of the scripts that resolved through
 	# it. The file's own text is compiled below.
-	script.source_code = text + "\n"
+	#
+	# Through the setter rather than the property: in the editor, a property assigned from a script
+	# marks the resource changed, and the next scene save writes the editor's copy back over the
+	# file, over any edit made to the file since.
+	script.set_source_code(text + "\n")
 	var _dropped: Error = script.reload(true)
-	script.source_code = text
+	script.set_source_code(text)
 
 	# A reload that fails is still answered as a call that ran, because the readings are what a
 	# caller needs then: a failure travels back as its message alone, and a project met one and
@@ -141,7 +145,7 @@ func _reload(asked: String, listings: Dictionary) -> Dictionary:
 		"heldConstantsBefore": held_constants,
 	}
 	if failed != OK:
-		script.source_code = previous
+		script.set_source_code(previous)
 		var restored: Error = script.reload(true)
 		answer["restored"] = restored == OK
 		if restored != OK:

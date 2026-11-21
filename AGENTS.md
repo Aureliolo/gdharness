@@ -92,10 +92,10 @@ the headless engine operations. Both are GDScript. `test/` holds the suites, wit
   files in all, plus the engine and editor legs.
 - `build-and-test` leaves the regressions and `test:integration` to the engine legs, which run them
   with Godot, unless the legs are skipped.
-- Locally, run the regressions and editor cases the change touches. A change that passes the
-  regressions can still fail `test/bridge.ts`, because the suites call the same code in different
-  ways.
-- Locally, run engines headless and leave the windowed cases to CI. Do not set
+- Locally, start an engine only to debug a failing test, or to show a new test fails with its fix
+  reverted. Every other engine-backed test runs in CI: push, then read the legs. Static gates and
+  tests that start no engine run locally.
+- Run engines headless and leave the windowed cases to CI. Do not set
   `GDHARNESS_ALLOW_WINDOWS` on a desktop someone is using.
 - Do not call `editor_run start` through a local probe editor, because a headless editor still opens
   a window for the game it plays. Measure played-game behaviour with the `withAPlayingEditor` fixture,

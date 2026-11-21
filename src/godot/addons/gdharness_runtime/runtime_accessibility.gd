@@ -50,6 +50,7 @@ function Mark($stage) {
 try {
   Mark 'began'
   Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+  Mark 'assemblies'
   $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   function Patterned($element, $name) {
     $pattern = ("System.Windows.Automation.$($name)Pattern" -as [type])::Pattern
@@ -237,6 +238,7 @@ func _walk_waited(pid: int, progress: String, windows: int, started_ms: int) -> 
 	var deadline: int = _deadline(began_at, -1, windows)
 	var walking: bool = false
 	var looked_at: int = began_at
+	var frames: int = 0
 	while OS.is_process_running(pid):
 		var now: int = Time.get_ticks_msec()
 		# Read again at the deadline too, so an answer marked since the last look is taken rather
@@ -260,12 +262,23 @@ func _walk_waited(pid: int, progress: String, windows: int, started_ms: int) -> 
 				int(Time.get_unix_time_from_system() * 1000.0)
 			)
 			var _gone: Error = DirAccess.remove_absolute(progress)
-			return (
-				"UI Automation had not read the tree after %d ms, so it was stopped: %s"
-				% [now - began_at, reached]
-			)
+			return _stopped(now - began_at, reached, frames)
 		await _host.get_tree().process_frame
+		frames += 1
 	return ""
+
+
+## Why a client stopped after [param waited_ms] at the stage [param reached] was stopped. The
+## frames the game ran meanwhile tell a machine too starved to run anything from a client stuck
+## on its own while the game, at no higher a priority, kept running.
+static func _stopped(waited_ms: int, reached: String, frames: int) -> String:
+	return (
+		(
+			"UI Automation had not read the tree after %d ms, so it was stopped: %s. The game "
+			+ "ran %d frame%s in that time."
+		)
+		% [waited_ms, reached, frames, "" if frames == 1 else "s"]
+	)
 
 
 ## Gives each of [param windows] the id in [param ids] at its place, -1 past their end, and matches
@@ -792,8 +805,9 @@ static func _marks(progress: String) -> Array:
 
 ## How far a client started at [param started_ms] and stopped at [param stopped_ms] got by the marks
 ## in [param progress], said for a caller whose read it stopped: the time went to starting
-## PowerShell, loading UI Automation, the walks, after the last walk, or writing the answer, and
-## which tells a loaded machine from a window that never answers.
+## PowerShell, loading UI Automation's assemblies, setting up the rest of the client, the walks,
+## after the last walk, or writing the answer, and which tells a loaded machine from a window that
+## never answers.
 static func _reached(progress: String, started_ms: int, stopped_ms: int) -> String:
 	var marks: Array = _marks(progress)
 	var at: Dictionary = {}
@@ -811,8 +825,16 @@ static func _reached(progress: String, started_ms: int, stopped_ms: int) -> Stri
 	if not at.has("began"):
 		return "PowerShell had not begun the client"
 	var began: int = at["began"] - started_ms
-	if not at.has("loaded"):
+	if not at.has("loaded") and not at.has("assemblies"):
 		return "PowerShell began the client after %d ms and was still loading UI Automation" % began
+	if not at.has("loaded"):
+		return (
+			(
+				"PowerShell began the client after %d ms and loaded UI Automation's assemblies in "
+				+ "%d ms, and was still setting up the description reader and the JSON serialiser"
+			)
+			% [began, at["assemblies"] - at["began"]]
+		)
 	var loaded: int = at["loaded"] - at["began"]
 	if walks == 0:
 		return (

@@ -99,10 +99,12 @@ func with_nearest_files(said: String, path: String) -> String:
 static func _namesakes(path: String) -> Array[String]:
 	var found: Array[String] = []
 	var folder: String = path.get_base_dir()
-	if not DirAccess.dir_exists_absolute(folder):
+	# Opened rather than checked and then listed, so a folder removed in between prints nothing.
+	var at: DirAccess = DirAccess.open(folder)
+	if at == null:
 		return found
 	var stem: String = path.get_file().get_basename()
-	var files: PackedStringArray = DirAccess.get_files_at(folder)
+	var files: PackedStringArray = at.get_files()
 	files.sort()
 	for file: String in files:
 		if file.get_basename() == stem and file != path.get_file():
