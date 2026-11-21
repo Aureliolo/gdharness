@@ -99327,6 +99327,78 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
 }
 
 /**
+ * A run whose case failed and then passed on a retry says so. gdUnit4's flaky check exits 0 on it
+ * and its report keeps the first failure, so the answer was `passed: false` beside the verdict
+ * "passed", with nothing naming the retry.
+ */
+async function testACaseThatPassedOnARetryIsNotSaidToHavePassed(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('retried case regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-retried-case-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="RetriedCase"\n\n[gdunit4]\n\n' +
+        'settings/test/flaky_check_enable=true\nsettings/test/flaky_max_retries=3\n',
+    );
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(project, 'test'), { recursive: true });
+    writeFileSync(
+      join(project, 'test', 'retried_test.gd'),
+      'extends GdUnitTestSuite\n\nstatic var tries: int = 0\n\n\n' +
+        'func test_second_time() -> void:\n\ttries += 1\n\tassert_int(tries).is_greater(1)\n\n\n' +
+        'func test_plain() -> void:\n\tassert_bool(true).is_true()\n',
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return {
+          text: blocks.join('\n'),
+          answer: JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown,
+        };
+      };
+      const retried = await run({ path: 'res://test/retried_test.gd' });
+      assert.deepEqual(
+        [
+          get(retried.answer, 'passed'),
+          get(retried.answer, 'exitCode'),
+          get(retried.answer, 'verdict'),
+          get(retried.answer, 'passedOnARetry'),
+          asArray(get(retried.answer, 'failed')).map((one) => get(one, 'name')),
+        ],
+        [
+          false,
+          0,
+          'passed only on a retry: retried_test:test_second_time',
+          ['retried_test:test_second_time'],
+          ['test_second_time'],
+        ],
+        retried.text,
+      );
+      assert.equal(
+        get(retried.answer, 'note'),
+        "retried_test:test_second_time failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it, and failed holds the first failure.",
+        retried.text,
+      );
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A project setting takes a value the way a property write does.
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
@@ -124078,6 +124150,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShaderReadWithNoIncludeIsUnchanged,
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,
+  testACaseThatPassedOnARetryIsNotSaidToHavePassed,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testASaveFromTheEditorIsRefusedWithNoEditor,
   testAConfigNamingAnotherVersionIsSaid,

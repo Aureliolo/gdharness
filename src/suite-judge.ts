@@ -1189,15 +1189,23 @@ function judgeStrayRows(judging: Judging, path: string, func: string, strays: re
   );
 }
 
+/**
+ * Whether [param ran] failed and then passed on a retry. gdUnit4's flaky check counts that as a
+ * pass and exits 0 on it, and no judge of a run does.
+ */
+export function passedOnARetry(ran: { readonly verdict: string }): boolean {
+  return ran.verdict === 'FLAKY';
+}
+
 /** Fails the suite at [param path] for [param ran] failing, and marks the lines it printed to be shown. */
 function judgeFailedCase(judging: Judging, printed: RunPrinted, path: string, ran: CaseRan): void {
-  if (ran.verdict !== 'FAILED' && ran.verdict !== 'FLAKY') {
+  if (ran.verdict !== 'FAILED' && !passedOnARetry(ran)) {
     return;
   }
   failSuite(
     judging,
     path,
-    ran.verdict === 'FLAKY'
+    passedOnARetry(ran)
       ? `${path} > ${ran.name} failed before it passed on a retry`
       : `${path} > ${ran.name} failed`,
   );

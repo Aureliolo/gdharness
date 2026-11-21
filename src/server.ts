@@ -431,6 +431,7 @@ import {
   failedOnPushErrors,
   funcOf,
   named,
+  passedOnARetry,
   pushErrorsFailedSentence,
   readExpected,
   readRun,
@@ -5564,6 +5565,8 @@ interface TestAnswer extends TestErrorsJudged {
   unmatched: string[];
   testsNotRun: string[];
   casesNotRun: string[];
+  /** The cases that failed and then passed on a retry, as `suite:case`. */
+  retried: string[];
   declaredAs: string;
   rowsMismatched: { test: string; reason: string }[];
   casesUnrunnable: { test: string; reason: string }[];
@@ -11031,8 +11034,17 @@ class GodotServer {
       test: `${one.suite} > ${one.name}`,
       reason: one.reason,
     }));
+    // gdUnit4 exits 0 on such a case, and its report holds only the failure.
+    const retried = [
+      ...new Set(
+        [...casePrinted.suites.values()].flatMap((suite) =>
+          suite.cases.filter(passedOnARetry).map((one) => `${basename(suite.path, '.gd')}:${one.name}`),
+        ),
+      ),
+    ];
     return this.reportAnswer({
       ...judged,
+      retried,
       declaredAndPrinted,
       ranIn,
       notRunIn,
@@ -11078,6 +11090,7 @@ class GodotServer {
       notSuites,
       nothingRan,
       report,
+      retried,
       rowsMismatched,
       testsNotRun,
       timedOut,
@@ -11104,6 +11117,7 @@ class GodotServer {
           missing,
           testsNotRun,
           casesNotRun,
+          retried,
           rowsMismatched,
           casesUnrunnable,
           notSuites,
@@ -11119,6 +11133,7 @@ class GodotServer {
       countedLeaks,
       declaredNotPrinted,
       notSuites,
+      retried,
       rowsMismatched,
       testsNotRun,
       undeclaredPrinted,
@@ -11133,6 +11148,7 @@ class GodotServer {
           countedLeaks.length +
           testsNotRun.length +
           casesNotRun.length +
+          retried.length +
           rowsMismatched.length +
           casesUnrunnable.length +
           notSuites.length >
@@ -11159,6 +11175,7 @@ class GodotServer {
         testsNotRun.length + casesNotRun.length > 0
           ? `not run: ${[...testsNotRun, ...casesNotRun].join(', ')}`
           : undefined,
+        retried.length > 0 ? `passed only on a retry: ${retried.join(', ')}` : undefined,
         rowsMismatched.length > 0
           ? `${rowsMismatched.length === 1 ? 'one row' : `${String(rowsMismatched.length)} rows`} skipped for data that does not fit the case`
           : undefined,
@@ -11180,6 +11197,7 @@ class GodotServer {
       hung,
       missing,
       notSuites,
+      retried,
       rowsMismatched,
       silentForMs,
       testsNotRun,
@@ -11191,6 +11209,7 @@ class GodotServer {
       ...(testsNotRun.length + casesNotRun.length > 0
         ? { testsNotRun: [...testsNotRun, ...casesNotRun] }
         : {}),
+      ...(retried.length > 0 ? { passedOnARetry: retried } : {}),
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
@@ -11273,10 +11292,13 @@ class GodotServer {
 
   /** The sentences of a test run's note about what was asked for and did not run. */
   private notRunNotes(s: TestAnswer): (string | undefined)[] {
-    const { casesNotRun, missingNote, rowsMismatched, testsNotRun } = s;
+    const { casesNotRun, missingNote, retried, rowsMismatched, testsNotRun } = s;
     return [
       missingNote,
       testsNotRun.length > 0 ? notRunSaid(testsNotRun) : undefined,
+      retried.length > 0
+        ? `${retried.join(', ')} failed before ${retried.length === 1 ? 'it' : 'they'} passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it, and failed holds the first failure.`
+        : undefined,
       casesNotRun.length > 0
         ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
         : undefined,
