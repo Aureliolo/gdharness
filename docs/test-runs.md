@@ -932,12 +932,13 @@ ones.
   was made. Two cases end the wait:
   - A waiter that has not looked for 5 seconds, counted from the later of the first time you left
     it a slot and its last look: from then on, leave it nothing, unless it looks again.
-  - A waiter that looks, when every slot you leave it has stood free, left to it, for 5 seconds
-    and it wants no more slots than you leave it (below). Leave it nothing from then on, so that
-    two takers that each place the other ahead do not leave the one free slot to each other for
-    good. Count each slot from the first look at which you left it to that waiter, and start again
-    if the slot is taken or left to another. A waiter that wants more slots than are free is waited
-    for, since it waits for more to come free.
+  - A slot you have left to waiters ahead at every look for 5 seconds, whichever waiter you left it
+    to at each. Count it from the first such look, and start again at the next look that finds it
+    free if a look finds it taken. Pass each waiter ahead that would take it and wants one slot,
+    then give the slot to the next one ahead, until it falls to you or to a waiter you wait for.
+    Takers that each place the others ahead, however many, then do not leave a free slot to each
+    other for good. A waiter that wants several slots (below) is waited for through its first 300
+    seconds, however many are free. So is a `gate` taker while a gate is queued.
 - A game that may take no free slot now (see Games and the kept slots) is given none, however long
   it has waited, and the takers behind it take the slots it cannot.
 - A mark may also hold `wants`, a whole number above 1, for a taker waiting for that many slots at
@@ -1082,8 +1083,8 @@ stays when its keeper takes the lock over. Games hold at most `kept - 1` of the 
 them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12, none of the 1 kept on 2) while a gate is
 queued, and a game's start waits once they do. On 2 slots no game runs while a gate is queued.
 
-The last kept slot, the lowest of them, stays for a headless call: a game never takes it, whether
-or not a gate is queued. With no gate queued a game takes any other slot.
+The last kept slot, the lowest of them, stays for a headless call. While a gate is queued a game
+never takes it. With no gate queued a game takes any slot, and that one only when no other is free.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is
