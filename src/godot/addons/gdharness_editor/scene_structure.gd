@@ -11,8 +11,9 @@ extends RefCounted
 ## the file gives it. A node no entry names goes only when a scene put back owns it, which is how a
 ## save keeps a node. Nothing else that exists is freed or made again: a node's own engine children,
 ## such as a container's scroll bars, are owned by no scene and held by the node. A scene with an
-## entry whose parent is not at its path is instanced again and left as it loads, since the engine
-## may have placed that entry's node elsewhere by the file's ids or at the root.
+## entry whose parent is not at its path is left as it loads, with what was put back before that
+## entry taken back, since the engine may have placed its node elsewhere by the file's ids or at
+## the root.
 ##
 ## An instanced scene is put back against its own state. A scene whose scripts are all tools, or
 ## whose root's script is a tool, is left as it loads, as is every scene instanced inside one with
@@ -48,20 +49,13 @@ var _packs: Dictionary = {}
 var _by_name: Dictionary = {}
 var _indexed: bool = false
 var _editable: PackedStringArray = []
-
-
-## [param top], instanced from [param packed], with its nodes put back. Where an entry's parent is
-## not at its path, [param top] is freed and the scene is answered instanced again, as it loads.
-func restored(top: Node, packed: PackedScene) -> Node:
-	if put_back(top, packed):
-		return top
-	top.free()
-	remade_ids.clear()
-	return packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+## Each change made to the scene while its entries are walked, oldest first: a node moved as
+## {node, parent, index}, one renamed as {node, name}, one made again as {node}.
+var _journal: Array[Dictionary] = []
 
 
 ## Puts back what the scripts that ran as [param top] was instanced from [param packed] did to its
-## nodes. Answers false, with the scene half put back, once an entry's parent is not at its path.
+## nodes. Answers false, with the scene as it loaded, once an entry's parent is not at its path.
 func put_back(top: Node, packed: PackedScene) -> bool:
 	_root = top
 	_editable = _editable_of(packed)
@@ -69,6 +63,7 @@ func put_back(top: Node, packed: PackedScene) -> bool:
 	_packs[state.get_instance_id()] = packed
 	var _at: Dictionary = _level(top, state, false)
 	if _unplaced:
+		_take_back()
 		return false
 	_strip()
 	_arrange()
@@ -79,6 +74,27 @@ func put_back(top: Node, packed: PackedScene) -> bool:
 			var level_state: SceneState = level["state"]
 			_reconnect(level_top, level_state)
 	return true
+
+
+## Takes back each change in [member _journal], newest first, which leaves the scene as it loaded.
+func _take_back() -> void:
+	for position: int in range(_journal.size() - 1, -1, -1):
+		var step: Dictionary = _journal[position]
+		var node: Node = step["node"]
+		if step.has("name"):
+			var named: StringName = step["name"]
+			node.name = named
+		elif step.has("parent"):
+			var parent: Node = step["parent"]
+			var index: int = step["index"]
+			node.reparent(parent, false)
+			parent.move_child(node, index)
+		else:
+			node.get_parent().remove_child(node)
+			node.free()
+	_journal.clear()
+	_remade.clear()
+	remade_ids.clear()
 
 
 ## Puts back the scene [param state] makes at [param top], answering each node of it by its path
@@ -240,6 +256,9 @@ func _node_of(top: Node, parent: Node, entry: Dictionary) -> Node:
 		return direct if direct != null else _remake(top, parent, entry)
 	if not elsewhere.is_ancestor_of(parent):
 		_make_room(parent, str(entry["name"]), elsewhere)
+		_journal.append(
+			{ "node": elsewhere, "parent": elsewhere.get_parent(), "index": elsewhere.get_index() }
+		)
 		elsewhere.reparent(parent, false)
 	return elsewhere
 
@@ -286,16 +305,13 @@ static func _fits(node: Node, entry: Dictionary) -> bool:
 
 
 ## Frees the name [param named] under [param parent] for [param node]: a node a script added there
-## goes if a scene put back owns it, else takes another name.
+## takes another name, and goes with the others no entry names if a scene put back owns it.
 func _make_room(parent: Node, named: String, node: Node) -> void:
 	var child: Node = _child_called(parent, named)
 	if child == null or child == node:
 		return
-	if _strippable(child):
-		parent.remove_child(child)
-		child.free()
-	else:
-		child.name = StringName("%sAddedByScript%d" % [named, child.get_instance_id()])
+	_journal.append({ "node": child, "name": child.name })
+	child.name = StringName("%sAddedByScript%d" % [named, child.get_instance_id()])
 
 
 ## The node of [param entry] made again under [param parent] as the file holds it, or null when its
@@ -310,6 +326,7 @@ func _remake(top: Node, parent: Node, entry: Dictionary) -> Node:
 	_make_room(parent, named, made)
 	parent.add_child(made)
 	made.owner = top
+	_journal.append({ "node": made })
 	if _indexed:
 		_index(made)
 	var state: SceneState = entry["state"]
