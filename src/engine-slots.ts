@@ -557,6 +557,11 @@ export class SlotLine {
   mark: string | undefined;
   /** The slots it leaves to those ahead at its last look. */
   private left = new Set<number>();
+  /**
+   * Each free slot it has left to a taker ahead at every look since, with the first of those looks,
+   * whichever taker ahead it left the slot to at each.
+   */
+  private readonly freeSince = new Map<number, number>();
 
   readonly taker: SlotTaker;
   readonly game: boolean;
@@ -632,8 +637,8 @@ export class SlotLine {
 
   /**
    * Those of [param numbers] it may take now, the order kept: it leaves out each of [param theirs],
-   * the free slots those ahead take first. How long a taker ahead is waited for is counted by the
-   * take, per taker, not per slot, so a wait for several slots keeps all of them for its drain.
+   * the free slots those ahead take first. How long they are left is counted per slot
+   * ({@link SlotLine.stoodFree}), and a wait for several slots keeps all of them for its drain.
    */
   admitted(numbers: readonly number[], theirs: ReadonlySet<number>): number[] {
     this.left = new Set(theirs);
@@ -643,6 +648,29 @@ export class SlotLine {
   /** The free slots it leaves to those waiting longer, lowest first. */
   leaves(): number[] {
     return [...this.left].toSorted((a, b) => a - b);
+  }
+
+  /**
+   * Notes that the look at [param now] leaves the free slots [param claimed] to takers ahead, and
+   * answers those of them it has left at every look for {@link SLOT_YIELD_MS}. A slot not left at
+   * this look, held or taken, starts again at the next look that leaves it.
+   */
+  stoodFree(claimed: Iterable<number>, now: number): Set<number> {
+    const left = new Set(claimed);
+    for (const slot of this.freeSince.keys()) {
+      if (!left.has(slot)) {
+        this.freeSince.delete(slot);
+      }
+    }
+    const stood = new Set<number>();
+    for (const slot of left) {
+      const since = this.freeSince.get(slot) ?? now;
+      this.freeSince.set(slot, since);
+      if (now - since >= SLOT_YIELD_MS) {
+        stood.add(slot);
+      }
+    }
+    return stood;
   }
 }
 
@@ -682,12 +710,15 @@ type SlotsDrawn =
       readonly limit?: Exclude<SlotLimit, 'starved'>;
       /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
       readonly left?: readonly number[];
+      /** The last kept slot, which a game's draw leaves out for a short headless call. */
+      readonly forACall?: number;
       readonly heldFor?: undefined;
     }
   | {
       readonly numbers: readonly number[];
       readonly limit: 'starved';
       readonly left?: readonly number[];
+      readonly forACall?: undefined;
       /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
       readonly heldFor: string;
     };
@@ -777,7 +808,8 @@ interface GateLook {
  * then as many of the gates' free ones as are spare ([param free], the highest first, where it
  * is known), whatever the take has waited. A gate's seat counts only the gates' slots, so work in
  * the kept ones never holds a seat back. A [param game] editor_run started never draws the last kept
- * slot, queue or none, which stays for a short headless call.
+ * slot, queue or none, which stays for a short headless call. A machine of one slot has no kept slot
+ * apart from it, so a game draws it there.
  */
 export function slotsDrawnOn(
   count: number,
@@ -791,7 +823,10 @@ export function slotsDrawnOn(
     return drawn;
   }
   const last = Math.max(1, count - keptSlotsOf(count));
-  return { ...drawn, numbers: drawn.numbers.filter((slot) => slot !== last) };
+  if (drawn.limit === 'starved' || !drawn.numbers.includes(last)) {
+    return drawn;
+  }
+  return { ...drawn, numbers: drawn.numbers.filter((slot) => slot !== last), forACall: last };
 }
 
 function drawnOn(count: number, taker: SlotTaker, queue: GateQueue, free?: readonly number[]): SlotsDrawn {
@@ -1322,8 +1357,6 @@ export class EngineSlots {
    * one such wait kept every short call of a server waiting 5 s for a slot that stood free.
    */
   private readonly passedOver = new Map<string, number>();
-  /** The slots left to each waiting mark, each with when this process first left it to that mark. */
-  private readonly standing = new Map<string, Map<number, number>>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
   /**
@@ -1726,24 +1759,13 @@ export class EngineSlots {
     const ahead = placed
       .ahead(waiting)
       .filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS);
-    for (const mark of this.standing.keys()) {
-      if (!ahead.some((one) => one.mark === mark)) {
-        this.standing.delete(mark);
-      }
-    }
-    let claims = await this.claimedAhead(ahead, queued);
-    for (const mark of claims.values()) {
+    const claimed = await this.claimedAhead(ahead, queued);
+    for (const mark of claimed.values()) {
       if (!this.passedOver.has(mark)) {
         this.passedOver.set(mark, now);
       }
     }
-    const yielding = this.standFreeForTheYield(ahead, claims, now);
-    if (yielding.size > 0) {
-      claims = await this.claimedAhead(
-        ahead.filter((one) => !yielding.has(one.mark)),
-        queued,
-      );
-    }
+    const claims = await this.standFreeForTheYield(placed, ahead, claimed, queued, now);
     const tried = placed.admitted(drawnBefore, new Set(claims.keys()));
     const left = placed.leaves().filter((slot) => drawnBefore.includes(slot) && !tried.includes(slot));
     if (left.length > 0 && this.drawn === drawn) {
@@ -1753,50 +1775,63 @@ export class EngineSlots {
   }
 
   /**
-   * Notes the slots [param claims] leave to takers ahead, each with when this process first left it
-   * to that taker, and answers the marks of the takers ahead that have let every slot they want
-   * stand free for {@link SLOT_YIELD_MS}. Those ahead have all looked within that time, or been left
-   * a slot for less. Two takers that each place the other ahead look every moment, so neither is
-   * ever dropped as gone, and each would leave the slot to the other for good. A taker that wants more slots than are free is still waited for, since it waits
-   * for more to come free.
+   * The free slots the takers [param ahead] of [param placed] take first once the yield is counted,
+   * from [param claims], those they take at the look at [param now]. Those ahead have all looked
+   * within {@link SLOT_YIELD_MS}, or been left a slot for less, so takers that each place the others
+   * ahead, in a ring of any size, would leave a free slot to each other for good. A slot left to
+   * takers ahead at every look for {@link SLOT_YIELD_MS}, whichever of them took it at each, passes
+   * each taker ahead that takes it and wants one slot, never a gate's engine while a gate is queued, until it falls to none of
+   * them or to one that is waited for.
    */
-  private standFreeForTheYield(
+  private async standFreeForTheYield(
+    placed: SlotLine,
     ahead: readonly SlotWaiter[],
-    claims: ReadonlyMap<number, string>,
+    claims: Map<number, string>,
+    queued: () => Promise<GateLook>,
     now: number,
-  ): Set<string> {
-    const yielding = new Set<string>();
-    for (const one of ahead) {
-      const claimed = [...claims].filter(([, mark]) => mark === one.mark).map(([slot]) => slot);
-      const since = this.standing.get(one.mark) ?? new Map<number, number>();
-      for (const slot of since.keys()) {
-        if (!claimed.includes(slot)) {
-          since.delete(slot);
+  ): Promise<Map<number, string>> {
+    const stood = placed.stoodFree(claims.keys(), now);
+    const passed = new Map<string, Set<number>>();
+    let taken = claims;
+    for (;;) {
+      const passing: [string, number][] = [];
+      for (const [slot, mark] of taken) {
+        const one = ahead.find((waiter) => waiter.mark === mark);
+        if (stood.has(slot) && one !== undefined && (await this.passable(one, queued, now))) {
+          passing.push([mark, slot]);
         }
       }
-      for (const slot of claimed) {
-        since.set(slot, since.get(slot) ?? now);
+      if (passing.length === 0) {
+        return taken;
       }
-      this.standing.set(one.mark, since);
-      const wants = now - one.since < SLOTS_DRAIN_MS ? one.wants : 1;
-      if (
-        claimed.length >= wants &&
-        claimed.every((slot) => now - (since.get(slot) ?? now) >= SLOT_YIELD_MS)
-      ) {
-        yielding.add(one.mark);
+      for (const [mark, slot] of passing) {
+        passed.set(mark, (passed.get(mark) ?? new Set()).add(slot));
       }
+      taken = await this.claimedAhead(ahead, queued, passed);
     }
-    return yielding;
+  }
+
+  /**
+   * Whether [param one], a taker ahead, may be passed for a slot that has stood free: it wants one
+   * slot, and it is no gate's engine while a gate is queued. A taker wanting several keeps the slots
+   * freed for it through its drain, however many are free, as the machine's queue keeps them.
+   */
+  private async passable(one: SlotWaiter, queued: () => Promise<GateLook>, now: number): Promise<boolean> {
+    if (one.wants > 1 && now - one.since < SLOTS_DRAIN_MS) {
+      return false;
+    }
+    return one.taker !== 'gate' || (await queued()).queue === 'none';
   }
 
   /**
    * The free slots the takers [param ahead] take first, in their order, each with the mark of the one
    * taking it: see {@link slotsClaimed}. A game the games limit holds back draws only slots that are
-   * held, so it claims none.
+   * held, so it claims none. A taker never takes a slot [param passed] names for its mark.
    */
   private async claimedAhead(
     ahead: readonly SlotWaiter[],
     queued: () => Promise<GateLook>,
+    passed: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
   ): Promise<Map<number, string>> {
     if (ahead.length === 0) {
       return new Map();
@@ -1812,7 +1847,8 @@ export class EngineSlots {
       Array.from({ length: now - one.since < SLOTS_DRAIN_MS ? one.wants : 1 }, () => one),
     );
     for (const one of places) {
-      drawn.push((await this.drawnFor(one.taker, one.game, queued)).numbers);
+      const numbers = (await this.drawnFor(one.taker, one.game, queued)).numbers;
+      drawn.push(numbers.filter((slot) => passed.get(one.mark)?.has(slot) !== true));
     }
     return new Map(
       [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, places[at]?.mark ?? '']),
@@ -2571,7 +2607,7 @@ export function slotWaitSaid(
   if (allLeft !== '') {
     return `${so}: ${allLeft}`;
   }
-  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const taking = slotsTaking(drawn, count);
   const using = inUseOf(drawn, taking);
   const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'is' : 'are'} in use`;
   const named = holdersNamed(using, holders);
@@ -2624,7 +2660,7 @@ function inUseOf(drawn: SlotsDrawn, taking: number): number {
  * them, or by number where it leaves some of them free.
  */
 function slotsInUseSaid(drawn: SlotsDrawn, count: number, directory: string, taking: number): string {
-  const all = slotsSaid(taking, count, directory, drawn.limit);
+  const all = slotsSaid(taking, count, directory, drawn);
   return (drawn.left?.length ?? 0) === 0
     ? all
     : `${slotsNamed(notLeftOf(drawn))} of ${all.replace(/^all /u, 'the ')}`;
@@ -2642,11 +2678,26 @@ function leftSaid(drawn: SlotsDrawn, past = false): string {
 }
 
 /**
- * The slots a take may use, [param taking] of the machine's [param count] in [param directory], named
- * for what holds it to them.
+ * How many slots of the machine's [param count] the take that drew [param drawn] may use: those it
+ * draws where something holds it to them or a game's draw leaves the last kept one out, else all.
  */
-function slotsSaid(taking: number, count: number, directory: string, limit: SlotLimit | undefined): string {
+function slotsTaking(drawn: SlotsDrawn, count: number): number {
+  return drawn.limit === undefined && drawn.forACall === undefined ? count : drawn.numbers.length;
+}
+
+/**
+ * The slots a take may use, [param taking] of the machine's [param count] in [param directory], named
+ * for what holds it to them, as [param drawn] gives it.
+ */
+function slotsSaid(taking: number, count: number, directory: string, drawn: SlotsDrawn): string {
   const where = `on this machine (${directory})`;
+  const { limit } = drawn;
+  const these = taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`;
+  if (drawn.forACall !== undefined) {
+    return limit === 'kept'
+      ? `${these} of the ${String(count)} ${where} kept for engines outside a gate that a game editor_run started may take while a gate is queued`
+      : `${these} of the ${String(count)} ${where} a game editor_run started may take, all but slot ${String(drawn.forACall)}, which stays for a short headless call,`;
+  }
   if (limit === 'kept') {
     return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} kept for engines outside a gate while a gate is queued`;
   }
@@ -2681,7 +2732,7 @@ export function slotWaitedSaid(
   if (allLeft !== '') {
     return `${waited} When it first waited, ${allLeft}`;
   }
-  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const taking = slotsTaking(drawn, count);
   const using = inUseOf(drawn, taking);
   const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'was' : 'were'} in use`;
   const named = holdersNamed(using, holders);
