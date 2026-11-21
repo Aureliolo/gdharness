@@ -46618,6 +46618,37 @@ async function withAPlayingEditor(
     sweep(project);
     sweep(runtimeDir);
   }
+  assert.deepEqual(
+    slotsLeftUnderThisProcess(),
+    [],
+    'a game announced under this process, so its slot was handed here and held until the whole run ended',
+  );
+}
+
+/**
+ * The suite's slot locks that name this process, each removed as it is found, so a case that left one
+ * fails alone rather than every later case that waits on the slot.
+ */
+function slotsLeftUnderThisProcess(): string[] {
+  const slots = process.env[SLOTS_VARIABLE];
+  if (slots === undefined || !existsSync(slots)) {
+    return [];
+  }
+  return readdirSync(slots)
+    .filter((name) => name.endsWith('.lock'))
+    .filter((name) => {
+      let pid: unknown;
+      try {
+        pid = get(JSON.parse(readFileSync(join(slots, name), 'utf8')) as unknown, 'pid');
+      } catch {
+        return false;
+      }
+      if (pid !== process.pid) {
+        return false;
+      }
+      rmSync(join(slots, name), { force: true });
+      return true;
+    });
 }
 
 /** Ends [param game] and waits for it to have gone, so nothing it held open is still held. */
@@ -53618,6 +53649,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
   // Measured from the play rather than from the call: the start asks the editor what it is playing
   // before it plays anything, and that question is held for the same 700 ms.
   let playedAt = 0;
+  const game = aPlayedStandIn();
   await withAPlayingEditor(
     ({ adapter, project, runtimeDir }) =>
       async (tool) => {
@@ -53627,10 +53659,10 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
           // one is swept by the reader and the start would have nothing to find.
           setTimeout(() => {
             writeFileSync(
-              join(runtimeDir, `runtime-${process.pid}.json`),
+              join(runtimeDir, `runtime-${game.pid}.json`),
               JSON.stringify({
                 protocol: RUNTIME_PROTOCOL,
-                pid: process.pid,
+                pid: game.pid,
                 port: 51_994,
                 address: '127.0.0.1',
                 project: { name: 'Played', path: project },
@@ -53670,7 +53702,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         true,
         `the announcement should have been found: ${JSON.stringify(found.answer)}`,
       );
-      assert.equal(get(found.answer, 'runtime', 'pid'), process.pid, JSON.stringify(found.answer));
+      assert.equal(get(found.answer, 'runtime', 'pid'), game.pid, JSON.stringify(found.answer));
       // The wait by the server's own clock rather than from the play: the start writes its notes
       // between the play and the wait, and on the Windows leg one of those writes waited out a
       // process holding the file, so a wait that ended after 1 ms without asking the editor was
@@ -53679,13 +53711,31 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         .map((line) => /announce wait ended after (\d+)ms: pid (\d+) announced/.exec(line))
         .find((said) => said !== null);
       assert.ok(waited !== undefined, `the server should say how its wait ended: ${account.join(' | ')}`);
-      assert.equal(Number(waited[2]), process.pid, account.join(' | '));
+      assert.equal(Number(waited[2]), game.pid, account.join(' | '));
       assert.ok(
         Number(waited[1]) < answersAfterMs,
         `and found before the editor's first answer arrived: the wait took ${waited[1]}ms, against ${answersAfterMs}ms, ${sincePlayMs}ms after the play; the server said: ${account.join(' | ')}`,
       );
     },
-  );
+  ).finally(() => {
+    game.end();
+  });
+}
+
+/**
+ * A live process for a game the fake editor plays to announce under, which [method end] ends. A
+ * played game's slot is handed to the pid that announces, so a game announced under this process
+ * would hold its slot until the whole run ends.
+ */
+function aPlayedStandIn(): { readonly pid: number; readonly end: () => void } {
+  const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  assert.ok(typeof game.pid === 'number', 'the fixture needs a live game to announce');
+  return {
+    pid: game.pid,
+    end: () => {
+      game.kill();
+    },
+  };
 }
 
 /**
@@ -54004,6 +54054,7 @@ async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<v
   const startsPlayingAfterMs = 600;
   let playedAt = 0;
   let statusAsked = 0;
+  const game = aPlayedStandIn();
   await withAPlayingEditor(
     ({ adapter, project, runtimeDir }) =>
       (tool) => {
@@ -54011,10 +54062,10 @@ async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<v
           playedAt = Date.now();
           setTimeout(() => {
             writeFileSync(
-              join(runtimeDir, `runtime-${process.pid}.json`),
+              join(runtimeDir, `runtime-${game.pid}.json`),
               JSON.stringify({
                 protocol: RUNTIME_PROTOCOL,
-                pid: process.pid,
+                pid: game.pid,
                 port: 51_993,
                 address: '127.0.0.1',
                 project: { name: 'Played', path: project },
@@ -54044,13 +54095,15 @@ async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<v
         true,
         `the start waits through an editor that has not started playing yet: ${JSON.stringify(found.answer)}`,
       );
-      assert.equal(get(found.answer, 'runtime', 'pid'), process.pid, JSON.stringify(found.answer));
+      assert.equal(get(found.answer, 'runtime', 'pid'), game.pid, JSON.stringify(found.answer));
       assert.ok(
         found.waitedMs >= startsPlayingAfterMs,
         `and the announcement it found came after the editor began: ${found.waitedMs}ms`,
       );
     },
-  );
+  ).finally(() => {
+    game.end();
+  });
 }
 
 /**

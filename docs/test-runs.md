@@ -1083,8 +1083,9 @@ stays when its keeper takes the lock over. Games hold at most `kept - 1` of the 
 them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12, none of the 1 kept on 2) while a gate is
 queued, and a game's start waits once they do. On 2 slots no game runs while a gate is queued.
 
-The last kept slot, the lowest of them, stays for a headless call. While a gate is queued a game
-never takes it. With no gate queued a game takes any slot, and that one only when no other is free.
+The last kept slot, the lowest of them, stays for a headless call. A game never takes it, whether
+or not a gate is queued. With no gate queued a game takes any other slot. On a machine of one slot,
+which has no kept slot apart from it, a game takes that slot.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is
