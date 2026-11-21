@@ -14922,12 +14922,50 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       }),
       'project_settings takes events[0] with its type (one of key, mouse_button, joypad_button, joypad_motion), which is missing.',
     );
+    // An argument the call's op does not take is not asked for its missing fields, nor is one
+    // beside an op the tool lacks: the caller who added them would be told that next.
+    assert.equal(
+      await call('project_settings', { op: 'get', projectPath: '/p', setting: 'a/b', events: [{}] }),
+      'project_settings get does not take events. get takes: projectPath, setting, from, prefix.',
+    );
+    assert.match(
+      await call('scene_animation', {
+        op: 'read',
+        projectPath: '/p',
+        scenePath: 'a.tscn',
+        playerNodePath: 'Player',
+        animationName: 'spin',
+        track: {},
+      }),
+      /^scene_animation read does not take track\. /,
+    );
+    assert.match(
+      await call('project_settings', { op: 'nope', projectPath: '/p', events: [{}] }),
+      /^project_settings has no op "nope"\. /,
+    );
+    assert.deepEqual(misshapen(pair, { x: 'one' }, 'point', false), ['point.x as number, not a string']);
+    assert.deepEqual(misshapen({ type: 'array', items: pair }, [{}], 'points', false), []);
     // An infinity is refused as no number, so its range has nothing to add.
     assert.deepEqual(
       [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -1].map((held) =>
         outOfBounds({ type: 'number', exclusiveMinimum: 0, maximum: 120 }, held, 'seconds'),
       ),
       [[], [], [], ['seconds above 0, not -1']],
+    );
+    // A schema that names no number type refuses no infinity, so its range still has to.
+    assert.deepEqual(
+      [
+        outOfBounds({ maximum: 120 }, Number.POSITIVE_INFINITY, 'seconds'),
+        outOfBounds({ minimum: 0 }, Number.NEGATIVE_INFINITY, 'seconds'),
+        outOfBounds({ type: ['number', 'null'], maximum: 120 }, Number.POSITIVE_INFINITY, 'seconds'),
+        outOfBounds({ type: 'integer', maximum: 120 }, Number.POSITIVE_INFINITY, 'seconds'),
+      ],
+      [
+        ['seconds of 120 or less, not Infinity'],
+        ['seconds of 0 or more, not -Infinity'],
+        ['seconds of 120 or less, not Infinity'],
+        [],
+      ],
     );
 
     // A list is held to the number of items its schema allows, at any depth. Only a pair is in a
@@ -15316,13 +15354,17 @@ function testEveryRuleOfAnArgumentsSchemaIsChecked(): void {
   for (const spec of TOOL_SPECS) {
     for (const [name, schema] of Object.entries(spec.parameters)) {
       const at = `${spec.name}.${name}`;
+      // The call names an op that takes the argument, since one that does not is not held to the
+      // fields its values lack.
+      const op = Object.keys(spec.operations ?? {}).find((held) => opTakes(spec, held, name));
+      const beside = name === 'op' || op === undefined ? {} : { op };
       assert.deepEqual(
-        unfitValues(spec, { [name]: aValueFor(schema) }),
+        unfitValues(spec, { ...beside, [name]: aValueFor(schema) }),
         [],
         `${at} refuses a value its schema takes`,
       );
       for (const [keyword, value] of breaking(schema, at)) {
-        const said = unfitValues(spec, { [name]: value });
+        const said = unfitValues(spec, { ...beside, [name]: value });
         assert.equal(
           said.length,
           1,

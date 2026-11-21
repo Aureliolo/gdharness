@@ -2207,10 +2207,34 @@ function describeValue(value: unknown): string {
  * misspelt `vartype` was otherwise dropped and the variable written as a Variant.
  */
 function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
-  return Object.entries(args).flatMap(([name, value]) => misshapen(spec.parameters[name], value, name));
+  const op = opNamed(spec, args);
+  return Object.entries(args).flatMap(([name, value]) =>
+    misshapen(
+      spec.parameters[name],
+      value,
+      name,
+      op === null || (op !== undefined && opTakes(spec, op, name)),
+    ),
+  );
 }
 
-export function misshapen(schema: unknown, value: unknown, path: string): string[] {
+/** The op [param args] name or the tool's default, null for a tool with no ops, undefined for an op it lacks. */
+function opNamed(spec: ToolSpec, args: OperationParams): string | null | undefined {
+  if (!spec.operations) {
+    return null;
+  }
+  const requested = args['op'] ?? spec.defaultOperation;
+  return typeof requested === 'string' && Object.hasOwn(spec.operations, requested) ? requested : undefined;
+}
+
+/**
+ * What [param schema] refuses in the type and fields of [param value].
+ *
+ * [param whole] is false for an argument the call's op does not take, or whose op is unknown. Such
+ * a value is not asked for the fields it lacks, since the caller who added them would next be told
+ * the op takes no such argument.
+ */
+export function misshapen(schema: unknown, value: unknown, path: string, whole = true): string[] {
   if (!isRecord(schema) || value === undefined || value === null) {
     return [];
   }
@@ -2225,19 +2249,19 @@ export function misshapen(schema: unknown, value: unknown, path: string): string
     return [`${path} as ${wanted.join(' or ')}, not ${describeValue(value)}`];
   }
   if (Array.isArray(value)) {
-    return value.flatMap((element, index) => misshapen(schema['items'], element, `${path}[${index}]`));
+    return value.flatMap((element, index) => misshapen(schema['items'], element, `${path}[${index}]`, whole));
   }
   if (!isRecord(value)) {
     return [];
   }
-  const lacking = lacked(schema, value, path);
+  const lacking = whole ? lacked(schema, value, path) : [];
   const properties = schema['properties'];
   if (!isRecord(properties)) {
     return lacking;
   }
   const unfit = Object.entries(value).flatMap(([field, held]) => {
     if (Object.hasOwn(properties, field)) {
-      return misshapen(properties[field], held, `${path}.${field}`);
+      return misshapen(properties[field], held, `${path}.${field}`, whole);
     }
     if (schema['additionalProperties'] !== false) {
       return [];
@@ -2340,8 +2364,11 @@ export function outOfBounds(schema: unknown, value: unknown, path: string): stri
     return [];
   }
   if (typeof value === 'number') {
-    // An infinity or a NaN is refused as no number, which says all a range would.
-    const range = Number.isFinite(value) ? outsideRange(schema, value) : undefined;
+    // A schema that names a number type refuses an infinity or a NaN as no number, which says all a
+    // range would. One that names none leaves the range as the only rule to hold it.
+    const refusedByType =
+      !Number.isFinite(value) && (schema['type'] === 'number' || schema['type'] === 'integer');
+    const range = refusedByType ? undefined : outsideRange(schema, value);
     return range === undefined ? [] : [`${path} ${range}, not ${value}`];
   }
   if (Array.isArray(value)) {
