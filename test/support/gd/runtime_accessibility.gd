@@ -195,10 +195,10 @@ func _the_readers() -> Array[String]:
 			failures.append_array(await _compiled(readers, dir))
 		"Linux":
 			failures.append_array(_atspi_without_a_bus(dir))
-			failures.append_array(await _error_output_read())
+			failures.append_array(await _error_output_read(dir))
 		"macOS":
 			failures.append_array(await _ax_asked(readers, dir))
-			failures.append_array(await _error_output_read())
+			failures.append_array(await _error_output_read(dir))
 	_remove_all(dir)
 	return failures
 
@@ -256,17 +256,20 @@ func _compiled(readers: Readers, dir: String) -> Array[String]:
 	return failures
 
 
-## Linux and macOS: what a client started through a pipe prints on its error output is read once
-## it has ended.
-func _error_output_read() -> Array[String]:
-	var piped: Dictionary = OS.execute_with_pipe("/bin/sh", ["-c", "echo broken >&2"], false)
-	var pid: int = piped.get("pid", -1)
+## Linux and macOS: what a client started as a read starts it prints on its error output is read
+## once it has ended, a "$" in its arguments reaching it unexpanded, and the file it was kept in is
+## removed.
+func _error_output_read(dir: String) -> Array[String]:
+	var is_made: Error = DirAccess.make_dir_recursive_absolute(dir)
+	var out: String = dir.path_join("errors.json")
+	var client: PackedStringArray = PackedStringArray(["-c", 'echo "$0" >&2', "broken $(x)"])
+	var pid: int = OS.create_process("/bin/sh", Readers.keeping_errors("/bin/sh", client, out))
 	var began: int = Time.get_ticks_msec()
 	while pid > 0 and OS.is_process_running(pid) and Time.get_ticks_msec() - began < AX_WAIT_MS:
 		await process_frame
-	var said: String = Readers.said(piped)
-	if said != "broken":
-		return ["a client's error output is read as: %s" % JSON.stringify(said)]
+	var printed: String = Readers.error_output(out)
+	if is_made != OK or printed != "broken $(x)" or FileAccess.file_exists(out + ".err"):
+		return ["a client's error output is read as: %s" % JSON.stringify(printed)]
 	return []
 
 

@@ -305,8 +305,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	# Not checked: a file that is not there was never written, which the answer below says.
 	var _removed: Error = DirAccess.remove_absolute(out)
 	var _progress_removed: Error = DirAccess.remove_absolute(progress)
+	var printed: String = GdhReaders.error_output(out)
 	var read: Variant = GdhRead.json_or_null(text)
-	var unanswered: String = _unanswered(text, read, reader, GdhReaders.said(launched))
+	var unanswered: String = _unanswered(text, read, reader, printed)
 	if not unanswered.is_empty():
 		return _refused(unanswered)
 	var answer: Dictionary = read

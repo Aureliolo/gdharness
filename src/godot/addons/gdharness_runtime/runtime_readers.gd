@@ -574,9 +574,13 @@ function read(argv) {
     answer({ error: 'Accessibility is not allowed for this process', permission: true });
     return;
   }
+  // The AX calls hand back CoreFoundation references, which the bridge unwraps only once each is
+  // cast to the object it is.
   const raw = (element, name) => {
     const ref = Ref();
-    return $.AXUIElementCopyAttributeValue(element, $(name), ref) === 0 ? ref[0] : null;
+    return $.AXUIElementCopyAttributeValue(element, $(name), ref) === 0
+      ? ObjC.castRefToObject(ref[0])
+      : null;
   };
   const text = (element, name) => {
     const value = raw(element, name);
@@ -589,7 +593,7 @@ function read(argv) {
     if (value === null) {
       return null;
     }
-    const said = ObjC.unwrap($.CFCopyDescription(value));
+    const said = String(ObjC.unwrap(value.description));
     const found = new RegExp(first + ':(-?[0-9.]+) ' + second + ':(-?[0-9.]+)').exec(said);
     return found === null ? null : [parseFloat(found[1]), parseFloat(found[2])];
   };
@@ -624,7 +628,7 @@ function read(argv) {
     const actions = [];
     const names = Ref();
     if ($.AXUIElementCopyActionNames(element, names) === 0) {
-      const listed = ObjC.unwrap(names[0]).map((one) => String(ObjC.unwrap(one)));
+      const listed = ObjC.unwrap(ObjC.castRefToObject(names[0])).map((one) => String(ObjC.unwrap(one)));
       if (listed.indexOf('AXPress') >= 0) {
         actions.push('click');
       }
@@ -646,13 +650,14 @@ function read(argv) {
     const focused = raw(element, 'AXFocused');
     if (focused !== null) {
       actions.push('focus');
-      if (ObjC.unwrap(focused) === true) {
+      // A CFBoolean may unwrap as a boolean or as the number 1 or 0.
+      if (Boolean(ObjC.unwrap(focused))) {
         node.focused = true;
       }
     }
     node.actions = actions;
     const enabled = raw(element, 'AXEnabled');
-    if (enabled !== null && ObjC.unwrap(enabled) === false) {
+    if (enabled !== null && !ObjC.unwrap(enabled)) {
       node.disabled = true;
     }
     node.children = [];
@@ -795,34 +800,35 @@ func start(
 		_:
 			return { "error": "There is no screen-reader client for %s" % OS.get_name() }
 	var started_ms: int = int(Time.get_unix_time_from_system() * 1000.0)
-	if OS.get_name() == "Windows":
-		var pid: int = OS.create_process(program, args)
-		if pid <= 0:
-			return { "error": "%s could not be started to read the tree" % program }
-		return { "pid": pid, "started_ms": started_ms, "compile_ms": compile_ms }
-	# Piped, so what an interpreter prints when the client fails before it can answer reaches the
-	# refusal.
-	var piped: Dictionary = OS.execute_with_pipe(program, args, false)
-	var piped_pid: int = piped.get("pid", -1)
-	if piped_pid <= 0:
+	if OS.get_name() != "Windows":
+		args = keeping_errors(program, args, out)
+		program = "/bin/sh"
+	var pid: int = OS.create_process(program, args)
+	if pid <= 0:
 		return { "error": "%s could not be started to read the tree" % program }
-	return {
-		"pid": piped_pid,
-		"started_ms": started_ms,
-		"compile_ms": compile_ms,
-		"stderr": piped.get("stderr"),
-		"stdio": piped.get("stdio"),
-	}
+	return { "pid": pid, "started_ms": started_ms, "compile_ms": compile_ms }
 
 
-## What the client started as [param launched] has printed on its error output, cut to 800
-## characters, or "" when it was not piped or printed nothing.
-static func said(launched: Dictionary) -> String:
-	var pipe: Variant = launched.get("stderr")
-	if not pipe is FileAccess:
+## The arguments that make /bin/sh run [param program] with [param args], its error output kept
+## beside [param out] for [method error_output], so what an interpreter prints when the client
+## fails before it can answer reaches the refusal. $0 is that file and "$@" the client, unexpanded.
+static func keeping_errors(
+	program: String, args: PackedStringArray, out: String
+) -> PackedStringArray:
+	return PackedStringArray(["-c", 'exec "$@" 2>"$0"', out + ".err", program]) + args
+
+
+## What the client that answers into [param out] printed on its error output, cut to 800
+## characters, or "" when it printed nothing. The file it was kept in is removed.
+static func error_output(out: String) -> String:
+	var kept: String = out + ".err"
+	var file: FileAccess = FileAccess.open(kept, FileAccess.READ)
+	if file == null:
 		return ""
-	var file: FileAccess = pipe
-	return file.get_buffer(800).get_string_from_utf8().strip_edges()
+	var printed: String = file.get_buffer(800).get_string_from_utf8().strip_edges()
+	file.close()
+	var _removed: Error = DirAccess.remove_absolute(kept)
+	return printed
 
 
 ## The compiled Windows client for [param source] in [param dir], compiled with [param csc] when it
