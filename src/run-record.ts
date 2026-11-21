@@ -120,6 +120,11 @@ export interface RunRecord {
    * nothing recorded, and settled the run as ended with no code.
    */
   readonly endingAt?: number;
+  /**
+   * What ended the run for its memory, written by a server that guarded a game it did not hold once
+   * the keeper had written the exit, so the server that picks the run up says why it ended.
+   */
+  readonly memoryEndedBy?: string;
 }
 
 /** A process that carried a run and restarted itself into the next one. */
@@ -207,6 +212,58 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
     return { projectPath, pid: typeof pid === 'number' ? pid : null, startedAt };
   } catch {
     return null;
+  }
+}
+
+/**
+ * The engines whose memory peak is kept for their project: a tool's, and editor_run check's boot,
+ * which is kept apart from the game editor_run start counts.
+ */
+export type PeakTool = 'project_test' | 'editor_run' | 'editor_launch' | 'headless' | 'boot_check';
+
+const PEAK_TOOLS: readonly PeakTool[] = [
+  'project_test',
+  'editor_run',
+  'editor_launch',
+  'headless',
+  'boot_check',
+];
+
+/**
+ * One file for each project and tool, written whole, so two servers keeping peaks of one project at
+ * once never write over each other's figure.
+ */
+function enginePeakPath(projectPath: string, tool: PeakTool, directory = runtimeDirectory()): string {
+  return join(directory, 'runs', `memory-${projectKey(projectPath)}-${tool}.json`);
+}
+
+/** The most bytes the last engine of each tool held for [param projectPath], by tool. */
+export function readEnginePeaks(
+  projectPath: string,
+  directory = runtimeDirectory(),
+): Partial<Record<PeakTool, number>> {
+  const peaks: Partial<Record<PeakTool, number>> = {};
+  for (const tool of PEAK_TOOLS) {
+    try {
+      const fields: unknown = JSON.parse(readFileSync(enginePeakPath(projectPath, tool, directory), 'utf8'));
+      const bytes = isRecord(fields) ? fields['bytes'] : undefined;
+      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
+        peaks[tool] = bytes;
+      }
+    } catch {
+      // Unkept or unreadable, so that tool counts the flat figure.
+    }
+  }
+  return peaks;
+}
+
+/** Keeps [param bytes] as what the last engine of [param tool] held for [param projectPath]. */
+export async function recordEnginePeak(projectPath: string, tool: PeakTool, bytes: number): Promise<void> {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    await writeWholeAsync(enginePeakPath(projectPath, tool), JSON.stringify({ bytes: Math.round(bytes) }));
+  } catch {
+    // Unwritable leaves the next start counting the flat figure.
   }
 }
 
@@ -413,6 +470,29 @@ export function amendRunRecord(record: RunRecord): boolean {
   return writeWhole(path, JSON.stringify(record, null, 2));
 }
 
+/** How long a server that ended a run it did not hold waits for the keeper to write the exit. */
+const KEEPER_EXIT_WAIT_MS = 10_000;
+
+/**
+ * Writes [param endedBy] into the note of [param record], a run this server ended for its memory
+ * without holding it. Written once the keeper has written the exit, since the keeper writes the
+ * note whole from its own copy, and a field put in before would be lost. Nothing is written once
+ * another run's note is there, or when the keeper never writes.
+ */
+export async function noteTheMemoryEnd(record: RunRecord, endedBy: string): Promise<boolean> {
+  for (const until = Date.now() + KEEPER_EXIT_WAIT_MS; Date.now() < until; ) {
+    const there = recordAt(runRecordPath(record.projectPath));
+    if (there === null || !sameRun(there, record)) {
+      return false;
+    }
+    if (there.endedAt !== undefined) {
+      return amendRunRecord({ ...there, memoryEndedBy: endedBy });
+    }
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  return false;
+}
+
 /**
  * The run of [param projectPath] a server left a note for, or null when there is none.
  *
@@ -524,8 +604,14 @@ function namedFields(
 /** The fields of a note that say how the run ended, each present only when the note holds it. */
 function endFields(
   fields: Record<string, unknown>,
-): Pick<RunRecord, 'exitCode' | 'exitSignal' | 'endedAt' | 'exitNotTold' | 'restartedFrom' | 'endingAt'> {
+): Pick<
+  RunRecord,
+  'exitCode' | 'exitSignal' | 'endedAt' | 'exitNotTold' | 'restartedFrom' | 'endingAt' | 'memoryEndedBy'
+> {
   return {
+    ...(typeof fields['memoryEndedBy'] === 'string' && fields['memoryEndedBy'] !== ''
+      ? { memoryEndedBy: fields['memoryEndedBy'] }
+      : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
     ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
     ...(typeof fields['endedAt'] === 'number' ? { endedAt: fields['endedAt'] } : {}),

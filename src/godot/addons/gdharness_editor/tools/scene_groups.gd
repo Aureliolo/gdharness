@@ -56,7 +56,7 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 	for group: Variant in adding:
 		if removing.has(group):
 			return "%s is in both addGroups and removeGroups." % str(group)
-	var at: String = scene.path_of(node)
+	var at: String = scene.filed_path(node)
 	var here: PackedStringArray = scene.groups_at(at)
 	for group: Variant in removing:
 		var name: String = str(group)

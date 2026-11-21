@@ -354,6 +354,41 @@ hold, less what it holds now. The run's first engine always starts.
 A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
 It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
 
+### The memory ceiling and the kept peak
+
+Every engine gdharness starts is read about once a second, with the processes it started. That
+covers a headless operation, `project_test`, a game from `editor_run start`, the boot of
+`editor_run check`, an editor from `editor_launch open` and the engines of a `gdharness test` run.
+A server also reads every game an earlier server left running, from the moment it starts. The
+figure is private bytes on Windows and resident memory on Linux and macOS.
+
+Two guards end an engine, with everything below it:
+
+- A runaway ends at its ceiling. The answer, the run's result and its printed line give the peak
+  and the ceiling and name how to raise it.
+- A machine running short ends the largest engine. Once free memory falls under 2 GiB or 5% of the
+  physical memory, whichever is larger, the server ends the engine it reads that holds the most.
+  It ends one a reading, never one under 1.5 GiB and never another server's. The answer gives the
+  free memory, the floor and what the engine held, and names the project setting that caps it.
+
+The ceiling is a quarter of the physical memory and at least 4 GiB. `GDHARNESS_ENGINE_MEMORY_CEILING_MB`
+sets it, in megabytes, for every engine. The project setting `gdharness/engine/memory_ceiling_mb` in
+`project.godot` sets it for the engines started for that project and wins over the variable. A
+setting that is not a whole number above 0 refuses the start, and so does one written in quotes.
+The answer for an engine ended for its memory names where its ceiling came from: the setting, the
+variable or the default.
+
+The memory of an engine is read in the same sample as its processor time, so an engine watched for
+both is read once for each tick.
+
+When an engine ends, its peak is kept for its project and tool in `runs/memory-<project>-<tool>.json`.
+The boot of `editor_run check` keeps its own, apart from the game's. An engine ended at its ceiling
+keeps none. The next start of that tool in that project counts the larger of 1.5 GiB and the kept
+peak, up to the ceiling. It is refused when the free memory less the reserve does not cover it. The
+refusal says what the engine needs, what that comes from and how much is free. It then names how
+much memory to free, or the ceiling to set that lets the engine start. That ceiling leaves a margin
+of a quarter of the room, and at least 1 GiB, for free memory that moves before the next start.
+
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.
@@ -895,11 +930,12 @@ the wait.
 Take in the order you began to wait. At each look, read every live mark but your own and `memory`
 ones.
 
-- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited long enough. A store-class taker waits two minutes. Any other waits two minutes
-  while no store-class taker is in line, and ten minutes while one is. The second group is the
-  other store-class takers and games that have waited as long. The third is every other `other`
-  taker. The wait and the class change only the place in line, never which slots a taker may take.
+- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that have waited
+  long enough. A store-class taker waits two minutes. Any other waits two minutes while no
+  store-class taker is in line, and ten minutes while one is. The second group is the other
+  store-class takers. The third is every other `other` taker. A game is placed as any other
+  `other` taker is. The wait and the class change only the place in line, never which slots a
+  taker may take.
 - A store-class taker is in line when you are one, or when a live store-class mark last looked
   under 5,000 ms ago (its `.seen` file, below). Read that time and your clock in whole
   milliseconds, rounded down, from the file's nanoseconds where the system gives them. A taker
@@ -909,9 +945,10 @@ ones.
   byte by byte, is ahead. Name marks in ASCII, so that every reader orders them alike.
 - Before you have a mark of your own, no other taker sees you. Two takers that began in the same
   millisecond may then both go first, and the slot's lock decides between them.
-- A stream of store-class takers delays an `other` taker that is not a game by ten minutes at most.
-  A game is never in the first group, so a store-class taker that is not a game and has waited two
-  minutes goes before a game of any age.
+- A stream of store-class takers delays an `other` taker, a game included, by ten minutes at most.
+  A store-class taker that has waited two minutes stands with gate work and goes before an `other`
+  taker that has waited less than ten minutes. Past ten minutes the `other` taker stands with gate
+  work as well, and the earlier `since` goes first.
 - A mark may hold `class` `store`, written by an `other` taker that has the class and by no other.
   A mark with no class, or any other, has none.
 - A taker has the class where `<directory>/store.json` lists the repository of the Godot project
@@ -925,10 +962,22 @@ ones.
 - Give each, in turn, the first free slot of those it may take now (below) not given to one before
   it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
-  its coming free. From then on, leave that waiter nothing, unless it has looked since. A waiter
-  says it looks by touching `<mark name without .json>.seen` beside its mark at each look, and
-  removes the file with its mark. Count the 5 seconds from the later of the first time you left it
-  a slot and its last look. A mark with no such file looks since it was made.
+  its coming free. A waiter says it looks by touching `<mark name without .json>.seen` beside its
+  mark at each look, and removes the file with its mark. A mark with no such file looks since it
+  was made. Two cases end the wait:
+  - A waiter that has not looked for 5 seconds, counted from the later of the first time you left
+    it a slot and its last look: from then on, leave it nothing, unless it looks again.
+  - A slot you have left to waiters ahead at every look for 5 seconds, whichever waiter you left it
+    to at each. Count it from the first such look, and start again at the next look that finds it
+    free if a look finds it taken. Pass each waiter ahead that would take it and wants one slot,
+    then give the slot to the next one ahead, until it falls to you or to a waiter you wait for.
+    A waiter passed for one slot is given the next free one it may take. That slot is left too,
+    so count it the same way, from the first look that gives it to a waiter ahead. Takers that
+    each place the others ahead, however many, then do not leave a free slot to each other for
+    good. A waiter that wants several slots (below) is waited for through its first 300
+    seconds, however many are free. So is a `gate` taker while a gate is queued.
+- A game that may take no free slot now (see Games and the kept slots) is given none, however long
+  it has waited, and the takers behind it take the slots it cannot.
 - A mark may also hold `wants`, a whole number above 1, for a taker waiting for that many slots at
   once. It is ahead that many times for its first 300 seconds of waiting, and once after. Any other
   `wants` counts as 1.
@@ -980,7 +1029,9 @@ One whose holder has gone is removed with its `.seated` file.
 
 ### The kept slots
 
-The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16.
+The last `max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16, but the
+gates always keep slot 0. The kept count is `count - max(1, count - max(2, floor(count / 4)))`, so
+1 of 2 slots and 2 of 3.
 
 ### Which slots each engine takes
 
@@ -1065,8 +1116,13 @@ long as it plays.
 ### Games and the kept slots
 
 A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
-stays when its keeper takes the lock over. Games hold at most `min(floor(kept / 2), kept - 1)` of
-the kept slots between them (2 of 16) before a game's start waits.
+stays when its keeper takes the lock over. Games hold at most `kept - 1` of the kept slots between
+them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12, none of the 1 kept on 2) while a gate is
+queued, and a game's start waits once they do. On 1 and 2 slots no game runs while a gate is queued.
+
+The last kept slot, the lowest of them, stays for a headless call. A game never takes it, whether
+or not a gate is queued. With no gate queued a game takes any other slot. A machine of one slot has
+no kept slot at all. There a game takes slot 0 while no gate is queued, and nothing while one is.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is

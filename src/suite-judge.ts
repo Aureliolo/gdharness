@@ -18,6 +18,7 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
+import type { MemoryEnd } from './engine-memory.js';
 import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
 import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
 import { isRecord, isStringList } from './records.js';
@@ -663,6 +664,8 @@ export interface EngineEnd {
   readonly peakBytes?: number;
   /** The priority the engine's process was last read with while it ran, named as its platform names it. */
   readonly priority?: string;
+  /** Set when gdharness ended the engine for holding more than its memory ceiling. */
+  readonly memoryEnded?: MemoryEnd;
 }
 
 export interface EngineVerdict {
@@ -1189,15 +1192,23 @@ function judgeStrayRows(judging: Judging, path: string, func: string, strays: re
   );
 }
 
+/**
+ * Whether [param ran] failed and then passed on a retry. gdUnit4's flaky check counts that as a
+ * pass and exits 0 on it, and no judge of a run does.
+ */
+export function passedOnARetry(ran: { readonly verdict: string }): boolean {
+  return ran.verdict === 'FLAKY';
+}
+
 /** Fails the suite at [param path] for [param ran] failing, and marks the lines it printed to be shown. */
 function judgeFailedCase(judging: Judging, printed: RunPrinted, path: string, ran: CaseRan): void {
-  if (ran.verdict !== 'FAILED' && ran.verdict !== 'FLAKY') {
+  if (ran.verdict !== 'FAILED' && !passedOnARetry(ran)) {
     return;
   }
   failSuite(
     judging,
     path,
-    ran.verdict === 'FLAKY'
+    passedOnARetry(ran)
       ? `${path} > ${ran.name} failed before it passed on a retry`
       : `${path} > ${ran.name} failed`,
   );

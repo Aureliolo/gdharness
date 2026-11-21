@@ -3233,6 +3233,19 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
     await refusal('resource_edit', { ...theme, op: 'read', properties: {} }),
     /resource_edit read does not take properties/,
   );
+
+  // A type variation's base is set through modify, and the file holds it as the engine writes it.
+  const varied = { projectPath: project, resourcePath: 'res://theme_variation.tres' };
+  await call('resource_edit', { ...varied, op: 'create', resourceType: 'Theme' });
+  await call('resource_edit', {
+    ...varied,
+    op: 'modify',
+    properties: { 'NewType/base_type': 'PanelContainer' },
+  });
+  assert.match(fileText(project, 'theme_variation.tres'), /^NewType\/base_type = &"PanelContainer"$/m);
+  assert.deepEqual(get(await call('resource_edit', { ...varied, op: 'read' }), 'properties'), {
+    'NewType/base_type': 'PanelContainer',
+  });
 }
 
 /**
@@ -4357,7 +4370,10 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   assert.doesNotMatch(fileText(project, 'moves/library.tres'), /&"stroll"/);
   assert.match(fileText(project, 'moves/library.tres'), /&"idle"/, 'and the rest of the library stays');
 
-  assert.match(await refusal('scene_animation', track([{ value: [1, 2] }])), /keyframes\[0\] has no time/);
+  assert.match(
+    await refusal('scene_animation', track([{ value: [1, 2] }])),
+    /^scene_animation takes track\.keyframes\[0\] with its time, which is missing\./,
+  );
   assert.match(await refusal('scene_animation', track([], 'colour')), /Sprite2D has no property colour/);
   assert.match(
     await refusal('scene_animation', {

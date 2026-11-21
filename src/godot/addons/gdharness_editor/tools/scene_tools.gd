@@ -1888,7 +1888,7 @@ func _unset_on(
 	reverted: Dictionary,
 	followed: Array[String],
 ) -> String:
-	var at: String = scene.path_of(node)
+	var at: String = scene.filed_path(node)
 	var places: Array[Array] = []
 	for path: String in paths:
 		var place: Array = GdhUnset.place_of(node, path, given)
