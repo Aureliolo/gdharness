@@ -7513,6 +7513,106 @@ async function testABreakpointOnAnotherProjectIsHeldBesideAnEditor(): Promise<vo
 }
 
 /**
+ * A class created in a project other than the connected editor's is not scanned for in that
+ * editor. It was asked for its scan state and then to scan, which it cannot do for a project it
+ * has not open, so the answer carried that refusal as a note on a create that had gone well.
+ */
+async function testAClassCreatedBesideAnotherProjectsEditorIsNotScannedThere(): Promise<void> {
+  await withAnEngineBesideAnEditorOfAnotherProject(async ({ otherProject, toolsAsked, call, openEditor }) => {
+    await openEditor();
+    const created = await call('script_edit', {
+      projectPath: otherProject,
+      op: 'create',
+      scriptPath: 'res://beside_class.gd',
+      className: 'BesideClass',
+      extends: 'RefCounted',
+    });
+    assert.deepEqual(
+      [
+        get(created.answer, 'registered'),
+        get(created.answer, 'editorRescanned'),
+        get(created.answer, 'editorRescanNote'),
+      ],
+      [true, undefined, undefined],
+      created.said,
+    );
+    assert.match(text(get(created.answer, 'classesUnchecked')), /open on .*not this one/, created.said);
+    assert.deepEqual(toolsAsked, [], 'the editor was asked nothing');
+  });
+}
+
+/**
+ * A class renamed in a project other than the connected editor's is settled on disk, as with no
+ * editor: its class list rebuilt and its changed scripts compiled. The editor was asked to scan
+ * the files instead, refused, and the rename answered that nothing had been scanned or compiled.
+ */
+async function testAClassRenamedBesideAnotherProjectsEditorIsSettledOnDisk(): Promise<void> {
+  await withAnEngineBesideAnEditorOfAnotherProject(async ({ otherProject, toolsAsked, call, openEditor }) => {
+    await openEditor();
+    writeFileSync(
+      join(otherProject, 'told.gd'),
+      'class_name Told\nextends RefCounted\n\n\nfunc say() -> String:\n\treturn "told"\n',
+    );
+    writeFileSync(join(otherProject, 'teller.gd'), 'extends Node\n\nvar typed: Told = Told.new()\n');
+    const renamed = await call('script_edit', {
+      projectPath: otherProject,
+      op: 'rename',
+      scriptPath: 'res://told.gd',
+      symbol: 'Told',
+      newName: 'Phrasing',
+    });
+    assert.deepEqual(
+      [
+        get(renamed.answer, 'ok'),
+        get(renamed.answer, 'editor'),
+        get(renamed.answer, 'classCache', 'added'),
+        get(renamed.answer, 'compiled', 'failed'),
+      ],
+      [true, undefined, ['Phrasing'], []],
+      renamed.said,
+    );
+    assert.equal(
+      readFileSync(join(otherProject, 'teller.gd'), 'utf8'),
+      'extends Node\n\nvar typed: Phrasing = Phrasing.new()\n',
+    );
+    assert.deepEqual(toolsAsked, [], 'the editor was asked nothing');
+  });
+}
+
+/**
+ * A class that left the cache of a project other than the connected editor's is put back without
+ * a word on that editor. The rebuild said the editor holding this project had written the cache
+ * short and recorded its pid as the one to restart, of an editor that has another project open.
+ */
+async function testAClassLostBesideAnotherProjectsEditorIsNotLaidOnThatEditor(): Promise<void> {
+  await withAnEngineBesideAnEditorOfAnotherProject(async ({ otherProject, toolsAsked, call, openEditor }) => {
+    await openEditor();
+    const refresh = async (): Promise<{ said: string; answer: unknown }> =>
+      await call('project_import', { projectPath: otherProject, op: 'refresh_classes' });
+    const cache = join(otherProject, '.godot', 'global_script_class_cache.cfg');
+    await refresh();
+    const withoutSquire = readFileSync(cache, 'utf8');
+    writeFileSync(join(otherProject, 'squire.gd'), 'class_name Squire\nextends RefCounted\n');
+    const first = await refresh();
+    assert.deepEqual(asArray(get(first.answer, 'added') ?? []).map(String), ['Squire'], first.said);
+
+    writeFileSync(cache, withoutSquire);
+    const second = await refresh();
+    assert.deepEqual(asArray(get(second.answer, 'added') ?? []).map(String), ['Squire'], second.said);
+    assert.deepEqual(
+      [
+        get(second.answer, 'lostSinceLastRebuild'),
+        get(second.answer, 'note'),
+        readClassNote(otherProject)?.shortListEditorPid,
+      ],
+      [undefined, undefined, undefined],
+      second.said,
+    );
+    assert.deepEqual(toolsAsked, [], 'the editor was asked nothing');
+  });
+}
+
+/**
  * A remove or a list naming a project other than the connected editor's acts on that project's
  * held set, and a list naming the editor's project still asks the editor.
  */
@@ -7592,6 +7692,8 @@ interface EditorBesideStage {
   readonly otherProject: string;
   readonly editorProject: string;
   readonly traffic: AdapterTraffic;
+  /** The tools the editor was asked for since it greeted. */
+  readonly toolsAsked: string[];
   readonly call: (name: string, args: Record<string, unknown>) => Promise<{ said: string; answer: unknown }>;
   readonly openEditor: () => Promise<void>;
 }
@@ -7612,6 +7714,7 @@ async function withAnEngineBesideAnEditorOfAnotherProject(
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-beside-rt-'));
   const port = await reservePort();
   const traffic: AdapterTraffic = { connections: 0, sent: '' };
+  const toolsAsked: string[] = [];
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_BRIDGE_PORT: String(port) },
   });
@@ -7655,6 +7758,7 @@ async function withAnEngineBesideAnEditorOfAnotherProject(
           socket.on('message', (raw: Buffer) => {
             const message: unknown = JSON.parse(String(raw));
             if (isRecord(message) && message['type'] === 'tool_invoke') {
+              toolsAsked.push(String(message['tool']));
               socket.send(
                 JSON.stringify({
                   type: 'tool_result',
@@ -7677,8 +7781,9 @@ async function withAnEngineBesideAnEditorOfAnotherProject(
             greeted = text(get(seen, 'editor', 'projectPath')) === editorProject;
           }
           assert.ok(greeted, 'the fake editor should have been greeted');
+          toolsAsked.length = 0;
         };
-        await body({ otherProject, editorProject, traffic, call, openEditor });
+        await body({ otherProject, editorProject, traffic, toolsAsked, call, openEditor });
       },
       (socket) => {
         traffic.connections += 1;
@@ -125448,6 +125553,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testBreakpointsAreSentAgainBeforeAPlay,
   testHeldBreakpointsBelongToTheirProject,
   testABreakpointOnAnotherProjectIsHeldBesideAnEditor,
+  testAClassCreatedBesideAnotherProjectsEditorIsNotScannedThere,
+  testAClassRenamedBesideAnotherProjectsEditorIsSettledOnDisk,
+  testAClassLostBesideAnotherProjectsEditorIsNotLaidOnThatEditor,
   testBreakpointRemoveAndListBesideAnEditorActOnTheNamedProject,
   testABreakpointOnTheEditorsProjectStillGoesToTheEditor,
   testABreakpointHeldBesideAnEditorStopsTheNextGameOfItsProject,
