@@ -895,11 +895,12 @@ the wait.
 Take in the order you began to wait. At each look, read every live mark but your own and `memory`
 ones.
 
-- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited long enough. A store-class taker waits two minutes. Any other waits two minutes
-  while no store-class taker is in line, and ten minutes while one is. The second group is the
-  other store-class takers and games that have waited as long. The third is every other `other`
-  taker. The wait and the class change only the place in line, never which slots a taker may take.
+- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that have waited
+  long enough. A store-class taker waits two minutes. Any other waits two minutes while no
+  store-class taker is in line, and ten minutes while one is. The second group is the other
+  store-class takers. The third is every other `other` taker. A game is placed as any other
+  `other` taker is. The wait and the class change only the place in line, never which slots a
+  taker may take.
 - A store-class taker is in line when you are one, or when a live store-class mark last looked
   under 5,000 ms ago (its `.seen` file, below). Read that time and your clock in whole
   milliseconds, rounded down, from the file's nanoseconds where the system gives them. A taker
