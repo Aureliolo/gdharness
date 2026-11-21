@@ -26050,6 +26050,11 @@ async function noteOfAnEndedRun(project: string, runtime: string): Promise<unkno
 /** How many lines a game prints in one frame, and the most that takes. Each line cost 1.5 ms through a file. */
 const FRAME_BURST_LINES = 200;
 const FRAME_BURST_LIMIT_MS = 50;
+/**
+ * How many bursts the game prints. The fastest is the measure: a transcript's cost is on every
+ * line of every burst, and a busy machine pausing the game falls on one burst or two.
+ */
+const FRAME_BURSTS = 5;
 
 /**
  * A game a keeper holds prints a burst of lines in one frame without waiting on its transcript, and
@@ -26057,7 +26062,7 @@ const FRAME_BURST_LIMIT_MS = 50;
  *
  * On Windows an engine flushes a file to disk after every write, so a game given the transcript
  * itself spent about 1.5 ms on each line (0.3 s for the burst) and the keeper must give it a pipe.
- * The game reports the time it took, so the measure is the game's own.
+ * The game reports the time its fastest burst took, so the measure is the game's own.
  */
 async function testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -26077,10 +26082,15 @@ async function testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript(): Promise<
         'extends SceneTree',
         '',
         'func _initialize() -> void:',
-        '\tvar from := Time.get_ticks_usec()',
-        `\tfor line in range(${String(FRAME_BURST_LINES)}):`,
-        '\t\tprint("burst line %d" % line)',
-        '\tprint("burst took %d us" % (Time.get_ticks_usec() - from))',
+        '\tvar least := -1',
+        `\tfor burst in range(${String(FRAME_BURSTS)}):`,
+        '\t\tvar from := Time.get_ticks_usec()',
+        `\t\tfor line in range(${String(FRAME_BURST_LINES)}):`,
+        `\t\t\tprint("burst line %d" % (burst * ${String(FRAME_BURST_LINES)} + line))`,
+        '\t\tvar took := Time.get_ticks_usec() - from',
+        '\t\tif least < 0 or took < least:',
+        '\t\t\tleast = took',
+        '\tprint("burst took %d us" % least)',
         '\tquit()',
         '',
       ].join('\n'),
@@ -26097,7 +26107,7 @@ async function testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript(): Promise<
     const printed = readFileSync(transcript, 'utf8').split(/\r?\n/);
     assert.deepEqual(
       printed.filter((line) => line.startsWith('burst line ')),
-      Array.from({ length: FRAME_BURST_LINES }, (_, line) => `burst line ${String(line)}`),
+      Array.from({ length: FRAME_BURSTS * FRAME_BURST_LINES }, (_, line) => `burst line ${String(line)}`),
       'the transcript holds every line in order by the time the exit is noted',
     );
     const took = printed.find((line) => line.startsWith('burst took '))?.match(/(\d+) us/)?.[1];
@@ -26108,7 +26118,7 @@ async function testAKeptGamesBurstOfPrintsIsNotSlowedByItsTranscript(): Promise<
     if (process.platform === 'win32') {
       assert.ok(
         Number(took) < FRAME_BURST_LIMIT_MS * 1000,
-        `${String(FRAME_BURST_LINES)} lines took the game ${took} us, over ${String(FRAME_BURST_LIMIT_MS)} ms`,
+        `${String(FRAME_BURST_LINES)} lines took the game ${took} us at its fastest of ${String(FRAME_BURSTS)} bursts, over ${String(FRAME_BURST_LIMIT_MS)} ms`,
       );
     }
   } finally {
