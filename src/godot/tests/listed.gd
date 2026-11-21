@@ -429,10 +429,16 @@ static func scripts_in(paths: PackedStringArray) -> PackedStringArray:
 	while not pending.is_empty():
 		var directory: String = pending[pending.size() - 1]
 		pending.remove_at(pending.size() - 1)
-		for file: String in DirAccess.get_files_at(directory):
+		# Another engine of the same run can make and remove a folder while a walk is under way.
+		# DirAccess.get_files_at prints an engine error for one that vanished, which a gate counts
+		# against the run, and DirAccess.open answers null for it quietly.
+		var at: DirAccess = DirAccess.open(directory)
+		if at == null:
+			continue
+		for file: String in at.get_files():
 			if file.ends_with(".gd"):
 				var _file: bool = found.append("%s/%s" % [directory, file])
-		for inner: String in DirAccess.get_directories_at(directory):
+		for inner: String in at.get_directories():
 			var _inner: bool = pending.append("%s/%s" % [directory, inner])
 	return found
 
@@ -1054,13 +1060,17 @@ class GdhShutdownWalk:
 		while not pending.is_empty():
 			var directory: String = pending[pending.size() - 1]
 			pending.remove_at(pending.size() - 1)
-			for file: String in DirAccess.get_files_at(directory):
+			# Quietly skips a folder another engine removed mid-walk, as scripts_in does.
+			var at: DirAccess = DirAccess.open(directory)
+			if at == null:
+				continue
+			for file: String in at.get_files():
 				var path: String = directory.path_join(file)
 				if file.ends_with(".gd") and ResourceLoader.has_cached(path):
 					var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
 					if script != null:
 						held.append(script)
-			for inner: String in DirAccess.get_directories_at(directory):
+			for inner: String in at.get_directories():
 				if not inner.begins_with("."):
 					var _inner: bool = pending.append(directory.path_join(inner))
 		ThemeDB.set_meta(WALK_HOLD, held)
@@ -1128,10 +1138,14 @@ class GdhReached:
 			if (directory != "res://"
 					and FileAccess.file_exists(directory.path_join("project.godot"))):
 				continue
-			for file: String in DirAccess.get_files_at(directory):
+			# Quietly skips a folder another engine removed mid-walk, as scripts_in does.
+			var at: DirAccess = DirAccess.open(directory)
+			if at == null:
+				continue
+			for file: String in at.get_files():
 				if not file.ends_with(".import") and not file.ends_with(".uid"):
 					var _file_found: bool = found.append(directory.path_join(file))
-			for inner: String in DirAccess.get_directories_at(directory):
+			for inner: String in at.get_directories():
 				if not inner.begins_with("."):
 					var _inner: bool = pending.append(directory.path_join(inner))
 		return found

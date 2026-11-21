@@ -322,9 +322,11 @@ static func _templates_dir() -> String:
 ## engine version and holds whichever platforms were installed into it, so its being there says
 ## nothing about this platform.
 static func _installed(templates: String, platform: String) -> bool:
-	if not DirAccess.dir_exists_absolute(templates):
+	# Opened rather than checked and then listed, so a folder removed in between prints nothing.
+	var at: DirAccess = DirAccess.open(templates)
+	if at == null:
 		return false
-	for file: String in DirAccess.get_files_at(templates):
+	for file: String in at.get_files():
 		if file.begins_with(PLATFORMS[platform]):
 			return true
 	return false
