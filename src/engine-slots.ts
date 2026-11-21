@@ -710,7 +710,7 @@ type SlotsDrawn =
       readonly limit?: Exclude<SlotLimit, 'starved'>;
       /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
       readonly left?: readonly number[];
-      /** The last kept slot, which a game's draw leaves out for a short headless call while a gate is queued. */
+      /** The last kept slot, which a game's draw leaves out for a short headless call. */
       readonly forACall?: number;
       readonly heldFor?: undefined;
     }
@@ -718,6 +718,7 @@ type SlotsDrawn =
       readonly numbers: readonly number[];
       readonly limit: 'starved';
       readonly left?: readonly number[];
+      readonly forACall?: undefined;
       /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
       readonly heldFor: string;
     };
@@ -806,9 +807,9 @@ interface GateLook {
  * any, the kept ones first so the gates' stay free longest, and while one is queued the kept ones,
  * then as many of the gates' free ones as are spare ([param free], the highest first, where it
  * is known), whatever the take has waited. A gate's seat counts only the gates' slots, so work in
- * the kept ones never holds a seat back. A [param game] editor_run started leaves the last kept slot
- * for a short headless call: while a gate is queued it never draws it, and with none queued it tries
- * it last, so a game still runs wherever any slot is free.
+ * the kept ones never holds a seat back. A [param game] editor_run started never draws the last kept
+ * slot, queue or none, which stays for a short headless call. A machine of one slot has no kept slot
+ * apart from it, so a game draws it there.
  */
 export function slotsDrawnOn(
   count: number,
@@ -825,10 +826,7 @@ export function slotsDrawnOn(
   if (drawn.limit === 'starved' || !drawn.numbers.includes(last)) {
     return drawn;
   }
-  const others = drawn.numbers.filter((slot) => slot !== last);
-  return drawn.limit === 'kept'
-    ? { ...drawn, numbers: others, forACall: last }
-    : { ...drawn, numbers: [...others, last] };
+  return { ...drawn, numbers: drawn.numbers.filter((slot) => slot !== last), forACall: last };
 }
 
 function drawnOn(count: number, taker: SlotTaker, queue: GateQueue, free?: readonly number[]): SlotsDrawn {
@@ -2609,7 +2607,7 @@ export function slotWaitSaid(
   if (allLeft !== '') {
     return `${so}: ${allLeft}`;
   }
-  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const taking = slotsTaking(drawn, count);
   const using = inUseOf(drawn, taking);
   const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'is' : 'are'} in use`;
   const named = holdersNamed(using, holders);
@@ -2680,6 +2678,14 @@ function leftSaid(drawn: SlotsDrawn, past = false): string {
 }
 
 /**
+ * How many slots of the machine's [param count] the take that drew [param drawn] may use: those it
+ * draws where something holds it to them or a game's draw leaves the last kept one out, else all.
+ */
+function slotsTaking(drawn: SlotsDrawn, count: number): number {
+  return drawn.limit === undefined && drawn.forACall === undefined ? count : drawn.numbers.length;
+}
+
+/**
  * The slots a take may use, [param taking] of the machine's [param count] in [param directory], named
  * for what holds it to them, as [param drawn] gives it.
  */
@@ -2687,8 +2693,10 @@ function slotsSaid(taking: number, count: number, directory: string, drawn: Slot
   const where = `on this machine (${directory})`;
   const { limit } = drawn;
   const these = taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`;
-  if (limit === 'kept' && drawn.forACall !== undefined) {
-    return `${these} of the ${String(count)} ${where} kept for engines outside a gate that a game editor_run started may take while a gate is queued`;
+  if (drawn.forACall !== undefined) {
+    return limit === 'kept'
+      ? `${these} of the ${String(count)} ${where} kept for engines outside a gate that a game editor_run started may take while a gate is queued`
+      : `${these} of the ${String(count)} ${where} a game editor_run started may take, all but slot ${String(drawn.forACall)}, which stays for a short headless call,`;
   }
   if (limit === 'kept') {
     return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} kept for engines outside a gate while a gate is queued`;
@@ -2724,7 +2732,7 @@ export function slotWaitedSaid(
   if (allLeft !== '') {
     return `${waited} When it first waited, ${allLeft}`;
   }
-  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const taking = slotsTaking(drawn, count);
   const using = inUseOf(drawn, taking);
   const slots = `${slotsInUseSaid(drawn, count, directory, taking)} ${using === 1 ? 'was' : 'were'} in use`;
   const named = holdersNamed(using, holders);

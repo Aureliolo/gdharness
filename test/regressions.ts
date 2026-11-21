@@ -75588,8 +75588,8 @@ async function checksASlotAlreadyHeld(rig: SlotsRig): Promise<void> {
   rmSync(join(queued, 'ticket.json.seated'));
   assert.deepEqual(
     await takeAll(outside, true),
-    ['3.lock', '1.lock', '0.lock', '2.lock'],
-    'a game takes any slot with no gate queued, the last kept one last',
+    ['3.lock', '1.lock', '0.lock'],
+    'a game takes any slot but the last kept one with no gate queued',
   );
   const held = await outside.takeFree();
   assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
@@ -77498,10 +77498,7 @@ async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promis
   }
 }
 
-/**
- * With no gate queued games take the last kept slot only once no other is free, and a gate queued
- * keeps it for a headless call.
- */
+/** With no gate queued games take every slot but the last kept one, and with a gate queued the call has it. */
 async function testGamesTakeEverySlotButTheLastKeptOneWithNoGateQueued(): Promise<void> {
   const folder = await gameLineFolder(12, false);
   try {
@@ -77510,24 +77507,21 @@ async function testGamesTakeEverySlotButTheLastKeptOneWithNoGateQueued(): Promis
       new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
     const games = [newGame(), newGame(), newGame(), newGame()];
     const taken: (number | null)[] = [];
-    for (const game of games.slice(0, 3)) {
+    for (const game of games) {
       taken.push(lockNumber(await game.takeFree(true)));
     }
-    assert.deepEqual(taken, [11, 10, 8], 'three games take 11, 10 and 8 before 9');
-    gateQueuedIn(folder);
-    assert.equal(await games[3]?.takeFree(true), null, 'with a gate queued a fourth game takes none');
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    assert.equal(lockNumber(await call.takeFree()), 9, 'and a headless call takes slot 9');
-    call.releaseAll();
-    rmSync(join(folder.directory, QUEUED_FOLDER, 'ticket.json'));
-    assert.equal(
-      lockNumber((await games[3]?.takeFree(true)) ?? null),
-      9,
-      'with no gate queued the fourth game takes slot 9, the only one free',
+    assert.deepEqual(
+      taken,
+      [11, 10, 8, null],
+      'three games take 11, 10 and 8, never 9, and a fourth takes none',
     );
+    gateQueuedIn(folder);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    assert.equal(lockNumber(await call.takeFree()), 9, 'and once a gate queues a headless call takes slot 9');
     for (const game of games) {
       game.releaseAll();
     }
+    call.releaseAll();
   } finally {
     rmSync(folder.directory, { recursive: true, force: true });
   }
@@ -77561,15 +77555,15 @@ async function testAGameNeverTakesTheLastKeptSlotWithAGateQueued(): Promise<void
   }
 }
 
-/** Every slot free and no gate queued: games take every slot but the last kept one, 9 of 12, before it. */
+/** Every slot free and no gate queued: games take every slot but the last kept one, which is 9 of 12. */
 async function testGamesTakeEverySlotButTheLastKeptOneOnTwelveSlots(): Promise<void> {
   const folder = await gameLineFolder(12, false);
   try {
     const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
     assert.deepEqual(
       await slotsTakenWhileFree(game, true),
-      [11, 10, 8, 7, 6, 5, 4, 3, 2, 1, 0, 9],
-      'games take every slot but 9 before 9',
+      [11, 10, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+      'games take every slot but 9',
     );
     game.releaseAll();
   } finally {
@@ -77584,8 +77578,8 @@ async function testGamesTakeEverySlotButTheLastKeptOneOnSixteenSlots(): Promise<
     const game = new EngineSlots(folder.directory, 16, folder.me, undefined, () => 'other');
     assert.deepEqual(
       await slotsTakenWhileFree(game, true),
-      [15, 14, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 12],
-      'games take every slot but 12 before 12',
+      [15, 14, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+      'games take every slot but 12',
     );
     game.releaseAll();
   } finally {
@@ -77997,23 +77991,23 @@ async function testAGamesWaitLineNamesTheKeptSlotsGamesMayTake(): Promise<void> 
   }
 }
 
-/** With no gate queued a game's wait line is any call's: it may take every slot. */
-async function testAGamesWaitLineWithNoGateQueuedNamesEverySlot(): Promise<void> {
+/**
+ * With no gate queued and every slot but the last kept one held, a game's wait line and answer name
+ * the 11 slots a game may take and their holders, and the last kept one left for a short call.
+ */
+async function testAGamesWaitLineWithNoGateQueuedNamesTheSlotLeftForACall(): Promise<void> {
   const folder = await gameLineFolder(12, false);
   try {
-    slotsHeld(
-      folder,
-      Array.from({ length: 12 }, (_, slot) => slot),
-    );
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
     const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
     assert.equal(await game.takeFree(true), null);
     assert.equal(
       slotWaitSaid(3000, 12, 'slots', game.holders(), game.drawn),
-      `Waiting 3 s so far for an engine: all 12 engine slots on this machine (slots) are in use: 12 by this process (pid ${String(process.pid)}). The engine starts when one is given back.`,
+      `Waiting 3 s so far for an engine: the 11 engine slots of the 12 on this machine (slots) a game editor_run started may take, all but slot 9, which stays for a short headless call, are in use: 11 by this process (pid ${String(process.pid)}). The engine starts when one is given back.`,
     );
     assert.equal(
       slotWaitedSaid(3000, 12, 'slots', game.holders(), game.drawn),
-      `This call waited 3 s for an engine slot in all. When it first waited, all 12 engine slots on this machine (slots) were in use: 12 by this process (pid ${String(process.pid)}).`,
+      `This call waited 3 s for an engine slot in all. When it first waited, the 11 engine slots of the 12 on this machine (slots) a game editor_run started may take, all but slot 9, which stays for a short headless call, were in use: 11 by this process (pid ${String(process.pid)}).`,
     );
   } finally {
     rmSync(folder.directory, { recursive: true, force: true });
@@ -78076,14 +78070,14 @@ async function testEveryOtherTakersWaitLinesStayAsTheyWere(): Promise<void> {
 }
 
 /**
- * On 1, 2 and 3 slots a game runs wherever a slot is free with no gate queued, the last kept slot
- * last. With a gate queued it takes no last kept slot where one exists apart from the rest.
+ * On 2 and 3 slots a game never takes the last kept slot, gate or none. On one slot, which is no
+ * kept slot apart from the rest, a game takes it, gate or none.
  */
 async function testAGameRunsOnOneTwoAndThreeSlots(): Promise<void> {
   for (const [count, queued, taken] of [
     [1, false, [0]],
-    [2, false, [0, 1]],
-    [3, false, [2, 0, 1]],
+    [2, false, [0]],
+    [3, false, [2, 0]],
     [1, true, [0]],
     [2, true, []],
     [3, true, [2]],
@@ -125721,7 +125715,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakerAheadWantingTwoIsWaitedForThroughItsDrain,
   testSideWorkNeverPassesAGatesEngineWhileAGateIsQueued,
   testAGamesWaitLineNamesTheKeptSlotsGamesMayTake,
-  testAGamesWaitLineWithNoGateQueuedNamesEverySlot,
+  testAGamesWaitLineWithNoGateQueuedNamesTheSlotLeftForACall,
   testAGamesAnswerNamesTheKeptSlotsGamesMayTake,
   testEveryOtherTakersWaitLinesStayAsTheyWere,
   testAGameRunsOnOneTwoAndThreeSlots,
