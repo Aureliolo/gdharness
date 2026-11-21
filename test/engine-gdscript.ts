@@ -4392,8 +4392,8 @@ function testTheRunnerListsNoFileOfANestedProject(godotPath: string): void {
 }
 
 /**
- * The test runner's walks of res:// pass a folder that lists but does not open without an engine
- * error. Another engine of the same gate can make and remove a folder while a walk is under way,
+ * The test runner's walks of res://, and the operations' listings of one folder, pass a folder that
+ * lists but does not open without an engine error. Another engine of the same gate can make and remove a folder while a walk is under way,
  * and the gate counts an engine error outside every suite against the run. A link whose target is
  * gone stands for that folder on Windows, and a folder nobody may enter elsewhere.
  */
@@ -4408,6 +4408,19 @@ function testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath: string): void {
   }
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-runner-walks-'));
   const shut = join(dir, 'scripts', 'shut');
+  const editorCache = join(dir, '.godot', 'editor');
+  const unopenable = (folder: string): void => {
+    if (process.platform === 'win32') {
+      rmSync(folder, { recursive: true, force: true });
+      const target = `${folder}-gone`;
+      mkdirSync(target);
+      symlinkSync(target, folder, 'junction');
+      rmSync(target, { recursive: true });
+    } else {
+      mkdirSync(folder, { recursive: true });
+      chmodSync(folder, 0o000);
+    }
+  };
   try {
     cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
     writeTreeAt(dir, {
@@ -4419,19 +4432,16 @@ function testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath: string): void {
       timeout: 180000,
     });
     assert.equal(imported.status, 0, `${imported.stdout}${imported.stderr}`);
-    if (process.platform === 'win32') {
-      const target = join(dir, 'gone_target');
-      mkdirSync(target);
-      symlinkSync(target, shut, 'junction');
-      rmSync(target, { recursive: true });
-    } else {
-      mkdirSync(shut);
-      chmodSync(shut, 0o000);
-    }
+    assert.ok(existsSync(editorCache), 'the import made the editor folder');
+    unopenable(shut);
+    unopenable(editorCache);
     cpSync(join('test', 'support', 'gd', 'runner_walks.gd'), join(dir, 'runner_walks.gd'));
     const run = runScript(godotPath, dir, join(dir, 'runner_walks.gd'), [
       '--',
       resolve(join('src', 'godot', 'tests', 'listed.gd')),
+      resolve(join('src', 'godot', 'operations')),
+      'res://scripts/shut',
+      shut,
     ]);
     const output = `${run.stdout}${run.stderr}`;
     assert.equal(run.status, 0, output);
@@ -4441,10 +4451,17 @@ function testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath: string): void {
       `the walks still reach the project's scripts: ${output}`,
     );
     assert.ok(asArray(get(walked, 'files')).includes('res://scripts/visible.gd'), `and its files: ${output}`);
-    assert.doesNotMatch(output, /Couldn't open directory/, 'no walk printed an engine error');
+    assert.deepEqual(
+      get(walked, 'listings'),
+      { namesakes: [], imported_from: '', installed: false, editor_cache: '' },
+      `each listing answers as for a folder that is not there: ${output}`,
+    );
+    assert.doesNotMatch(output, /Couldn't open directory/, 'no walk or listing printed an engine error');
   } finally {
-    if (process.platform !== 'win32' && existsSync(shut)) {
-      chmodSync(shut, 0o755);
+    for (const folder of [shut, editorCache]) {
+      if (process.platform !== 'win32' && existsSync(folder)) {
+        chmodSync(folder, 0o755);
+      }
     }
     sweep(dir);
   }
