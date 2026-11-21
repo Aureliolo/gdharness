@@ -207,8 +207,6 @@ import {
   type MemoryEnd,
   MemoryWatch,
   memoryEndedSaid,
-  memoryEndSentence,
-  shortFloorBytes,
   startRefusedSaid,
 } from '../src/engine-memory.js';
 import {
@@ -127162,103 +127160,6 @@ async function testAnEngineRunLeavesNoReservationInTheSlots(): Promise<void> {
   }
 }
 
-/** A sample of [param held] engines, keyed by pid, for a watcher whose readings a test sets. */
-function heldSample(held: ReadonlyMap<number, number>): {
-  at: number;
-  machine: number;
-  processors: null;
-  held: Map<number, number>;
-  below: Map<number, number[]>;
-} {
-  return {
-    at: 0,
-    machine: 0,
-    processors: null,
-    held: new Map(held),
-    below: new Map([...held.keys()].map((pid) => [pid, []])),
-  };
-}
-
-/**
- * While the machine is short of memory, the largest guarded engine is ended, one a reading. A
- * reading back over the floor ends nothing, and an engine under 1.5 GiB is never ended this way.
- */
-async function testAMachineShortOfMemoryEndsItsLargestEngineOneAReading(): Promise<void> {
-  const GIB = 1024 ** 3;
-  // Pids no process here has, so the readings are only what the test sets.
-  const sizes = new Map([
-    [4_000_001, 3 * GIB],
-    [4_000_002, 5 * GIB],
-    [4_000_003, 2 * GIB],
-    [4_000_004, 1 * GIB],
-  ]);
-  const names = new Map([
-    [4_000_001, 'three'],
-    [4_000_002, 'five'],
-    [4_000_003, 'two'],
-    [4_000_004, 'one'],
-  ]);
-  // A 64 GiB machine has its floor at 3.2 GiB. Free memory by reading, from the first.
-  const free = [1, 1, 10, 1, 1, 1, 1, 1].map((gib) => gib * GIB);
-  let readings = 0;
-  const watch = new MemoryWatch(
-    () => {
-      readings += 1;
-      return Promise.resolve(heldSample(sizes));
-    },
-    10,
-    () => free[Math.min(readings, free.length) - 1] ?? 0,
-    64 * GIB,
-  );
-  const ended: [number, string, MemoryEnd][] = [];
-  const guards = [...sizes.keys()].map((pid) =>
-    watch.guard(pid, { bytes: 16 * GIB, source: 'default' }, (end) => {
-      ended.push([readings, names.get(pid) ?? '', end]);
-    }),
-  );
-  try {
-    assert.ok(await untilTrue(() => readings >= free.length + 2, 10_000), `readings: ${String(readings)}`);
-    assert.deepEqual(
-      ended.map(([reading, name]) => [reading, name]),
-      [
-        [1, 'five'],
-        [2, 'three'],
-        [4, 'two'],
-      ],
-      'the largest first, one a reading, none while back over the floor, never one under 1.5 GiB',
-    );
-    assert.deepEqual(ended[0]?.[2], {
-      peakBytes: 5 * GIB,
-      ceilingBytes: 16 * GIB,
-      source: 'default',
-      short: { freeBytes: GIB, floorBytes: shortFloorBytes(64 * GIB) },
-    });
-  } finally {
-    for (const guard of guards) {
-      guard.release();
-    }
-  }
-}
-
-/** The answer for an engine ended because the machine ran short gives the figures and the setting that caps it. */
-function testAMachineShortOfMemoryNamesTheFreeMemoryTheFloorAndTheEngine(): void {
-  const GIB = 1024 ** 3;
-  assert.deepEqual(
-    [8, 16, 64, 128].map((gib) => shortFloorBytes(gib * GIB) / GIB),
-    [2, 2, Math.floor(64 * GIB * 0.05) / GIB, Math.floor(128 * GIB * 0.05) / GIB],
-  );
-  const end: MemoryEnd = {
-    peakBytes: 5 * GIB,
-    ceilingBytes: 16 * GIB,
-    source: 'default',
-    short: { freeBytes: 1.5 * GIB, floorBytes: shortFloorBytes(64 * GIB) },
-  };
-  const why =
-    "the machine ran short of memory, with 1.5 GB free under the 3.2 GB floor while the engine held 5.0 GB, the most of the engines this server guards. Set gdharness/engine/memory_ceiling_mb in project.godot to cap this project's engines lower";
-  assert.equal(memoryEndedSaid(end), `ended because ${why}`);
-  assert.equal(memoryEndSentence('get_scene_tree', end), `get_scene_tree was ended because ${why}.`);
-}
-
 /** A game ended for its memory and polled while it ends is answered with its exit, not a missing keeper. */
 async function testAPolledGameEndedForItsMemoryCarriesNoKeeperNote(): Promise<void> {
   await withMemoryEngine(GROWS, async (call) => {
@@ -127336,19 +127237,21 @@ async function testTheRefusalNamesAllThereIsToFreeUnderTheKeptMemory(): Promise<
   });
 }
 
-/** A server guards a game an earlier server left running from its own start, before any call. */
-async function testAServerGuardsTheGamesLeftRunningFromItsStart(): Promise<void> {
+/**
+ * A server that starts beside another ends none of that server's games, however low its own ceiling.
+ * A game is guarded by the server that started it, and by the next only once a call picks it up.
+ */
+async function testANewServerEndsNoOtherLiveServersGame(): Promise<void> {
   const project = memoryProject();
+  const other = memoryProject();
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
-  // 600 MB reached 12 MB every 150 ms: past 300 MB after about 4 s, once the first server has gone.
+  // 600 MB, under the default ceiling the first server has and past the second's 300 MB.
   const env = {
     GODOT_PATH: memoryEngine(),
     GDHARNESS_RUNTIME_DIR: runtime,
     GDHARNESS_PROJECT: project,
     GDH_HOLD_MB: '600',
-    GDH_GROW_MB: '12',
     GDH_STAY_MS: '30000',
-    [CEILING_VARIABLE]: '300',
   };
   const call = async (server: ServerProcess, name: string): Promise<unknown> => {
     const response = await server.request(
@@ -127367,43 +127270,48 @@ async function testAServerGuardsTheGamesLeftRunningFromItsStart(): Promise<void>
     return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
   };
   let pid = 0;
+  const first = new ServerProcess({ env });
   try {
-    const first = new ServerProcess({ env });
-    try {
-      await first.initialize('regression-test');
-      const started = await call(first, 'editor_run');
-      assert.equal(get(started, 'started'), true, JSON.stringify(started));
-      pid = asNumber(get(started, 'pid'));
-    } finally {
-      await first.stop();
-    }
-    const second = new ServerProcess({ env });
+    await first.initialize('regression-test');
+    const started = await call(first, 'editor_run');
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+    pid = asNumber(get(started, 'pid'));
+    const second = new ServerProcess({
+      env: { ...env, GDHARNESS_PROJECT: other, [CEILING_VARIABLE]: '300' },
+    });
     try {
       await second.initialize('regression-test');
-      assert.ok(
-        await untilTrue(() => !alive(pid), 20_000),
-        'the game was ended with no call to the second server',
-      );
-      // Its note is written once its keeper has written the exit.
-      await delay(2000);
-      const output = await call(second, 'editor_output');
-      assert.equal(get(output, 'running'), false, JSON.stringify(output));
-      assert.match(
-        String(get(output, 'endedBy')),
-        /^its memory ceiling: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
-        JSON.stringify(output),
-      );
+      await delay(8000);
+      assert.ok(alive(pid), 'the game is still running 8 s after the second server started');
+      const output = await call(first, 'editor_output');
+      assert.equal(get(output, 'running'), true, JSON.stringify(output));
     } finally {
       await second.stop();
     }
   } finally {
+    await first.stop();
     try {
       process.kill(pid, 'SIGKILL');
     } catch {
       // Gone already.
     }
-    sweep(project, runtime);
+    sweep(project, other, runtime);
   }
+}
+
+/** An import pass ended for its memory gives that as how it ended, not the signal that ended it. */
+function testAnImportPassEndedForItsMemorySaysSoAndNotItsSignal(): void {
+  const MIB = 1024 ** 2;
+  const end: MemoryEnd = { peakBytes: 700 * MIB, ceilingBytes: 300 * MIB, source: 'variable' };
+  const ran: EngineRun = {
+    ...anImportRun('', null, memoryEndedSaid(end)),
+    exitSignal: 'SIGTERM',
+    memoryEnd: end,
+  };
+  assert.equal(
+    get(judgeImport(ran, null), 'message'),
+    'the import pass failed (ended for its memory: the engine held 0.7 GB, past the 0.3 GB ceiling. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it): no output at all',
+  );
 }
 
 /** A test run's engine is guarded from its start, ended past its ceiling, and no longer guarded once it is answered. */
@@ -127437,7 +127345,11 @@ async function testATestRunsEngineKnownAtItsStartIsGuardedAndReleased(): Promise
     );
     assert.equal(engineMemory.polling, false, 'the engine is no longer guarded once it is answered');
     assert.ok(Date.now() - began < 15_000, `ended, not left to run: ${JSON.stringify(end)}`);
-    assert.equal(end.memoryEnded?.source, 'project', JSON.stringify(end));
+    assert.match(
+      String(end.ended),
+      /^ended for its memory: the engine held \d+\.\d GB, past the 0\.3 GB ceiling\. Set gdharness\/engine\/memory_ceiling_mb in project\.godot to raise it$/,
+      JSON.stringify(end),
+    );
   } finally {
     sweep(project, scratch);
   }
@@ -128909,12 +128821,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABaseTypeOnAResourceThatIsNoThemeIsStillRefused,
   testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven,
   testAnEngineRunLeavesNoReservationInTheSlots,
-  testAMachineShortOfMemoryEndsItsLargestEngineOneAReading,
-  testAMachineShortOfMemoryNamesTheFreeMemoryTheFloorAndTheEngine,
   testAPolledGameEndedForItsMemoryCarriesNoKeeperNote,
   testTheRefusalsCeilingStepStartsTheEngineWhenFollowed,
   testTheRefusalNamesAllThereIsToFreeUnderTheKeptMemory,
-  testAServerGuardsTheGamesLeftRunningFromItsStart,
+  testANewServerEndsNoOtherLiveServersGame,
+  testAnImportPassEndedForItsMemorySaysSoAndNotItsSignal,
   testATestRunsEngineKnownAtItsStartIsGuardedAndReleased,
   testAGoneEngineCostsNoSnapshotAtEachReading,
   testTheWindowsMemoryReaderReadsPrivateBytesNotTheWorkingSet,

@@ -4,14 +4,11 @@
  *
  * One watcher judges every guarded engine from the shared sample, which reads each engine's memory
  * once with the processes below it, so an engine that forks workers is counted whole and an engine
- * also watched for its time is read once. It runs only while an engine is guarded. Each reading
- * also takes the machine's free memory, and while that is under {@link SHORT_FLOOR} the largest
- * guarded engine is ended, one a reading, so engines each under their ceiling do not together take
- * what the machine holds.
+ * also watched for its time is read once. It runs only while an engine is guarded.
  */
 
 import { readFileSync } from 'node:fs';
-import { freemem, totalmem } from 'node:os';
+import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { alive } from './alive.js';
 import { type Sample, sampled, watching } from './engine-spent.js';
@@ -36,17 +33,6 @@ const CEILING_FLOOR_BYTES = 4 * GIB;
 
 /** How often the guarded engines are read. */
 const POLL_MS = 1000;
-
-/**
- * The free memory under which the machine is short: the larger of the two figures. While it is
- * short, the largest guarded engine holding at least {@link MEMORY_PER_ENGINE} is ended.
- */
-const SHORT_FLOOR = { leastBytes: 2 * GIB, shareOfMemory: 0.05 } as const;
-
-/** The free memory under which a machine of [param memory] bytes is short: see {@link SHORT_FLOOR}. */
-export function shortFloorBytes(memory: number): number {
-  return Math.max(SHORT_FLOOR.leastBytes, Math.floor(memory * SHORT_FLOOR.shareOfMemory));
-}
 
 /** [param bytes] as gigabytes to one decimal place. */
 export const gigabytes = (bytes: number): string => `${(bytes / GIB).toFixed(1)} GB`;
@@ -117,31 +103,15 @@ export function ceilingBytes(env: NodeJS.ProcessEnv = process.env, memory: numbe
   return ceilingFor(undefined, env, memory).bytes;
 }
 
-/**
- * An engine ended for its memory: the most it held, its ceiling and where that came from. [param
- * short] is set for an engine ended because the machine ran short, with the free memory read then
- * and the floor it was under, and peakBytes is then what the engine held at that reading.
- */
+/** An engine that held more than its ceiling: the most it held, the ceiling it passed and where that came from. */
 export interface MemoryEnd {
   readonly peakBytes: number;
   readonly ceilingBytes: number;
   readonly source: CeilingSource;
-  readonly short?: { readonly freeBytes: number; readonly floorBytes: number };
 }
 
-/** Why a machine short of memory ended [param end]'s engine, and the setting that caps its project's engines lower. */
-function shortSaid(end: MemoryEnd & { readonly short: NonNullable<MemoryEnd['short']> }): string {
-  return `the machine ran short of memory, with ${gigabytes(end.short.freeBytes)} free under the ${gigabytes(end.short.floorBytes)} floor while the engine held ${gigabytes(end.peakBytes)}, the most of the engines this server guards. Set ${CEILING_SETTING} in project.godot to cap this project's engines lower`;
-}
-
-/**
- * What an engine held past its ceiling, and the setting or variable that raises the ceiling. For an
- * engine ended because the machine ran short, why, and the setting that caps its project lower.
- */
-function memoryCeilingSaid(end: MemoryEnd): string {
-  if (end.short !== undefined) {
-    return shortSaid({ ...end, short: end.short });
-  }
+/** What an engine held past its ceiling, and the setting or variable that raises the ceiling. */
+export function memoryCeilingSaid(end: MemoryEnd): string {
   const held = `the engine held ${gigabytes(end.peakBytes)}, past the ${gigabytes(end.ceilingBytes)} ceiling`;
   if (end.source === 'project') {
     return `${held}. Set ${CEILING_SETTING} in project.godot to raise it`;
@@ -154,9 +124,6 @@ function memoryCeilingSaid(end: MemoryEnd): string {
 
 /** [param subject] ended for its memory, in one sentence that names what sets the ceiling. */
 export function memoryEndSentence(subject: string, end: MemoryEnd): string {
-  if (end.short !== undefined) {
-    return `${subject} was ended because ${shortSaid({ ...end, short: end.short })}.`;
-  }
   const held = `${subject} was ended for its memory: it held ${gigabytes(end.peakBytes)}, past`;
   if (end.source === 'project') {
     return `${held} the ${gigabytes(end.ceilingBytes)} ceiling ${CEILING_SETTING} in project.godot sets.`;
@@ -169,16 +136,7 @@ export function memoryEndSentence(subject: string, end: MemoryEnd): string {
 
 /** Why an engine was ended for its memory, as the reason an answer gives. */
 export function memoryEndedSaid(end: MemoryEnd): string {
-  return end.short === undefined
-    ? `ended for its memory: ${memoryCeilingSaid(end)}`
-    : `ended because ${memoryCeilingSaid(end)}`;
-}
-
-/** What ended a game for its memory, as a run's `endedBy` says it. */
-export function memoryEndedBy(end: MemoryEnd): string {
-  return end.short === undefined
-    ? `its memory ceiling: ${memoryCeilingSaid(end)}`
-    : `its memory, because ${memoryCeilingSaid(end)}`;
+  return `ended for its memory: ${memoryCeilingSaid(end)}`;
 }
 
 /** What a start of [param tool]'s engine needs, and what that figure is taken from. */
@@ -235,10 +193,7 @@ interface Guarded {
   readonly ended: (end: MemoryEnd) => void;
   readonly keep: EngineKeep | undefined;
   peak: number;
-  /** What it and the processes below it held at the last reading, and which those were. */
-  last: { readonly bytes: number; readonly below: readonly number[] } | undefined;
-  /** Why it was ended, once it was: past its ceiling, or the largest when the machine ran short. */
-  endedFor: 'ceiling' | 'short' | null;
+  over: boolean;
 }
 
 /** An engine's guard: what it has held at most, and the way to stop guarding it once it has ended. */
@@ -255,23 +210,10 @@ export class MemoryWatch {
   private reading = false;
   private readonly sample: () => Promise<Sample>;
   private readonly everyMs: number;
-  private readonly free: () => number;
-  private readonly memory: number;
 
-  /**
-   * Reads with [param sample] every [param everyMs], and takes the machine's free memory from
-   * [param free] at each reading, judged against the floor of a machine of [param memory] bytes.
-   */
-  constructor(
-    sample: () => Promise<Sample> = sampled,
-    everyMs: number = POLL_MS,
-    free: () => number = freemem,
-    memory: number = totalmem(),
-  ) {
+  constructor(sample: () => Promise<Sample> = sampled, everyMs: number = POLL_MS) {
     this.sample = sample;
     this.everyMs = everyMs;
-    this.free = free;
-    this.memory = memory;
   }
 
   /** Whether the watcher is reading: only while an engine is guarded. */
@@ -288,8 +230,7 @@ export class MemoryWatch {
    * Guards the engine [param pid]. Once it and everything below it hold more than [param ceiling],
    * the processes below it are ended and [param ended] is called, once. The caller ends the
    * engine itself there. The peak is kept for [param keep]'s project and tool when the guard is
-   * released, unless the engine was ended for passing it. [param ended] is also called for the
-   * largest guarded engine when the machine runs short of memory, with the shortfall on the end.
+   * released, unless the engine was ended for it.
    */
   guard(pid: number, ceiling: Ceiling, ended: (end: MemoryEnd) => void, keep?: EngineKeep): EngineGuard {
     const guarded: Guarded = {
@@ -298,8 +239,7 @@ export class MemoryWatch {
       ended,
       keep,
       peak: 0,
-      last: undefined,
-      endedFor: null,
+      over: false,
     };
     this.guards.add(guarded);
     watching(pid, true, true);
@@ -322,10 +262,9 @@ export class MemoryWatch {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // An engine ended past its ceiling keeps no peak: its figure is the fault, not what the project
-    // needs, and kept it would refuse the project's next start. One ended for a machine short of
-    // memory held what the project needs, so it keeps its peak.
-    if (guarded.keep !== undefined && guarded.peak > 0 && guarded.endedFor !== 'ceiling') {
+    // An engine ended for its memory keeps no peak: its figure is the fault, not what the project
+    // needs, and kept it would refuse the project's next start.
+    if (guarded.keep !== undefined && guarded.peak > 0 && !guarded.over) {
       void recordEnginePeak(guarded.keep.project, guarded.keep.tool, guarded.peak);
     }
     return guarded.peak;
@@ -342,13 +281,11 @@ export class MemoryWatch {
         return;
       }
       const taken = await this.sample();
-      const free = this.free();
       for (const one of live) {
         if (this.guards.has(one)) {
           this.judge(one, taken.held?.get(one.pid), taken.below?.get(one.pid) ?? []);
         }
       }
-      this.endTheLargestIfShort(free);
     } finally {
       this.reading = false;
     }
@@ -356,7 +293,6 @@ export class MemoryWatch {
 
   /** Records the [param bytes] [param one] holds with [param below] against its ceiling, ending the engine past it. */
   private judge(one: Guarded, bytes: number | undefined, below: readonly number[]): void {
-    one.last = undefined;
     if (bytes === undefined) {
       // An engine nobody released, such as a game that outlives the call that started it.
       if (!alive(one.pid)) {
@@ -364,62 +300,22 @@ export class MemoryWatch {
       }
       return;
     }
-    if (one.endedFor !== null) {
+    if (one.over) {
       return;
     }
     one.peak = Math.max(one.peak, bytes);
-    one.last = { bytes, below };
     if (bytes <= one.ceiling.bytes) {
       return;
     }
-    one.endedFor = 'ceiling';
-    endBelow(below);
-    one.ended({ peakBytes: one.peak, ceilingBytes: one.ceiling.bytes, source: one.ceiling.source });
-  }
-
-  /**
-   * Ends the guarded engine that held the most at this reading when [param free], the machine's free
-   * memory, is under its floor. One a reading, so what the last end freed is read before another
-   * goes, and never one holding less than {@link MEMORY_PER_ENGINE}.
-   */
-  private endTheLargestIfShort(free: number): void {
-    const floor = shortFloorBytes(this.memory);
-    if (free >= floor) {
-      return;
-    }
-    let largest: Guarded | undefined;
-    for (const one of this.guards) {
-      if (
-        one.endedFor === null &&
-        one.last !== undefined &&
-        one.last.bytes >= MEMORY_PER_ENGINE &&
-        one.last.bytes > (largest?.last?.bytes ?? 0)
-      ) {
-        largest = one;
+    one.over = true;
+    for (const child of below) {
+      try {
+        process.kill(child, 'SIGKILL');
+      } catch {
+        // Gone already.
       }
     }
-    if (largest?.last === undefined) {
-      return;
-    }
-    largest.endedFor = 'short';
-    endBelow(largest.last.below);
-    largest.ended({
-      peakBytes: largest.last.bytes,
-      ceilingBytes: largest.ceiling.bytes,
-      source: largest.ceiling.source,
-      short: { freeBytes: free, floorBytes: floor },
-    });
-  }
-}
-
-/** Ends the processes [param below] an engine, which its caller cannot reach. */
-function endBelow(below: readonly number[]): void {
-  for (const child of below) {
-    try {
-      process.kill(child, 'SIGKILL');
-    } catch {
-      // Gone already.
-    }
+    one.ended({ peakBytes: one.peak, ceilingBytes: one.ceiling.bytes, source: one.ceiling.source });
   }
 }
 
