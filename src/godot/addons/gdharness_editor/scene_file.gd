@@ -166,9 +166,7 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		return { "ok": false, "error": "Failed to instantiate " + path }
 	if not Engine.is_editor_hint():
 		var structure: GdhSceneStructure = GdhSceneStructure.new()
-		root = structure.restored(root, packed)
-		if root == null:
-			return { "ok": false, "error": "Failed to instantiate " + path }
+		var _whole: bool = structure.put_back(root, packed)
 		_remade_ids = structure.remade_ids
 		_unhold_placeholders()
 	_state = packed.get_state()
@@ -1795,10 +1793,10 @@ func _headless_packed(packed: PackedScene) -> Array:
 ## The refusal [param check] gives for a copy of [param packed] instantiated, or "".
 func _failed_check(packed: PackedScene, check: Callable) -> String:
 	var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
-	if saved != null and not Engine.is_editor_hint():
-		saved = GdhSceneStructure.new().restored(saved, packed)
 	if saved == null:
 		return "The packed copy of %s did not instantiate, so nothing was written." % path
+	if not Engine.is_editor_hint():
+		var _whole: bool = GdhSceneStructure.new().put_back(saved, packed)
 	_checked_pack = packed
 	var missing: String = str(check.call(saved))
 	saved.free()
