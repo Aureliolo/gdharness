@@ -198,7 +198,9 @@ func _load_packed(for_writing: bool, failed: GdhHeadlessCheck.GdhParseErrors) ->
 		ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
 	)
 	if packed != null:
+		var held: Array[Array] = GdhHeadlessCheck.embedded_held(packed)
 		root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+		GdhHeadlessCheck.hold_embedded(held)
 	if watching:
 		OS.remove_logger(failed)
 	return packed
@@ -1770,7 +1772,10 @@ func _headless_packed(packed: PackedScene) -> Array:
 
 ## The refusal [param check] gives for a copy of [param packed] instantiated, or "".
 func _failed_check(packed: PackedScene, check: Callable) -> String:
+	# The copy holds the scene's own embedded resources, and its scripts run on them once more.
+	var held: Array[Array] = GdhHeadlessCheck.embedded_held(packed)
 	var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	GdhHeadlessCheck.hold_embedded(held)
 	if saved == null:
 		return "The packed copy of %s did not instantiate, so nothing was written." % path
 	_checked_pack = packed
