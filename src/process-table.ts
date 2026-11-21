@@ -306,9 +306,12 @@ public static class GdhProcessTable
     // The parent links of the last snapshot, which a reading of memory walks rather than taking a
     // snapshot of its own: one costs about twenty times what reading a process through its handle
     // does. Taken again once it is TreeMs old, or when a process asked about is not in it, so an
-    // engine is read from its first reading. An engine that has ended is no longer asked about.
+    // engine is read from its first reading. A process asked about and missing from a snapshot taken
+    // since it was asked is gone, and is remembered as missing until the next, so an engine that has
+    // ended and is still asked about costs no snapshot at each reading.
     private static Dictionary<int, Entry> treeByPid;
     private static Dictionary<int, List<Entry>> treeChildren;
+    private static HashSet<int> treeMissing = new HashSet<int>();
     private static int treeTakenAt;
     private const int TreeMs = 10000;
 
@@ -338,6 +341,7 @@ public static class GdhProcessTable
         }
         treeByPid = byPid;
         treeChildren = children;
+        treeMissing = new HashSet<int>();
         treeTakenAt = Environment.TickCount;
     }
 
@@ -390,7 +394,7 @@ public static class GdhProcessTable
         {
             foreach (int pid in wanted)
             {
-                unknown = unknown || !treeByPid.ContainsKey(pid);
+                unknown = unknown || (!treeByPid.ContainsKey(pid) && !treeMissing.Contains(pid));
             }
         }
         if (treeByPid == null || age > TreeMs || unknown)
@@ -403,6 +407,7 @@ public static class GdhProcessTable
             Entry root;
             if (!treeByPid.TryGetValue(pid, out root))
             {
+                treeMissing.Add(pid);
                 continue;
             }
             long bytes = CommittedBy(root);

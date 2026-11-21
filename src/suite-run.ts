@@ -960,9 +960,8 @@ async function runStages(context: RunContext): Promise<number> {
   );
   const memory =
     started.shared && (deal.memoryHeld || started.follows !== null)
-      ? // The gate counts this run's own engines as it admits them, so their reservations are left out.
-        new MemoryGate(launch.slots, async () => (await memoryAvailable(false)).bytes, undefined, {
-          owed: () => reservedMemory(undefined, undefined, false),
+      ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes, undefined, {
+          owed: reservedMemory,
           say,
         })
       : undefined;
