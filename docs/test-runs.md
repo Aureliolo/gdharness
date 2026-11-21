@@ -895,11 +895,12 @@ the wait.
 Take in the order you began to wait. At each look, read every live mark but your own and `memory`
 ones.
 
-- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited long enough. A store-class taker waits two minutes. Any other waits two minutes
-  while no store-class taker is in line, and ten minutes while one is. The second group is the
-  other store-class takers and games that have waited as long. The third is every other `other`
-  taker. The wait and the class change only the place in line, never which slots a taker may take.
+- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that have waited
+  long enough. A store-class taker waits two minutes. Any other waits two minutes while no
+  store-class taker is in line, and ten minutes while one is. The second group is the other
+  store-class takers. The third is every other `other` taker. A game is placed as any other
+  `other` taker is. The wait and the class change only the place in line, never which slots a
+  taker may take.
 - A store-class taker is in line when you are one, or when a live store-class mark last looked
   under 5,000 ms ago (its `.seen` file, below). Read that time and your clock in whole
   milliseconds, rounded down, from the file's nanoseconds where the system gives them. A taker
@@ -1065,8 +1066,9 @@ long as it plays.
 ### Games and the kept slots
 
 A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
-stays when its keeper takes the lock over. Games hold at most `min(floor(kept / 2), kept - 1)` of
-the kept slots between them (2 of 16) before a game's start waits.
+stays when its keeper takes the lock over. Games hold at most `kept - 1` of the kept slots between
+them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12) before a game's start waits. The last
+kept slot stays for a headless call.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is
