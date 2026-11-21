@@ -815,7 +815,7 @@ interface GateLook {
  * is known), whatever the take has waited. A gate's seat counts only the gates' slots, so work in
  * the kept ones never holds a seat back. A [param game] editor_run started never draws the last kept
  * slot, queue or none, which stays for a short headless call. A machine of one slot has no kept slot
- * apart from it, so a game draws it there. While a gate is queued a game takes it no more than it
+ * at all, so a game draws slot 0 there. While a gate is queued a game takes it no more than it
  * takes the kept slot of two, by the games limit its take reads.
  */
 export function slotsDrawnOn(
@@ -1768,11 +1768,6 @@ export class EngineSlots {
       .ahead(waiting)
       .filter((one) => now - Math.max(this.passedOver.get(one.mark) ?? now, one.seen) < SLOT_YIELD_MS);
     const claimed = await this.claimedAhead(ahead, queued);
-    for (const mark of claimed.values()) {
-      if (!this.passedOver.has(mark)) {
-        this.passedOver.set(mark, now);
-      }
-    }
     const claims = await this.standFreeForTheYield(placed, ahead, claimed, queued, now);
     const tried = placed.admitted(drawnBefore, new Set(claims.keys()));
     const left = placed.leaves().filter((slot) => drawnBefore.includes(slot) && !tried.includes(slot));
@@ -1807,6 +1802,11 @@ export class EngineSlots {
       const passing: [string, number][] = [];
       for (const [slot, mark] of taken) {
         left.add(slot);
+        // A taker ahead that stops looking is dropped SLOT_YIELD_MS after it was first left a slot,
+        // whichever pass gave it the slot.
+        if (!this.passedOver.has(mark)) {
+          this.passedOver.set(mark, now);
+        }
         const one = ahead.find((waiter) => waiter.mark === mark);
         if (stood.has(slot) && one !== undefined && (await this.passable(one, queued, now))) {
           passing.push([mark, slot]);

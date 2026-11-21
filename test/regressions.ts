@@ -77741,11 +77741,13 @@ interface TakerInTurn {
   readonly ahead?: (after: number) => readonly string[];
   /** Whether it only looks, as a taker on a build that leaves the slot to the others does. */
   readonly looksOnly?: boolean;
+  /** The last ms in at which its mark looks, for a taker that stops looking. It looks at every step without it. */
+  readonly lastLook?: number;
 }
 
 /**
  * Looks at each of [param steps], in ms from the start, for every taker of [param takers] in turn on
- * a simulated clock, each mark looking just before each take, and answers each take as
+ * a simulated clock, each mark that still looks doing so just before each take, and answers each take as
  * `<mark> took <slot> at <ms>`. [param before] runs before each step's takes.
  */
 async function takesInTurn(
@@ -77764,7 +77766,11 @@ async function takesInTurn(
       Date.now = () => t0 + after;
       before(after);
       for (const { one, line, slots } of lines.filter((each) => each.one.looksOnly !== true)) {
-        const marked = takers.filter((each) => existsSync(join(folder.directory, WAITING_FOLDER, each.mark)));
+        const marked = takers.filter(
+          (each) =>
+            existsSync(join(folder.directory, WAITING_FOLDER, each.mark)) &&
+            (each.lastLook === undefined || after <= each.lastLook),
+        );
         for (const other of marked) {
           lookedAt(folder, other.mark, t0 + after);
         }
@@ -78323,6 +78329,162 @@ async function testAGameOnOneSlotTakesNothingWhileAGateIsQueued(): Promise<void>
   } finally {
     rmSync(folder.directory, { recursive: true, force: true });
   }
+}
+
+/**
+ * With a gate queued on 12 slots and only gate slot 8 free, side work behind a waiter for three slots
+ * past its drain, which looks and never takes, and a gate's engine whose last look is at
+ * [param lastLook], or which looks at every step without it. The takes of the looks at [param steps].
+ */
+async function sideWorkBehindAGatesEngine(
+  lastLook: number | undefined,
+  steps: readonly number[],
+): Promise<string[]> {
+  const folder = await gameLineFolder(12);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
+    return await takesInTurn(
+      folder,
+      [
+        { mark: 'wants.json', waited: 400_000, taker: 'tier', wants: 3, looksOnly: true },
+        {
+          mark: 'gate.json',
+          waited: 350_000,
+          taker: 'gate',
+          looksOnly: true,
+          ...(lastLook === undefined ? {} : { lastLook }),
+        },
+        { mark: 'side.json', waited: 10_000, taker: 'tier' },
+      ],
+      steps,
+    );
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * With a gate queued on 12 slots and only kept slot 10 free, a call behind a waiter for three slots
+ * past its drain, which looks and never takes, and a waiter for two 100 s into its drain whose last
+ * look is at [param lastLook], or which looks at every step without it. The takes at [param steps].
+ */
+async function aCallBehindAWaiterInItsDrain(
+  lastLook: number | undefined,
+  steps: readonly number[],
+): Promise<string[]> {
+  const folder = await gameLineFolder(12);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
+    return await takesInTurn(
+      folder,
+      [
+        { mark: 'wants3.json', waited: 400_000, wants: 3, looksOnly: true },
+        {
+          mark: 'wants2.json',
+          waited: 100_000,
+          wants: 2,
+          looksOnly: true,
+          ...(lastLook === undefined ? {} : { lastLook }),
+        },
+        { mark: 'call.json', waited: 50_000, ahead: () => ['wants3.json', 'wants2.json'] },
+      ],
+      steps,
+    );
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A gate's engine that stopped looking, given gate slot 8 only once the waiter ahead of it is passed
+ * for it, is dropped {@link SLOT_YIELD_MS} after it was given the slot: side work takes the slot then.
+ */
+async function testAGatesEngineGivenASlotInALaterPassIsDroppedOnceItStopsLooking(): Promise<void> {
+  assert.deepEqual(await sideWorkBehindAGatesEngine(0, looksEvery(SLOT_YIELD_MS * 6)), [
+    `side.json took 8 at ${String(SLOT_YIELD_MS * 2)}`,
+  ]);
+}
+
+/**
+ * A waiter for two in its drain that stopped looking, given kept slot 10 only once the waiter ahead
+ * of it is passed for it, is dropped {@link SLOT_YIELD_MS} after it was given the slot: the call
+ * behind takes the slot then, long before the drain ends.
+ */
+async function testAWaiterInItsDrainGivenASlotInALaterPassIsDroppedOnceItStopsLooking(): Promise<void> {
+  assert.deepEqual(await aCallBehindAWaiterInItsDrain(0, looksEvery(SLOT_YIELD_MS * 6)), [
+    `call.json took 10 at ${String(SLOT_YIELD_MS * 2)}`,
+  ]);
+}
+
+/**
+ * The same gate's engine and waiter in its drain, still looking, are never passed or dropped: the
+ * taker behind each takes nothing.
+ */
+async function testATakerWaitedForAndGivenASlotInALaterPassIsKeptWhileItLooks(): Promise<void> {
+  assert.deepEqual(
+    await sideWorkBehindAGatesEngine(undefined, looksEvery(SLOT_YIELD_MS * 6)),
+    [],
+    'side work',
+  );
+  assert.deepEqual(
+    await aCallBehindAWaiterInItsDrain(undefined, looksEvery(SLOT_YIELD_MS * 6)),
+    [],
+    'the call',
+  );
+}
+
+/**
+ * A gate's engine, or a waiter for two in its drain, alone ahead and given the slot at the first pass,
+ * is dropped {@link SLOT_YIELD_MS} after it stopped looking.
+ */
+async function testATakerGivenASlotInTheFirstPassIsDroppedOnceItStopsLooking(): Promise<void> {
+  const gateFolder = await gameLineFolder(12);
+  try {
+    slotsHeld(gateFolder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
+    assert.deepEqual(
+      await takesInTurn(
+        gateFolder,
+        [
+          { mark: 'gate.json', waited: 350_000, taker: 'gate', looksOnly: true, lastLook: 0 },
+          { mark: 'side.json', waited: 10_000, taker: 'tier' },
+        ],
+        looksEvery(SLOT_YIELD_MS * 3),
+      ),
+      [`side.json took 8 at ${String(SLOT_YIELD_MS)}`],
+      "a gate's engine",
+    );
+  } finally {
+    rmSync(gateFolder.directory, { recursive: true, force: true });
+  }
+  const drainFolder = await gameLineFolder(12);
+  try {
+    slotsHeld(drainFolder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
+    assert.deepEqual(
+      await takesInTurn(
+        drainFolder,
+        [
+          { mark: 'wants2.json', waited: 100_000, wants: 2, looksOnly: true, lastLook: 0 },
+          { mark: 'call.json', waited: 50_000 },
+        ],
+        looksEvery(SLOT_YIELD_MS * 3),
+      ),
+      [`call.json took 10 at ${String(SLOT_YIELD_MS)}`],
+      'a waiter in its drain',
+    );
+  } finally {
+    rmSync(drainFolder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Side work behind the gate's engine given gate slot 8 in a later pass takes it at the look
+ * {@link SLOT_YIELD_MS} after the engine was given it, and not at a look 1 ms before.
+ */
+async function testAGatesEngineGivenASlotInALaterPassIsDroppedAtItsYieldAndNotBefore(): Promise<void> {
+  const due = SLOT_YIELD_MS * 2;
+  assert.deepEqual(await sideWorkBehindAGatesEngine(0, looksEvery(due + 3000, due - 1)), [
+    `side.json took 8 at ${String(due)}`,
+  ]);
 }
 
 /**
@@ -125953,6 +126115,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEachFreeSlotCountsItsOwnYield,
   testTheSlotAPassedWaiterIsGivenIsTakenAtItsYieldAndNotBefore,
   testAGameOnOneSlotTakesNothingWhileAGateIsQueued,
+  testAGatesEngineGivenASlotInALaterPassIsDroppedOnceItStopsLooking,
+  testAWaiterInItsDrainGivenASlotInALaterPassIsDroppedOnceItStopsLooking,
+  testATakerWaitedForAndGivenASlotInALaterPassIsKeptWhileItLooks,
+  testATakerGivenASlotInTheFirstPassIsDroppedOnceItStopsLooking,
+  testAGatesEngineGivenASlotInALaterPassIsDroppedAtItsYieldAndNotBefore,
   testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
   testAWaitingMarkNamesTheStoreClass,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
