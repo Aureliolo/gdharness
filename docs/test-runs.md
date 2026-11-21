@@ -781,7 +781,9 @@ nothing would see it end. An editor, and a game played from it by hand, take non
 
 A wait for a slot is announced. A tool call that asked for progress hears it at once and every 20
 seconds after. A call that waited a second or more in all is answered with an `engine_slot_wait`
-block. It holds `waitedMs` and a note naming who held the slots when it first waited.
+block. It holds `waitedMs` and a note naming who held the slots when it first waited. A wait for a
+free slot that the memory budget holds back says so instead, naming the budget, what the live locks
+hold and what the engine needs.
 
 `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds, and again
 every 20 seconds while it lasts. It is one line however many of its engines are waiting. Every
@@ -887,6 +889,10 @@ A tool of a game's own that starts engines takes slots the same way, in the step
   A writer that has gone leaves its file, which any sweep may remove by the pid in its name.
 - An optional `"by"` says what took the slot, such as the tool and its project. A run waiting for a
   slot names each holder by it, or by its pid when it is missing.
+- An optional `"memory"` says the bytes the engine on the slot may hold. gdharness writes the larger
+  of 1.5 GiB and the peak kept for the engine's project and tool, at most that engine's ceiling.
+  A lock without it counts 1.5 GiB for each slot it stands for, which is one unless it holds a
+  `"wants"` above 1, a whole number of slots held in one file.
 
 ### Step 2: find a free lock
 
@@ -916,7 +922,10 @@ the wait.
 - Make it exclusively as a lock is. Create the folder first if it is missing.
 - It holds what your lock will, plus `taker` (`gate`, `timing`, `tier` or `other`, as below) and
   `since`. That is when the take began to wait, in seconds since the epoch.
-- A wait for memory rather than a slot names `taker` `memory`.
+- A wait for memory rather than a slot names `taker` `memory`. gdharness keeps its place in line
+  with such a mark when a slot is free and the budget below leaves no room for the engine. It adds
+  `kind`, the taker it would be in line, and `memory`, the bytes its engine will hold. A `memory`
+  mark that names no `since` is a run waiting for memory while it holds its slot, and takes no place.
 
 ### Step 5: take in order
 
@@ -965,6 +974,16 @@ ones.
   waits for it alone and puts down no waiting mark.
 - A waiter that leaves a free slot untaken is waiting for something else, such as memory.
 - A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
+- The engines of one machine stay inside its memory budget, which is the physical memory less 16
+  GiB, and at least what the slot count stands for at 1.5 GiB a slot. Before taking a free slot,
+  add up the `memory` of every live lock, the `memory` of the live `memory` marks ahead of you
+  that name `since` and `memory`, and your own figure. Take the slot only if the sum stays inside
+  the budget. Otherwise wait, keeping your place in line, and look again as a lock goes.
+- A take that finds no other lock live takes whatever its figure, so the machine's first engine
+  always starts. Count the locks again after taking, and give the slot back and wait when the
+  folder now holds more than the budget and yours is the newest lock.
+- The free memory a run reads before it starts an engine is a later, separate check on what the
+  machine holds at that moment. No lock's figure enters it, and no engine is counted in both.
 
 ### Step 6: give the slot back
 

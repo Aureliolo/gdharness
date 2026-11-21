@@ -353,7 +353,9 @@ import {
   everyRunRecord,
   type LatestRun,
   listeningPid,
+  memoryEndOf,
   noteIsAbout,
+  noteMemoryEnd,
   openTranscript,
   type PeakTool,
   profileMarkPath,
@@ -1229,6 +1231,14 @@ export function runIsUp(
     return true;
   }
   return editorSays ?? stillRunning(run);
+}
+
+/** How many frames a boot check runs and how long it may take, from its arguments or the defaults. */
+function bootLimits(args: OperationParams): { readonly frames: number; readonly timeoutMs: number } {
+  return {
+    frames: readPositiveNumber(args, 'frames') ?? 3,
+    timeoutMs: readPositiveNumber(args, 'timeoutMs') ?? 60000,
+  };
 }
 
 /**
@@ -14301,6 +14311,10 @@ class GodotServer {
    * reading a game gone with no code.
    */
   private endForItsMemory(game: GodotProcess, end: MemoryEnd): void {
+    if (game.pickedUp === true) {
+      // The server that started it, still answering, finds its game gone and reads why from here.
+      noteMemoryEnd(game, `its memory ceiling: ${memoryCeilingSaid(end)}`);
+    }
     const ending = (async (): Promise<void> => {
       if (this.activeProcess === game) {
         await this.endActiveGame(`its memory ceiling: ${memoryCeilingSaid(end)}`, true, false);
@@ -15739,7 +15753,7 @@ class GodotServer {
     // In one of the machine's engine slots, taken before the engine starts and given back once its
     // log is whole, so the caller's own limit counts the engine's time and not the wait. [param
     // project] is the project the run is of, which gives the slot its store class.
-    const held = await slotForCall(false, project);
+    const held = await slotForCall(false, project, tool);
     try {
       const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
       void run.settled.finally(held.release);
@@ -16902,6 +16916,33 @@ class GodotServer {
     return ended;
   }
 
+  /** One start of a boot check's engine, ended at [param timeoutMs] where it has not ended by itself. */
+  private async bootOnce(
+    godotPath: string,
+    cmdArgs: string[],
+    env: NodeJS.ProcessEnv | undefined,
+    timeoutMs: number,
+    projectPath: string,
+  ): Promise<{
+    readonly boot: Awaited<ReturnType<GodotServer['spawnGame']>>;
+    readonly hung: boolean;
+    readonly crashedStarts?: number;
+  }> {
+    const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, 'boot_check', projectPath);
+    const hungUp = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        started.process.kill();
+        resolve(true);
+      }, timeoutMs);
+      whenEnded(started, () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+    await started.settled;
+    return { boot: started, hung: hungUp };
+  }
+
   /**
    * editor_run check: the project booted headless and left to quit after a few frames, which
    * is what a commit gate does by hand. A project that will not quit is killed and reported as
@@ -16918,8 +16959,11 @@ class GodotServer {
     engineArgs: readonly string[],
     engineNote: string | null,
   ): Promise<ToolResponse> {
-    const frames = readPositiveNumber(args, 'frames') ?? 3;
-    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
+    const memory = await this.memoryCeiling(projectPath, 'boot_check');
+    if (!memory.ok) {
+      return memory.response;
+    }
+    const { frames, timeoutMs } = bootLimits(args);
     const cmdArgs = runArguments({
       projectPath,
       headless: true,
@@ -16933,25 +16977,7 @@ class GodotServer {
       : undefined;
     // An engine that died as it started never reached the project, so the boot is started again.
     const { boot, hung } = await startedUntilItRuns(
-      async (): Promise<{
-        readonly boot: Awaited<ReturnType<GodotServer['spawnGame']>>;
-        readonly hung: boolean;
-        readonly crashedStarts?: number;
-      }> => {
-        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, 'boot_check', projectPath);
-        const hungUp = await new Promise<boolean>((resolve) => {
-          const timer = setTimeout(() => {
-            started.process.kill();
-            resolve(true);
-          }, timeoutMs);
-          whenEnded(started, () => {
-            clearTimeout(timer);
-            resolve(false);
-          });
-        });
-        await started.settled;
-        return { boot: started, hung: hungUp };
-      },
+      () => this.bootOnce(godotPath, cmdArgs, env, timeoutMs, projectPath),
       callSignal(),
       (one) => !one.hung && diedAtStartOf(one.boot),
     );
@@ -17478,12 +17504,21 @@ class GodotServer {
     // The keeper that holds the game writes its exit into the record the moment it ends, which can
     // be a moment after the process has gone: answered then, the run was over with no exit code
     // and nothing saying why.
+    if (!going && run.pickedUp !== true && typeof run.endedHere !== 'string') {
+      // Another server of the project that picked the game up and ended it for its memory says so
+      // here, since it clears the run's note, which is where its exit would be read.
+      const beside = memoryEndOf(run);
+      if (beside !== undefined) {
+        run.endedBeside = beside;
+      }
+    }
     if (
       !going &&
       run.pid !== null &&
       !exited(run) &&
       run.endedUnwatched !== true &&
       typeof run.endedHere !== 'string' &&
+      run.endedBeside === undefined &&
       !(await this.untilTheExitIsRecorded(run))
     ) {
       run.endedUnwatched = true;
@@ -17948,7 +17983,7 @@ class GodotServer {
     transcript: string | undefined;
   } {
     return {
-      endedBy: stillRunning(run) ? undefined : (run.endedHere ?? null),
+      endedBy: stillRunning(run) ? undefined : (run.endedHere ?? run.endedBeside ?? null),
       project: run.throughEditor ? undefined : (run.projectPath ?? undefined),
       transcript: run.transcript ?? undefined,
     };
@@ -18100,6 +18135,9 @@ class GodotServer {
   private endedNotes(run: GodotProcess): string[] {
     if (typeof run.endedHere === 'string') {
       return [`This run was ended here, by ${run.endedHere}.`];
+    }
+    if (run.endedBeside !== undefined && !stillRunning(run)) {
+      return [`This run was ended by another server of this project, by ${run.endedBeside}.`];
     }
     if (stillRunning(run) || run.throughEditor) {
       return [];
