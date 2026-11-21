@@ -3,8 +3,8 @@
   // `lint:dead` runs this with KNIP_DISABLE_RAW_TRANSFER=1. knip parses through oxc-parser, whose
   // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
-  // helper-lost-owner.ts, helper-owner.ts, inflight-owner.ts, keep-cache.ts, keep-rounds.ts, kept-launcher.ts, nested-job.ts,
-  // run-engine-and-leave.ts, run-engine-once.ts, slot-grant.ts, slot-holder.ts and
+  // helper-lost-owner.ts, helper-owner.ts, inflight-owner.ts, keep-cache.ts, keep-rounds.ts, kept-launcher.ts, memory-engine.ts,
+  // nested-job.ts, run-engine-and-leave.ts, run-engine-once.ts, slot-grant.ts, slot-holder.ts and
   // stopped-engine.ts are started as processes by the fuzz properties and regressions, so nothing
   // imports them.
   "entry": [
@@ -17,6 +17,7 @@
     "test/support/keep-cache.ts",
     "test/support/keep-rounds.ts",
     "test/support/kept-launcher.ts",
+    "test/support/memory-engine.ts",
     "test/support/nested-job.ts",
     "test/support/run-engine-and-leave.ts",
     "test/support/run-engine-once.ts",

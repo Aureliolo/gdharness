@@ -6,8 +6,8 @@
  * WMI provider host, which walks every process and formats every property it was asked for, and a
  * machine running several servers, benches and a gate kept a whole core busy in wmiprvse for
  * listings nobody was waiting on. The kernel hands the same table over in one call, with the parent
- * links, start times and processor times in it. A handle is opened only for a command line, a
- * process's memory and the children `HoldChildren` keeps.
+ * links, start times, processor times and private bytes in it. A handle is opened only for a
+ * command line and the children `HoldChildren` keeps.
  */
 
 import { tmpdir } from 'node:os';
@@ -77,6 +77,7 @@ public static class GdhProcessTable
         public int Parent;
         public long Created;
         public long Processor;
+        public long Private;
     }
 
     private static readonly Dictionary<int, IntPtr> held = new Dictionary<int, IntPtr>();
@@ -87,6 +88,7 @@ public static class GdhProcessTable
     {
         int pidAt = IntPtr.Size == 8 ? 80 : 68;
         int parentAt = IntPtr.Size == 8 ? 88 : 72;
+        int privateAt = IntPtr.Size == 8 ? 200 : 132;
         int length = 1 << 20;
         while (true)
         {
@@ -115,6 +117,7 @@ public static class GdhProcessTable
                     entry.Processor = Marshal.ReadInt64(at, 40) + Marshal.ReadInt64(at, 48);
                     entry.Pid = (int)Marshal.ReadIntPtr(at, pidAt).ToInt64();
                     entry.Parent = (int)Marshal.ReadIntPtr(at, parentAt).ToInt64();
+                    entry.Private = Marshal.ReadIntPtr(at, privateAt).ToInt64();
                     entries.Add(entry);
                     int next = Marshal.ReadInt32(at, 0);
                     if (next == 0)
@@ -301,41 +304,68 @@ public static class GdhProcessTable
         return said.ToString();
     }
 
-    private const int ProcessVmCounters = 3;
-
-    /// <summary>"pid bytes" on a line for each of the comma-separated pids that will open, the bytes it has committed.</summary>
+    /// <summary>
+    /// "pid bytes children" on a line for each running one of the comma-separated pids, from one
+    /// snapshot: the private bytes of the process and of every process below it, and those below it
+    /// as comma-separated pids. A process counts as a child only if it started after its parent.
+    /// </summary>
     public static string HeldBy(string pids)
     {
-        StringBuilder said = new StringBuilder();
-        int size = 11 * IntPtr.Size;
-        foreach (int pid in Pids(pids))
+        List<Entry> entries = Snapshot();
+        Dictionary<int, Entry> byPid = new Dictionary<int, Entry>();
+        Dictionary<int, List<Entry>> children = new Dictionary<int, List<Entry>>();
+        foreach (Entry entry in entries)
         {
-            IntPtr handle = OpenProcess(QueryLimitedInformation, false, pid);
-            if (handle == IntPtr.Zero)
+            byPid[entry.Pid] = entry;
+        }
+        foreach (Entry entry in entries)
+        {
+            Entry parent;
+            if (entry.Pid <= 0 || !byPid.TryGetValue(entry.Parent, out parent) || entry.Created < parent.Created)
             {
                 continue;
             }
-            try
+            List<Entry> siblings;
+            if (!children.TryGetValue(entry.Parent, out siblings))
             {
-                IntPtr buffer = Marshal.AllocHGlobal(size);
-                try
+                siblings = new List<Entry>();
+                children[entry.Parent] = siblings;
+            }
+            siblings.Add(entry);
+        }
+        StringBuilder said = new StringBuilder();
+        foreach (int pid in Pids(pids))
+        {
+            Entry root;
+            if (!byPid.TryGetValue(pid, out root))
+            {
+                continue;
+            }
+            long bytes = root.Private;
+            List<string> below = new List<string>();
+            HashSet<int> seen = new HashSet<int>();
+            seen.Add(pid);
+            Queue<int> queue = new Queue<int>();
+            queue.Enqueue(pid);
+            while (queue.Count > 0)
+            {
+                List<Entry> next;
+                if (!children.TryGetValue(queue.Dequeue(), out next))
                 {
-                    int needed;
-                    if (NtQueryInformationProcess(handle, ProcessVmCounters, buffer, size, out needed) == 0)
+                    continue;
+                }
+                foreach (Entry child in next)
+                {
+                    if (seen.Add(child.Pid))
                     {
-                        long bytes = Marshal.ReadIntPtr(buffer, 9 * IntPtr.Size).ToInt64();
-                        said.Append(Number(pid)).Append(' ').Append(bytes.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                        bytes += child.Private;
+                        below.Add(Number(child.Pid));
+                        queue.Enqueue(child.Pid);
                     }
                 }
-                finally
-                {
-                    Marshal.FreeHGlobal(buffer);
-                }
             }
-            finally
-            {
-                CloseHandle(handle);
-            }
+            said.Append(Number(pid)).Append(' ').Append(bytes.ToString(CultureInfo.InvariantCulture)).Append(' ')
+                .Append(string.Join(",", below.ToArray())).Append('\n');
         }
         return said.ToString();
     }

@@ -1,3 +1,4 @@
+import type { MemoryEnd } from './engine-memory.js';
 import type { CallSlot } from './engine-slots.js';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay, RestartedFrom } from './run-record.js';
@@ -251,4 +252,6 @@ export interface GodotProcess {
 export interface SpawnedGame extends GodotProcess {
   process: ChildProcess;
   throughEditor: false;
+  /** Set when the run was ended for holding more memory than its ceiling. */
+  memoryEnd?: MemoryEnd;
 }

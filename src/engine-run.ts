@@ -22,6 +22,13 @@ import {
   helperPid,
   spawnOnDesktop,
 } from './desktop.js';
+import {
+  CEILING_VARIABLE,
+  ceilingBytes,
+  type EngineGuard,
+  engineMemory,
+  memoryEndedSaid,
+} from './engine-memory.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
@@ -149,6 +156,12 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
+  let ceiling: number;
+  try {
+    ceiling = ceilingBytes();
+  } catch (error) {
+    return { log: new GameLog(), exitCode: null, exitSignal: null, failure: errorMessage(error) };
+  }
   if (options.desktop !== undefined || process.platform === 'win32') {
     const compiled = await ensureHelperCompiled();
     if (compiled !== null) {
@@ -163,7 +176,11 @@ export async function runEngine(
   try {
     return await inASlot(
       (lock) =>
-        startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
+        startedUntilItRuns(
+          () => runStarted(executable, args, lock, options, signal, ceiling),
+          signal,
+          crashedAtStart,
+        ),
       options.project,
     );
   } catch (error) {
@@ -301,6 +318,7 @@ function runStarted(
   lock: string,
   options: RunOptions,
   signal: AbortSignal | undefined,
+  ceiling: number,
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
@@ -331,8 +349,18 @@ function runStarted(
       log.append('stderr', chunk);
     });
     const state: RunState = { pid: engineAt(), failure: null, closed: false };
+    let guard: EngineGuard | undefined;
     const found = (engine: number): void => {
       watching(engine, true);
+      guard ??= engineMemory.guard(
+        engine,
+        ceiling,
+        (end) => {
+          state.failure ??= memoryEndedSaid(end, CEILING_VARIABLE);
+          child.kill();
+        },
+        options.project === undefined ? undefined : { project: options.project, tool: 'headless' },
+      );
       if (files !== null) {
         void nameSlotEngineOf(lock, process.pid, engine);
       }
@@ -367,6 +395,7 @@ function runStarted(
     });
     child.on('close', (code, closedBy) => {
       state.closed = true;
+      guard?.release();
       if (state.pid !== undefined) {
         watching(state.pid, false);
       }
