@@ -2,14 +2,18 @@
  * What an engine this server started may hold: a ceiling that ends it, and the peak of each project's
  * engines kept so the next start of that project counts what it is likely to take.
  *
- * One watcher reads every guarded engine's memory together, with the processes below it, so an engine
- * that forks workers is counted whole. It runs only while an engine is guarded.
+ * One watcher judges every guarded engine from the shared sample, which reads each engine's memory
+ * once with the processes below it, so an engine that forks workers is counted whole and an engine
+ * also watched for its time is read once. It runs only while an engine is guarded.
  */
 
+import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
+import { join } from 'node:path';
 import { alive } from './alive.js';
-import { type TreeHeld, treesHeldBy } from './engine-spent.js';
+import { type Sample, sampled, watching } from './engine-spent.js';
 import { EngineUsageError } from './errors.js';
+import { parseProjectGodot } from './resources.js';
 import { type PeakTool, recordEnginePeak } from './run-record.js';
 
 const GIB = 1024 ** 3;
@@ -20,6 +24,9 @@ export const MEMORY_PER_ENGINE = 1.5 * GIB;
 
 /** The variable that sets the ceiling of every engine this server starts, in megabytes. */
 export const CEILING_VARIABLE = 'GDHARNESS_ENGINE_MEMORY_CEILING_MB';
+
+/** The project setting that sets the ceiling of every engine started for that project, in megabytes. */
+const CEILING_SETTING = 'gdharness/engine/memory_ceiling_mb';
 
 /** The least the default ceiling is, whatever the machine has. */
 const CEILING_FLOOR_BYTES = 4 * GIB;
@@ -35,34 +42,84 @@ function defaultCeilingBytes(memory: number = totalmem()): number {
   return Math.max(CEILING_FLOOR_BYTES, Math.floor(memory / 4));
 }
 
+/** Where a ceiling's figure comes from: the project's setting, the server's variable, or the default. */
+type CeilingSource = 'project' | 'variable' | 'default';
+
+/** The most one engine may hold, and where that figure comes from. */
+export interface Ceiling {
+  readonly bytes: number;
+  readonly source: CeilingSource;
+}
+
+/** The setting of the project at [param project] as read from its project.godot, or undefined when it is not set. */
+function settingOf(project: string): string | number | boolean | null | undefined {
+  try {
+    return parseProjectGodot(readFileSync(join(project, 'project.godot'), 'utf8'))['gdharness']?.[
+      CEILING_SETTING.slice('gdharness/'.length)
+    ];
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * The ceiling for one engine, in bytes: the variable in [param env], else {@link defaultCeilingBytes}
- * of [param memory].
+ * The ceiling for one engine started for [param project]: the project's setting, else the variable in
+ * [param env], else a quarter of [param memory] and at least 4 GiB. A setting or variable that is not a
+ * whole number of megabytes above 0 is refused.
  */
-export function ceilingBytes(env: NodeJS.ProcessEnv = process.env, memory: number = totalmem()): number {
+export function ceilingFor(
+  project: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  memory: number = totalmem(),
+): Ceiling {
+  const set = project === undefined ? undefined : settingOf(project);
+  if (set !== undefined) {
+    if (typeof set !== 'number' || !Number.isInteger(set) || set <= 0) {
+      throw new EngineUsageError(
+        `${CEILING_SETTING} in project.godot takes a whole number of megabytes above 0, not ${String(set)}.`,
+      );
+    }
+    return { bytes: set * MIB, source: 'project' };
+  }
   const named = env[CEILING_VARIABLE]?.trim() ?? '';
-  if (named !== '' && !/^[1-9]\d*$/.test(named)) {
+  if (named === '') {
+    return { bytes: defaultCeilingBytes(memory), source: 'default' };
+  }
+  if (!/^[1-9]\d*$/.test(named)) {
     throw new EngineUsageError(
       `${CEILING_VARIABLE} takes a whole number of megabytes above 0, not ${named}.`,
     );
   }
-  return named === '' ? defaultCeilingBytes(memory) : Number(named) * MIB;
+  return { bytes: Number(named) * MIB, source: 'variable' };
 }
 
-/** An engine that held more than its ceiling: the most it held and the ceiling it passed. */
+/** The ceiling of an engine started for no project: see {@link ceilingFor}. */
+export function ceilingBytes(env: NodeJS.ProcessEnv = process.env, memory: number = totalmem()): number {
+  return ceilingFor(undefined, env, memory).bytes;
+}
+
+/** An engine that held more than its ceiling: the most it held, the ceiling it passed and where that came from. */
 export interface MemoryEnd {
   readonly peakBytes: number;
   readonly ceilingBytes: number;
+  readonly source: CeilingSource;
 }
 
-/** What an engine held past its ceiling, and [param raisedBy], the argument or variable that raises it. */
-export function memoryCeilingSaid(end: MemoryEnd, raisedBy: string): string {
-  return `the engine held ${gigabytes(end.peakBytes)}, past the ${gigabytes(end.ceilingBytes)} ceiling. Set ${raisedBy} to raise it`;
+/** What an engine held past its ceiling, and the setting or variable that raises the ceiling. */
+export function memoryCeilingSaid(end: MemoryEnd): string {
+  const held = `the engine held ${gigabytes(end.peakBytes)}, past the ${gigabytes(end.ceilingBytes)} ceiling`;
+  if (end.source === 'project') {
+    return `${held}. Set ${CEILING_SETTING} in project.godot to raise it`;
+  }
+  if (end.source === 'variable') {
+    return `${held}. Set ${CEILING_VARIABLE} to raise it`;
+  }
+  return `${held}, the default. Set ${CEILING_VARIABLE} or ${CEILING_SETTING} in project.godot to raise it`;
 }
 
 /** Why an engine was ended for its memory, as the reason an answer gives. */
-export function memoryEndedSaid(end: MemoryEnd, raisedBy: string): string {
-  return `ended for its memory: ${memoryCeilingSaid(end, raisedBy)}`;
+export function memoryEndedSaid(end: MemoryEnd): string {
+  return `ended for its memory: ${memoryCeilingSaid(end)}`;
 }
 
 /** What a start of [param tool]'s engine needs, and what that figure is taken from. */
@@ -93,7 +150,7 @@ export function startRefusedSaid(
 /** One engine under guard. */
 interface Guarded {
   readonly pid: number;
-  readonly ceilingBytes: number;
+  readonly ceiling: Ceiling;
   readonly ended: (end: MemoryEnd) => void;
   readonly keep: { readonly project: string; readonly tool: PeakTool } | undefined;
   peak: number;
@@ -112,14 +169,11 @@ export class MemoryWatch {
   private readonly guards = new Set<Guarded>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private reading = false;
-  private readonly read: (pids: readonly number[]) => Promise<ReadonlyMap<number, TreeHeld>>;
+  private readonly sample: () => Promise<Sample>;
   private readonly everyMs: number;
 
-  constructor(
-    read: (pids: readonly number[]) => Promise<ReadonlyMap<number, TreeHeld>> = treesHeldBy,
-    everyMs: number = POLL_MS,
-  ) {
-    this.read = read;
+  constructor(sample: () => Promise<Sample> = sampled, everyMs: number = POLL_MS) {
+    this.sample = sample;
     this.everyMs = everyMs;
   }
 
@@ -129,18 +183,19 @@ export class MemoryWatch {
   }
 
   /**
-   * Guards the engine [param pid]. Once it and everything below it hold more than [param ceiling]
-   * bytes, the processes below it are ended and [param ended] is called, once. The caller ends the
+   * Guards the engine [param pid]. Once it and everything below it hold more than [param ceiling],
+   * the processes below it are ended and [param ended] is called, once. The caller ends the
    * engine itself there. The peak is kept for [param keep]'s project and tool when the guard is released.
    */
   guard(
     pid: number,
-    ceiling: number,
+    ceiling: Ceiling,
     ended: (end: MemoryEnd) => void,
     keep?: { readonly project: string; readonly tool: PeakTool },
   ): EngineGuard {
-    const guarded: Guarded = { pid, ceilingBytes: ceiling, ended, keep, peak: 0, over: false };
+    const guarded: Guarded = { pid, ceiling, ended, keep, peak: 0, over: false };
     this.guards.add(guarded);
+    watching(pid, true, true);
     this.timer ??= setInterval(() => {
       void this.poll();
     }, this.everyMs);
@@ -155,6 +210,7 @@ export class MemoryWatch {
     if (!this.guards.delete(guarded)) {
       return guarded.peak;
     }
+    watching(guarded.pid, false);
     if (this.guards.size === 0 && this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -175,10 +231,10 @@ export class MemoryWatch {
       if (live.length === 0) {
         return;
       }
-      const held = await this.read(live.map((one) => one.pid));
+      const taken = await this.sample();
       for (const one of live) {
         if (this.guards.has(one)) {
-          this.judge(one, held.get(one.pid));
+          this.judge(one, taken.held?.get(one.pid), taken.below?.get(one.pid) ?? []);
         }
       }
     } finally {
@@ -186,9 +242,9 @@ export class MemoryWatch {
     }
   }
 
-  /** Records what [param tree] holds against [param one]'s ceiling, ending the engine past it. */
-  private judge(one: Guarded, tree: TreeHeld | undefined): void {
-    if (tree === undefined) {
+  /** Records the [param bytes] [param one] holds with [param below] against its ceiling, ending the engine past it. */
+  private judge(one: Guarded, bytes: number | undefined, below: readonly number[]): void {
+    if (bytes === undefined) {
       // An engine nobody released, such as a game that outlives the call that started it.
       if (!alive(one.pid)) {
         this.release(one);
@@ -198,19 +254,19 @@ export class MemoryWatch {
     if (one.over) {
       return;
     }
-    one.peak = Math.max(one.peak, tree.bytes);
-    if (tree.bytes <= one.ceilingBytes) {
+    one.peak = Math.max(one.peak, bytes);
+    if (bytes <= one.ceiling.bytes) {
       return;
     }
     one.over = true;
-    for (const below of tree.below) {
+    for (const child of below) {
       try {
-        process.kill(below, 'SIGKILL');
+        process.kill(child, 'SIGKILL');
       } catch {
         // Gone already.
       }
     }
-    one.ended({ peakBytes: one.peak, ceilingBytes: one.ceilingBytes });
+    one.ended({ peakBytes: one.peak, ceilingBytes: one.ceiling.bytes, source: one.ceiling.source });
   }
 }
 

@@ -158,8 +158,8 @@ import {
   walkStoppedPartWay,
 } from './engine-leaks.js';
 import {
-  CEILING_VARIABLE,
-  ceilingBytes,
+  type Ceiling,
+  ceilingFor,
   engineMemory,
   type MemoryEnd,
   memoryCeilingSaid,
@@ -10173,24 +10173,25 @@ class GodotServer {
   }
 
   /**
-   * The ceiling for the engine of a call, or the refusal when GDHARNESS_ENGINE_MEMORY_CEILING_MB is
-   * not a size or the machine has no room for what this project's last engine of [param tool] held.
+   * The ceiling for the engine of a call, or the refusal when the project's setting or
+   * GDHARNESS_ENGINE_MEMORY_CEILING_MB is not a size, or the machine has no room for what this
+   * project's last engine of [param tool] held.
    */
   private async memoryCeiling(
     projectPath: string,
     tool: PeakTool,
   ): Promise<
-    { readonly ok: true; readonly bytes: number } | { readonly ok: false; readonly response: ToolResponse }
+    { readonly ok: true; readonly ceiling: Ceiling } | { readonly ok: false; readonly response: ToolResponse }
   > {
-    let bytes: number;
+    let ceiling: Ceiling;
     try {
-      bytes = ceilingBytes();
+      ceiling = ceilingFor(projectPath);
     } catch (error) {
       return { ok: false, response: this.createErrorResponse(errorMessage(error)) };
     }
-    const refused = await memoryRefusal(projectPath, tool, bytes);
+    const refused = await memoryRefusal(projectPath, tool, ceiling.bytes);
     return refused === null
-      ? { ok: true, bytes }
+      ? { ok: true, ceiling }
       : { ok: false, response: this.createErrorResponse(refused) };
   }
 
@@ -10405,10 +10406,7 @@ class GodotServer {
       cmdArgs,
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
-      {
-        tool: 'project_test',
-        ceiling: ceilingBytes(),
-      },
+      'project_test',
       project.value.path,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
@@ -10573,7 +10571,7 @@ class GodotServer {
   private cutShortBy(read: TestReadOut): { readonly verdict: string; readonly hung: boolean } | null {
     const { run, timedOut, timeoutMs, silentForMs, saidAnything } = read;
     if (run.memoryEnd !== undefined) {
-      return { verdict: memoryEndedSaid(run.memoryEnd, CEILING_VARIABLE), hung: false };
+      return { verdict: memoryEndedSaid(run.memoryEnd), hung: false };
     }
     return timedOut
       ? timedOutVerdict(
@@ -12652,7 +12650,7 @@ class GodotServer {
           : `pid ${String(this.launchedEditor.pid)}: ${
               this.launchedEditor.memoryEnd === undefined
                 ? howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)
-                : memoryEndedSaid(this.launchedEditor.memoryEnd, CEILING_VARIABLE)
+                : memoryEndedSaid(this.launchedEditor.memoryEnd)
             }`,
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer. An open cannot, because it returns before the save happens.
@@ -13725,17 +13723,11 @@ class GodotServer {
     if (!ceiling.ok) {
       return ceiling.response;
     }
-    const opened = await this.openAnEditor(
-      engine.value,
-      project.path,
-      ports,
-      {
-        hidden: args['hidden'] === true,
-        silent: resolveSilent(args['silent']),
-        until: null,
-      },
-      ceiling.bytes,
-    );
+    const opened = await this.openAnEditor(engine.value, project.path, ports, {
+      hidden: args['hidden'] === true,
+      silent: resolveSilent(args['silent']),
+      until: null,
+    });
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
@@ -13840,11 +13832,10 @@ class GodotServer {
     projectPath: string,
     ports: EditorPorts,
     start: EditorStart,
-    memoryCeiling?: number,
   ): Promise<EditorOpened> {
-    let ceiling: number;
+    let ceiling: Ceiling;
     try {
-      ceiling = memoryCeiling ?? ceilingBytes();
+      ceiling = ceilingFor(projectPath);
     } catch (error) {
       return { pid: null, startedAt: null, error: errorMessage(error), arguments: [] };
     }
@@ -14265,9 +14256,9 @@ class GodotServer {
         : {}),
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const ceiling = await this.memoryCeiling(project.value.path, 'editor_run');
-    if (!ceiling.ok) {
-      return ceiling.response;
+    const memory = await this.memoryCeiling(project.value.path, 'editor_run');
+    if (!memory.ok) {
+      return memory.response;
     }
     const launch = async (): Promise<GodotProcess | { error: string }> => {
       const game = await this.launchKeptGame(
@@ -14287,7 +14278,7 @@ class GodotServer {
       if (!('error' in game) && game.pid !== null) {
         engineMemory.guard(
           game.pid,
-          ceiling.bytes,
+          memory.ceiling,
           (end) => {
             void this.endForItsMemory(game, end);
           },
@@ -14309,11 +14300,7 @@ class GodotServer {
   /** Ends [param game], a run held past its memory ceiling, and says so on it. */
   private async endForItsMemory(game: GodotProcess, end: MemoryEnd): Promise<void> {
     if (this.activeProcess === game) {
-      await this.endActiveGame(
-        `its memory ceiling: ${memoryCeilingSaid(end, CEILING_VARIABLE)}`,
-        true,
-        false,
-      );
+      await this.endActiveGame(`its memory ceiling: ${memoryCeilingSaid(end)}`, true, false);
     } else if (game.pid !== null) {
       try {
         process.kill(game.pid, 'SIGKILL');
@@ -15734,12 +15721,10 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
-    memory: { readonly tool: PeakTool; readonly ceiling: number } = {
-      tool: 'editor_run',
-      ceiling: ceilingBytes(),
-    },
+    tool: PeakTool = 'editor_run',
     project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
+    const ceiling = ceilingFor(project);
     if (onDesktop === undefined && process.platform === 'win32') {
       const compiled = await ensureHelperCompiled();
       if (compiled !== null) {
@@ -15761,12 +15746,12 @@ class GodotServer {
       if (run.pid !== null) {
         const guard = engineMemory.guard(
           run.pid,
-          memory.ceiling,
+          ceiling,
           (end) => {
             run.memoryEnd = end;
             run.stop();
           },
-          project === undefined ? undefined : { project, tool: memory.tool },
+          project === undefined ? undefined : { project, tool },
         );
         void run.settled.finally(guard.release);
       }

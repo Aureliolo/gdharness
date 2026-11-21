@@ -42,6 +42,8 @@ export interface Sample {
   /** Null when the machine was quiet enough that no engine's processor time needed reading. */
   readonly processors: ReadonlyMap<number, number> | null;
   readonly held?: ReadonlyMap<number, number>;
+  /** The processes below each engine whose memory was read, which are counted in its figure. */
+  readonly below?: ReadonlyMap<number, readonly number[]>;
 }
 
 /**
@@ -190,11 +192,36 @@ async function take(): Promise<Sample> {
       ? 1
       : (machine - previous.machine) / ((at - previous.at) * availableParallelism());
   const busy = share >= BUSY && watched.size > 0;
-  const [processors, held] = await Promise.all([
+  const [processors, trees] = await Promise.all([
     busy ? processorSecondsOf([...watched]) : null,
-    withMemory.size === 0 ? null : heldBy([...withMemory]),
+    withMemory.size === 0 ? null : readTrees([...withMemory]),
   ]);
-  return { at, machine, processors, ...(held === null ? {} : { held }) };
+  return {
+    at,
+    machine,
+    processors,
+    ...(trees === null
+      ? {}
+      : {
+          held: new Map([...trees].map(([pid, tree]) => [pid, tree.bytes])),
+          below: new Map([...trees].map(([pid, tree]) => [pid, tree.below])),
+        }),
+  };
+}
+
+let readTrees: (pids: readonly number[]) => Promise<Map<number, TreeHeld>> = treesHeldBy;
+/**
+ * Reads engine memory with [param read] until the function returned is called, so a case can count
+ * the readings a sample takes.
+ */
+export function readingMemoryWith(
+  read: (pids: readonly number[]) => Promise<Map<number, TreeHeld>>,
+): () => void {
+  const before = readTrees;
+  readTrees = read;
+  return () => {
+    readTrees = before;
+  };
 }
 
 /** What a process and everything below it hold, and the processes below it. */
