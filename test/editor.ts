@@ -3237,7 +3237,11 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   // A type variation's base is set through modify, and the file holds it as the engine writes it.
   const varied = { projectPath: project, resourcePath: 'res://theme_variation.tres' };
   await call('resource_edit', { ...varied, op: 'create', resourceType: 'Theme' });
-  await call('resource_edit', { ...varied, op: 'modify', properties: { 'NewType/base_type': 'PanelContainer' } });
+  await call('resource_edit', {
+    ...varied,
+    op: 'modify',
+    properties: { 'NewType/base_type': 'PanelContainer' },
+  });
   assert.match(fileText(project, 'theme_variation.tres'), /^NewType\/base_type = &"PanelContainer"$/m);
   assert.deepEqual(get(await call('resource_edit', { ...varied, op: 'read' }), 'properties'), {
     'NewType/base_type': 'PanelContainer',

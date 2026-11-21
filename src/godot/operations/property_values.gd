@@ -454,16 +454,20 @@ func _check_held(writing: GdhWriting) -> void:
 
 
 ## The refusal for a Theme's [param property], a type variation's base, that holds [param held]
-## after it was given [param given]. The engine keeps no base for a type named after one of its
-## classes or for an empty one, and answers neither.
+## after it was given [param given]. The engine keeps no empty base, and no base for a type named
+## after one of its classes.
 func _base_not_held(property: String, given: Variant, held: Variant) -> String:
+	var cause: String = (
+		"the engine takes no empty base"
+		if str(given).is_empty()
+		else "the engine takes no base for a type named after an engine class"
+	)
 	return (
 		(
-			"Theme.%s was given %s and holds %s after it was set: the engine takes no base for a "
-			+ "type named after an engine class, and no empty base. remove_theme_item without "
+			"Theme.%s was given %s and holds %s after it was set: %s. remove_theme_item without "
 			+ "item takes a base out with its type. Nothing was written."
 		)
-		% [property, shown(given), shown(held)]
+		% [property, shown(given), shown(held), cause]
 	)
 
 
