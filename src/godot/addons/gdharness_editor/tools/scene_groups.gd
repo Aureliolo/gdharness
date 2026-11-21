@@ -15,7 +15,7 @@ static func read(scene: GdhSceneFile, node: Node) -> Dictionary:
 	if all.is_empty():
 		return {}
 	var answer: Dictionary = { "groups": all }
-	var here: Array = _sorted(scene.groups_at(scene.filed_path(node)))
+	var here: Array = _sorted(scene.groups_at(scene.path_of(node)))
 	if here.size() != all.size():
 		answer["groupsHere"] = here
 	return answer
