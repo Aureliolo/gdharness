@@ -273,6 +273,7 @@ import {
   crowded,
   nowSeconds,
   processorSecondsOf,
+  readingMemoryWith,
   type Sample,
   Spent,
   STARVED,
@@ -126237,17 +126238,25 @@ async function testAProjectWithNoKeptPeakCountsOneAndAHalfGiB(): Promise<void> {
 
 /** The watcher reads only while an engine is guarded, and stops reading one once it is released. */
 async function testTheMemoryWatcherPollsOnlyWhileAnEngineIsGuarded(): Promise<void> {
-  const asked: number[][] = [];
-  const watch = new MemoryWatch((pids) => {
-    asked.push([...pids]);
-    return Promise.resolve(new Map(pids.map((pid) => [pid, { bytes: 1, below: [] }])));
+  const asked: number[] = [];
+  const watch = new MemoryWatch(() => {
+    asked.push(Date.now());
+    return Promise.resolve({
+      at: 0,
+      machine: 0,
+      processors: null,
+      held: new Map([[process.pid, 1]]),
+      below: new Map([[process.pid, []]]),
+    });
   }, 10);
   await delay(100);
   assert.deepEqual([watch.polling, asked.length], [false, 0], 'nothing guarded, nothing read');
-  const guard = watch.guard(process.pid, 1024 ** 3, () => assert.fail('under its ceiling'));
+  const guard = watch.guard(process.pid, { bytes: 1024 ** 3, source: 'default' }, () =>
+    assert.fail('under its ceiling'),
+  );
   await delay(150);
   assert.equal(watch.polling, true);
-  assert.ok(asked.length > 3 && asked.every((pids) => pids.length === 1 && pids[0] === process.pid));
+  assert.ok(asked.length > 3);
   assert.equal(guard.release(), 1);
   const after = asked.length;
   await delay(100);
@@ -126313,6 +126322,180 @@ async function testTheLinuxMemoryReaderCountsAProcessAndWhatItStarted(): Promise
 /** macOS reads the resident size from ps. */
 async function testTheMacMemoryReaderCountsAProcessAndWhatItStarted(): Promise<void> {
   await checkTheMemoryReaderOf('darwin');
+}
+
+/** Puts the project setting that holds the ceiling, in megabytes, into [param project]. */
+function setTheCeilingOf(project: string, value: string): void {
+  appendFileSync(join(project, 'project.godot'), `\n[gdharness]\n\nengine/memory_ceiling_mb=${value}\n`);
+}
+
+const SETTING_END_SAID =
+  /^ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set gdharness\/engine\/memory_ceiling_mb in project\.godot to raise it$/;
+
+/** Runs [param body] with [param holds] in this process's environment, which the engines it starts inherit. */
+async function withHoldsInTheEnvironment<T>(
+  holds: Record<string, string>,
+  body: () => Promise<T>,
+): Promise<T> {
+  const before = Object.keys(holds).map((name) => [name, process.env[name]] as const);
+  Object.assign(process.env, holds);
+  try {
+    return await body();
+  } finally {
+    for (const [name, value] of before) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+}
+
+/** A project's setting is the ceiling of every engine started for it, and its answer names the setting. */
+async function testAProjectSettingEndsItsEnginesPastTheCeiling(): Promise<void> {
+  await withMemoryEngine(
+    { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
+    async (call, project) => {
+      setTheCeilingOf(project, '300');
+      const ran = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
+      assert.match(String(get(ran, 'verdict')), SETTING_END_SAID, JSON.stringify(ran));
+      assert.equal(get(ran, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(ran));
+      assert.equal(get(ran, 'memoryEnded', 'source'), 'project', JSON.stringify(ran));
+
+      const started = await call('editor_run', { op: 'start', headless: true });
+      assert.equal(get(started, 'started'), true, JSON.stringify(started));
+      let output: unknown = null;
+      for (let tries = 0; tries < 40 && get(output, 'running') !== false; tries++) {
+        await delay(500);
+        output = await call('editor_output', {});
+      }
+      assert.match(
+        String(get(output, 'endedBy')),
+        /^its memory ceiling: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set gdharness\/engine\/memory_ceiling_mb in project\.godot to raise it$/,
+        JSON.stringify(output),
+      );
+
+      const editor = await call('editor_launch', { op: 'open' });
+      assert.equal(get(editor, 'launched'), true, JSON.stringify(editor));
+      let ended = '';
+      for (let tries = 0; tries < 40 && ended === ''; tries++) {
+        await delay(500);
+        const said = get(await call('editor_status', {}), 'editor', 'launchedEditorEnded');
+        ended = typeof said === 'string' ? said : '';
+      }
+      assert.match(
+        ended,
+        new RegExp(`^pid ${String(get(editor, 'pid'))}: ${SETTING_END_SAID.source.slice(1)}`),
+        ended,
+      );
+
+      const headless = await withHoldsInTheEnvironment(
+        { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
+        () =>
+          runEngine(memoryEngine(), ['--headless', '--path', project], {
+            timeout: { ms: 60_000, said: 'a minute' },
+            project,
+          }),
+      );
+      assert.match(String(headless.failure), SETTING_END_SAID, String(headless.failure));
+    },
+  );
+}
+
+/** A project's setting wins over the variable for that project only, and another project keeps the variable. */
+async function testTheSettingWinsOverTheVariableForItsProjectOnly(): Promise<void> {
+  await withMemoryEngine(
+    {
+      GDH_HOLD_MB: '600',
+      GDH_GROW_MB: '100',
+      GDH_STAY_MS: '3500',
+      [CEILING_VARIABLE]: '400',
+    },
+    async (call, project) => {
+      setTheCeilingOf(project, '800');
+      const own = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
+      assert.equal(get(own, 'memoryEnded'), undefined, `the setting raised it: ${JSON.stringify(own)}`);
+      assert.equal(get(own, 'exitCode'), 0, JSON.stringify(own));
+
+      const other = memoryProject();
+      try {
+        const bound = await call('project_test', {
+          projectPath: other,
+          path: 'res://tests',
+          timeoutMs: 60_000,
+        });
+        assert.match(
+          String(get(bound, 'verdict')),
+          /^ended for its memory: the engine held 0\.[4-9] GB, past the 0\.4 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
+          JSON.stringify(bound),
+        );
+        assert.equal(get(bound, 'memoryEnded', 'source'), 'variable', JSON.stringify(bound));
+      } finally {
+        sweep(other);
+      }
+    },
+  );
+}
+
+/** A setting that is not a whole number above 0 refuses the start, naming the setting, its value and the rule. */
+async function testASettingThatIsNoSizeRefusesTheStart(): Promise<void> {
+  const refusal = (value: string): string =>
+    `gdharness/engine/memory_ceiling_mb in project.godot takes a whole number of megabytes above 0, not ${value}.`;
+  await withMemoryEngine({ GDH_STAY_MS: '1000' }, async (call, project) => {
+    const file = join(project, 'project.godot');
+    const clean = readFileSync(file, 'utf8');
+    for (const [written, shown] of [
+      ['0', '0'],
+      ['-5', '-5'],
+      ['"lots"', 'lots'],
+      ['2.5', '2.5'],
+    ] as const) {
+      writeFileSync(file, clean);
+      setTheCeilingOf(project, written);
+      assert.equal(
+        await call('project_test', { path: 'res://tests', timeoutMs: 60_000 }),
+        refusal(shown),
+        `project_test with ${written}`,
+      );
+    }
+    assert.equal(await call('editor_run', { op: 'start', headless: true }), refusal('2.5'), 'editor_run');
+    assert.equal(await call('editor_launch', { op: 'open' }), refusal('2.5'), 'editor_launch');
+    const headless = await runEngine(memoryEngine(), ['--headless', '--path', project], { project });
+    assert.equal(headless.failure, refusal('2.5'), 'a headless operation');
+  });
+}
+
+/** One engine is read once for each sample, whoever asks for it. */
+async function testAHeadlessEngineIsSampledOncePerTick(): Promise<void> {
+  const project = memoryProject();
+  const reads: { readonly at: number; readonly pids: readonly number[] }[] = [];
+  const restore = readingMemoryWith((pids) => {
+    reads.push({ at: Date.now(), pids: [...pids] });
+    return treesHeldBy(pids);
+  });
+  try {
+    const ran = await withHoldsInTheEnvironment({ GDH_HOLD_MB: '60', GDH_STAY_MS: '3500' }, () =>
+      runEngine(memoryEngine(), ['--headless', '--path', project], {
+        timeout: { ms: 60_000, said: 'a minute' },
+        project,
+      }),
+    );
+    assert.equal(ran.exitCode, 0, String(ran.failure));
+  } finally {
+    restore();
+    sweep(project);
+  }
+  assert.ok(reads.length >= 3, `the engine was read while it ran: ${JSON.stringify(reads)}`);
+  assert.ok(
+    reads.every((read) => read.pids.length === 1),
+    `each reading names the one engine once: ${JSON.stringify(reads)}`,
+  );
+  const gaps = reads.slice(1).map((read, at) => read.at - (reads[at]?.at ?? 0));
+  assert.ok(
+    gaps.every((gap) => gap >= 450),
+    `no two readings share a tick: ${JSON.stringify(gaps)}`,
+  );
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -127696,6 +127879,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWindowsMemoryReaderCountsAProcessAndWhatItStarted,
   testTheLinuxMemoryReaderCountsAProcessAndWhatItStarted,
   testTheMacMemoryReaderCountsAProcessAndWhatItStarted,
+  testAProjectSettingEndsItsEnginesPastTheCeiling,
+  testTheSettingWinsOverTheVariableForItsProjectOnly,
+  testASettingThatIsNoSizeRefusesTheStart,
+  testAHeadlessEngineIsSampledOncePerTick,
 ];
 
 /**

@@ -23,8 +23,8 @@ import {
   spawnOnDesktop,
 } from './desktop.js';
 import {
-  CEILING_VARIABLE,
-  ceilingBytes,
+  type Ceiling,
+  ceilingFor,
   type EngineGuard,
   engineMemory,
   memoryEndedSaid,
@@ -156,9 +156,9 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
-  let ceiling: number;
+  let ceiling: Ceiling;
   try {
-    ceiling = ceilingBytes();
+    ceiling = ceilingFor(options.project);
   } catch (error) {
     return { log: new GameLog(), exitCode: null, exitSignal: null, failure: errorMessage(error) };
   }
@@ -318,7 +318,7 @@ function runStarted(
   lock: string,
   options: RunOptions,
   signal: AbortSignal | undefined,
-  ceiling: number,
+  ceiling: Ceiling,
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
@@ -356,7 +356,7 @@ function runStarted(
         engine,
         ceiling,
         (end) => {
-          state.failure ??= memoryEndedSaid(end, CEILING_VARIABLE);
+          state.failure ??= memoryEndedSaid(end);
           child.kill();
         },
         options.project === undefined ? undefined : { project: options.project, tool: 'headless' },

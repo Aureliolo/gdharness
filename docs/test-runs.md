@@ -363,7 +363,14 @@ ceiling is ended with everything below it, and the answer gives the peak and the
 how to raise it.
 
 The ceiling is a quarter of the physical memory and at least 4 GiB. `GDHARNESS_ENGINE_MEMORY_CEILING_MB`
-sets it, in megabytes, for every engine the server starts.
+sets it, in megabytes, for every engine the server starts. The project setting
+`gdharness/engine/memory_ceiling_mb` in `project.godot` sets it for the engines started for that
+project and wins over the variable. A setting that is not a whole number above 0 refuses the start.
+The answer for an engine ended for its memory names where its ceiling came from: the setting, the
+variable or the default.
+
+The memory of an engine is read in the same sample as its processor time, so an engine watched for
+both is read once for each tick.
 
 When an engine ends, its peak is kept for its project and tool in `runs/memory-<project>.json`.
 The next start of that tool in that project counts the larger of 1.5 GiB and the kept peak, up to the
