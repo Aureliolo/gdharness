@@ -1066,8 +1066,9 @@ long as it plays.
 ### Games and the kept slots
 
 A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
-stays when its keeper takes the lock over. Games hold at most `min(floor(kept / 2), kept - 1)` of
-the kept slots between them (2 of 16) before a game's start waits.
+stays when its keeper takes the lock over. Games hold at most `kept - 1` of the kept slots between
+them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12) before a game's start waits. The last
+kept slot stays for a headless call.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is

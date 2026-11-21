@@ -75027,28 +75027,28 @@ async function testAGameHeldBackByTheGamesLimitDoesNotSayItLooks(): Promise<void
       JSON.stringify({ pid: process.pid, started: holder.started }),
     );
     const sessions = new EngineSlots(directory, 16, holder, undefined, () => 'other');
-    const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
+    const games = [
+      await sessions.takeFree(true),
+      await sessions.takeFree(true),
+      await sessions.takeFree(true),
+    ];
     assert.ok(
       games.every((lock) => lock !== null),
-      'two games take the kept slots games may hold',
+      'three games take the kept slots games may hold',
     );
     const line = new SlotLine('other', true);
     line.mark = 'game-1.json';
     const note = join(directory, WAITING_FOLDER, 'game-1.seen');
-    assert.equal(await sessions.takeFree(true, line), null, 'a third game waits');
+    assert.equal(await sessions.takeFree(true, line), null, 'a fourth game waits');
     assert.equal(sessions.drawn.limit, 'games', 'held by the games limit');
     assert.equal(existsSync(note), false, 'and a game it holds back does not say it looks');
     const first = games[0];
     assert.ok(first !== undefined, 'the first game holds a slot');
     sessions.release(first);
-    const third = await sessions.takeFree(true, line);
-    assert.ok(third !== null, 'with the limit allowing it, the third game takes a slot');
+    const fourth = await sessions.takeFree(true, line);
+    assert.ok(fourth !== null, 'with the limit allowing it, the fourth game takes a slot');
     assert.equal(existsSync(note), true, 'and says it looks');
-    sessions.release(third);
-    const second = games[1];
-    if (second !== undefined) {
-      sessions.release(second);
-    }
+    sessions.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -75059,15 +75059,15 @@ const EVERY_OF_16_SLOTS = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
 
 /** The numbers of slots kept and drawn, and who takes which slot, need no folder of locks. */
 function checksTheSlotRulesWithoutAFolder(): void {
-  // A quarter of the slots, at least two, kept for engines outside a gate, and half of those at most
-  // for the games editor_run started, never the last, which stays for short calls.
+  // A quarter of the slots, at least two, kept for engines outside a gate, and every one of those but
+  // the last for the games editor_run started. The last stays for short calls.
   assert.deepEqual(
     [2, 4, 8, 12, 16, 32].map((count) => keptSlotsOf(count)),
     [2, 2, 2, 3, 4, 8],
   );
   assert.deepEqual(
     [1, 2, 3, 4, 8].map((kept) => gamesKeptOf(kept)),
-    [0, 1, 1, 2, 4],
+    [0, 1, 2, 3, 7],
   );
   const every16 = EVERY_OF_16_SLOTS;
   assert.deepEqual(slotsDrawnOn(16, 'other', 'none'), { numbers: every16 });
@@ -75611,12 +75611,12 @@ async function checksASlotAlreadyHeld(rig: SlotsRig): Promise<void> {
   }
 }
 
-/** Games hold two of the four kept slots on a machine with sixteen, and a short call has the rest. */
+/** Games hold three of the four kept slots on a machine with sixteen, and a short call has the last. */
 async function checksTheSixteenSlots(
   started: SlotsRig['started'],
   holder: SlotsRig['holder'],
 ): Promise<void> {
-  // Sixteen slots, four kept: games hold two between them, and a short call still has the others.
+  // Sixteen slots, four kept: games hold three between them, and a short call still has the last.
   // A probe's headless scene edit waited an hour behind the one game a session had started.
   const sixteen = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-slots-'));
   try {
@@ -75624,32 +75624,36 @@ async function checksTheSixteenSlots(
     writeFileSync(join(sixteen, QUEUED_FOLDER, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
     publishesNothingSpare(sixteen, started);
     const sessions = new EngineSlots(sixteen, 16, holder, undefined, () => 'other');
-    const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
+    const games = [
+      await sessions.takeFree(true),
+      await sessions.takeFree(true),
+      await sessions.takeFree(true),
+    ];
     assert.deepEqual(
       games.map((lock) => (lock === null ? null : basename(lock))),
-      ['15.lock', '14.lock'],
-      'two games take the highest kept slots',
+      ['15.lock', '14.lock', '13.lock'],
+      'three games take the highest kept slots',
     );
     assert.deepEqual(
       games.map((lock) => (lock === null ? null : holderOf(readFileSync(lock, 'utf8'))?.game)),
-      [true, true],
+      [true, true, true],
       "each lock says it is a game's",
     );
-    assert.equal(await sessions.takeFree(true), null, 'a third game waits');
+    assert.equal(await sessions.takeFree(true), null, 'a fourth game waits');
     assert.deepEqual(
       sessions.drawn,
-      { numbers: [14, 15], limit: 'games' },
+      { numbers: [13, 14, 15], limit: 'games' },
       'held by the games holding theirs',
     );
     assert.equal(
       slotWaitSaid(3000, 16, 'slots', sessions.holders(), sessions.drawn),
-      `Waiting 3 s so far for an engine: the 2 engine slots of the 16 on this machine (slots) that games editor_run started may hold while a gate is queued, the rest kept for short calls, are in use: 2 by this process (pid ${String(process.pid)}). The engine starts when one is given back or no gate is queued.`,
+      `Waiting 3 s so far for an engine: the 3 engine slots of the 16 on this machine (slots) that games editor_run started may hold while a gate is queued, the rest kept for short calls, are in use: 3 by this process (pid ${String(process.pid)}). The engine starts when one is given back or no gate is queued.`,
     );
     const short = await sessions.takeFree();
     assert.equal(
       short === null ? null : basename(short),
-      '13.lock',
-      'while a short call takes a kept slot the games leave',
+      '12.lock',
+      'while a short call takes the kept slot the games leave',
     );
     if (short !== null) {
       sessions.release(short);
@@ -75667,8 +75671,10 @@ async function checksTheSixteenSlots(
       "the keeper's lock still says it is a game's",
     );
     rmSync(first, { force: true });
-    if (games[1] !== null && games[1] !== undefined) {
-      sessions.release(games[1]);
+    for (const other of games.slice(1)) {
+      if (other !== null) {
+        sessions.release(other);
+      }
     }
 
     // An upload beside a queued gate takes a gates' slot at once, where side work waits for a kept
@@ -76536,7 +76542,8 @@ async function testATakerAheadClaimsTheGateSlotsItsKindMayTake(): Promise<void> 
 
 /**
  * An empty lock among the kept slots, which a taker is still writing, counts toward the slots games
- * hold: with a game on one of two it may take, a further game finds none to take.
+ * hold: with a game on one of the three it may take and two such locks, a further game finds none
+ * to take.
  */
 async function testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame(): Promise<void> {
   const started = await ownStart();
@@ -76552,8 +76559,14 @@ async function testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame(): Promise<
     const game = await sessions.takeFree(true);
     assert.equal(game === null ? null : basename(game), '15.lock', 'a game takes the highest kept slot');
     writeFileSync(join(directory, '14.lock'), '');
+    const second = await sessions.takeFree(true);
+    assert.equal(second === null ? null : basename(second), '13.lock', 'one empty lock leaves a game a slot');
+    if (second !== null) {
+      sessions.release(second);
+    }
+    writeFileSync(join(directory, '13.lock'), '');
     assert.equal(await sessions.takeFree(true), null, 'a further game finds the kept slots it may take held');
-    assert.deepEqual(sessions.drawn, { numbers: [14, 15], limit: 'games' }, 'held by the games limit');
+    assert.deepEqual(sessions.drawn, { numbers: [13, 14, 15], limit: 'games' }, 'held by the games limit');
     sessions.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });

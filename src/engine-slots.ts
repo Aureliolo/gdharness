@@ -649,10 +649,11 @@ export class SlotLine {
 
 /**
  * How many kept slots of [param kept] the games editor_run started may hold between them while a
- * gate is queued: half, and never the last, which stays for a short headless call.
+ * gate is queued: every one but the last, which stays for a short headless call. Half of them was
+ * one game for a machine of twelve slots, and each further game waited for that game's whole run.
  */
 export function gamesKeptOf(kept: number): number {
-  return Math.max(0, Math.min(Math.floor(kept / 2), kept - 1));
+  return Math.max(0, kept - 1);
 }
 
 /** The variable a timing sets in what it runs, with the slot it holds. A timing takes any slot. */
