@@ -86,6 +86,8 @@ var _opened_with: Dictionary = {}
 var _asked: Dictionary = {}
 ## What each node a tool set properties on held before it did, by instance id.
 var _before: Dictionary = {}
+## Where each node a tool set properties on was before it did, by instance id.
+var _was_at: Dictionary = {}
 ## Each copy a tool made, by instance id, to the instance id of the node it copies.
 var _copied_from: Dictionary = {}
 ## What a tool wrote in the embedded resources it reached into, by their id in the file, as
@@ -854,6 +856,7 @@ func asked(node: Node, names: Array) -> void:
 	var on: Dictionary = _asked.get_or_add(id, {})
 	if not _before.has(id):
 		_before[id] = GdhHeadlessCheck.stored(node)
+		_was_at[id] = path_of(node)
 	for name: Variant in names:
 		var property: String = str(name)
 		on[property] = true
@@ -1591,7 +1594,13 @@ static func _free_name(parent: Node, taken: String) -> String:
 
 ## The properties this scene's own file sets on [param node], each with the value the file gives it.
 func set_here(node: Node) -> Dictionary:
-	return set_at(path_of(node))
+	return set_at(filed_path(node))
+
+
+## The path this scene's file holds [param node] at: where it was before a tool set anything on it,
+## since a set that renames the node moves it.
+func filed_path(node: Node) -> String:
+	return str(_was_at.get(node.get_instance_id(), path_of(node)))
 
 
 ## Where the values of [param node], at [param at] in the file, come from when the file does not set

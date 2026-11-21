@@ -27747,6 +27747,122 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
 }
 
 /**
+ * A server of one project, with no editor connected, reaches the games of another project a call
+ * names. Such a call looked among the server's own project's games unless an editor of another
+ * project was connected, so a stop by number refused a worktree's game that editor_status listed.
+ *
+ * A server of the game's project starts it and is killed, and its note is taken away. A server of
+ * another project then names the game's project: a stop without a number names the number, a start
+ * says the game was already running, and the number with the project ends it.
+ */
+async function testAStopByNumberReachesAnotherProjectsGameWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('another project stopped by its number regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-'));
+  const own = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-own-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-runtime-'));
+  const shared = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtime };
+  const first = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: project } });
+  let second: ServerProcess | null = null;
+  const met = new MetProcesses();
+  const start = { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 30_000 };
+  try {
+    writeFileSync(
+      join(own, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Own"\n',
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Other number"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await first.initialize('regression-test');
+    const started = await first.request(
+      'tools/call',
+      { name: 'editor_run', arguments: start },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const game = asNumber(get(parseTextContent(started), 'runtime', 'pid'));
+    await met.meet(game);
+    const serverPid = first.child.pid;
+    assert.ok(serverPid !== undefined, 'the server should have a pid');
+    await killTheTree(serverPid);
+    await delay(1_000);
+    assert.ok(isAlive(game), `the run should outlive its server: pid ${game}`);
+    rmSync(runRecordPath(project, runtime));
+
+    const beside = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: own } });
+    second = beside;
+    await beside.initialize('regression-test');
+    const stop = async (args: Record<string, unknown>): ReturnType<ServerProcess['request']> =>
+      await beside.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop', ...args } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+
+    const unnamed = await stop({ projectPath: project });
+    assert.ok(
+      (textOf(unnamed) ?? '').includes(`editor_run stop with pid ${game} and projectPath ${project} ends it`),
+      `a stop naming the project names the number and the project: ${textOf(unnamed)}`,
+    );
+    const ownOnly = await stop({ pid: game });
+    assert.match(
+      textOf(ownOnly) ?? '',
+      new RegExp(`^pid ${game} is not a game announced for this project, so nothing was signalled`),
+      `the number alone is looked for among this server's project's games: ${textOf(ownOnly)}`,
+    );
+    assert.ok(isAlive(game), 'and neither ended it');
+
+    const again = await beside.request(
+      'tools/call',
+      { name: 'editor_run', arguments: start },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const later = asNumber(get(parseTextContent(again), 'runtime', 'pid'));
+    await met.meet(later);
+    assert.ok(
+      text(get(parseTextContent(again), 'message')).includes(
+        `editor_run stop with pid ${game} and projectPath ${project} ends it and leaves this run going.`,
+      ),
+      `a start says the project's game was already running: ${textOf(again)}`,
+    );
+
+    const answer = parseTextContent(await stop({ pid: game, projectPath: project }));
+    assert.deepEqual(
+      [get(answer, 'stopped'), get(answer, 'endedPid')],
+      [true, game],
+      `the number with its project ends the game: ${JSON.stringify(answer)}`,
+    );
+    assert.equal(await met.gone(game, 10_000), true, `pid ${game} should be gone`);
+    assert.ok(isAlive(later), 'and the run started here goes on');
+    const held = parseTextContent(await stop({ projectPath: project }));
+    assert.equal(get(held, 'stopped'), true, `the run held here stops as before: ${JSON.stringify(held)}`);
+    assert.equal(await met.gone(later, 10_000), true, `pid ${later} should be gone`);
+  } finally {
+    await met.end();
+    await first.stop().catch(() => undefined);
+    await second?.stop();
+    sweep(project);
+    sweep(own);
+    sweep(runtime);
+  }
+}
+
+/**
  * A run outlives the harness's tree kill of the server that started it, and the next server reads
  * its exit code.
  *
@@ -113526,6 +113642,72 @@ async function testASceneNodeUnsetDropsTheStoredLine(): Promise<void> {
 }
 
 /**
+ * A set that renames its node still reads the file where it holds the node. The rename ran first,
+ * and the lines and groups were then looked up under the new name, which the file does not hold
+ * yet, so an unset or a removed group beside a rename was refused.
+ */
+async function testASetThatRenamesItsNodeReadsTheFileUnderTheOldName(): Promise<void> {
+  const files = {
+    'base.tscn': '[gd_scene format=3]\n\n[node name="Base" type="Node2D"]\nrotation = 1.0\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n' +
+      '[ext_resource type="PackedScene" path="res://base.tscn" id="1_base"]\n\n' +
+      '[node name="Root" type="Node2D"]\n\n' +
+      '[node name="Old" type="Sprite2D" parent="."]\nposition = Vector2(1, 2)\nflip_h = true\n\n' +
+      '[node name="Coin" type="Area2D" parent="." groups=["coins", "loot"]]\n\n' +
+      '[node name="Crate" parent="." instance=ExtResource("1_base")]\nmodulate = Color(0, 0, 1, 1)\n',
+  };
+  await withASceneProject('unset beside a rename', files, async ({ call, written, fileOf }) => {
+    const set = (nodePath: string, name: string, rest: Record<string, unknown>): Record<string, unknown> => ({
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath,
+      properties: { name },
+      ...rest,
+    });
+
+    const renamed = await written('scene_node', set('Old', 'New', { unset: ['flip_h'] }));
+    assert.deepEqual(
+      [get(renamed, 'nodePath'), get(renamed, 'unset')],
+      ['New', { flip_h: false }],
+      JSON.stringify(renamed),
+    );
+    assert.deepEqual(
+      linesUnder(fileOf('main.tscn'), '[node name="New" type="Sprite2D" parent="."'),
+      ['position = Vector2(1, 2)'],
+      fileOf('main.tscn'),
+    );
+
+    const grouped = await written('scene_node', set('Coin', 'Gem', { removeGroups: ['coins'] }));
+    assert.deepEqual(
+      [get(grouped, 'nodePath'), get(grouped, 'groups')],
+      ['Gem', ['loot']],
+      JSON.stringify(grouped),
+    );
+    assert.match(
+      fileOf('main.tscn'),
+      /\[node name="Gem" type="Area2D" parent="\."[^\]]* groups=\["loot"\]\]/,
+    );
+
+    // A value the instanced scene gives is refused under the name the file holds.
+    const kept = fileOf('main.tscn');
+    assert.equal(
+      textOf(await call('scene_node', set('Crate', 'Box', { unset: ['rotation'] }))),
+      'res://main.tscn holds no line for rotation on Crate: its value comes from res://base.tscn, so it is unset there, with scene_node set on that scene.',
+    );
+    assert.equal(fileOf('main.tscn'), kept, 'and the refusal changed nothing');
+
+    const boxed = await written('scene_node', set('Crate', 'Box', { unset: ['modulate'] }));
+    assert.deepEqual(
+      [get(boxed, 'nodePath'), get(boxed, 'unset')],
+      ['Box', { modulate: { _type: 'Color', r: 1, g: 1, b: 1, a: 1 } }],
+      JSON.stringify(boxed),
+    );
+    assert.deepEqual(linesUnder(fileOf('main.tscn'), '[node name="Box"'), [], fileOf('main.tscn'));
+  });
+}
+
+/**
  * resource_edit modify unset drops a stored line of a .tres file, so the value is what the shader,
  * the script or the class declares.
  */
@@ -123932,6 +124114,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInheritedSceneIsMadeWithNoEditor,
   testAnInstanceKeepsItsOwnValuesWithNoEditor,
   testASceneNodeUnsetDropsTheStoredLine,
+  testASetThatRenamesItsNodeReadsTheFileUnderTheOldName,
   testAResourceUnsetDropsTheStoredLine,
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
@@ -124269,6 +124452,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnotherProjectsRunLeavesOursStoppable,
   testARunCanBeStartedOnAnotherEngine,
   testAGameNoNoteNamesIsStoppedByItsNumber,
+  testAStopByNumberReachesAnotherProjectsGameWithNoEditor,
   testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,

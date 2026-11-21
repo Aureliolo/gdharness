@@ -14078,7 +14078,7 @@ class GodotServer {
     // not take with it. Read now rather than afterwards, because the game about to start announces
     // itself too and would otherwise be reported as something it left behind.
     const started = project.value.path;
-    const wereHereFirst = this.everyRuntimeOfOurs(this.editorHasAnotherThan(started) ? started : undefined);
+    const wereHereFirst = this.everyRuntimeOfOurs(this.anotherProjectThanOurs(started));
 
     // The editor when it is there: a game it plays is a game its debugger is holding, and that
     // session is the only thing the debug tools can reach. A game started here as its own
@@ -14304,6 +14304,19 @@ class GodotServer {
     return this.dapClient?.isStopped() === true;
   }
 
+  /**
+   * The project a call names when it is another than this server's own, or than the connected
+   * editor's for a server with none. A call naming no project is about that one's games.
+   */
+  private anotherProjectThanOurs(asked: string | undefined): string | undefined {
+    if (asked === undefined) {
+      return undefined;
+    }
+    const status = this.godotBridge.getStatus();
+    const ours = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
+    return ours !== null && ours !== '' && isSameDirectory(ours, asked) ? undefined : asked;
+  }
+
   private editorHasAnotherThan(projectPath: string): boolean {
     const open = this.godotBridge.getStatus().projectPath;
     return (
@@ -14410,10 +14423,7 @@ class GodotServer {
     const stranded = wereHereFirst.filter((one) => one.pid !== ended?.pid && alive(one.pid));
     // The set the game was started with: nothing has changed it since the launch read it.
     const handed = this.dapHoldingBreakpointsOf(project.value.path).breakpointsHeld();
-    const alsoRunning = leftRunningNote(
-      stranded,
-      this.editorHasAnotherThan(project.value.path) ? project.value.path : undefined,
-    );
+    const alsoRunning = leftRunningNote(stranded, this.anotherProjectThanOurs(project.value.path));
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
@@ -16507,10 +16517,9 @@ class GodotServer {
    */
   private nothingOfOursIsRunning(aboutProject?: string): string {
     const status = this.godotBridge.getStatus();
-    // A call naming a project the editor does not have open is about that project's games. The
-    // editor plays only its own, so its game is no answer to the call.
-    const about =
-      aboutProject !== undefined && this.editorHasAnotherThan(aboutProject) ? aboutProject : undefined;
+    // A call naming another project than this server's is about that project's games. The editor
+    // plays only its own, so its game is no answer to the call.
+    const about = this.anotherProjectThanOurs(aboutProject);
     // The third situation, and the one this used to answer as either of the others. A game the
     // editor is playing is reached by asking the editor, so while no editor is connected there is
     // nothing to ask and a run that is alive on screen is invisible here. That window is ordinary:
@@ -18203,15 +18212,17 @@ class GodotServer {
     args: OperationParams,
   ): Promise<ToolResponse> {
     const announced = runtimesAnnounced();
-    // A stop naming a project the editor does not have open is about that project's games.
-    const asked = readNonEmptyString(args, 'projectPath');
-    const about = asked !== undefined && this.editorHasAnotherThan(asked) ? asked : undefined;
-    const game = [
-      ...this.allAnnouncedForOurProject(announced.running, about),
-      ...this.allAnnouncedForOurProject(announced.unspoken, about),
-    ].find((one) => one.pid === pid);
-    if (game !== undefined) {
-      const elsewhere = this.anotherProjectsRun(game.project.path, args, 'signalled');
+    const among = (project?: string): RuntimeEndpoint | UnspokenRuntime | undefined =>
+      [
+        ...this.allAnnouncedForOurProject(announced.running, project),
+        ...this.allAnnouncedForOurProject(announced.unspoken, project),
+      ].find((one) => one.pid === pid);
+    const about = this.anotherProjectThanOurs(readNonEmptyString(args, 'projectPath'));
+    const game = among(about);
+    if (game === undefined && about !== undefined) {
+      const ours = among();
+      const elsewhere =
+        ours === undefined ? null : this.anotherProjectsRun(ours.project.path, args, 'signalled');
       if (elsewhere !== null) {
         return elsewhere;
       }
