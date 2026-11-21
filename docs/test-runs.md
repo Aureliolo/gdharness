@@ -910,9 +910,10 @@ ones.
   byte by byte, is ahead. Name marks in ASCII, so that every reader orders them alike.
 - Before you have a mark of your own, no other taker sees you. Two takers that began in the same
   millisecond may then both go first, and the slot's lock decides between them.
-- A stream of store-class takers delays an `other` taker that is not a game by ten minutes at most.
-  A game is never in the first group, so a store-class taker that is not a game and has waited two
-  minutes goes before a game of any age.
+- A stream of store-class takers delays an `other` taker, a game included, by ten minutes at most.
+  A store-class taker that has waited two minutes stands with gate work and goes before an `other`
+  taker that has waited less than ten minutes. Past ten minutes the `other` taker stands with gate
+  work as well, and the earlier `since` goes first.
 - A mark may hold `class` `store`, written by an `other` taker that has the class and by no other.
   A mark with no class, or any other, has none.
 - A taker has the class where `<directory>/store.json` lists the repository of the Godot project
@@ -926,10 +927,19 @@ ones.
 - Give each, in turn, the first free slot of those it may take now (below) not given to one before
   it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
-  its coming free. From then on, leave that waiter nothing, unless it has looked since. A waiter
-  says it looks by touching `<mark name without .json>.seen` beside its mark at each look, and
-  removes the file with its mark. Count the 5 seconds from the later of the first time you left it
-  a slot and its last look. A mark with no such file looks since it was made.
+  its coming free. A waiter says it looks by touching `<mark name without .json>.seen` beside its
+  mark at each look, and removes the file with its mark. A mark with no such file looks since it
+  was made. Two cases end the wait:
+  - A waiter that has not looked for 5 seconds, counted from the later of the first time you left
+    it a slot and its last look: from then on, leave it nothing, unless it looks again.
+  - A waiter that looks, when every slot you leave it has stood free, left to it, for 5 seconds
+    and it wants no more slots than you leave it (below). Leave it nothing from then on, so that
+    two takers that each place the other ahead do not leave the one free slot to each other for
+    good. Count each slot from the first look at which you left it to that waiter, and start again
+    if the slot is taken or left to another. A waiter that wants more slots than are free is waited
+    for, since it waits for more to come free.
+- A game that may take no free slot now (see Games and the kept slots) is given none, however long
+  it has waited, and the takers behind it take the slots it cannot.
 - A mark may also hold `wants`, a whole number above 1, for a taker waiting for that many slots at
   once. It is ahead that many times for its first 300 seconds of waiting, and once after. Any other
   `wants` counts as 1.
@@ -981,7 +991,9 @@ One whose holder has gone is removed with its `.seated` file.
 
 ### The kept slots
 
-The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16.
+The last `max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16, but the
+gates always keep slot 0. The kept count is `count - max(1, count - max(2, floor(count / 4)))`, so
+1 of 2 slots and 2 of 3.
 
 ### Which slots each engine takes
 
@@ -1067,8 +1079,11 @@ long as it plays.
 
 A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
 stays when its keeper takes the lock over. Games hold at most `kept - 1` of the kept slots between
-them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12) before a game's start waits. The last
-kept slot stays for a headless call.
+them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12, none of the 1 kept on 2) while a gate is
+queued, and a game's start waits once they do. On 2 slots no game runs while a gate is queued.
+
+The last kept slot, the lowest of them, stays for a headless call: a game never takes it, whether
+or not a gate is queued. With no gate queued a game takes any other slot.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is
