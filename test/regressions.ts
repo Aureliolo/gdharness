@@ -76125,8 +76125,8 @@ async function checksASlotAlreadyHeld(rig: SlotsRig): Promise<void> {
   rmSync(join(queued, 'ticket.json.seated'));
   assert.deepEqual(
     await takeAll(outside, true),
-    ['3.lock', '2.lock', '1.lock', '0.lock'],
-    'a game takes any slot with no gate queued',
+    ['3.lock', '1.lock', '0.lock'],
+    'a game takes any slot but the last kept one with no gate queued',
   );
   const held = await outside.takeFree();
   assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
@@ -77337,7 +77337,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     tied.mark = '1-0.json';
     assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
     // Gate work goes before younger side work whenever each began, and side work that has waited two
-    // minutes with it. A game never counts as aged. Uploads waited behind side work begun before them.
+    // minutes with it, a game as any other one-off. Uploads waited behind side work begun before them.
     const sideWork = {
       mark: 'a.json',
       taker: 'other',
@@ -77666,15 +77666,25 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
       }
     }
   }
-  // Ahead of a gate in line, a game still claims none of the slots kept for gates.
-  const forAGame = slotsDrawnOn(12, 'other', 'queued').numbers;
+  // Ahead of a gate in line, a game still claims none of the slots kept for gates, and none of the
+  // last kept slot.
+  const forAGame = slotsDrawnOn(12, 'other', 'queued', undefined, true).numbers;
   const gated = 12 - keptSlotsOf(12);
   assert.deepEqual(
-    [...slotsClaimed([forAGame], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).keys()].filter(
-      (slot) => slot < gated,
-    ),
+    marksOf(new SlotLine('gate', false, () => now), [agedGame]),
+    ['game.json'],
+    'an aged game is placed ahead of a gate that asked after it',
+  );
+  assert.deepEqual(forAGame, [11, 10], 'and draws the kept slots but the last');
+  assert.deepEqual(
+    [...slotsClaimed([forAGame], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).keys()],
+    [11],
+    'so a game ahead of a gate leaves it every gate slot and the last kept slot',
+  );
+  assert.deepEqual(
+    slotsDrawnOn(12, 'other', 'queued', undefined, true).numbers.filter((slot) => slot < gated),
     [],
-    'a game ahead of a gate leaves it every gate slot',
+    'and none of its slots is a gate slot',
   );
   assert.deepEqual(
     marksOf(new SlotLine('other', true, () => now), [
@@ -77712,6 +77722,488 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
     [],
     'and has that gate work behind it',
   );
+}
+
+/** A slots folder of [param count] slots with a gate queued, unless [param gateQueued] is false, and no lock. */
+async function gameLineFolder(count: number, gateQueued = true): Promise<GameLineFolder> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-line-'));
+  mkdirSync(join(directory, WAITING_FOLDER));
+  mkdirSync(join(directory, QUEUED_FOLDER));
+  const me = { pid: process.pid, started, by: 'gdharness test of /p' };
+  const folder = { directory, count, me, started };
+  if (gateQueued) {
+    gateQueuedIn(folder);
+  }
+  return folder;
+}
+
+interface GameLineFolder {
+  readonly directory: string;
+  readonly count: number;
+  readonly me: { readonly pid: number; readonly started: number; readonly by: string };
+  readonly started: number;
+}
+
+/** Queues a gate in [param folder], with nothing of the gates' free slots spare. */
+function gateQueuedIn(folder: GameLineFolder): void {
+  writeFileSync(
+    join(folder.directory, QUEUED_FOLDER, 'ticket.json'),
+    JSON.stringify({ pid: process.pid, started: folder.started }),
+  );
+  publishesNothingSpare(folder.directory, folder.started);
+}
+
+/** Holds [param slots] with locks of this process, a game's where [param game] is set. */
+function slotsHeld(folder: GameLineFolder, slots: readonly number[], game = false): void {
+  for (const slot of slots) {
+    writeFileSync(
+      join(folder.directory, `${String(slot)}.lock`),
+      JSON.stringify({ ...folder.me, ...(game ? { game: true } : {}) }),
+    );
+  }
+}
+
+/** A line of a take that began [param waited] ms ago and looks now, on whatever clock the test sets. */
+function lineBegunAgo(
+  game: boolean,
+  waited: number,
+  mark: string,
+  taker: 'gate' | 'other' = 'other',
+): SlotLine {
+  let offset = -waited;
+  const line = new SlotLine(taker, game, () => Date.now() + offset);
+  offset = 0;
+  line.mark = mark;
+  return line;
+}
+
+/** Writes the waiting mark of [param line], for a taker waiting for [param wants] slots, and its look at [param at]. */
+function waitingMarked(folder: GameLineFolder, line: SlotLine, at: number, wants = 1): void {
+  const mark = line.mark ?? '';
+  writeFileSync(
+    join(folder.directory, WAITING_FOLDER, mark),
+    JSON.stringify({ ...line.marked(folder.me), ...(wants > 1 ? { wants } : {}) }),
+  );
+  lookedAt(folder, mark, at);
+}
+
+/** Sets the look note of the mark [param mark] to [param at]. */
+function lookedAt(folder: GameLineFolder, mark: string, at: number): void {
+  const note = join(folder.directory, WAITING_FOLDER, mark.replace(/\.json$/u, '.seen'));
+  writeFileSync(note, '');
+  utimesSync(note, at / 1000, at / 1000);
+}
+
+/** The slot [param lock] names, or null. */
+function lockNumber(lock: string | null): number | null {
+  const slot = lock === null ? undefined : /(\d+)\.lock$/u.exec(lock)?.[1];
+  return slot === undefined ? null : Number(slot);
+}
+
+/** Takes slots at [param count] by [param taker] while it can, a game's where [param game] is set. */
+async function slotsTakenWhileFree(slots: EngineSlots, game: boolean): Promise<number[]> {
+  const taken: number[] = [];
+  for (let lock = await slots.takeFree(game); lock !== null; lock = await slots.takeFree(game)) {
+    taken.push(lockNumber(lock) ?? -1);
+  }
+  return taken;
+}
+
+/**
+ * Waiting games that the games limit holds back claim no kept slot, so a call that asked after them
+ * takes the last kept slot at its first look, whatever its age and however many games wait.
+ */
+async function testAGameHeldBackByTheGamesLimitClaimsNoSlotAheadOfACall(): Promise<void> {
+  for (const [count, gamesHeld, last] of [
+    [12, [11, 10], 9],
+    [12, [11, 9], 10],
+    [16, [15, 14, 13], 12],
+    [16, [15, 14, 12], 13],
+  ] as const) {
+    for (const waitingGames of [1, 2, 5]) {
+      for (const callWaited of [200_000, 100_000]) {
+        const folder = await gameLineFolder(count);
+        try {
+          slotsHeld(
+            folder,
+            Array.from({ length: count - keptSlotsOf(count) }, (_, slot) => slot),
+          );
+          slotsHeld(folder, gamesHeld, true);
+          const now = Date.now();
+          for (let at = 0; at < waitingGames; at += 1) {
+            waitingMarked(folder, lineBegunAgo(true, 300_000 - at * 1000, `game-${String(at)}.json`), now);
+          }
+          const call = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
+          const took = await call.takeFree(false, lineBegunAgo(false, callWaited, 'call.json'));
+          assert.equal(
+            lockNumber(took),
+            last,
+            `${count} slots, ${waitingGames} capped games ahead, a call of ${callWaited} ms: ${JSON.stringify(call.drawn)}`,
+          );
+          call.releaseAll();
+        } finally {
+          rmSync(folder.directory, { recursive: true, force: true });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Two slots, a gate queued with one spare slot, a game of 300 s, a gate's engine of 100 s and a call
+ * of 200 s: no game can run there, so the gate's engine keeps slot 0 and the call has slot 1, whichever
+ * of them looks first.
+ */
+async function testAGameThatCanNeverRunLeavesTheGatesEngineItsOnlySlot(): Promise<void> {
+  for (const order of ['gate first', 'call first'] as const) {
+    const folder = await gameLineFolder(2);
+    try {
+      writeFileSync(
+        join(folder.directory, SPARE_FILE),
+        JSON.stringify({ spare: 1, pid: process.pid, started: folder.started, written: Date.now() }),
+      );
+      waitingMarked(folder, lineBegunAgo(true, 300_000, 'game.json'), Date.now());
+      const gate = new EngineSlots(folder.directory, 2, folder.me, undefined, () => 'gate');
+      const call = new EngineSlots(folder.directory, 2, folder.me, undefined, () => 'other');
+      const takes = {
+        gate: async () =>
+          lockNumber(await gate.takeFree(false, lineBegunAgo(false, 100_000, 'gate.json', 'gate'))),
+        call: async () => lockNumber(await call.takeFree(false, lineBegunAgo(false, 200_000, 'call.json'))),
+      };
+      const taken: Record<string, number | null> = {};
+      for (const who of order === 'gate first' ? (['gate', 'call'] as const) : (['call', 'gate'] as const)) {
+        taken[who] = await takes[who]();
+      }
+      assert.deepEqual(
+        taken,
+        { gate: 0, call: 1 },
+        `the gate's engine takes slot 0 and the call slot 1 (${order})`,
+      );
+      gate.releaseAll();
+      call.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * A call that finds the last kept slot free leaves it to no capped game ahead of it, so its line
+ * names no taker it leaves a slot to.
+ */
+async function testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    slotsHeld(folder, [11, 10], true);
+    waitingMarked(folder, lineBegunAgo(true, 300_000, 'game.json'), Date.now());
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    assert.equal(
+      lockNumber(await call.takeFree(false, lineBegunAgo(false, 200_000, 'call.json'))),
+      9,
+      'the call takes slot 9',
+    );
+    assert.equal(call.drawn.left, undefined, 'and leaves no slot to a taker ahead');
+    const said = slotWaitSaid(3000, 12, folder.directory, call.holders(), call.drawn);
+    assert.doesNotMatch(said, /go first|takers ahead/u, said);
+    assert.doesNotMatch(
+      slotWaitedSaid(3000, 12, folder.directory, call.holders(), call.drawn),
+      /takers ahead/u,
+      'nor does its answer',
+    );
+    call.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A line that places every other taker ahead of it, as a build whose order differs from this one's would. */
+class EveryoneAheadLine extends SlotLine {
+  override ahead(waiters: Parameters<SlotLine['ahead']>[0]): ReturnType<SlotLine['ahead']> {
+    return waiters.filter((one) => one.mark !== this.mark);
+  }
+}
+
+/**
+ * Two takers that each place the other ahead, both looking, on one free kept slot. Neither is gone, so
+ * neither is dropped as gone: each leaves the slot to the other until it has stood free for
+ * {@link SLOT_YIELD_MS}, and then one of them takes it.
+ */
+async function testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherForGood(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  const realNow = Date.now;
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
+    const t0 = Date.now();
+    const first = new EveryoneAheadLine('other', false, () => Date.now());
+    first.mark = 'first.json';
+    const second = lineBegunAgo(false, 200_000, 'second.json');
+    waitingMarked(folder, lineBegunAgo(false, 300_000, 'first.json'), t0);
+    waitingMarked(folder, second, t0);
+    const a = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const b = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const look = async (taker: EngineSlots, line: SlotLine, at: number): Promise<number | null> => {
+      Date.now = () => at;
+      lookedAt(folder, 'first.json', at);
+      lookedAt(folder, 'second.json', at);
+      return lockNumber(await taker.takeFree(false, line));
+    };
+    for (const after of [0, 1000, 2000, 3000, SLOT_YIELD_MS - 1]) {
+      assert.deepEqual(
+        [await look(a, first, t0 + after), await look(b, second, t0 + after)],
+        [null, null],
+        `each leaves the slot to the other ${after} ms in`,
+      );
+    }
+    assert.deepEqual(a.drawn.left, [9], 'the one slot is left to the other');
+    const yielded = [await look(a, first, t0 + SLOT_YIELD_MS), await look(b, second, t0 + SLOT_YIELD_MS)];
+    assert.deepEqual(
+      yielded,
+      [9, null],
+      'at the yield one takes it and the other takes none of the slots it holds',
+    );
+    a.releaseAll();
+    b.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A taker ahead that wants two slots while one is free is waited for past the yield, since it waits for
+ * a second to come free, and takes both once it does. One that wants one slot is waited for no longer
+ * than the yield.
+ */
+async function testATakerAheadThatWantsMoreSlotsThanAreFreeIsStillWaitedFor(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  const realNow = Date.now;
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
+    const t0 = Date.now();
+    const wanting = lineBegunAgo(false, 200_000, 'wants.json');
+    waitingMarked(folder, wanting, t0, 2);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const behind = lineBegunAgo(false, 100_000, 'call.json');
+    const look = async (at: number): Promise<number | null> => {
+      Date.now = () => at;
+      lookedAt(folder, 'wants.json', at);
+      return lockNumber(await call.takeFree(false, behind));
+    };
+    for (const after of [0, SLOT_YIELD_MS - 1, SLOT_YIELD_MS, SLOT_YIELD_MS * 3]) {
+      assert.equal(await look(t0 + after), null, `slot 9 is left to the taker wanting two ${after} ms in`);
+      assert.deepEqual(call.drawn.left, [9], `and only that one is free ${after} ms in`);
+    }
+    rmSync(join(folder.directory, '10.lock'));
+    assert.equal(
+      await look(t0 + SLOT_YIELD_MS * 3 + 1000),
+      null,
+      'a second slot freeing leaves the call nothing',
+    );
+    assert.deepEqual(call.drawn.left, [9, 10], 'both are left to the taker that takes both');
+    slotsHeld(folder, [9, 10]);
+    assert.equal(await look(t0 + SLOT_YIELD_MS * 3 + 2000), null, 'and it has them');
+    call.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A taker ahead that stops looking holds nothing back past the yield, counted from its last look. */
+async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  const realNow = Date.now;
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
+    const t0 = Date.now();
+    waitingMarked(folder, lineBegunAgo(false, 200_000, 'gone.json'), t0);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const behind = lineBegunAgo(false, 100_000, 'call.json');
+    const look = async (at: number): Promise<number | null> => {
+      Date.now = () => at;
+      return lockNumber(await call.takeFree(false, behind));
+    };
+    assert.equal(await look(t0), null, 'a taker ahead that has just looked is waited for');
+    assert.equal(await look(t0 + SLOT_YIELD_MS - 100), null, 'until it has left the slot for the yield');
+    assert.equal(await look(t0 + SLOT_YIELD_MS + 100), 9, 'and then the call takes it');
+    call.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** With no gate queued games take every slot but the last kept one, and with a gate queued the call has it. */
+async function testGamesTakeEverySlotButTheLastKeptOneWithNoGateQueued(): Promise<void> {
+  const folder = await gameLineFolder(12, false);
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7]);
+    const newGame = (): EngineSlots =>
+      new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const games = [newGame(), newGame(), newGame(), newGame()];
+    const taken: (number | null)[] = [];
+    for (const game of games) {
+      taken.push(lockNumber(await game.takeFree(true)));
+    }
+    assert.deepEqual(
+      taken,
+      [11, 10, 8, null],
+      'three games take 11, 10 and 8, never 9, and a fourth takes none',
+    );
+    gateQueuedIn(folder);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    assert.equal(lockNumber(await call.takeFree()), 9, 'and once a gate queues a headless call takes slot 9');
+    for (const game of games) {
+      game.releaseAll();
+    }
+    call.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * With a gate queued a game that finds fewer kept slots held by games than the limit still never takes
+ * the last kept one, so a headless call has it.
+ */
+async function testAGameNeverTakesTheLastKeptSlotWithAGateQueued(): Promise<void> {
+  for (const [count, gameHeld, otherHeld, last] of [
+    [12, [11], [10], 9],
+    [16, [15], [14, 13], 12],
+  ] as const) {
+    const folder = await gameLineFolder(count);
+    try {
+      slotsHeld(
+        folder,
+        Array.from({ length: count - keptSlotsOf(count) }, (_, slot) => slot),
+      );
+      slotsHeld(folder, gameHeld, true);
+      slotsHeld(folder, otherHeld);
+      const game = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
+      assert.equal(await game.takeFree(true), null, `${count} slots: a game takes none, not slot ${last}`);
+      const call = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
+      assert.equal(lockNumber(await call.takeFree()), last, 'and the call has it');
+      call.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/** Every slot free and no gate queued: games take every slot but the last kept one, which is 9 of 12. */
+async function testGamesTakeEverySlotButTheLastKeptOneOnTwelveSlots(): Promise<void> {
+  const folder = await gameLineFolder(12, false);
+  try {
+    const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    assert.deepEqual(
+      await slotsTakenWhileFree(game, true),
+      [11, 10, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+      'games take every slot but 9',
+    );
+    game.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** The same on sixteen slots, where the last kept slot is 12. */
+async function testGamesTakeEverySlotButTheLastKeptOneOnSixteenSlots(): Promise<void> {
+  const folder = await gameLineFolder(16, false);
+  try {
+    const game = new EngineSlots(folder.directory, 16, folder.me, undefined, () => 'other');
+    assert.deepEqual(
+      await slotsTakenWhileFree(game, true),
+      [15, 14, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+      'games take every slot but 12',
+    );
+    game.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The line of a game held back by the games limit names how many slots games may hold, never how many
+ * they do, also when they hold more than that.
+ */
+async function testTheGamesLimitLineNamesTheLimitAndNotTheGamesHoldingSlots(): Promise<void> {
+  for (const [count, held, may] of [
+    [12, [11, 10], 2],
+    [12, [11, 10, 9], 2],
+    [16, [15, 14, 13], 3],
+    [16, [15, 14, 13, 12], 3],
+  ] as const) {
+    const folder = await gameLineFolder(count);
+    try {
+      const gated = count - keptSlotsOf(count);
+      slotsHeld(
+        folder,
+        Array.from({ length: gated }, (_, slot) => slot),
+      );
+      slotsHeld(folder, held, true);
+      const game = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
+      assert.equal(await game.takeFree(true), null, `${count} slots, games on ${held.join(', ')}`);
+      assert.equal(game.drawn.limit, 'games');
+      assert.equal(
+        slotWaitSaid(3000, count, 'slots', game.holders(), game.drawn),
+        `Waiting 3 s so far for an engine: the ${String(may)} engine slots of the ${String(count)} on this machine (slots) that games editor_run started may hold while a gate is queued, the rest kept for short calls, are in use: ${String(may)} by this process (pid ${String(process.pid)}). The engine starts when one is given back or no gate is queued.`,
+      );
+      game.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/** On two slots no game runs while a gate is queued, and the game starts once none is. */
+async function testNoGameRunsOnTwoSlotsWhileAGateIsQueued(): Promise<void> {
+  const folder = await gameLineFolder(2);
+  try {
+    const game = new EngineSlots(folder.directory, 2, folder.me, undefined, () => 'other');
+    assert.equal(await game.takeFree(true), null, 'a game finds no slot to take');
+    assert.equal(
+      slotWaitSaid(3000, 2, 'slots', game.holders(), game.drawn),
+      'Waiting 3 s so far for an engine: no game may run on this machine (slots) while a gate is queued, and the engine starts once no gate is queued.',
+    );
+    assert.equal(
+      slotWaitedSaid(3000, 2, 'slots', game.holders(), game.drawn),
+      'This call waited 3 s for an engine slot in all. When it first waited, no game could run on this machine (slots) while a gate was queued.',
+    );
+    rmSync(join(folder.directory, QUEUED_FOLDER, 'ticket.json'));
+    assert.equal(
+      lockNumber(await game.takeFree(true)),
+      0,
+      'with no gate queued it takes slot 0, never the last kept slot 1',
+    );
+    game.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A game ahead of a gate in line draws only kept slots, so it claims none of the gates' slots. */
+async function testAGameAheadOfAGateTakesNoSlotOfTheGates(): Promise<void> {
+  const gated = 12 - keptSlotsOf(12);
+  const folder = await gameLineFolder(12);
+  try {
+    writeFileSync(
+      join(folder.directory, SPARE_FILE),
+      JSON.stringify({ spare: 3, pid: process.pid, started: folder.started, written: Date.now() }),
+    );
+    const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const taken = await slotsTakenWhileFree(game, true);
+    assert.deepEqual(taken, [11, 10], 'a game takes no gate slot however many are spare');
+    assert.deepEqual(
+      taken.filter((slot) => slot < gated),
+      [],
+      'none of them a gate slot',
+    );
+    game.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -125519,6 +126011,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
   testAStoreClassTakerGoesBeforeEarlierYoungSideWork,
+  testAGameHeldBackByTheGamesLimitClaimsNoSlotAheadOfACall,
+  testAGameThatCanNeverRunLeavesTheGatesEngineItsOnlySlot,
+  testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt,
+  testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherForGood,
+  testATakerAheadThatWantsMoreSlotsThanAreFreeIsStillWaitedFor,
+  testATakerAheadThatStoppedLookingIsDroppedAfterTheYield,
+  testGamesTakeEverySlotButTheLastKeptOneWithNoGateQueued,
+  testAGameNeverTakesTheLastKeptSlotWithAGateQueued,
+  testGamesTakeEverySlotButTheLastKeptOneOnTwelveSlots,
+  testGamesTakeEverySlotButTheLastKeptOneOnSixteenSlots,
+  testTheGamesLimitLineNamesTheLimitAndNotTheGamesHoldingSlots,
+  testNoGameRunsOnTwoSlotsWhileAGateIsQueued,
+  testAGameAheadOfAGateTakesNoSlotOfTheGates,
   testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
   testAWaitingMarkNamesTheStoreClass,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
