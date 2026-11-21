@@ -284,8 +284,8 @@ interface MemoryRoom {
  * of the two is the room. What other work has reserved on the machine and still owes comes off
  * either ({@link reservedMemory}), since that memory is spoken for before it is taken.
  */
-export async function memoryAvailable(ownEngines = true): Promise<MemoryRoom> {
-  const reserved = await reservedMemory(undefined, undefined, ownEngines);
+export async function memoryAvailable(): Promise<MemoryRoom> {
+  const reserved = await reservedMemory();
   const level = await macMemoryLevel();
   if (level !== null) {
     return lessReserved({ bytes: (totalmem() * level) / 100, said: 'of memory free' }, reserved);
@@ -296,7 +296,7 @@ export async function memoryAvailable(ownEngines = true): Promise<MemoryRoom> {
 /**
  * Why an engine of [param tool] for [param project] is not started, or null: what the project's last
  * engine of that tool held (at most [param ceiling]) is more than the machine has left past what it
- * keeps and what the engines running on it may still grow to. A project with no peak above the flat
+ * keeps and what other work has reserved. A project with no peak above the flat
  * figure is never refused, since that figure is an estimate and the machine's free memory alone
  * says nothing against it.
  */
@@ -599,7 +599,6 @@ async function engineWatchedOnce(
       ceiling,
       guard: undefined,
     };
-    guardTheEngine(watch);
     while (!finished.now) {
       await delay(LOOK_MS);
       await lookAtTheEngine(watch);
@@ -835,9 +834,10 @@ async function lookAtTheEngine(watch: Watch): Promise<void> {
     watch.pid = engineAt(watch.started);
     if (watch.pid !== undefined) {
       foundEngine(watch.lock, watch.pid);
-      guardTheEngine(watch);
     }
   }
+  // At the first look also for an engine whose pid was known at its start, as off Windows.
+  guardTheEngine(watch);
   if (watch.pid !== undefined) {
     watch.priority = priorityOf(watch.pid) ?? watch.priority;
   }

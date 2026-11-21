@@ -162,7 +162,7 @@ import {
   ceilingFor,
   engineMemory,
   type MemoryEnd,
-  memoryCeilingSaid,
+  memoryEndedBy,
   memoryEndedSaid,
 } from './engine-memory.js';
 import {
@@ -354,6 +354,7 @@ import {
   type LatestRun,
   listeningPid,
   noteIsAbout,
+  noteTheMemoryEnd,
   openTranscript,
   type PeakTool,
   profileMarkPath,
@@ -5690,6 +5691,8 @@ class GodotServer {
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;
+  /** The ending of each run ended for its memory, which an answer about the run waits for. */
+  private readonly memoryEndings = new WeakMap<GodotProcess, Promise<void>>();
   // A run of a project the editor does not have open, which ended here and gave way to the
   // editor's play. A call naming its project still reads it.
   private endedBesideTheEditor: GodotProcess | null = null;
@@ -5884,6 +5887,9 @@ class GodotServer {
       );
     });
     sweepAbandonedScratch();
+    void this.guardTheRunsLeftRunning().catch((error: unknown) => {
+      console.error(`[SERVER] The games left running could not be guarded: ${errorMessage(error)}`);
+    });
     // The helper a windowed run starts through and the process table, compiled now rather than
     // inside the first windowed start or listing, which on a slow machine took longer than either
     // is given. Once per machine and version. A server finding another already compiling goes on
@@ -14280,7 +14286,7 @@ class GodotServer {
           game.pid,
           memory.ceiling,
           (end) => {
-            void this.endForItsMemory(game, end);
+            this.endForItsMemory(game, end);
           },
           { project: project.value.path, tool: 'editor_run' },
         );
@@ -14297,16 +14303,66 @@ class GodotServer {
     return await this.spawnedStartAnswer(run, started, cmdArgs, launch);
   }
 
-  /** Ends [param game], a run held past its memory ceiling, and says so on it. */
-  private async endForItsMemory(game: GodotProcess, end: MemoryEnd): Promise<void> {
-    if (this.activeProcess === game) {
-      await this.endActiveGame(`its memory ceiling: ${memoryCeilingSaid(end)}`, true, false);
-    } else if (game.pid !== null) {
-      try {
-        process.kill(game.pid, 'SIGKILL');
-      } catch {
-        // Gone already.
+  /**
+   * Ends [param game], a run ended for its memory, and says so on it. The ending is kept on the run
+   * until it is done, so an answer about the run waits for the exit its keeper writes rather than
+   * reading a game gone with no code.
+   */
+  private endForItsMemory(game: GodotProcess, end: MemoryEnd): void {
+    const ending = (async (): Promise<void> => {
+      if (this.activeProcess === game) {
+        await this.endActiveGame(memoryEndedBy(end), true, false);
+      } else if (game.pid !== null) {
+        try {
+          process.kill(game.pid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
       }
+    })();
+    this.memoryEndings.set(game, ending);
+  }
+
+  /**
+   * Guards every game a server before this one started and left running, so none runs unguarded
+   * until a call picks its run up. One this server holds by then is ended as its own. Any other is
+   * ended by its pid, and its note says why once its keeper has written the exit.
+   */
+  private async guardTheRunsLeftRunning(): Promise<void> {
+    for (const record of everyRunRecord()) {
+      if (
+        record.endedAt !== undefined ||
+        !alive(record.pid) ||
+        engineMemory.isGuarding(record.pid) ||
+        !(await couldStillBeTheRecordedRun(record))
+      ) {
+        continue;
+      }
+      let ceiling: Ceiling;
+      try {
+        ceiling = ceilingFor(record.projectPath);
+      } catch {
+        // A setting that is not a size refuses the next start, and this game is already running.
+        continue;
+      }
+      engineMemory.guard(
+        record.pid,
+        ceiling,
+        (end) => {
+          const held = this.activeProcess;
+          if (held?.pid === record.pid) {
+            this.endForItsMemory(held, end);
+            return;
+          }
+          try {
+            process.kill(record.pid, 'SIGKILL');
+          } catch {
+            // Gone already.
+          }
+          void noteTheMemoryEnd(record, memoryEndedBy(end));
+        },
+        { project: record.projectPath, tool: 'editor_run' },
+      );
     }
   }
 
@@ -16542,7 +16598,7 @@ class GodotServer {
       pid,
       ceiling,
       (end) => {
-        void this.endForItsMemory(adopted, end);
+        this.endForItsMemory(adopted, end);
       },
       { project: projectPath, tool: 'editor_run' },
     );
@@ -16592,6 +16648,7 @@ class GodotServer {
       pickedUp: true,
       ...(record.exported === true ? { exported: true as const } : {}),
       ...(record.restartedFrom === undefined ? {} : { restartedFrom: record.restartedFrom }),
+      ...(record.memoryEndedBy === undefined ? {} : { endedHere: record.memoryEndedBy }),
     };
   }
 
@@ -17793,6 +17850,9 @@ class GodotServer {
     if (elsewhere !== null) {
       return elsewhere;
     }
+    // A run being ended for its memory is answered once that ending is done, with the exit its
+    // keeper wrote.
+    await this.memoryEndings.get(run);
     await this.tieThePlayedGame(run);
     this.drainEditorOutput(run);
     this.drainTranscript(run);

@@ -430,10 +430,12 @@ function runStarted(
       const started = child.pid !== undefined;
       const told = started ? whole(code) : null;
       state.failure ??= desktopFailure(files, log, options.desktop !== undefined);
+      // Read before the helper's files are discarded, since they say whether it started the engine.
+      const exitCode = engineExitCode(files, told);
       discard(scratch);
       resolve({
         log,
-        exitCode: engineExitCode(files, told),
+        exitCode,
         exitSignal: closedBy,
         failure: state.failure,
         ...(memoryEnd === undefined ? {} : { memoryEnd }),
