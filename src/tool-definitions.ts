@@ -1725,7 +1725,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'resource_edit',
     title: 'Edit resources',
-    description: `Resource files. create makes a .tres of any engine resource class, a Material class for a material. read answers in the form modify takes. A Theme item is a property named like \`Button/colors/font_color\`. move and read need no editor. A modify drops the lines read lists under notLoaded. move with no editor writes .uid and .import files, and leaves paths in .scn and .res files (leftAlone). ${PATHS_LEFT} ${CLASSES_REBUILT}`,
+    description: `Resource files. create makes a .tres of any engine resource class, a Material class for a material. read answers in the form modify takes. A Theme item is a property named like \`Button/colors/font_color\`, and modify sets a type variation's base as \`NewType/base_type\`. move and read need no editor. A modify drops the lines read lists under notLoaded. move with no editor writes .uid and .import files, and leaves paths in .scn and .res files (leftAlone). ${PATHS_LEFT} ${CLASSES_REBUILT}`,
     answer: [
       WITHOUT_AN_EDITOR,
       'create and modify answer each property given under properties as the file holds it once saved. modify answers each one unset under unset. A property given its default is left out of a .tres file and named under notStored. alsoChanged names what the engine changed in step with a given property. alsoSaved names what the save changed, added or dropped in the main resource, as {property, was, saved}.',
