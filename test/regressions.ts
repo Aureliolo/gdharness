@@ -109869,6 +109869,67 @@ async function testAnEditorNotYetReachedHoldsAWriteWithNoEditor(): Promise<void>
   );
 }
 
+/**
+ * What a node's script that is not a tool changes inside a sub-resource as the scene is instanced
+ * is not saved, a tool script's change is, and so is what the call itself writes there.
+ */
+async function testWhatAScriptChangesInASubResourceIsNotSaved(): Promise<void> {
+  const grower = (tool: boolean): string =>
+    `${tool ? '@tool\n' : ''}extends Node2D\n\n\nfunc _notification(what: int) -> void:\n` +
+    '\tif what == NOTIFICATION_SCENE_INSTANTIATED:\n' +
+    '\t\tvar path: Path2D = get_node(^"Path")\n\t\tpath.curve.add_point(Vector2(10, 0))\n';
+  const onePoint = '_data = {\n"points": PackedVector2Array(0, 0, 0, 0, 5, 5)\n}\npoint_count = 1\n';
+  const scene = (name: string, script: string, curve: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Script" path="res://${script}" id="1_s"]\n\n` +
+    `[sub_resource type="Curve2D" id="Curve2D_1"]\n${curve}\n` +
+    `[node name="${name}" type="Node2D" unique_id=100]\nscript = ExtResource("1_s")\n\n` +
+    '[node name="Path" type="Path2D" parent="." unique_id=101]\ncurve = SubResource("Curve2D_1")\n\n' +
+    '[node name="Plain" type="Node2D" parent="." unique_id=102]\n';
+  const curveOf = (file: string): string =>
+    file.split('\n\n').find((part) => part.startsWith('[sub_resource')) ?? '';
+  // The point the script adds ends the curve's points.
+  const scripted = '10, 0)';
+  const filed = '5, 5)';
+  await withASceneProject(
+    'script change in a sub-resource',
+    {
+      'grower.gd': grower(false),
+      'toolgrower.gd': grower(true),
+      'empty.tscn': scene('Empty', 'grower.gd', ''),
+      'held.tscn': scene('Held', 'grower.gd', onePoint),
+      'asked.tscn': scene('Asked', 'grower.gd', onePoint),
+      'tooled.tscn': scene('Tooled', 'toolgrower.gd', ''),
+    },
+    async (scenes) => {
+      const edited = async (file: string, nodePath: string, properties: Record<string, unknown>) => {
+        await scenes.written('scene_node', { op: 'set', scenePath: file, nodePath, properties });
+        return curveOf(scenes.fileOf(file));
+      };
+      const failures: string[] = [];
+      const expect = (holds: boolean, said: string, curve: string): void => {
+        if (!holds) {
+          failures.push(`${said}: ${curve}`);
+        }
+      };
+      for (const file of ['empty.tscn', 'held.tscn']) {
+        const first = await edited(file, 'Plain', { editor_description: 'edited' });
+        const second = await edited(file, 'Plain', { editor_description: 'edited again' });
+        expect(!first.includes(scripted), `${file} saved the script's point`, first);
+        expect(second === first, `${file} changed between two edits of ${first}`, second);
+      }
+      const held = curveOf(scenes.fileOf('held.tscn'));
+      expect(held.includes(filed), "held.tscn lost the file's point", held);
+      const asked = await edited('asked.tscn', 'Path', { 'curve/bake_interval': 7 });
+      expect(asked.includes('bake_interval = 7'), 'asked.tscn lost the value asked', asked);
+      expect(asked.includes(filed), "asked.tscn lost the file's point", asked);
+      expect(!asked.includes(scripted), "asked.tscn saved the script's point", asked);
+      const tooled = await edited('tooled.tscn', 'Plain', { editor_description: 'edited' });
+      expect(tooled.includes(scripted), 'tooled.tscn lost what its tool script adds', tooled);
+      assert.deepEqual(failures, [], failures.join('\n'));
+    },
+  );
+}
+
 /** What a case of scene writes through a headless engine needs: a project, a call and the files. */
 interface SceneWriteProject {
   call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
@@ -123818,6 +123879,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenameLeavesAloneWhatLiesBehindALinkOutOfTheProject,
   testANamedPathBehindALinkOutIsRefused,
   testAWriteBehindALinkOutIsRefused,
+  testWhatAScriptChangesInASubResourceIsNotSaved,
   testAFileBesideTheSceneBehindALinkOutIsNotWritten,
   testABreakpointBehindALinkOutIsSetUnchecked,
   testEveryProjectWalkIsOne,
