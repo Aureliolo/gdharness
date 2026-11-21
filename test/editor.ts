@@ -4357,7 +4357,10 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   assert.doesNotMatch(fileText(project, 'moves/library.tres'), /&"stroll"/);
   assert.match(fileText(project, 'moves/library.tres'), /&"idle"/, 'and the rest of the library stays');
 
-  assert.match(await refusal('scene_animation', track([{ value: [1, 2] }])), /keyframes\[0\] has no time/);
+  assert.match(
+    await refusal('scene_animation', track([{ value: [1, 2] }])),
+    /^scene_animation takes track\.keyframes\[0\] with its time, which is missing\./,
+  );
   assert.match(await refusal('scene_animation', track([], 'colour')), /Sprite2D has no property colour/);
   assert.match(
     await refusal('scene_animation', {
