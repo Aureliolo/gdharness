@@ -148,6 +148,7 @@ import {
   restartUnderway,
   runtimeAddonOfAnotherRelease,
 } from './editor-open.js';
+import { memoryRefusal } from './engine-launch.js';
 import {
   EXIT_LEAK,
   heldAtExit,
@@ -156,6 +157,14 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
+import {
+  CEILING_VARIABLE,
+  ceilingBytes,
+  engineMemory,
+  type MemoryEnd,
+  memoryCeilingSaid,
+  memoryEndedSaid,
+} from './engine-memory.js';
 import {
   CONSOLE_CLOSED,
   diedAtStartOf,
@@ -346,6 +355,7 @@ import {
   listeningPid,
   noteIsAbout,
   openTranscript,
+  type PeakTool,
   profileMarkPath,
   profilePath,
   type RunRecord,
@@ -5719,6 +5729,8 @@ class GodotServer {
     readonly arguments: readonly string[];
     /** How it was started, so a start that died as it started can be made again the same way. */
     readonly start: EditorStart;
+    /** Set when the editor was ended for holding more memory than its ceiling. */
+    memoryEnd?: MemoryEnd;
   } | null = null;
 
   /**
@@ -10160,9 +10172,35 @@ class GodotServer {
     });
   }
 
+  /**
+   * The ceiling for the engine of a call, or the refusal when GDHARNESS_ENGINE_MEMORY_CEILING_MB is
+   * not a size or the machine has no room for what this project's last engine of [param tool] held.
+   */
+  private async memoryCeiling(
+    projectPath: string,
+    tool: PeakTool,
+  ): Promise<
+    { readonly ok: true; readonly bytes: number } | { readonly ok: false; readonly response: ToolResponse }
+  > {
+    let bytes: number;
+    try {
+      bytes = ceilingBytes();
+    } catch (error) {
+      return { ok: false, response: this.createErrorResponse(errorMessage(error)) };
+    }
+    const refused = await memoryRefusal(projectPath, tool, bytes);
+    return refused === null
+      ? { ok: true, bytes }
+      : { ok: false, response: this.createErrorResponse(refused) };
+  }
+
   /** A test run's class cache rebuilt and its imports brought up to date, before the engine starts. */
   private async testRebuilt(run: TestEngine): Promise<ToolResponse> {
     const { project } = run;
+    const ceiling = await this.memoryCeiling(project.value.path, 'project_test');
+    if (!ceiling.ok) {
+      return ceiling.response;
+    }
     // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
     // waited, and the engine below starts on the cache the rebuild left.
     const began = Date.now();
@@ -10308,7 +10346,11 @@ class GodotServer {
     const attempt = await startedUntilItRuns(
       () => this.testEngineRan(prepared, onDesktop, autoloaded, seeded),
       callSignal(),
-      (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
+      (one) =>
+        !one.timedOut &&
+        one.stopped.for === null &&
+        one.run.memoryEnd === undefined &&
+        diedAtStartOf(one.run),
     );
     const { run, console, timedOut, silentForMs, saidAnything, stopped } = attempt;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
@@ -10363,6 +10405,10 @@ class GodotServer {
       cmdArgs,
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
+      {
+        tool: 'project_test',
+        ceiling: ceilingBytes(),
+      },
       project.value.path,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
@@ -10523,21 +10569,25 @@ class GodotServer {
     return await originsOf(printedErrors, declaredClasses(projectPath), checkWithEngine(engine, projectPath));
   }
 
+  /** Why a test run was ended before its engine finished, or null when it was not. */
+  private cutShortBy(read: TestReadOut): { readonly verdict: string; readonly hung: boolean } | null {
+    const { run, timedOut, timeoutMs, silentForMs, saidAnything } = read;
+    if (run.memoryEnd !== undefined) {
+      return { verdict: memoryEndedSaid(run.memoryEnd, CEILING_VARIABLE), hung: false };
+    }
+    return timedOut
+      ? timedOutVerdict(
+          timeoutMs,
+          silentForMs,
+          repeatingScriptError(run.log.all, (entry) => run.log.raisedByScript(entry)),
+          saidAnything,
+        )
+      : null;
+  }
+
   /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
   private async testJudged(read: TestReadOut): Promise<ToolResponse> {
-    const {
-      flags,
-      run,
-      asked,
-      timeoutMs,
-      timedOut,
-      silentForMs,
-      saidAnything,
-      engine,
-      project,
-      notCompiled,
-      report,
-    } = read;
+    const { flags, run, asked, timedOut, engine, project, notCompiled, report } = read;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for.
     const engineEntries = foldedRepeats(
@@ -10578,21 +10628,14 @@ class GodotServer {
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
-    const nothingRan = timedOut || notCompiled !== null ? null : whyNoReport(said, asked.join(' and '));
-    const cutShort =
-      timedOut && notCompiled === null
-        ? timedOutVerdict(
-            timeoutMs,
-            silentForMs,
-            repeatingScriptError(run.log.all, (entry) => run.log.raisedByScript(entry)),
-            saidAnything,
-          )
-        : null;
+    const endedEarly = timedOut || run.memoryEnd !== undefined;
+    const nothingRan = endedEarly || notCompiled !== null ? null : whyNoReport(said, asked.join(' and '));
+    const cutShort = notCompiled === null ? this.cutShortBy(read) : null;
     const hung = cutShort?.hung ?? false;
     const printedErrors =
       notCompiled !== null
         ? compileErrorsIn(run.log.all)
-        : timedOut || exitCode !== 105
+        : endedEarly || exitCode !== 105
           ? []
           : scriptErrorsPrinted(said);
     const declaring = await this.declaringOrigins(printedErrors, project.value.path, engine.value);
@@ -10745,6 +10788,7 @@ class GodotServer {
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
                 ...(timedOut ? { timedOut, silentForMs } : {}),
+                ...(run.memoryEnd === undefined ? {} : { memoryEnded: run.memoryEnd }),
                 ...(missing.length > 0 ? { missing } : {}),
                 ...nonEmpty(foldedScriptErrors(scriptErrors)),
                 ...atTheEnd,
@@ -12605,7 +12649,11 @@ class GodotServer {
       launchedEditorEnded:
         status.connected || launchedIsUp || this.launchedEditor === null
           ? undefined
-          : `pid ${String(this.launchedEditor.pid)}: ${howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)}`,
+          : `pid ${String(this.launchedEditor.pid)}: ${
+              this.launchedEditor.memoryEnd === undefined
+                ? howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)
+                : memoryEndedSaid(this.launchedEditor.memoryEnd, CEILING_VARIABLE)
+            }`,
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer. An open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
@@ -13627,24 +13675,33 @@ class GodotServer {
     return await inTurnToOpen(project.value.path, () => this.launchInTurn(args, project.value));
   }
 
+  /** The refusal to open an editor while one of the project's has not reached this server yet, or null. */
+  private async anEditorStillArriving(projectPath: string): Promise<ToolResponse | null> {
+    const arriving = await this.editorsNotYetConnected(projectPath);
+    if (arriving === undefined || arriving.length === 0) {
+      return null;
+    }
+    const pids = arriving
+      .map((one) => `pid ${one.pid}${one.startedAt === null ? '' : `, started ${one.startedAt}`}`)
+      .join('; ');
+    return this.createErrorResponse(
+      `An editor of this project is already running (${pids}) and has not reached this server yet: an editor dials in once it is up, later while it imports, so opening another would put two editors on one project and one language server port.`,
+      [
+        'editor_status names it under editorsNotYetConnected and says when it has connected',
+        `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and open again`,
+      ],
+    );
+  }
+
   /** editor_launch open once no other open of the project's editor is under way. */
   private async launchInTurn(args: OperationParams, project: { path: string }): Promise<ToolResponse> {
     const refused = this.anEditorThatCannotConnect(project.path);
     if (refused !== null) {
       return refused;
     }
-    const arriving = await this.editorsNotYetConnected(project.path);
-    if (arriving !== undefined && arriving.length > 0) {
-      const pids = arriving
-        .map((one) => `pid ${one.pid}${one.startedAt === null ? '' : `, started ${one.startedAt}`}`)
-        .join('; ');
-      return this.createErrorResponse(
-        `An editor of this project is already running (${pids}) and has not reached this server yet: an editor dials in once it is up, later while it imports, so opening another would put two editors on one project and one language server port.`,
-        [
-          'editor_status names it under editorsNotYetConnected and says when it has connected',
-          `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and open again`,
-        ],
-      );
+    const arrivingRefusal = await this.anEditorStillArriving(project.path);
+    if (arrivingRefusal !== null) {
+      return arrivingRefusal;
     }
     const engine = await this.engine(project.path);
     if (!engine.ok) {
@@ -13664,11 +13721,21 @@ class GodotServer {
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.
     const unfinished = restartOwed(project.path);
-    const opened = await this.openAnEditor(engine.value, project.path, ports, {
-      hidden: args['hidden'] === true,
-      silent: resolveSilent(args['silent']),
-      until: null,
-    });
+    const ceiling = await this.memoryCeiling(project.path, 'editor_launch');
+    if (!ceiling.ok) {
+      return ceiling.response;
+    }
+    const opened = await this.openAnEditor(
+      engine.value,
+      project.path,
+      ports,
+      {
+        hidden: args['hidden'] === true,
+        silent: resolveSilent(args['silent']),
+        until: null,
+      },
+      ceiling.bytes,
+    );
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
@@ -13773,11 +13840,34 @@ class GodotServer {
     projectPath: string,
     ports: EditorPorts,
     start: EditorStart,
+    memoryCeiling?: number,
   ): Promise<EditorOpened> {
+    let ceiling: number;
+    try {
+      ceiling = memoryCeiling ?? ceilingBytes();
+    } catch (error) {
+      return { pid: null, startedAt: null, error: errorMessage(error), arguments: [] };
+    }
     const opened = await openEditorProcess(engine, projectPath, ports, start);
     if (opened.pid === null) {
       return opened;
     }
+    const { pid } = opened;
+    engineMemory.guard(
+      pid,
+      ceiling,
+      (end) => {
+        if (this.launchedEditor?.pid === pid) {
+          this.launchedEditor.memoryEnd = end;
+        }
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
+      },
+      { project: projectPath, tool: 'editor_launch' },
+    );
     // Remembered so that "nothing is coming" and "the editor this server just started is still
     // importing" stop being the same answer. The grace window is measured from the bridge taking
     // its port, which is the right reference for an editor that was already up and has to notice,
@@ -14175,8 +14265,12 @@ class GodotServer {
         : {}),
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const launch = async (): Promise<GodotProcess | { error: string }> =>
-      await this.launchKeptGame(
+    const ceiling = await this.memoryCeiling(project.value.path, 'editor_run');
+    if (!ceiling.ok) {
+      return ceiling.response;
+    }
+    const launch = async (): Promise<GodotProcess | { error: string }> => {
+      const game = await this.launchKeptGame(
         engine.value,
         cmdArgs,
         project.value.path,
@@ -14190,6 +14284,18 @@ class GodotServer {
         exported === null,
         engineCalls,
       );
+      if (!('error' in game) && game.pid !== null) {
+        engineMemory.guard(
+          game.pid,
+          ceiling.bytes,
+          (end) => {
+            void this.endForItsMemory(game, end);
+          },
+          { project: project.value.path, tool: 'editor_run' },
+        );
+      }
+      return game;
+    };
     const started = await launch();
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
@@ -14198,6 +14304,23 @@ class GodotServer {
     }
     this.holdTheStart(started, run);
     return await this.spawnedStartAnswer(run, started, cmdArgs, launch);
+  }
+
+  /** Ends [param game], a run held past its memory ceiling, and says so on it. */
+  private async endForItsMemory(game: GodotProcess, end: MemoryEnd): Promise<void> {
+    if (this.activeProcess === game) {
+      await this.endActiveGame(
+        `its memory ceiling: ${memoryCeilingSaid(end, CEILING_VARIABLE)}`,
+        true,
+        false,
+      );
+    } else if (game.pid !== null) {
+      try {
+        process.kill(game.pid, 'SIGKILL');
+      } catch {
+        // Gone already.
+      }
+    }
   }
 
   /** Makes [param started] the run this server holds for a start spawned here. */
@@ -15611,6 +15734,10 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+    memory: { readonly tool: PeakTool; readonly ceiling: number } = {
+      tool: 'editor_run',
+      ceiling: ceilingBytes(),
+    },
     project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
     if (onDesktop === undefined && process.platform === 'win32') {
@@ -15630,6 +15757,18 @@ class GodotServer {
       // The pid callers read is the engine's, which the helper writes down once it has started it.
       if (run.engineFiles !== undefined) {
         await this.engineKnown(run, run.engineFiles);
+      }
+      if (run.pid !== null) {
+        const guard = engineMemory.guard(
+          run.pid,
+          memory.ceiling,
+          (end) => {
+            run.memoryEnd = end;
+            run.stop();
+          },
+          project === undefined ? undefined : { project, tool: memory.tool },
+        );
+        void run.settled.finally(guard.release);
       }
       return run;
     } catch (error) {
@@ -16781,7 +16920,7 @@ class GodotServer {
         readonly hung: boolean;
         readonly crashedStarts?: number;
       }> => {
-        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, projectPath);
+        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, undefined, projectPath);
         const hungUp = await new Promise<boolean>((resolve) => {
           const timer = setTimeout(() => {
             started.process.kill();

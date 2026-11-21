@@ -7,7 +7,7 @@
  * deadline while doing their usual work at a fraction of a core.
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { availableParallelism, cpus } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { askProcessTable } from './process-table.js';
@@ -197,16 +197,30 @@ async function take(): Promise<Sample> {
   return { at, machine, processors, ...(held === null ? {} : { held }) };
 }
 
-/** The bytes each of [param pids] holds, without any the platform does not answer for. */
-export async function heldBy(pids: readonly number[]): Promise<Map<number, number>> {
-  const held = new Map<number, number>();
+/** What a process and everything below it hold, and the processes below it. */
+export interface TreeHeld {
+  readonly bytes: number;
+  readonly below: readonly number[];
+}
+
+/**
+ * The memory each of [param pids] holds with every process below it, without any the platform does
+ * not answer for. Private bytes on Windows and resident bytes elsewhere: the memory a process holds
+ * for itself, which a shared mapping or a file cache does not add to.
+ */
+export async function treesHeldBy(pids: readonly number[]): Promise<Map<number, TreeHeld>> {
+  const held = new Map<number, TreeHeld>();
   try {
     if (process.platform === 'win32') {
       await readWindowsHeld(pids, held);
-    } else if (process.platform === 'linux') {
-      await readProcSeconds(pids, new Map(), held);
     } else {
-      await readPsSeconds(pids, new Map(), held, ASK_TIMEOUT_MS);
+      const table = process.platform === 'linux' ? await readProcTable() : await readPsTable();
+      for (const pid of pids) {
+        const tree = treeOf(table, pid);
+        if (tree !== undefined) {
+          held.set(pid, tree);
+        }
+      }
     }
   } catch {
     // Unread, so the engine's figure is left out.
@@ -214,14 +228,88 @@ export async function heldBy(pids: readonly number[]): Promise<Map<number, numbe
   return held;
 }
 
-async function readWindowsHeld(pids: readonly number[], held: Map<number, number>): Promise<void> {
+/** The bytes each of [param pids] holds with everything below it: see {@link treesHeldBy}. */
+export async function heldBy(pids: readonly number[]): Promise<Map<number, number>> {
+  const trees = await treesHeldBy(pids);
+  return new Map([...trees].map(([pid, tree]) => [pid, tree.bytes]));
+}
+
+async function readWindowsHeld(pids: readonly number[], held: Map<number, TreeHeld>): Promise<void> {
   const said = await askProcessTable(`HeldBy('${pids.join(',')}')`, ASK_TIMEOUT_MS);
   for (const line of said.split(/\r?\n/)) {
-    const [pid, bytes] = line.trim().split(' ').map(Number);
-    if (pid !== undefined && bytes !== undefined && Number.isFinite(pid) && Number.isFinite(bytes)) {
-      held.set(pid, bytes);
+    const [pid, bytes, below] = line.trim().split(' ');
+    const root = Number(pid);
+    const total = Number(bytes);
+    if (pid !== undefined && bytes !== undefined && Number.isFinite(root) && Number.isFinite(total)) {
+      held.set(root, { bytes: total, below: (below ?? '').split(',').filter(Boolean).map(Number) });
     }
   }
+}
+
+/** One process of a table read for its memory: whose child it is and what it holds. */
+type Held = ReadonlyMap<number, { readonly parent: number; readonly bytes: number }>;
+
+/** [param pid] and everything below it in [param table], or undefined where it is not listed. */
+function treeOf(table: Held, pid: number): TreeHeld | undefined {
+  const root = table.get(pid);
+  if (root === undefined) {
+    return undefined;
+  }
+  const below: number[] = [];
+  const seen = new Set<number>([pid]);
+  let bytes = root.bytes;
+  for (let next = [pid]; next.length > 0; ) {
+    const parents = new Set(next);
+    next = [];
+    for (const [child, entry] of table) {
+      if (parents.has(entry.parent) && !seen.has(child)) {
+        seen.add(child);
+        below.push(child);
+        bytes += entry.bytes;
+        next.push(child);
+      }
+    }
+  }
+  return { bytes, below };
+}
+
+async function readProcTable(): Promise<Held> {
+  const page = await pageBytes();
+  const table = new Map<number, { parent: number; bytes: number }>();
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) {
+      continue;
+    }
+    try {
+      // The fields after the command, which is in brackets and may hold spaces of its own.
+      const fields = (readFileSync(`/proc/${name}/stat`, 'utf8').split(')').pop() ?? '').trim().split(/\s+/);
+      const parent = Number(fields[1]);
+      const resident = Number(fields[21]);
+      if (Number.isFinite(parent) && Number.isFinite(resident)) {
+        table.set(Number(name), { parent, bytes: resident * page });
+      }
+    } catch {
+      // Gone between the listing and the read.
+    }
+  }
+  return table;
+}
+
+async function readPsTable(): Promise<Held> {
+  const table = new Map<number, { parent: number; bytes: number }>();
+  const { stdout } = await run('ps', ['-A', '-o', 'pid=,ppid=,rss='], { timeout: ASK_TIMEOUT_MS });
+  for (const line of stdout.split('\n')) {
+    const [pid, parent, rss] = line.trim().split(/\s+/).map(Number);
+    if (
+      pid !== undefined &&
+      parent !== undefined &&
+      rss !== undefined &&
+      [pid, parent, rss].every(Number.isFinite)
+    ) {
+      table.set(pid, { parent, bytes: rss * 1024 });
+    }
+  }
+  return table;
 }
 
 /**
@@ -244,9 +332,9 @@ export async function processorSecondsOf(
     if (process.platform === 'win32') {
       await readWindowsSeconds(pids, found, withinMs);
     } else if (process.platform === 'linux') {
-      await readProcSeconds(pids, found, new Map());
+      await readProcSeconds(pids, found);
     } else {
-      await readPsSeconds(pids, found, new Map(), withinMs);
+      await readPsSeconds(pids, found, withinMs);
     }
   } catch {
     // Unread, so the stretch counts by the clock.
@@ -268,12 +356,8 @@ async function readWindowsSeconds(
   }
 }
 
-async function readProcSeconds(
-  pids: readonly number[],
-  found: Map<number, number>,
-  held: Map<number, number>,
-): Promise<void> {
-  const [ticks, page] = await Promise.all([ticksASecond(), pageBytes()]);
+async function readProcSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
+  const ticks = await ticksASecond();
   for (const pid of pids) {
     try {
       // The fields after the command, which is in brackets and may hold spaces of its own.
@@ -288,10 +372,6 @@ async function readProcSeconds(
       if (Number.isFinite(used)) {
         found.set(pid, used / ticks);
       }
-      const resident = Number(fields[21]);
-      if (Number.isFinite(resident)) {
-        held.set(pid, resident * page);
-      }
     } catch {
       // Gone between the listing and the read.
     }
@@ -300,7 +380,7 @@ async function readProcSeconds(
 
 /** What `ps` printed for [param some], also when it exited 1 because one of them had gone. */
 function askedPs(some: readonly number[], withinMs: number): Promise<string> {
-  return run('ps', ['-o', 'pid=,time=,rss=', '-p', some.join(',')], { timeout: withinMs }).then(
+  return run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: withinMs }).then(
     (done) => done.stdout,
     (error: unknown) => {
       const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
@@ -312,7 +392,6 @@ function askedPs(some: readonly number[], withinMs: number): Promise<string> {
 async function readPsSeconds(
   pids: readonly number[],
   found: Map<number, number>,
-  held: Map<number, number>,
   withinMs: number,
 ): Promise<void> {
   // ps exits 1 when any pid it was given has gone, and still prints the rest. One it cannot
@@ -322,14 +401,10 @@ async function readPsSeconds(
     stdout = (await Promise.all(pids.map((pid) => askedPs([pid], withinMs)))).join('\n');
   }
   for (const line of stdout.split('\n')) {
-    const [pid, time, rss] = line.trim().split(/\s+/);
+    const [pid, time] = line.trim().split(/\s+/);
     const seconds = time === undefined ? undefined : secondsFromClock(time);
     if (pid !== undefined && seconds !== undefined) {
       found.set(Number(pid), seconds);
-    }
-    const kibibytes = rss === undefined ? Number.NaN : Number(rss);
-    if (pid !== undefined && Number.isFinite(kibibytes)) {
-      held.set(Number(pid), kibibytes * 1024);
     }
   }
 }

@@ -354,6 +354,22 @@ hold, less what it holds now. The run's first engine always starts.
 A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
 It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
 
+### The memory ceiling and the kept peak
+
+Every engine the server starts (a headless operation, `project_test`, a game from `editor_run start`
+and an editor from `editor_launch open`) is read about once a second, with the processes it started.
+The figure is private bytes on Windows and resident memory on Linux and macOS. An engine past its
+ceiling is ended with everything below it, and the answer gives the peak and the ceiling and names
+how to raise it.
+
+The ceiling is a quarter of the physical memory and at least 4 GiB. `GDHARNESS_ENGINE_MEMORY_CEILING_MB`
+sets it, in megabytes, for every engine the server starts.
+
+When an engine ends, its peak is kept for its project and tool in `runs/memory-<project>.json`.
+The next start of that tool in that project counts the larger of 1.5 GiB and the kept peak, up to the
+ceiling, and is refused when the free memory less the reserve does not cover it. The refusal says
+what the engine needs, what that comes from and how much is free.
+
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.

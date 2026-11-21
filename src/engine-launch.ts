@@ -34,6 +34,7 @@ import {
   helperStep,
   spawnOnDesktop,
 } from './desktop.js';
+import { engineNeed, gigabytes, MEMORY_PER_ENGINE, startRefusedSaid } from './engine-memory.js';
 import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
 import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
@@ -47,6 +48,7 @@ import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal, priorityOf } from './priority.js';
 import { askProcessTable } from './process-table.js';
+import { type PeakTool, readEnginePeaks } from './run-record.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { diedAsItStarted, linesAsPrinted } from './start-race.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
@@ -63,7 +65,9 @@ export const WINDOWS_EXCEPTION = 0xc0000000;
  * for its suites.
  */
 const MEMORY_KEPT = 4 * 1024 ** 3;
-export const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
+
+export { MEMORY_PER_ENGINE };
+
 const LOOK_MS = 500;
 
 /** How long Windows is given to say how much it can still commit, on a machine the run may load. */
@@ -212,8 +216,7 @@ export function heldRunSaid(directory: string): string {
   return `left ${directory}, which another process holds, such as an engine of that run still going`;
 }
 
-/** [param bytes] as gigabytes to one decimal place. */
-export const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+export { gigabytes };
 
 /**
  * How many of the [param most] engines asked for the machine has room for, given its [param
@@ -277,6 +280,26 @@ export async function memoryAvailable(): Promise<MemoryRoom> {
     return lessReserved({ bytes: (totalmem() * level) / 100, said: 'of memory free' }, reserved);
   }
   return memoryRoomOf(freemem(), await windowsCommitLeft(), reserved);
+}
+
+/**
+ * Why an engine of [param tool] for [param project] is not started, or null: what the project's last
+ * engine of that tool held (at most [param ceiling]) is more than the machine has left past what it
+ * keeps. A project with no peak above the flat figure is never refused, since that figure is an
+ * estimate and the machine's free memory alone says nothing against it.
+ */
+export async function memoryRefusal(
+  project: string,
+  tool: PeakTool,
+  ceiling: number,
+  room: () => Promise<MemoryRoom> = memoryAvailable,
+): Promise<string | null> {
+  const need = engineNeed(readEnginePeaks(project)[tool], ceiling, tool);
+  if (need.bytes <= MEMORY_PER_ENGINE) {
+    return null;
+  }
+  const free = await room();
+  return free.bytes - MEMORY_KEPT >= need.bytes ? null : startRefusedSaid(need, free, MEMORY_KEPT);
 }
 
 /**
