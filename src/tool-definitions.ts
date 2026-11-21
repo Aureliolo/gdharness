@@ -2507,7 +2507,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       accessibility: {
         effect: 'read',
         summary:
-          'what the game tells a screen reader, in a windowed Windows run started with engineArgs ["--accessibility", "always"] or accessibility_support at Always Active',
+          'what the game tells a screen reader, in a windowed run started with engineArgs ["--accessibility", "always"] or accessibility_support at Always Active',
         requires: [],
       },
     },

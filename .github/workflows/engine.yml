@@ -56,6 +56,17 @@ jobs:
       - name: Install dependencies
         run: bun scripts/install-packages.ts
 
+      # The screen-reader regression reads a game's tree over AT-SPI on Linux. The runner has Xvfb
+      # and dbus but none of the rest: dbus-launch, the accessibility bus, python3's AT-SPI bindings that the
+      # reader is written in, the software GL the game's window draws with, and a window manager to give
+      # that window the focus, without which AccessKit leaves the focused element out.
+      - name: Install the Linux screen-reader stack
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            at-spi2-core dbus-x11 gir1.2-atspi-2.0 libgl1-mesa-dri libglx-mesa0 openbox python3-gi xvfb
+
       # The suites start servers from the bundle.
       - name: Build
         run: bun run build
