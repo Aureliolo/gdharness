@@ -414,8 +414,14 @@ func _check_held(writing: GdhWriting) -> void:
 	var given: Dictionary = writing.given
 	for property: String in given:
 		var held: Variant = read_at(target, property)
-		if not GdhSame.same(held, _as_held(target, property, given)):
+		var theme_base: bool = target is Theme and property.ends_with("/base_type")
+		if not GdhSame.same(held, _as_held(target, property, given)) or (
+			theme_base and str(given[property]).is_empty()
+		):
 			unheld = property
+			if theme_base:
+				writing.stop(_base_not_held(property, given[property], held))
+				return
 			if writing.undone_by.has(property):
 				var in_step: String = (
 					(
@@ -445,6 +451,20 @@ func _check_held(writing: GdhWriting) -> void:
 				)
 			)
 			return
+
+
+## The refusal for a Theme's [param property], a type variation's base, that holds [param held]
+## after it was given [param given]. The engine keeps no base for a type named after one of its
+## classes or for an empty one, and answers neither.
+func _base_not_held(property: String, given: Variant, held: Variant) -> String:
+	return (
+		(
+			"Theme.%s was given %s and holds %s after it was set: the engine takes no base for a "
+			+ "type named after an engine class, and no empty base. remove_theme_item without "
+			+ "item takes a base out with its type. Nothing was written."
+		)
+		% [property, shown(given), shown(held)]
+	)
 
 
 ## Notes in [param undone_by] each property of [param given] that writing [param written] on
@@ -1082,9 +1102,12 @@ func declaration(target: Object, property: String) -> Dictionary:
 
 ## The entry a Theme would declare for [param property] once it held that item, or {} when the name
 ## is not an item's. A Theme lists only the items it holds and takes any other through set, so an
-## item a read of one theme answered with was refused when written into another that lacked it.
+## item a read of one theme answered with was refused when written into another that lacked it. A
+## type variation's `<type>/base_type` is such an entry too, a StringName.
 static func _theme_item(property: String) -> Dictionary:
 	var parts: PackedStringArray = property.split("/")
+	if parts.size() == 2 and parts[1] == "base_type" and not parts[0].is_empty():
+		return { "name": property, "type": TYPE_STRING_NAME, "usage": PROPERTY_USAGE_DEFAULT }
 	if (
 		parts.size() != 3
 		or parts[0].is_empty()
