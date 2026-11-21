@@ -8255,8 +8255,7 @@ class GodotServer {
    * the start is what the caller asked for, and this only decides when it happens.
    */
   private async untilTheEditorsScanIsWritten(projectPath: string): Promise<ScanWait> {
-    const open = this.godotBridge.getStatus().projectPath;
-    if (!this.godotBridge.isConnected() || open === undefined || !isSameDirectory(open, projectPath)) {
+    if (!this.editorHasOpen(projectPath)) {
       return { waitedMs: 0, stillScanning: false };
     }
     const started = Date.now();
@@ -19592,7 +19591,7 @@ class GodotServer {
         : noted.rebuiltWith.filter((name) => !before.has(name) && after.has(name)).toSorted();
     const cameBack = writtenBefore === null ? [] : declaredSince(projectPath, after, lost, writtenBefore);
     const droppedByTheEditor = lost.filter((name) => !cameBack.includes(name));
-    const seenLosing = droppedByTheEditor.length > 0 && this.godotBridge.isConnected();
+    const seenLosing = droppedByTheEditor.length > 0 && this.editorHasOpen(projectPath);
     // The note as it stands now, not as it was read before the rebuild: a call that wrote it
     // meanwhile keeps its change.
     const editorPid = this.godotBridge.getStatus().editorPid ?? null;
@@ -19745,8 +19744,11 @@ class GodotServer {
     // so the class written here stayed a name it could not resolve until somebody called
     // editor_rescan. Scanned here, as modify reloads the script there, unless this editor's scans
     // write a list shorter than the file: a scan there loses classes, and the note says what loads them.
+    // An editor with another project open has no scan of this one to run.
     const scanned =
-      answered.isError === true || this.editorWritesAShortList(project.value.path)
+      answered.isError === true ||
+      !this.editorHasOpen(project.value.path) ||
+      this.editorWritesAShortList(project.value.path)
         ? null
         : await this.handleRescanFilesystem({ projectPath: project.value.path });
     return await this.alsoSayWhatTheEditorCannotSee(
@@ -19998,7 +20000,7 @@ class GodotServer {
       return this.createErrorResponse(`Nothing was renamed: ${errorMessage(error)}`);
     }
 
-    const editorSettled = this.godotBridge.isConnected()
+    const editorSettled = this.editorHasOpen(projectPath)
       ? await this.settleRenameInEditor(projectPath, outcome.scriptsInOrder, {
           gone: outcome.moved === null ? [] : [outcome.moved.from],
           oldClass: outcome.isClass ? symbol : null,
