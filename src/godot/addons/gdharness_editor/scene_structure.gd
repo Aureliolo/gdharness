@@ -11,8 +11,8 @@ extends RefCounted
 ## the file gives it. A node no entry names goes only when a scene put back owns it, which is how a
 ## save keeps a node. Nothing else that exists is freed or made again: a node's own engine children,
 ## such as a container's scroll bars, are owned by no scene and held by the node. A scene with an
-## entry whose parent is not at its path frees nothing, since the engine may have placed that
-## entry's node elsewhere by the file's ids or at the root.
+## entry whose parent is not at its path is instanced again and left as it loads, since the engine
+## may have placed that entry's node elsewhere by the file's ids or at the root.
 ##
 ## An instanced scene is put back against its own state. A scene whose scripts are all tools, or
 ## whose root's script is a tool, is left as it loads, as is every scene instanced inside one with
@@ -37,8 +37,8 @@ var _ordered: Dictionary = {}
 var _deferred: Array[Dictionary] = []
 ## Each scene put back, as {top, state}, for the connections of the nodes made again.
 var _levels: Array[Dictionary] = []
-## The top of each scene with an entry whose parent was not found at its path, by instance id.
-var _unplaced: Dictionary = {}
+## Whether an entry's parent was not found at its path, in the scene or one it instances.
+var _unplaced: bool = false
 ## The unique_ids of each scene's entries, by its state's instance id, read once.
 var _ids_by_state: Dictionary = {}
 ## The scene each state put back comes from, by the state's instance id.
@@ -50,14 +50,26 @@ var _indexed: bool = false
 var _editable: PackedStringArray = []
 
 
+## [param top], instanced from [param packed], with its nodes put back. Where an entry's parent is
+## not at its path, [param top] is freed and the scene is answered instanced again, as it loads.
+func restored(top: Node, packed: PackedScene) -> Node:
+	if put_back(top, packed):
+		return top
+	top.free()
+	remade_ids.clear()
+	return packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+
+
 ## Puts back what the scripts that ran as [param top] was instanced from [param packed] did to its
-## nodes.
-func put_back(top: Node, packed: PackedScene) -> void:
+## nodes. Answers false, with the scene half put back, once an entry's parent is not at its path.
+func put_back(top: Node, packed: PackedScene) -> bool:
 	_root = top
 	_editable = _editable_of(packed)
 	var state: SceneState = packed.get_state()
 	_packs[state.get_instance_id()] = packed
 	var _at: Dictionary = _level(top, state, false)
+	if _unplaced:
+		return false
 	_strip()
 	_arrange()
 	_resolve_deferred()
@@ -66,6 +78,7 @@ func put_back(top: Node, packed: PackedScene) -> void:
 			var level_top: Node = level["top"]
 			var level_state: SceneState = level["state"]
 			_reconnect(level_top, level_state)
+	return true
 
 
 ## Puts back the scene [param state] makes at [param top], answering each node of it by its path
@@ -85,8 +98,8 @@ func _level(top: Node, state: SceneState, kept: bool) -> Dictionary:
 			continue
 		var parent: Node = _at_path(top, at, str(entry["parent"]))
 		if parent == null:
-			_unplaced[top.get_instance_id()] = true
-			continue
+			_unplaced = true
+			return at
 		var node: Node = _node_of(top, parent, entry) if putting else _unclaimed(parent, entry)
 		if node == null:
 			continue
@@ -99,6 +112,8 @@ func _level(top: Node, state: SceneState, kept: bool) -> Dictionary:
 			var placed_state: SceneState = placed.get_state()
 			_packs[placed_state.get_instance_id()] = placed
 			var inner: Dictionary = _level(node, placed_state, tool_root)
+			if _unplaced:
+				return at
 			for path: Variant in inner:
 				if not str(path).is_empty():
 					at[_key(key, str(path))] = inner[path]
@@ -417,17 +432,15 @@ func _id_of(entry: Dictionary) -> int:
 
 
 ## The unique_id the scene of [param state] gives each entry, in the order its state holds them, as
-## the engine packed them, text and binary alike. SceneState gives none to a script. A base scene is
-## read from its file. Empty where no scene is found, or its ids do not number the entries.
+## the engine packed them, text and binary alike. SceneState gives none to a script. Empty for a
+## scene another inherits, whose node made again is saved as an entry changing it, or where the ids
+## do not number the entries.
 func _ids_of(state: SceneState) -> PackedInt32Array:
 	var key: int = state.get_instance_id()
 	if _ids_by_state.has(key):
 		return _ids_by_state[key]
 	var ids: PackedInt32Array = []
-	var file: String = state.get_path()
 	var packed: PackedScene = _packs.get(key)
-	if packed == null and not file.is_empty() and ResourceLoader.exists(file):
-		packed = ResourceLoader.load(file, "PackedScene") as PackedScene
 	if packed != null:
 		var bundled: Dictionary = packed._get_bundled_scene()
 		var held: Variant = bundled.get("node_ids")
@@ -457,13 +470,11 @@ func _order(parent: Node, node: Node, entry: Dictionary, putting: bool) -> void:
 		var _inserted: int = children.insert(wanted, node)
 
 
-## Whether [param node] is one no entry names, owned by a scene put back whose every entry was
-## placed, which a save would keep.
+## Whether [param node] is one no entry names, owned by a scene put back, which a save would keep.
 func _strippable(node: Node) -> bool:
 	if _claimed.has(node.get_instance_id()) or node.owner == null:
 		return false
-	var owner_id: int = node.owner.get_instance_id()
-	return _put_back.has(owner_id) and not _unplaced.has(owner_id)
+	return _put_back.has(node.owner.get_instance_id())
 
 
 ## Frees each node a script added that a scene put back owns.

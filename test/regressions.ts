@@ -108281,8 +108281,8 @@ async function testAChildOfANodeItsOwnSceneRenamedIsKept(): Promise<void> {
 async function testAChildWhoseParentIsNotAtItsPathStaysWhereTheEngineHungIt(): Promise<void> {
   const deep = (parent: string, ids: string): string =>
     `[node name="Deep" type="Node2D" parent="${parent}"${ids} unique_id=302]\nposition = Vector2(7, 8)\n\n`;
-  const host = (name: string, child: string, extra = ''): string =>
-    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n` +
+  const host = (name: string, child: string, extra = '', script = 'quiet.gd'): string =>
+    `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://${script}" id="1_q"]\n` +
     '[ext_resource type="PackedScene" path="res://part.tscn" id="2_p"]\n\n' +
     `[node name="${name}" type="Node2D" unique_id=300]\nscript = ExtResource("1_q")\n\n` +
     '[node name="Inst" parent="." unique_id=301 instance=ExtResource("2_p")]\n\n' +
@@ -108290,9 +108290,19 @@ async function testAChildWhoseParentIsNotAtItsPathStaysWhereTheEngineHungIt(): P
     extra +
     '[node name="Plain" type="Node2D" parent="." unique_id=305]\n\n[editable path="Inst"]\n';
   const mover = '\t\tvar y: Node = get_node(^"Inst/Y")\n\t\ty.reparent(get_node(^"Inst/X2"))';
+  // A second Deep, under Box, whose entry comes after the one the engine hung elsewhere.
+  const namesake =
+    '[node name="Other" type="Node2D" parent="." unique_id=306]\n\n' +
+    '[node name="Box" type="Node2D" parent="." unique_id=307]\n\n' +
+    '[node name="Deep" type="Node2D" parent="Box" unique_id=308]\nposition = Vector2(1, 1)\n\n';
+  const renamed = deep('Inst/X', ' parent_id_path=PackedInt32Array(301, 201)');
   const files = (tool: boolean): Record<string, string> => ({
     'quiet.gd': `${tool ? '@tool\n' : ''}${QUIET_ON_LOAD}`,
     'mover.gd': onInstanced(mover, tool),
+    'boxmover.gd': onInstanced('\t\tget_node(^"Box/Deep").reparent(get_node(^"Other"), false)', tool),
+    'boxfreer.gd': onInstanced('\t\tget_node(^"Box/Deep").free()', tool),
+    'namesake-moved.tscn': host('NamesakeMoved', renamed, namesake, 'boxmover.gd'),
+    'namesake-freed.tscn': host('NamesakeFreed', renamed, namesake, 'boxfreer.gd'),
     'part.tscn':
       `${PUT_BACK_HEADER}[ext_resource type="Script" path="res://quiet.gd" id="1_q"]\n\n` +
       '[node name="Part" type="Node2D" unique_id=200]\nscript = ExtResource("1_q")\n\n' +
@@ -108306,7 +108316,7 @@ async function testAChildWhoseParentIsNotAtItsPathStaysWhereTheEngineHungIt(): P
     'unnumbered.tscn': host('Unnumbered', deep('Inst/Lost', '')),
     'quoted.tscn': host(
       'Quoted',
-      deep('Inst/X', ' parent_id_path=PackedInt32Array(301, 201)'),
+      renamed,
       '[node name="Note" type="Node2D" parent="." unique_id=306]\neditor_description = "a\n[node name=\\"Fake\\"]"\n\n',
     ),
     'moving.tscn':
@@ -108317,7 +108327,14 @@ async function testAChildWhoseParentIsNotAtItsPathStaysWhereTheEngineHungIt(): P
       '[node name="Kid" type="Node2D" parent="Inst/Y" unique_id=702]\nposition = Vector2(4, 4)\n\n' +
       '[node name="Plain" type="Node2D" parent="." unique_id=705]\n\n[editable path="Inst"]\n',
   });
-  const scenes = ['gone.tscn', 'unnumbered.tscn', 'quoted.tscn', 'moving.tscn'];
+  const scenes = [
+    'gone.tscn',
+    'unnumbered.tscn',
+    'quoted.tscn',
+    'moving.tscn',
+    'namesake-moved.tscn',
+    'namesake-freed.tscn',
+  ];
   const saved = async (tool: boolean): Promise<Record<string, string>> => {
     const out: Record<string, string> = {};
     await withASceneProject(
