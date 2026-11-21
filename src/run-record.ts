@@ -34,7 +34,7 @@ import { STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runtimeDirectories, runtimeDirectory } from './runtime-directories.js';
 import { runHidden } from './spawn.js';
 import { tableListener } from './tcp-listeners.js';
-import { changeWholeAsync, writeWhole, writeWholeAsync } from './whole-file.js';
+import { writeWhole, writeWholeAsync } from './whole-file.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -210,13 +210,26 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
   }
 }
 
-/** The tools whose engines have their memory peak kept for their project. */
-export type PeakTool = 'project_test' | 'editor_run' | 'editor_launch' | 'headless';
+/**
+ * The engines whose memory peak is kept for their project: a tool's, and editor_run check's boot,
+ * which is kept apart from the game editor_run start counts.
+ */
+export type PeakTool = 'project_test' | 'editor_run' | 'editor_launch' | 'headless' | 'boot_check';
 
-const PEAK_TOOLS: readonly PeakTool[] = ['project_test', 'editor_run', 'editor_launch', 'headless'];
+const PEAK_TOOLS: readonly PeakTool[] = [
+  'project_test',
+  'editor_run',
+  'editor_launch',
+  'headless',
+  'boot_check',
+];
 
-function enginePeaksPath(projectPath: string, directory = runtimeDirectory()): string {
-  return join(directory, 'runs', `memory-${projectKey(projectPath)}.json`);
+/**
+ * One file for each project and tool, written whole, so two servers keeping peaks of one project at
+ * once never write over each other's figure.
+ */
+function enginePeakPath(projectPath: string, tool: PeakTool, directory = runtimeDirectory()): string {
+  return join(directory, 'runs', `memory-${projectKey(projectPath)}-${tool}.json`);
 }
 
 /** The most bytes the last engine of each tool held for [param projectPath], by tool. */
@@ -224,37 +237,26 @@ export function readEnginePeaks(
   projectPath: string,
   directory = runtimeDirectory(),
 ): Partial<Record<PeakTool, number>> {
-  try {
-    const fields: unknown = JSON.parse(readFileSync(enginePeaksPath(projectPath, directory), 'utf8'));
-    if (!isRecord(fields)) {
-      return {};
-    }
-    const peaks: Partial<Record<PeakTool, number>> = {};
-    for (const tool of PEAK_TOOLS) {
-      const bytes = fields[tool];
+  const peaks: Partial<Record<PeakTool, number>> = {};
+  for (const tool of PEAK_TOOLS) {
+    try {
+      const fields: unknown = JSON.parse(readFileSync(enginePeakPath(projectPath, tool, directory), 'utf8'));
+      const bytes = isRecord(fields) ? fields['bytes'] : undefined;
       if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
         peaks[tool] = bytes;
       }
+    } catch {
+      // Unkept or unreadable, so that tool counts the flat figure.
     }
-    return peaks;
-  } catch {
-    return {};
   }
+  return peaks;
 }
 
 /** Keeps [param bytes] as what the last engine of [param tool] held for [param projectPath]. */
 export async function recordEnginePeak(projectPath: string, tool: PeakTool, bytes: number): Promise<void> {
   try {
     mkdirSync(runsDirectory(), { recursive: true });
-    await changeWholeAsync(enginePeaksPath(projectPath), (text) => {
-      let kept: unknown = null;
-      try {
-        kept = text === null ? null : JSON.parse(text);
-      } catch {
-        // Unreadable, so it is written again from this peak alone.
-      }
-      return JSON.stringify({ ...(isRecord(kept) ? kept : {}), [tool]: Math.round(bytes) }, null, 2);
-    });
+    await writeWholeAsync(enginePeakPath(projectPath, tool), JSON.stringify({ bytes: Math.round(bytes) }));
   } catch {
     // Unwritable leaves the next start counting the flat figure.
   }
