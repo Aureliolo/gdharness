@@ -936,8 +936,10 @@ ones.
     to at each. Count it from the first such look, and start again at the next look that finds it
     free if a look finds it taken. Pass each waiter ahead that would take it and wants one slot,
     then give the slot to the next one ahead, until it falls to you or to a waiter you wait for.
-    Takers that each place the others ahead, however many, then do not leave a free slot to each
-    other for good. A waiter that wants several slots (below) is waited for through its first 300
+    A waiter passed for one slot is given the next free one it may take. That slot is left too,
+    so count it the same way, from the first look that gives it to a waiter ahead. Takers that
+    each place the others ahead, however many, then do not leave a free slot to each other for
+    good. A waiter that wants several slots (below) is waited for through its first 300
     seconds, however many are free. So is a `gate` taker while a gate is queued.
 - A game that may take no free slot now (see Games and the kept slots) is given none, however long
   it has waited, and the takers behind it take the slots it cannot.
@@ -1081,11 +1083,11 @@ long as it plays.
 A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
 stays when its keeper takes the lock over. Games hold at most `kept - 1` of the kept slots between
 them (3 of the 4 kept on 16 slots, 2 of the 3 kept on 12, none of the 1 kept on 2) while a gate is
-queued, and a game's start waits once they do. On 2 slots no game runs while a gate is queued.
+queued, and a game's start waits once they do. On 1 and 2 slots no game runs while a gate is queued.
 
 The last kept slot, the lowest of them, stays for a headless call. A game never takes it, whether
 or not a gate is queued. With no gate queued a game takes any other slot. On a machine of one slot,
-which has no kept slot apart from it, a game takes that slot.
+which has no kept slot apart from it, a game takes that slot while no gate is queued.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
 longest. A take works out again at every look which slots it may try. A slot it already holds is
