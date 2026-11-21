@@ -199,7 +199,14 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from '../src/engine-leaks.js';
-import { CEILING_VARIABLE, ceilingBytes, engineNeed, MemoryWatch } from '../src/engine-memory.js';
+import {
+  CEILING_VARIABLE,
+  ceilingBytes,
+  engineMemory,
+  engineNeed,
+  MemoryWatch,
+  startRefusedSaid,
+} from '../src/engine-memory.js';
 import {
   crashedAtStart,
   ENGINE_STARTS,
@@ -126053,7 +126060,7 @@ const GROWS = {
 const MEMORY_END_SAID =
   /^ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/;
 
-/** A test run holding more than its ceiling is ended within seconds, and its peak is kept. */
+/** A test run holding more than its ceiling is ended within seconds, and keeps no peak. */
 async function testAProjectTestPastItsMemoryCeilingIsEndedForIt(): Promise<void> {
   await withMemoryEngine(GROWS, async (call, project, runtime) => {
     const began = Date.now();
@@ -126067,11 +126074,7 @@ async function testAProjectTestPastItsMemoryCeilingIsEndedForIt(): Promise<void>
     assert.equal(get(ran, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(ran));
     assert.ok(asNumber(get(ran, 'memoryEnded', 'peakBytes')) > 300 * 1024 * 1024, JSON.stringify(ran));
     const peaks = readEnginePeaks(project, runtime);
-    assert.ok(
-      (peaks.project_test ?? 0) > 300 * 1024 * 1024,
-      `the run's peak is kept: ${JSON.stringify(peaks)}`,
-    );
-    assert.equal(peaks.editor_run, undefined, 'and only for the tool that ran');
+    assert.deepEqual(peaks, {}, 'an engine ended for its memory keeps no peak');
   });
 }
 
@@ -126122,7 +126125,8 @@ async function testAnEditorPastItsMemoryCeilingIsEndedForIt(): Promise<void> {
 /** An engine under its ceiling runs to its end, as on a server with no ceiling. */
 async function testAnEngineUnderItsMemoryCeilingRunsToItsEnd(): Promise<void> {
   await withMemoryEngine(
-    { GDH_HOLD_MB: '60', GDH_STAY_MS: '2500', [CEILING_VARIABLE]: '300' },
+    // Six seconds gives the once-a-second watch five readings or more, also when its guard starts late.
+    { GDH_HOLD_MB: '60', GDH_STAY_MS: '6000', [CEILING_VARIABLE]: '300' },
     async (call, project, runtime) => {
       const ran = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
       assert.equal(get(ran, 'memoryEnded'), undefined, JSON.stringify(ran));
@@ -126207,14 +126211,20 @@ async function testAPeakIsKeptPerProjectAndToolAndCountedByTheNextStart(): Promi
     assert.deepEqual(readEnginePeaks('/projects/a'), { project_test: 3 * GIB, editor_launch: 2 * GIB });
     assert.deepEqual(readEnginePeaks('/projects/b'), { project_test: 5 * GIB });
     const room = (bytes: number) => () => Promise.resolve({ bytes, said: 'of memory free' });
+    const byDefault = { bytes: 16 * GIB, source: 'default' } as const;
     assert.equal(
-      await memoryRefusal('/projects/a', 'project_test', 16 * GIB, room(6.5 * GIB)),
-      'Not started: the engine needs 3.0 GB (the 3.0 GB the last project_test engine of this project held), and the machine has 6.5 GB of memory free, 4.0 GB of it kept for everything else.',
+      await memoryRefusal('/projects/a', 'project_test', byDefault, room(6.5 * GIB)),
+      'Not started: the engine needs 3.0 GB (the 3.0 GB the last project_test engine of this project held), and the machine has 6.5 GB of memory free, 4.0 GB of it kept for everything else. Free 0.5 GB of memory, or set GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness/engine/memory_ceiling_mb in project.godot to 2560 or less, which caps what the engine may hold and is counted at.',
     );
-    assert.equal(await memoryRefusal('/projects/a', 'project_test', 16 * GIB, room(7.5 * GIB)), null);
+    assert.equal(await memoryRefusal('/projects/a', 'project_test', byDefault, room(7.5 * GIB)), null);
     assert.equal(
-      await memoryRefusal('/projects/b', 'project_test', 4 * GIB, room(7 * GIB)),
-      'Not started: the engine needs 4.0 GB (the 5.0 GB the last project_test engine of this project held, capped at the 4.0 GB ceiling), and the machine has 7.0 GB of memory free, 4.0 GB of it kept for everything else.',
+      await memoryRefusal(
+        '/projects/b',
+        'project_test',
+        { bytes: 4 * GIB, source: 'project' },
+        room(7 * GIB),
+      ),
+      'Not started: the engine needs 4.0 GB (the 5.0 GB the last project_test engine of this project held, capped at the 4.0 GB ceiling), and the machine has 7.0 GB of memory free, 4.0 GB of it kept for everything else. Free 1.0 GB of memory, or set gdharness/engine/memory_ceiling_mb in project.godot to 3072 or less, which caps what the engine may hold and is counted at.',
     );
   });
 }
@@ -126231,8 +126241,9 @@ async function testAProjectWithNoKeptPeakCountsOneAndAHalfGiB(): Promise<void> {
     await recordEnginePeak('/projects/small', 'project_test', GIB);
     assert.equal(engineNeed(GIB, 16 * GIB, 'project_test').bytes, 1.5 * GIB);
     const none = () => Promise.resolve({ bytes: 0, said: 'of memory free' });
-    assert.equal(await memoryRefusal('/projects/new', 'project_test', 16 * GIB, none), null);
-    assert.equal(await memoryRefusal('/projects/small', 'project_test', 16 * GIB, none), null);
+    const ceiling = { bytes: 16 * GIB, source: 'default' } as const;
+    assert.equal(await memoryRefusal('/projects/new', 'project_test', ceiling, none), null);
+    assert.equal(await memoryRefusal('/projects/small', 'project_test', ceiling, none), null);
   });
 }
 
@@ -126254,9 +126265,13 @@ async function testTheMemoryWatcherPollsOnlyWhileAnEngineIsGuarded(): Promise<vo
   const guard = watch.guard(process.pid, { bytes: 1024 ** 3, source: 'default' }, () =>
     assert.fail('under its ceiling'),
   );
-  await delay(150);
+  // A loaded machine stretches a 10 ms timer, so the readings are waited for rather than counted
+  // after a set time.
+  for (const until = Date.now() + 10_000; asked.length <= 3 && Date.now() < until; ) {
+    await delay(10);
+  }
   assert.equal(watch.polling, true);
-  assert.ok(asked.length > 3);
+  assert.ok(asked.length > 3, `read while guarded: ${String(asked.length)}`);
   assert.equal(guard.release(), 1);
   const after = asked.length;
   await delay(100);
@@ -126272,8 +126287,13 @@ async function checkTheMemoryReaderOf(platform: NodeJS.Platform): Promise<void> 
   const MIB = 1024 * 1024;
   const hold = (megabytes: number): string => `Buffer.alloc(${String(megabytes)} * 1024 * 1024, 1)`;
   const grandchild = `const keep = ${hold(150)}; setInterval(() => keep.length, 1000);`;
+  // The process first holds 700 MB and lets it go, so a reader of a peak reads far past what the
+  // two hold now, and a reader of reserved address space further still.
   const child = [
-    `const keep = ${hold(200)};`,
+    `let spike = ${hold(700)};`,
+    'spike = null;',
+    'Bun.gc(true);',
+    `const keep = ${hold(100)};`,
     `const { spawn } = require('node:${['child', 'process'].join('_')}');`,
     `const below = spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore', windowsHide: true });`,
     "process.stdout.write([below.pid, ''].join('\\n'));",
@@ -126293,13 +126313,15 @@ async function checkTheMemoryReaderOf(platform: NodeJS.Platform): Promise<void> 
     for (let tries = 0; tries < 40; tries++) {
       await delay(250);
       held = (await treesHeldBy([pid])).get(pid);
-      if (held?.below.includes(below) === true && held.bytes >= 340 * MIB) {
+      if (held?.below.includes(below) === true && held.bytes >= 250 * MIB) {
         break;
       }
     }
     assert.ok(held !== undefined, 'the process is read');
     assert.ok(held.below.includes(below), `the process it started is below it: ${JSON.stringify(held)}`);
-    assert.ok(held.bytes >= 340 * MIB, `its own and the process below it are counted: ${String(held.bytes)}`);
+    // 250 MB of buffers, and each runtime's own few tens of megabytes.
+    assert.ok(held.bytes >= 250 * MIB, `its own and the process below it are counted: ${String(held.bytes)}`);
+    assert.ok(held.bytes <= 600 * MIB, `only what the two hold now is counted: ${String(held.bytes)}`);
   } finally {
     try {
       process.kill(parent.pid ?? 0, 'SIGKILL');
@@ -126438,6 +126460,10 @@ async function testTheSettingWinsOverTheVariableForItsProjectOnly(): Promise<voi
   );
 }
 
+/** The refusal of a setting written as text, which reads as a number and is not one. */
+const textRefusal = (value: string): string =>
+  `gdharness/engine/memory_ceiling_mb in project.godot is the text "${value}", and takes a whole number of megabytes above 0, written without quotes.`;
+
 /** A setting that is not a whole number above 0 refuses the start, naming the setting, its value and the rule. */
 async function testASettingThatIsNoSizeRefusesTheStart(): Promise<void> {
   const refusal = (value: string): string =>
@@ -126445,17 +126471,17 @@ async function testASettingThatIsNoSizeRefusesTheStart(): Promise<void> {
   await withMemoryEngine({ GDH_STAY_MS: '1000' }, async (call, project) => {
     const file = join(project, 'project.godot');
     const clean = readFileSync(file, 'utf8');
-    for (const [written, shown] of [
-      ['0', '0'],
-      ['-5', '-5'],
-      ['"lots"', 'lots'],
-      ['2.5', '2.5'],
+    for (const [written, said] of [
+      ['0', refusal('0')],
+      ['-5', refusal('-5')],
+      ['"lots"', textRefusal('lots')],
+      ['2.5', refusal('2.5')],
     ] as const) {
       writeFileSync(file, clean);
       setTheCeilingOf(project, written);
       assert.equal(
         await call('project_test', { path: 'res://tests', timeoutMs: 60_000 }),
-        refusal(shown),
+        said,
         `project_test with ${written}`,
       );
     }
@@ -126496,6 +126522,453 @@ async function testAHeadlessEngineIsSampledOncePerTick(): Promise<void> {
     gaps.every((gap) => gap >= 450),
     `no two readings share a tick: ${JSON.stringify(gaps)}`,
   );
+}
+
+/** Waits up to [param ms] for [param done], reading it every 100 ms, and answers its last reading. */
+async function untilTrue(done: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
+  for (const until = Date.now() + ms; Date.now() < until; ) {
+    if (await done()) {
+      return true;
+    }
+    await delay(100);
+  }
+  return await done();
+}
+
+/** editor_run check's engine ended for its memory says so, and the check keeps its peak apart from the game's. */
+async function testABootCheckEndedForItsMemorySaysSoAndKeepsItsOwnPeak(): Promise<void> {
+  await withMemoryEngine(GROWS, async (call) => {
+    const checked = await call('editor_run', { op: 'check', timeoutMs: 60_000 });
+    assert.equal(get(checked, 'booted'), false, JSON.stringify(checked));
+    assert.match(String(get(checked, 'endedBy')), MEMORY_END_SAID, JSON.stringify(checked));
+    assert.equal(get(checked, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(checked));
+    assert.equal(get(checked, 'memoryEnded', 'source'), 'variable', JSON.stringify(checked));
+  });
+  const GIB = 1024 ** 3;
+  await withMemoryEngine(
+    { GDH_HOLD_MB: '60', GDH_STAY_MS: '4000', [CEILING_VARIABLE]: '300' },
+    async (call, project, runtime) => {
+      await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, () =>
+        recordEnginePeak(project, 'editor_run', 2 * GIB),
+      );
+      const checked = await call('editor_run', { op: 'check', timeoutMs: 60_000 });
+      assert.equal(get(checked, 'endedBy'), undefined, JSON.stringify(checked));
+      assert.ok(
+        await untilTrue(() => (readEnginePeaks(project, runtime).boot_check ?? 0) > 0, 5000),
+        `the check keeps its own peak: ${JSON.stringify(readEnginePeaks(project, runtime))}`,
+      );
+      assert.equal(readEnginePeaks(project, runtime).editor_run, 2 * GIB, "the game's figure stays");
+    },
+  );
+}
+
+/** An engine ended for its memory keeps no peak, and a refusal names what lets the start go ahead. */
+async function testAnEngineEndedForItsMemoryKeepsNoPeakAndARefusalNamesTheWayOn(): Promise<void> {
+  const GIB = 1024 ** 3;
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  try {
+    await withHoldsInTheEnvironment({ GODOT_ENGINE_SLOTS: slots }, () =>
+      withARuntimeDirectory(async () => {
+        const watch = new MemoryWatch(
+          () =>
+            Promise.resolve({
+              at: 0,
+              machine: 0,
+              processors: null,
+              held: new Map([[process.pid, 2 * GIB]]),
+              below: new Map([[process.pid, []]]),
+            }),
+          10,
+        );
+        let ended = 0;
+        const guard = watch.guard(
+          process.pid,
+          { bytes: GIB, source: 'default' },
+          () => {
+            ended += 1;
+          },
+          { project: '/projects/runaway', tool: 'project_test' },
+        );
+        assert.ok(await untilTrue(() => ended === 1, 5000), 'ended past its ceiling');
+        assert.equal(guard.release(), 2 * GIB);
+        await delay(200);
+        assert.deepEqual(
+          readEnginePeaks('/projects/runaway'),
+          {},
+          'its figure is the fault, so none is kept',
+        );
+      }),
+    );
+  } finally {
+    sweep(slots);
+  }
+  const need = { bytes: 3 * GIB, said: 'the 3.0 GB the last editor_run engine of this project held' };
+  const room = { bytes: 6.5 * GIB, said: 'of memory free' };
+  const opening =
+    'Not started: the engine needs 3.0 GB (the 3.0 GB the last editor_run engine of this project held), and the machine has 6.5 GB of memory free, 4.0 GB of it kept for everything else. Free 0.5 GB of memory, or set ';
+  const closing = ' to 2560 or less, which caps what the engine may hold and is counted at.';
+  assert.equal(
+    startRefusedSaid(need, room, 4 * GIB, { bytes: 16 * GIB, source: 'project' }),
+    `${opening}gdharness/engine/memory_ceiling_mb in project.godot${closing}`,
+  );
+  for (const source of ['variable', 'default'] as const) {
+    assert.equal(
+      startRefusedSaid(need, room, 4 * GIB, { bytes: 16 * GIB, source }),
+      `${opening}GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness/engine/memory_ceiling_mb in project.godot${closing}`,
+      source,
+    );
+  }
+  assert.match(
+    startRefusedSaid(need, { bytes: 4.5 * GIB, said: 'of memory free' }, 4 * GIB, {
+      bytes: 16 * GIB,
+      source: 'project',
+    }),
+    /Free 2\.5 GB of memory, or set gdharness\/engine\/memory_ceiling_mb in project\.godot to 1536 or less,/,
+    'a ceiling is never named below the flat figure, which every start fits',
+  );
+}
+
+/** A game editor_run started and left running is guarded by the server that next holds it. */
+async function testAGameItsServerLeftRunningIsGuardedByTheNextServer(): Promise<void> {
+  const project = memoryProject();
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+  // 600 MB reached 12 MB every 150 ms: past 300 MB after about 4 s, once the first server has gone.
+  const env = {
+    GODOT_PATH: memoryEngine(),
+    GDHARNESS_RUNTIME_DIR: runtime,
+    GDHARNESS_PROJECT: project,
+    GDH_HOLD_MB: '600',
+    GDH_GROW_MB: '12',
+    GDH_STAY_MS: '20000',
+    [CEILING_VARIABLE]: '300',
+  };
+  const call = async (
+    server: ServerProcess,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> => {
+    const response = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+    const json = blocks.find((block) => block.trimStart().startsWith('{'));
+    return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
+  };
+  let pid = 0;
+  try {
+    const first = new ServerProcess({ env });
+    try {
+      await first.initialize('regression-test');
+      const started = await call(first, 'editor_run', { op: 'start', headless: true });
+      assert.equal(get(started, 'started'), true, JSON.stringify(started));
+      pid = asNumber(get(started, 'pid'));
+    } finally {
+      await first.stop();
+    }
+    const second = new ServerProcess({ env });
+    try {
+      await second.initialize('regression-test');
+      let output: unknown = null;
+      for (let tries = 0; tries < 40 && get(output, 'running') !== false; tries++) {
+        output = await call(second, 'editor_output', {});
+        await delay(500);
+      }
+      assert.match(
+        String(get(output, 'endedBy')),
+        /^its memory ceiling: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
+        JSON.stringify(output),
+      );
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Gone already.
+    }
+    sweep(project, runtime);
+  }
+}
+
+/**
+ * A start refused for memory says what it needs, what is free and what lets it start, the same
+ * through project_test, editor_run start, editor_launch open and a headless operation.
+ */
+async function testAStartRefusedForMemorySaysSoThroughEveryTool(): Promise<void> {
+  const GIB = 1024 ** 3;
+  const refusal = (tool: string): RegExp =>
+    new RegExp(
+      `^Not started: the engine needs 120\\.0 GB \\(the 120\\.0 GB the last ${tool} engine of this project held\\), and the machine has \\d+\\.\\d GB of memory (free|left to commit)( after \\d+\\.\\d GB reserved)?, 4\\.0 GB of it kept for everything else\\. Free \\d+\\.\\d GB of memory, or set GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness/engine/memory_ceiling_mb in project\\.godot to \\d+ or less, which caps what the engine may hold and is counted at\\.$`,
+    );
+  const ceiling = { [CEILING_VARIABLE]: String(120 * 1024) };
+  await withMemoryEngine({ GDH_STAY_MS: '1000', ...ceiling }, async (call, project, runtime) => {
+    await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, async () => {
+      for (const tool of ['project_test', 'editor_run', 'editor_launch', 'headless'] as const) {
+        await recordEnginePeak(project, tool, 120 * GIB);
+      }
+    });
+    assert.match(
+      String(await call('project_test', { path: 'res://tests', timeoutMs: 60_000 })),
+      refusal('project_test'),
+    );
+    assert.match(String(await call('editor_run', { op: 'start', headless: true })), refusal('editor_run'));
+    assert.match(String(await call('editor_launch', { op: 'open' })), refusal('editor_launch'));
+    const outcome = await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime, ...ceiling }, () =>
+      runOperation(
+        { godotPath: memoryEngine(), script: 'none', debug: false },
+        'get_scene_tree',
+        {},
+        project,
+      ),
+    );
+    assert.equal(outcome.ok, false, JSON.stringify(outcome));
+    assert.match(String(get(outcome, 'message')), refusal('headless'), JSON.stringify(outcome));
+  });
+}
+
+/** A headless engine is let go as it ends: nothing reserves for it or reads it afterwards. */
+async function testAHeadlessEngineIsReadNoMoreOnceItHasEnded(): Promise<void> {
+  const project = memoryProject();
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  const reads: { readonly at: number; readonly pids: readonly number[] }[] = [];
+  const restore = readingMemoryWith((pids) => {
+    reads.push({ at: Date.now(), pids: [...pids] });
+    return treesHeldBy(pids);
+  });
+  let endedAt = 0;
+  let engines: number[] = [];
+  try {
+    await withHoldsInTheEnvironment(
+      { GODOT_ENGINE_SLOTS: slots, GDH_HOLD_MB: '60', GDH_STAY_MS: '2500' },
+      async () => {
+        const ran = await runEngine(memoryEngine(), ['--headless', '--path', project], { project });
+        endedAt = Date.now();
+        assert.equal(ran.exitCode, 0, String(ran.failure));
+        engines = [...new Set(reads.flatMap((read) => read.pids))];
+        assert.deepEqual(
+          engines.filter((pid) => engineMemory.isGuarding(pid)),
+          [],
+          'the engine is no longer guarded once its run is answered',
+        );
+        assert.equal(await reservedMemory(slots), 0, 'and reserves nothing');
+      },
+    );
+    await delay(3000);
+  } finally {
+    restore();
+    sweep(project, slots);
+  }
+  assert.ok(engines.length > 0, 'the engine was read while it ran');
+  const after = reads.filter((read) => read.at > endedAt && read.pids.some((pid) => engines.includes(pid)));
+  assert.deepEqual(after, [], 'nothing reads an engine that has ended');
+}
+
+/** Two processes keeping the peaks of one project at once each keep their own last figure. */
+async function testTwoWritersOfOneProjectsPeaksLoseNoFigure(): Promise<void> {
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-peaks-'));
+  const project = join(runtime, 'two writers');
+  const record = pathToFileURL(resolve('src', 'run-record.ts')).href;
+  try {
+    const writers = ['project_test', 'editor_run'].map(
+      (tool) =>
+        new Promise<number | null>((done) => {
+          const writer = spawnHidden(
+            process.execPath,
+            [
+              '-e',
+              [
+                `import { recordEnginePeak } from ${JSON.stringify(record)};`,
+                'for (let step = 1; step <= 200; step++) {',
+                `  await recordEnginePeak(${JSON.stringify(project)}, '${tool}', step * 1024 * 1024);`,
+                '}',
+              ].join('\n'),
+            ],
+            { stdio: 'ignore', env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime } },
+          );
+          writer.once('exit', done);
+        }),
+    );
+    assert.deepEqual(await Promise.all(writers), [0, 0], 'both writers ran');
+    assert.deepEqual(readEnginePeaks(project, runtime), {
+      project_test: 200 * 1024 * 1024,
+      editor_run: 200 * 1024 * 1024,
+    });
+  } finally {
+    sweep(runtime);
+  }
+}
+
+/**
+ * Four engines whose kept peaks pass the machine's memory together: the starts that fit are let
+ * through, each running engine reserves what it may still grow to, and the starts past that are
+ * refused.
+ */
+async function testRunningEnginesReserveWhatTheyMayStillGrowTo(): Promise<void> {
+  const GIB = 1024 ** 3;
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  const projects = [memoryProject(), memoryProject(), memoryProject(), memoryProject()];
+  const engines: ReturnType<typeof spawnHidden>[] = [];
+  try {
+    await withHoldsInTheEnvironment({ GODOT_ENGINE_SLOTS: slots }, () =>
+      withARuntimeDirectory(async () => {
+        const guards: { release: () => number }[] = [];
+        try {
+          for (const project of projects) {
+            await recordEnginePeak(project, 'project_test', 3 * GIB);
+          }
+          // A machine with 12 GiB free: 8 GiB past what it keeps, room for two engines of 3 GiB.
+          const room = async (): Promise<{ bytes: number; said: string }> =>
+            memoryRoomOf(12 * GIB, null, await reservedMemory(slots));
+          const ceiling = { bytes: 16 * GIB, source: 'default' } as const;
+          const said: (string | null)[] = [];
+          for (const project of projects) {
+            const refused = await memoryRefusal(project, 'project_test', ceiling, room);
+            said.push(refused);
+            if (refused !== null) {
+              continue;
+            }
+            const engine = spawnHidden(memoryEngine(), ['--path', project], {
+              stdio: 'ignore',
+              env: { ...process.env, GDH_HOLD_MB: '0', GDH_STAY_MS: '30000' },
+            });
+            engines.push(engine);
+            const owedBefore = await reservedMemory(slots);
+            guards.push(
+              engineMemory.guard(engine.pid ?? 0, ceiling, () => assert.fail('under its ceiling'), {
+                project,
+                tool: 'project_test',
+              }),
+            );
+            assert.ok(
+              await untilTrue(async () => (await reservedMemory(slots)) > owedBefore + 2 * GIB, 10_000),
+              `the engine reserves what it may grow to: ${String(await reservedMemory(slots))}`,
+            );
+          }
+          assert.deepEqual(
+            said.map((one) => (one === null ? 'started' : 'refused')),
+            ['started', 'started', 'refused', 'refused'],
+            JSON.stringify(said),
+          );
+          assert.match(
+            String(said[2]),
+            /^Not started: the engine needs 3\.0 GB \(the 3\.0 GB the last project_test engine of this project held\), and the machine has \d\.\d GB of memory free after \d\.\d GB reserved, 4\.0 GB of it kept for everything else\. Free \d\.\d GB of memory, or set GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness\/engine\/memory_ceiling_mb in project\.godot to \d+ or less, which caps what the engine may hold and is counted at\.$/,
+          );
+        } finally {
+          for (const guard of guards) {
+            guard.release();
+          }
+        }
+        assert.equal(await reservedMemory(slots), 0, 'an engine no longer guarded reserves nothing');
+      }),
+    );
+  } finally {
+    for (const engine of engines) {
+      engine.kill();
+    }
+    sweep(slots, ...projects);
+  }
+}
+
+/** A headless operation ended for its memory is answered in one sentence naming what sets the ceiling. */
+async function testAHeadlessOperationEndedForItsMemoryIsSaidInOneSentence(): Promise<void> {
+  const project = memoryProject();
+  try {
+    setTheCeilingOf(project, '300');
+    const outcome = await withHoldsInTheEnvironment(
+      { GDH_OPERATION_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
+      () =>
+        runOperation(
+          { godotPath: memoryEngine(), script: 'none', debug: false },
+          'get_scene_tree',
+          {},
+          project,
+        ),
+    );
+    assert.equal(outcome.ok, false, JSON.stringify(outcome));
+    assert.match(
+      String(get(outcome, 'message')),
+      /^get_scene_tree was ended for its memory: it held 0\.[3-9] GB, past the 0\.3 GB ceiling gdharness\/engine\/memory_ceiling_mb in project\.godot sets\.$/,
+      JSON.stringify(outcome),
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A ceiling setting written in quotes is refused as text, with its name. */
+async function testACeilingSettingWrittenAsTextIsRefusedAsText(): Promise<void> {
+  await withMemoryEngine({ GDH_STAY_MS: '1000' }, async (call, project) => {
+    setTheCeilingOf(project, '"300"');
+    assert.equal(await call('project_test', { path: 'res://tests', timeoutMs: 60_000 }), textRefusal('300'));
+  });
+}
+
+/** A reading of an engine's memory on Windows costs a read through its handle, not a walk of every process. */
+async function testAMemoryReadingCostsAHandleReadForEachEngine(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log(`the memory reading cost regression skipped (this is ${process.platform})`);
+    return;
+  }
+  const idle = [0, 1].map(() =>
+    spawnHidden(
+      process.execPath,
+      ['-e', 'const keep = Buffer.alloc(20 * 1024 * 1024, 1); setInterval(() => keep.length, 1000);'],
+      {
+        stdio: 'ignore',
+      },
+    ),
+  );
+  try {
+    const pids = idle.map((one) => one.pid ?? 0);
+    await delay(1000);
+    // The first reading takes the snapshot the next ones walk.
+    assert.equal((await treesHeldBy(pids)).size, 2, 'both are read');
+    const times: number[] = [];
+    for (let reading = 0; reading < 10; reading++) {
+      const began = performance.now();
+      await treesHeldBy(pids);
+      times.push(performance.now() - began);
+    }
+    // A walk of the process table took 18 ms for each reading, a read of two handles about 1 ms. The
+    // quickest of ten, since other work on the machine only ever adds to a reading's time.
+    const quickest = Math.min(...times);
+    assert.ok(quickest < 10, `the quickest of ten readings of two engines: ${quickest.toFixed(1)} ms`);
+  } finally {
+    for (const one of idle) {
+      one.kill();
+    }
+  }
+}
+
+/** A test run's engine past its ceiling is ended, and the run's result and output say so. */
+function testATestRunsEnginePastItsCeilingIsEndedAndSaysSo(): void {
+  const project = memoryProject();
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  const resultFile = join(slots, 'result.json');
+  const said =
+    /ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it/;
+  try {
+    const began = Date.now();
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: memoryEngine(), ...GROWS },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const printed = `${ran.stdout}${ran.stderr}`;
+    assert.ok(Date.now() - began < 30_000, `the engine was ended, not left to run: ${printed}`);
+    assert.notEqual(ran.status, 0, printed);
+    assert.match(printed, said, printed);
+    assert.match(readFileSync(resultFile, 'utf8'), said, readFileSync(resultFile, 'utf8'));
+  } finally {
+    sweep(project, slots);
+  }
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -127883,6 +128356,17 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheSettingWinsOverTheVariableForItsProjectOnly,
   testASettingThatIsNoSizeRefusesTheStart,
   testAHeadlessEngineIsSampledOncePerTick,
+  testABootCheckEndedForItsMemorySaysSoAndKeepsItsOwnPeak,
+  testAnEngineEndedForItsMemoryKeepsNoPeakAndARefusalNamesTheWayOn,
+  testAGameItsServerLeftRunningIsGuardedByTheNextServer,
+  testAStartRefusedForMemorySaysSoThroughEveryTool,
+  testAHeadlessEngineIsReadNoMoreOnceItHasEnded,
+  testTwoWritersOfOneProjectsPeaksLoseNoFigure,
+  testRunningEnginesReserveWhatTheyMayStillGrowTo,
+  testAHeadlessOperationEndedForItsMemoryIsSaidInOneSentence,
+  testACeilingSettingWrittenAsTextIsRefusedAsText,
+  testAMemoryReadingCostsAHandleReadForEachEngine,
+  testATestRunsEnginePastItsCeilingIsEndedAndSaysSo,
 ];
 
 /**

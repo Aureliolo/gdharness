@@ -10287,7 +10287,7 @@ class GodotServer {
     } catch (error) {
       return { ok: false, response: this.createErrorResponse(errorMessage(error)) };
     }
-    const refused = await memoryRefusal(projectPath, tool, ceiling.bytes);
+    const refused = await memoryRefusal(projectPath, tool, ceiling);
     return refused === null
       ? { ok: true, ceiling }
       : { ok: false, response: this.createErrorResponse(refused) };
@@ -16642,9 +16642,37 @@ class GodotServer {
     // for the run would report a finished bench as running and offer its number to be killed.
     if (!alive(record.pid) || !(await couldStillBeTheRecordedRun(record))) {
       this.settleAnEndedAdoption(adopted, record);
+    } else {
+      this.guardTheAdopted(adopted, record.projectPath);
     }
     this.activeProcess = adopted;
     return adopted;
+  }
+
+  /**
+   * Guards [param adopted], a game the server before this one started and left running, against
+   * its project's memory ceiling, as the server that started it did.
+   */
+  private guardTheAdopted(adopted: GodotProcess, projectPath: string): void {
+    const { pid } = adopted;
+    if (pid === null || engineMemory.isGuarding(pid)) {
+      return;
+    }
+    let ceiling: Ceiling;
+    try {
+      ceiling = ceilingFor(projectPath);
+    } catch {
+      // A setting that is not a size refuses the next start, and this game is already running.
+      return;
+    }
+    engineMemory.guard(
+      pid,
+      ceiling,
+      (end) => {
+        void this.endForItsMemory(adopted, end);
+      },
+      { project: projectPath, tool: 'editor_run' },
+    );
   }
 
   /**
@@ -17031,7 +17059,7 @@ class GodotServer {
         readonly hung: boolean;
         readonly crashedStarts?: number;
       }> => {
-        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, undefined, projectPath);
+        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, 'boot_check', projectPath);
         const hungUp = await new Promise<boolean>((resolve) => {
           const timer = setTimeout(() => {
             started.process.kill();
@@ -17046,7 +17074,7 @@ class GodotServer {
         return { boot: started, hung: hungUp };
       },
       callSignal(),
-      (one) => !one.hung && diedAtStartOf(one.boot),
+      (one) => !one.hung && one.boot.memoryEnd === undefined && diedAtStartOf(one.boot),
     );
 
     const errors = boot.log.count('error');
@@ -17062,8 +17090,10 @@ class GodotServer {
     const shown = printed.reduce((sum, entry) => sum + (entry.times ?? 1), 0);
     this.lastCheckAt = Date.now();
     return this.jsonTextResponse({
-      booted: !hung && boot.exitCode === 0 && errors === 0,
+      booted: !hung && boot.memoryEnd === undefined && boot.exitCode === 0 && errors === 0,
       hung,
+      endedBy: boot.memoryEnd === undefined ? undefined : memoryEndedSaid(boot.memoryEnd),
+      memoryEnded: boot.memoryEnd,
       engineNote: engineNote ?? undefined,
       exitCode: boot.neverStarted === true ? null : boot.exitCode,
       exitSignal: boot.exitSignal ?? undefined,

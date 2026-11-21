@@ -1320,11 +1320,14 @@ function comparable(path: string): string {
  * The bytes other work has reserved and still owes, summed over the live marks in
  * `<directory>/reserved`. A mark counts by the rule a lock does ({@link lockIsFree}), and one
  * [param env] names in {@link RESERVED_VARIABLE} counts nothing, since a gate that reserved its peak
- * runs this inside it. The default directory is the machine's, never a pool's.
+ * runs this inside it. The marks of the engines this process runs ({@link engineReservation}) count
+ * unless [param ownEngines] is false, for a reader that counts its own engines itself. The default
+ * directory is the machine's, never a pool's.
  */
 export async function reservedMemory(
   directory: string = machineSlotsDirectory(),
   env: NodeJS.ProcessEnv = process.env,
+  ownEngines = true,
 ): Promise<number> {
   const own = new Set(
     (nonEmpty(env[RESERVED_VARIABLE]) ?? '')
@@ -1332,8 +1335,12 @@ export async function reservedMemory(
       .filter((path) => path !== '')
       .map(comparable),
   );
+  const ours = `${ENGINE_MARK_PREFIX}${String(process.pid)}-`;
   const live = reservationMarks(directory).filter(
-    (mark) => alive(mark.holder.pid) && !own.has(comparable(mark.path)),
+    (mark) =>
+      alive(mark.holder.pid) &&
+      !own.has(comparable(mark.path)) &&
+      (ownEngines || !basename(mark.path).startsWith(ours)),
   );
   if (live.length === 0) {
     return 0;
@@ -1343,6 +1350,87 @@ export async function reservedMemory(
   return live
     .filter((mark) => !lockIsFree(mark.content, mark.writtenAt, now, alive, (asked) => starts.get(asked)))
     .reduce((sum, mark) => sum + mark.owed, 0);
+}
+
+/** How the reservation mark of an engine this process started is named, before `<pid>-<engine>.json`. */
+const ENGINE_MARK_PREFIX = 'engine-';
+
+/** The reservation an engine keeps in the machine's slots while it runs: see {@link engineReservation}. */
+export interface EngineReservation {
+  /** Marks what the engine may still take, given [param held], what it holds now. */
+  readonly holds: (held: number) => void;
+  /** Removes the mark. */
+  readonly end: () => void;
+}
+
+/** How far what an engine owes moves before its mark is written again. */
+const RESERVATION_STEP_BYTES = 64 * 1024 ** 2;
+
+/**
+ * A reservation mark for the running engine [param engine], which may grow to [param expected] bytes:
+ * it owes that less what it holds now, and every reader of {@link reservedMemory} on the machine
+ * counts it. The mark names the engine as its holder, so it counts nothing once the engine has gone,
+ * also when this process went first.
+ */
+export function engineReservation(
+  engine: number,
+  expected: number,
+  directory: string = machineSlotsDirectory(),
+): EngineReservation {
+  const path = join(
+    directory,
+    RESERVED_FOLDER,
+    `${ENGINE_MARK_PREFIX}${String(process.pid)}-${String(engine)}.json`,
+  );
+  const state: { started: number | undefined; written: number | null; ended: boolean; owed: number } = {
+    started: undefined,
+    written: null,
+    ended: false,
+    owed: expected,
+  };
+  const write = (): void => {
+    if (state.ended || state.started === undefined) {
+      return;
+    }
+    const owed = Math.max(0, Math.round(state.owed));
+    if (
+      state.written !== null &&
+      (owed === state.written || (owed > 0 && Math.abs(owed - state.written) < RESERVATION_STEP_BYTES))
+    ) {
+      return;
+    }
+    state.written = owed;
+    try {
+      if (owed === 0) {
+        removeWhole(path);
+        return;
+      }
+      mkdirSync(dirname(path), { recursive: true });
+      writeWhole(path, JSON.stringify({ pid: engine, started: state.started, owed }));
+    } catch {
+      // An unwritable slots folder leaves the engine unreserved, as before it had a mark.
+    }
+  };
+  void startTimesOf([engine]).then((starts) => {
+    state.started = starts.get(engine);
+    write();
+  });
+  return {
+    holds: (held) => {
+      state.owed = expected - held;
+      write();
+    },
+    end: () => {
+      state.ended = true;
+      if (state.written !== null) {
+        try {
+          removeWhole(path);
+        } catch {
+          // Its holder's end leaves it counting nothing.
+        }
+      }
+    },
+  };
 }
 
 /**

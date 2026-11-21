@@ -1,20 +1,23 @@
 /**
- * What an engine this server started may hold: a ceiling that ends it, and the peak of each project's
+ * What an engine this process started may hold: a ceiling that ends it, and the peak of each project's
  * engines kept so the next start of that project counts what it is likely to take.
  *
  * One watcher judges every guarded engine from the shared sample, which reads each engine's memory
  * once with the processes below it, so an engine that forks workers is counted whole and an engine
- * also watched for its time is read once. It runs only while an engine is guarded.
+ * also watched for its time is read once. It runs only while an engine is guarded. A guarded engine
+ * reserves what it may still grow to, so engines each under their ceiling are not started together
+ * past what the machine holds.
  */
 
 import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { alive } from './alive.js';
+import { type EngineReservation, engineReservation } from './engine-slots.js';
 import { type Sample, sampled, watching } from './engine-spent.js';
 import { EngineUsageError } from './errors.js';
 import { parseProjectGodot } from './resources.js';
-import { type PeakTool, recordEnginePeak } from './run-record.js';
+import { type PeakTool, readEnginePeaks, recordEnginePeak } from './run-record.js';
 
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
@@ -74,6 +77,11 @@ export function ceilingFor(
 ): Ceiling {
   const set = project === undefined ? undefined : settingOf(project);
   if (set !== undefined) {
+    if (typeof set === 'string') {
+      throw new EngineUsageError(
+        `${CEILING_SETTING} in project.godot is the text ${JSON.stringify(set)}, and takes a whole number of megabytes above 0, written without quotes.`,
+      );
+    }
     if (typeof set !== 'number' || !Number.isInteger(set) || set <= 0) {
       throw new EngineUsageError(
         `${CEILING_SETTING} in project.godot takes a whole number of megabytes above 0, not ${String(set)}.`,
@@ -117,6 +125,18 @@ export function memoryCeilingSaid(end: MemoryEnd): string {
   return `${held}, the default. Set ${CEILING_VARIABLE} or ${CEILING_SETTING} in project.godot to raise it`;
 }
 
+/** [param subject] ended for its memory, in one sentence that names what sets the ceiling. */
+export function memoryEndSentence(subject: string, end: MemoryEnd): string {
+  const held = `${subject} was ended for its memory: it held ${gigabytes(end.peakBytes)}, past`;
+  if (end.source === 'project') {
+    return `${held} the ${gigabytes(end.ceilingBytes)} ceiling ${CEILING_SETTING} in project.godot sets.`;
+  }
+  if (end.source === 'variable') {
+    return `${held} the ${gigabytes(end.ceilingBytes)} ceiling ${CEILING_VARIABLE} sets.`;
+  }
+  return `${held} the default ${gigabytes(end.ceilingBytes)} ceiling, which ${CEILING_VARIABLE} or ${CEILING_SETTING} in project.godot raises.`;
+}
+
 /** Why an engine was ended for its memory, as the reason an answer gives. */
 export function memoryEndedSaid(end: MemoryEnd): string {
   return `ended for its memory: ${memoryCeilingSaid(end)}`;
@@ -138,13 +158,37 @@ export function engineNeed(
     : { bytes: ceiling, said: `${from}, capped at the ${gigabytes(ceiling)} ceiling` };
 }
 
-/** Why a start was refused: what the engine needs and from what, and what the machine has free. */
+/**
+ * Why a start was refused: what the engine needs and from what, and what the machine has free. Then
+ * what lets it start: the memory to free, or a ceiling that caps what it is counted at, named by
+ * where [param ceiling] comes from.
+ */
 export function startRefusedSaid(
   need: { readonly bytes: number; readonly said: string },
   room: { readonly bytes: number; readonly said: string },
   kept: number,
+  ceiling: Ceiling,
 ): string {
-  return `Not started: the engine needs ${gigabytes(need.bytes)} (${need.said}), and the machine has ${gigabytes(Math.max(0, room.bytes))} ${room.said}, ${gigabytes(kept)} of it kept for everything else.`;
+  const left = Math.max(0, room.bytes - kept);
+  const fits = Math.max(MEMORY_PER_ENGINE, Math.floor(left / MIB) * MIB) / MIB;
+  const set =
+    ceiling.source === 'project'
+      ? `${CEILING_SETTING} in project.godot`
+      : `${CEILING_VARIABLE} or ${CEILING_SETTING} in project.godot`;
+  return `Not started: the engine needs ${gigabytes(need.bytes)} (${need.said}), and the machine has ${gigabytes(Math.max(0, room.bytes))} ${room.said}, ${gigabytes(kept)} of it kept for everything else. Free ${gigabytes(need.bytes - left)} of memory, or set ${set} to ${String(fits)} or less, which caps what the engine may hold and is counted at.`;
+}
+
+/** What a guarded engine is taken to grow to: its project's kept peak for [param keep]'s tool, else the flat figure, within [param ceiling]. */
+function expectedOf(keep: EngineKeep | undefined, ceiling: Ceiling): number {
+  return keep === undefined
+    ? Math.min(MEMORY_PER_ENGINE, ceiling.bytes)
+    : engineNeed(readEnginePeaks(keep.project)[keep.tool], ceiling.bytes, keep.tool).bytes;
+}
+
+/** The project and tool an engine's peak is kept for. */
+interface EngineKeep {
+  readonly project: string;
+  readonly tool: PeakTool;
 }
 
 /** One engine under guard. */
@@ -152,7 +196,8 @@ interface Guarded {
   readonly pid: number;
   readonly ceiling: Ceiling;
   readonly ended: (end: MemoryEnd) => void;
-  readonly keep: { readonly project: string; readonly tool: PeakTool } | undefined;
+  readonly keep: EngineKeep | undefined;
+  readonly reservation: EngineReservation;
   peak: number;
   over: boolean;
 }
@@ -161,7 +206,7 @@ interface Guarded {
 export interface EngineGuard {
   /** The most the engine and everything below it has held. */
   readonly peak: () => number;
-  /** Stops guarding it, keeps its peak for its project, and answers the peak. */
+  /** Stops guarding it, keeps its peak for its project unless it was ended for it, and answers the peak. */
   readonly release: () => number;
 }
 
@@ -182,18 +227,28 @@ export class MemoryWatch {
     return this.timer !== null;
   }
 
+  /** Whether the engine [param pid] is guarded already. */
+  isGuarding(pid: number): boolean {
+    return [...this.guards].some((one) => one.pid === pid);
+  }
+
   /**
    * Guards the engine [param pid]. Once it and everything below it hold more than [param ceiling],
    * the processes below it are ended and [param ended] is called, once. The caller ends the
-   * engine itself there. The peak is kept for [param keep]'s project and tool when the guard is released.
+   * engine itself there. The peak is kept for [param keep]'s project and tool when the guard is
+   * released, unless the engine was ended for it. While it is guarded, what it may still grow to is
+   * reserved on the machine ({@link engineReservation}), so the next start anywhere counts it.
    */
-  guard(
-    pid: number,
-    ceiling: Ceiling,
-    ended: (end: MemoryEnd) => void,
-    keep?: { readonly project: string; readonly tool: PeakTool },
-  ): EngineGuard {
-    const guarded: Guarded = { pid, ceiling, ended, keep, peak: 0, over: false };
+  guard(pid: number, ceiling: Ceiling, ended: (end: MemoryEnd) => void, keep?: EngineKeep): EngineGuard {
+    const guarded: Guarded = {
+      pid,
+      ceiling,
+      ended,
+      keep,
+      reservation: engineReservation(pid, expectedOf(keep, ceiling)),
+      peak: 0,
+      over: false,
+    };
     this.guards.add(guarded);
     watching(pid, true, true);
     this.timer ??= setInterval(() => {
@@ -211,11 +266,14 @@ export class MemoryWatch {
       return guarded.peak;
     }
     watching(guarded.pid, false);
+    guarded.reservation.end();
     if (this.guards.size === 0 && this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    if (guarded.keep !== undefined && guarded.peak > 0) {
+    // An engine ended for its memory keeps no peak: its figure is the fault, not what the project
+    // needs, and kept it would refuse the project's next start.
+    if (guarded.keep !== undefined && guarded.peak > 0 && !guarded.over) {
       void recordEnginePeak(guarded.keep.project, guarded.keep.tool, guarded.peak);
     }
     return guarded.peak;
@@ -255,6 +313,7 @@ export class MemoryWatch {
       return;
     }
     one.peak = Math.max(one.peak, bytes);
+    one.reservation.holds(bytes);
     if (bytes <= one.ceiling.bytes) {
       return;
     }
@@ -270,5 +329,5 @@ export class MemoryWatch {
   }
 }
 
-/** The watcher every engine this server starts is guarded by. */
+/** The watcher every engine this process starts is guarded by. */
 export const engineMemory = new MemoryWatch();
