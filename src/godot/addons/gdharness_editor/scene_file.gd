@@ -123,6 +123,22 @@ var _engine_kept: Dictionary = {}
 var _unmade: Array[Dictionary] = []
 
 
+## Empties [member also_saved] and [member unmade_note] for the next call.
+##
+## Assigned here rather than from another script: in the editor, a member assigned on this script
+## from outside marks the script changed, and every scene save then writes it back and reloads it.
+static func clear_call_notes() -> void:
+	also_saved.clear()
+	unmade_note = ""
+
+
+## [member unmade_note], emptied for the next call.
+static func take_unmade_note() -> String:
+	var note: String = unmade_note
+	unmade_note = ""
+	return note
+
+
 ## Opens [param scene_path], answering a refusal, or {} with [member root] set.
 ##
 ## A write is refused while the editor holds unsaved changes to the scene: the file is reloaded

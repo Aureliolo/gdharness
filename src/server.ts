@@ -106,6 +106,7 @@ import {
   type HeldBreakpoint,
   handleDAPTool,
   type StoppedAt,
+  withoutBreakpoint,
 } from './dap_client.js';
 import {
   type DesktopStart,
@@ -7479,7 +7480,7 @@ class GodotServer {
     }
     if (op === 'list') {
       const session = this.dapHoldingBreakpointsOf(project.value.path);
-      const editor = this.godotBridge.isConnected();
+      const editor = this.editorHasProject(project.value.path);
       return this.jsonTextResponse({
         held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
         ...(editor
@@ -7562,10 +7563,19 @@ class GodotServer {
     };
   }
 
-  /** A breakpoint handed to the editor's adapter when one is connected, and otherwise held here. */
+  /**
+   * Whether the connected editor is the one to ask about [param projectPath]'s breakpoints. An
+   * editor with another project open refuses a path outside its own, so a breakpoint of this
+   * project is held here as with no editor.
+   */
+  private editorHasProject(projectPath: string): boolean {
+    return this.godotBridge.isConnected() && !this.editorHasAnotherThan(projectPath);
+  }
+
+  /** A breakpoint handed to the editor's adapter when it has the project open, and otherwise held here. */
   private async applyBreakpoint(call: BreakpointCall): Promise<ToolResponse> {
     const { op, args, session, located, scriptPath, line } = call;
-    const editor = this.godotBridge.isConnected();
+    const editor = this.editorHasProject(call.project.value.path);
     let answer: Record<string, unknown>;
     if (editor) {
       const answered = await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
@@ -7594,6 +7604,13 @@ class GodotServer {
     return await this.breakpointResponse(call, editor, answer);
   }
 
+  /** Why a breakpoint is held here and not given to an editor, as the start of a sentence. */
+  private noEditorForBreakpoints(): string {
+    return this.godotBridge.isConnected()
+      ? `The connected editor has another project open (${this.godotBridge.getStatus().projectPath ?? ''})`
+      : 'No editor is connected';
+  }
+
   /** What a set or removed breakpoint answers: the adapter's answer, every breakpoint held and what a running game was told. */
   private async breakpointResponse(
     call: BreakpointCall,
@@ -7605,7 +7622,14 @@ class GodotServer {
     // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
     const held = session.breakpointsHeld();
     await writeBreakpointNoteAsync(project.value.path, held);
-    const kept = this.keptRun();
+    // Only a game of this project takes the line: another project's game would stop on its own
+    // script of the same name.
+    const running = this.keptRun();
+    const kept =
+      running === null ||
+      (typeof running.projectPath === 'string' && !isSameDirectory(running.projectPath, project.value.path))
+        ? null
+        : running;
     const told =
       kept === null
         ? null
@@ -7634,8 +7658,8 @@ class GodotServer {
       note: editor
         ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
         : held.length === 0
-          ? 'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.'
-          : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
+          ? `${this.noEditorForBreakpoints()} and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.`
+          : `${this.noEditorForBreakpoints()}, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.`,
       ...(editor ? this.breakpointsAtRisk() : {}),
     });
   }
@@ -12211,10 +12235,28 @@ class GodotServer {
       // The note follows the held set when it changes without a call: a breakpoint of this
       // server's clicked off in the editor's gutter, or a file the adapter would not take back
       // before a play. Without this the next server put back what the user had just removed.
-      this.dapClient.setBreakpointsSink((held) => {
-        const project = this.godotBridge.getStatus().projectPath ?? this.ownProject;
+      const client = this.dapClient;
+      // Into the note of the project whose set the client holds, which after a call naming
+      // another project is not the editor's.
+      client.setBreakpointsSink((held) => {
+        const project =
+          this.breakpointsSeededOn?.client === client
+            ? this.breakpointsSeededOn.project
+            : (this.godotBridge.getStatus().projectPath ?? this.ownProject);
         if (project !== null) {
           writeBreakpointNote(project, held);
+        }
+      });
+      // The gutter is the editor's project's, so a line clicked off there while the client holds
+      // another project's set is taken out of the editor project's note.
+      client.setRemovedNotHeldSink((scriptPath, line) => {
+        const project = this.godotBridge.getStatus().projectPath;
+        if (typeof project !== 'string') {
+          return;
+        }
+        const kept = withoutBreakpoint(readBreakpointNote(project), scriptPath, line);
+        if (kept !== null) {
+          writeBreakpointNote(project, kept);
         }
       });
     }
