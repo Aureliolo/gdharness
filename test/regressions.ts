@@ -14897,6 +14897,38 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     assert.deepEqual(misshapen(pair, { x: 1, y: null }, 'point'), ['point with its y, which is missing']);
     assert.deepEqual(misshapen(pair, { x: 1, y: 2 }, 'point'), []);
     assert.deepEqual(misshapen({ type: ['object', 'string'], required: ['x'] }, 'red', 'point'), []);
+    assert.deepEqual(misshapen({ type: 'object', required: ['x'] }, {}, 'point'), [
+      'point with its x, which is missing',
+    ]);
+    // A missing field that takes one of a few values is named with them, and a track's node is
+    // asked for though the editor would aim a track naming none at the player's root.
+    assert.equal(
+      await call('scene_animation', {
+        op: 'add_track',
+        projectPath: '/p',
+        scenePath: 'a.tscn',
+        playerNodePath: 'Player',
+        animationName: 'spin',
+        track: { property: 'rotation', keyframes: [{ time: 0, value: 1 }] },
+      }),
+      'scene_animation takes track with its type (one of property, method, position_3d, rotation_3d, scale_3d, blend_shape, bezier, audio, animation), nodePath, which are missing.',
+    );
+    assert.equal(
+      await call('project_settings', {
+        op: 'add_input_action',
+        projectPath: '/p',
+        actionName: 'jump',
+        events: [{ keycode: 'Space' }],
+      }),
+      'project_settings takes events[0] with its type (one of key, mouse_button, joypad_button, joypad_motion), which is missing.',
+    );
+    // An infinity is refused as no number, so its range has nothing to add.
+    assert.deepEqual(
+      [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, Number.NaN, -1].map((held) =>
+        outOfBounds({ type: 'number', exclusiveMinimum: 0, maximum: 120 }, held, 'seconds'),
+      ),
+      [[], [], [], ['seconds above 0, not -1']],
+    );
 
     // A list is held to the number of items its schema allows, at any depth. Only a pair is in a
     // tool's schema today, so the other three shapes are handed in.
@@ -14911,6 +14943,18 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'list with 2 to 3 items, not 0',
     ]);
     assert.deepEqual(outOfBounds({ ...numbers, minItems: 2, maxItems: 3 }, [1, 2, 3], 'list'), []);
+    assert.deepEqual(
+      [
+        outOfBounds({ ...numbers, minItems: 1 }, [], 'list'),
+        outOfBounds({ ...numbers, maxItems: 1 }, [1, 2], 'list'),
+        outOfBounds({ ...numbers, minItems: 1, maxItems: 1 }, [1, 2], 'list'),
+      ],
+      [
+        ['list with 1 item or more, not 0'],
+        ['list with 1 item or fewer, not 2'],
+        ['list with 1 item, not 2'],
+      ],
+    );
     // A range on an element or a field is read as one on an argument is.
     assert.deepEqual(outOfBounds(numbers, [1, -1], 'list'), ['list[1] of 0 or more, not -1']);
     assert.deepEqual(
@@ -15230,7 +15274,10 @@ function breakingOne(schema: ArgumentSchema, keyword: string, at: string): unkno
     case 'maxItems':
       return [fittingList(schema, Number(held) + 1)];
     case 'required':
-      return requiredOf(schema).map((field) => ({ ...schemaOf(aValueFor(schema)), [field]: undefined }));
+      // Left out, as a call's JSON can carry it, and not given as undefined.
+      return requiredOf(schema).map((field) =>
+        Object.fromEntries(Object.entries(schemaOf(aValueFor(schema))).filter(([name]) => name !== field)),
+      );
     case 'additionalProperties':
       assert.equal(
         typeof held,
@@ -121922,8 +121969,13 @@ function placeholderFor(parameter: object | undefined): unknown {
     return choices[0];
   }
   switch (parameter === undefined ? undefined : Reflect.get(parameter, 'type')) {
-    case 'object':
-      return {};
+    case 'object': {
+      // With the fields its schema requires, which the argument check asks for first.
+      const fields = schemaOf(schemaOf(parameter)['properties']);
+      return Object.fromEntries(
+        requiredOf(schemaOf(parameter)).map((field) => [field, placeholderFor(schemaOf(fields[field]))]),
+      );
+    }
     case 'array':
       return [];
     case 'integer':

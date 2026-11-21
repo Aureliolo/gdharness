@@ -2265,9 +2265,17 @@ function lacked(schema: Record<string, unknown>, value: Record<string, unknown>,
           typeof field === 'string' && (!Object.hasOwn(value, field) || (value[field] ?? null) === null),
       )
     : [];
-  return missing.length === 0
-    ? []
-    : [`${path} with its ${missing.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} missing`];
+  if (missing.length === 0) {
+    return [];
+  }
+  // A field that takes one of a few values is named with them, as its own reader names them.
+  const properties = schema['properties'];
+  const said = missing.map((field) => {
+    const listed =
+      isRecord(properties) && isRecord(properties[field]) ? properties[field]['enum'] : undefined;
+    return Array.isArray(listed) ? `${field} (one of ${listed.join(', ')})` : field;
+  });
+  return [`${path} with its ${said.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} missing`];
 }
 
 /**
@@ -2332,7 +2340,8 @@ export function outOfBounds(schema: unknown, value: unknown, path: string): stri
     return [];
   }
   if (typeof value === 'number') {
-    const range = outsideRange(schema, value);
+    // An infinity or a NaN is refused as no number, which says all a range would.
+    const range = Number.isFinite(value) ? outsideRange(schema, value) : undefined;
     return range === undefined ? [] : [`${path} ${range}, not ${value}`];
   }
   if (Array.isArray(value)) {
@@ -2367,10 +2376,11 @@ function outsideCount(schema: Record<string, unknown>, count: number): string | 
   if (!((fewest !== undefined && count < fewest) || (most !== undefined && count > most))) {
     return undefined;
   }
+  const items = (held: number | undefined): string => (held === 1 ? '1 item' : `${held} items`);
   if (fewest !== undefined && most !== undefined) {
-    return fewest === most ? `${fewest} items` : `${fewest} to ${most} items`;
+    return fewest === most ? items(fewest) : `${fewest} to ${most} items`;
   }
-  return fewest !== undefined ? `${fewest} items or more` : `${most} items or fewer`;
+  return fewest !== undefined ? `${items(fewest)} or more` : `${items(most)} or fewer`;
 }
 
 /** The range [param schema] declares, worded for a refusal, when [param value] falls outside it. */
