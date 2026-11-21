@@ -58571,7 +58571,14 @@ function checkTreeReadElsewhere(answered: JsonRpcMessage): void {
   const tree = parseTextContent(answered);
   const window = get(tree, 'windows', 0);
   assert.equal(get(window, 'role'), 'window', `one window: ${shown}`);
-  const children = asArray(get(window, 'children'));
+  // Every element under the window, since the AX API puts the window's content view, an unnamed
+  // group, between the window and the game's elements.
+  const children: unknown[] = [];
+  const pending = [...asArray(get(window, 'children'))];
+  for (let next = pending.shift(); next !== undefined; next = pending.shift()) {
+    children.push(next);
+    pending.push(...asArray(get(next, 'children')));
+  }
   const page = children.find((child) => get(child, 'name') === 'Page');
   assert.ok(page !== undefined, `the Page is among the window's elements: ${shown}`);
   assert.deepEqual(
