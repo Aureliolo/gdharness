@@ -22,8 +22,8 @@ export function logLimitBytes(): number {
 export function pastTheLogLimit(suite: string | null, limit = logLimitBytes()): string {
   const mib = limit / 1024 / 1024;
   const size = Number.isInteger(mib) ? `${String(mib)} MiB` : `${String(limit)} bytes`;
-  const running = suite === null ? '' : ` It was running ${suite}.`;
-  return `the engine printed more than the ${size} a log may hold, so it was ended.${running}`;
+  const running = suite === null ? '' : `. It was running ${suite}.`;
+  return `the engine printed more than the ${size} a log may hold, so it was ended${running}`;
 }
 
 /**
@@ -38,7 +38,11 @@ export function* eachLogLine(path: string, chunkBytes = 1024 * 1024): Generator<
   const fd = openSync(path, 'r');
   try {
     const chunk = Buffer.alloc(chunkBytes);
-    for (let got = readSync(fd, chunk, 0, chunkBytes, null); got > 0; got = readSync(fd, chunk, 0, chunkBytes, null)) {
+    for (
+      let got = readSync(fd, chunk, 0, chunkBytes, null);
+      got > 0;
+      got = readSync(fd, chunk, 0, chunkBytes, null)
+    ) {
       const bytes = chunk.subarray(0, got);
       let from = 0;
       for (let end = bytes.indexOf(0x0a); end >= 0; end = bytes.indexOf(0x0a, from)) {

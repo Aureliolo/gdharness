@@ -448,7 +448,11 @@ export class GameLog {
   /** Of the entries dropped, how many there were of each severity. */
   private readonly goneSeen: Record<Severity, number> = { error: 0, warning: 0, info: 0 };
   /** The index of the entry each stream's crash report is going into, while it is. */
-  private readonly crashIndex: Record<Stream, number | null> = { stdout: null, stderr: null, transcript: null };
+  private readonly crashIndex: Record<Stream, number | null> = {
+    stdout: null,
+    stderr: null,
+    transcript: null,
+  };
 
   /**
    * A log kept to [param kept]'s bound holds about twice that many of its newest entries, and hands

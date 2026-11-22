@@ -238,7 +238,7 @@ export type RunRead = Omit<RunPrinted, 'lines'> & {
 };
 
 /** The most errors a run read off a log of any size keeps. */
-export const ERRORS_KEPT = 100_000;
+const ERRORS_KEPT = 100_000;
 
 /** The lines read once, in order, with a look at those just ahead and nothing kept behind. */
 class LinesAhead {
@@ -645,7 +645,14 @@ const readEngineError: LineReader = (state, line, at) => {
   } else if (state.during === null) {
     keptError(state, state.afterCase, { text, at, warning, script });
   } else {
-    keptError(state, state.errors, { text, at, suite: state.open.path, during: state.during, warning, script });
+    keptError(state, state.errors, {
+      text,
+      at,
+      suite: state.open.path,
+      during: state.during,
+      warning,
+      script,
+    });
   }
   return true;
 };
@@ -691,7 +698,13 @@ const NESTED_ERROR = 'While attempting to print an error, another error was prin
  */
 export function readEngineLog(path: string, nested: readonly string[], chunkBytes?: number): RunRead {
   const read = readRunLines(existsSync(path) ? eachLogLine(path, chunkBytes) : [''], ERRORS_KEPT);
-  const added = nested.map((text) => ({ text, at: read.lineCount, suite: null, during: null, warning: false }));
+  const added = nested.map((text) => ({
+    text,
+    at: read.lineCount,
+    suite: null,
+    during: null,
+    warning: false,
+  }));
   return added.length === 0 ? read : { ...read, errors: [...read.errors, ...added] };
 }
 
@@ -787,19 +800,23 @@ export class SuiteCuts {
           ? null
           : suiteOpenedBy(stripVTControlCharacters(joined.toString('utf8', start, end)));
       if (path !== null) {
-        // The suite that ends here is judged on what it printed up to this line.
-        const at = base + start;
-        if (this.past === null && at - this.opened + this.elsewhere > this.limit) {
-          this.past = { suite: this.suite };
-        }
-        this.suite = owned(path);
-        this.opened = at;
-        this.elsewhere = 0;
+        this.opens(path, base + start);
       }
       from = end + 1;
     }
     const rest = joined.subarray(Math.max(from, joined.lastIndexOf(0x0a) + 1));
     this.carry = rest.length > CARRY_MOST ? null : Buffer.from(rest);
+  }
+
+  /** Opens the suite at [param path], whose line begins at byte [param at], once the running one is judged. */
+  private opens(path: string, at: number): void {
+    // The suite that ends here is judged on what it printed up to this line.
+    if (this.past === null && at - this.opened + this.elsewhere > this.limit) {
+      this.past = { suite: this.suite };
+    }
+    this.suite = owned(path);
+    this.opened = at;
+    this.elsewhere = 0;
   }
 
   /** Reads what the file at [param path] holds past what has been read, if it is there. */
@@ -837,7 +854,9 @@ const TAKE_BYTES = 1024 * 1024;
 export function withNestedErrors(printed: RunPrinted, piped: readonly LogEntry[]): RunPrinted {
   const nested = piped.flatMap((entry, at) => {
     const text = nestedError(entry, piped[at + 1]);
-    return text === null ? [] : [{ text, at: printed.lines.length, suite: null, during: null, warning: false }];
+    return text === null
+      ? []
+      : [{ text, at: printed.lines.length, suite: null, during: null, warning: false }];
   });
   return nested.length === 0 ? printed : { ...printed, errors: [...printed.errors, ...nested] };
 }

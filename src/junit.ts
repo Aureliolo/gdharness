@@ -346,13 +346,13 @@ export function rowsIgnoredIn(printed: Iterable<string>): Set<string> {
 }
 
 /** A reading of printed lines taken a line at a time, so a run's lines need not all be held at once. */
-export interface LineFold<Result> {
+interface LineFold<Result> {
   take(line: string): void;
   result(): Result;
 }
 
 /** What [param fold] makes of [param lines]. */
-export function foldedOver<Result>(fold: LineFold<Result>, lines: Iterable<string>): Result {
+function foldedOver<Result>(fold: LineFold<Result>, lines: Iterable<string>): Result {
   for (const line of lines) {
     fold.take(line);
   }
@@ -990,11 +990,19 @@ function diffsIn(printed: string): PrintedDiff[] {
 /** The diff [param match] of {@link PRINTED_ACTUAL} found, in strings of its own. */
 function diffOf(match: RegExpExecArray): PrintedDiff {
   const { merged, actual } = readDiff(match[1] ?? '');
-  return { suffix: owned(match[3] ?? ''), at: owned(match[5] ?? ''), merged: owned(merged), actual: owned(actual) };
+  return {
+    suffix: owned(match[3] ?? ''),
+    at: owned(match[5] ?? ''),
+    merged: owned(merged),
+    actual: owned(actual),
+  };
 }
 
 /** What opens a printed diff, which no match starts anywhere else. */
 const DIFF_OPENS = " but was\n '";
+
+/** The location line that ends a case's report, and with it any diff opened before it. */
+const LOCATED = new RegExp(`\\tat ${LOCATION}`, 'g');
 
 /**
  * The diffs a console prints, read as its bytes arrive, as {@link withActualsPrinted} reads them off
@@ -1032,12 +1040,22 @@ export class PrintedDiffs {
       more = more.slice(0, -1);
     }
     this.unread += more.replaceAll('\r\n', '\n');
-    if (!ended && !more.includes('\n')) {
-      return;
-    }
+    // Every diff opens on a line break, so text with none read since the last look holds no new one.
+    const from = ended || more.includes('\n') ? this.readFound(ended) : 0;
+    const open = this.liveOpening(from, ended);
+    const keepFrom = open >= 0 ? open : Math.max(from, this.unread.length - DIFF_OPENS.length + 1);
+    this.unread = owned(this.unread.slice(keepFrom));
+  }
+
+  /** Takes every diff the text held ends, and gives back where the text after the last one begins. */
+  private readFound(ended: boolean): number {
     let from = 0;
     PRINTED_ACTUAL.lastIndex = 0;
-    for (let match = PRINTED_ACTUAL.exec(this.unread); match !== null; match = PRINTED_ACTUAL.exec(this.unread)) {
+    for (
+      let match = PRINTED_ACTUAL.exec(this.unread);
+      match !== null;
+      match = PRINTED_ACTUAL.exec(this.unread)
+    ) {
       const end = match.index + match[0].length;
       // A location runs on to the end of its line, so a match whose line has not ended may still
       // grow. One that has ended is the match the whole text gives.
@@ -1048,9 +1066,27 @@ export class PrintedDiffs {
       from = end;
     }
     PRINTED_ACTUAL.lastIndex = 0;
-    const open = this.unread.indexOf(DIFF_OPENS, from);
-    const keepFrom = open >= 0 ? open : Math.max(from, this.unread.length - DIFF_OPENS.length + 1);
-    this.unread = owned(this.unread.slice(keepFrom));
+    return from;
+  }
+
+  /**
+   * Where the first opening from [param from] on that may still become a diff is, or -1. A diff ends
+   * on the first location line after its opening, so an opening past whose first location line no
+   * diff was read never becomes one, as an array's value followed by its table of differences.
+   */
+  private liveOpening(from: number, ended: boolean): number {
+    if (ended) {
+      return -1;
+    }
+    for (let open = this.unread.indexOf(DIFF_OPENS, from); open >= 0; ) {
+      LOCATED.lastIndex = open + DIFF_OPENS.length;
+      const located = LOCATED.exec(this.unread);
+      if (located === null || !this.unread.includes('\n', located.index + located[0].length)) {
+        return open;
+      }
+      open = this.unread.indexOf(DIFF_OPENS, located.index + 1);
+    }
+    return -1;
   }
 }
 

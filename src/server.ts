@@ -222,14 +222,14 @@ import {
   ignoredLeftOut,
   ignoredYetRan,
   orphansLeftSaid,
-  orphansPrinted,
-  parseJUnit,
+  type orphansPrinted,
   type PrintedDiff,
   PrintedDiffs,
+  parseJUnit,
   type ScriptError,
   type TestReport,
   testProgressMessage,
-  whyNoReport,
+  type whyNoReport,
 } from './junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
@@ -429,7 +429,6 @@ import {
   uncollectedSaid,
   unexpectedErrors,
 } from './suite-judge.js';
-import { DISTINCT_KEPT, type RepeatedError, ScriptErrorRepeats, TestRunTally } from './test-tally.js';
 import {
   capsFrames,
   gdUnitFailsOnPushErrors,
@@ -461,6 +460,7 @@ import {
   withNotRun,
   withNotSuites,
 } from './test-split.js';
+import { DISTINCT_KEPT, type RepeatedError, ScriptErrorRepeats, TestRunTally } from './test-tally.js';
 import {
   asParams,
   type OperationParams,
@@ -9909,10 +9909,7 @@ class GodotServer {
       }
       lastSent = now;
       // Whole seconds, from ticks at least a second apart, so each is more than the last.
-      progress(
-        Math.floor((now - began) / 1000),
-        testProgressMessage(suites.result(), now - began),
-      );
+      progress(Math.floor((now - began) / 1000), testProgressMessage(suites.result(), now - began));
     }, 1000);
     ticker.unref();
     return ticker;
@@ -10380,7 +10377,12 @@ class GodotServer {
       shown: aboveTheRunner,
       uncaught: (entry, byScript) => byScript && !entry.detail.some((line) => line.includes(ERROR_ASSERT)),
     });
-    const log = new GameLog({ most: ENTRIES_HELD, retired: (entry, byScript) => tally.take(entry, byScript) });
+    const log = new GameLog({
+      most: ENTRIES_HELD,
+      retired: (entry, byScript) => {
+        tally.take(entry, byScript);
+      },
+    });
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(
@@ -10388,8 +10390,8 @@ class GodotServer {
       cmdArgs,
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
-      project.value.path,
       log,
+      project.value.path,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
     const keep = async (): Promise<void> => {
@@ -10487,18 +10489,8 @@ class GodotServer {
 
   /** A test run's report, engine log and console read once the engine has ended. */
   private async testRead(ran: TestRan): Promise<ToolResponse> {
-    const {
-      project,
-      began,
-      rebuiltAt,
-      importedAt,
-      tally,
-      stopped,
-      ours,
-      userData,
-      engineLog,
-      expectedFile,
-    } = ran;
+    const { project, began, rebuiltAt, importedAt, tally, stopped, ours, userData, engineLog, expectedFile } =
+      ran;
     const endedAt = Date.now();
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
@@ -10996,7 +10988,9 @@ class GodotServer {
     // Folded the way engineEntries is, from a subset of the same entries, so each folded entry here
     // has the first index its counterpart there has.
     const uncaughtFolded = uncaught?.folded.result() ?? [];
-    const listedAsUncaught = new Set(uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS).map((entry) => entry.index));
+    const listedAsUncaught = new Set(
+      uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS).map((entry) => entry.index),
+    );
     const notApplied = ignoredYetRan(report, ignored);
     const ignoreRead = ignoredLeftOut(report, ignored, declaredUnder, tally.rowsIgnored.result());
     // A bare case name is already answered under ignoreNotApplied, with the form that would work.
@@ -11264,9 +11258,12 @@ class GodotServer {
       failed,
       failedWithoutDetail: briefed > 0 ? briefed : undefined,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
-      uncaughtScriptErrors: uncaughtFolded.length > 0 ? uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS) : undefined,
+      uncaughtScriptErrors:
+        uncaughtFolded.length > 0 ? uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS) : undefined,
       uncaughtScriptErrorsOmitted:
-        uncaughtFolded.length > MOST_UNCAUGHT_ERRORS ? uncaughtFolded.length - MOST_UNCAUGHT_ERRORS : undefined,
+        uncaughtFolded.length > MOST_UNCAUGHT_ERRORS
+          ? uncaughtFolded.length - MOST_UNCAUGHT_ERRORS
+          : undefined,
       undeclaredErrors: undeclaredErrors.length > 0 ? undeclaredErrors : undefined,
       undeclaredErrorsOmitted:
         undeclaredAll.length > undeclaredErrors.length
@@ -15642,8 +15639,8 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
-    project?: string,
     log?: GameLog,
+    project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
     if (onDesktop === undefined && process.platform === 'win32') {
       const compiled = await ensureHelperCompiled();
@@ -15656,7 +15653,13 @@ class GodotServer {
     // project] is the project the run is of, which gives the slot its store class.
     const held = await slotForCall(false, project);
     try {
-      const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop, log);
+      const run = this.spawnHeld(
+        godotPath,
+        cmdArgs,
+        onTheSlot(env ?? process.env, held.lock),
+        onDesktop,
+        log,
+      );
       void run.settled.finally(held.release);
       void slotEngineNamed(held.lock, run, onDesktop?.files.pid ?? run.engineFiles?.pid);
       // The pid callers read is the engine's, which the helper writes down once it has started it.
@@ -16814,7 +16817,7 @@ class GodotServer {
         readonly hung: boolean;
         readonly crashedStarts?: number;
       }> => {
-        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, projectPath);
+        const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, undefined, projectPath);
         const hungUp = await new Promise<boolean>((resolve) => {
           const timer = setTimeout(() => {
             started.process.kill();

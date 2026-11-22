@@ -190,6 +190,8 @@ import {
   writeLaneFile,
 } from '../src/engine-launch.js';
 import {
+  EXIT_LEAK,
+  heldAtExit,
   projectSelfTypedExports,
   selfTypedExports,
   selfTypedSentence,
@@ -368,6 +370,7 @@ import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
 import {
+  discoveryListing,
   failedCases,
   finishesASuite,
   hookFailuresPrinted,
@@ -378,8 +381,10 @@ import {
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
+  rowsIgnoredIn,
   type ScriptError,
   suitesPrinted,
+  whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
@@ -579,7 +584,13 @@ import {
   sweepAbandonedScratch,
   untilDiscarded,
 } from '../src/scratch.js';
-import { type CheckScript, originsOf, unresolvedClassIn, withoutListed } from '../src/script-origins.js';
+import {
+  type CheckScript,
+  compileErrorsIn,
+  originsOf,
+  unresolvedClassIn,
+  withoutListed,
+} from '../src/script-origins.js';
 import {
   callersOf,
   frameFunctionsFor,
@@ -836,6 +847,7 @@ import {
   unmatchedSaid,
   withNotSuites,
 } from '../src/test-split.js';
+import { DISTINCT_KEPT, TestRunTally } from '../src/test-tally.js';
 import type { OperationParams } from '../src/tool-args.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -125143,6 +125155,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdharnessTestEndsTheSameEngineWithTheSameSentence,
   testATestRunWhoseSuitesTogetherPassTheLimitIsJudgedWhole,
   testATestRunPrintingPastTheLimitOnItsConsoleIsEnded,
+  testEverySuiteIsJudgedAgainstTheLimitAsItCloses,
+  testASuitePastTheLimitIsEndedWhateverFollowsAndOnEitherStream,
+  testAFailingStringIsReadBackFromWhicheverSuitePrintedIt,
+  testAPassingRunListsTwentyUncaughtScriptErrorsAndCountsTheRest,
+  testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog,
+  testATestRunsTallyPastItsBoundsSaysWhatItCut,
 ];
 
 /**
@@ -125696,26 +125714,47 @@ function testTheSuiteCutsFindEverySuiteHoweverTheBytesArrive(): void {
   const { text: printed, suites } = tenSuitesPrinted();
   const long = `${'y'.repeat(70 * 1024)} Run Test Suite: res://tests/hidden_test.gd\r\n`;
   const whole = Buffer.from(`${printed}\r\n${long}café \u{1F600}\r\n`);
-  const lastAt = whole.lastIndexOf(0x0a, whole.indexOf(`Run Test Suite: \u001b[0m\u001b[38;2;250;235;215m${suites.at(-1)?.path ?? ''}`)) + 1;
+  const lastAt =
+    whole.lastIndexOf(
+      0x0a,
+      whole.indexOf(`Run Test Suite: \u001b[0m\u001b[38;2;250;235;215m${suites.at(-1)?.path ?? ''}`),
+    ) + 1;
   for (const size of [1, 2, 5, 13, 4096, whole.length]) {
     const cuts = new SuiteCuts();
     for (const chunk of piecesOf(whole, size)) {
       cuts.take(chunk);
     }
     const said = `read ${String(size)} at a time`;
-    assert.deepEqual([cuts.suite, cuts.printed, cuts.past], [suites.at(-1)?.path, whole.length - lastAt, null], said);
-  }
-  const value = 'value: "Run Test Suite: res://tests/value_test.gd" was printed\n';
-  for (const size of [1, 7, value.length]) {
-    const cuts = new SuiteCuts();
-    for (const chunk of piecesOf(Buffer.from(`Run Test Suite: ${S_TEST}\n${value}after\n`), size)) {
-      cuts.take(chunk);
-    }
     assert.deepEqual(
-      [cuts.suite, cuts.printed],
-      [suiteOpenedBy(value), value.length + 'after\n'.length],
-      `a value holding a suite's line opens the suite the log's reader reads, read ${String(size)} at a time`,
+      [cuts.suite, cuts.printed, cuts.past],
+      [suites.at(-1)?.path, whole.length - lastAt, null],
+      said,
     );
+  }
+  const opening = `Run Test Suite: ${S_TEST}\n`;
+  for (const value of [
+    `value: "Run Test Suite: res://tests/value_test.gd" was printed\n`,
+    ` 'first line\nRun Test Suite: res://tests/value_test.gd\nlast line'\n`,
+  ]) {
+    const run = Buffer.from(`${opening}${value}after\n`);
+    const opened =
+      value
+        .split('\n')
+        .map(suiteOpenedBy)
+        .findLast((path) => path !== null) ?? null;
+    for (const size of [1, 7, run.length]) {
+      const cuts = new SuiteCuts();
+      for (const chunk of piecesOf(run, size)) {
+        cuts.take(chunk);
+      }
+      assert.deepEqual(
+        [cuts.suite, cuts.printed],
+        opened === null
+          ? [S_TEST, run.length]
+          : [opened, run.length - opening.length - value.indexOf('Run Test')],
+        `a value holding a suite's line opens the suite the log's reader reads, read ${String(size)} at a time`,
+      );
+    }
   }
 }
 
@@ -125757,7 +125796,10 @@ let chattyEngineBuilt: string | null = null;
  * run it opens each suite of GDH_SUITES (`path:bytes`, comma separated) and prints that many bytes
  * in it, into its --log-file with GDH_PRINT_TO=log, on its console with stdout, and both with both.
  * With split it prints the suites' lines on stdout and their bytes on stderr. With GDH_BURST=1 each
- * suite's bytes go in one write. It ends itself after 15 s.
+ * suite's bytes go in one write. Each value below is base64: GDH_IN_SUITE is JSON naming what each
+ * suite prints on stdout after its line, GDH_STDERR what is printed on stderr after the suites, and
+ * GDH_REPORT the JUnit report written where gdUnit4 writes it. GDH_EXIT is the exit code. It ends
+ * itself after 15 s.
  */
 function chattyEngine(): string {
   if (chattyEngineBuilt !== null) {
@@ -125769,8 +125811,10 @@ function chattyEngine(): string {
   writeFileSync(
     source,
     [
-      "import { appendFileSync, writeFileSync } from 'node:fs';",
+      "import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
       'const args = process.argv.slice(2);',
+      "const given = (name: string): string => Buffer.from(process.env[name] ?? '', 'base64').toString('utf8');",
       "if (args.includes('--version')) {",
       "  process.stdout.write('4.7.2.stable.official.ed1daf0bf\\n');",
       '  process.exit(0);',
@@ -125800,9 +125844,11 @@ function chattyEngine(): string {
       "const line = 'x'.repeat(1023) + '\\n';",
       'const block = line.repeat(16);',
       "say('Godot Engine v4.7.2.stable.official - https://godotengine.org\\n');",
+      "const inSuite = JSON.parse(given('GDH_IN_SUITE') || '{}') as Record<string, string>;",
       "for (const one of (process.env['GDH_SUITES'] ?? '').split(',')) {",
       "  const at = one.lastIndexOf(':');",
       "  say('Run Test Suite: ' + one.slice(0, at) + '\\n');",
+      "  process.stdout.write(inSuite[one.slice(0, at)] ?? '');",
       '  const bytes = Number(one.slice(at + 1));',
       '  if (burst) {',
       '    say(line.repeat(Math.ceil(bytes / line.length)), true);',
@@ -125816,7 +125862,14 @@ function chattyEngine(): string {
       'if (burst) {',
       '  await new Promise((settle) => setTimeout(settle, 3000));',
       '}',
-      'process.exit(0);',
+      "process.stderr.write(given('GDH_STDERR'));",
+      "const report = given('GDH_REPORT');",
+      "if (report !== '') {",
+      "  const into = join(args[args.indexOf('--path') + 1] ?? '', (args[args.indexOf('-rd') + 1] ?? '').slice('res://'.length), 'report_1');",
+      '  mkdirSync(into, { recursive: true });',
+      "  writeFileSync(join(into, 'results.xml'), report);",
+      '}',
+      "process.exit(Number(process.env['GDH_EXIT'] ?? '0'));",
       '',
     ].join('\n'),
   );
@@ -125839,12 +125892,25 @@ const CHATTY_A = 'res://tests/a_test.gd';
 const CHATTY_B = 'res://tests/b_test.gd';
 const CHATTY_C = 'res://tests/c_test.gd';
 
-/** project_test's answer for a run of {@link chattyEngine} over [param suites], printing to [param to]. */
+/** What else a run of {@link chattyEngine} prints, writes and exits with. */
+interface ChattyRun {
+  readonly inSuite?: Readonly<Record<string, string>>;
+  readonly stderr?: string;
+  readonly report?: string;
+  readonly exit?: number;
+}
+
+/**
+ * project_test's answer for a run of {@link chattyEngine} over [param suites], printing to [param to],
+ * with [param also] as its {@link ChattyRun} says.
+ */
 async function aRunOfTheChattyEngine(
   suites: string,
   to: 'log' | 'stdout' | 'both' | 'split',
   burst = false,
+  also: ChattyRun = {},
 ): Promise<unknown> {
+  const base64 = (plain: string): string => Buffer.from(plain).toString('base64');
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chatty-'));
   try {
     writeTree(project, {
@@ -125875,6 +125941,10 @@ async function aRunOfTheChattyEngine(
         GDH_SUITES: suites,
         GDH_PRINT_TO: to,
         GDH_BURST: burst ? '1' : '0',
+        GDH_IN_SUITE: base64(JSON.stringify(also.inSuite ?? {})),
+        GDH_STDERR: base64(also.stderr ?? ''),
+        GDH_REPORT: base64(also.report ?? ''),
+        GDH_EXIT: String(also.exit ?? 0),
       },
     );
     return answer;
@@ -125902,7 +125972,9 @@ async function testATestRunWhoseSuitePrintsPastTheLimitIsEnded(): Promise<void> 
       get(answer, 'tests'),
       get(answer, 'suitesFinished'),
       get(answer, 'suiteRunning'),
-      asArray(get(answer, 'entries')).map((entry) => get(entry, 'text')).slice(0, 2),
+      asArray(get(answer, 'entries'))
+        .map((entry) => get(entry, 'text'))
+        .slice(0, 2),
     ],
     [
       false,
@@ -125924,7 +125996,11 @@ async function testATestRunWhoseSuitePrintsPastTheLimitIsEnded(): Promise<void> 
  * so is one whose lines are errors on the other stream. Each names the suite that printed them.
  */
 async function testASuitePastTheLimitIsEndedWhateverFollowsAndOnEitherStream(): Promise<void> {
-  const burst = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:400000,${CHATTY_C}:1000`, 'log', true);
+  const burst = await aRunOfTheChattyEngine(
+    `${CHATTY_A}:100000,${CHATTY_B}:400000,${CHATTY_C}:1000`,
+    'log',
+    true,
+  );
   assert.deepEqual(
     [get(burst, 'passed'), get(burst, 'verdict'), get(burst, 'exitCode')],
     [false, CHATTY_ENDED, null],
@@ -126009,6 +126085,296 @@ async function testATestRunPrintingPastTheLimitOnItsConsoleIsEnded(): Promise<vo
     [get(answer, 'passed'), get(answer, 'verdict'), get(answer, 'suitesFinished'), get(answer, 'exitCode')],
     [false, CHATTY_ENDED, [CHATTY_A], null],
     JSON.stringify(answer),
+  );
+}
+
+/** A JUnit report of {@link CHATTY_A}, {@link CHATTY_B} and {@link CHATTY_C}, each with its one case, those named in [param failing] failing as given. */
+function chattyReport(failing: Readonly<Record<string, string>> = {}): string {
+  const suites = [CHATTY_A, CHATTY_B, CHATTY_C].map((path, id) => {
+    const name = path.slice('res://tests/'.length, -'.gd'.length);
+    const detail = failing[path];
+    const failure =
+      detail === undefined
+        ? ''
+        : `\n\t\t\t<failure message="FAILED: ${path}:5" type="FAILURE"><![CDATA[${detail}]]></failure>\n\t\t`;
+    return `\t<testsuite id="${String(id)}" name="${name}" package="tests" tests="1" failures="${detail === undefined ? 0 : 1}" errors="0" skipped="0" flaky="0" time="0.010">\n\t\t<testcase name="test_one" classname="${name}" time="0.001">${failure}</testcase>\n\t</testsuite>`;
+  });
+  const failures = Object.keys(failing).length;
+  return `<?xml version="1.0" encoding="UTF-8" ?>\n<testsuites id="2026-11-22" name="report_1" tests="3" failures="${String(failures)}" skipped="0" flaky="0" time="0.030">\n${suites.join('\n')}\n</testsuites>\n`;
+}
+
+/**
+ * The value of a failing string equality is read back from what each suite printed, the first suite
+ * and a later one alike, as the console printed it.
+ */
+async function testAFailingStringIsReadBackFromWhicheverSuitePrintedIt(): Promise<void> {
+  const e = String.fromCharCode(0x1b);
+  const printedAt = (path: string, value: string): string =>
+    ` but was\n '${value}'${e}[0m${e}[38;2;173;216;230m\tat 'test_one' in ${path}:5${e}[0m\n`;
+  const missing = (gone: string): string => `${e}[48;2;38;0;0m${e}[38;2;255;255;255m${gone}${e}[0m`;
+  const merged = (path: string): string =>
+    `Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_one' in ${path}:5`;
+  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:0,${CHATTY_B}:0,${CHATTY_C}:0`, 'both', false, {
+    inSuite: {
+      [CHATTY_A]: printedAt(CHATTY_A, missing('abc')),
+      [CHATTY_C]: printedAt(CHATTY_C, `a${missing('bc')}`),
+    },
+    report: chattyReport({ [CHATTY_A]: merged(CHATTY_A), [CHATTY_C]: merged(CHATTY_C) }),
+    exit: 100,
+  });
+  assert.deepEqual(
+    asArray(get(answer, 'failed')).map((one) => /but was\n '(.*)'\n/.exec(String(get(one, 'detail')))?.[1]),
+    ['', 'a'],
+    JSON.stringify(answer).slice(0, 4000),
+  );
+}
+
+/**
+ * A passing run's script errors that no case failed on are listed up to twenty, and the rest are
+ * counted. Nineteen and twenty are listed whole.
+ */
+async function testAPassingRunListsTwentyUncaughtScriptErrorsAndCountsTheRest(): Promise<void> {
+  for (const [errors, listed, omitted] of [
+    [19, 19, undefined],
+    [20, 20, undefined],
+    [25, 20, 5],
+  ] as const) {
+    const stderr = Array.from(
+      { length: errors },
+      (_error, n) =>
+        `SCRIPT ERROR: uncaught number ${String(n)}\n   at: test_one (${CHATTY_A}:${String(n + 1)})\n`,
+    ).join('');
+    const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:0,${CHATTY_B}:0,${CHATTY_C}:0`, 'both', false, {
+      stderr,
+      report: chattyReport(),
+    });
+    const said = `${String(errors)} errors: ${JSON.stringify(answer).slice(0, 4000)}`;
+    assert.deepEqual(
+      [
+        asArray(get(answer, 'uncaughtScriptErrors')).map((one) => get(one, 'text')),
+        get(answer, 'uncaughtScriptErrorsOmitted'),
+      ],
+      [Array.from({ length: listed }, (_error, n) => `uncaught number ${String(n)}`), omitted],
+      said,
+    );
+  }
+}
+
+/** A test run's tally, its log kept to [param most] entries, and a log holding every entry, both fed [param printed]. */
+function aTalliedRun(
+  printed: readonly { readonly stream: 'stdout' | 'stderr'; readonly text: string }[],
+  most: number,
+): { tally: TestRunTally; whole: GameLog } {
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: 'MARK',
+    shown: (entry) => entry,
+    uncaught: (entry, byScript) =>
+      byScript && !entry.detail.some((line) => line.includes('GdUnitGodotErrorAssertImpl.gd')),
+  });
+  const bounded = new GameLog({
+    most,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  const whole = new GameLog();
+  for (const { stream, text: said } of printed) {
+    bounded.append(stream, said);
+    whole.append(stream, said);
+  }
+  bounded.finish();
+  whole.finish();
+  bounded.handOverHeld();
+  return { tally, whole };
+}
+
+/** What a test run printed in round [param n]: a suite with every kind of line its answer reads. */
+function aTalliedRound(n: number): { stream: 'stdout' | 'stderr'; text: string }[] {
+  const suite = `res://tests/s${String(n % 4)}_test.gd`;
+  return [
+    {
+      stream: 'stdout',
+      text: [
+        `Run Test Suite: ${suite}`,
+        `  ${suite} > test_a STARTED`,
+        `  ${suite} > test_a FAILED 1ms`,
+        `MARK value ${String(n)}`,
+        `gdharness ignored ${suite} > test_row:${String(n)}`,
+        `gdharness orphans: ${suite} > test_a left 1: Node`,
+        `  s_test > finalize()  Report:`,
+        `  Expecting: 'true' but is 'false'\tat 'before' in ${suite}:${String(n)}`,
+        `Statistics: 1 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 1 orphans | FAILED 10ms`,
+        '',
+      ].join('\n'),
+    },
+    {
+      stream: 'stderr',
+      text: [
+        `SCRIPT ERROR: uncaught ${String(n % 9)}`,
+        `   at: test_a (${suite}:3)`,
+        'SCRIPT ERROR: looping again',
+        '   at: _process (res://loop.gd:7)',
+        `ERROR: Failed to compile ${String(n % 5)}`,
+        `   at: GDScript::reload (res://broken_${String(n % 5)}.gd:4)`,
+        `WARNING: warned ${String(n % 11)}`,
+        '   at: thing (core/thing.cpp:1)',
+        'While attempting to print an error, another error was printed:',
+        `ERROR: nested ${String(n % 3)}`,
+        '   at: print (core/print.cpp:2)',
+        '',
+      ].join('\n'),
+    },
+  ];
+}
+
+/**
+ * A test run's tally reads what its bounded log hands over as the answer read the whole log: below
+ * every bound each reading is the one taken off every entry, and nothing is said to be cut.
+ */
+function testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog(): void {
+  const printed = [
+    ...Array.from({ length: 300 }, (_round, n) => aTalliedRound(n)).flat(),
+    {
+      stream: 'stderr' as const,
+      text: 'WARNING: ObjectDB instances leaked at exit\nERROR: 2 resources still in use at exit\n',
+    },
+    { stream: 'stdout' as const, text: 'Overall Summary: 300 test cases | 300 orphans\n' },
+    { stream: 'stderr' as const, text: 'SCRIPT ERROR: looping again\n   at: _process (res://loop.gd:7)\n' },
+  ];
+  const { tally, whole } = aTalliedRun(printed, 20);
+  const all = whole.all;
+  const said = all.filter((entry) => answersTo(entry, 'info', undefined)).map((entry) => entry.text);
+  const byScript = (entry: LogEntry): boolean => whole.raisedByScript(entry);
+  const uncaught = all.filter((entry) => byScript(entry));
+  assert.deepEqual(
+    {
+      engine: tally.engine.result(),
+      printed: tally.entriesWithout([], 60),
+      uncaught: [
+        tally.uncaught.count,
+        tally.uncaught.first?.text,
+        [...tally.uncaught.texts],
+        tally.uncaught.folded.result(),
+      ],
+      compileErrors: tally.compileErrors,
+      nested: tally.nested,
+      leaked: [...tally.leaked],
+      walk: tally.walk.result(),
+      held: tally.held.result(),
+      hooks: tally.hooks.result(),
+      orphans: tally.orphans.result(),
+      rows: tally.rowsIgnored.result(),
+      suites: tally.suites.result(),
+      noReport: tally.noReport.result()('res://tests'),
+      discovery: tally.discovery.result(),
+      repeated: repeatingScriptError(tally.repeats),
+      echoed: tally.echoed?.result(),
+      capped: tally.capped(),
+    },
+    {
+      engine: foldedRepeats(all.filter((entry) => answersTo(entry, 'warning', undefined))),
+      printed: foldedRepeats(all).slice(0, 60),
+      uncaught: [
+        uncaught.length,
+        uncaught[0]?.text,
+        [...new Set(uncaught.map((entry) => entry.text))],
+        foldedRepeats(uncaught),
+      ],
+      compileErrors: compileErrorsIn(all),
+      nested: withNestedErrors(readRun(''), all).errors.map((error) => error.text),
+      leaked: [...new Set(all.filter((entry) => EXIT_LEAK.test(entry.text)).map((entry) => entry.text))],
+      walk: walkStoppedPartWay(all.map((entry) => entry.text)),
+      held: heldAtExit(all.map((entry) => entry.text)),
+      hooks: hookFailuresPrinted(said),
+      orphans: orphansPrinted(said),
+      rows: rowsIgnoredIn(said),
+      suites: suitesPrinted(said),
+      noReport: whyNoReport(said, 'res://tests'),
+      discovery: discoveryListing(said),
+      repeated: repeatingScriptError(all, byScript),
+      echoed: whole.select({ severity: 'info', sinceLastCall: false, contains: 'MARK', limit: 200 }),
+      capped: [],
+    },
+  );
+  assert.ok(repeatingScriptError(all, byScript) !== null, 'the run ends on a repeated script error');
+}
+
+/**
+ * Past each bound the tally keeps the newest or the oldest of what it lists, as the answer shows
+ * them, and names every list it cut. Its counts are of every entry.
+ */
+function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
+  const many = DISTINCT_KEPT + 50;
+  const lines = (count: number, line: (n: number) => string): string =>
+    Array.from({ length: count }, (_line, n) => line(n)).join('');
+  const printed = [
+    {
+      stream: 'stderr' as const,
+      text: lines(many, (n) => `WARNING: warned ${String(n)}\n   at: thing (core/thing.cpp:1)\n`),
+    },
+    {
+      stream: 'stderr' as const,
+      text: lines(many, (n) => `SCRIPT ERROR: uncaught ${String(n)}\n   at: test_a (res://a.gd:3)\n`),
+    },
+    {
+      stream: 'stderr' as const,
+      text: lines(
+        1050,
+        (n) => `ERROR: Failed ${String(n)}\n   at: GDScript::reload (res://b_${String(n)}.gd:4)\n`,
+      ),
+    },
+    {
+      stream: 'stderr' as const,
+      text: lines(
+        1050,
+        (n) =>
+          `While attempting to print an error, another error was printed:\nERROR: nested ${String(n)}\n   at: p (c.cpp:1)\n`,
+      ),
+    },
+    {
+      stream: 'stderr' as const,
+      text: lines(many, (n) => `ERROR: ${String(n)} resources still in use at exit\n   at: x (y.cpp:1)\n`),
+    },
+    {
+      stream: 'stdout' as const,
+      text: `  s_test > finalize()  Report:\n${lines(1050, (n) => `  part ${String(n)}\n`)}  Expecting: 1\tat 'before' in res://s_test.gd:5\n`,
+    },
+  ];
+  const { tally, whole } = aTalliedRun(printed, 100);
+  const all = whole.all;
+  const warned = foldedRepeats(all.filter((entry) => answersTo(entry, 'warning', undefined)));
+  const uncaught = foldedRepeats(all.filter((entry) => whole.raisedByScript(entry)));
+  assert.deepEqual(
+    {
+      engine: tally.engine.result(),
+      uncaught: [tally.uncaught.count, tally.uncaught.folded.result(), tally.uncaught.texts.size],
+      compileErrors: tally.compileErrors,
+      nested: tally.nested.length,
+      leaked: tally.leaked.size,
+      hook: tally.hooks.result()[0]?.message,
+      errors: whole.count('error'),
+      capped: tally.capped(),
+    },
+    {
+      engine: warned.slice(-DISTINCT_KEPT),
+      uncaught: [many, uncaught.slice(0, DISTINCT_KEPT), DISTINCT_KEPT],
+      compileErrors: compileErrorsIn(all).slice(0, 1000),
+      nested: 1000,
+      leaked: DISTINCT_KEPT,
+      hook: [...Array.from({ length: 1000 }, (_line, n) => `part ${String(n)}`), 'Expecting: 1'].join(' '),
+      errors: all.filter((entry) => entry.severity === 'error').length,
+      capped: [
+        'compile errors',
+        'engine entries',
+        'hook failure messages',
+        'leaks at exit',
+        'nested errors',
+        'repeated script errors',
+        'uncaught script errors',
+      ],
+    },
   );
 }
 

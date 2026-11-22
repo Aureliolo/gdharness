@@ -377,6 +377,104 @@ function testAScriptErrorDoesNotTakeTheCasesAfterIt(): void {
   );
 }
 
+/** The lines of a long run on both streams: prints, errors with their detail, and loose message lines. */
+function aLongRunPrinted(rounds: number): { stream: 'stdout' | 'stderr'; text: string }[] {
+  const printed: { stream: 'stdout' | 'stderr'; text: string }[] = [];
+  for (let at = 0; at < rounds; at += 1) {
+    printed.push({ stream: 'stdout', text: `print ${String(at)}\n` });
+    printed.push({
+      stream: 'stderr',
+      text: [
+        `SCRIPT ERROR: failure ${String(at % 7)}`,
+        `   at: case_${String(at % 3)} (res://tests/a_test.gd:${String(at % 11)})`,
+        '   GDScript backtrace (most recent call first):',
+        `       [0] case_${String(at % 3)} (res://tests/a_test.gd:${String(at % 11)})`,
+        '',
+      ].join('\n'),
+    });
+    if (at % 5 === 0) {
+      // A headline ending in a colon, whose message runs on over unindented lines.
+      printed.push({
+        stream: 'stderr',
+        text: `ERROR: configuration errors:\nmissing template ${String(at)}\nmissing other ${String(at)}\n   at: export (editor/export.cpp:1)\n`,
+      });
+    }
+    if (at % 4 === 0) {
+      // Unindented lines after a headline, which an `at:` line later makes its message.
+      printed.push({
+        stream: 'stderr',
+        text: `ERROR: first part ${String(at)}\nsecond part ${String(at)}\n   at: thing (core/thing.cpp:2)\n`,
+      });
+    }
+    if (at % 6 === 0) {
+      printed.push({
+        stream: 'stderr',
+        text: `WARNING: mild ${String(at)}\nnot its message ${String(at)}\n`,
+      });
+    }
+  }
+  return printed;
+}
+
+/** [param text] in pieces of [param size] characters. */
+function piecesOfText(text: string, size: number): string[] {
+  const pieces: string[] = [];
+  for (let at = 0; at < text.length; at += size) {
+    pieces.push(text.slice(at, at + size));
+  }
+  return pieces;
+}
+
+/**
+ * A log kept to a bound holds a few times that many entries however long the run, and hands every
+ * other entry to its reader whole, in order, each with its full detail and whether a script raised
+ * it, as the log holding every entry reads them. Its counts are of every entry.
+ */
+function testALogKeptToABoundHandsOverEveryEntryWhole(): void {
+  const most = 25;
+  const printed = aLongRunPrinted(400);
+  for (const size of [1, 13, 4096]) {
+    const whole = new GameLog();
+    const handed: [string, string, string, string[], boolean][] = [];
+    const bounded = new GameLog({
+      most,
+      retired: (entry, byScript) =>
+        handed.push([entry.severity, entry.source, entry.text, [...entry.detail], byScript]),
+    });
+    let largest = 0;
+    for (const { stream, text } of printed) {
+      for (const piece of piecesOfText(text, size)) {
+        whole.append(stream, piece);
+        bounded.append(stream, piece);
+        largest = Math.max(largest, bounded.all.length);
+      }
+    }
+    whole.finish();
+    bounded.finish();
+    const said = `read ${String(size)} characters at a time`;
+    assert.ok(
+      largest <= 4 * most,
+      `${said}: the log held ${String(largest)} entries, more than ${String(4 * most)}`,
+    );
+    assert.ok(bounded.retiredCount > 0, `${said}: entries were handed over`);
+    for (const severity of ['error', 'warning', 'info'] as const) {
+      assert.equal(bounded.count(severity), whole.count(severity), `${said}: every ${severity} is counted`);
+    }
+    bounded.handOverHeld();
+    assert.deepEqual(
+      handed,
+      whole.all.map((entry) => [
+        entry.severity,
+        entry.source,
+        entry.text,
+        entry.detail,
+        whole.raisedByScript(entry),
+      ]),
+      `${said}: every entry reaches the reader whole and in order`,
+    );
+  }
+}
+
 testAScriptErrorDoesNotTakeTheCasesAfterIt();
 testAnEntrySaysTheScriptItPointsAt();
 testACrashIsAnErrorWithItsReport();
@@ -384,4 +482,5 @@ testAFilteredReadDoesNotConsumeWhatItDidNotReport();
 testHeadlinesKeepTheirDetail();
 testChunksAndLineEndingsDoNotMatter();
 testSelectionAnswersByEntry();
+testALogKeptToABoundHandsOverEveryEntryWhole();
 console.log('game log tests passed');

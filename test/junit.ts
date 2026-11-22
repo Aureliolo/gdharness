@@ -18,6 +18,7 @@ import {
   MOST_REPORTS_SHOWN,
   orphansLeftSaid,
   orphansPrinted,
+  PrintedDiffs,
   parseJUnit,
   RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
@@ -904,7 +905,21 @@ function testEveryShapeOfAStringEqualityReadsItsValue(): void {
   }
 }
 
-function readsEveryShape(ending: string): void {
+/** The cases of {@link everyShapePrinted}, one for each shape of a failing string equality. */
+type ShapeCase =
+  | 'test_ignoring_case_second'
+  | 'test_bbcode'
+  | 'test_literal_lb'
+  | 'test_dict_lb'
+  | 'test_bbcode_expected_only'
+  | 'test_has_message';
+
+/** What gdUnit4 printed for every shape of a failing string equality, and what its report says of each. */
+function everyShapePrinted(): {
+  printed: string[];
+  reported: Record<ShapeCase, string>;
+  unprintedMessage: string;
+} {
   const e = String.fromCharCode(0x1b);
   const printed = [
     `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_ignoring_case_second${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
@@ -969,6 +984,11 @@ function readsEveryShape(ending: string): void {
       "Expecting error message:\n 'Expecting:\n '3'\n but was\n '1''\n but was\n 'Expecting:\n '3'2\n but was\n '1''\n\tat 'test_has_message' in res://probe/probe_test.gd:76",
   };
   const unprintedMessage = `Expecting error message:\n 'abc'\n but was\n 'abXc'\n\tat 'test_unprinted' in res://probe/probe_test.gd:90`;
+  return { printed, reported, unprintedMessage };
+}
+
+function readsEveryShape(ending: string): void {
+  const { printed, reported, unprintedMessage } = everyShapePrinted();
   const [ignoring, bbcode, literal, dictionary, renderedAway, message, unprinted] = withActualsPrinted(
     [...Object.values(reported), unprintedMessage].map((detail) => ({ detail })),
     printed.join(ending),
@@ -1235,6 +1255,86 @@ Godot Runtime Error !
   );
 }
 
+/** [param whole] in pieces of [param size] bytes. */
+function piecesOf(whole: Buffer, size: number): Buffer[] {
+  const pieces: Buffer[] = [];
+  for (let at = 0; at < whole.length; at += size) {
+    pieces.push(whole.subarray(at, at + size));
+  }
+  return pieces;
+}
+
+/**
+ * The diffs read off a console as its bytes arrive are those its whole text holds, however the bytes
+ * are cut, and only an open diff is held. The console holds every shape of string diff twice, a
+ * value holding a line that opens a suite, an array's value that never becomes a diff, and thousands
+ * of lines with no diff at all between them.
+ */
+function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
+  const e = String.fromCharCode(0x1b);
+  const { printed, reported, unprintedMessage } = everyShapePrinted();
+  const suiteLine = 'Run Test Suite: res://tests/value_test.gd';
+  const inValue = [
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255ma`,
+    suiteLine,
+    `b${e}[0m'`,
+    ' but was',
+    ` '${e}[38;2;30;144;255ma`,
+    suiteLine,
+    `${e}[48;2;38;0;0m${e}[38;2;255;255;255mb${e}[0m${e}[48;2;0;38;0m${e}[38;2;255;255;255mc${e}[0m'${e}[0m\tat 'test_suite_line' in res://probe/probe_test.gd:110`,
+  ];
+  const at = "\n\tat 'test_suite_line' in res://probe/probe_test.gd:110";
+  const inValueDetail = `Expecting:\n 'a\n${suiteLine}\nb'\n but was\n 'a\n${suiteLine}\nbc'${at}`;
+  const array = [
+    '  Expecting:',
+    " '[0, 75]'",
+    ' but was',
+    " '[0, 55]'",
+    '',
+    'Differences found:',
+    "Index\tCurrent\tExpected\t1\t55\t75\t\tat 'test_array' in res://probe/probe_test.gd:4",
+  ];
+  const quiet = Array.from(
+    { length: 3000 },
+    (_line, n) => `  res://tests/f_test.gd > test_${String(n)} PASSED 1ms`,
+  );
+  const failed = [
+    ...Object.values(reported),
+    inValueDetail,
+    ...Object.values(reported),
+    unprintedMessage,
+  ].map((detail) => ({ detail }));
+  for (const ending of ['\n', '\r\n']) {
+    const shapes = [...printed, ...inValue];
+    const whole = [...shapes, ...array, ...quiet, suiteLine, ...shapes.slice(0, printed.length), ''].join(
+      ending,
+    );
+    const expected = withActualsPrinted(failed, whole);
+    assert.equal(
+      expected[6]?.detail,
+      `Expecting:\n 'a\n${suiteLine}\nb'\n but was\n 'a\n${suiteLine}\nc'${at}`,
+      'a value holding a line that opens a suite is read back',
+    );
+    const bytes = Buffer.from(whole);
+    for (const size of [1, 2, 7, bytes.length]) {
+      const diffs = new PrintedDiffs();
+      let most = 0;
+      for (const piece of piecesOf(bytes, size)) {
+        diffs.take(piece);
+        most = Math.max(most, diffs.held);
+      }
+      const said = `read ${String(size)} bytes at a time, lines ended ${JSON.stringify(ending)}`;
+      assert.deepEqual(
+        withActualsPrinted(failed, diffs.finish()),
+        expected,
+        `${said}: the diffs are the whole text's`,
+      );
+      assert.ok(most < 4096, `${said}: ${String(most)} characters were held of ${String(whole.length)}`);
+    }
+  }
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1251,4 +1351,5 @@ testOrphansAreReadOffTheConsole();
 testScriptErrorsAreReadOffTheConsole();
 testFinishedSuitesAreReadOffTheConsole();
 testAnIgnoreThatLeftOutNothingIsNamed();
+testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText();
 console.log('junit reader tests passed');

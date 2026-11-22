@@ -199,19 +199,22 @@ export class TestRunTally {
       this.takeUncaught(entry);
     }
     const { text } = entry;
-    for (const fold of [this.noReport, this.discovery, this.suites, this.orphans, this.hooks, this.rowsIgnored]) {
+    for (const fold of [
+      this.noReport,
+      this.discovery,
+      this.suites,
+      this.orphans,
+      this.hooks,
+      this.rowsIgnored,
+    ]) {
       fold.take(text);
     }
     this.repeats.take(entry, byScript);
     for (const error of entry.severity === 'error' ? compileErrorsIn([entry]) : []) {
       this.keep(this.compileErrors, error, 'compile errors');
     }
-    if (EXIT_LEAK.test(text) && !this.leaked.has(text)) {
-      if (this.leaked.size < DISTINCT_KEPT) {
-        this.leaked.add(owned(text));
-      } else {
-        this.cut.add('leaks at exit');
-      }
+    if (EXIT_LEAK.test(text)) {
+      this.distinct(this.leaked, text, 'leaks at exit');
     }
     this.walk.take(text);
     this.held.take(text);
@@ -222,14 +225,20 @@ export class TestRunTally {
     const { uncaught } = this;
     uncaught.count += 1;
     uncaught.first ??= entryOwned(entry);
-    if (!uncaught.texts.has(entry.text)) {
-      if (uncaught.texts.size < DISTINCT_KEPT) {
-        uncaught.texts.add(owned(entry.text));
-      } else {
-        this.cut.add('uncaught script errors');
-      }
-    }
+    this.distinct(uncaught.texts, entry.text, 'uncaught script errors');
     uncaught.folded.take(this.asked.shown(entry));
+  }
+
+  /** Adds [param text] to [param set] while it holds fewer than its most, else notes [param what] cut. */
+  private distinct(set: Set<string>, text: string, what: string): void {
+    if (set.has(text)) {
+      return;
+    }
+    if (set.size < DISTINCT_KEPT) {
+      set.add(owned(text));
+    } else {
+      this.cut.add(what);
+    }
   }
 
   /** Adds [param item] to [param list] while it holds fewer than its most, else notes [param what] cut. */
