@@ -248,6 +248,7 @@ import {
   type TestReport,
   testProgressMessage,
   whyNoReport,
+  withPrintedPassesSettled,
 } from './junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
@@ -439,14 +440,16 @@ import { type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
+  casesRetried,
   declaringAdvice,
   failedOnPushErrors,
   funcOf,
   named,
-  passedOnARetry,
+  printedPassing,
   pushErrorsFailedSentence,
   readExpected,
   readRun,
+  suiteNotRunFault,
   uncollectedSaid,
   unexpectedErrors,
   withNestedErrors,
@@ -5685,8 +5688,10 @@ interface TestAnswer extends TestErrorsJudged {
   unmatched: string[];
   testsNotRun: string[];
   casesNotRun: string[];
-  /** The cases that failed and then passed on a retry, as `suite:case`. */
+  /** The cases that failed and then passed on a retry, as path > case. */
   retried: string[];
+  /** The suites asked for that never started or never finished, as gdharness test says it. */
+  suitesNotRun: string[];
   declaredAs: string;
   rowsMismatched: { test: string; reason: string }[];
   casesUnrunnable: { test: string; reason: string }[];
@@ -5778,7 +5783,7 @@ const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>(
   completion: ['lsp_get_completions', 'Completion'],
 });
 
-class GodotServer {
+export class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
   private readonly operationsScript = shippedOperationsScript();
@@ -10921,7 +10926,12 @@ class GodotServer {
 
   /** The answer of a test run that wrote a report, judged against what the engine printed. */
   private testReported(reported: TestWithReport): ToolResponse {
-    const { run, console, report, casePrinted, declaredErrors, said, uncaught } = reported;
+    const { run, console, casePrinted, declaredErrors, said, uncaught } = reported;
+    // A failure the report keeps from an attempt before a case's last is not the run's: gdUnit4 and
+    // gdharness test both go by what the case printed in the end.
+    const report = withPrintedPassesSettled(reported.report, (path, name) =>
+      printedPassing(casePrinted, path, name),
+    );
     const { failed, briefed } = failedWithin(
       failedCases(report, Buffer.concat(console).toString('utf8')),
       FAILED_BUDGET,
@@ -11034,6 +11044,7 @@ class GodotServer {
     });
     return this.testReportAnswer({
       ...reported,
+      report,
       failed,
       briefed,
       orphans,
@@ -11180,16 +11191,21 @@ class GodotServer {
       reason: one.reason,
     }));
     // gdUnit4 exits 0 on such a case, and its report holds only the failure.
-    const retried = [
-      ...new Set(
-        [...casePrinted.suites.values()].flatMap((suite) =>
-          suite.cases.filter(passedOnARetry).map((one) => `${basename(suite.path, '.gd')}:${one.name}`),
-        ),
-      ),
-    ];
+    const retried = casesRetried(casePrinted);
+    // A suite the runner was handed that printed no start or no end, which exits 0 beside the suites
+    // that ran. A suite with no case, or every case of it left out, is one gdUnit4 has nothing to run
+    // in. A case counts as left out by its rows when the runner said it left out any: gdUnit4 opens
+    // a suite whenever discovery leaves it a row, so a suite that never opened kept none.
+    const leftOutWhole = (suite: string, func: string): boolean =>
+      ignoreRead.leftOut.some((one) => one === `${suite}:${func}` || one.startsWith(`${suite}:${func}:`));
+    const suitesNotRun = (selection.value?.suites ?? asked)
+      .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
+      .filter((suite) => !suite.cases.every((func) => leftOutWhole(basename(suite.path, '.gd'), func)))
+      .flatMap((suite) => suiteNotRunFault(casePrinted, suite.path) ?? []);
     return this.reportAnswer({
       ...judged,
       retried,
+      suitesNotRun,
       declaredAndPrinted,
       ranIn,
       notRunIn,
@@ -11237,6 +11253,7 @@ class GodotServer {
       report,
       retried,
       rowsMismatched,
+      suitesNotRun,
       testsNotRun,
       timedOut,
       uncaught,
@@ -11263,6 +11280,7 @@ class GodotServer {
           testsNotRun,
           casesNotRun,
           retried,
+          suitesNotRun,
           rowsMismatched,
           casesUnrunnable,
           notSuites,
@@ -11280,6 +11298,7 @@ class GodotServer {
       notSuites,
       retried,
       rowsMismatched,
+      suitesNotRun,
       testsNotRun,
       undeclaredPrinted,
       verdict,
@@ -11294,6 +11313,7 @@ class GodotServer {
           testsNotRun.length +
           casesNotRun.length +
           retried.length +
+          suitesNotRun.length +
           rowsMismatched.length +
           casesUnrunnable.length +
           notSuites.length >
@@ -11321,6 +11341,7 @@ class GodotServer {
           ? `not run: ${[...testsNotRun, ...casesNotRun].join(', ')}`
           : undefined,
         retried.length > 0 ? `passed only on a retry: ${retried.join(', ')}` : undefined,
+        suitesNotRun.length > 0 ? suitesNotRun.join(', ') : undefined,
         rowsMismatched.length > 0
           ? `${rowsMismatched.length === 1 ? 'one row' : `${String(rowsMismatched.length)} rows`} skipped for data that does not fit the case`
           : undefined,
@@ -11437,12 +11458,15 @@ class GodotServer {
 
   /** The sentences of a test run's note about what was asked for and did not run. */
   private notRunNotes(s: TestAnswer): (string | undefined)[] {
-    const { casesNotRun, missingNote, retried, rowsMismatched, testsNotRun } = s;
+    const { casesNotRun, failed, missingNote, retried, rowsMismatched, suitesNotRun, testsNotRun } = s;
     return [
       missingNote,
       testsNotRun.length > 0 ? notRunSaid(testsNotRun) : undefined,
       retried.length > 0
-        ? `${retried.join(', ')} failed before ${retried.length === 1 ? 'it' : 'they'} passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it, and failed holds the first failure.`
+        ? `${retried.join(', ')} failed before ${retried.length === 1 ? 'it' : 'they'} passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it${failed.length > 0 ? ', and failed holds the first failure' : ''}.`
+        : undefined,
+      suitesNotRun.length > 0
+        ? `${suitesNotRun.join(', ')}, though gdUnit4 exited without saying so. The run is not called passed, as gdharness test judges it.`
         : undefined,
       casesNotRun.length > 0
         ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`

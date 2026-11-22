@@ -1122,11 +1122,15 @@ function judgeSuite(
 ): void {
   const { path, cases, rows = {} } = handed;
   const suite = printed.suites.get(path);
+  const notRun = suiteNotRunFault(printed, path);
   if (suite === undefined) {
-    if (!rowsGone.has(path)) {
-      failSuite(judging, path, `${path} never started`);
+    if (notRun !== undefined && !rowsGone.has(path)) {
+      failSuite(judging, path, notRun);
     }
     return;
+  }
+  if (notRun !== undefined) {
+    failSuite(judging, path, notRun);
   }
   judgeClosing(judging, path, suite);
   const finished = new Set(suite.cases.map((ran) => ran.func));
@@ -1154,13 +1158,21 @@ function judgeSuite(
   }
 }
 
-/** Judges how the suite at [param path] ended: not at all, or on a verdict other than PASSED. */
-function judgeClosing(judging: Judging, path: string, suite: SuitePrinted): void {
-  if (suite.closed === null) {
-    failSuite(judging, path, `${path} never finished`);
-    return;
+/**
+ * What fails a suite [param printed] holds nothing of, or holds with no closing statistics: that it
+ * never started, or never finished. Undefined for a suite that did both.
+ */
+export function suiteNotRunFault(printed: RunPrinted, path: string): string | undefined {
+  const suite = printed.suites.get(path);
+  if (suite === undefined) {
+    return `${path} never started`;
   }
-  if (suite.closed.verdict === 'PASSED') {
+  return suite.closed === null ? `${path} never finished` : undefined;
+}
+
+/** Judges how the suite at [param path] ended on a verdict other than PASSED. */
+function judgeClosing(judging: Judging, path: string, suite: SuitePrinted): void {
+  if (suite.closed === null || suite.closed.verdict === 'PASSED') {
     return;
   }
   // The cases can all pass while the suite does not: a failing assertion in before or after.
@@ -1193,8 +1205,26 @@ function judgeStrayRows(judging: Judging, path: string, func: string, strays: re
  * Whether [param ran] failed and then passed on a retry. gdUnit4's flaky check counts that as a
  * pass and exits 0 on it, and no judge of a run does.
  */
-export function passedOnARetry(ran: { readonly verdict: string }): boolean {
+function passedOnARetry(ran: { readonly verdict: string }): boolean {
   return ran.verdict === 'FLAKY';
+}
+
+/** The cases [param printed] holds that passed only on a retry, each as its suite's path, ` > ` and its name. */
+export function casesRetried(printed: RunPrinted): string[] {
+  return [...printed.suites.values()].flatMap((suite) =>
+    suite.cases.filter(passedOnARetry).map((ran) => `${suite.path} > ${ran.name}`),
+  );
+}
+
+/**
+ * Whether the case named [param name] in the suite at [param path] was printed passing, and printed
+ * so every time. gdUnit4 decides a case's success from its last attempt, so a failure its report
+ * still holds from an earlier one is not the run's.
+ */
+export function printedPassing(printed: RunPrinted, path: string | null, name: string): boolean {
+  const same =
+    path === null ? [] : (printed.suites.get(path)?.cases.filter((ran) => ran.name === name) ?? []);
+  return same.length > 0 && same.every((ran) => ran.verdict === 'PASSED');
 }
 
 /** Fails the suite at [param path] for [param ran] failing, and marks the lines it printed to be shown. */
