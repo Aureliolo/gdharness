@@ -26,7 +26,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, Socket } from 'node:net';
-import { availableParallelism, constants, homedir, setPriority, tmpdir } from 'node:os';
+import { availableParallelism, constants, getPriority, homedir, setPriority, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import { text as pipedText } from 'node:stream/consumers';
@@ -49608,7 +49608,7 @@ async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
 
 /**
  * An engine's ceiling counts its own processor time while other work crowds the machine, up to
- * eight times the ceiling on the clock. A gate's add_autoload, at below normal priority on a machine
+ * eight times the ceiling on the clock. A gate's add_autoload, on a machine
  * 94% busy, was ended at ten minutes while it worked. The machine is read through a stand-in here.
  */
 async function testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine(): Promise<void> {
@@ -86041,8 +86041,8 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
     assert.ok(Number.isInteger(one.slot), `the slot it held: ${String(one.slot)}`);
     assert.equal(
       one.priority,
-      process.platform === 'win32' ? 'below normal' : 'nice 10',
-      'the priority its process had while it ran',
+      priorityNamed(getPriority()),
+      'the priority its process had while it ran, normal as the run itself is',
     );
     assert.match(one.log, /test-runs[\\/]\d+-\d+[\\/]engine-\d[\\/]engine\.log$/);
     assert.match(readFileSync(one.log, 'utf8'), /test_slow/, 'the slow engine ran the slow suite');
@@ -86060,7 +86060,7 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
     );
     assert.match(
       slow.said,
-      /^ {2}res:\/\/tests\/slow_test\.gd > test_slow \d+\.\d{3} s, engine \d, slot \d+, priority (?:below normal|nice 10): .*engine\.log$/m,
+      /^ {2}res:\/\/tests\/slow_test\.gd > test_slow \d+\.\d{3} s, engine \d, slot \d+, priority (?:normal|nice -?\d+): .*engine\.log$/m,
       slow.said,
     );
     assert.match(slow.said, /^Passed: /m, slow.said);
@@ -86157,7 +86157,7 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
       );
       assert.match(
         sharedCase.priority ?? '',
-        process.platform === 'win32' ? /^below normal$/ : /^nice -?\d+$/,
+        new RegExp(`^${priorityNamed(getPriority())}$`),
         `the priority its engine had: ${sharedCase.case}`,
       );
       assert.ok(existsSync(sharedCase.log), `${sharedCase.case}'s log is kept`);
@@ -92055,19 +92055,19 @@ async function testAnEngineCrashIsToldByItsWholeExitCode(): Promise<void> {
 }
 
 /**
- * Every engine runs below normal priority, through the desktop helper and started directly. At
- * normal priority on a machine running every core, engines starved other work kept below normal,
- * and a test there made no progress in 300 seconds. A stand-in engine prints its own priority.
+ * Every engine and game runs at the priority its parent has, started directly, through a lane,
+ * through the desktop helper and through the keeper. Load is held by the engine slots, never by
+ * lowering an engine. A stand-in engine prints its own priority.
  */
-async function testAnEngineRunsBelowNormalPriority(): Promise<void> {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-below-normal-'));
+async function testAnEngineRunsAtNormalPriority(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-normal-priority-'));
   try {
-    // Read after a pause, so a start that lowers the engine just after creating it is not missed.
+    // Read after a pause, so a start that changes the engine just after creating it is not missed.
     const own = [
       '-e',
       'setTimeout(() => { console.log("priority " + require("node:os").getPriority()); }, 500)',
     ];
-    const below = `priority ${String(constants.priority.PRIORITY_BELOW_NORMAL)}`;
+    const below = `priority ${String(getPriority())}`;
     const ran = await runEngine(process.execPath, own);
     assert.equal(ran.failure, null, howItEnded(ran));
     const printed = ran.log
@@ -92075,6 +92075,51 @@ async function testAnEngineRunsBelowNormalPriority(): Promise<void> {
       .map((entry) => entry.text)
       .join('\n');
     assert.match(printed, new RegExp(`^${below}$`, 'm'), `a direct start: ${printed}`);
+
+    if (process.platform === 'win32') {
+      assert.equal(await ensureHelperCompiled(), null, 'the helper is compiled');
+      const helped = spawnOnDesktop(
+        { directory: scratch, endsWithHelper: true, separateErrors: true, scratch },
+        process.execPath,
+        own,
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let said = '';
+      helped.child.stdout?.on('data', (chunk: Buffer) => {
+        said += chunk.toString();
+      });
+      let timer: NodeJS.Timeout | undefined;
+      await new Promise<void>((done) => {
+        helped.child.once('exit', () => {
+          done();
+        });
+        timer = setTimeout(done, 20_000);
+      });
+      clearTimeout(timer);
+      assert.match(said, new RegExp(`^${below}$`, 'm'), `through the desktop helper: ${said}`);
+    }
+
+    const kept = join(scratch, 'keeper.txt');
+    const launcher = join(scratch, 'keeper.mjs');
+    const gameScript = [
+      'setTimeout(() => {',
+      `  require('node:fs').writeFileSync(${JSON.stringify(kept)}, 'priority ' + require('node:os').getPriority());`,
+      '}, 500);',
+      'setTimeout(() => {}, 3000);',
+    ].join('\n');
+    writeFileSync(
+      launcher,
+      [
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `await launchOutsideTheTree(${JSON.stringify({ command: process.execPath, args: ['-e', gameScript] })}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+      ].join('\n'),
+    );
+    const launched = spawnSyncHidden(process.execPath, [launcher], { encoding: 'utf8', timeout: 90_000 });
+    for (let waited = 0; waited < 30_000 && !existsSync(kept); waited += 200) {
+      await delay(200);
+    }
+    assert.ok(existsSync(kept), `the keeper's game ran: ${launched.stdout} ${launched.stderr}`);
+    assert.match(readFileSync(kept, 'utf8'), new RegExp(`^${below}$`), "a keeper's game");
 
     const directory = join(scratch, 'engine');
     mkdirSync(directory);
@@ -132466,7 +132511,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineWritesItsLogThroughAPipeOnWindows,
   testAnEngineCrashIsToldByItsWholeExitCode,
   testAnEngineStartedDirectlyIsToldByItsWholeExitCode,
-  testAnEngineRunsBelowNormalPriority,
+  testAnEngineRunsAtNormalPriority,
   testACommandOfSeveralEnginesHoldsOneSlot,
   testASlotCommandGrantsTheSlotAnEngineRunsOn,
   testASlotCommandRefusalFailsTheStartWithItsReason,

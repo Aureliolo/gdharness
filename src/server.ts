@@ -304,7 +304,6 @@ import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { portFromEnvOrNull } from './ports.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
-import { belowNormal } from './priority.js';
 import {
   ancestorsIn,
   CONSOLE_WRAPPER,
@@ -16234,7 +16233,6 @@ export class GodotServer {
             ...(env ? { env } : {}),
           })
         : helped.child;
-    belowNormal(child);
     const whole = holdChildExit(child);
     const stop = (): void => {
       if (helped === null) {

@@ -150,7 +150,7 @@ output can still read it there. It holds:
   slow. Each case slower than the limit, slowest first, has the `suite`, the `case` as gdUnit4
   printed it, `seconds`, the `engine` index, its `slot`, its `priority` and its `log`. `slot` is
   the engine slot's number, or null. `priority` is read from the engine's process while it ran: a
-  Windows priority class such as `below normal`, or the nice value such as `nice 10` on Linux and
+  Windows priority class such as `normal`, or the nice value such as `nice 0` on Linux and
   macOS. It is null when the engine ended before it was read. `log` names the kept file itself,
   which is under `engine-<n>-again/` after an out-of-memory rerun. Take the path from the field and
   never build it. `seconds` is exact, and the report prints it to the millisecond.

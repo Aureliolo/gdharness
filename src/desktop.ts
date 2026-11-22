@@ -69,8 +69,6 @@ public static class GdharnessDesktop {
   const int UseShowWindow = 0x1;
   const short ShowNoActivate = 4;
   const uint CreateNoWindow = 0x08000000;
-  // Every engine runs below normal, so a machine running every core leaves other work its share.
-  const uint BelowNormalPriorityClass = 0x00004000;
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   struct StartupInfo {
@@ -1074,7 +1072,7 @@ public static class GdharnessDesktop {
     // The process gets a console that is never shown, so a console program it starts joins that one
     // and opens no window of its own. A process with no console at all gives each such child a new
     // console, which Windows Terminal shows on the desktop in use, whichever desktop the process is on.
-    uint creation = CreateNoWindow | BelowNormalPriorityClass | CreateSuspended | ExtendedStartupInfoPresent;
+    uint creation = CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent;
     lock (running) {
       if (leaving && endsWithThis) {
         throw new Win32Exception(0, "the process that started this one has ended");

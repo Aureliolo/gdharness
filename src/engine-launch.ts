@@ -56,7 +56,7 @@ import { wholeFlag } from './launch.js';
 import { logLimitBytes, pastTheLogLimit, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
-import { belowNormal, priorityOf } from './priority.js';
+import { priorityOf } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type PeakTool, readEnginePeaks } from './run-record.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
@@ -768,7 +768,6 @@ function startOnThisDesktop(start: EngineStart): StartedEngine {
     cwd: launch.projectPath,
     detached: true,
   });
-  belowNormal(child);
   return {
     kind: 'started',
     child,

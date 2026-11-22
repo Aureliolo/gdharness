@@ -42,7 +42,6 @@ import {
   sendSpec,
   withChanges,
 } from './outside.js';
-import { belowNormal } from './priority.js';
 import { startTimesOf } from './process-children.js';
 import {
   amendRunRecord,
@@ -98,7 +97,6 @@ async function startDirectly(
       env: withChanges(process.env, spec.envChanges),
       cwd: directory,
     });
-    belowNormal(child);
     const whole = holdExit(child.pid);
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
@@ -208,7 +206,6 @@ async function startedThroughHelper(
       },
     );
     const { child } = onDesktop;
-    belowNormal(child);
     const whole = holdChildExit(child);
     const spawned = await spawnedOrEnded(child);
     if (spawned !== null) {

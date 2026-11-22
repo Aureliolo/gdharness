@@ -36,7 +36,6 @@ import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
 import type { SpawnedGame } from './godot-process.js';
-import { belowNormal } from './priority.js';
 import { discard, scratchDirectory } from './scratch.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
 import {
@@ -355,7 +354,6 @@ function runStarted(
       return;
     }
     const { child, files, scratch } = launched;
-    belowNormal(child);
     const whole = holdChildExit(child);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
     const engineAt = (): number | undefined => (files === null ? child.pid : helperPid(files.pid));

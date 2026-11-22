@@ -252,7 +252,7 @@ export interface SlowCase {
   readonly slot: number | null;
   /**
    * The priority its process was read with while it ran: a Windows priority class such as
-   * `below normal`, or `nice 10` on Linux and macOS. Null when it ended before it was read.
+   * `normal`, or `nice 0` on Linux and macOS. Null when it ended before it was read.
    */
   readonly priority: string | null;
   /** The engine's log, kept beside the run's other logs. */
