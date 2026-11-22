@@ -81588,6 +81588,185 @@ async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise
   }
 }
 
+/** The memory mark a run puts down carries the repository of its project in git, and none outside git. */
+async function testARunsMemoryMarkNamesTheRepositoryOfItsProject(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-memory-'));
+  try {
+    const project = join(root, 'listed-game');
+    mkdirSync(join(project, '.git'), { recursive: true });
+    const loose = join(root, 'loose');
+    mkdirSync(loose);
+    const me = { pid: process.pid, started: await ownStart() };
+    const markOf = (forProject: string, folder: string): unknown => {
+      const directory = join(root, folder);
+      const slots = new EngineSlots(directory, 1, me, undefined, () => 'gate', forProject);
+      const unmark = slots.markWaiting();
+      try {
+        const marks = readdirSync(join(directory, WAITING_FOLDER)).filter((name) => name.endsWith('.json'));
+        assert.equal(marks.length, 1, 'the run puts down one mark');
+        return JSON.parse(readFileSync(join(directory, WAITING_FOLDER, marks[0] ?? ''), 'utf8'));
+      } finally {
+        unmark();
+      }
+    };
+    assert.deepEqual(
+      markOf(project, 'git'),
+      { ...me, repository: 'listed-game', taker: 'memory' },
+      'a run for a project in git names its repository',
+    );
+    assert.deepEqual(markOf(loose, 'none'), { ...me, taker: 'memory' }, 'and one outside git names none');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What a program taking slots as the server does, with no way of saying lines of its own, puts in the
+ * answers of two calls that each wait for a slot, with [param priority] as the slots folder's list.
+ */
+async function answersOfTwoWaitingCalls(priority: string): Promise<{ directory: string; answers: string[] }> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-answers-'));
+  const directory = join(root, 'slots');
+  mkdirSync(directory);
+  writeFileSync(join(directory, 'priority.json'), priority);
+  const project = join(root, 'listed-game');
+  mkdirSync(join(project, '.git'), { recursive: true });
+  const script = join(root, 'calls.ts');
+  const source = (file: string): string => JSON.stringify(pathToFileURL(resolve('src', file)).href);
+  writeFileSync(
+    script,
+    [
+      `import * as slots from ${source('engine-slots.ts')};`,
+      `import { callNotesSaid, newCallNotes, withCallSignal } from ${source('call-signal.ts')};`,
+      `const directory = ${JSON.stringify(directory)};`,
+      `const project = ${JSON.stringify(project)};`,
+      'for (let call = 0; call < 2; call += 1) {',
+      '  const stop = new AbortController();',
+      '  const notes = newCallNotes();',
+      '  const before = slots.slotWaiters(directory).length;',
+      '  const answered = withCallSignal(stop.signal, () => slots.slotForCall(false, project),',
+      '    undefined, undefined, undefined, notes).then(() => "took", () => "stopped");',
+      '  const until = Date.now() + 10000;',
+      '  while (slots.slotWaiters(directory).length === before && Date.now() < until) {',
+      '    await new Promise((done) => setTimeout(done, 20));',
+      '  }',
+      '  stop.abort();',
+      '  await answered;',
+      '  console.log(JSON.stringify(callNotesSaid(notes)));',
+      '}',
+      'process.exit(0);',
+    ].join('\n'),
+  );
+  const me = { pid: process.pid, started: await ownStart() };
+  const holder = new EngineSlots(directory, 1, me, undefined, () => 'tier');
+  const env = { ...process.env };
+  for (const name of SLOT_VARIABLES) {
+    delete env[name];
+  }
+  env[SLOTS_VARIABLE] = directory;
+  env[SLOT_COUNT_VARIABLE] = '1';
+  try {
+    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
+    const child = spawnHidden(process.execPath, [script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      err += chunk.toString();
+    });
+    // Its output is whole only once its streams close, which can come after it exits.
+    await once(child, 'close');
+    assert.equal(child.exitCode, 0, `the program ended: ${err}`);
+    return { directory, answers: out.split('\n').filter((line) => line !== '') };
+  } finally {
+    holder.releaseAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A server says a malformed priority list once, in the answer of the first call that waited, and a good one never. */
+async function testAServerSaysAMalformedPriorityListOnceInItsAnswers(): Promise<void> {
+  const bad = await answersOfTwoWaitingCalls('{"high": "listed-game"}');
+  assert.deepEqual(
+    bad.answers,
+    [
+      JSON.stringify({
+        engineSlotNote: `priority.json has no "high" array of strings in ${bad.directory}, so no repository has high priority.`,
+      }),
+      '{}',
+    ],
+    'the first call says it and the second does not',
+  );
+  const good = await answersOfTwoWaitingCalls('{"high": ["listed-game"]}');
+  assert.deepEqual(good.answers, ['{}', '{}'], 'a well-formed list is not said');
+}
+
+/** A gate mark naming a listed repository holds no ordinary one-off back, as gate work stays out of high priority. */
+async function testAGateMarkOfAListedRepositoryIsNotHighPriority(): Promise<void> {
+  const gate = { name: '1-gate', secondsAgo: 5, body: { taker: 'gate', repository: 'high-game' } };
+  const ordinary = {
+    name: '2-ordinary',
+    secondsAgo: 300,
+    body: { taker: 'other', repository: 'normal-game' },
+  };
+  const folder = await priorityFolder([gate, ordinary], '{"high": ["high-game"]}');
+  try {
+    assert.deepEqual(
+      slotWaiters(folder.directory).map((one) => [one.mark, one.repository, one.high]),
+      [
+        ['1-gate.json', 'high-game', false],
+        ['2-ordinary.json', 'normal-game', false],
+      ],
+      'the gate mark names its repository and is not high',
+    );
+    assert.deepEqual(
+      folder.order(new SlotLine('gate', false, () => folder.clock)),
+      ['2-ordinary', '1-gate'],
+      'so the one-off of 300 s stands with gate work, in since order',
+    );
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A gate's own line of a listed repository is never judged high, so it holds ordinary one-offs to 120 s. */
+async function testAGatesOwnLineOfAListedRepositoryIsNotHighPriority(): Promise<void> {
+  const ordinary = {
+    name: '1-ordinary',
+    secondsAgo: 300,
+    body: { taker: 'other', repository: 'normal-game' },
+  };
+  const folder = await priorityFolder([ordinary], '{"high": ["high-game"]}');
+  try {
+    const line = new SlotLine('gate', false, () => folder.clock, false, 'high-game');
+    line.judge(new Set(['high-game']));
+    assert.equal(line.high, false, 'the gate line is not high');
+    assert.deepEqual(folder.order(line), ['1-ordinary'], 'and the one-off of 300 s stands before it');
+    const own = new SlotLine('other', false, () => folder.clock, false, 'high-game');
+    own.judge(new Set(['high-game']));
+    assert.equal(own.high, true, 'where a one-off line of the same repository is high');
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A mark whose `repository` is an empty string names no repository, even beside a list naming one. */
+async function testAnEmptyRepositoryInAMarkReadsAsNone(): Promise<void> {
+  const empty = { name: '1-empty', secondsAgo: 10, body: { taker: 'other', repository: '' } };
+  const folder = await priorityFolder([empty], '{"high": ["", "listed-game"]}');
+  try {
+    assert.deepEqual(
+      slotWaiters(folder.directory).map((one) => [one.mark, one.repository, one.high]),
+      [['1-empty.json', undefined, false]],
+      'the empty name is no repository and not high',
+    );
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
 /**
  * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
  *
@@ -130788,6 +130967,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABadPriorityFileGivesNormalOrderAndIsSaidOnce,
   testANormalOneOffPast600SecondsStandsWithGateWorkBesideAListedWaiter,
   testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone,
+  testARunsMemoryMarkNamesTheRepositoryOfItsProject,
+  testAServerSaysAMalformedPriorityListOnceInItsAnswers,
+  testAGateMarkOfAListedRepositoryIsNotHighPriority,
+  testAGatesOwnLineOfAListedRepositoryIsNotHighPriority,
+  testAnEmptyRepositoryInAMarkReadsAsNone,
   testEveryGameTheServerStartsTakesItsSlotForItsProject,
   testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
   testAnUnreadableWorktreeGitFileListsNoWorktrees,

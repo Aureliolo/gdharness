@@ -962,7 +962,8 @@ its `kind` names.
   Its writer replaces it whole. A taker only reads it, at each look, and judges every mark by the
   list it has just read, so a list changed while takers wait reorders them at the next look. A
   file that is missing, empty or not that shape names no repository. A file that is not that shape
-  is said once per process on the slot line's output and never stops a look.
+  never stops a look. Each process says so once: in an `engineSlotNote` of the answer of the call
+  that looked, or on the slot line's output outside a call.
 - A project's repository is found from its folder upwards: the first folder holding `.git`. Where
   `.git` is a file, as in a linked worktree, follow its `gitdir:` line, then the `commondir` file
   in that folder. The repository's name is the name of the folder holding the shared `.git`.
