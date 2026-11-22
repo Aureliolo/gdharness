@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
-import { callProgress } from './call-signal.js';
+import { callProgress, commitCallAsSent } from './call-signal.js';
 import { errorCode, errorMessage, Refusal, toError } from './errors.js';
 import { idleClosed } from './idle-close.js';
 import { waitFromEnv } from './launch.js';
@@ -451,6 +451,9 @@ export class EditorClosing extends Error {}
 /** The connection to the editor ended while a call waited on it, so the editor answered nothing. */
 export class EditorDisconnected extends Error {}
 
+/** The bridge stopped while a call waited on a request the editor had been sent and not answered. */
+export class BridgeStopped extends Error {}
+
 /**
  * The most one answer from the editor may carry. Kept in step with `ANSWER_BYTES` in the editor
  * addon's bridge_client.gd, which sends a larger answer as an error saying its size.
@@ -527,6 +530,8 @@ export class GodotBridge extends EventEmitter {
   private listeningSince: Date | null = null;
   private httpServer: http.Server | null = null;
   private godotWss: WebSocketServer | null = null;
+  /** The close of the HTTP server once [method letGoOfThePort] has begun it, which [method stop] waits on. */
+  private portLetGo: Promise<void> | null = null;
   private socket: WebSocket | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
   private connectionInfo: GodotConnectionInfo | null = null;
@@ -684,9 +689,19 @@ export class GodotBridge extends EventEmitter {
     });
   }
 
+  /**
+   * Stops listening on the port, so a server taking over can take it, and keeps the editor already
+   * connected, whose answers to requests already sent still arrive. [method stop] ends the rest.
+   */
+  public letGoOfThePort(): void {
+    if (this.httpServer !== null && this.portLetGo === null) {
+      this.portLetGo = this.closeServer(this.httpServer);
+    }
+  }
+
   public async stop(): Promise<void> {
     this.stopKeepalive();
-    this.pending.drop(new Error('GodotBridge stopped'));
+    this.pending.drop(new BridgeStopped('GodotBridge stopped'));
     this.resourceQueues.clear();
     const closeTasks: Promise<void>[] = [];
 
@@ -716,8 +731,9 @@ export class GodotBridge extends EventEmitter {
 
     if (this.httpServer) {
       const httpServer = this.httpServer;
-      closeTasks.push(this.closeServer(httpServer));
+      closeTasks.push(this.portLetGo ?? this.closeServer(httpServer));
       this.httpServer = null;
+      this.portLetGo = null;
     }
 
     await Promise.all(closeTasks);
@@ -1069,6 +1085,8 @@ export class GodotBridge extends EventEmitter {
       args,
     };
 
+    // Once sent, the editor may carry the request out whatever becomes of the call.
+    commitCallAsSent();
     const startedAt = Date.now();
     const reply = this.pending.wait(requestId, waitMs, () => new BridgeTimeout(toolName, waitMs), {
       tool: toolName,

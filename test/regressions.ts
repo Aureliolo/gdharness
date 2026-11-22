@@ -40097,7 +40097,7 @@ async function greetAsAStandInEditor(
   server: ServerProcess,
   bridgePort: number,
   project: string,
-  onInvoke: (editor: WebSocket, id: unknown) => void = (editor, id) => {
+  onInvoke: (editor: WebSocket, id: unknown, tool: unknown) => void = (editor, id) => {
     editor.send(JSON.stringify({ type: 'tool_result', id, success: false, error: 'a stand-in' }));
   },
   greeted: Readonly<Record<string, unknown>> = {},
@@ -40112,7 +40112,7 @@ async function greetAsAStandInEditor(
   editor.on('message', (raw: Buffer) => {
     const message: unknown = JSON.parse(String(raw));
     if (isRecord(message) && message['type'] === 'tool_invoke') {
-      onInvoke(editor, message['id']);
+      onInvoke(editor, message['id'], message['tool']);
     }
   });
   editor.send(JSON.stringify(greeting(project, greeted)));
@@ -47104,6 +47104,8 @@ interface PlayingEditorStage {
   readonly runtimeDir: string;
   /** The port the scripted adapter serves, which the editor greeted the server with. */
   readonly adapter: number;
+  /** The port of the server's editor bridge, which the fake editor is connected to. */
+  readonly bridgePort: number;
   /** One `editor_run start` through the editor, timed. */
   readonly start: (runtimeWaitMs: number) => Promise<{ answer: unknown; waitedMs: number }>;
 }
@@ -47142,7 +47144,8 @@ const FAKE_EDITOR_PID = process.pid;
  * says it is, this one unless a fixture wants the adapter to be somebody else's. [param options.env]
  * is added to the server's environment, for a fixture about a default the environment sets. The
  * editor plays headless unless [param options.playsWindowed] says it plays a window, which is what
- * sends a silent windowed start, and a headless one, to be started by the server instead.
+ * sends a silent windowed start, and a headless one, to be started by the server instead. The server
+ * serves the project, so a second server of it replaces this one, when [param options.servesItsProject] says so.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
@@ -47155,6 +47158,7 @@ async function withAPlayingEditor(
     editorPid?: number;
     env?: Readonly<Record<string, string>>;
     playsWindowed?: boolean;
+    servesItsProject?: boolean;
   } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
@@ -47182,6 +47186,7 @@ async function withAPlayingEditor(
       // how long one took: without it a start that sat nine seconds on a played game left
       // nothing behind to say where the time went.
       GDHARNESS_DEBUG: '1',
+      ...(options.servesItsProject === true ? { GDHARNESS_PROJECT: project } : {}),
       ...options.env,
     },
   });
@@ -47292,7 +47297,7 @@ async function withAPlayingEditor(
           const answered = parseTextContent(response) ?? { refused: textOf(response) };
           return { answer: answered, waitedMs: Date.now() - began };
         };
-        await body({ server, project, runtimeDir, adapter, start });
+        await body({ server, project, runtimeDir, adapter, bridgePort: port, start });
       },
       options.onAdapter,
     );
@@ -77730,14 +77735,9 @@ async function theyEndItOnce(
       firstEnded || secondEnded,
       `one server says it ended the game and the other answers that end: ${shown}`,
     );
-    // The exit code is not compared: the server that answers the other's end may read the game's
-    // exit from its keeper's note, as 1, or find none.
+    // Both say the run ended by the stop that reached it, which has no exit code of its own.
     for (const answer of [ours, theirs]) {
-      assert.deepEqual(
-        endOfTheAnswer(answer).filter((_field, at) => at !== 1),
-        [false, ended, undefined, get(answer, 'note')],
-        shown,
-      );
+      assert.deepEqual(endOfTheAnswer(answer), [false, null, ended, undefined, get(answer, 'note')], shown);
     }
   });
 }
@@ -78257,7 +78257,11 @@ async function figuresWhile(
  * fresh process. The script reaches `run` (engine-run), `spent` (engine-spent), `memory`
  * (engine-memory), `slots` (engine-slots) and `headless`.
  */
-async function inAProcessOfItsOwn(script: readonly string[], env: Record<string, string>): Promise<unknown> {
+async function inAProcessOfItsOwn(
+  script: readonly string[],
+  env: Record<string, string>,
+  limit?: { readonly ms: number; readonly call: string },
+): Promise<unknown> {
   const modules = {
     run: 'engine-run.ts',
     spent: 'engine-spent.ts',
@@ -78285,7 +78289,20 @@ async function inAProcessOfItsOwn(script: readonly string[], env: Record<string,
       printed += chunk;
     });
   }
+  let overran = false;
+  const cut =
+    limit === undefined
+      ? undefined
+      : setTimeout(() => {
+          overran = true;
+          child.kill('SIGKILL');
+        }, limit.ms);
   const ended = await exitOf(child);
+  clearTimeout(cut);
+  assert.ok(
+    !overran,
+    `${limit?.call ?? 'the script'} did not return within ${String(limit?.ms)} ms, as a call whose parameters no longer match its caller does not: ${printed}`,
+  );
   assert.equal(ended.code, 0, `the process ran its script: ${printed}`);
   const said = printed
     .split('\n')
@@ -78399,6 +78416,7 @@ async function testAServersHeldEngineRaisesItsSlot(): Promise<void> {
               'say({ done: run.pid !== null });',
             ],
             { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '20', GDH_STAY_MS: '4000' },
+            { ms: 60_000, call: 'GodotServer.spawnGame' },
           );
           assert.equal(get(ran, 'done'), true, `the engine started and ran out: ${JSON.stringify(ran)}`);
         },
@@ -78413,53 +78431,19 @@ async function testAServersHeldEngineRaisesItsSlot(): Promise<void> {
 
 /**
  * A real keeper asked to stop its game twice, as two servers past their ceilings ask it, answers
- * `signalled` to the stop that reached the live game and `gone` to the other, whether the asks come
- * together or after the game has been signalled and before its exit is handled.
+ * `signalled` to the stop that reached the live game and to no other, whether the asks come together,
+ * after the game has been signalled and before its exit is handled, or once the keeper has gone. A
+ * later ask is answered `gone` by a keeper still up, and is `unreached` once the keeper has gone, as
+ * it soon does on Linux and macOS.
  */
 async function testAKeeperAskedToStopTwiceSignalsOnlyTheFirst(): Promise<void> {
   await withNoCeilingSet(async () => {
-    for (const apart of [0, 50, 150]) {
+    for (const apart of [0, 50, 150, 'once the keeper has gone'] as const) {
       const project = memoryProject();
-      let pids: number[] = [];
+      const pids: number[] = [];
       try {
-        const launched = await launchOutsideTheTree(
-          {
-            command: process.execPath,
-            args: [join(import.meta.dirname, 'support', 'memory-engine.ts')],
-            env: { ...process.env, GDH_HOLD_MB: '20', GDH_STAY_MS: '30000' },
-            run: {
-              transcript: join(project, 'transcript.log'),
-              startedAt: Date.now(),
-              projectPath: project,
-              debugged: false,
-            },
-          },
-          process.execPath,
-          resolve('build', 'keeper.js'),
-        );
-        assert.ok('pid' in launched, JSON.stringify(launched));
-        assert.ok(launched.keeperPid !== undefined, 'a keeper holds the game');
-        pids = [launched.pid, launched.keeperPid];
-        const address = await answeredWithin(() => {
-          const named = readRunRecord(project)?.keeper;
-          return named === undefined || named === '' ? undefined : named;
-        }, 20_000);
-        assert.ok(address !== undefined, 'the note names the keeper');
-        const first = askTheKeeperToStop(address, 5000);
-        const second = delay(apart).then(async () => await askTheKeeperToStop(address, 5000));
-        const answers = [await first, await second];
-        assert.deepEqual(
-          answers.map(String).toSorted((a, b) => a.localeCompare(b)),
-          ['gone', 'signalled'],
-          `asked twice ${String(apart)} ms apart, one stop reaches the game: ${JSON.stringify(answers)}`,
-        );
-        if (apart > 0) {
-          assert.deepEqual(
-            answers,
-            ['signalled', 'gone'],
-            `the first is the one that reaches it (${apart} ms)`,
-          );
-        }
+        const answers = await aKeeperAskedToStopTwice(project, apart, pids);
+        await judgeTwoStops(project, apart, answers);
       } finally {
         for (const pid of pids) {
           try {
@@ -78473,6 +78457,84 @@ async function testAKeeperAskedToStopTwiceSignalsOnlyTheFirst(): Promise<void> {
       }
     }
   });
+}
+
+/** Where the second of two stops is asked: [param apart] ms after the first, or once the keeper has gone. */
+type SecondStop = 0 | 50 | 150 | 'once the keeper has gone';
+
+/**
+ * The answers of a real keeper of a stand-in game of [param project] asked to stop it twice, the
+ * second ask as [param apart] says. The game's and the keeper's pids are added to [param pids].
+ */
+async function aKeeperAskedToStopTwice(
+  project: string,
+  apart: SecondStop,
+  pids: number[],
+): Promise<unknown[]> {
+  const launched = await launchOutsideTheTree(
+    {
+      command: process.execPath,
+      args: [join(import.meta.dirname, 'support', 'memory-engine.ts')],
+      env: { ...process.env, GDH_HOLD_MB: '20', GDH_STAY_MS: '30000' },
+      run: {
+        transcript: join(project, 'transcript.log'),
+        startedAt: Date.now(),
+        projectPath: project,
+        debugged: false,
+      },
+    },
+    process.execPath,
+    resolve('build', 'keeper.js'),
+  );
+  assert.ok('pid' in launched, JSON.stringify(launched));
+  assert.ok(launched.keeperPid !== undefined, 'a keeper holds the game');
+  pids.push(launched.pid, launched.keeperPid);
+  const address = await answeredWithin(() => {
+    const named = readRunRecord(project)?.keeper;
+    return named === undefined || named === '' ? undefined : named;
+  }, 20_000);
+  assert.ok(address !== undefined, 'the note names the keeper');
+  const keeperPid = launched.keeperPid;
+  const first = askTheKeeperToStop(address, 5000);
+  const before =
+    typeof apart === 'number'
+      ? delay(apart)
+      : first.then(async () => {
+          assert.ok(await untilTrue(() => !alive(keeperPid), 20_000), 'the keeper goes with its game');
+        });
+  const second = before.then(async () => await askTheKeeperToStop(address, 5000));
+  return [await first, await second];
+}
+
+/**
+ * Asserts [param answers], of a keeper of [param project] asked to stop twice as [param apart] says:
+ * one reached the game, the first unless both came together, and the other was told the game had
+ * gone or found no keeper. The run's note says the stop ended it.
+ */
+async function judgeTwoStops(project: string, apart: SecondStop, answers: unknown[]): Promise<void> {
+  const said = `asked twice, ${typeof apart === 'number' ? `${String(apart)} ms apart` : apart}: ${JSON.stringify(answers)}`;
+  const reached = answers.filter((answer) => answer === 'signalled');
+  assert.equal(reached.length, 1, `one stop reaches the game, ${said}`);
+  const other = answers.find((answer) => answer !== 'signalled');
+  const unreached = typeof other === 'object' && other !== null && 'unreached' in other;
+  assert.ok(other === 'gone' || unreached, `the other is told the game has gone or finds no keeper, ${said}`);
+  if (apart !== 0) {
+    assert.equal(answers[0], 'signalled', `the first is the one that reaches it, ${said}`);
+  }
+  if (typeof apart !== 'number') {
+    assert.ok(unreached, `a keeper that has gone answers nothing, ${said}`);
+  }
+  // Ended by the stop, as the server that asked for it says, and not by the exit code 1 of
+  // Windows' TerminateProcess, which reads like a game that exited 1 by itself.
+  const ended = await answeredWithin(() => {
+    const note = readRunRecord(project);
+    return note?.endedAt === undefined ? undefined : note;
+  }, 20_000);
+  assert.deepEqual(
+    [ended !== undefined && 'exitCode' in ended, ended?.exitSignal],
+    [false, 'SIGTERM'],
+    `the note says the stop ended the run, ${said}: ${JSON.stringify(ended)}`,
+  );
 }
 
 /**
@@ -78810,7 +78872,7 @@ async function testAReplacedServerStopsEveryCallAndRefusesOnlyThoseNotPastThePoi
     createErrorResponse: (said: string) => ({ content: [{ type: 'text', text: said }], isError: true }),
     stopWatchingForASuccessor: () => undefined,
     stopTryingTheBridge: () => undefined,
-    godotBridge: { stop: () => Promise.resolve() },
+    godotBridge: { stop: () => Promise.resolve(), letGoOfThePort: () => undefined },
     logDebug: () => undefined,
     handleShutdown: (...said: unknown[]) => {
       shutdowns.push(said);
@@ -78835,6 +78897,357 @@ async function testAReplacedServerStopsEveryCallAndRefusesOnlyThoseNotPastThePoi
   );
   await standing;
   assert.deepEqual(shutdowns, [['superseded by 4242', 0]], 'and the server then exits');
+}
+
+/** The line a server prints to its stderr as it begins to stand down for a newer one. */
+const STANDING_DOWN = 'so this server is finished and is stopping';
+
+/** The note of a start's runtime when its server was replaced [param waitedMs] into the wait, by [param successor]. */
+function replacedDuringTheWaitSaid(successor: number, waitedMs: number, state: string): string {
+  return `this gdharness server was replaced by a newer one on the same project, pid ${String(successor)}, ${String(waitedMs)}ms into the wait for the game to announce itself, and ${state}: editor_status on the server now serving says whether it has announced.`;
+}
+
+/** The wait a start's runtime note says it had before its server was replaced, or NaN. */
+function waitBeforeTheReplacement(runtime: unknown): number {
+  return Number(/, (\d+)ms into the wait/.exec(String(get(runtime, 'note')))?.[1]);
+}
+
+/**
+ * A spawned start past its spawn when its server is replaced says which game it started and how long
+ * it really waited for the game to announce, never the minute it was given. Asked with and without
+ * a progress token, since a client that sends one has its call carried another way.
+ */
+async function testASpawnedStartCaughtByAReplacementSaysTheWaitItHad(): Promise<void> {
+  for (const progressToken of [undefined, 'start']) {
+    await withAServerToBeReplaced({ runtimeScript: true, oneSlot: false }, async (servers) => {
+      const began = Date.now();
+      const start = servers.first.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: servers.project, op: 'start', headless: true, runtimeWaitMs: 60_000 },
+          ...(progressToken === undefined ? {} : { _meta: { progressToken } }),
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const note = await answeredWithin(() => readRunRecord(servers.project) ?? undefined, 30_000);
+      assert.ok(note !== undefined, 'the start spawned its game');
+      const second = await servers.replace();
+      const said = saidToACall(await start);
+      const tookMs = Date.now() - began;
+      const shown = `${progressToken === undefined ? 'no token' : 'a token'}: ${said.text}`;
+      assert.equal(said.isError, false, `the start is not told to call again, ${shown}`);
+      const answer: unknown = JSON.parse(said.text);
+      const runtime = get(answer, 'runtime');
+      const waited = waitBeforeTheReplacement(runtime);
+      assert.ok(waited > 0 && waited <= tookMs, `the wait said is the one had, under ${tookMs} ms, ${shown}`);
+      assert.deepEqual(
+        [get(answer, 'started'), get(answer, 'pid'), runtime],
+        [
+          true,
+          note.pid,
+          {
+            listening: false,
+            mayYetAnnounce: true,
+            note: replacedDuringTheWaitSaid(Number(second.child.pid), waited, 'the game is still running'),
+            heldAt: null,
+          },
+        ],
+        `it says which game it started and that the wait ended with the replacement, ${shown}`,
+      );
+    });
+  }
+}
+
+/**
+ * A start the editor plays, past its play when its server is replaced, says the game was started
+ * and how long it really waited for it to announce, never "call again", which would play it twice.
+ */
+async function testAnEditorPlayedStartCaughtByAReplacementSaysTheWaitItHad(): Promise<void> {
+  const played = { times: 0 };
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          played.times += 1;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing: played.times > 0, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, runtimeDir, bridgePort, start }) => {
+      const began = Date.now();
+      const starting = start(60_000);
+      assert.ok(await untilTrue(() => played.times > 0, 30_000), 'the editor is asked to play');
+      const successor = new ServerProcess({
+        env: {
+          GDHARNESS_BRIDGE_PORT: String(bridgePort),
+          GDHARNESS_RUNTIME_DIR: runtimeDir,
+          GODOT_PATH: standInEngine(),
+          GDHARNESS_PROJECT: project,
+        },
+      });
+      try {
+        await successor.initialize('regression-test');
+        const { answer } = await starting;
+        const tookMs = Date.now() - began;
+        const shown = JSON.stringify(answer);
+        const runtime = get(answer, 'runtime');
+        const waited = waitBeforeTheReplacement(runtime);
+        assert.ok(
+          waited > 0 && waited <= tookMs,
+          `the wait said is the one had, under ${tookMs} ms: ${shown}`,
+        );
+        assert.deepEqual(
+          [get(answer, 'started'), get(answer, 'through'), runtime, played.times],
+          [
+            true,
+            'editor',
+            {
+              listening: false,
+              mayYetAnnounce: true,
+              note: replacedDuringTheWaitSaid(
+                Number(successor.child.pid),
+                waited,
+                'the game is still running',
+              ),
+              heldAt: null,
+            },
+            1,
+          ],
+          `it says the editor played its game and that the wait ended with the replacement: ${shown}`,
+        );
+        assert.equal(await untilTrue(() => server.exited, 20_000), true, 'the replaced server exits');
+      } finally {
+        await successor.stop();
+      }
+    },
+    { servesItsProject: true },
+  );
+}
+
+/** What a stand-in editor on a server about to be replaced is handed, and how the test reaches both. */
+interface StandInEditorStage {
+  readonly project: string;
+  readonly first: ServerProcess;
+  readonly call: (args: Record<string, unknown>) => Promise<{ text: string; isError: boolean }>;
+  readonly replace: () => Promise<ServerProcess>;
+}
+
+/**
+ * Runs [param body] with a server of a new project, a stand-in editor greeted on its bridge that
+ * hands every resource_edit modify to [param edit] and answers anything else at once, and a way to start a
+ * second server of the project, which replaces the first.
+ */
+async function withAStandInEditorOnAServerToBeReplaced(
+  edit: (answer: (result: Record<string, unknown>) => void) => void,
+  body: (stage: StandInEditorStage) => Promise<void>,
+): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-replaced-editor-'));
+  const bridgePort = await reservePort();
+  const env = { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project };
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const first = new ServerProcess({ env });
+  const replacements: ServerProcess[] = [];
+  let editor: WebSocket | null = null;
+  try {
+    await first.initialize('regression-test');
+    editor = await greetAsAStandInEditor(first, bridgePort, project, (socket, id, tool) => {
+      const answer = (result: Record<string, unknown>): void => {
+        try {
+          socket.send(JSON.stringify({ type: 'tool_result', id, success: true, result }));
+        } catch {
+          // The socket has gone.
+        }
+      };
+      if (tool === 'modify_resource') {
+        edit(answer);
+      } else {
+        answer({ ok: true });
+      }
+    });
+    await body({
+      project,
+      first,
+      call: async (args) =>
+        saidToACall(
+          await first.request(
+            'tools/call',
+            { name: 'resource_edit', arguments: { projectPath: project, ...args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ),
+      replace: async () => {
+        const second = new ServerProcess({ env });
+        replacements.push(second);
+        await second.initialize('regression-test');
+        return second;
+      },
+    });
+  } finally {
+    editor?.terminate();
+    for (const second of replacements) {
+      await second.stop();
+    }
+    await first.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * An editor call sent to the editor before its server is replaced is answered with the editor's
+ * answer, which comes once the server has begun to stand down. A second edit of the same resource,
+ * queued behind the first and not yet sent, is told to call again and never reaches the editor, so
+ * the file is as it was.
+ */
+async function testAnEditorCallSentBeforeItsServerIsReplacedIsAnsweredByTheEditor(): Promise<void> {
+  const edits: ((result: Record<string, unknown>) => void)[] = [];
+  const before = '[gd_resource type="Resource" format=3]\n\n[resource]\n';
+  await withAStandInEditorOnAServerToBeReplaced(
+    (answer) => {
+      edits.push(answer);
+    },
+    async ({ project, first, call, replace }) => {
+      writeFileSync(join(project, 'ui.tres'), before);
+      const asked = { resourcePath: 'res://ui.tres', op: 'modify', properties: {} };
+      const sent = call(asked);
+      assert.ok(await untilTrue(() => edits.length === 1, 20_000), 'the editor is sent the edit');
+      const queued = call(asked);
+      await delay(500);
+      const second = await replace();
+      assert.ok(
+        await untilTrue(() => first.stderr.includes(STANDING_DOWN), 30_000),
+        'the replaced server stands down',
+      );
+      await delay(500);
+      edits[0]?.({ ok: true, modified: 'res://ui.tres' });
+      const [editorSaid, queuedSaid] = [await sent, await queued];
+      assert.deepEqual(
+        [editorSaid.text.startsWith('{') ? JSON.parse(editorSaid.text) : editorSaid.text, editorSaid.isError],
+        [{ ok: true, modified: 'res://ui.tres', writtenBy: 'the editor' }, false],
+        `the sent edit is answered with what the editor said: ${editorSaid.text}`,
+      );
+      assert.deepEqual(
+        queuedSaid,
+        {
+          text: `This gdharness server was replaced by a newer one on the same project, pid ${String(second.child.pid)}, so call again.`,
+          isError: true,
+        },
+        'the edit not yet sent is told to call again',
+      );
+      await delay(500);
+      assert.equal(edits.length, 1, 'and never reaches the editor');
+      assert.equal(readFileSync(join(project, 'ui.tres'), 'utf8'), before, 'so the file is as it was');
+    },
+  );
+}
+
+/**
+ * An editor call sent to the editor before its server is replaced, which the editor does not answer
+ * before the server stops, is answered as sent and perhaps carried out, never "call again", since
+ * calling again would apply the edit twice.
+ */
+async function testAnEditorCallTheEditorNeverAnswersIsAnsweredAsSentWhenItsServerIsReplaced(): Promise<void> {
+  let sentAt = 0;
+  await withAStandInEditorOnAServerToBeReplaced(
+    () => {
+      sentAt = Date.now();
+    },
+    async ({ call, replace }) => {
+      const sent = call({ resourcePath: 'res://ui.tres', op: 'modify', properties: {} });
+      assert.ok(await untilTrue(() => sentAt > 0, 20_000), 'the editor is sent the edit');
+      const second = await replace();
+      assert.deepEqual(
+        await sent,
+        {
+          text: `This gdharness server was replaced by a newer one on the same project, pid ${String(second.child.pid)}, and stopped after resource_edit modify was sent to the editor and before the editor answered, so the editor may have carried it out. Read what it changed before asking for it again.\nNext:\n- editor_status on the server now serving says whether the editor is connected`,
+          isError: true,
+        },
+        'the edit is answered as sent',
+      );
+    },
+  );
+}
+
+/**
+ * A start the editor would play, held in the wait for the one engine slot when its server is
+ * replaced, is told to call again and the editor is never asked to play, though the start asked the
+ * editor questions before the wait. The slot is freed once the answer is in, so a start left to run
+ * would take it and play.
+ */
+async function testAnEditorPlayedStartNotYetPlayedWhenItsServerIsReplacedPlaysNothing(): Promise<void> {
+  const asked: string[] = [];
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  try {
+    await withAPlayingEditor(
+      ({ adapter }) =>
+        (tool) => {
+          asked.push(tool);
+          if (tool === 'play_scene') {
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing: false, scenePath: '', debugPort: adapter };
+          }
+          return { ok: true };
+        },
+      async ({ server, project, runtimeDir, bridgePort, start }) => {
+        const holder = new EngineSlots(
+          slots,
+          1,
+          { pid: process.pid, started: await ownStart() },
+          undefined,
+          () => 'tier',
+        );
+        const successor = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(bridgePort),
+            GDHARNESS_RUNTIME_DIR: runtimeDir,
+            GODOT_PATH: standInEngine(),
+            GDHARNESS_PROJECT: project,
+            [SLOTS_VARIABLE]: slots,
+            [SLOT_COUNT_VARIABLE]: '1',
+          },
+        });
+        try {
+          assert.equal(await holder.takeFree(), join(slots, '0.lock'), 'the one slot is held');
+          const starting = start(60_000);
+          assert.ok(
+            await untilTrue(() => slotWaiters(slots).length > 0, 30_000),
+            'the start waits for a slot',
+          );
+          const before = [...asked];
+          await successor.initialize('regression-test');
+          const { answer } = await starting;
+          assert.deepEqual(
+            answer,
+            {
+              refused: `This gdharness server was replaced by a newer one on the same project, pid ${String(successor.child.pid)}, so call again.`,
+            },
+            'the start is told to call again',
+          );
+          holder.releaseAll();
+          assert.equal(await untilTrue(() => server.exited, 20_000), true, 'the replaced server exits');
+          assert.ok(
+            before.length > 0,
+            `the start asked the editor before the wait: ${JSON.stringify(before)}`,
+          );
+          assert.ok(
+            !asked.includes('play_scene'),
+            `the editor is never asked to play: ${JSON.stringify(asked)}`,
+          );
+        } finally {
+          holder.releaseAll();
+          await successor.stop();
+        }
+      },
+      { servesItsProject: true, env: { [SLOTS_VARIABLE]: slots, [SLOT_COUNT_VARIABLE]: '1' } },
+    );
+  } finally {
+    sweep(slots);
+  }
 }
 
 /**
@@ -132336,6 +132749,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartPastItsSpawnWhenItsServerIsReplacedAnswersWithItsGame,
   testACallIsRefusedItsPointOfNoReturnOnlyOnceToldToStop,
   testAReplacedServerStopsEveryCallAndRefusesOnlyThoseNotPastThePoint,
+  testASpawnedStartCaughtByAReplacementSaysTheWaitItHad,
+  testAnEditorPlayedStartCaughtByAReplacementSaysTheWaitItHad,
+  testAnEditorCallSentBeforeItsServerIsReplacedIsAnsweredByTheEditor,
+  testAnEditorCallTheEditorNeverAnswersIsAnsweredAsSentWhenItsServerIsReplaced,
+  testAnEditorPlayedStartNotYetPlayedWhenItsServerIsReplacedPlaysNothing,
   testAGamesKeeperRaisesTheSlotItHolds,
   testARaiseNotWrittenIsAskedAgain,
   testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,
