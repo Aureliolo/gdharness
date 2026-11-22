@@ -38,12 +38,14 @@ import { halfAsLongAgain, MAIN_SCENE, readBootNoteAsync, waitSizedTo, writeBootN
 import { readBreakpointNote, writeBreakpointNote, writeBreakpointNoteAsync } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
+  type CallCommit,
   type CallNotes,
   type CallProgress,
   callNotes,
   callNotesSaid,
   callProgress,
   callSignal,
+  commitCall,
   newCallNotes,
   type SlotWaits,
   stillGoingSaid,
@@ -2501,6 +2503,23 @@ const HANDOVER_MS = SUCCESSOR_CHECK_MS + 5_000;
  * its port, before it exits. A call already sent when it began reaches it within this.
  */
 const STAND_DOWN_MS = 3000;
+
+/** How long a call told to stop is given to stop before it is answered as replaced anyway. */
+const CALL_STOPS_MS = 1000;
+
+/**
+ * How long a replaced server waits, before it exits, for the calls past the point of no return to
+ * say what they did.
+ */
+const COMMITTED_CALLS_MS = 5000;
+
+/** A call being answered, with what stops it and whether it has done what cannot be undone. */
+interface OpenCall extends CallInFlight {
+  readonly stop: AbortController;
+  readonly commit: CallCommit;
+  /** Settled with the call's work, whatever it answered. Set once the work has begun. */
+  settled: Promise<unknown>;
+}
 
 /** The answer of every call a replaced server is asked, with [param successor], the server now serving. */
 function replacedSaid(successor: number): string {
@@ -5854,8 +5873,8 @@ export class GodotServer {
   private bridgeRetry: NodeJS.Timeout | null = null;
   private successorWatch: NodeJS.Timeout | null = null;
   /**
-   * The answer of every call once a newer server of this project has replaced this one: settled
-   * then, so the calls still running are answered with it too.
+   * Settled once a newer server of this project has replaced this one. Each call still running is
+   * stopped, and answered with [member replacedAnswer] unless it is past the point of no return.
    */
   private readonly replaced = Promise.withResolvers<ToolResponse>();
   private replacedAnswer: ToolResponse | null = null;
@@ -5912,7 +5931,7 @@ export class GodotServer {
   private readonly greetedEditors = new Set<number>();
 
   /** The calls being answered, by a number of their own, which the lifecycle log's ended line names. */
-  private readonly inFlight = new Map<number, CallInFlight>();
+  private readonly inFlight = new Map<number, OpenCall>();
   /** The runtime calls being answered, each with the game it went to. */
   private readonly callsOnGames = new Set<CallOnAGame>();
   private callsTaken = 0;
@@ -6251,8 +6270,10 @@ export class GodotServer {
   /**
    * Stops this server for [param successor], the newer server of its project. The bridge port goes
    * first, so the successor takes the port it was configured with. Every call still running is
-   * answered at once with the replacement, and so is every call arriving in the next
-   * `STAND_DOWN_MS`, since each caller waits on this pipe until it is answered. Then it exits.
+   * stopped. One that had not spawned a game or played a scene is answered with the replacement,
+   * and one that had says what it did. Every call arriving in the next `STAND_DOWN_MS` is
+   * answered with the replacement, since each caller waits on this pipe until it is answered.
+   * Then it exits.
    */
   private async standDown(successor: number): Promise<void> {
     if (this.replacedAnswer !== null) {
@@ -6263,6 +6284,13 @@ export class GodotServer {
     );
     this.noteTheEnd('superseded', { successor });
     this.replacedAnswer = this.createErrorResponse(replacedSaid(successor));
+    // Every call is told to stop, and one that has not yet done what cannot be undone is told so
+    // at that point, so a start that has spawned nothing spawns nothing.
+    const open = [...this.inFlight.values()];
+    for (const call of open) {
+      call.commit.refused = !call.commit.committed;
+      call.stop.abort();
+    }
     this.replaced.resolve(this.replacedAnswer);
     this.stopWatchingForASuccessor();
     this.stopTryingTheBridge();
@@ -6270,6 +6298,10 @@ export class GodotServer {
       await this.godotBridge.stop();
     } catch (error) {
       this.logDebug(`Godot bridge did not stop cleanly: ${errorMessage(error)}`);
+    }
+    const past = open.filter((call) => call.commit.committed);
+    if (past.length > 0) {
+      await Promise.race([Promise.all(past.map((call) => call.settled)), delay(COMMITTED_CALLS_MS)]);
     }
     await delay(STAND_DOWN_MS);
     await this.handleShutdown(`superseded by ${successor}`, 0);
@@ -6587,29 +6619,78 @@ export class GodotServer {
                 });
             };
       const call = this.callsTaken++;
-      this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
+      const open: OpenCall = {
+        tool: spec.name,
+        op: checked.op ?? '',
+        startedAt: Date.now(),
+        stop: new AbortController(),
+        commit: { committed: false, refused: false },
+        settled: Promise.resolve(),
+      };
+      this.inFlight.set(call, open);
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
       const notes = newCallNotes();
       try {
+        const work = withCallSignal(
+          AbortSignal.any([ctx.mcpReq.signal, open.stop.signal]),
+          () => this.answered(spec.name, checked.op ?? '', args),
+          progress,
+          {
+            everyMs: heartbeatMs(),
+            said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
+          },
+          slotWaits,
+          notes,
+          open.commit,
+        );
+        open.settled = work.catch(() => undefined);
         const won = await Promise.race([
-          withCallSignal(
-            ctx.mcpReq.signal,
-            () => this.answered(spec.name, checked.op ?? '', args),
-            progress,
-            {
-              everyMs: heartbeatMs(),
-              said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
-            },
-            slotWaits,
-            notes,
-          ).then((answered) => ({ answered, replaced: false })),
-          this.replaced.promise.then((answered) => ({ answered, replaced: true })),
+          work.then(
+            (answered) => this.settledAnswer(open, { answered }),
+            (error: unknown) => this.settledAnswer(open, { error }),
+          ),
+          this.replaced.promise.then(async (said) => await this.answerOfAReplacedCall(open, work, said)),
         ]);
         return won.replaced ? won.answered : this.toldAnswer(spec.name, won.answered, notes, slotWaits);
       } finally {
         this.inFlight.delete(call);
       }
     });
+  }
+
+  /**
+   * The answer of [param open] once its work has settled with [param outcome]. A call that has done
+   * nothing it cannot undo, and settles once this server is replaced, was stopped by that and says
+   * so, whatever the stop made of its answer.
+   */
+  private settledAnswer(
+    open: OpenCall,
+    outcome: { readonly answered: ToolResponse } | { readonly error: unknown },
+  ): { answered: ToolResponse; replaced: boolean } {
+    if (this.replacedAnswer !== null && !open.commit.committed) {
+      return { answered: this.replacedAnswer, replaced: true };
+    }
+    if ('error' in outcome) {
+      throw outcome.error;
+    }
+    return { answered: outcome.answered, replaced: false };
+  }
+
+  /**
+   * The answer of [param open] once this server is replaced. A call past the point of no return is
+   * answered with what it did, since "call again" would do it twice. Any other has been told to
+   * stop and is given a moment to, so that its work is over before it is told to call again.
+   */
+  private async answerOfAReplacedCall(
+    open: OpenCall,
+    work: Promise<ToolResponse>,
+    said: ToolResponse,
+  ): Promise<{ answered: ToolResponse; replaced: boolean }> {
+    if (open.commit.committed) {
+      return { answered: await work, replaced: false };
+    }
+    await Promise.race([open.settled, delay(CALL_STOPS_MS)]);
+    return { answered: said, replaced: true };
   }
 
   /** The answer [param answered] of a call to [param tool] with what the call has to tell beside it. */
@@ -14606,6 +14687,7 @@ export class GodotServer {
   ): Promise<GodotProcess | null> {
     if (
       starts >= ENGINE_STARTS ||
+      callSignal()?.aborted === true ||
       process.platform !== 'win32' ||
       dead.transcript === null ||
       dead.pid === null ||
@@ -14935,6 +15017,10 @@ export class GodotServer {
    * was waited for the whole budget and then reported, correctly, as no longer running.
    */
   private giveUpOnTheAnnouncement(probe: AnnounceProbe): boolean {
+    // A call told to stop, once its game is started, says what it did and leaves the wait.
+    if (callSignal()?.aborted === true) {
+      return true;
+    }
     const run = this.activeProcess;
     if (this.theEditorsSessionStoppedOn(run)) {
       return true;
@@ -15171,6 +15257,12 @@ export class GodotServer {
     // In one of the machine's engine slots, like every engine started for a call, taken before the
     // play so a full machine holds the play rather than the game.
     const slot = await slotForCall(true, projectPath);
+    try {
+      commitCall();
+    } catch (error) {
+      slot.release();
+      throw error;
+    }
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
@@ -16229,6 +16321,13 @@ export class GodotServer {
     // since the run outlives this server. So a started run leaves the lock to it, and one the keeper
     // never took over names this server, which frees it by going.
     const slot = await slotForCall(true, projectPath);
+    // The last place a call told to stop can still spawn nothing.
+    try {
+      commitCall();
+    } catch (error) {
+      slot.release();
+      throw error;
+    }
     // From the slot rather than the call, since the wait to announce is counted from here: counted
     // from the call, a 24-minute wait for a slot spent the whole of it before the engine began.
     const startedAt = Date.now();
