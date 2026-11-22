@@ -929,8 +929,9 @@ the wait.
 
 ### Step 5: take in order
 
-Take in the order you began to wait. At each look, read every live mark but your own and `memory`
-ones.
+Take in the order you began to wait. At each look, read every live mark but your own and the
+`memory` marks that name no `since`. A `memory` mark that names `since` stands in line as the taker
+its `kind` names.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that have waited
   long enough. A store-class taker waits two minutes. Any other waits two minutes while no
