@@ -18620,10 +18620,10 @@ export class GodotServer {
     const game = among(about);
     if (game === undefined && about !== undefined) {
       const ours = among();
-      const elsewhere =
-        ours === undefined ? null : this.anotherProjectsRun(ours.project.path, args, 'signalled');
-      if (elsewhere !== null) {
-        return elsewhere;
+      if (ours !== undefined && !isSameDirectory(ours.project.path, about)) {
+        return this.createErrorResponse(
+          `pid ${pid} is a game of ${ours.project.path}, and this call names ${about}, so nothing was signalled. Stop it with editor_run stop and that pid, without projectPath or with projectPath ${ours.project.path}.`,
+        );
       }
     }
     if (game === undefined) {
