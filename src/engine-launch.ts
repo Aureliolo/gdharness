@@ -40,10 +40,12 @@ import {
   type EngineGuard,
   engineMemory,
   engineNeed,
+  flatNeed,
   gigabytes,
   MEMORY_PER_ENGINE,
   memoryEndedSaid,
   startRefusedSaid,
+  WINDOWED_MEMORY_PER_ENGINE,
 } from './engine-memory.js';
 import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
@@ -76,7 +78,7 @@ export const WINDOWS_EXCEPTION = 0xc0000000;
  */
 const MEMORY_KEPT = 4 * 1024 ** 3;
 
-export { MEMORY_PER_ENGINE };
+export { MEMORY_PER_ENGINE, WINDOWED_MEMORY_PER_ENGINE };
 
 const LOOK_MS = 500;
 
@@ -306,7 +308,7 @@ export async function memoryRefusal(
   room: () => Promise<MemoryRoom> = memoryAvailable,
 ): Promise<string | null> {
   const need = engineNeed(readEnginePeaks(project)[tool], ceiling.bytes, tool);
-  if (need.bytes <= MEMORY_PER_ENGINE) {
+  if (need.bytes <= flatNeed(tool)) {
     return null;
   }
   const free = await room();

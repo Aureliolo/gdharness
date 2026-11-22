@@ -576,17 +576,22 @@ the tree. On Windows the run asks once through UI Automation, as a screen reader
 first suite starts. A run that could not ask prints why, starting with
 `gdharness could not ask for the accessibility tree`.
 
-### The windowed engine
+### The windowed engines
 
-All the windowed suites go to one windowed engine, which starts first, counts toward `--engines`
-and runs nothing else. A suite there sees the machine's real screen size, scale and keyboard
+Windowed suites are dealt as headless ones are, to windowed engines that run nothing else. Each
+counts toward `--engines`. The windowed engines take the share of the lanes that the windowed
+suites make of the run's work, and never more than there are windowed units. One windowed suite runs
+in one windowed engine. A suite there sees the machine's real screen size, scale and keyboard
 layout, and runs slower for drawing frames.
 
-### After the windowed engine
+A windowed engine is counted as holding 3 GB until a peak is kept for the project's windowed
+engines, so the machine's memory budget lets fewer of them start at once than headless ones.
 
-Once the windowed engine ends, a headless engine follows it in the same slot without giving the
+### After a windowed engine
+
+Once a windowed engine ends, a headless engine follows it in the same slot without giving the
 slot back. It is dealt as though it began then, so a few quick windowed suites never leave a slot
-idle. The windowed engine takes no second share, since its display flags belong to the windowed
+idle. A windowed engine takes no second share, since its display flags belong to the windowed
 suites. With `--engines 1` the run is that one slot, the windowed engine and then a headless one.
 On a machine with room for fewer engines than asked for, the slots run one after the other. The
 line announcing the run says so.
