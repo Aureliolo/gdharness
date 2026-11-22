@@ -2384,10 +2384,21 @@ const BOUNDARY_WAIT_MS = 2000;
 /**
  * How long a replacement waits for its predecessor to let go of the configured bridge port before
  * taking another. The predecessor looks for a successor every `SUCCESSOR_CHECK_MS`, and then has
- * its shutdown to get through, so this covers one full check and the shutdown after it. One still
- * answering a call stops later, once it has answered, and the replacement takes another port.
+ * its shutdown to get through, so this covers one full check and the shutdown after it. It lets go
+ * of the port as it begins to stand down, before its calls are answered.
  */
 const HANDOVER_MS = SUCCESSOR_CHECK_MS + 5_000;
+
+/**
+ * How long a server that has been replaced goes on answering calls with that, after letting go of
+ * its port, before it exits. A call already sent when it began reaches it within this.
+ */
+const STAND_DOWN_MS = 3000;
+
+/** The answer of every call a replaced server is asked, with [param successor], the server now serving. */
+function replacedSaid(successor: number): string {
+  return `This gdharness server was replaced by a newer one on the same project, pid ${String(successor)}, so call again.`;
+}
 
 /**
  * How often the port is asked for while waiting. The editor tries again a second after its socket
@@ -5723,6 +5734,12 @@ class GodotServer {
   private bridgeStartupError: string | null = null;
   private bridgeRetry: NodeJS.Timeout | null = null;
   private successorWatch: NodeJS.Timeout | null = null;
+  /**
+   * The answer of every call once a newer server of this project has replaced this one: settled
+   * then, so the calls still running are answered with it too.
+   */
+  private readonly replaced = Promise.withResolvers<ToolResponse>();
+  private replacedAnswer: ToolResponse | null = null;
   private consoleWatch: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
@@ -6083,8 +6100,7 @@ class GodotServer {
    *
    * The announcement is the signal because it is already the one both sides read, and it carries
    * the process that wrote it. A successor has to still be running to count, so that a
-   * replacement which died without withdrawing does not take the last server with it. A server with
-   * a call in flight answers it before it stops, since its caller is still waiting on this pipe.
+   * replacement which died without withdrawing does not take the last server with it.
    */
   private watchForASuccessor(): void {
     if (this.ownProject === null || this.successorWatch !== null) {
@@ -6092,14 +6108,9 @@ class GodotServer {
     }
     const watch = setInterval(() => {
       const successor = this.supersededBy();
-      if (successor === null || this.inFlight.size > 0) {
-        return;
+      if (successor !== null) {
+        void this.standDown(successor);
       }
-      console.error(
-        `[SERVER] pid ${successor} now serves ${this.ownProject}, so this server is finished and is stopping.`,
-      );
-      this.noteTheEnd('superseded', { successor });
-      void this.handleShutdown(`superseded by ${successor}`, 0);
     }, SUCCESSOR_CHECK_MS);
     // Never a reason on its own for the process to stay up.
     watch.unref();
@@ -6116,6 +6127,33 @@ class GodotServer {
       return null;
     }
     return alive(announced.pid) ? announced.pid : null;
+  }
+
+  /**
+   * Stops this server for [param successor], the newer server of its project. The bridge port goes
+   * first, so the successor takes the port it was configured with. Every call still running is
+   * answered at once with the replacement, and so is every call arriving in the next
+   * `STAND_DOWN_MS`, since each caller waits on this pipe until it is answered. Then it exits.
+   */
+  private async standDown(successor: number): Promise<void> {
+    if (this.replacedAnswer !== null) {
+      return;
+    }
+    console.error(
+      `[SERVER] pid ${successor} now serves ${this.ownProject}, so this server is finished and is stopping.`,
+    );
+    this.noteTheEnd('superseded', { successor });
+    this.replacedAnswer = this.createErrorResponse(replacedSaid(successor));
+    this.replaced.resolve(this.replacedAnswer);
+    this.stopWatchingForASuccessor();
+    this.stopTryingTheBridge();
+    try {
+      await this.godotBridge.stop();
+    } catch (error) {
+      this.logDebug(`Godot bridge did not stop cleanly: ${errorMessage(error)}`);
+    }
+    await delay(STAND_DOWN_MS);
+    await this.handleShutdown(`superseded by ${successor}`, 0);
   }
 
   private stopWatchingForASuccessor(): void {
@@ -6386,6 +6424,9 @@ class GodotServer {
     });
     protocol.setRequestHandler('tools/call', async (request, ctx) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
+      if (this.replacedAnswer !== null) {
+        return this.replacedAnswer;
+      }
       this.noteTheClient(clientOf(ctx.mcpReq.envelope));
       const spec = toolSpec(request.params.name);
       if (!spec) {
@@ -6431,31 +6472,44 @@ class GodotServer {
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
       const notes = newCallNotes();
       try {
-        const answered = await withCallSignal(
-          ctx.mcpReq.signal,
-          () => this.answered(spec.name, checked.op ?? '', args),
-          progress,
-          {
-            everyMs: heartbeatMs(),
-            said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
-          },
-          slotWaits,
-          notes,
-        );
-        const answer = this.withCallNotes(answered, notes);
-        // A test run whose class rebuild took a minute could not be told from a slow rebuild, since
-        // every step's time holds its wait for a slot and the wait was said only as progress.
-        const waited =
-          slotWaits.said === undefined || slotWaits.ms < 1000
-            ? answer
-            : this.saying(answer, {
-                engine_slot_wait: { waitedMs: slotWaits.ms, note: slotWaits.said(slotWaits.ms) },
-              });
-        return this.withinTheClientsLimit(spec.name, this.withFeedbackNotice(this.withUpdateNotice(waited)));
+        const won = await Promise.race([
+          withCallSignal(
+            ctx.mcpReq.signal,
+            () => this.answered(spec.name, checked.op ?? '', args),
+            progress,
+            {
+              everyMs: heartbeatMs(),
+              said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
+            },
+            slotWaits,
+            notes,
+          ).then((answered) => ({ answered, replaced: false })),
+          this.replaced.promise.then((answered) => ({ answered, replaced: true })),
+        ]);
+        return won.replaced ? won.answered : this.toldAnswer(spec.name, won.answered, notes, slotWaits);
       } finally {
         this.inFlight.delete(call);
       }
     });
+  }
+
+  /** The answer [param answered] of a call to [param tool] with what the call has to tell beside it. */
+  private toldAnswer(
+    tool: string,
+    answered: ToolResponse,
+    notes: CallNotes,
+    slotWaits: SlotWaits,
+  ): ToolResponse {
+    const answer = this.withCallNotes(answered, notes);
+    // A test run whose class rebuild took a minute could not be told from a slow rebuild, since
+    // every step's time holds its wait for a slot and the wait was said only as progress.
+    const waited =
+      slotWaits.said === undefined || slotWaits.ms < 1000
+        ? answer
+        : this.saying(answer, {
+            engine_slot_wait: { waitedMs: slotWaits.ms, note: slotWaits.said(slotWaits.ms) },
+          });
+    return this.withinTheClientsLimit(tool, this.withFeedbackNotice(this.withUpdateNotice(waited)));
   }
 
   /**

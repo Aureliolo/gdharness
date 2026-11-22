@@ -992,8 +992,9 @@ its `kind` names.
 - A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
 - The engines of one machine stay inside its memory budget, which is the physical memory less 16
   GiB, and at least what the slot count stands for at 1.5 GiB a slot. Before taking a free slot,
-  add up the `memory` of every live lock, the `memory` of the live `memory` marks ahead of you
-  that name `since` and `memory`, and your own figure. Take the slot only if the sum stays inside
+  add up the `memory` of each lock below the slot count that names a live holder, the `memory` of
+  the live `memory` marks ahead of you that name `since` and `memory`, and your own figure. A lock
+  past the count, and one still empty, count nothing. Take the slot only if the sum stays inside
   the budget. Otherwise wait, keeping your place in line, and look again as a lock goes.
 - A take that finds no other lock live takes whatever its figure, so the machine's first engine
   always starts. Count the locks again after taking, and give the slot back and wait when the

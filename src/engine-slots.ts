@@ -2710,26 +2710,35 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
 /**
  * Raises the `memory` of the slot at [param lock] to [param bytes] where it counts less and this
  * process holds it, so the budget counts an engine that grew past what its take counted. A figure is
- * never lowered. Answers what the lock counts after, or null for a lock this process does not hold.
- * Renamed over the lock, as {@link handSlot} is.
+ * never lowered. Renamed over the lock, as {@link handSlot} is.
+ *
+ * Answers what the lock counts after: [param bytes] once it is rewritten, and the figure it held
+ * where that was as much already or the rewrite failed, as it does while a reader holds the lock
+ * open. 0 where the lock could not be read, and null for a lock this process does not hold. An
+ * answer below [param bytes] is a raise to ask again.
  */
 export async function raiseSlotMemory(lock: string, bytes: number): Promise<number | null> {
-  let counted: number | null = null;
+  // Set in the change, which runs again on each try: null for a lock held elsewhere.
+  const read: { held?: number | null } = {};
+  let written = false;
   try {
-    await changeWholeAsync(lock, (content) => {
+    written = await changeWholeAsync(lock, (content) => {
       const holder = content === null ? null : holderOf(content);
       if (holder?.pid !== process.pid) {
-        counted = null;
+        read.held = null;
         return null;
       }
       const was = holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1);
-      counted = Math.max(was, bytes);
+      read.held = was;
       return bytes > was ? JSON.stringify({ ...holder, memory: bytes }) : null;
     });
   } catch {
+    // Not rewritten, and the figure read, if any, stands.
+  }
+  if (read.held === null) {
     return null;
   }
-  return counted;
+  return written ? bytes : (read.held ?? 0);
 }
 
 /**
