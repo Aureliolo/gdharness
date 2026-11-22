@@ -241,7 +241,7 @@ const RUNNING_PROJECT_PATH: JsonSchema = {
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
-  description: 'The game, by pid.',
+  description: 'Its pid.',
 };
 const SCENE_PATH: JsonSchema = {
   type: 'string',
@@ -1924,7 +1924,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_run',
     title: 'Run the game',
     description:
-      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. A start ends the run of its project and user:// folder, and goes beside any other. start and check first import what changed on disk since its import.',
+      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether runtime_* can reach the game. A start ends the run of its project and user:// folder, and goes beside any other. start and check first import what changed on disk since its import.',
     parameters: {
       // start and check need telling which project. The ops about the run already going take it
       // too, because a call copied from the start carries it, and they check it rather than ignore
@@ -1968,19 +1968,19 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       visible: {
         type: 'boolean',
         ops: ['start'],
-        description: `Show the window on the desktop in use. By default on Windows it goes on a desktop of its own. On Linux and macOS the window shows either way.`,
+        description: `Show the window on the desktop in use. By default on Windows it goes on a desktop of its own, with --disable-vsync and --max-fps ${String(HIDDEN_WINDOW_FPS)}. On Linux and macOS the window shows either way.`,
       },
       silent: {
         type: 'boolean',
         ops: ['start'],
         description:
-          'Default true: this server starts a windowed game with no sound. false lets a connected editor play it. A headless run is silent already. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.',
+          "Default true: this server starts a windowed game muted. false lets a connected editor play it. A headless run is silent already, and the editor plays one only when the project's main_run_args hold --headless. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.",
       },
       executable: {
         type: 'string',
         ops: ['start'],
         description:
-          'An exported build to run instead of the project, inside the project or an absolute path. No scene or profile.',
+          'An exported build to run instead of the project, inside the project or absolute. No scene or profile.',
       },
       godot: {
         type: 'string',
@@ -2065,7 +2065,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['stop', 'wait', 'profile'],
         description:
-          'The run, by pid. A stop also takes a game no server keeps, listed under runtimes in editor_status.',
+          'Its pid. A stop also takes a game of this project that no server keeps, as editor_status lists under runtimes.',
       },
     },
     requires: [],
@@ -2099,7 +2099,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     answer: [
       "start answers through, gdharness for a game this server started itself and editor for one the editor plays. scene is the scene the game started in, the project's main scene when none was given. runtime says whether the game is listening and on which port. When it is not, mayYetAnnounce says whether that is final. false is a runtime that is not coming, and true a game still on its way up, which editor_status will see and runtimeWaitMs waits longer for.",
       "start ends a game whose engine could not create a renderer on the hidden desktop, with mayYetAnnounce false and a note naming the failure. runtime carries addonIsStale and staleNote when the game announced on a runtime addon other than this server's. No runtime_* call is then sent to it, and staleNote says what brings it into step. refreshedClasses names the class_name declarations on disk that the engine's class cache was missing, added before the game started. transcript is the file both the run's streams are written to, so a watch on it can be armed off the start.",
-      'A start ends the run of its own place first, the same project writing into the same user:// folder, and goes beside every run of another place. Calls about a run name it with pid, or by projectPath when one run of that folder goes, and are refused while several go. This server starts the game itself unless a connected editor plays it, as silent says. Its debugger is then the keeper holding it, and the debug_* tools answer for it all the same. args put after the separator, so a flag the engine reads goes to the game instead, and argsNote says so.',
+      'A call about a run names it by pid, or by projectPath when one run of that folder goes, and is refused while several go. This server starts the game itself unless a connected editor plays it, as silent says. Its debugger is then the keeper holding it, and the debug_* tools answer for it all the same. args put after the separator, so a flag the engine reads goes to the game instead, and argsNote says so.',
       "The editor plays a game headless only when the project's editor/run/main_run_args holds --headless. So this server starts a headless run of a project whose editor plays with a window. A game that restarts itself with OS.set_restart_on_exit stays one run. editor_output and editor_status follow the process it restarted into, and name those before it under restartedFrom.",
       `${IMPORTED_FIRST} An exported build carries its own imports and is not asked. A silent windowed run has --audio-driver Dummy in its arguments.`,
       'A windowed run this server starts on the hidden desktop has no display to wait on, so it is given --disable-vsync and --max-fps ' +
@@ -2146,8 +2146,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: {
         type: 'string',
-        description:
-          'The project whose output you mean. Refused when not that of a run or the editor this server keeps.',
+        description: 'The project whose output you mean. Refused unless a run or the editor here is of it.',
       },
       pid: { ...RUNNING_PID, ops: ['run'] },
       severity: {

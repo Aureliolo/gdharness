@@ -16940,7 +16940,10 @@ function testTheLaunchAndRunWarningsAreInTheToolList(): void {
   assert.match(launch, /Ending this server between them, as a reconnect does, leaves no editor\./);
   assert.match(launch, /rebind: end the connected editor's debug sessions/);
   assert.match(launch, /close and restart save the open scenes\./);
-  assert.match(listedText('editor_run'), /A start ends a run of the same project first\./);
+  assert.match(
+    listedText('editor_run'),
+    /A start ends the run of its project and user:\/\/ folder, and goes beside any other\./,
+  );
   assert.match(
     serverInstructions(),
     /The gdharness skill's tool reference and the site say what each answer field means\./,
@@ -128080,6 +128083,7 @@ async function withAnEditorOfAnotherProject(
     runtimeAddon?: boolean;
     announced?: boolean;
     stoppedInTheEditor?: boolean;
+    slots?: number;
   },
   body: (stage: AnotherProjectsEditorStage) => Promise<void>,
 ): Promise<void> {
@@ -128092,6 +128096,10 @@ async function withAnEditorOfAnotherProject(
     return;
   }
   const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-beside-editor-'));
+  const slotFolder =
+    options.slots === undefined
+      ? null
+      : mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-beside-editor-slots-'));
   const games: number[] = [];
   // Idle until the fixture has greeted, since the status calls that wait for the greeting take up
   // whatever the editor plays.
@@ -128177,6 +128185,14 @@ async function withAnEditorOfAnotherProject(
       {
         engine: godotPath,
         ...(options.playsWindowed === true ? { playsWindowed: true } : {}),
+        ...(slotFolder === null
+          ? {}
+          : {
+              env: {
+                GODOT_ENGINE_SLOTS: slotFolder,
+                GODOT_ENGINE_SLOT_COUNT: String(options.slots),
+              },
+            }),
         ...(options.stoppedInTheEditor === true
           ? {
               onAdapter: (socket: Socket) => {
@@ -128200,6 +128216,9 @@ async function withAnEditorOfAnotherProject(
       }
     }
     sweep(other);
+    if (slotFolder !== null) {
+      sweep(slotFolder);
+    }
   }
 }
 
@@ -128899,7 +128918,8 @@ async function testOneProjectStartedWithTwoSavesFoldersGoesBeside(): Promise<voi
 
 /** A start of a place a run holds ends that run only, and names it. */
 async function testAStartOfTheSamePlaceEndsOnlyThatRun(): Promise<void> {
-  await withRunsBeside({}, async ({ trees, start, call, savesFolder }) => {
+  // Slots for three games at a time, the most this case holds, whatever the machine has.
+  await withRunsBeside({ slots: 4 }, async ({ trees, start, call, savesFolder }) => {
     const beside = asNumber(get(await start(trees[1], { runtimeWaitMs: 0 }), 'pid'), 'the run beside');
     for (const savesIn of [undefined, savesFolder('same')]) {
       const extra = savesIn === undefined ? { runtimeWaitMs: 0 } : { runtimeWaitMs: 0, savesIn };
@@ -129103,33 +129123,40 @@ function testARunNoteIsKeptPerPlace(): void {
  * cache lacks, and a file that was never imported.
  */
 async function testAStartOfAWorktreeAsksTheEditorOfAnotherCheckoutNothing(): Promise<void> {
-  await withAnEditorOfAnotherProject({ runtimeAddon: true }, async ({ editor, otherProject, startOther }) => {
-    writeFileSync(join(otherProject, 'gadget.gd'), 'class_name Gadget\nextends Node\n');
-    writeFileSync(
-      join(otherProject, 'icon.svg'),
-      '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>\n',
-    );
-    const saves = join(otherProject, '..', `${basename(otherProject)}-saves`);
-    const variants: Record<string, unknown>[] = [
-      {},
-      { savesIn: saves },
-      { env: { GAME_PROBE: '1' } },
-      { savesIn: `${saves}-2`, env: { GAME_PROBE: '2' } },
-      { runtimeWaitMs: 60_000 },
-      { savesIn: saves, runtimeWaitMs: 60_000 },
-    ];
-    if (windowedRunRefused() === null) {
-      variants.push({ headless: false }, { headless: false, savesIn: `${saves}-3` });
-    }
-    for (const extra of variants) {
-      editor.calls.length = 0;
-      const started = await startOther(extra);
-      assert.equal(get(started, 'started'), true, `${JSON.stringify(extra)}: ${JSON.stringify(started)}`);
-      assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
-      const naming = editor.calls.filter((one) => JSON.stringify(one.args).includes(basename(otherProject)));
-      assert.deepEqual(naming, [], `${JSON.stringify(extra)}: the editor was asked about the worktree`);
-    }
-  });
+  // Slots for two games at a time, whatever the machine has, and each game is stopped before the next.
+  await withAnEditorOfAnotherProject(
+    { runtimeAddon: true, slots: 3 },
+    async ({ editor, otherProject, startOther, call }) => {
+      writeFileSync(join(otherProject, 'gadget.gd'), 'class_name Gadget\nextends Node\n');
+      writeFileSync(
+        join(otherProject, 'icon.svg'),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>\n',
+      );
+      const saves = join(otherProject, '..', `${basename(otherProject)}-saves`);
+      const variants: Record<string, unknown>[] = [
+        {},
+        { savesIn: saves },
+        { env: { GAME_PROBE: '1' } },
+        { savesIn: `${saves}-2`, env: { GAME_PROBE: '2' } },
+        { runtimeWaitMs: 60_000 },
+        { savesIn: saves, runtimeWaitMs: 60_000 },
+      ];
+      if (windowedRunRefused() === null) {
+        variants.push({ headless: false }, { headless: false, savesIn: `${saves}-3` });
+      }
+      for (const extra of variants) {
+        editor.calls.length = 0;
+        const started = await startOther(extra);
+        assert.equal(get(started, 'started'), true, `${JSON.stringify(extra)}: ${JSON.stringify(started)}`);
+        assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
+        const naming = editor.calls.filter((one) =>
+          JSON.stringify(one.args).includes(basename(otherProject)),
+        );
+        assert.deepEqual(naming, [], `${JSON.stringify(extra)}: the editor was asked about the worktree`);
+        await call('editor_run', { op: 'stop', pid: asNumber(get(started, 'pid'), 'the started run') });
+      }
+    },
+  );
 }
 
 /** A start through the editor ends only the editor's own game, and the run beside it goes on. */
