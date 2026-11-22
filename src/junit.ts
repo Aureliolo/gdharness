@@ -389,7 +389,29 @@ export function ignoredLeftOut(
   declared: DeclaredSuites,
   rowsIgnored: ReadonlySet<string> = new Set(),
 ): { leftOut: string[]; unmatched: string[] } {
-  const leftOut = new Set<string>();
+  return leftOutNamed(ignoredLeftOutAt(report, ignored, declared, rowsIgnored));
+}
+
+/** [param read] answered as {@link ignoredLeftOut} does, each case by its suite's name. */
+export function leftOutNamed(read: ReturnType<typeof ignoredLeftOutAt>): {
+  leftOut: string[];
+  unmatched: string[];
+} {
+  return { leftOut: [...new Set(read.leftOut.values())].toSorted(), unmatched: read.unmatched };
+}
+
+/**
+ * {@link ignoredLeftOut} with each case or row keyed by its suite's path, as `res://dir/suite.gd:test_name`
+ * and `res://dir/suite.gd:test_name:N`, so two suites of one file name stay apart. Each key maps to the
+ * form {@link ignoredLeftOut} answers it as.
+ */
+export function ignoredLeftOutAt(
+  report: TestReport,
+  ignored: readonly string[],
+  declared: DeclaredSuites,
+  rowsIgnored: ReadonlySet<string> = new Set(),
+): { leftOut: Map<string, string>; unmatched: string[] } {
+  const leftOut = new Map<string, string>();
   const unmatched: string[] = [];
   for (const entry of ignored) {
     const row = rowNamed(entry);
@@ -401,12 +423,12 @@ export function ignoredLeftOut(
       unmatched.push(entry);
     }
   }
-  return { leftOut: [...leftOut].toSorted(), unmatched };
+  return { leftOut, unmatched };
 }
 
 /** Adds the rows the runner left out for one row entry to [param leftOut]. False when it left out none. */
 function addRowsLeftOut(
-  leftOut: Set<string>,
+  leftOut: Map<string, string>,
   declared: DeclaredSuites,
   rowsIgnored: ReadonlySet<string>,
   row: { suite: string; test: string; row: number },
@@ -415,14 +437,17 @@ function addRowsLeftOut(
     rowsIgnored.has(`${one.path} > ${one.test}:${String(row.row)}`),
   );
   for (const one of rows) {
-    leftOut.add(`${suiteNameOf(one.path)}:${one.test}:${String(row.row)}`);
+    leftOut.set(
+      `${one.path}:${one.test}:${String(row.row)}`,
+      `${suiteNameOf(one.path)}:${one.test}:${String(row.row)}`,
+    );
   }
   return rows.length > 0;
 }
 
 /** Adds the cases one suite or case entry names that the report lacks to [param leftOut]. False when it names no declared case. */
 function addCasesLeftOut(
-  leftOut: Set<string>,
+  leftOut: Map<string, string>,
   report: TestReport,
   declared: DeclaredSuites,
   entry: string,
@@ -437,7 +462,7 @@ function addCasesLeftOut(
       .filter((ran) => ran.path === path || (ran.path === null && ran.name === suiteNameOf(path)))
       .some((ran) => ran.cases.some((one) => isCaseOrRow(one.name, test)));
     if (!reported) {
-      leftOut.add(`${suiteNameOf(path)}:${test}`);
+      leftOut.set(`${path}:${test}`, `${suiteNameOf(path)}:${test}`);
     }
   }
   return named.length > 0;

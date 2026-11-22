@@ -104161,6 +104161,8 @@ interface FedRunAsked {
   readonly selected?: ReadonlyArray<{ readonly suite: string; readonly test: string }>;
   /** The suites gdharness test is handed, every fed suite when absent. */
   readonly handed?: readonly string[];
+  /** The cases of the selected suites that the selection leaves out, as `suite path:test`. */
+  readonly selectionIgnore?: readonly string[];
 }
 
 /**
@@ -104216,10 +104218,7 @@ function fedRunAnswered(
         return `<testsuite id="0" name="${name}" package="${suite.path.replace(/^res:\/\//, '').replace(/\/[^/]*$/, '')}" tests="${String(suite.cases.length)}" failures="${String(failures)}" errors="0" skipped="0" flaky="0" time="0.04">${cases}</testsuite>`;
       })
       .join('')}</testsuites>`;
-    const { tally } = aTalliedRun(
-      engineText.split('\n').map((line) => ({ stream: 'stdout' as const, text: line })),
-      1000,
-    );
+    const { tally } = aTalliedRun([{ stream: 'stdout' as const, text: `${engineText}\n` }], 1000);
     const diffs = new PrintedDiffs();
     diffs.take(Buffer.from(engineText));
     const word = ({ 0: 'passed', 100: 'failures' } as Record<number, string>)[exitCode] ?? 'other';
@@ -104243,7 +104242,11 @@ function fedRunAnswered(
         value:
           selected === undefined
             ? null
-            : { suites: [...new Set(selected.map((one) => one.suite))], selected, ignore: [] },
+            : {
+                suites: [...new Set(selected.map((one) => one.suite))],
+                selected,
+                ignore: asked.selectionIgnore ?? [],
+              },
       },
       notSuites: [],
       flags: { value: [] },
@@ -104253,6 +104256,7 @@ function fedRunAnswered(
       engine: { note: null },
       run: {
         exitSignal: null,
+        log: new GameLog(),
         exitCode,
       },
       tally,
@@ -104540,6 +104544,119 @@ function testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted(): void {
     verdictOf(oneCase),
     [false, `${FED_ROWS} never started`, ['p_test:test_p'], [`${FED_ROWS} never started`]],
     `one case of two ignored: ${JSON.stringify(oneCase)}`,
+  );
+}
+
+/**
+ * A case both named by `tests` and left out by `ignore` is not run, and the suite holding it is no
+ * suite that never started: the cases the selection leaves out of it are left out as well.
+ */
+function testASelectedCaseThatIsIgnoredLeavesItsSuiteStarted(): void {
+  const run = fedRunAnswered(
+    [
+      { path: FED_A, cases: [fedCase(FED_A, 'test_a'), fedCase(FED_A, 'test_b')], closed: 'NEVER' },
+      { path: FED_B, cases: [fedCase(FED_B, 'test_b')], closed: 'PASSED' },
+    ],
+    0,
+    {
+      ignored: ['a_test:test_a'],
+      selected: [
+        { suite: FED_A, test: 'test_a' },
+        { suite: FED_B, test: 'test_b' },
+      ],
+      selectionIgnore: [`${FED_A}:test_b`],
+    },
+  );
+  assert.deepEqual(
+    [run.answer['passed'], run.answer['verdict'], run.answer['testsNotRun']],
+    [false, 'not run: a_test:test_a', ['a_test:test_a']],
+    JSON.stringify(run),
+  );
+  assert.equal(
+    String(run.answer['note']).includes('never started'),
+    false,
+    `the suite is not said to have never started: ${JSON.stringify(run)}`,
+  );
+}
+
+/**
+ * An ignore entry hides the cases of the suite at its path and no other of the same file name.
+ */
+function testAnIgnoreEntryHidesNoSuiteOfTheSameFileName(): void {
+  const beside: FedSuite = { path: FED_B, cases: [fedCase(FED_B, 'test_b')], closed: 'PASSED' };
+  const silent = fedRunAnswered(
+    [
+      { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'NEVER' },
+      { path: FED_OTHER, cases: [fedCase(FED_OTHER, 'test_a')], closed: 'NEVER' },
+      beside,
+    ],
+    0,
+    { ignored: ['other/a_test'], handed: [FED_A, FED_B] },
+  );
+  assert.deepEqual(
+    [silent.answer['passed'], silent.answer['verdict'], silent.faults],
+    [false, `${FED_A} never started`, [`${FED_A} never started`]],
+    JSON.stringify(silent),
+  );
+  const ran = fedRunAnswered(
+    [
+      { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' },
+      { path: FED_OTHER, cases: [fedCase(FED_OTHER, 'test_a')], closed: 'PASSED' },
+    ],
+    0,
+    { ignored: ['other/a_test:test_a'] },
+  );
+  assert.deepEqual(
+    [ran.answer['passed'], ran.answer['verdict'], ran.faults],
+    [true, 'passed', []],
+    JSON.stringify(ran),
+  );
+  const left = fedRunAnswered(
+    [
+      { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' },
+      { path: FED_OTHER, cases: [fedCase(FED_OTHER, 'test_a')], closed: 'NEVER' },
+    ],
+    0,
+    { ignored: ['other/a_test:test_a'], handed: [FED_A] },
+  );
+  assert.deepEqual(
+    [left.answer['passed'], left.answer['verdict'], left.faults],
+    [true, 'passed', []],
+    JSON.stringify(left),
+  );
+}
+
+const FED_EMPTY_ROWS = 'res://er/e_test.gd';
+
+/**
+ * A suite whose rows were all left out, beside a case with no rows to run, never opens in gdUnit4.
+ * It is answered by naming the case with no rows, as the same suite is with nothing ignored.
+ */
+function testACaseWithNoRowsIsNamedWhenEveryOtherRowIsIgnored(): void {
+  const run = fedRunAnswered(
+    [
+      { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' },
+      {
+        path: FED_EMPTY_ROWS,
+        cases: [
+          fedCase(FED_EMPTY_ROWS, 'test_e'),
+          fedCase(FED_EMPTY_ROWS, 'test_p:0 (1)'),
+          fedCase(FED_EMPTY_ROWS, 'test_p:1 (2)'),
+        ],
+        closed: 'NEVER',
+      },
+    ],
+    0,
+    {
+      ignored: ['e_test:test_p:0', 'e_test:test_p:1'],
+      rowsIgnored: [`${FED_EMPTY_ROWS} > test_p:0`, `${FED_EMPTY_ROWS} > test_p:1`],
+      handed: [FED_A],
+    },
+  );
+  assert.deepEqual(
+    [run.answer['passed'], run.answer['verdict'], run.answer['testsNotRun'], run.faults],
+    [false, 'not run: e_test:test_e', ['e_test:test_e'], []],
+    JSON.stringify(run),
   );
 }
 
@@ -131486,6 +131603,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuiteAskedForThatNeverRanFailsTheRun,
   testASuiteARunOfNamedCasesLeftOutIsNoSuiteThatNeverStarted,
   testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted,
+  testASelectedCaseThatIsIgnoredLeavesItsSuiteStarted,
+  testAnIgnoreEntryHidesNoSuiteOfTheSameFileName,
+  testACaseWithNoRowsIsNamedWhenEveryOtherRowIsIgnored,
   testAFlakyCaseFailsTheRunWhateverTheReportHolds,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testASaveFromTheEditorIsRefusedWithNoEditor,

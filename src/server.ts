@@ -231,8 +231,9 @@ import {
   failedWithin,
   finishesASuite,
   ignoredForTheRunner,
-  ignoredLeftOut,
+  ignoredLeftOutAt,
   ignoredYetRan,
+  leftOutNamed,
   orphansLeftSaid,
   type orphansPrinted,
   type PrintedDiff,
@@ -5741,7 +5742,7 @@ interface TestAnswer extends TestErrorsJudged {
   uncaughtFolded: ReturnType<typeof foldedRepeats>;
   listedAsUncaught: Set<number>;
   notApplied: ReturnType<typeof ignoredYetRan>;
-  ignoreRead: ReturnType<typeof ignoredLeftOut>;
+  ignoreRead: ReturnType<typeof leftOutNamed>;
   unmatched: string[];
   testsNotRun: string[];
   casesNotRun: string[];
@@ -11336,7 +11337,21 @@ export class GodotServer {
       uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS).map((entry) => entry.index),
     );
     const notApplied = ignoredYetRan(report, ignored);
-    const ignoreRead = ignoredLeftOut(report, ignored, declaredUnder, tally.rowsIgnored.result());
+    const rowsIgnored = tally.rowsIgnored.result();
+    const ignoreAt = ignoredLeftOutAt(report, ignored, declaredUnder, rowsIgnored);
+    const ignoreRead = leftOutNamed(ignoreAt);
+    // What either the request's ignore or the selection's own left out, by the suite's path: two
+    // suites of one file name are two suites.
+    const leftOutByPath = new Set([...ignoreAt.leftOut.keys(), ...(selection.value?.ignore ?? [])]);
+    const leftOutWhole = (suite: string, func: string): boolean =>
+      leftOutByPath.has(`${suite}:${func}`) ||
+      [...leftOutByPath].some((one) => one.startsWith(`${suite}:${func}:`));
+    // gdUnit4 opens a suite whenever discovery leaves it a row, and the runner says which rows it left
+    // out of a suite it loaded. A suite so loaded that never opened holds, beside those rows, only
+    // cases with no row to run.
+    const loadedYetUnopened = (suite: { path: string }): boolean =>
+      casePrinted.suites.get(suite.path) === undefined &&
+      [...rowsIgnored].some((row) => row.startsWith(`${suite.path} > `));
     // A bare case name is already answered under ignoreNotApplied, with the form that would work.
     const unmatched = ignoreRead.unmatched.filter((entry) => !notApplied.some((one) => one.entry === entry));
     // A case read from its file that gdUnit4 never reported, which is a run of less than was asked
@@ -11368,13 +11383,14 @@ export class GodotServer {
             )
             .flatMap((suite) => {
               const ran = casePrinted.suites.get(suite.path);
-              if (ran?.closed?.verdict !== 'PASSED') {
+              if (ran?.closed?.verdict !== 'PASSED' && !loadedYetUnopened(suite)) {
                 return [];
               }
               return suite.cases
-                .filter((func) => !ran.cases.some((one) => one.func === func))
-                .map((func) => `${basename(suite.path, '.gd')}:${func}`)
-                .filter((one) => !ignoreRead.leftOut.includes(one));
+                .filter(
+                  (func) => !ran?.cases.some((one) => one.func === func) && !leftOutWhole(suite.path, func),
+                )
+                .map((func) => `${basename(suite.path, '.gd')}:${func}`);
             })
         : [];
     // The constant's shape is given only in the documentation, which a caller of the tool does not
@@ -11400,11 +11416,11 @@ export class GodotServer {
     // that ran. A suite with no case, or every case of it left out, is one gdUnit4 has nothing to run
     // in. A case counts as left out by its rows when the runner said it left out any: gdUnit4 opens
     // a suite whenever discovery leaves it a row, so a suite that never opened kept none.
-    const leftOutWhole = (suite: string, func: string): boolean =>
-      ignoreRead.leftOut.some((one) => one === `${suite}:${func}` || one.startsWith(`${suite}:${func}:`));
     const suitesNotRun = (selection.value?.suites ?? asked)
       .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
-      .filter((suite) => !suite.cases.every((func) => leftOutWhole(basename(suite.path, '.gd'), func)))
+      .filter(
+        (suite) => !suite.cases.every((func) => leftOutWhole(suite.path, func)) && !loadedYetUnopened(suite),
+      )
       .flatMap((suite) => suiteNotRunFault(casePrinted, suite.path) ?? []);
     return this.reportAnswer({
       ...judged,
