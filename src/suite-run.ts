@@ -73,6 +73,7 @@ import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { slotCommandOf } from './slot-delegate.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
+  casesRan,
   type EngineAssignment,
   type EngineEnd,
   type EngineStart,
@@ -3108,10 +3109,7 @@ function printTimings(ran: readonly EngineRan[], closed: ReturnType<typeof close
 
 /** The line of totals a run ends on: its cases, suites, engines and times. */
 function totalsSaid(ran: readonly EngineRan[], took: number): string {
-  const cases = ran.reduce(
-    (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
-    0,
-  );
+  const cases = ran.reduce((sum, engine) => sum + casesRan(engine.printed), 0);
   const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
   const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
   return `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;

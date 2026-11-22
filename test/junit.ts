@@ -23,6 +23,7 @@ import {
   RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
   scriptErrorsPrinted,
+  skippedInReport,
   suitesPrinted,
   testProgressMessage,
   VALUE_NOT_RECOVERED_NOTE,
@@ -1342,6 +1343,46 @@ function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
   }
 }
 
+/**
+ * What gdUnit4 writes for a case skipped with do_skip, a row of a parameterised case, and a case of
+ * a suite skipped whole, whose reason is gdUnit4's own: each is listed with the reason under it.
+ */
+function testEverySkipTheReportHoldsIsListedWithItsReason(): void {
+  const skipped = (name: string, line: number, reason: string): string =>
+    `\t\t<testcase name="${name}" classname="x" time="0.000">\n\t\t\t<skipped message="SKIPPED: res://test/x.gd:${String(line)}">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`;
+  const report = parseJUnit(
+    `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-22" name="report_1" tests="10" failures="0" skipped="7" flaky="0" time="0.000">
+\t<testsuite id="0" name="one_skip_test" package="test" tests="2" failures="0" errors="0" skipped="1" flaky="0" time="0.458">
+\t\t<testcase name="test_a" classname="one_skip_test" time="0.044">
+\t\t</testcase>
+${skipped('test_skipped', 6, 'not ready yet')}\t</testsuite>
+\t<testsuite id="1" name="rows_skip_test" package="test" tests="2" failures="0" errors="0" skipped="2" flaky="0" time="0.432">
+${skipped('test_rows:0 (1)', 3, 'rows wait')}${skipped('test_rows:1 (2)', 3, 'rows wait')}\t</testsuite>
+\t<testsuite id="2" name="whole_skip_test" package="test" tests="1" failures="0" errors="0" skipped="1" flaky="0" time="0.000">
+${skipped('test_a', 6, 'Skipped from the entire test suite')}\t</testsuite>
+</testsuites>
+`,
+  );
+  assert.deepEqual(
+    skippedInReport(report),
+    [
+      { suite: 'res://test/one_skip_test.gd', name: 'test_skipped', reason: 'not ready yet' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:0 (1)', reason: 'rows wait' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:1 (2)', reason: 'rows wait' },
+      {
+        suite: 'res://test/whole_skip_test.gd',
+        name: 'test_a',
+        reason: 'Skipped from the entire test suite',
+      },
+    ],
+    'each skipped case, in the order of its suite',
+  );
+  assert.deepEqual(skippedInReport(parseJUnit(GDUNIT_REPORT)), [
+    { suite: 'res://test/sums_test.gd', name: 'test_skipped_for_now', reason: 'not today' },
+  ]);
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1359,4 +1400,5 @@ testScriptErrorsAreReadOffTheConsole();
 testFinishedSuitesAreReadOffTheConsole();
 testAnIgnoreThatLeftOutNothingIsNamed();
 testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText();
+testEverySkipTheReportHoldsIsListedWithItsReason();
 console.log('junit reader tests passed');

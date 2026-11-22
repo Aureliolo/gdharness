@@ -678,6 +678,30 @@ export function withPrintedPassesSettled(
   };
 }
 
+/** A case the report holds as skipped, with the reason gdUnit4 wrote under it. */
+interface SkippedInReport {
+  /** The suite's script, or its name when the report names no folder. */
+  readonly suite: string;
+  readonly name: string;
+  readonly reason: string;
+}
+
+// The reason gdUnit4 writes under the skip's heading: `  Reason: 'not today'`.
+const REPORTED_REASON = /^\s*Reason: '(.*)'\s*$/m;
+
+/** Every case [param report] holds as skipped. */
+export function skippedInReport(report: TestReport): SkippedInReport[] {
+  return report.suites.flatMap((suite) =>
+    suite.cases
+      .filter((entry) => entry.status === 'skipped')
+      .map((entry) => ({
+        suite: suite.path ?? suite.name,
+        name: entry.name,
+        reason: REPORTED_REASON.exec(entry.detail ?? '')?.[1] ?? entry.message ?? 'no reason given',
+      })),
+  );
+}
+
 /** A hook's failure as the runner printed it, which is the only place its message is. */
 interface HookFailure {
   /** The hook, `before` or `after`. */

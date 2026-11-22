@@ -242,6 +242,7 @@ import {
   PrintedDiffs,
   parseJUnit,
   type ScriptError,
+  skippedInReport,
   type TestReport,
   testProgressMessage,
   type whyNoReport,
@@ -2775,6 +2776,18 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
   return said.scanNote === undefined
     ? outcome
     : { ...outcome, message: `${outcome.message} ${said.scanNote}` };
+}
+
+/**
+ * The verdict part for what [param skipped] lists, counting every case it names and each a suite
+ * skipped whole held. Undefined when nothing was skipped.
+ */
+function skippedVerdict(skipped: readonly { readonly cases?: number }[]): string | undefined {
+  if (skipped.length === 0) {
+    return undefined;
+  }
+  const count = skipped.reduce((sum, one) => sum + (one.cases ?? 1), 0);
+  return `${count === 1 ? 'one case' : `${String(count)} cases`} skipped with do_skip, so ${count === 1 ? 'it' : 'they'} never ran`;
 }
 
 /**
@@ -5784,6 +5797,8 @@ interface TestAnswer extends TestErrorsJudged {
   declaredAs: string;
   rowsMismatched: { test: string; reason: string }[];
   casesUnrunnable: { test: string; reason: string }[];
+  /** The cases, rows and suites skipped with do_skip, and how many cases never ran for it. */
+  casesSkipped: { test: string; reason: string; cases?: number }[];
   engineEntriesShown: ReturnType<typeof foldedRepeats>;
 }
 
@@ -11447,6 +11462,28 @@ export class GodotServer {
       test: `${one.suite} > ${one.name}`,
       reason: one.reason,
     }));
+    // A case, row or suite skipped with do_skip never ran either. The console says each suite's reason
+    // and the report each case's, so what only the report holds is listed too.
+    const consoleSkipped = new Set(
+      [
+        ...casePrinted.mismatched,
+        ...casePrinted.unrunnable,
+        ...casePrinted.skipped.filter((one) => one.name !== null),
+      ].map((one) => `${one.suite} > ${one.name}`),
+    );
+    const skippedWhole = new Set(
+      casePrinted.skipped.filter((one) => one.name === null).map((one) => one.suite),
+    );
+    const casesSkipped = [
+      ...casePrinted.skipped.map((one) =>
+        one.name === null
+          ? { test: one.suite, reason: one.reason, cases: one.cases }
+          : { test: `${one.suite} > ${one.name}`, reason: one.reason },
+      ),
+      ...skippedInReport(report)
+        .filter((one) => !consoleSkipped.has(`${one.suite} > ${one.name}`) && !skippedWhole.has(one.suite))
+        .map((one) => ({ test: `${one.suite} > ${one.name}`, reason: one.reason })),
+    ];
     // gdUnit4 exits 0 on such a case, and its report holds only the failure.
     const retried = casesRetried(casePrinted);
     // A suite the runner was handed that printed no start or no end, which exits 0 beside the suites
@@ -11479,6 +11516,7 @@ export class GodotServer {
       declaredAs,
       rowsMismatched,
       casesUnrunnable,
+      casesSkipped,
       engineEntriesShown,
     });
   }
@@ -11499,6 +11537,7 @@ export class GodotServer {
   private reportPassed(s: TestAnswer): Record<string, unknown> {
     const {
       casesNotRun,
+      casesSkipped,
       casesUnrunnable,
       countedLeaks,
       declaredNotPrinted,
@@ -11542,6 +11581,7 @@ export class GodotServer {
           suitesNotRun,
           rowsMismatched,
           casesUnrunnable,
+          casesSkipped,
           notSuites,
         ].every((found) => found.length === 0),
     };
@@ -11551,6 +11591,7 @@ export class GodotServer {
   private reportVerdict(s: TestAnswer): Record<string, unknown> {
     const {
       casesNotRun,
+      casesSkipped,
       casesUnrunnable,
       countedLeaks,
       declaredNotPrinted,
@@ -11575,6 +11616,7 @@ export class GodotServer {
           suitesNotRun.length +
           rowsMismatched.length +
           casesUnrunnable.length +
+          casesSkipped.length +
           notSuites.length >
           0
           ? undefined
@@ -11607,6 +11649,7 @@ export class GodotServer {
         casesUnrunnable.length > 0
           ? `${casesUnrunnable.length === 1 ? 'one case' : `${String(casesUnrunnable.length)} cases`} skipped as gdUnit4 cannot run ${casesUnrunnable.length === 1 ? 'it' : 'them'} as declared`
           : undefined,
+        skippedVerdict(casesSkipped),
         notSuites.length > 0 ? notSuitesVerdict(notSuites.length) : undefined,
       ]
         .filter((part) => part !== undefined)
@@ -11618,6 +11661,7 @@ export class GodotServer {
   private reportLists(s: TestAnswer): Record<string, unknown> {
     const {
       casesNotRun,
+      casesSkipped,
       casesUnrunnable,
       hung,
       missing,
@@ -11637,6 +11681,7 @@ export class GodotServer {
       ...(retried.length > 0 ? { passedOnARetry: retried } : {}),
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
+      ...(casesSkipped.length > 0 ? { casesSkipped } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
     };
   }
@@ -11743,8 +11788,11 @@ export class GodotServer {
 
   /** The sentences of a test run's note about scripts that are no suite, cut reports and ignore entries. */
   private ignoredNotes(s: TestAnswer): (string | undefined)[] {
-    const { briefed, casesUnrunnable, failed, notApplied, notSuites, uncaught, unmatched } = s;
+    const { briefed, casesSkipped, casesUnrunnable, failed, notApplied, notSuites, uncaught, unmatched } = s;
     return [
+      casesSkipped.length > 0
+        ? `gdUnit4 skipped what casesSkipped names because ${casesSkipped.length === 1 ? 'it was' : 'they were'} declared with do_skip, though it printed ${casesSkipped.length === 1 ? 'it' : 'each case'} passed first. Each entry carries the skip_reason it was given. The run is not called passed, as gdharness test judges it.`
+        : undefined,
       casesUnrunnable.length > 0
         ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
         : undefined,

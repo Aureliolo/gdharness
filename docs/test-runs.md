@@ -195,6 +195,11 @@ A suite is a script under one of the test directories whose chain of `extends` r
 The suite also declares a function starting `test_`, or inherits one from a script of the project.
 Those functions are the cases it is expected to run, which is how a case that never ran is noticed.
 
+A case, a row or a whole suite skipped with `do_skip` never ran either, though gdUnit4 prints it
+passed and exits 0. The run fails and lists each skip with its `skip_reason`, and a suite skipped
+whole is listed once. `project_test` answers them under `casesSkipped`. `gdharness test` counts
+only the cases that ran. No option allows a skip.
+
 A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
 `PackedStringArray` of `res://` paths in `project.godot`. Benches written as suites and run by hand
 go there. A suite in such a folder still runs when it is named, or a folder at or inside the listed
