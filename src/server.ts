@@ -15079,8 +15079,8 @@ export class GodotServer {
     }
     // Only asked when there is no announcement to answer with: a game that announced is up, and
     // asking the editor about a played one costs a round trip the answer would not use.
-    const running = endpoint !== null || (going !== null && (await this.runStillGoing(going)));
-    if (going !== null && !running) {
+    const running = endpoint !== null || (await this.runStillGoing(going));
+    if (!running) {
       this.drainTranscript(going);
     }
     const endedOnABox = running ? null : boxThatEndedTheGame(going);
@@ -15093,9 +15093,8 @@ export class GodotServer {
       running,
       withArgs,
       servesAProject: this.ownProject !== null,
-      ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
-      runtimeCameUp:
-        going !== null && !running && going.log.all.some((entry) => entry.text.startsWith(CONSOLE_BOUNDARY)),
+      ...(going.throughEditor ? { playingSeen: going.seenPlaying === true } : {}),
+      runtimeCameUp: !running && going.log.all.some((entry) => entry.text.startsWith(CONSOLE_BOUNDARY)),
     });
     // Listening is not answering: a game on another build's runtime addon is asked nothing, and a
     // start that says only that it listened leaves the caller to learn it from the first refusal.
@@ -16318,14 +16317,13 @@ export class GodotServer {
     }
     if ('error' in launched) {
       slot.release();
-    } else if (slot.delegated) {
+      return launched;
+    }
+    if (slot.delegated) {
       // The keeper outlives the game's first process and follows its restarts, so it holds the slot.
       await handSlotToKeeper(slot, launched.keeperPid, projectPath);
     } else {
       slot.leave();
-    }
-    if ('error' in launched) {
-      return launched;
     }
     const startedBy = Date.now();
     await this.noteTheLatestRun({ projectPath, pid: launched.pid, startedAt });
@@ -16442,6 +16440,41 @@ export class GodotServer {
     ) {
       return;
     }
+    const held = await this.heldRunsAgainstThePlay();
+    if (held.stands) {
+      return;
+    }
+    const playing = held.asked ?? (await this.editorPlayingState());
+    if (playing?.playing !== true) {
+      return;
+    }
+    await this.attachToThePlayedGame();
+    // The file the server that started this play was writing, when it left one. Only when it names
+    // this editor's project: these directories are shared by every server on the machine, and a
+    // note from another project's run would put its output under this one's heading, which is the
+    // fault this whole method exists to end.
+    const project = this.godotBridge.getStatus().projectPath ?? null;
+    // And only when it is about the play in progress: the note stays after its play, and one from an
+    // earlier play gave this one that play's console and start time. A note that cannot say which
+    // play it is about is not used, since nothing then separates it from any other.
+    const note = this.noteOfThePlay(project, playing.play);
+    // No `announcedBefore`: a picked-up run saw nothing announced, so `announcedPidOf` ties it to
+    // the one game announced for this project, and the run is asked of the operating system the
+    // way the run that started it was. Without a number `running` stayed true after the game had
+    // quit for as long as the record lasted, beside a status call taking the editor's word that
+    // nothing was playing.
+    this.holdRun(editorPickedUpRun(project, note, playing.play));
+    this.watchThePlayedConsole();
+  }
+
+  /**
+   * Whether the runs held here stand against taking up what the editor plays, with the editor's
+   * answer about its play when it was asked.
+   */
+  private async heldRunsAgainstThePlay(): Promise<{
+    stands: boolean;
+    asked: Awaited<ReturnType<GodotServer['editorPlayingState']>>;
+  }> {
     // The editor plays one game, so at most one held run is its play. A spawned run going beside it
     // is not the editor's to replace, and is not replaced.
     const going = this.runs.findLast((one) => one.throughEditor) ?? null;
@@ -16463,29 +16496,9 @@ export class GodotServer {
       if (going !== null) {
         await this.reconnectThePlayedConsole(going, asked?.playing);
       }
-      return;
+      return { stands: true, asked };
     }
-    const playing = asked ?? (await this.editorPlayingState());
-    if (playing?.playing !== true) {
-      return;
-    }
-    await this.attachToThePlayedGame();
-    // The file the server that started this play was writing, when it left one. Only when it names
-    // this editor's project: these directories are shared by every server on the machine, and a
-    // note from another project's run would put its output under this one's heading, which is the
-    // fault this whole method exists to end.
-    const project = this.godotBridge.getStatus().projectPath ?? null;
-    // And only when it is about the play in progress: the note stays after its play, and one from an
-    // earlier play gave this one that play's console and start time. A note that cannot say which
-    // play it is about is not used, since nothing then separates it from any other.
-    const note = this.noteOfThePlay(project, playing.play);
-    // No `announcedBefore`: a picked-up run saw nothing announced, so `announcedPidOf` ties it to
-    // the one game announced for this project, and the run is asked of the operating system the
-    // way the run that started it was. Without a number `running` stayed true after the game had
-    // quit for as long as the record lasted, beside a status call taking the editor's word that
-    // nothing was playing.
-    this.holdRun(editorPickedUpRun(project, note, playing.play));
-    this.watchThePlayedConsole();
+    return { stands: false, asked };
   }
 
   /** The note an earlier server left of the editor's play of [param project], when it is of [param play]. */
@@ -16599,11 +16612,11 @@ export class GodotServer {
    * none. A run that is over, or whose game is not announced, or of another project, is nobody's
    * answer here, and the call is judged as it was without this.
    */
-  private async ownGameAmong(
+  private ownGameAmong(
     run: GodotProcess | null,
     running: readonly RuntimeEndpoint[],
     projectPath: string | undefined,
-  ): Promise<number | undefined> {
+  ): number | undefined {
     if (run === null || !stillRunning(run)) {
       return undefined;
     }
@@ -17252,8 +17265,8 @@ export class GodotServer {
     if (call.pid !== undefined) {
       return { run: this.runs.findLast((one) => this.isTheProcessOf(one, call.pid)) ?? null };
     }
-    const named = call.projectPath;
-    const ofProject = named === undefined ? [] : this.runs.filter((one) => this.isOfProject(one, named));
+    const asked = call.projectPath;
+    const ofProject = asked === undefined ? [] : this.runs.filter((one) => this.isOfProject(one, asked));
     const pool = ofProject.length > 0 ? ofProject : this.runs;
     const going = pool.filter((one) => stillRunning(one));
     if (going.length > 1) {
@@ -17293,9 +17306,9 @@ export class GodotServer {
 
   /** The refusal for a call that names no run while [param going] are running: each is listed. */
   private severalRunsGoing(going: readonly GodotProcess[]): ToolResponse {
-    const named = going.map((one) => this.runInWords(one));
+    const listed = going.map((one) => this.runInWords(one));
     return this.createErrorResponse(
-      `${going.length} runs of this server are going: ${named.join('; ')}. Name one with pid.`,
+      `${going.length} runs of this server are going: ${listed.join('; ')}. Name one with pid.`,
       ['Pass pid, the number of the run to answer about', 'editor_status lists them under game.runs'],
     );
   }
@@ -17311,7 +17324,7 @@ export class GodotServer {
           : `res://${run.bootScene}`;
     const project = run.projectPath ?? this.godotBridge.getStatus().projectPath ?? 'no project recorded';
     const saves = run.savesIn === undefined ? '' : `, user:// in ${run.savesIn}`;
-    return `${run.throughEditor ? 'the game the editor plays' : `pid ${pid === undefined ? 'unknown' : pid}`} (${project}, ${scene}${saves})`;
+    return `${run.throughEditor ? 'the game the editor plays' : `pid ${pid ?? 'unknown'}`} (${project}, ${scene}${saves})`;
   }
 
   /**
@@ -22232,23 +22245,17 @@ export class GodotServer {
     const callArgs = asParams(args);
     // inline is the server's to act on, so it is kept from the game with the rest of these.
     const { op: _op, projectPath, pid, outputPath, inline: _inline, ...params } = callArgs;
+    const pidGiven = typeof pid === 'number';
+    const aboutProject = typeof projectPath === 'string' ? projectPath : undefined;
     // With no pid the run meant is the one this server holds, and with several going none is.
-    const picked =
-      typeof pid === 'number'
-        ? { run: null }
-        : await this.currentRun({ projectPath: typeof projectPath === 'string' ? projectPath : undefined });
+    const picked = pidGiven ? { run: null } : await this.currentRun({ projectPath: aboutProject });
     if ('refusal' in picked) {
       return picked.refusal;
     }
     const held = picked.run;
-    const waited =
-      typeof pid === 'number'
-        ? null
-        : await this.ownRunOnItsWay(
-            held,
-            typeof projectPath === 'string' ? projectPath : this.ownProject,
-            timeoutMs,
-          );
+    const waited = pidGiven
+      ? null
+      : await this.ownRunOnItsWay(held, aboutProject ?? this.ownProject, timeoutMs);
     if (waited !== null) {
       return this.createErrorResponse(waited, [
         'editor_status lists it under runtimes once it has announced',
@@ -22264,21 +22271,15 @@ export class GodotServer {
     // given the game this server started or plays is the one meant when it is among them: a
     // caller who started a bench and asks about it was refused with "pass pid" the moment the
     // bench opened its first worker.
-    const wanted = typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined);
-    const own =
-      typeof pid === 'number'
-        ? undefined
-        : ((await this.ownGameAmong(held, announced.running, wanted)) ??
-          (await this.ownGameThroughTheTree(held, announced.running, wanted)));
-    const choice = chooseRuntime(
-      announced.running,
-      wanted,
-      announced.unspoken,
-      typeof pid === 'number' ? pid : own,
-    );
+    const wanted = aboutProject ?? this.ownProject ?? undefined;
+    const own = pidGiven
+      ? undefined
+      : (this.ownGameAmong(held, announced.running, wanted) ??
+        (await this.ownGameThroughTheTree(held, announced.running, wanted)));
+    const choice = chooseRuntime(announced.running, wanted, announced.unspoken, pidGiven ? pid : own);
     if ('problem' in choice) {
       return this.noGameToChoose(choice.problem, {
-        named: typeof pid === 'number',
+        named: pidGiven,
         announced,
         wanted,
         ended: held,

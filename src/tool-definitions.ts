@@ -1974,7 +1974,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          "Default true: this server starts a windowed game with no sound. false lets a connected editor play it. A headless run is silent already. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.",
+          'Default true: this server starts a windowed game with no sound. false lets a connected editor play it. A headless run is silent already. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.',
       },
       executable: {
         type: 'string',

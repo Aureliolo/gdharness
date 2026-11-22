@@ -128710,7 +128710,7 @@ async function testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame(): Pr
 /** What `withRunsBeside` hands a case: a served project, two worktrees of it and the calls to start games in them. */
 interface RunsBesideStage {
   /** The project the server serves. */
-  readonly main: string;
+  readonly served: string;
   /** Two more folders of the same repository, each a project of its own. */
   readonly trees: readonly [string, string];
   readonly runtimeDir: string;
@@ -128772,7 +128772,7 @@ async function withRunsBeside(
   const runtimeDir = join(root, 'runtime');
   const slots = join(root, 'slots');
   mkdirSync(runtimeDir);
-  const main = projectOfARepository(root, 'main');
+  const served = projectOfARepository(root, 'main');
   const trees: readonly [string, string] = [
     projectOfARepository(root, 'treea'),
     projectOfARepository(root, 'treeb'),
@@ -128780,7 +128780,7 @@ async function withRunsBeside(
   const env: Record<string, string> = {
     GODOT_PATH: godotPath,
     GDHARNESS_RUNTIME_DIR: runtimeDir,
-    GDHARNESS_PROJECT: main,
+    GDHARNESS_PROJECT: served,
     ...(options.slots === undefined
       ? {}
       : { GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: String(options.slots) }),
@@ -128792,7 +128792,7 @@ async function withRunsBeside(
     const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
       textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
     await body({
-      main,
+      served,
       trees,
       runtimeDir,
       slots,
@@ -128831,14 +128831,18 @@ function pidsOfTheRuns(status: unknown): number[] {
   return asArray(get(status, 'game', 'runs')).map((one) => asNumber(get(one, 'pid'), 'a run listed'));
 }
 
-/** The answer of editor_output for [param pid], once it holds [param text], or the last answer read. */
+function ascending(first: number, second: number): number {
+  return first - second;
+}
+
+/** The answer of editor_output for [param pid], once it holds [param wanted], or the last answer read. */
 async function outputOnceItHolds(
   call: RunsBesideStage['call'],
   pid: number,
-  text: string,
+  wanted: string,
 ): Promise<string> {
   let said = '';
-  for (let tries = 0; tries < 60 && !said.includes(text); tries += 1) {
+  for (let tries = 0; tries < 60 && !said.includes(wanted); tries += 1) {
     said = await call('editor_output', { pid });
     await delay(500);
   }
@@ -128853,11 +128857,19 @@ async function testTwoWorktreesStartBesideEachOther(): Promise<void> {
     const pids = [first, second].map((one) => asNumber(get(one, 'pid'), 'a started run'));
     assert.notEqual(pids[0], pids[1]);
     assert.equal(get(second, 'endedPreviousRun'), undefined, `nothing was ended: ${JSON.stringify(second)}`);
-    assert.equal(get(second, 'alsoRunning'), undefined, `the first run is this server's own: ${JSON.stringify(second)}`);
+    assert.equal(
+      get(second, 'alsoRunning'),
+      undefined,
+      `the first run is this server's own: ${JSON.stringify(second)}`,
+    );
     assert.equal(get(first, 'runtime', 'listening'), true, JSON.stringify(first));
     assert.equal(get(second, 'runtime', 'listening'), true, JSON.stringify(second));
     const status = jsonOf(await call('editor_status', {}), 'editor_status');
-    assert.deepEqual(pidsOfTheRuns(status).toSorted(), pids.toSorted(), JSON.stringify(get(status, 'game')));
+    assert.deepEqual(
+      pidsOfTheRuns(status).toSorted(ascending),
+      pids.toSorted(ascending),
+      JSON.stringify(get(status, 'game')),
+    );
     assert.equal(get(status, 'game', 'run'), null, 'no one run is the run');
     const listed = asArray(get(status, 'game', 'runtimes')).map((one) => get(one, 'pid'));
     for (const started of [first, second]) {
@@ -128878,8 +128890,8 @@ async function testOneProjectStartedWithTwoSavesFoldersGoesBeside(): Promise<voi
     assert.equal(get(second, 'endedPreviousRun'), undefined, JSON.stringify(second));
     const status = jsonOf(await call('editor_status', {}), 'editor_status');
     assert.deepEqual(
-      pidsOfTheRuns(status).toSorted(),
-      [asNumber(get(first, 'pid')), asNumber(get(second, 'pid'))].toSorted(),
+      pidsOfTheRuns(status).toSorted(ascending),
+      [asNumber(get(first, 'pid')), asNumber(get(second, 'pid'))].toSorted(ascending),
       JSON.stringify(get(status, 'game')),
     );
   });
@@ -128954,7 +128966,14 @@ async function testACallNamingNoRunIsRefusedWhileTwoGo(): Promise<void> {
     ];
     for (const [tool, args] of calls) {
       const refused = await call(tool, args);
-      for (const wanted of [`pid ${only}`, `pid ${second}`, trees[0], trees[1], 'the main scene', 'Name one with pid']) {
+      for (const wanted of [
+        `pid ${only}`,
+        `pid ${second}`,
+        trees[0],
+        trees[1],
+        'the main scene',
+        'Name one with pid',
+      ]) {
         assert.ok(refused.includes(wanted), `${tool} ${JSON.stringify(args)} names ${wanted}: ${refused}`);
       }
     }
@@ -128974,11 +128993,18 @@ async function testARestartedServerFindsEveryRunStillGoing(): Promise<void> {
   await withRunsBeside({}, async ({ trees, start, call, restartServer }) => {
     const pids = [
       asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'run a'),
-      asNumber(get(await start(trees[1], { runtimeWaitMs: 0, savesIn: join(trees[1], 'saves') }), 'pid'), 'run b'),
+      asNumber(
+        get(await start(trees[1], { runtimeWaitMs: 0, savesIn: join(trees[1], 'saves') }), 'pid'),
+        'run b',
+      ),
     ];
     await restartServer();
     const status = jsonOf(await call('editor_status', {}), 'editor_status');
-    assert.deepEqual(pidsOfTheRuns(status).toSorted(), pids.toSorted(), JSON.stringify(get(status, 'game')));
+    assert.deepEqual(
+      pidsOfTheRuns(status).toSorted(ascending),
+      pids.toSorted(ascending),
+      JSON.stringify(get(status, 'game')),
+    );
     for (const pid of pids) {
       const output = jsonOf(await call('editor_output', { pid }), 'output after the restart');
       assert.equal(get(output, 'running'), true, JSON.stringify(output));
@@ -129000,7 +129026,7 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
     assert.equal(get(ended, 'running'), false, JSON.stringify(ended));
     const after = readRunRecord(trees[0], [runtimeDir]);
     assert.equal(after?.pid, staying, 'the note of the staying run is still there');
-    assert.equal(after?.exitCode, undefined, 'and says nothing of an exit');
+    assert.equal(after.exitCode, undefined, 'and says nothing of an exit');
     const output = await outputOnceItHolds(call, staying, 'label-treea');
     assert.ok(output.includes('label-treea'), output);
     assert.equal(get(jsonOf(output, 'output'), 'running'), true);
@@ -129012,12 +129038,12 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
  * Of three slots the last stays for a short headless call, so two are the games'.
  */
 async function testAThirdPlaceWaitsForAnEngineSlot(): Promise<void> {
-  await withRunsBeside({ slots: 3 }, async ({ main, trees, start, call, slots }) => {
+  await withRunsBeside({ slots: 3 }, async ({ served, trees, start, call, slots }) => {
     const first = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the first run');
     const second = await start(trees[1], { runtimeWaitMs: 0 });
     assert.equal(get(second, 'started'), true, JSON.stringify(second));
     let answered = false;
-    const third = start(main, { runtimeWaitMs: 0 }).then((started) => {
+    const third = start(served, { runtimeWaitMs: 0 }).then((started) => {
       answered = true;
       return started;
     });
@@ -129037,7 +129063,7 @@ function testARunNoteIsKeptPerPlace(): void {
   process.env['GDHARNESS_RUNTIME_DIR'] = directory;
   try {
     mkdirSync(project);
-    const noted = (pid: number, savesIn?: string) =>
+    const noted = (pid: number, savesIn?: string): void => {
       writeRunRecord({
         pid,
         transcript: join(directory, `run-${pid}.log`),
@@ -129048,6 +129074,7 @@ function testARunNoteIsKeptPerPlace(): void {
         command: 'godot',
         ...(savesIn === undefined ? {} : { savesIn }),
       });
+    };
     noted(1);
     noted(2, join(directory, 'a'));
     noted(3, join(directory, 'b'));
@@ -129119,7 +129146,11 @@ async function testAStartThroughTheEditorEndsOnlyTheEditorsOwnGame(): Promise<vo
       'a second start through the editor',
     );
     assert.equal(get(again, 'through'), 'editor', JSON.stringify(again));
-    assert.notEqual(get(again, 'endedPreviousRun'), undefined, `the editor's game was ended: ${JSON.stringify(again)}`);
+    assert.notEqual(
+      get(again, 'endedPreviousRun'),
+      undefined,
+      `the editor's game was ended: ${JSON.stringify(again)}`,
+    );
     assert.ok(editor.asked.includes('stop_playing'), editor.asked.join(', '));
     const output = jsonOf(await call('editor_output', { pid: beside }), 'output of the run beside');
     assert.equal(get(output, 'running'), true, 'the run beside went on');
