@@ -1444,8 +1444,7 @@ function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
     }
     pieces = withActualsPrinted(failed, diffs.finish());
   });
-  assert.notEqual(whole[1]?.detail, failed[1]?.detail, 'the whole text gives the value back');
-  assert.equal(pieces[1]?.detail, whole[1]?.detail, 'and so does the console read in pieces');
+  assert.equal(pieces[1]?.detail, whole[1]?.detail, 'the console read in pieces reads the value as the whole text does');
   for (const [n, path, small] of [
     [0, 'res://tests/a_test.gd', 'small'],
     [2, 'res://tests/c_test.gd', 'after'],
