@@ -350,14 +350,13 @@ export function progressRead(
   read: number,
 ): { suites: SuitesPrinted; finishedOne: boolean; read: number } {
   const suites = tally.suites.copy();
-  const entries = log.all;
-  for (const entry of entries) {
+  for (const entry of log.all) {
     suites.take(entry.text);
   }
-  const from = log.retiredCount;
+  const fresh = log.heldFrom(read);
   return {
     suites: suites.result(),
-    finishedOne: entries.slice(Math.max(0, read - from)).some((entry) => finishesASuite(entry.text)),
-    read: from + entries.length,
+    finishedOne: fresh.entries.some((entry) => finishesASuite(entry.text)),
+    read: fresh.next,
   };
 }

@@ -10834,11 +10834,11 @@ export class GodotServer {
     const timedOut = await new Promise<boolean>((resolve) => {
       let read = 0;
       const watching = setInterval(() => {
-        const from = run.log.retiredCount;
-        for (const entry of run.log.all.slice(Math.max(0, read - from))) {
+        const fresh = run.log.heldFrom(read);
+        for (const entry of fresh.entries) {
           stopped.for ??= autoloadNotCompiled(entry, autoloaded);
         }
-        read = from + run.log.all.length;
+        read = fresh.next;
         // What the log let go before this look was read by the tally.
         stopped.for ??= tally.notCompiled;
         if (stopped.for !== null) {

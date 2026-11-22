@@ -813,6 +813,15 @@ export class GameLog {
     return this.gone;
   }
 
+  /**
+   * The entries held at or past [param read], a position among every entry the log has made, and
+   * the position after the last of them, which the next look passes. A reader that also reads what
+   * the log lets go has read every entry once.
+   */
+  heldFrom(read: number): { readonly entries: readonly LogEntry[]; readonly next: number } {
+    return { entries: this.entries.slice(Math.max(0, read - this.gone)), next: this.gone + this.entries.length };
+  }
+
   count(severity: Severity): number {
     return this.goneSeen[severity] + this.entries.filter((entry) => entry.severity === severity).length;
   }

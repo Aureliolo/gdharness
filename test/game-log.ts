@@ -574,6 +574,32 @@ function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
   );
 }
 
+/**
+ * Looks at a log kept to a bound each find the entries printed since the last look that the log
+ * still holds, as the whole log has them, also when it let go of some before the look.
+ */
+function testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded(): void {
+  const whole = new GameLog();
+  const bounded = new GameLog({ most: 5, retired: () => undefined });
+  let read = 0;
+  let lostSome = false;
+  for (let chunk = 0; chunk < 30; chunk += 1) {
+    const text = Array.from({ length: 1 + (chunk % 13) }, (_line, n) => `line ${String(chunk)} ${String(n)}\n`).join('');
+    whole.append('stdout', text);
+    bounded.append('stdout', text);
+    const looked = bounded.heldFrom(read);
+    lostSome ||= bounded.retiredCount > read;
+    assert.deepEqual(
+      looked.entries.map((entry) => entry.text),
+      whole.all.slice(Math.max(read, bounded.retiredCount)).map((entry) => entry.text),
+      `chunk ${String(chunk)}`,
+    );
+    assert.equal(looked.next, whole.all.length, `chunk ${String(chunk)}`);
+    read = looked.next;
+  }
+  assert.ok(bounded.retiredCount > 0 && lostSome, 'entries were let go before a look');
+}
+
 testAScriptErrorDoesNotTakeTheCasesAfterIt();
 testAnEntrySaysTheScriptItPointsAt();
 testACrashIsAnErrorWithItsReport();
@@ -583,4 +609,5 @@ testChunksAndLineEndingsDoNotMatter();
 testSelectionAnswersByEntry();
 testALogKeptToABoundHandsOverEveryEntryWhole();
 testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver();
+testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded();
 console.log('game log tests passed');
