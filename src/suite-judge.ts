@@ -8,7 +8,7 @@
  * the engine's streams go into one file, so an error is read in order with the case lines around it.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
 import {
   EXIT_LEAK,
@@ -20,7 +20,7 @@ import {
 } from './engine-leaks.js';
 import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
 import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
-import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { bytesAt, readLogLines } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
 
 /** One case as the run reported it finishing. */
@@ -224,7 +224,11 @@ function rowRuns(share: RowShare, row: number | null): boolean {
 
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
 export function readRun(printed: string): RunPrinted {
-  const lines = stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n');
+  return readRunLines(stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n'));
+}
+
+/** As {@link readRun}, from the lines already split and stripped of colour codes. */
+function readRunLines(lines: readonly string[]): RunPrinted {
   const state: RunState = {
     lines,
     suites: new Map(),
@@ -251,8 +255,12 @@ export function readRun(printed: string): RunPrinted {
   const { during } = state;
   const stoppedIn = last === null ? null : stoppedInOf(last, during, state.lastCase);
   settleAfterCase(state, 'after');
-  const joined = lines.join('\n');
-  const starved = STARVED.flatMap((pattern) => [...joined.matchAll(pattern)].map((found) => found[0]));
+  // Joined a suite at a time, since the whole run can pass what one string holds. Each pattern spans
+  // an error line and the whitespace and `at:` line after it, which never holds a suite's start.
+  const pieces = piecesAtSuites(lines);
+  const starved = STARVED.flatMap((pattern) =>
+    pieces.flatMap((piece) => [...piece.matchAll(pattern)].map((found) => found[0])),
+  );
   const unloadable = scriptErrorsPrinted(lines).map(
     (error) => `${error.path}${error.line === null ? '' : `:${String(error.line)}`}: ${error.message}`,
   );
@@ -561,12 +569,134 @@ function readLine(state: RunState, line: string, at: number): void {
 const NESTED_ERROR = 'While attempting to print an error, another error was printed:';
 
 /**
- * What the engine printed into the log at [param path], read as gdharness test reads it: whole up to
- * [param limit] bytes, else its start and its end with a line saying how much was left out. A log
- * not there is an empty run. The errors in [param piped] are added as {@link withNestedErrors} says.
+ * What the engine printed into the log at [param path], read whole a line at a time, so a log of any
+ * size is judged as its text would be. A log not there is an empty run. The errors in [param piped]
+ * are added as {@link withNestedErrors} says. [param chunkBytes] is how much is read at once.
  */
-export function readEngineLog(path: string, piped: readonly LogEntry[], limit = LOG_LIMIT_BYTES): RunPrinted {
-  return withNestedErrors(readRun(existsSync(path) ? readLog(path, limit) : ''), piped);
+export function readEngineLog(path: string, piped: readonly LogEntry[], chunkBytes?: number): RunPrinted {
+  return withNestedErrors(readRunLines(existsSync(path) ? readLogLines(path, chunkBytes) : ['']), piped);
+}
+
+/** [param lines] joined into one text for each suite, cut before each line opening one. */
+function piecesAtSuites(lines: readonly string[]): string[] {
+  const pieces: string[] = [];
+  let from = 0;
+  for (const [at, line] of lines.entries()) {
+    if (at > from && suiteOpenedBy(line) !== null) {
+      pieces.push(lines.slice(from, at).join('\n'));
+      from = at;
+    }
+  }
+  pieces.push(lines.slice(from).join('\n'));
+  return pieces;
+}
+
+/** The bytes gdUnit4's line opening a suite holds, which the line is looked for by. */
+const SUITE_MARK = Buffer.from('Run Test Suite:');
+
+/** The longest unfinished line kept for where it began. A suite's line is far shorter. */
+const CARRY_MOST = 64 * 1024;
+
+/**
+ * Where each suite's lines begin in what an engine prints, read a chunk at a time, so what the
+ * running suite has printed is counted without holding what came before it.
+ */
+export class SuiteCuts {
+  /** The byte each suite's line begins at, in the order printed. */
+  readonly cuts: number[] = [];
+  /** The suite printing now, or null before the first. */
+  suite: string | null = null;
+  /** How many bytes have been read. */
+  taken = 0;
+  /** The unfinished last line, or null for one too long to keep. */
+  private carry: Buffer | null = Buffer.alloc(0);
+
+  /** How many bytes the running suite has printed, or the engine before its first suite. */
+  get printed(): number {
+    return this.taken - (this.cuts.at(-1) ?? 0);
+  }
+
+  /** Reads [param chunk], the bytes printed next. */
+  take(chunk: Buffer): void {
+    const kept = this.carry ?? Buffer.alloc(0);
+    const joined = kept.length === 0 ? chunk : Buffer.concat([kept, chunk]);
+    const base = this.taken - kept.length;
+    this.taken += chunk.length;
+    let from = 0;
+    if (this.carry === null) {
+      // The rest of a line too long to keep, which is no suite's line.
+      const newline = joined.indexOf(0x0a);
+      if (newline < 0) {
+        return;
+      }
+      from = newline + 1;
+    }
+    for (let found = joined.indexOf(SUITE_MARK, from); found >= 0; found = joined.indexOf(SUITE_MARK, from)) {
+      const start = Math.max(from, joined.lastIndexOf(0x0a, found) + 1);
+      const end = joined.indexOf(0x0a, found);
+      if (end < 0) {
+        break;
+      }
+      // A line too long to keep is left out however it arrived, so the cuts never hang on the chunks.
+      const path =
+        end - start > CARRY_MOST
+          ? null
+          : suiteOpenedBy(stripVTControlCharacters(joined.toString('utf8', start, end)));
+      if (path !== null) {
+        this.suite = path;
+        this.cuts.push(base + start);
+      }
+      from = end + 1;
+    }
+    const rest = joined.subarray(Math.max(from, joined.lastIndexOf(0x0a) + 1));
+    this.carry = rest.length > CARRY_MOST ? null : Buffer.from(rest);
+  }
+
+  /** Reads what the file at [param path] holds past what has been read, if it is there. */
+  takeFrom(path: string): void {
+    let fd: number;
+    try {
+      fd = openSync(path, 'r');
+    } catch {
+      return;
+    }
+    try {
+      for (let size = fstatSync(fd).size; this.taken < size; ) {
+        const chunk = bytesAt(fd, this.taken, Math.min(TAKE_BYTES, size - this.taken));
+        if (chunk.length === 0) {
+          break;
+        }
+        this.take(chunk);
+      }
+    } finally {
+      closeSync(fd);
+    }
+  }
+}
+
+/** The most of a growing log read at once. */
+const TAKE_BYTES = 1024 * 1024;
+
+/** [param chunks] as text, cut at the bytes [param cuts] names, so each text is one suite's lines. */
+export function textsCutAt(chunks: readonly Buffer[], cuts: readonly number[]): string[] {
+  const texts: string[] = [];
+  let piece: Buffer[] = [];
+  let at = 0;
+  let next = 0;
+  for (const chunk of chunks) {
+    let from = 0;
+    for (let cut = cuts[next]; cut !== undefined && cut < at + chunk.length; cut = cuts[next]) {
+      piece.push(chunk.subarray(from, Math.max(from, cut - at)));
+      texts.push(Buffer.concat(piece).toString('utf8'));
+      piece = [];
+      from = Math.max(from, cut - at);
+      next += 1;
+    }
+    piece.push(chunk.subarray(from));
+    at += chunk.length;
+  }
+  texts.push(Buffer.concat(piece).toString('utf8'));
+  return texts;
 }
 
 /**

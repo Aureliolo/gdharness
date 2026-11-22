@@ -865,14 +865,19 @@ export const RENDERED_AWAY_NOTE =
  * "abcd" reads "abcXd". The console keeps the marks. A detail the console has no copy of says its
  * value may be the merge, and one whose sides still read alike says why, rather than letting
  * either side stand as the value. A string gdUnit4 masked because it held BBCode is unmasked.
+ *
+ * [param printed] may come as texts in the order printed, each a suite's lines, since a whole
+ * console can pass what one string holds. A diff is read within one text.
  */
 export function withActualsPrinted<Case extends { readonly detail: string | null }>(
   failed: readonly Case[],
-  printed: string,
+  printed: string | readonly string[],
 ): Case[] {
   // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
   // return taken out, so the two are compared the way the report spells them.
-  const diffs = [...printed.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)].map((match) => ({
+  const texts = typeof printed === 'string' ? [printed] : printed;
+  const matches = texts.flatMap((text) => [...text.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)]);
+  const diffs = matches.map((match) => ({
     suffix: match[3] ?? '',
     at: match[5] ?? '',
     ...readDiff(match[1] ?? ''),
@@ -1046,12 +1051,12 @@ function foldedReports(reports: readonly CaseReport[]): FoldedReport[] {
 
 /**
  * Every case in [param report] that failed or hit an error, with the values [param printed] puts
- * back into each of its reports.
+ * back into each of its reports, read as {@link withActualsPrinted} reads it.
  *
  * Read report by report rather than case by case, because the printed diffs are matched in the
  * order the run met them, and a case failing two string equalities printed two.
  */
-export function failedCases(report: TestReport, printed: string): FailedCase[] {
+export function failedCases(report: TestReport, printed: string | readonly string[]): FailedCase[] {
   const cases = report.suites.flatMap((suite) =>
     suite.cases
       .filter((entry) => entry.status === 'failed' || entry.status === 'error')

@@ -1,4 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
+import { stripVTControlCharacters } from 'node:util';
 
 /**
  * The most of an engine's log that is read, and how much an engine may print before it is ended.
@@ -8,6 +10,62 @@ import { closeSync, fstatSync, openSync, readSync, renameSync, rmSync, writeSync
  */
 export const LOG_LIMIT_BYTES = 128 * 1024 * 1024;
 
+/** The limit in force, which GDHARNESS_LOG_LIMIT_BYTES lowers for a test of an engine printing past it. */
+export function logLimitBytes(): number {
+  const set = Number(process.env['GDHARNESS_LOG_LIMIT_BYTES']);
+  return Number.isInteger(set) && set > 0 && set < LOG_LIMIT_BYTES ? set : LOG_LIMIT_BYTES;
+}
+
+/**
+ * Why an engine that printed more than [param limit] bytes was ended, in the words every run answers
+ * with, naming [param suite] when one was running.
+ */
+export function pastTheLogLimit(suite: string | null, limit = logLimitBytes()): string {
+  const mib = limit / 1024 / 1024;
+  const size = Number.isInteger(mib) ? `${String(mib)} MiB` : `${String(limit)} bytes`;
+  const running = suite === null ? '' : ` while running ${suite}`;
+  return `the engine printed more than the ${size} a log may hold${running}, so it was ended`;
+}
+
+/**
+ * The lines of the log at [param path] as the text read whole would split them, with colour codes
+ * taken out and CRLF read as one line end. It is read [param chunkBytes] at a time, so no string
+ * holds more than one line.
+ */
+export function readLogLines(path: string, chunkBytes = 1024 * 1024): string[] {
+  const lines: string[] = [];
+  const decoder = new StringDecoder('utf8');
+  let partial: string[] = [];
+  const fd = openSync(path, 'r');
+  try {
+    const chunk = Buffer.alloc(chunkBytes);
+    for (let got = readSync(fd, chunk, 0, chunkBytes, null); got > 0; ) {
+      partial = linesInto(lines, partial, decoder.write(chunk.subarray(0, got)));
+      got = readSync(fd, chunk, 0, chunkBytes, null);
+    }
+  } finally {
+    closeSync(fd);
+  }
+  partial.push(decoder.end());
+  lines.push(stripVTControlCharacters(partial.join('')));
+  return lines;
+}
+
+/** Adds each line [param text] finishes to [param lines], and gives back the unfinished one's pieces. */
+function linesInto(lines: string[], partial: string[], text: string): string[] {
+  const parts = text.split('\n');
+  if (parts.length === 1) {
+    partial.push(text);
+    return partial;
+  }
+  parts[0] = `${partial.join('')}${parts[0] ?? ''}`;
+  for (const raw of parts.slice(0, -1)) {
+    const line = stripVTControlCharacters(raw);
+    lines.push(line.endsWith('\r') ? line.slice(0, -1) : line);
+  }
+  return [parts.at(-1) ?? ''];
+}
+
 /** Of a log read in part, how much comes from its start. The rest is its end, where a run stops. */
 const HEAD_SHARE = 4;
 
@@ -16,7 +74,7 @@ const HEAD_SHARE = 4;
  * its last three quarters of that, cut at line ends, with a line between saying how much was not
  * read.
  */
-export function readLog(path: string, limit = LOG_LIMIT_BYTES): string {
+export function readLog(path: string, limit = logLimitBytes()): string {
   const fd = openSync(path, 'r');
   try {
     const size = fstatSync(fd).size;

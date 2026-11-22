@@ -53,7 +53,7 @@ import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { wholeFlag } from './launch.js';
-import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { logLimitBytes, pastTheLogLimit, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal, priorityOf } from './priority.js';
@@ -61,7 +61,7 @@ import { askProcessTable } from './process-table.js';
 import { type PeakTool, readEnginePeaks } from './run-record.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { diedAsItStarted, linesAsPrinted } from './start-race.js';
-import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
+import { type EngineEnd, type RunPrinted, readRun, SuiteCuts } from './suite-judge.js';
 
 /** Most engines a run starts, whatever the machine has. */
 export const MOST_ENGINES = 4;
@@ -474,7 +474,7 @@ export function endingWithRunner(
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed (on Windows one pipe, copied into the log), and waits for it, ending it once it has printed nothing for
  * [param silenceSeconds], has run past the run's deadline, has printed more than
- * {@link LOG_LIMIT_BYTES}, or an autoload has failed to start. Its
+ * {@link logLimitBytes}, or an autoload has failed to start. Its
  * user data is a `user` folder in [param directory], so two engines never write one save or
  * settings file.
  *
@@ -598,6 +598,7 @@ async function engineWatchedOnce(
       shareNumber: 0,
       shareFrom: 0,
       shareTail: Buffer.alloc(0),
+      suites: new SuiteCuts(),
       deciding: null,
       failure: undefined,
       ceiling,
@@ -825,6 +826,8 @@ interface Watch {
   shareFrom: number;
   /** The end of what was scanned, in case a share's marker is split between two reads. */
   shareTail: Buffer;
+  /** The suites the log has opened, so an engine ended for printing too much names the one running. */
+  readonly suites: SuiteCuts;
   /** Settles once the run has answered with the next share, while the engine waits for it. */
   deciding: Promise<void> | null;
   /** Why handing over a share failed, thrown once the engine has ended. */
@@ -902,6 +905,7 @@ function scanWhatTheLogGained(watch: Watch, now: number, at: number): void {
       watch.started.stop();
     }
     watch.carried = scanned.slice(-AUTOLOAD_FAILED.length);
+    watch.suites.take(chunk.subarray(0, got));
     if (watch.shares !== undefined && watch.deciding === null) {
       noticeShareEnd(watch, chunk.subarray(0, got), offset);
     }
@@ -909,8 +913,8 @@ function scanWhatTheLogGained(watch: Watch, now: number, at: number): void {
   }
   watch.size = now;
   watch.quiet.restart(at);
-  if (watch.outcome.ended === null && watch.size - watch.shareFrom > LOG_LIMIT_BYTES) {
-    watch.outcome.ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
+  if (watch.outcome.ended === null && watch.size - watch.shareFrom > logLimitBytes()) {
+    watch.outcome.ended = pastTheLogLimit(watch.suites.suite);
     watch.started.stop();
   }
 }
