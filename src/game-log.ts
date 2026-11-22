@@ -9,6 +9,7 @@
  */
 
 import { StringDecoder } from 'node:string_decoder';
+import { owned } from './log-read.js';
 
 export type Severity = 'error' | 'warning' | 'info';
 
@@ -365,19 +366,66 @@ export type FoldedEntry = ReportedEntry & { readonly times?: number };
  * so a line printed from two places stays two entries.
  */
 export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntry[] {
-  const first = new Map<string, { entry: LogEntry; times: number }>();
+  const folded = new FoldedRepeats();
   for (const entry of entries) {
-    const key = JSON.stringify([entry.severity, entry.source, entry.text, entry.detail]);
-    const seen = first.get(key);
-    if (seen === undefined) {
-      first.set(key, { entry, times: 1 });
-    } else {
-      seen.times += 1;
-    }
+    folded.take(entry);
   }
-  return [...first.values()].map(({ entry, times }) =>
-    times === 1 ? reported(entry) : { ...reported(entry), times },
-  );
+  return folded.result();
+}
+
+/**
+ * {@link foldedRepeats}, an entry at a time, holding at most [param most] distinct entries. Past that
+ * a fold that keeps the newest lets its oldest distinct entry go for each new one, and one that keeps
+ * the oldest takes no new one. Below it the fold is exact.
+ */
+export class FoldedRepeats {
+  private readonly first = new Map<string, { entry: LogEntry; times: number }>();
+  /** Whether a distinct entry was let go or not taken for the bound. */
+  overflowed = false;
+
+  private readonly most: number;
+  private readonly keeps: 'newest' | 'oldest';
+
+  constructor(most = Number.POSITIVE_INFINITY, keeps: 'newest' | 'oldest' = 'newest') {
+    this.most = most;
+    this.keeps = keeps;
+  }
+
+  take(entry: LogEntry): void {
+    const key = JSON.stringify([entry.severity, entry.source, entry.text, entry.detail]);
+    const seen = this.first.get(key);
+    if (seen !== undefined) {
+      seen.times += 1;
+      return;
+    }
+    if (this.first.size >= this.most) {
+      this.overflowed = true;
+      if (this.keeps === 'oldest') {
+        return;
+      }
+      const oldest = this.first.keys().next();
+      if (oldest.done !== true) {
+        this.first.delete(oldest.value);
+      }
+    }
+    // Copied, since a line holds the whole chunk it was read in for as long as it is kept.
+    const kept = Number.isFinite(this.most)
+      ? { ...entry, text: owned(entry.text), detail: entry.detail.map(owned) }
+      : entry;
+    this.first.set(key, { entry: kept, times: 1 });
+  }
+
+  result(): FoldedEntry[] {
+    return [...this.first.values()].map(({ entry, times }) =>
+      times === 1 ? reported(entry) : { ...reported(entry), times },
+    );
+  }
+}
+
+/** How many entries a log holds, and who reads each one it lets go. */
+interface LogBound {
+  readonly most: number;
+  readonly retired: (entry: LogEntry, byScript: boolean) => void;
 }
 
 /**
@@ -390,8 +438,27 @@ export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntr
  * else starts an entry of its own.
  */
 export class GameLog {
-  /** The entries, whose index the log renumbers when it folds a line into an earlier entry. */
+  /**
+   * The entries, whose index the log renumbers when it folds a line into an earlier entry. A log
+   * kept to a bound holds only its newest ones here, and the first is at index {@link gone}.
+   */
   private readonly entries: (LogEntry & { index: number })[] = [];
+  /** How many entries have been handed to {@link kept}'s reader and dropped. */
+  private gone = 0;
+  /** Of the entries dropped, how many there were of each severity. */
+  private readonly goneSeen: Record<Severity, number> = { error: 0, warning: 0, info: 0 };
+  /** The index of the entry each stream's crash report is going into, while it is. */
+  private readonly crashIndex: Record<Stream, number | null> = { stdout: null, stderr: null, transcript: null };
+
+  /**
+   * A log kept to [param kept]'s bound holds about twice that many of its newest entries, and hands
+   * each older one to its reader once no later line can change it. Such a log's `all`, `select` and
+   * `crashReport` see only the entries held, and its counts every entry.
+   */
+  constructor(kept?: LogBound) {
+    this.kept = kept;
+  }
+  private readonly kept: LogBound | undefined;
   private readonly decoders: Record<Stream, StringDecoder> = {
     stdout: new StringDecoder('utf8'),
     stderr: new StringDecoder('utf8'),
@@ -464,6 +531,52 @@ export class GameLog {
     for (const raw of lines) {
       this.line(source, raw.replace(/\r$/, ''));
     }
+    this.retire();
+  }
+
+  /**
+   * Hands the oldest entries past the bound to the reader. Only entries no later line can change go:
+   * none from a headline still taking its detail on, or from a crash report still being printed,
+   * unless the log holds four times its bound.
+   */
+  private retire(): void {
+    if (this.kept === undefined) {
+      return;
+    }
+    const { most, retired } = this.kept;
+    if (this.entries.length <= 2 * most) {
+      return;
+    }
+    let pinned = this.gone + this.entries.length;
+    for (const source of STREAMS) {
+      const owner = this.lastHeadline[source];
+      pinned = Math.min(pinned, owner?.index ?? pinned, owner?.loose[0]?.index ?? pinned);
+      pinned = Math.min(pinned, this.crashIndex[source] ?? pinned);
+    }
+    const count =
+      this.entries.length > 4 * most
+        ? this.entries.length - most
+        : Math.min(this.entries.length - most, pinned - this.gone);
+    if (count <= 0) {
+      return;
+    }
+    for (const entry of this.entries.splice(0, count)) {
+      retired(entry, this.byScript.delete(entry.index));
+      this.goneSeen[entry.severity] += 1;
+    }
+    this.gone += count;
+  }
+
+  /**
+   * Hands every entry still held to the reader of a log kept to a bound, once its streams have
+   * ended, and keeps them, so the reader has read the whole run and the log still answers for its
+   * end. Called once.
+   */
+  handOverHeld(): void {
+    const { kept } = this;
+    for (const entry of kept === undefined ? [] : this.entries) {
+      kept?.retired(entry, this.byScript.has(entry.index));
+    }
   }
 
   /** Whatever was printed without a final newline, once the stream has ended. */
@@ -520,7 +633,9 @@ export class GameLog {
     }
     if (CRASH_HEADER.test(line)) {
       const detail: string[] = [];
-      this.entries.push({ index: this.entries.length, severity: 'error', source, text: line.trim(), detail });
+      const index = this.gone + this.entries.length;
+      this.entries.push({ index, severity: 'error', source, text: line.trim(), detail });
+      this.crashIndex[source] = index;
       this.crashed[source] = detail;
       this.lastHeadline[source] = null;
       return true;
@@ -537,7 +652,7 @@ export class GameLog {
   ): void {
     const detail: string[] = [];
     const entry: LogEntry = {
-      index: this.entries.length,
+      index: this.gone + this.entries.length,
       severity: headline?.severity ?? 'info',
       source,
       text: headline?.text ?? line,
@@ -570,7 +685,7 @@ export class GameLog {
 
   /** Moves the lines that followed [param owner]'s headline, now known to be its message, into its detail. */
   private takeLooseLines(owner: Headed): void {
-    const taken = owner.loose.filter((entry) => this.entries[entry.index] === entry);
+    const taken = owner.loose.filter((entry) => this.entries[entry.index - this.gone] === entry);
     owner.loose = [];
     if (taken.length === 0) {
       return;
@@ -592,10 +707,10 @@ export class GameLog {
   private removeEntries(gone: readonly LogEntry[]): void {
     const dropped = new Set(gone.map((entry) => entry.index));
     const before = [...dropped].toSorted((a, b) => a - b);
-    const first = before[0] ?? this.entries.length;
+    const first = before[0] ?? this.gone + this.entries.length;
     const shifted = (position: number): number =>
       position - before.filter((index) => index < position).length;
-    const moved = this.entries.splice(first);
+    const moved = this.entries.splice(first - this.gone);
     const kept = moved.filter((entry) => !dropped.has(entry.index));
     const scripts = kept.filter((entry) => this.byScript.has(entry.index));
     for (const entry of moved) {
@@ -610,8 +725,12 @@ export class GameLog {
     for (const severity of SEVERITIES) {
       this.seen[severity] = shifted(this.seen[severity]);
     }
+    for (const source of STREAMS) {
+      const crash = this.crashIndex[source];
+      this.crashIndex[source] = crash === null ? null : shifted(crash);
+    }
     for (const entry of kept) {
-      entry.index = this.entries.length;
+      entry.index = this.gone + this.entries.length;
       this.entries.push(entry);
     }
     for (const entry of scripts) {
@@ -621,7 +740,7 @@ export class GameLog {
 
   /** Takes the error at [param index] as raised by a call whose mark waits for the file its detail names. */
   private claimedByCall(index: number): void {
-    const entry = this.entries[index];
+    const entry = this.entries[index - this.gone];
     if (entry?.severity !== 'error') {
       return;
     }
@@ -630,7 +749,7 @@ export class GameLog {
     );
     const mark = at === -1 ? undefined : this.awaitedRaised.splice(at, 1)[0];
     if (mark !== undefined) {
-      this.entries[index] = { ...entry, severity: 'info', raisedBy: mark.by };
+      this.entries[index - this.gone] = { ...entry, severity: 'info', raisedBy: mark.by };
     }
   }
 
@@ -669,20 +788,27 @@ export class GameLog {
    */
   record(severity: Severity, text: string): void {
     this.entries.push({
-      index: this.entries.length,
+      index: this.gone + this.entries.length,
       severity,
       source: 'debugger',
       text,
       detail: [],
     });
+    this.retire();
   }
 
+  /** The entries still held, the newest of the run when older ones were let go. */
   get all(): readonly LogEntry[] {
     return this.entries;
   }
 
+  /** How many entries were let go before the first of {@link all}. */
+  get retiredCount(): number {
+    return this.gone;
+  }
+
   count(severity: Severity): number {
-    return this.entries.filter((entry) => entry.severity === severity).length;
+    return this.goneSeen[severity] + this.entries.filter((entry) => entry.severity === severity).length;
   }
 
   /**
@@ -722,12 +848,12 @@ export class GameLog {
     contains?: string | undefined;
     limit: number;
   }): { entries: LogEntry[]; omitted: number } {
-    const floor = options.sinceLastCall ? this.seen[options.severity] : 0;
+    const floor = options.sinceLastCall ? Math.max(0, this.seen[options.severity] - this.gone) : 0;
     const wanted = ADMITTED[options.severity];
     const needle = options.contains?.toLowerCase();
     if (needle === undefined) {
       for (const severity of wanted) {
-        this.seen[severity] = this.entries.length;
+        this.seen[severity] = this.gone + this.entries.length;
       }
     }
     const matching = this.entries

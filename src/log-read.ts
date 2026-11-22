@@ -1,5 +1,4 @@
 import { closeSync, fstatSync, openSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
-import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
 
 /**
@@ -23,47 +22,51 @@ export function logLimitBytes(): number {
 export function pastTheLogLimit(suite: string | null, limit = logLimitBytes()): string {
   const mib = limit / 1024 / 1024;
   const size = Number.isInteger(mib) ? `${String(mib)} MiB` : `${String(limit)} bytes`;
-  const running = suite === null ? '' : ` while running ${suite}`;
-  return `the engine printed more than the ${size} a log may hold${running}, so it was ended`;
+  const running = suite === null ? '' : ` It was running ${suite}.`;
+  return `the engine printed more than the ${size} a log may hold, so it was ended.${running}`;
 }
 
 /**
  * The lines of the log at [param path] as the text read whole would split them, with colour codes
- * taken out and CRLF read as one line end. It is read [param chunkBytes] at a time, so no string
- * holds more than one line.
+ * taken out and CRLF read as one line end. It is read [param chunkBytes] at a time, and each line is
+ * given as it ends, so nothing holds more of the log than a chunk and a line.
  */
-export function readLogLines(path: string, chunkBytes = 1024 * 1024): string[] {
-  const lines: string[] = [];
-  const decoder = new StringDecoder('utf8');
-  let partial: string[] = [];
+export function* eachLogLine(path: string, chunkBytes = 1024 * 1024): Generator<string, void, undefined> {
+  // Cut in bytes and decoded a line at a time, so a line kept holds no more than itself. No byte of
+  // a character UTF-8 spells in several is a line feed, so no character is cut.
+  let carry: Buffer[] = [];
   const fd = openSync(path, 'r');
   try {
     const chunk = Buffer.alloc(chunkBytes);
-    for (let got = readSync(fd, chunk, 0, chunkBytes, null); got > 0; ) {
-      partial = linesInto(lines, partial, decoder.write(chunk.subarray(0, got)));
-      got = readSync(fd, chunk, 0, chunkBytes, null);
+    for (let got = readSync(fd, chunk, 0, chunkBytes, null); got > 0; got = readSync(fd, chunk, 0, chunkBytes, null)) {
+      const bytes = chunk.subarray(0, got);
+      let from = 0;
+      for (let end = bytes.indexOf(0x0a); end >= 0; end = bytes.indexOf(0x0a, from)) {
+        const text =
+          carry.length === 0
+            ? bytes.toString('utf8', from, end)
+            : Buffer.concat([...carry, bytes.subarray(from, end)]).toString('utf8');
+        carry = [];
+        const line = stripVTControlCharacters(text);
+        yield line.endsWith('\r') ? line.slice(0, -1) : line;
+        from = end + 1;
+      }
+      if (from < got) {
+        carry.push(Buffer.from(bytes.subarray(from)));
+      }
     }
   } finally {
     closeSync(fd);
   }
-  partial.push(decoder.end());
-  lines.push(stripVTControlCharacters(partial.join('')));
-  return lines;
+  yield stripVTControlCharacters(Buffer.concat(carry).toString('utf8'));
 }
 
-/** Adds each line [param text] finishes to [param lines], and gives back the unfinished one's pieces. */
-function linesInto(lines: string[], partial: string[], text: string): string[] {
-  const parts = text.split('\n');
-  if (parts.length === 1) {
-    partial.push(text);
-    return partial;
-  }
-  parts[0] = `${partial.join('')}${parts[0] ?? ''}`;
-  for (const raw of parts.slice(0, -1)) {
-    const line = stripVTControlCharacters(raw);
-    lines.push(line.endsWith('\r') ? line.slice(0, -1) : line);
-  }
-  return [parts.at(-1) ?? ''];
+/**
+ * [param text] in a string of its own. A line cut from a larger text holds that text in memory for
+ * as long as it is kept, so what outlives a read is copied.
+ */
+export function owned(text: string): string {
+  return Buffer.from(text, 'utf16le').toString('utf16le');
 }
 
 /** Of a log read in part, how much comes from its start. The rest is its end, where a run stops. */
@@ -74,7 +77,7 @@ const HEAD_SHARE = 4;
  * its last three quarters of that, cut at line ends, with a line between saying how much was not
  * read.
  */
-export function readLog(path: string, limit = logLimitBytes()): string {
+export function readLog(path: string, limit = LOG_LIMIT_BYTES): string {
   const fd = openSync(path, 'r');
   try {
     const size = fstatSync(fd).size;

@@ -10,7 +10,9 @@
  * it off what the runner printed, because the exit code cannot say.
  */
 
+import { StringDecoder } from 'node:string_decoder';
 import { caseLineOf, suiteOpenedBy } from './game-log.js';
+import { owned } from './log-read.js';
 
 export class MalformedReportError extends Error {
   constructor(message: string) {
@@ -339,8 +341,38 @@ export function ignoredForTheRunner(ignored: readonly string[], declared: Declar
 }
 
 /** The rows the runner said it left out for an ignore entry, as `res://suite.gd > test_name:N`. */
-export function rowsIgnoredIn(printed: readonly string[]): Set<string> {
-  return new Set(printed.flatMap((line) => IGNORED_ROW_LINE.exec(line)?.[1] ?? []));
+export function rowsIgnoredIn(printed: Iterable<string>): Set<string> {
+  return foldedOver(new RowsIgnoredRead(), printed);
+}
+
+/** A reading of printed lines taken a line at a time, so a run's lines need not all be held at once. */
+export interface LineFold<Result> {
+  take(line: string): void;
+  result(): Result;
+}
+
+/** What [param fold] makes of [param lines]. */
+export function foldedOver<Result>(fold: LineFold<Result>, lines: Iterable<string>): Result {
+  for (const line of lines) {
+    fold.take(line);
+  }
+  return fold.result();
+}
+
+/** {@link rowsIgnoredIn}, a line at a time. */
+export class RowsIgnoredRead implements LineFold<Set<string>> {
+  private readonly rows = new Set<string>();
+
+  take(line: string): void {
+    const row = IGNORED_ROW_LINE.exec(line)?.[1];
+    if (row !== undefined) {
+      this.rows.add(row);
+    }
+  }
+
+  result(): Set<string> {
+    return new Set(this.rows);
+  }
 }
 
 /**
@@ -609,27 +641,52 @@ const REPORT_END = /^\s*Statistics:/;
  * value, `but was`, the value), so a message is every line since the report's heading or the hook
  * before it: read from its last line alone, a hook expecting 4 that met 3 was reported as "3".
  */
-export function hookFailuresPrinted(printed: readonly string[]): HookFailure[] {
-  let above: string[] | null = null;
-  return printed.flatMap((line) => {
+export function hookFailuresPrinted(printed: Iterable<string>): HookFailure[] {
+  return foldedOver(new HookFailuresRead(), printed);
+}
+
+/** The most lines of one hook failure's message kept. An assertion's message is a handful. */
+const HOOK_MESSAGE_LINES = 1000;
+
+/** {@link hookFailuresPrinted}, a line at a time. */
+export class HookFailuresRead implements LineFold<HookFailure[]> {
+  private readonly found: HookFailure[] = [];
+  private above: string[] | null = null;
+  /** Whether a message ran past {@link HOOK_MESSAGE_LINES} and lost the lines after them. */
+  cut = false;
+
+  take(line: string): void {
     if (REPORT_HEADING.test(line)) {
-      above = [];
-      return [];
+      this.above = [];
+      return;
     }
     if (REPORT_END.test(line)) {
-      above = null;
-      return [];
+      this.above = null;
+      return;
     }
     const tab = line.lastIndexOf(HOOK_LOCATION);
     const found = tab === -1 ? null : HOOK_FAILURE.exec(line.slice(tab + 1));
     if (found === null) {
-      above?.push(line.trim());
-      return [];
+      if (this.above === null) {
+        return;
+      }
+      if (this.above.length < HOOK_MESSAGE_LINES) {
+        this.above.push(owned(line.trim()));
+      } else {
+        this.cut = true;
+      }
+      return;
     }
-    const message = [...(above ?? []), line.slice(0, tab).trim()].filter((part) => part !== '').join(' ');
-    above = [];
-    return [{ hook: found[1] ?? '', path: found[2] ?? '', line: Number(found[3]), message }];
-  });
+    const message = [...(this.above ?? []), line.slice(0, tab).trim()]
+      .filter((part) => part !== '')
+      .join(' ');
+    this.above = [];
+    this.found.push({ hook: found[1] ?? '', path: found[2] ?? '', line: Number(found[3]), message });
+  }
+
+  result(): HookFailure[] {
+    return [...this.found];
+  }
 }
 
 /** What gdUnit4 prints when it was pointed at something, and there was nothing there to run. */
@@ -650,12 +707,34 @@ const NO_SUCH_PATH = /given directory or file does not exists:\s*(.+?)\s*$/i;
  * [param asked] is the path the run was pointed at, which the answer names because a run that
  * found nothing is nearly always a run that looked in the wrong place.
  */
-export function whyNoReport(printed: readonly string[], asked: string): string | null {
-  const missing = printed.map((line) => NO_SUCH_PATH.exec(line)).find((found) => found !== null);
-  if (missing !== undefined) {
-    return `nothing at ${missing[1] ?? asked}`;
+export function whyNoReport(printed: Iterable<string>, asked: string): string | null {
+  return foldedOver(new NoReportRead(), printed)(asked);
+}
+
+/** {@link whyNoReport}, a line at a time, given the path asked for once the lines are read. */
+export class NoReportRead implements LineFold<(asked: string) => string | null> {
+  private missing: string | null | undefined;
+  private nothingRan = false;
+
+  take(line: string): void {
+    if (this.missing === undefined) {
+      const found = NO_SUCH_PATH.exec(line);
+      if (found !== null) {
+        this.missing = found[1] === undefined ? null : owned(found[1]);
+      }
+    }
+    this.nothingRan ||= NOTHING_RAN.test(line);
   }
-  return printed.some((line) => NOTHING_RAN.test(line)) ? `no test cases found at ${asked}` : null;
+
+  result(): (asked: string) => string | null {
+    const { missing, nothingRan } = this;
+    return (asked) => {
+      if (missing !== undefined) {
+        return `nothing at ${missing ?? asked}`;
+      }
+      return nothingRan ? `no test cases found at ${asked}` : null;
+    };
+  }
 }
 
 /** One error in a script gdUnit4 could not load while looking for suites. */
@@ -675,42 +754,75 @@ const DISCOVERY_FAILED = 'Script errors were detected during test discovery!';
  * writes no report and runs none of the suites that did load. What it prints is the line above,
  * then each error as its message and an `at` line naming the script and line.
  */
-export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
+export function scriptErrorsPrinted(printed: Iterable<string>): ScriptError[] {
   return discoveryListing(printed)?.errors ?? [];
+}
+
+/** Where gdUnit4 listed the scripts it could not load, and the errors read off the list. */
+export interface DiscoveryListing {
+  readonly errors: ScriptError[];
+  readonly from: number;
+  readonly to: number;
 }
 
 /**
  * Where in [param printed] gdUnit4 listed the scripts it could not load, from its heading to the
  * last line of the list, with the errors read off it. Null when it listed none.
  */
-export function discoveryListing(
-  printed: readonly string[],
-): { readonly errors: ScriptError[]; readonly from: number; readonly to: number } | null {
-  const start = printed.findIndex((line) => line.includes(DISCOVERY_FAILED));
-  if (start < 0) {
-    return null;
-  }
-  const found: ScriptError[] = [];
-  let message: string | null = null;
-  let to = start + 1;
-  for (const line of printed.slice(start + 1)) {
-    const at = /^\s*at (res:\/\/.+):(\d+)\s*$/.exec(line);
-    if (at !== null && message !== null) {
-      found.push({ path: at[1] ?? '', line: Number(at[2]) === 0 ? null : Number(at[2]), message });
-      message = null;
-    } else if (at === null && message === null && /^ {2}\S/.test(line)) {
-      message = line.trim();
-    } else {
-      break;
+export function discoveryListing(printed: Iterable<string>): DiscoveryListing | null {
+  return foldedOver(new DiscoveryRead(), printed);
+}
+
+/** {@link discoveryListing}, a line at a time. */
+export class DiscoveryRead implements LineFold<DiscoveryListing | null> {
+  private readonly found: ScriptError[] = [];
+  private message: string | null = null;
+  private at = 0;
+  private from = -1;
+  private to = -1;
+  private done = false;
+
+  take(line: string): void {
+    const at = this.at;
+    this.at += 1;
+    if (this.done) {
+      return;
     }
-    to += 1;
+    if (this.from < 0) {
+      if (line.includes(DISCOVERY_FAILED)) {
+        this.from = at;
+        this.to = at + 1;
+      }
+      return;
+    }
+    const located = /^\s*at (res:\/\/.+):(\d+)\s*$/.exec(line);
+    if (located !== null && this.message !== null) {
+      this.found.push({
+        path: owned(located[1] ?? ''),
+        line: Number(located[2]) === 0 ? null : Number(located[2]),
+        message: this.message,
+      });
+      this.message = null;
+    } else if (located === null && this.message === null && /^ {2}\S/.test(line)) {
+      this.message = owned(line.trim());
+    } else {
+      this.done = true;
+      return;
+    }
+    this.to += 1;
   }
-  // gdUnit4 lists them in the order the filesystem hands it the directory, which Linux and
-  // Windows disagree about, so the same project named its broken scripts in two orders.
-  const errors = found.toSorted((a, b) =>
-    a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0),
-  );
-  return { errors, from: start, to };
+
+  result(): DiscoveryListing | null {
+    if (this.from < 0) {
+      return null;
+    }
+    // gdUnit4 lists them in the order the filesystem hands it the directory, which Linux and
+    // Windows disagree about, so the same project named its broken scripts in two orders.
+    const errors = this.found.toSorted((a, b) =>
+      a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0),
+    );
+    return { errors, from: this.from, to: this.to };
+  }
 }
 
 const ESCAPE = String.fromCharCode(0x1b);
@@ -828,22 +940,14 @@ export const RENDERED_AWAY_NOTE =
  * value may be the merge, and one whose sides still read alike says why, rather than letting
  * either side stand as the value. A string gdUnit4 masked because it held BBCode is unmasked.
  *
- * [param printed] may come as texts in the order printed, each a suite's lines, since a whole
- * console can pass what one string holds. A diff is read within one text.
+ * [param printed] may come as the diffs {@link PrintedDiffs} read off a console as it arrived,
+ * since a whole console can pass what one string holds.
  */
 export function withActualsPrinted<Case extends { readonly detail: string | null }>(
   failed: readonly Case[],
-  printed: string | readonly string[],
+  printed: string | readonly PrintedDiff[],
 ): Case[] {
-  // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
-  // return taken out, so the two are compared the way the report spells them.
-  const texts = typeof printed === 'string' ? [printed] : printed;
-  const matches = texts.flatMap((text) => [...text.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)]);
-  const diffs = matches.map((match) => ({
-    suffix: match[3] ?? '',
-    at: match[5] ?? '',
-    ...readDiff(match[1] ?? ''),
-  }));
+  const diffs = typeof printed === 'string' ? diffsIn(printed) : printed;
   // Each printed diff belongs to one failure, and both are in the order the run met them. The same
   // assertion line failing twice merges alike when the values differ only where the marks were, so
   // a diff offered to every failure it matched gave both the first one's value.
@@ -869,11 +973,85 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
 }
 
 /** One failing string's diff as the console printed it, with the value read back from it. */
-interface PrintedDiff {
+export interface PrintedDiff {
   readonly suffix: string;
   readonly at: string;
   readonly merged: string;
   readonly actual: string;
+}
+
+/** Every diff [param printed] holds, in the order printed. */
+function diffsIn(printed: string): PrintedDiff[] {
+  // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
+  // return taken out, so the two are compared the way the report spells them.
+  return [...printed.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)].map(diffOf);
+}
+
+/** The diff [param match] of {@link PRINTED_ACTUAL} found, in strings of its own. */
+function diffOf(match: RegExpExecArray): PrintedDiff {
+  const { merged, actual } = readDiff(match[1] ?? '');
+  return { suffix: owned(match[3] ?? ''), at: owned(match[5] ?? ''), merged: owned(merged), actual: owned(actual) };
+}
+
+/** What opens a printed diff, which no match starts anywhere else. */
+const DIFF_OPENS = " but was\n '";
+
+/**
+ * The diffs a console prints, read as its bytes arrive, as {@link withActualsPrinted} reads them off
+ * the whole text. It keeps the text from the first diff not yet ended, and otherwise only enough to
+ * find a diff's opening cut between two chunks.
+ */
+export class PrintedDiffs {
+  private readonly decoder = new StringDecoder('utf8');
+  private readonly found: PrintedDiff[] = [];
+  /** The text not yet read past, line breaks as the report spells them. */
+  private unread = '';
+  /** A carriage return the last chunk ended on, which a line feed in the next makes a line break. */
+  private carriage = false;
+
+  /** Reads [param chunk], the bytes printed next. */
+  take(chunk: Buffer): void {
+    this.read(this.decoder.write(chunk), false);
+  }
+
+  /** The diffs read, once the console has ended. */
+  finish(): PrintedDiff[] {
+    this.read(this.decoder.end(), true);
+    return [...this.found];
+  }
+
+  /** How many characters of the console are held, which stays small unless a diff is still open. */
+  get held(): number {
+    return this.unread.length;
+  }
+
+  private read(text: string, ended: boolean): void {
+    let more = `${this.carriage ? '\r' : ''}${text}`;
+    this.carriage = !ended && more.endsWith('\r');
+    if (this.carriage) {
+      more = more.slice(0, -1);
+    }
+    this.unread += more.replaceAll('\r\n', '\n');
+    if (!ended && !more.includes('\n')) {
+      return;
+    }
+    let from = 0;
+    PRINTED_ACTUAL.lastIndex = 0;
+    for (let match = PRINTED_ACTUAL.exec(this.unread); match !== null; match = PRINTED_ACTUAL.exec(this.unread)) {
+      const end = match.index + match[0].length;
+      // A location runs on to the end of its line, so a match whose line has not ended may still
+      // grow. One that has ended is the match the whole text gives.
+      if (!ended && !this.unread.includes('\n', end)) {
+        break;
+      }
+      this.found.push(diffOf(match));
+      from = end;
+    }
+    PRINTED_ACTUAL.lastIndex = 0;
+    const open = this.unread.indexOf(DIFF_OPENS, from);
+    const keepFrom = open >= 0 ? open : Math.max(from, this.unread.length - DIFF_OPENS.length + 1);
+    this.unread = owned(this.unread.slice(keepFrom));
+  }
 }
 
 /**
@@ -1018,7 +1196,7 @@ function foldedReports(reports: readonly CaseReport[]): FoldedReport[] {
  * Read report by report rather than case by case, because the printed diffs are matched in the
  * order the run met them, and a case failing two string equalities printed two.
  */
-export function failedCases(report: TestReport, printed: string | readonly string[]): FailedCase[] {
+export function failedCases(report: TestReport, printed: string | readonly PrintedDiff[]): FailedCase[] {
   const cases = report.suites.flatMap((suite) =>
     suite.cases
       .filter((entry) => entry.status === 'failed' || entry.status === 'error')
@@ -1182,50 +1360,60 @@ const OVERALL = 'Overall Summary';
  * line ending each one, with the totals repeated under `Overall Summary`. Matched loosely, on the
  * count and the word, because the runner writes them with colour and cursor moves around them.
  */
-export function orphansPrinted(printed: readonly string[]): OrphanReport {
-  const suites: SuiteOrphans[] = [];
-  let total: number | null = null;
-  let running: string | null = null;
-  const named = new Map<string, OrphansLeft[]>();
-  for (const line of printed) {
+export function orphansPrinted(printed: Iterable<string>): OrphanReport {
+  return foldedOver(new OrphansRead(), printed);
+}
+
+/** {@link orphansPrinted}, a line at a time. */
+export class OrphansRead implements LineFold<OrphanReport> {
+  private readonly suites: SuiteOrphans[] = [];
+  private total: number | null = null;
+  private running: string | null = null;
+  private readonly named = new Map<string, OrphansLeft[]>();
+
+  take(line: string): void {
     const left = orphansLeftOn(line);
     if (left !== null) {
-      const known = named.get(left.suite);
+      const known = this.named.get(left.suite);
       if (known === undefined) {
-        named.set(left.suite, [left]);
+        this.named.set(left.suite, [left]);
       } else {
         known.push(left);
       }
-      continue;
+      return;
     }
     const started = suiteOpenedBy(line);
     if (started !== null) {
-      running = started;
-      continue;
+      this.running = owned(started);
+      return;
     }
     const counted = ORPHANS.exec(line);
     if (counted?.[1] === undefined) {
-      continue;
+      return;
     }
     const orphans = Number(counted[1]);
     if (line.includes(OVERALL)) {
-      total = orphans;
-      running = null;
-      continue;
+      this.total = orphans;
+      this.running = null;
+      return;
     }
-    if (running !== null && orphans > 0) {
-      suites.push({ path: running, orphans, left: [] });
+    if (this.running !== null && orphans > 0) {
+      this.suites.push({ path: this.running, orphans, left: [] });
     }
     // Whether it counted any or not: the suite's statistics line is the end of its block, and the
     // next count belongs to whatever runs next rather than to this one.
-    running = null;
+    this.running = null;
   }
-  return {
-    // Summed as a fallback, so a summary line this stops recognising costs the total and not the
-    // per-suite rows, which are the part worth having.
-    total: total ?? suites.reduce((sum, suite) => sum + suite.orphans, 0),
-    suites: suites.map((suite) => ({ ...suite, left: named.get(suite.path) ?? [] })),
-  };
+
+  result(): OrphanReport {
+    const { suites, named } = this;
+    return {
+      // Summed as a fallback, so a summary line this stops recognising costs the total and not the
+      // per-suite rows, which are the part worth having.
+      total: this.total ?? suites.reduce((sum, suite) => sum + suite.orphans, 0),
+      suites: suites.map((suite) => ({ ...suite, left: named.get(suite.path) ?? [] })),
+    };
+  }
 }
 
 /** One suite the run finished, as its statistics line counted it, and the cases that did not pass. */
@@ -1254,46 +1442,67 @@ export function finishesASuite(line: string): boolean {
  * minutes answered nothing of the suites that had run. Read as it goes as well, for the progress a
  * long run reports.
  */
-export function suitesPrinted(printed: readonly string[]): {
+export function suitesPrinted(printed: Iterable<string>): SuitesPrinted {
+  return foldedOver(new SuitesRead(), printed);
+}
+
+/** The suites a run finished, and the one it is in. */
+export interface SuitesPrinted {
   finished: SuiteFinished[];
   running: string | null;
-} {
-  const finished: SuiteFinished[] = [];
-  let running: string | null = null;
-  let failed: string[] = [];
-  for (const line of printed) {
+}
+
+/** {@link suitesPrinted}, a line at a time. */
+export class SuitesRead implements LineFold<SuitesPrinted> {
+  private finished: SuiteFinished[] = [];
+  private running: string | null = null;
+  private failed: string[] = [];
+
+  take(line: string): void {
     const started = suiteOpenedBy(line);
     if (started !== null) {
-      running = started;
-      failed = [];
-      continue;
+      this.running = owned(started);
+      this.failed = [];
+      return;
     }
-    if (running === null) {
-      continue;
+    if (this.running === null) {
+      return;
     }
     const ended = caseLineOf(line);
     if (ended?.verdict === 'FAILED') {
-      failed.push(ended.name);
-      continue;
+      this.failed.push(owned(ended.name));
+      return;
     }
     const counted = finishesASuite(line) ? SUITE_COUNTS.exec(line) : null;
     if (counted !== null) {
-      finished.push({
-        path: running,
+      this.finished.push({
+        path: this.running,
         cases: Number(counted[1]),
         errors: Number(counted[2]),
         failures: Number(counted[3]),
-        failed,
+        failed: this.failed,
       });
-      running = null;
+      this.running = null;
     }
   }
-  return { finished, running };
+
+  result(): SuitesPrinted {
+    return { finished: [...this.finished], running: this.running };
+  }
+
+  /** A reading that goes on from where this one is, leaving this one as it is. */
+  copy(): SuitesRead {
+    const copy = new SuitesRead();
+    copy.finished = [...this.finished];
+    copy.running = this.running;
+    copy.failed = [...this.failed];
+    return copy;
+  }
 }
 
 /** The progress message for a run [param elapsedMs] in, from what [param printed] says so far. */
-export function testProgressMessage(printed: readonly string[], elapsedMs: number): string {
-  const { finished, running } = suitesPrinted(printed);
+export function testProgressMessage(printed: Iterable<string> | SuitesPrinted, elapsedMs: number): string {
+  const { finished, running } = Symbol.iterator in printed ? suitesPrinted(printed) : printed;
   const failing = finished.filter((suite) => suite.errors + suite.failures > 0).length;
   const seconds = Math.floor(elapsedMs / 1000);
   const took = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;

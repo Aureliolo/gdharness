@@ -174,13 +174,17 @@ export function checkWithEngine(godotPath: string, projectPath: string): CheckSc
  * scripts it could not load, each listed error as the engine printed it with its backtrace, and the
  * load failure that follows each. A parse error in a core script took nineteen dependents down
  * with it, and their entries alone ran the answer past fifteen kilobytes after the head had already
- * folded them into one list.
+ * folded them into one list. [param listing] is where the whole run listed them, for entries that
+ * are its first only.
  */
-export function withoutListed(entries: readonly LogEntry[], errors: readonly ScriptError[]): LogEntry[] {
+export function withoutListed(
+  entries: readonly LogEntry[],
+  errors: readonly ScriptError[],
+  listing = discoveryListing(entries.map((entry) => entry.text)),
+): LogEntry[] {
   if (errors.length === 0) {
     return [...entries];
   }
-  const listing = discoveryListing(entries.map((entry) => entry.text));
   const paths = new Set(errors.map((error) => error.path));
   return entries.filter((entry, at) => {
     if (listing !== null && at >= listing.from && at < listing.to) {

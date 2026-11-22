@@ -148,14 +148,7 @@ import {
   restartUnderway,
   runtimeAddonOfAnotherRelease,
 } from './editor-open.js';
-import {
-  EXIT_LEAK,
-  heldAtExit,
-  projectSelfTypedExports,
-  selfTypedSentence,
-  WALK_STOPPED_SENTENCE,
-  walkStoppedPartWay,
-} from './engine-leaks.js';
+import { projectSelfTypedExports, selfTypedSentence, WALK_STOPPED_SENTENCE } from './engine-leaks.js';
 import {
   CONSOLE_CLOSED,
   diedAtStartOf,
@@ -225,17 +218,15 @@ import {
   failedCases,
   failedWithin,
   finishesASuite,
-  hookFailuresPrinted,
   ignoredForTheRunner,
   ignoredLeftOut,
   ignoredYetRan,
   orphansLeftSaid,
   orphansPrinted,
   parseJUnit,
-  rowsIgnoredIn,
+  type PrintedDiff,
+  PrintedDiffs,
   type ScriptError,
-  scriptErrorsPrinted,
-  suitesPrinted,
   type TestReport,
   testProgressMessage,
   whyNoReport,
@@ -384,12 +375,10 @@ import { runtimeDirectory } from './runtime-directories.js';
 import { discard, scratchDirectory, sweepAbandonedScratch } from './scratch.js';
 import {
   checkWithEngine,
-  compileErrorsIn,
   originsOf,
   type ScriptOrigin,
   type UnconfirmedOrigin,
   unresolvedClassIn,
-  withoutListed,
 } from './script-origins.js';
 import {
   callersOf,
@@ -433,14 +422,14 @@ import {
   funcOf,
   named,
   pushErrorsFailedSentence,
+  type RunRead,
   readEngineLog,
   readExpected,
   SuiteCuts,
-  textsCutAt,
   uncollectedSaid,
   unexpectedErrors,
-  type withNestedErrors,
 } from './suite-judge.js';
+import { DISTINCT_KEPT, type RepeatedError, ScriptErrorRepeats, TestRunTally } from './test-tally.js';
 import {
   capsFrames,
   gdUnitFailsOnPushErrors,
@@ -3512,13 +3501,6 @@ export function autoloadNotCompiledNote(
   return `No result counts: the autoload ${at.name} (${at.path}) did not compile${where}${stop}${more}${dependents} Every suite runs with the autoloads, so a case calling into a script that did not compile fails the same way on every pass, and one waiting in a loop for the call to succeed never ends. ${ended}. script_diagnostics checks a script without running anything.`;
 }
 
-/** One script error a run printed over and over: its text, where it was raised, and how often. */
-interface RepeatedError {
-  readonly text: string;
-  readonly where: string | null;
-  readonly times: number;
-}
-
 /** How many identical script errors, the last thing a run printed among them, make a loop. */
 const LOOPING_AFTER = 100;
 
@@ -3532,25 +3514,21 @@ const LOOPING_AFTER = 100;
  * that copy a loop printed 1,767 times counted one, so the place is read off the last whole copy.
  */
 export function repeatingScriptError(
-  entries: readonly LogEntry[],
-  byScript: (entry: LogEntry) => boolean,
+  entries: readonly LogEntry[] | ScriptErrorRepeats,
+  byScript: (entry: LogEntry) => boolean = () => false,
 ): RepeatedError | null {
-  const last = entries.at(-1);
-  if (last === undefined || !byScript(last)) {
-    return null;
+  let repeats: ScriptErrorRepeats;
+  if (entries instanceof ScriptErrorRepeats) {
+    repeats = entries;
+  } else {
+    repeats = new ScriptErrorRepeats();
+    for (const entry of entries) {
+      repeats.take(entry, byScript(entry));
+    }
   }
-  const whole =
-    last.detail.length > 0
-      ? last
-      : (entries.findLast(
-          (entry) => entry.text === last.text && entry.detail.length > 0 && byScript(entry),
-        ) ?? last);
-  const where = whole.detail[0] ?? null;
-  const times = entries.filter(
-    (entry) => entry.text === last.text && (entry.detail[0] ?? null) === where && byScript(entry),
-  ).length;
-  return times >= LOOPING_AFTER
-    ? { text: last.text, where: where?.replace(/^at: /, '') ?? null, times }
+  const repeated = repeats.result();
+  return repeated !== null && repeated.times >= LOOPING_AFTER
+    ? { ...repeated, where: repeated.where?.replace(/^at: /, '') ?? null }
     : null;
 }
 
@@ -4253,6 +4231,9 @@ function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading[
 /** How many distinct engine entries a test run's answer carries, the newest kept. */
 const MOST_ENGINE_ENTRIES = 200;
 
+/** How many entries a test run's log holds before it hands the oldest to the run's tally. */
+const ENTRIES_HELD = 10_000;
+
 /** How many distinct ordinary lines a check's answer carries, the newest kept. */
 const MOST_PRINTED_LINES = 50;
 /** How many distinct undeclared engine errors a test run's answer names, the first kept. */
@@ -4324,18 +4305,34 @@ function gdUnitFailsOnScriptErrors(projectPath: string): boolean {
  * at the deepest call the engine allows, where that logger cannot be called. The case then passes
  * on whatever the faulted call returned, beside thousands of engine errors, and the run exits 0.
  */
-function uncaughtNote(uncaught: readonly LogEntry[]): string | undefined {
-  const first = uncaught[0];
-  if (first === undefined) {
+function uncaughtNote(uncaught: TestRunTally['uncaught'] | null): string | undefined {
+  const first = uncaught?.first;
+  if (uncaught === null || first === null || first === undefined) {
     return undefined;
   }
-  const count = uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`;
+  const count = uncaught.count === 1 ? 'one script error' : `${String(uncaught.count)} script errors`;
   return (
     `Every case passed, but the run printed ${count} that no case failed on, the first "${first.text}". ` +
     'They are under uncaughtScriptErrors. gdUnit4 fails a case on the script errors its logger sees, and ' +
     'it did not see these, so the cases passed on whatever the faulted calls returned. A stack overflow is ' +
     'one it cannot see: it is raised deeper than the logger can be called.'
   );
+}
+
+/** How many distinct script errors no case failed on an answer lists in full. */
+const MOST_UNCAUGHT_ERRORS = 20;
+
+/**
+ * What a test run printed more of than its answer keeps, as the answer says it, or nothing. Below the
+ * bounds every list is read off the whole run.
+ */
+function printedCapped(tally: TestRunTally): { printedCapped?: string } {
+  const capped = tally.capped();
+  return capped.length === 0
+    ? {}
+    : {
+        printedCapped: `The run printed more distinct lines than an answer keeps, so ${capped.join(', ')} ${capped.length === 1 ? 'is' : 'are'} from a bounded window of ${String(DISTINCT_KEPT)} distinct entries, and the counts in ${capped.length === 1 ? 'it' : 'them'} are of that window. The counts of errors and warnings are of every line.`,
+      };
 }
 
 /** Where gdUnit4 comes from, for a project without it or with one too old to run the tests. */
@@ -5466,9 +5463,10 @@ interface TestPrepared extends TestScanned {
 /** A test run whose engine has ended. */
 interface TestRan extends TestPrepared {
   run: SpawnedTest;
-  console: Buffer[];
-  /** The byte of the console each suite's lines begin at. */
-  consoleCuts: readonly number[];
+  /** What the piped streams said, read as the run's log let each entry go. */
+  tally: TestRunTally;
+  /** The diffs of failing strings the console printed, colours and all. */
+  diffs: readonly PrintedDiff[];
   timedOut: boolean;
   /** Why the engine was ended for printing past the limit a log may hold, or null when it was not. */
   capped: string | null;
@@ -5488,7 +5486,7 @@ interface TestReadOut extends TestRan {
     engineStart?: number | undefined;
     engineCompile?: number | undefined;
   };
-  casePrinted: ReturnType<typeof withNestedErrors>;
+  casePrinted: RunRead;
   notCompiled: ReturnType<typeof autoloadNotCompiled>;
   report: TestReport | null;
   reportProblem: string | null;
@@ -5499,9 +5497,8 @@ interface TestReadOut extends TestRan {
 interface TestJudged extends TestReadOut {
   engineEntries: ReturnType<typeof foldedRepeats>;
   exitCode: SpawnedTest['exitCode'];
-  uncaught: SpawnedTest['log']['all'];
-  printed: SpawnedTest['log']['all'];
-  said: string[];
+  /** The script errors no case failed on, or none when the run is not judged on them. */
+  uncaught: TestRunTally['uncaught'] | null;
   nothingRan: ReturnType<typeof whyNoReport> | null;
   hung: boolean;
   printedErrors: ScriptError[];
@@ -9888,7 +9885,7 @@ class GodotServer {
    * thirty minutes, and the SDK's own default is a minute. The number sent is the seconds the run
    * has taken, which only goes up as the protocol asks. The counts are in the message.
    */
-  private reportTestProgress(log: GameLog): NodeJS.Timeout | undefined {
+  private reportTestProgress(log: GameLog, tally: TestRunTally): NodeJS.Timeout | undefined {
     const progress = callProgress();
     if (progress === undefined) {
       return undefined;
@@ -9897,9 +9894,15 @@ class GodotServer {
     let read = 0;
     let lastSent = began;
     const ticker = setInterval(() => {
+      // What the log let go was read by the tally, and what it still holds is read on from there.
+      const suites = tally.suites.copy();
       const entries = log.all;
-      const finishedOne = entries.slice(read).some((entry) => finishesASuite(entry.text));
-      read = entries.length;
+      for (const entry of entries) {
+        suites.take(entry.text);
+      }
+      const from = log.retiredCount;
+      const finishedOne = entries.slice(Math.max(0, read - from)).some((entry) => finishesASuite(entry.text));
+      read = from + entries.length;
       const now = Date.now();
       if (!finishedOne && now - lastSent < heartbeatMs()) {
         return;
@@ -9908,10 +9911,7 @@ class GodotServer {
       // Whole seconds, from ticks at least a second apart, so each is more than the last.
       progress(
         Math.floor((now - began) / 1000),
-        testProgressMessage(
-          entries.map((entry) => entry.text),
-          now - began,
-        ),
+        testProgressMessage(suites.result(), now - began),
       );
     }, 1000);
     ticker.unref();
@@ -10319,9 +10319,9 @@ class GodotServer {
     const attempt = await startedUntilItRuns(
       () => this.testEngineRan(prepared, onDesktop, autoloaded, seeded),
       callSignal(),
-      (one) => !one.timedOut && one.capped === null && one.stopped.for === null && diedAtStartOf(one.run),
+      (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
     );
-    const { run, console, consoleCuts, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
+    const { run, tally, diffs, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
     // Or its pid never came, which is a helper that hung until the run's limit ended it.
     const helperFailed = onDesktop
@@ -10342,8 +10342,8 @@ class GodotServer {
     return await this.testRead({
       ...prepared,
       run,
-      console,
-      consoleCuts,
+      tally,
+      diffs,
       timedOut,
       capped,
       silentForMs,
@@ -10361,8 +10361,8 @@ class GodotServer {
     seeded: SeededFiles,
   ): Promise<{
     readonly run: SpawnedTest;
-    readonly console: Buffer[];
-    readonly consoleCuts: readonly number[];
+    readonly tally: TestRunTally;
+    readonly diffs: readonly PrintedDiff[];
     readonly timedOut: boolean;
     readonly capped: string | null;
     readonly silentForMs: number;
@@ -10370,7 +10370,17 @@ class GodotServer {
     readonly stopped: { for: { name: string; path: string } | null };
     readonly crashedStarts?: number;
   }> {
-    const { project, engine, cmdArgs, timeoutMs, userData, helperFiles, engineLog } = prepared;
+    const { args, flags, project, engine, cmdArgs, timeoutMs, userData, helperFiles, engineLog } = prepared;
+    // Every reading the answer takes from the piped streams is taken as the log lets each entry go,
+    // so a run's memory does not grow with what it prints.
+    const tally = new TestRunTally({
+      autoloaded,
+      verbose: flags.value.includes('--verbose'),
+      echo: readNonEmptyString(args, 'printed'),
+      shown: aboveTheRunner,
+      uncaught: (entry, byScript) => byScript && !entry.detail.some((line) => line.includes(ERROR_ASSERT)),
+    });
+    const log = new GameLog({ most: ENTRIES_HELD, retired: (entry, byScript) => tally.take(entry, byScript) });
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(
@@ -10379,6 +10389,7 @@ class GodotServer {
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
       project.value.path,
+      log,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
     const keep = async (): Promise<void> => {
@@ -10387,16 +10398,17 @@ class GodotServer {
     const keeping = run.settled.then(keep, keep);
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
-    const console: Buffer[] = [];
+    const diffs = new PrintedDiffs();
     // A suite printing past what a log may hold ends the engine, as a share doing so ends gdharness
-    // test's. Counted on the log and on the console alike, each from the start of the running suite.
+    // test's. Each suite is judged on the log and on the console, the console's errors counted with
+    // its other lines, from where the suite began to where the next one does.
     const limit = logLimitBytes();
-    const logCuts = new SuiteCuts();
-    const consoleCuts = new SuiteCuts();
+    const logCuts = new SuiteCuts(limit);
+    const consoleCuts = new SuiteCuts(limit);
     const capped: { why: string | null } = { why: null };
     const capPast = (cuts: SuiteCuts): boolean => {
-      if (capped.why === null && cuts.printed > limit) {
-        capped.why = pastTheLogLimit(cuts.suite, limit);
+      if (capped.why === null && cuts.past !== null) {
+        capped.why = pastTheLogLimit(cuts.past.suite, limit);
         run.stop();
       }
       return capped.why !== null;
@@ -10406,27 +10418,31 @@ class GodotServer {
     let lastSaid = Date.now();
     let saidAnything = false;
     run.process.stdout?.on('data', (data: Buffer) => {
-      console.push(data);
+      diffs.take(data);
       consoleCuts.take(data);
       capPast(consoleCuts);
       lastSaid = Date.now();
       saidAnything = true;
     });
-    run.process.stderr?.on('data', () => {
+    run.process.stderr?.on('data', (data: Buffer) => {
+      consoleCuts.add(data.length);
+      capPast(consoleCuts);
       lastSaid = Date.now();
       saidAnything = true;
     });
-    const reporting = this.reportTestProgress(run.log);
+    const reporting = this.reportTestProgress(run.log, tally);
     let silentForMs = 0;
     const stopped: { for: { name: string; path: string } | null } = { for: null };
     const timedOut = await new Promise<boolean>((resolve) => {
       let read = 0;
       const watching = setInterval(() => {
-        const entries = run.log.all;
-        for (const entry of entries.slice(read)) {
+        const from = run.log.retiredCount;
+        for (const entry of run.log.all.slice(Math.max(0, read - from))) {
           stopped.for ??= autoloadNotCompiled(entry, autoloaded);
         }
-        read = entries.length;
+        read = from + run.log.all.length;
+        // What the log let go before this look was read by the tally.
+        stopped.for ??= tally.notCompiled;
         if (stopped.for !== null) {
           clearInterval(watching);
           run.stop();
@@ -10456,10 +10472,11 @@ class GodotServer {
     }
     await run.settled;
     await keeping;
+    run.log.handOverHeld();
     return {
       run,
-      console,
-      consoleCuts: consoleCuts.cuts,
+      tally,
+      diffs: diffs.finish(),
       timedOut,
       capped: capped.why,
       silentForMs,
@@ -10475,8 +10492,7 @@ class GodotServer {
       began,
       rebuiltAt,
       importedAt,
-      run,
-      autoloaded,
+      tally,
       stopped,
       ours,
       userData,
@@ -10487,7 +10503,7 @@ class GodotServer {
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
-    const casePrinted = readEngineLog(engineLog, run.log.all);
+    const casePrinted = readEngineLog(engineLog, tally.nested);
     const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
@@ -10505,10 +10521,7 @@ class GodotServer {
     // Read again once the run is over, so a run that ended between two looks answers as one that
     // was stopped: whether it got through its suites first is a race, and what they said about
     // code that did not compile is not an answer either way.
-    const notCompiled =
-      stopped.for ??
-      run.log.all.map((entry) => autoloadNotCompiled(entry, autoloaded)).find((found) => found !== null) ??
-      null;
+    const notCompiled = stopped.for ?? tally.notCompiled;
 
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
@@ -10567,7 +10580,6 @@ class GodotServer {
   /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
   private async testJudged(read: TestReadOut): Promise<ToolResponse> {
     const {
-      flags,
       run,
       asked,
       timeoutMs,
@@ -10579,20 +10591,11 @@ class GodotServer {
       project,
       notCompiled,
       report,
+      tally,
     } = read;
-    // An engine ended for printing too much is judged as one cut off by the limit.
-    const cutOff = timedOut || capped !== null;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
-    // use at exit among them, and they are what the flag was passed for.
-    const engineEntries = foldedRepeats(
-      run.log
-        .select({
-          severity: flags.value.includes('--verbose') ? 'info' : 'warning',
-          sinceLastCall: false,
-          limit: Number.POSITIVE_INFINITY,
-        })
-        .entries.map(aboveTheRunner),
-    );
+    // use at exit among them, and they are what the flag was passed for. The tally took them so.
+    const engineEntries = tally.engine.result();
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: failedVerdict(report),
@@ -10606,39 +10609,25 @@ class GodotServer {
     };
     const exitCode = run.neverStarted === true ? null : run.exitCode;
     const uncaught =
-      report !== null && exitCode === 0 && !cutOff && gdUnitFailsOnScriptErrors(project.value.path)
-        ? run.log.all.filter(
-            (entry) =>
-              run.log.raisedByScript(entry) && !entry.detail.some((line) => line.includes(ERROR_ASSERT)),
-          )
-        : [];
-    // All of it, because the counts are read off it: the newest two hundred lines lost an early
-    // suite's orphans, and with them the warning, on any tier that printed a line per case.
-    const printed = run.log.select({
-      severity: 'info',
-      sinceLastCall: false,
-      limit: Number.POSITIVE_INFINITY,
-    }).entries;
+      report !== null && exitCode === 0 && !timedOut && gdUnitFailsOnScriptErrors(project.value.path)
+        ? tally.uncaught
+        : null;
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
-    // and `passed` is the one word a skimming reader must never be handed for one of those.
-    const said = printed.map((entry) => entry.text);
-    const nothingRan = cutOff || notCompiled !== null ? null : whyNoReport(said, asked.join(' and '));
+    // and `passed` is the one word a skimming reader must never be handed for one of those. Read off
+    // every line, as the counts are: the newest two hundred lost an early suite's orphans, and with
+    // them the warning, on any tier that printed a line per case.
+    const nothingRan = timedOut || notCompiled !== null ? null : tally.noReport.result()(asked.join(' and '));
     const cutShort =
       timedOut && notCompiled === null
-        ? timedOutVerdict(
-            timeoutMs,
-            silentForMs,
-            repeatingScriptError(run.log.all, (entry) => run.log.raisedByScript(entry)),
-            saidAnything,
-          )
+        ? timedOutVerdict(timeoutMs, silentForMs, repeatingScriptError(tally.repeats), saidAnything)
         : null;
     const hung = cutShort?.hung ?? false;
     const printedErrors =
       notCompiled !== null
-        ? compileErrorsIn(run.log.all)
-        : cutOff || exitCode !== 105
+        ? tally.compileErrors
+        : timedOut || exitCode !== 105
           ? []
-          : scriptErrorsPrinted(said);
+          : (tally.discovery.result()?.errors ?? []);
     const declaring = await this.declaringOrigins(printedErrors, project.value.path, engine.value);
     const scriptErrors: ScriptError[] = [...declaring.origins, ...printedErrors];
     const ranAs = ranAsOf({
@@ -10647,7 +10636,7 @@ class GodotServer {
       cutShort,
       nothingRan,
       brokenScripts: new Set(scriptErrors.map((error) => error.path)).size,
-      uncaught: uncaught.length,
+      uncaught: uncaught?.count ?? 0,
       exitCode,
       verdicts,
       run,
@@ -10657,8 +10646,6 @@ class GodotServer {
       engineEntries,
       exitCode,
       uncaught,
-      printed,
-      said,
       nothingRan,
       hung,
       printedErrors,
@@ -10670,7 +10657,7 @@ class GodotServer {
 
   /** A test run's verdict worded beside what was missing, the saves and the lines it was asked to echo. */
   private testVerdict(judged: TestJudged): ToolResponse {
-    const { args, project, asked, missing, run, nothingRan, ranAs } = judged;
+    const { project, asked, missing, tally, nothingRan, ranAs } = judged;
     const nothingAt = missing.join(' and ');
     // gdUnit4's passed is about the paths that were there, and a run of fewer is not called one.
     const verdict =
@@ -10689,11 +10676,7 @@ class GodotServer {
     const savesNote = savesStayPut() && nothingRan === null ? SAVES_NOT_MOVED_NOTE : undefined;
     // Asked for by name, on a pass as much as a failure: a probe suite measuring something had to
     // fail an assertion to carry its numbers back, since a passing answer holds nothing it printed.
-    const marker = readNonEmptyString(args, 'printed');
-    const echoed =
-      marker === undefined
-        ? undefined
-        : run.log.select({ severity: 'info', sinceLastCall: false, contains: marker, limit: 200 });
+    const echoed = tally.echoed?.result();
     const printedLines =
       echoed === undefined
         ? {}
@@ -10724,15 +10707,14 @@ class GodotServer {
       hung,
       missingNote,
       nothingRan,
-      printed,
       printedErrors,
       printedLines,
       ranAs,
       reportProblem,
-      said,
       savesNote,
       scriptErrors,
       silentForMs,
+      tally,
       timedOut,
       tookMs,
       tookMsBy,
@@ -10741,7 +10723,8 @@ class GodotServer {
     // What finished before a run without a report ended, which only the console holds: a run cut
     // off by its timeout or by the client otherwise answers nothing of the suites it got through.
     if (report === null) {
-      const { finished, running } = suitesPrinted(said);
+      const { finished, running } = tally.suites.result();
+      const entries = tally.entriesWithout(scriptErrors, 60);
       const failing = finished.filter((suite) => suite.errors + suite.failures > 0);
       const atTheEnd = {
         ...nonEmpty({
@@ -10794,8 +10777,9 @@ class GodotServer {
                 ...nonEmpty(foldedScriptErrors(scriptErrors)),
                 ...atTheEnd,
                 arguments: cmdArgs,
-                entries: foldedRepeats(withoutListed(printed, scriptErrors).map(aboveTheRunner)).slice(0, 60),
+                entries,
                 ...printedLines,
+                ...printedCapped(tally),
                 savesNote,
                 ...scanned,
                 ...windowSaid,
@@ -10818,17 +10802,15 @@ class GodotServer {
 
   /** The answer of a test run that wrote a report, judged against what the engine printed. */
   private testReported(reported: TestWithReport): ToolResponse {
-    const { run, console, consoleCuts, report, casePrinted, declaredErrors, said, uncaught } = reported;
-    // A suite at a time, since the whole console can pass what one string holds.
-    const { failed, briefed } = failedWithin(
-      failedCases(report, textsCutAt(console, consoleCuts)),
-      FAILED_BUDGET,
-    );
+    const { tally, diffs, report, casePrinted, declaredErrors, uncaught } = reported;
+    // From the diffs read off the console as it printed, since the whole console can pass what one
+    // string holds.
+    const { failed, briefed } = failedWithin(failedCases(report, diffs), FAILED_BUDGET);
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
     // of that into its XML, so a tier that passed every case and left nodes behind arrived as the
     // word "warnings" and nothing else: no failure, no entry, nothing naming a suite. Read off
     // what it printed, which is where the counts are.
-    const orphans = orphansPrinted(said);
+    const orphans = tally.orphans.result();
     const leftBehind = new Map(orphans.suites.map((suite) => [suite.path, suite.orphans]));
     const orphansIn = (path: string | null): number => (path === null ? 0 : (leftBehind.get(path) ?? 0));
     const warnings = orphans.suites.map((suite) => ({
@@ -10853,7 +10835,7 @@ class GodotServer {
     const judgedErrors = unexpectedErrors(casePrinted, declaredErrors, [...casePrinted.suites.keys()]);
     // Less those already under uncaughtScriptErrors, and folded with how often each was printed: a
     // stack overflow prints an error for every frame, and came back as a thousand entries.
-    const uncaughtTexts = new Set(uncaught.map((entry) => entry.text));
+    const uncaughtTexts = uncaught?.texts ?? new Set<string>();
     // Less the script errors a case erred on, which are that case's failure under failed. Named here
     // as well, one null call was counted twice and its note advised declaring it.
     const erredOn = new Set(
@@ -10902,16 +10884,13 @@ class GodotServer {
     const undeclaredErrors = undeclaredAll.slice(0, MOST_UNDECLARED_ERRORS);
     // Off the piped streams rather than the engine's log file, which has stopped taking lines by
     // the time the engine reports what it still holds at exit.
-    const leakedAtExit = [
-      ...new Set(run.log.all.filter((entry) => EXIT_LEAK.test(entry.text)).map((entry) => entry.text)),
-    ];
+    const leakedAtExit = [...tally.leaked];
     // Listed all the same, and not counted: the engine's shutdown stopped before freeing them.
-    const walkStopped = leakedAtExit.length > 0 && walkStoppedPartWay(run.log.all.map((entry) => entry.text));
+    const walkStopped = leakedAtExit.length > 0 && tally.walk.result();
     const countedLeaks = walkStopped ? [] : leakedAtExit;
     // Named in a sentence, since engineEntries keeps the newest lines and a verbose engine prints
     // one for every object it held: a game's leak was 1251 of them.
-    const heldNamed =
-      countedLeaks.length > 0 ? heldAtExit(run.log.all.map((entry) => entry.text)) : undefined;
+    const heldNamed = countedLeaks.length > 0 ? tally.held.result() : undefined;
     // A declared text matches the whole line, so one declaring the start of a message that ends in
     // a number reads as both never printed and undeclared, and nothing said the two were one line.
     const declaredNotPrinted = judgedErrors.neverPrinted.map((unprinted) => ({
@@ -10964,7 +10943,7 @@ class GodotServer {
       judgedErrors,
       orphansIn,
       report,
-      said,
+      tally,
       uncaught,
       undeclaredErrors,
     } = judged;
@@ -10992,7 +10971,7 @@ class GodotServer {
     );
     // A hook that failed is counted on its suite and named nowhere in the report, so it is read off
     // what the run printed. It was answered as no failure at all, and the suite as passed.
-    const hooksPrinted = hookFailuresPrinted(said);
+    const hooksPrinted = tally.hooks.result();
     const hookFailures = report.suites
       .filter((suite) => suite.hookFailures + suite.hookErrors > 0)
       .flatMap((suite) => {
@@ -11016,10 +10995,10 @@ class GodotServer {
     const notRun = report.suites.reduce((sum, suite) => sum + notRunIn(suite), 0);
     // Folded the way engineEntries is, from a subset of the same entries, so each folded entry here
     // has the first index its counterpart there has.
-    const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
-    const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
+    const uncaughtFolded = uncaught?.folded.result() ?? [];
+    const listedAsUncaught = new Set(uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS).map((entry) => entry.index));
     const notApplied = ignoredYetRan(report, ignored);
-    const ignoreRead = ignoredLeftOut(report, ignored, declaredUnder, rowsIgnoredIn(said));
+    const ignoreRead = ignoredLeftOut(report, ignored, declaredUnder, tally.rowsIgnored.result());
     // A bare case name is already answered under ignoreNotApplied, with the form that would work.
     const unmatched = ignoreRead.unmatched.filter((entry) => !notApplied.some((one) => one.entry === entry));
     // A case read from its file that gdUnit4 never reported, which is a run of less than was asked
@@ -11143,9 +11122,9 @@ class GodotServer {
         report.tests > 0 &&
         report.failures === 0 &&
         report.errors === 0 &&
+        (uncaught?.count ?? 0) === 0 &&
         [
           hookFailures,
-          uncaught,
           undeclaredPrinted,
           declaredNotPrinted,
           countedLeaks,
@@ -11285,7 +11264,9 @@ class GodotServer {
       failed,
       failedWithoutDetail: briefed > 0 ? briefed : undefined,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
-      uncaughtScriptErrors: uncaughtFolded.length > 0 ? uncaughtFolded : undefined,
+      uncaughtScriptErrors: uncaughtFolded.length > 0 ? uncaughtFolded.slice(0, MOST_UNCAUGHT_ERRORS) : undefined,
+      uncaughtScriptErrorsOmitted:
+        uncaughtFolded.length > MOST_UNCAUGHT_ERRORS ? uncaughtFolded.length - MOST_UNCAUGHT_ERRORS : undefined,
       undeclaredErrors: undeclaredErrors.length > 0 ? undeclaredErrors : undefined,
       undeclaredErrorsOmitted:
         undeclaredAll.length > undeclaredErrors.length
@@ -11400,6 +11381,7 @@ class GodotServer {
   private reportSuites(s: TestAnswer): Record<string, unknown> {
     const {
       classes,
+      tally,
       declaredAndPrinted,
       engineEntries,
       engineEntriesShown,
@@ -11446,6 +11428,7 @@ class GodotServer {
         engineEntries.length > engineEntriesShown.length
           ? engineEntries.length - engineEntriesShown.length
           : undefined,
+      ...printedCapped(tally),
       classes: withAddonClassesCounted(classes.payload, cachedClasses(project.value.path) ?? new Map()),
     };
   }
@@ -15660,6 +15643,7 @@ class GodotServer {
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
     project?: string,
+    log?: GameLog,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
     if (onDesktop === undefined && process.platform === 'win32') {
       const compiled = await ensureHelperCompiled();
@@ -15672,7 +15656,7 @@ class GodotServer {
     // project] is the project the run is of, which gives the slot its store class.
     const held = await slotForCall(false, project);
     try {
-      const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
+      const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop, log);
       void run.settled.finally(held.release);
       void slotEngineNamed(held.lock, run, onDesktop?.files.pid ?? run.engineFiles?.pid);
       // The pid callers read is the engine's, which the helper writes down once it has started it.
@@ -15710,6 +15694,7 @@ class GodotServer {
     cmdArgs: string[],
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
+    given?: GameLog,
   ): SpawnedGame & {
     readonly settled: Promise<void>;
     readonly stop: () => void;
@@ -15758,7 +15743,7 @@ class GodotServer {
         });
       }
     }
-    const log = new GameLog();
+    const log = given ?? new GameLog();
     const started: SpawnedGame = {
       process: child,
       pid: child.pid ?? null,

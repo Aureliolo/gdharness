@@ -752,13 +752,13 @@ import {
   judgeCompile,
   judgeEngine,
   type RowShare,
+  type RunRead,
   readEngineLog,
   readExpected,
   readRun,
   rowsAcross,
   SuiteCuts,
   secondsOf,
-  textsCutAt,
   uncollectedSaid,
   unexpectedErrors,
   versionFault,
@@ -125483,18 +125483,19 @@ function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
       { index: 1, severity: 'error', source: 'stderr', text: 'Stack overflow', detail: [] },
     ];
     assert.deepEqual(
-      readEngineLog(log, piped),
-      withNestedErrors(readRun(whole), piped),
+      readEngineLog(log, ['Stack overflow']),
+      asRead(withNestedErrors(readRun(whole), piped)),
       'a log read at once is read whole',
     );
-    assert.deepEqual(readEngineLog(log, [], 97), readRun(whole), 'and so is one read in pieces');
-    assert.ok(
-      !readEngineLog(log, []).lines.some((line) => line.startsWith('[gdharness: ')),
+    assert.deepEqual(readEngineLog(log, [], 97), asRead(readRun(whole)), 'and so is one read in pieces');
+    assert.equal(
+      readEngineLog(log, []).lineCount,
+      whole.split('\n').length,
       'and nothing says part of it was left out',
     );
     assert.deepEqual(
       readEngineLog(join(scratch, 'missing.log'), []),
-      readRun(''),
+      asRead(readRun('')),
       'a log never written is an empty run',
     );
   } finally {
@@ -125549,6 +125550,11 @@ function testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader(): void {
   } finally {
     sweep(scratch);
   }
+}
+
+/** [param printed], a run read whole, as a run read a line at a time answers it. */
+function asRead({ lines, ...read }: ReturnType<typeof readRun>): RunRead {
+  return { ...read, lineCount: lines.length, errorsDropped: 0 };
 }
 
 /** A run of ten suites, each case printing a line between its start and its end. */
@@ -125625,7 +125631,7 @@ function testAnEngineLogReadInPiecesIsJudgedAsItsWholeText(): void {
       ['awkward bytes', awkward],
     ] as const) {
       writeFileSync(log, bytes);
-      const whole = withNestedErrors(readRun(readFileSync(log, 'utf8')), []);
+      const whole = asRead(readRun(readFileSync(log, 'utf8')));
       for (const chunk of [1, 2, 3, 7, 64, 4096, undefined]) {
         assert.deepEqual(
           readEngineLog(log, [], chunk),
@@ -125672,43 +125678,73 @@ function testAnEngineLogReadInPiecesIsJudgedAsItsWholeText(): void {
   }
 }
 
+/** [param whole] in pieces of [param size] bytes. */
+function piecesOf(whole: Buffer, size: number): Buffer[] {
+  const chunks: Buffer[] = [];
+  for (let at = 0; at < whole.length; at += size) {
+    chunks.push(whole.subarray(at, at + size));
+  }
+  return chunks;
+}
+
 /**
- * The cuts at each suite's line are found however the bytes arrive, so what the running suite has
- * printed is counted from its own line, and the texts cut there join back into the whole console.
+ * The suite cuts find every suite's line however the bytes arrive, so what the running suite has
+ * printed is counted from its own line. A line too long to keep opens none, and a value holding a
+ * suite's line is read as the log's reader reads it.
  */
 function testTheSuiteCutsFindEverySuiteHoweverTheBytesArrive(): void {
   const { text: printed, suites } = tenSuitesPrinted();
   const long = `${'y'.repeat(70 * 1024)} Run Test Suite: res://tests/hidden_test.gd\r\n`;
   const whole = Buffer.from(`${printed}\r\n${long}café \u{1F600}\r\n`);
-  const expected: number[] = [];
-  for (let at = whole.indexOf('Run Test Suite:'); at >= 0; at = whole.indexOf('Run Test Suite:', at + 1)) {
-    expected.push(whole.lastIndexOf(0x0a, at) + 1);
-  }
+  const lastAt = whole.lastIndexOf(0x0a, whole.indexOf(`Run Test Suite: \u001b[0m\u001b[38;2;250;235;215m${suites.at(-1)?.path ?? ''}`)) + 1;
   for (const size of [1, 2, 5, 13, 4096, whole.length]) {
-    const chunks: Buffer[] = [];
-    for (let at = 0; at < whole.length; at += size) {
-      chunks.push(whole.subarray(at, at + size));
-    }
     const cuts = new SuiteCuts();
-    for (const chunk of chunks) {
+    for (const chunk of piecesOf(whole, size)) {
       cuts.take(chunk);
     }
     const said = `read ${String(size)} at a time`;
+    assert.deepEqual([cuts.suite, cuts.printed, cuts.past], [suites.at(-1)?.path, whole.length - lastAt, null], said);
+  }
+  const value = 'value: "Run Test Suite: res://tests/value_test.gd" was printed\n';
+  for (const size of [1, 7, value.length]) {
+    const cuts = new SuiteCuts();
+    for (const chunk of piecesOf(Buffer.from(`Run Test Suite: ${S_TEST}\n${value}after\n`), size)) {
+      cuts.take(chunk);
+    }
     assert.deepEqual(
-      cuts.cuts,
-      expected.slice(0, suites.length),
-      `${said}: a line too long to keep opens none`,
-    );
-    assert.equal(cuts.suite, suites.at(-1)?.path, said);
-    assert.equal(cuts.printed, whole.length - (expected[suites.length - 1] ?? 0), said);
-    const texts = textsCutAt(chunks, cuts.cuts);
-    assert.equal(texts.length, suites.length + 1, said);
-    assert.equal(texts.join(''), whole.toString('utf8'), `${said}: the texts join into the console`);
-    assert.ok(
-      texts[1]?.includes(`Run Test Suite: \u001b[0m\u001b[38;2;250;235;215m${suites[0]?.path ?? ''}`),
-      said,
+      [cuts.suite, cuts.printed],
+      [suiteOpenedBy(value), value.length + 'after\n'.length],
+      `a value holding a suite's line opens the suite the log's reader reads, read ${String(size)} at a time`,
     );
   }
+}
+
+/**
+ * Every suite is judged against the limit as it closes, however little follows it, and the running
+ * one as each chunk arrives. Lines on the other stream count towards the running suite.
+ */
+function testEverySuiteIsJudgedAgainstTheLimitAsItCloses(): void {
+  const over = `Run Test Suite: ${CHATTY_A}\n${'x'.repeat(1023)}\n`;
+  const run = Buffer.from(`Godot Engine\n${over}${'y'.repeat(2000)}\nRun Test Suite: ${CHATTY_B}\nshort\n`);
+  for (const size of [1, 64, run.length]) {
+    const cuts = new SuiteCuts(1500);
+    for (const chunk of piecesOf(run, size)) {
+      cuts.take(chunk);
+    }
+    assert.deepEqual(
+      [cuts.past, cuts.suite],
+      [{ suite: CHATTY_A }, CHATTY_B],
+      `a suite past the limit is named once the next one opens, read ${String(size)} at a time`,
+    );
+  }
+  const two = Buffer.from(`Run Test Suite: ${CHATTY_A}\nfine\nRun Test Suite: ${CHATTY_B}\nshort\n`);
+  const cuts = new SuiteCuts(1500);
+  cuts.take(two.subarray(0, two.indexOf('fine')));
+  cuts.add(1400);
+  cuts.take(two.subarray(two.indexOf('fine')));
+  assert.deepEqual(cuts.past, null, 'under the limit with the other stream counted');
+  cuts.add(1500);
+  assert.deepEqual(cuts.past, { suite: CHATTY_B }, "the other stream's errors put the running suite past it");
 }
 
 /** The limit a test run's log is held to here, far below the real one. */
@@ -125720,7 +125756,8 @@ let chattyEngineBuilt: string | null = null;
  * A stand-in engine for project_test. It answers an operation with an empty class list. As a test
  * run it opens each suite of GDH_SUITES (`path:bytes`, comma separated) and prints that many bytes
  * in it, into its --log-file with GDH_PRINT_TO=log, on its console with stdout, and both with both.
- * It ends itself after 15 s.
+ * With split it prints the suites' lines on stdout and their bytes on stderr. With GDH_BURST=1 each
+ * suite's bytes go in one write. It ends itself after 15 s.
  */
 function chattyEngine(): string {
   if (chattyEngineBuilt !== null) {
@@ -125746,7 +125783,12 @@ function chattyEngine(): string {
       "const logAt = args.indexOf('--log-file');",
       'const log = logAt >= 0 ? args[logAt + 1] : undefined;',
       "const to = process.env['GDH_PRINT_TO'] ?? 'both';",
-      'const say = (text: string): void => {',
+      "const burst = process.env['GDH_BURST'] === '1';",
+      'const say = (text: string, body = false): void => {',
+      "  if (to === 'split') {",
+      '    (body ? process.stderr : process.stdout).write(text);',
+      '    return;',
+      '  }',
       "  if (to !== 'log') {",
       '    process.stdout.write(text);',
       '  }',
@@ -125761,11 +125803,18 @@ function chattyEngine(): string {
       "for (const one of (process.env['GDH_SUITES'] ?? '').split(',')) {",
       "  const at = one.lastIndexOf(':');",
       "  say('Run Test Suite: ' + one.slice(0, at) + '\\n');",
-      '  for (let left = Number(one.slice(at + 1)); left > 0; left -= block.length) {',
-      '    say(left >= block.length ? block : line.repeat(Math.ceil(left / line.length)));',
+      '  const bytes = Number(one.slice(at + 1));',
+      '  if (burst) {',
+      '    say(line.repeat(Math.ceil(bytes / line.length)), true);',
+      '  }',
+      '  for (let left = burst ? 0 : bytes; left > 0; left -= block.length) {',
+      '    say(left >= block.length ? block : line.repeat(Math.ceil(left / line.length)), true);',
       '    await new Promise((settle) => setTimeout(settle, 5));',
       '  }',
       "  say('Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 1s 30ms\\n');",
+      '}',
+      'if (burst) {',
+      '  await new Promise((settle) => setTimeout(settle, 3000));',
       '}',
       'process.exit(0);',
       '',
@@ -125791,7 +125840,11 @@ const CHATTY_B = 'res://tests/b_test.gd';
 const CHATTY_C = 'res://tests/c_test.gd';
 
 /** project_test's answer for a run of {@link chattyEngine} over [param suites], printing to [param to]. */
-async function aRunOfTheChattyEngine(suites: string, to: 'log' | 'stdout' | 'both'): Promise<unknown> {
+async function aRunOfTheChattyEngine(
+  suites: string,
+  to: 'log' | 'stdout' | 'both' | 'split',
+  burst = false,
+): Promise<unknown> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chatty-'));
   try {
     writeTree(project, {
@@ -125821,6 +125874,7 @@ async function aRunOfTheChattyEngine(suites: string, to: 'log' | 'stdout' | 'bot
         GDHARNESS_LOG_LIMIT_BYTES: String(CHATTY_LIMIT),
         GDH_SUITES: suites,
         GDH_PRINT_TO: to,
+        GDH_BURST: burst ? '1' : '0',
       },
     );
     return answer;
@@ -125831,21 +125885,57 @@ async function aRunOfTheChattyEngine(suites: string, to: 'log' | 'stdout' | 'bot
 
 /** What a run whose second suite prints past {@link CHATTY_LIMIT} is ended with, by either tool. */
 const CHATTY_ENDED =
-  'the engine printed more than the 300000 bytes a log may hold while running res://tests/b_test.gd, so it was ended';
+  'the engine printed more than the 300000 bytes a log may hold, so it was ended. It was running res://tests/b_test.gd.';
 
 /**
  * A project_test run whose suite prints past the limit a log may hold into its log is ended within
  * seconds, and fails with the sentence gdharness test ends such an engine with, naming the suite.
+ * The answer still carries the suites that finished, the one running and what the engine printed.
  */
 async function testATestRunWhoseSuitePrintsPastTheLimitIsEnded(): Promise<void> {
-  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:1000000000`, 'log');
+  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:1000000000`, 'both');
   assert.deepEqual(
-    [get(answer, 'passed'), get(answer, 'verdict'), get(answer, 'exitCode'), get(answer, 'tests')],
-    [false, CHATTY_ENDED, null, 0],
-    JSON.stringify(answer),
+    [
+      get(answer, 'passed'),
+      get(answer, 'verdict'),
+      get(answer, 'exitCode'),
+      get(answer, 'tests'),
+      get(answer, 'suitesFinished'),
+      get(answer, 'suiteRunning'),
+      asArray(get(answer, 'entries')).map((entry) => get(entry, 'text')).slice(0, 2),
+    ],
+    [
+      false,
+      CHATTY_ENDED,
+      null,
+      0,
+      [CHATTY_A],
+      CHATTY_B,
+      ['Godot Engine v4.7.2.stable.official - https://godotengine.org', `Run Test Suite: ${CHATTY_A}`],
+    ],
+    JSON.stringify(answer).slice(0, 4000),
   );
   const engineMs = Number(get(answer, 'tookMsBy', 'engine'));
   assert.ok(engineMs < 8000, `ended within seconds of passing the limit: ${String(engineMs)} ms`);
+}
+
+/**
+ * A suite that prints past the limit faster than one look is ended once the next suite opens, and
+ * so is one whose lines are errors on the other stream. Each names the suite that printed them.
+ */
+async function testASuitePastTheLimitIsEndedWhateverFollowsAndOnEitherStream(): Promise<void> {
+  const burst = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:400000,${CHATTY_C}:1000`, 'log', true);
+  assert.deepEqual(
+    [get(burst, 'passed'), get(burst, 'verdict'), get(burst, 'exitCode')],
+    [false, CHATTY_ENDED, null],
+    JSON.stringify(burst).slice(0, 4000),
+  );
+  const split = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:1000000000`, 'split');
+  assert.deepEqual(
+    [get(split, 'passed'), get(split, 'verdict'), get(split, 'exitCode'), get(split, 'suiteRunning')],
+    [false, CHATTY_ENDED, null, CHATTY_B],
+    JSON.stringify(split).slice(0, 4000),
+  );
 }
 
 /** gdharness test ends the same engine printing past the limit with the same sentence. */
