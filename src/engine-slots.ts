@@ -1594,8 +1594,25 @@ export class EngineSlots {
    * work tree. The repository is found once for the take, and the priority list at each look.
    */
   private lineFor(taker: SlotTaker, game: boolean, project: string | undefined = this.project): SlotLine {
-    const repository = project === undefined ? null : repositoryNameOf(project);
-    return new SlotLine(taker, game, Date.now, false, repository ?? undefined);
+    return new SlotLine(taker, game, Date.now, false, this.repositoryOf(project));
+  }
+
+  /** The repository of [param project], where it is in a git work tree, which a waiting mark carries. */
+  private repositoryOf(project: string | undefined): string | undefined {
+    return (project === undefined ? null : repositoryNameOf(project)) ?? undefined;
+  }
+
+  /**
+   * Says [param line] in the answer of the call being answered, where there is one, else through
+   * this process's own way of saying: a server's standard output is the protocol.
+   */
+  private noted(line: string): void {
+    const notes = callNotes();
+    if (notes === undefined) {
+      this.say?.(line);
+    } else {
+      notes.slotNotes.add(line);
+    }
   }
 
   /**
@@ -2058,7 +2075,9 @@ export class EngineSlots {
     const drawn = this.drawn;
     const drawnBefore = drawn.numbers;
     const now = Date.now();
-    const high = highPriorityOf(this.directory, this.say);
+    const high = highPriorityOf(this.directory, (line) => {
+      this.noted(line);
+    });
     placed.judge(high);
     const waiting = await slotWaitersAsync(this.directory, high);
     for (const mark of this.passedOver.keys()) {
@@ -2248,14 +2267,20 @@ export class EngineSlots {
   /**
    * Puts down the mark of a wait for something other than a slot, memory for one, and answers what
    * takes it up again, so a gate counting its own time reads that wait as held up by others too. It
-   * names its kind as `memory`, which no take lets go first, since it takes no slot.
+   * names its kind as `memory`, which no take lets go first, since it takes no slot, and the
+   * repository of this process's project as a take's mark does.
    */
   markWaiting(): () => void {
     if (slotCommandOf() !== undefined) {
       // The waiting folder is the built-in taker's.
       return () => undefined;
     }
-    const mark = this.waitMarked({ ...this.holder, taker: MEMORY_TAKER });
+    const repository = this.repositoryOf(this.project);
+    const mark = this.waitMarked({
+      ...this.holder,
+      ...(repository === undefined ? {} : { repository }),
+      taker: MEMORY_TAKER,
+    });
     return () => {
       if (mark !== undefined) {
         this.waitEnded(mark);

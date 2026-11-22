@@ -32,7 +32,10 @@ export interface SlotWaits {
  */
 export interface CallNotes {
   readonly classList: Set<string>;
-  /** What the slot command said of a slot it lost or would not hand on. */
+  /**
+   * What the slot command said of a slot it lost or would not hand on, and that the priority list
+   * of the slots was malformed.
+   */
   readonly slotNotes: Set<string>;
 }
 
