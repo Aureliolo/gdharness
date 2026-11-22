@@ -970,7 +970,12 @@ import {
   unheldPort,
 } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
-import { leftInSlots, SLOT_VARIABLES, withTheSuitesOwnSlotVariables } from './support/slots.js';
+import {
+  leftInSlots,
+  SLOT_VARIABLES,
+  suiteSlotCount,
+  withTheSuitesOwnSlotVariables,
+} from './support/slots.js';
 import {
   endEnginesLeft,
   leftBehindBy,
@@ -23307,6 +23312,10 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
     return;
   }
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-'));
+  // A cache folder of its own, empty, so the compile is done here and not taken from the user's.
+  const cache = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-cache-'));
+  const inheritedCache = process.env['XDG_CACHE_HOME'];
+  process.env['XDG_CACHE_HOME'] = cache;
   try {
     const assembly = helperAssembly(directory);
     const lock = `${assembly}.compiling`;
@@ -23344,7 +23353,132 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
     assert.equal(await ensureHelperCompiled(directory), null, 'a later call finds it');
     assert.equal(statSync(assembly).mtimeMs, compiledAt, 'and compiles nothing');
   } finally {
-    sweep(directory);
+    if (inheritedCache === undefined) {
+      delete process.env['XDG_CACHE_HOME'];
+    } else {
+      process.env['XDG_CACHE_HOME'] = inheritedCache;
+    }
+    sweep(directory, cache);
+  }
+}
+
+/**
+ * A suite takes no more engine slots than the process that started it allows. The slot count a
+ * run's engines take is read by a fresh process from the variables this suite leaves, so it is
+ * asked there, under a count of 2 and under none.
+ */
+function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
+  assert.equal(suiteSlotCount('2', 32), 2, 'a caller allowing 2 caps the suite below its own most');
+  assert.equal(suiteSlotCount('1', 32), 1);
+  assert.equal(suiteSlotCount('9', 32), 4, 'a count above the suite most does not raise it');
+  assert.equal(suiteSlotCount('2', 1), 1, 'and one above the processors does not either');
+  for (const none of [undefined, '', '0', '-3', '1.5', 'many']) {
+    assert.equal(suiteSlotCount(none, 32), 4, `${String(none)} sets no cap: the suite most`);
+    assert.equal(suiteSlotCount(none, 2), 2, `${String(none)} sets no cap: the processors`);
+  }
+  const slotCountIn = (counted: string | undefined): number => {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env['GODOT_ENGINE_SLOT_COUNT'];
+    if (counted !== undefined) {
+      env['GODOT_ENGINE_SLOT_COUNT'] = counted;
+    }
+    const script = [
+      `await import(${JSON.stringify(pathToFileURL(join(process.cwd(), 'test', 'support', 'slots.ts')).href)});`,
+      `const { machineSlots } = await import(${JSON.stringify(pathToFileURL(join(process.cwd(), 'src', 'engine-slots.ts')).href)});`,
+      'process.stdout.write(String(machineSlots().count));',
+    ].join('\n');
+    const ran = spawnSyncHidden(process.execPath, ['-e', script], { encoding: 'utf8', env, timeout: 60_000 });
+    assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+    return Number(ran.stdout);
+  };
+  const own = suiteSlotCount(undefined, availableParallelism());
+  assert.equal(slotCountIn(undefined), own, 'with no cap the suite takes its own count');
+  assert.equal(slotCountIn('2'), Math.min(2, own), 'a cap of 2 leaves the engines of a run at most 2 slots');
+  assert.equal(slotCountIn('1'), 1);
+}
+
+/**
+ * Two directories asking for one helper compile it once between them. The cache is a folder of this
+ * case's own, and its copy is replaced by a marker after the first compile, so a second compile
+ * would show as the real assembly where the marker should be.
+ */
+async function testAHelperIsCompiledOnceForEveryDirectoryThatAsksForIt(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('compiled helper cache regression skipped (Windows only)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-cache-'));
+  const inherited = process.env['XDG_CACHE_HOME'];
+  try {
+    process.env['XDG_CACHE_HOME'] = join(root, 'cache');
+    const helper = new CompiledHelper('once helper', 'gdharness-once', 'public class OnceCompiled { }');
+    const [first, second] = [join(root, 'first'), join(root, 'second')];
+    mkdirSync(first);
+    mkdirSync(second);
+    assert.equal(await helper.ensure(first), null, 'the first directory gets the helper');
+    const stored = join(root, 'cache', 'gdharness', 'helpers', basename(helper.assembly(first)));
+    assert.ok(existsSync(stored), 'and the cache keeps the compiled one');
+    const compiled = readFileSync(helper.assembly(first));
+    assert.deepEqual(readFileSync(stored), compiled, 'which is the one the directory holds');
+    writeFileSync(stored, 'taken from the cache');
+    assert.equal(await helper.ensure(second), null, 'the second directory gets it too');
+    assert.equal(
+      readFileSync(helper.assembly(second), 'utf8'),
+      'taken from the cache',
+      'from the cache, with nothing compiled again',
+    );
+    assert.deepEqual(readFileSync(helper.assembly(first)), compiled, 'and the first keeps its own copy');
+    assert.deepEqual(readdirSync(second), [basename(helper.assembly(second))], 'with nothing left beside it');
+
+    // A cache that cannot be made leaves the compile in the directory asked for.
+    const blocked = join(root, 'blocked');
+    writeFileSync(blocked, 'a file where the cache folder would go');
+    process.env['XDG_CACHE_HOME'] = blocked;
+    const third = join(root, 'third');
+    mkdirSync(third);
+    assert.equal(await helper.ensure(third), null, 'a cache that cannot be used does not stop the compile');
+    assert.ok(
+      readFileSync(helper.assembly(third)).subarray(0, 2).toString('latin1') === 'MZ',
+      'which is a compiled assembly',
+    );
+  } finally {
+    if (inherited === undefined) {
+      delete process.env['XDG_CACHE_HOME'];
+    } else {
+      process.env['XDG_CACHE_HOME'] = inherited;
+    }
+    sweep(root);
+  }
+}
+
+/** Cleanup ends a process whose command line names a fixture directory, and only that one. */
+async function testCleanupEndsTheProcessesNamingAFixtureDirectoryAndNoOthers(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ends-'));
+  const named = join(root, 'named');
+  const sibling = join(root, 'named-beside');
+  const idle = (path: string): ReturnType<typeof spawnHidden> =>
+    spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)', path], { stdio: 'ignore' });
+  const [target, other] = [idle(named), idle(sibling)];
+  try {
+    assert.ok(
+      (await answeredWithin(
+        () => (alive(target.pid ?? 0) && alive(other.pid ?? 0) ? true : undefined),
+        5_000,
+      )) === true,
+      'both stand-ins run',
+    );
+    const ended = await endEnginesUnder(named);
+    assert.deepEqual(
+      ended.map((one) => one.pid),
+      [target.pid],
+      'only the process naming the directory is ended',
+    );
+    assert.equal(alive(target.pid ?? 0), false, 'and it is gone');
+    assert.equal(alive(other.pid ?? 0), true, 'while one naming a longer directory runs on');
+  } finally {
+    target.kill();
+    other.kill();
+    sweep(root);
   }
 }
 
@@ -132203,6 +132337,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
+  testAHelperIsCompiledOnceForEveryDirectoryThatAsksForIt,
+  testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows,
+  testCleanupEndsTheProcessesNamingAFixtureDirectoryAndNoOthers,
   testADesktopStartIsOneCall,
   testAHelperThatNeverRanHasEnded,
   testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine,

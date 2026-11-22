@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../../src/alive.js';
-import { type SpawnSyncReturns, spawnSyncHidden } from '../../src/spawn.js';
+import { processTree, whyTheProcessTreeFailed } from '../../src/process-children.js';
 
 /** One engine ended because it was still holding a fixture's directory, and the directory it held. */
 export interface EndedEngine {
@@ -26,19 +26,19 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
   if (paths.length === 0) {
     return [];
   }
-  const listing = listProcesses();
+  const listing = await listProcesses();
 
   // A listing that did not happen is the failure this had for months, and it looks exactly like a
   // machine with nothing to clean up. Said out loud, because the cost of it lands on the next run
   // and on whoever is using the machine, not on this one.
-  if (listing.status !== 0 || listing.stdout.trim() === '') {
+  if (listing === undefined || listing.trim() === '') {
     console.warn(
-      `could not list processes to clean up engines under ${paths.join(', ')}: ${listing.status ?? listing.error?.message ?? 'no output'}`,
+      `could not list processes to clean up engines under ${paths.join(', ')}: ${whyTheProcessTreeFailed() ?? 'no output'}`,
     );
     return [];
   }
 
-  const ended = endListed(listing.stdout, paths);
+  const ended = endListed(listing, paths);
 
   // Waited for, because a signal is not an exit, and an engine on its way out still holds the files
   // and the ports it had: the next fixture reserves a port, is handed that number because nothing
@@ -60,19 +60,16 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
  * the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects
  * and eleven engines were left running on this machine before anybody looked. The path is the
  * discriminator anyway, and a name filter can only subtract from that.
+ *
+ * Read from the server's own process table, which this process asks through the one PowerShell it
+ * keeps. A PowerShell of its own per listing cost half a second of processor time each, and a run
+ * lists after every fixture that leaves a directory behind.
  */
-function listProcesses(): SpawnSyncReturns<string> {
-  return process.platform === 'win32'
-    ? spawnSyncHidden(
-        'powershell',
-        [
-          '-NoProfile',
-          '-Command',
-          'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
-        ],
-        { encoding: 'utf8', timeout: 30_000 },
-      )
-    : spawnSyncHidden('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
+async function listProcesses(): Promise<string | undefined> {
+  const tree = await processTree();
+  return tree === undefined
+    ? undefined
+    : [...tree].map(([pid, { command }]) => `${String(pid)} ${command}`).join('\n');
 }
 
 /** Signals every process of [param listing] whose command line names one of [param paths]. */
