@@ -488,6 +488,92 @@ function testALogKeptToABoundHandsOverEveryEntryWhole(): void {
   }
 }
 
+interface Printed {
+  readonly stream: 'stdout' | 'stderr' | 'transcript';
+  readonly text: string;
+}
+
+/** [param count] plain lines on [param stream], each its own entry. */
+function filler(stream: Printed['stream'], name: string, count: number): Printed {
+  return {
+    stream,
+    text: Array.from({ length: count }, (_line, n) => `${name} ${String(n)}\n`).join(''),
+  };
+}
+
+/**
+ * Past entries handed over, a log kept to a bound still places each line as the log holding every
+ * entry does: a call's mark claims the error its detail names, a headline takes the loose lines that
+ * turn out to be its message, also when lines taken out before them moved them, and a crash report
+ * printed beside other output reaches the reader with all of it.
+ */
+function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
+  const printed: Printed[] = [
+    filler('stdout', 'before', 100),
+    { stream: 'stdout' as const, text: 'gdharness: debug_state evaluate raised from core/math/expression.cpp: boom\n' },
+    filler('stdout', 'waiting', 10),
+    { stream: 'stderr' as const, text: 'ERROR: boom\n   at: evaluate (core/math/expression.cpp:12)\n' },
+    { stream: 'stderr' as const, text: 'ERROR: first part\nsecond part\n' },
+    { stream: 'transcript' as const, text: 'ERROR: told twice\nits reason\n' },
+    { stream: 'stdout' as const, text: 'CrashHandlerException: Program crashed with signal 11\n' },
+    { stream: 'stdout' as const, text: 'Engine version: Godot Engine v4.7.2.stable.official\n' },
+    { stream: 'stderr' as const, text: '   at: thing (core/thing.cpp:2)\n' },
+    { stream: 'transcript' as const, text: '   at: told (core/told.cpp:3)\ntold again\n' },
+    filler('stderr', 'beside', 12),
+    filler('stderr', 'beside', 12),
+    filler('stderr', 'beside', 12),
+    {
+      stream: 'stdout' as const,
+      text: 'Load address: 7ff51ac40000\nGDScript backtrace (most recent call first):\n',
+    },
+    filler('stderr', 'after', 4),
+  ];
+  const whole = new GameLog();
+  const handed: unknown[] = [];
+  const bounded = new GameLog({
+    most: 10,
+    retired: (entry, byScript) => handed.push([entry.severity, entry.text, [...entry.detail], entry.raisedBy, byScript]),
+  });
+  for (const { stream, text } of printed) {
+    whole.append(stream, text);
+    bounded.append(stream, text);
+  }
+  whole.finish();
+  bounded.finish();
+  assert.ok(bounded.retiredCount > 80, `entries were handed over before the crash: ${String(bounded.retiredCount)}`);
+  bounded.handOverHeld();
+  const wholeRead = whole.all.map((entry) => [
+    entry.severity,
+    entry.text,
+    entry.detail,
+    entry.raisedBy,
+    whole.raisedByScript(entry),
+  ]);
+  assert.deepEqual(handed, wholeRead, 'every entry reaches the reader as the whole log holds it');
+  assert.deepEqual(
+    wholeRead.filter(
+      ([, text]) => ['boom', 'first part', 'told twice'].includes(String(text)) || String(text).startsWith('Crash'),
+    ),
+    [
+      ['info', 'boom', ['at: evaluate (core/math/expression.cpp:12)'], 'debug_state evaluate', false],
+      ['error', 'first part', ['second part', 'at: thing (core/thing.cpp:2)'], undefined, false],
+      ['error', 'told twice', ['its reason', 'at: told (core/told.cpp:3)'], undefined, false],
+      [
+        'error',
+        'CrashHandlerException: Program crashed with signal 11',
+        [
+          'Engine version: Godot Engine v4.7.2.stable.official',
+          'Load address: 7ff51ac40000',
+          'GDScript backtrace (most recent call first):',
+        ],
+        undefined,
+        false,
+      ],
+    ],
+    'the whole log claims the error, takes the message and keeps the crash whole',
+  );
+}
+
 testAScriptErrorDoesNotTakeTheCasesAfterIt();
 testAnEntrySaysTheScriptItPointsAt();
 testACrashIsAnErrorWithItsReport();
@@ -496,4 +582,5 @@ testHeadlinesKeepTheirDetail();
 testChunksAndLineEndingsDoNotMatter();
 testSelectionAnswersByEntry();
 testALogKeptToABoundHandsOverEveryEntryWhole();
+testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver();
 console.log('game log tests passed');

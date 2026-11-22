@@ -714,7 +714,7 @@ export class GameLog {
   private removeEntries(gone: readonly LogEntry[]): void {
     const dropped = new Set(gone.map((entry) => entry.index));
     const before = [...dropped].toSorted((a, b) => a - b);
-    const first = before[0] ?? this.gone + this.entries.length;
+    const first = before[0] ?? this.entries.length;
     const shifted = (position: number): number =>
       position - before.filter((index) => index < position).length;
     const moved = this.entries.splice(first - this.gone);
