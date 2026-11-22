@@ -238,7 +238,7 @@ export interface EngineGuard {
 export class MemoryWatch {
   private readonly guards = new Set<Guarded>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  private reading = false;
+  private reading: Promise<void> | null = null;
   private readonly sample: () => Promise<Sample>;
   private readonly everyMs: number;
 
@@ -326,24 +326,35 @@ export class MemoryWatch {
     return guarded.peak;
   }
 
-  private async poll(): Promise<void> {
-    if (this.reading) {
+  /**
+   * Answers once the reading under way has ended. A guard released mid-reading leaves its question
+   * to the process table out until it is answered, and that wait holds this process open.
+   */
+  async settled(): Promise<void> {
+    await this.reading?.catch(() => undefined);
+  }
+
+  private poll(): Promise<void> {
+    if (this.reading !== null) {
+      return Promise.resolve();
+    }
+    const reading = this.read().finally(() => {
+      this.reading = null;
+    });
+    this.reading = reading;
+    return reading;
+  }
+
+  private async read(): Promise<void> {
+    const live = [...this.guards];
+    if (live.length === 0) {
       return;
     }
-    this.reading = true;
-    try {
-      const live = [...this.guards];
-      if (live.length === 0) {
-        return;
+    const taken = await this.sample();
+    for (const one of live) {
+      if (this.guards.has(one)) {
+        this.judge(one, taken.held?.get(one.pid), taken.below?.get(one.pid) ?? []);
       }
-      const taken = await this.sample();
-      for (const one of live) {
-        if (this.guards.has(one)) {
-          this.judge(one, taken.held?.get(one.pid), taken.below?.get(one.pid) ?? []);
-        }
-      }
-    } finally {
-      this.reading = false;
     }
   }
 

@@ -49649,6 +49649,41 @@ async function testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine(): Promise<v
 }
 
 /**
+ * A guard released while its reading is out leaves that reading going, and the watcher says when it
+ * has ended, so a caller that must leave nothing open can wait for it.
+ */
+async function testAMemoryReadingStillOutAtReleaseIsWaitedFor(): Promise<void> {
+  let answer: (sample: Sample) => void = () => undefined;
+  let started: () => void = () => undefined;
+  const reading = new Promise<void>((begun) => {
+    started = begun;
+  });
+  const watch = new MemoryWatch(
+    () =>
+      new Promise<Sample>((given) => {
+        answer = given;
+        started();
+      }),
+    10,
+  );
+  const guard = watch.guard(process.pid, { bytes: MEMORY_GIB, source: 'default' }, () =>
+    assert.fail('under its ceiling'),
+  );
+  await reading;
+  guard.release();
+  let ended = false;
+  const settled = watch.settled().then(() => {
+    ended = true;
+  });
+  await delay(50);
+  assert.equal(ended, false, 'the reading is still out');
+  answer({ at: 0, machine: 0, processors: null });
+  await settled;
+  assert.equal(ended, true);
+  await watch.settled();
+}
+
+/**
  * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
  * A timeout kills with a signal and leaves no code, and a program that never started has none
@@ -131824,6 +131859,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
   testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine,
+  testAMemoryReadingStillOutAtReleaseIsWaitedFor,
   testAnEngineRunSaysHowItEnded,
   testAnEngineThatCrashesAsItStartsIsStartedAgain,
   testAnEngineThatDiesAfterItsBannerIsStartedAgain,
@@ -134124,6 +134160,9 @@ async function runOneRegression(test: RegressionCase, run: RegressionRun): Promi
     clearTimeout(deadline);
     endWindow();
   }
+  // An engine's last memory reading can still be out when its test ends, and its question to
+  // Windows holds a timer until it is answered.
+  await engineMemory.settled();
   // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing,
   // and so the weights the parts are split by (test/support/shards.ts) can be read off a run.
   const took = Date.now() - began;
