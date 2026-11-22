@@ -13189,9 +13189,7 @@ export class GodotServer {
       // remembering. The hold is judged from the same answer, so a run that is over is held
       // nowhere in the same call that says it is over.
       const active =
-        current === null
-          ? 'refusal' in picked
-          : await this.runStillGoing(current, playing?.playing ?? null);
+        current === null ? 'refusal' in picked : await this.runStillGoing(current, playing?.playing ?? null);
       // With several runs going no one of them is the run, so each is listed instead.
       const several = 'refusal' in picked ? this.runs.filter((one) => stillRunning(one)) : [];
       return {
@@ -14600,13 +14598,17 @@ export class GodotServer {
    * reading a game gone with no code.
    */
   private endForItsMemory(game: GodotProcess, end: MemoryEnd): void {
-    if (game.pickedUp === true) {
-      // The server that started it, still answering, finds its game gone and reads why from here.
-      noteMemoryEnd(game, `its memory ceiling: ${memoryCeilingSaid(end)}`);
-    }
+    const endedBy = `its memory ceiling: ${memoryCeilingSaid(end)}`;
+    // Another server holding the game, still answering, finds it gone and reads why from here.
+    noteMemoryEnd(game, endedBy);
     const ending = (async (): Promise<void> => {
       if (this.runs.includes(game)) {
-        await this.endActiveGame(game, `its memory ceiling: ${memoryCeilingSaid(end)}`, true, false);
+        await this.endActiveGame(game, endedBy, true, false);
+        // Neither its keeper nor a signal from here reached the game: another server's end had, and
+        // that end is the one this server answers.
+        if (game.endedHere === endedBy && game.endedThrough === undefined) {
+          game.endedHere = null;
+        }
       } else if (game.pid !== null) {
         try {
           process.kill(game.pid, 'SIGKILL');
@@ -17251,8 +17253,7 @@ export class GodotServer {
       return { run: this.runs.findLast((one) => this.isTheProcessOf(one, call.pid)) ?? null };
     }
     const named = call.projectPath;
-    const ofProject =
-      named === undefined ? [] : this.runs.filter((one) => this.isOfProject(one, named));
+    const ofProject = named === undefined ? [] : this.runs.filter((one) => this.isOfProject(one, named));
     const pool = ofProject.length > 0 ? ofProject : this.runs;
     const going = pool.filter((one) => stillRunning(one));
     if (going.length > 1) {
@@ -17302,7 +17303,12 @@ export class GodotServer {
   /** [param run] as a sentence names it: its process, project and scene. */
   private runInWords(run: GodotProcess): string {
     const pid = run.pid ?? this.announcedPidOf(run);
-    const scene = run.bootScene === undefined ? 'scene not recorded' : run.bootScene === MAIN_SCENE ? 'the main scene' : `res://${run.bootScene}`;
+    const scene =
+      run.bootScene === undefined
+        ? 'scene not recorded'
+        : run.bootScene === MAIN_SCENE
+          ? 'the main scene'
+          : `res://${run.bootScene}`;
     const project = run.projectPath ?? this.godotBridge.getStatus().projectPath ?? 'no project recorded';
     const saves = run.savesIn === undefined ? '' : `, user:// in ${run.savesIn}`;
     return `${run.throughEditor ? 'the game the editor plays' : `pid ${pid === undefined ? 'unknown' : pid}`} (${project}, ${scene}${saves})`;
@@ -17927,9 +17933,9 @@ export class GodotServer {
     // The keeper that holds the game writes its exit into the record the moment it ends, which can
     // be a moment after the process has gone: answered then, the run was over with no exit code
     // and nothing saying why.
-    if (!going && run.pickedUp !== true && typeof run.endedHere !== 'string') {
-      // Another server of the project that picked the game up and ended it for its memory says so
-      // here, since it clears the run's note, which is where its exit would be read.
+    if (!going && typeof run.endedHere !== 'string') {
+      // Another server holding the game that ended it for its memory says so here, since it clears
+      // the run's note, which is where its exit would be read.
       const beside = memoryEndOf(run);
       if (beside !== undefined) {
         run.endedBeside = beside;

@@ -23,7 +23,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { errorCode, errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
@@ -354,9 +354,10 @@ function memoryEndPath(run: { readonly transcript: string | null; readonly start
 }
 
 /**
- * Notes that the server about to end [param run] does so for its memory, as [param endedBy] says. A
- * server that started the run and sees it gone reads it with {@link memoryEndOf}, since the note of
- * the run itself is cleared by the end.
+ * Notes that the server about to end [param run] does so for its memory, as [param endedBy] says. Any
+ * other server holding the run that sees it gone reads it with {@link memoryEndOf}, since the note of
+ * the run itself is cleared by the end. The first note stays: a server noting it later ends the game
+ * later, and finds it gone.
  */
 export function noteMemoryEnd(
   run: { readonly transcript: string | null; readonly startedAt: number },
@@ -364,9 +365,10 @@ export function noteMemoryEnd(
 ): void {
   try {
     mkdirSync(runsDirectory(), { recursive: true });
-    writeWhole(memoryEndPath(run), JSON.stringify({ endedBy }));
+    // Created whole in one write, before the game is ended, so nobody reads it part written.
+    writeFileSync(memoryEndPath(run), JSON.stringify({ endedBy }), { flag: 'wx' });
   } catch {
-    // Unwritable leaves the other server's answer without the reason.
+    // Noted already, or unwritable, which leaves the other server's answer without the reason.
   }
 }
 
