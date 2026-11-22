@@ -132218,6 +132218,63 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
   }
 }
 
+/**
+ * An engine whose only suite was skipped whole says why nothing ran in the skip, so the run adds no
+ * "executed no test case" problem. An engine that executed nothing with no skip keeps it.
+ */
+function testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const wholeSuite = [
+    'Run Test Suite: res://test/whole_skip_test.gd',
+    ...['test_a', 'test_b'].flatMap((name) => [
+      `  res://test/whole_skip_test.gd > ${name} STARTED`,
+      `  res://test/whole_skip_test.gd > ${name} PASSED 0ms`,
+      ...skipBlock('Skipped from the entire test suite'),
+    ]),
+    '  whole_skip_test > finalize()  Report:',
+    '  The Entire test-suite is skipped!',
+    '  Skipped 2 tests',
+    "  Reason: 'the whole suite waits'",
+    '',
+    'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans | PASSED 0ms',
+    '',
+    'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |',
+    'Executed test suites: (1/1)',
+    'Executed test cases : (0/2), 2 skipped',
+  ].join('\n');
+  const skipped = judgeEngine(
+    readRun(wholeSuite),
+    {
+      suites: [{ path: 'res://test/whole_skip_test.gd', cases: ['test_a', 'test_b'] }],
+      expected: { errors: {}, warnings: {} },
+    },
+    clean,
+  );
+  assert.deepEqual(
+    skipped.faults,
+    [
+      'res://test/whole_skip_test.gd never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "the whole suite waits"',
+    ],
+    'a suite skipped whole',
+  );
+  const nothing = judgeEngine(
+    readRun(
+      [
+        'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+        'Executed test suites: (0/0)',
+        'Executed test cases : (0/0)',
+      ].join('\n'),
+    ),
+    { suites: [], expected: { errors: {}, warnings: {} } },
+    clean,
+  );
+  assert.deepEqual(
+    nothing.faults,
+    ['the run executed no test case at all, whatever it exited with'],
+    'an engine that ran nothing with no skip',
+  );
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
@@ -133735,6 +133792,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASkipOnlyTheReportHoldsIsListed,
   testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips,
   testRealSkipsFailARunOfBothTools,
+  testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem,
 ];
 
 /**

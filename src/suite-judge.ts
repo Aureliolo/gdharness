@@ -1469,6 +1469,10 @@ function summaryFault(
   if (nothingLeft || (printed.executed !== null && printed.executed !== 0)) {
     return undefined;
   }
+  // Every case that did not execute is a listed skip, which already says why nothing ran.
+  if (printed.executed === 0 && printed.skipped.length > 0 && casesRan(printed) === 0) {
+    return undefined;
+  }
   return printed.executed === null
     ? 'the run never printed its summary'
     : 'the run executed no test case at all, whatever it exited with';
