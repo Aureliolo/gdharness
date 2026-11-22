@@ -44,6 +44,7 @@ import {
   SLOW_RUN_MARK,
   sweepRunDirectories,
   versionNamed,
+  WINDOWED_MEMORY_PER_ENGINE,
   watchedEngine,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
@@ -1101,6 +1102,14 @@ interface Deal {
   readonly plans: readonly EnginePlan[];
 }
 
+/** The name a windowed lane's slot memory and kept peak go by, apart from a headless lane's. */
+const WINDOWED_LANE = 'test_windowed_lane';
+
+/** What a window holds at least, for the suites [param paths] that need one: see {@link peakOf}. */
+function windowedFloor(paths: readonly string[]): { paths: ReadonlySet<string>; bytes: number } {
+  return { paths: new Set(paths), bytes: WINDOWED_MEMORY_PER_ENGINE };
+}
+
 /** The room [param bytes] of memory leaves for engines of the size the run's suites were seen to hold. */
 function roomFinder(
   options: TestOptions,
@@ -1114,6 +1123,7 @@ function roomFinder(
     suites.map((suite) => suite.path),
     times,
     MEMORY_PER_ENGINE,
+    windowedFloor(suites.filter((suite) => suite.windowed).map((suite) => suite.path)),
   );
   const perEngine = {
     bytes: sized.bytes,
@@ -1228,9 +1238,7 @@ function announceDeal(
   sayWhatWasCutUp(deal, say);
   // Said beside the deal, so a suite past the split in one engine reads as asked for, not missed.
   const keptWhole = units.flatMap((unit) =>
-    unit.cost > splitPast && !unit.windowed && suites.some((s) => s.path === unit.suite && s.together)
-      ? [unit.suite]
-      : [],
+    unit.cost > splitPast && suites.some((s) => s.path === unit.suite && s.together) ? [unit.suite] : [],
   );
   // By the engines there was room for rather than those used: kept whole, it may need only one.
   if (options.order === null && room.engines > 1 && keptWhole.length > 0) {
@@ -2305,7 +2313,8 @@ export async function runShares<
   const empty = (): boolean => shares.empty;
   // The share this lane would draw now, read at each look. A run following a lanes file reads it
   // between the admission and the draw, and asks again if the share it would draw has grown.
-  const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
+  const windowedFloors = windowedFloor(units.filter((unit) => unit.windowed).map((unit) => unit.suite));
+  const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE, windowedFloors).bytes;
   /**
    * Whether the lanes file tells fewer lanes than lane [param at] belongs to. Once the run is over
    * it reads nothing and answers no, so a lane parked when another failed ends instead of looping.
@@ -2345,7 +2354,15 @@ export async function runShares<
     if (await parkedPastTheLanesTold(at, held)) {
       return empty() ? 'over' : 'again';
     }
-    held.lock ??= await slots.take(handedOut.signal);
+    held.lock ??= await slots.take(
+      handedOut.signal,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      shares.nextWindowed ? WINDOWED_LANE : undefined,
+    );
     const lock = held.lock;
     await handed?.lend(lock);
     return (await fallenPast(at)) ? 'again' : { lock };
@@ -2661,7 +2678,17 @@ async function runEngine(
   const files = writtenEngineFiles(plan, directory);
   const args = engineArguments(launch, plan, directory, files, sharesIn);
   const log = join(directory, reuse === undefined ? 'engine.log' : 'process.log');
-  const lock = slot ?? (await launch.slots.take());
+  const lock =
+    slot ??
+    (await launch.slots.take(
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      plan.windowed ? WINDOWED_LANE : undefined,
+    ));
   const reports = join(directory, 'reports');
   const running = {
     share: {
@@ -2679,7 +2706,7 @@ async function runEngine(
   let end: EngineEnd;
   try {
     end = await watchedEngine(
-      { ...launch, lane: plan.lane },
+      { ...launch, lane: plan.lane, ...(plan.windowed ? { peakKept: WINDOWED_LANE } : {}) },
       lock,
       args,
       directory,
