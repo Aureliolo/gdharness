@@ -76434,6 +76434,20 @@ async function testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun(): Promis
   );
 }
 
+/** The first server to note a run's memory end keeps its note when a second notes one after it. */
+async function testTheFirstMemoryEndNotedOfARunStays(): Promise<void> {
+  await withARuntimeDirectory(() => {
+    const run = {
+      transcript: join(process.env['GDHARNESS_RUNTIME_DIR'] ?? '', 'runs', 'run-1.log'),
+      startedAt: 1,
+    };
+    noteMemoryEnd(run, 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
+    noteMemoryEnd(run, 'its memory ceiling: the engine held 0.8 GB, past the 0.3 GB ceiling');
+    assert.equal(memoryEndOf(run), 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
+    return Promise.resolve();
+  });
+}
+
 /** One, two and three slots hold what they stand for, a gate queued or not, and never wait for memory. */
 async function testSmallMachinesNeverWaitForMemoryWithinTheirSlots(): Promise<void> {
   const started = await ownStart();
@@ -76882,39 +76896,39 @@ async function oneCommandLineLaneCountsItsOwnPeak(command: 'spread' | 'test', to
 }
 
 /**
- * Two servers of one project on one runtime, each with [param holds] of its own, until [param body]
- * ends. The second is named no project of its own, so it never announces and the first is never
- * replaced by it: both serve the project's calls for as long as the body runs.
+ * Two servers on one runtime that both see one game, each with [param holds] of its own, until
+ * [param body] ends. The first serves a project of its own and starts the game of another, as a
+ * session working elsewhere does. The second serves the game's project, so it picks the game up from
+ * its note. Neither announces on the other's project, so neither replaces the other.
  */
-async function withTwoServersOfOneProject(
+async function withTwoServersOfOneGame(
   holds: { readonly first: Record<string, string>; readonly second: Record<string, string> },
   body: (
     call: (server: 'first' | 'second', name: string, args: Record<string, unknown>) => Promise<unknown>,
   ) => Promise<void>,
 ): Promise<void> {
+  const elsewhere = memoryProject();
   const project = memoryProject();
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  const shared = {
-    GODOT_PATH: memoryEngine(),
-    GDHARNESS_RUNTIME_DIR: runtime,
-    GDHARNESS_PROJECT: project,
-    [SLOTS_VARIABLE]: slots,
-  };
+  const shared = { GODOT_PATH: memoryEngine(), GDHARNESS_RUNTIME_DIR: runtime, [SLOTS_VARIABLE]: slots };
   const servers = {
-    first: new ServerProcess({ env: { ...shared, ...holds.first } }),
+    first: new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: elsewhere, ...holds.first } }),
     second: null as ServerProcess | null,
   };
   try {
     await servers.first.initialize('regression-test');
-    const announcedBy = (): number | undefined => readAnnouncement(announcementPath(project))?.pid;
-    assert.ok(
-      await untilTrue(() => announcedBy() === servers.first.child.pid, 15_000),
-      'the first server announces itself',
-    );
-    servers.second = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: '', ...holds.second } });
+    servers.second = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: project, ...holds.second } });
     await servers.second.initialize('regression-test');
     const second = servers.second;
+    const announcedBy = (path: string): number | undefined => readAnnouncement(announcementPath(path))?.pid;
+    assert.ok(
+      await untilTrue(
+        () => announcedBy(elsewhere) === servers.first.child.pid && announcedBy(project) === second.child.pid,
+        15_000,
+      ),
+      'each server announces on its own project',
+    );
     const call = async (
       server: 'first' | 'second',
       name: string,
@@ -76933,7 +76947,7 @@ async function withTwoServersOfOneProject(
   } finally {
     await servers.second?.stop();
     await servers.first.stop();
-    sweep(project, runtime, slots);
+    sweep(elsewhere, project, runtime, slots);
   }
 }
 
@@ -76946,66 +76960,116 @@ function endOfTheAnswer(answer: unknown): unknown[] {
   return ['running', 'exitCode', 'endedBy', 'endedUnwatched', 'note'].map((field) => get(answer, field));
 }
 
+/** The end of the second server's answer once its game is over, polled for up to 20 s. */
+async function theSecondsEnd(
+  call: (server: 'first' | 'second', name: string, args: Record<string, unknown>) => Promise<unknown>,
+): Promise<unknown> {
+  let theirs: unknown = null;
+  for (let tries = 0; tries < 40 && get(theirs, 'running') !== false; tries++) {
+    await delay(500);
+    theirs = await call('second', 'editor_output', {});
+  }
+  return theirs;
+}
+
 /**
- * A server whose game another server of its project ended for its memory answers that end, with no
- * keeper said to have gone and no answer lost. A second server called before the game passes its
- * ceiling ends it once it does, and the first says so too.
+ * A server whose game another server ended for its memory answers that end, with no keeper said to
+ * have gone and no answer lost. The server serving the game's project picks it up and ends it past
+ * its ceiling, while the server that started it waits on it or after it has seen it running.
  */
 async function testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd(): Promise<void> {
+  // The first server's ceiling is the default, so only the second's ends the game.
   const grows = { GDH_HOLD_MB: '600', GDH_GROW_MB: '50', GDH_STAY_MS: '30000' };
+  const slow = { GDH_HOLD_MB: '600', GDH_GROW_MB: '20', GDH_STAY_MS: '15000' };
   await withNoCeilingSet(async () => {
-    await withTwoServersOfOneProject(
-      { first: grows, second: { [CEILING_VARIABLE]: '300' } },
-      async (call) => {
-        const started = await call('first', 'editor_run', { op: 'start', headless: true });
-        assert.equal(get(started, 'started'), true, JSON.stringify(started));
-        const waited = call('first', 'editor_run', { op: 'wait', timeoutMs: 60_000 });
-        const seen = await call('second', 'editor_output', {});
-        const theirs = await untilTrue(
-          async () => get(await call('second', 'editor_output', {}), 'running') === false,
-          15_000,
-        );
-        assert.ok(theirs, `the second server ends the game: ${JSON.stringify(seen)}`);
-        const ended = String(get(await call('second', 'editor_output', {}), 'endedBy'));
-        assert.match(ended, ANOTHERS_END);
-        assert.deepEqual(
-          endOfTheAnswer(await waited),
-          [
-            false,
-            null,
-            ended,
-            undefined,
-            `This run was ended by another server of this project, by ${ended}.`,
-          ],
-          'the first server answers its wait with the end the second made',
-        );
-      },
+    for (const seenRunningFirst of [false, true]) {
+      await withTwoServersOfOneGame(
+        { first: seenRunningFirst ? slow : grows, second: { [CEILING_VARIABLE]: '300' } },
+        async (call) => {
+          const started = await call('first', 'editor_run', { op: 'start', headless: true });
+          assert.equal(get(started, 'started'), true, JSON.stringify(started));
+          const seen = await call('second', 'editor_output', {});
+          if (seenRunningFirst) {
+            assert.equal(
+              get(seen, 'running'),
+              true,
+              `the second sees it under the ceiling: ${JSON.stringify(seen)}`,
+            );
+          }
+          const waited = call('first', 'editor_run', { op: 'wait', timeoutMs: 60_000 });
+          const theirs = await theSecondsEnd(call);
+          const ours = await waited;
+          const shown = `${JSON.stringify(seen)} ${JSON.stringify(theirs)} ${JSON.stringify(ours)}`;
+          const ended = String(get(theirs, 'endedBy'));
+          assert.match(ended, ANOTHERS_END, shown);
+          assert.deepEqual(
+            endOfTheAnswer(theirs),
+            [false, null, ended, undefined, `This run was ended here, by ${ended}.`],
+            `the second server says it ended the game: ${shown}`,
+          );
+          assert.deepEqual(
+            endOfTheAnswer(ours),
+            [
+              false,
+              null,
+              ended,
+              undefined,
+              `This run was ended by another server of this project, by ${ended}.`,
+            ],
+            `the first server answers with the end the second made: ${shown}`,
+          );
+        },
+      );
+    }
+  });
+}
+
+/**
+ * Two servers holding one game say one end between them: the one whose keeper or signal reached the
+ * game says it ended it, and the other answers that end. Once with only the starting server's
+ * ceiling passed, so the server that picked the game up answers the starter's end, and once with
+ * both passed, so both guards may fire and the later one finds the game gone.
+ */
+async function testTwoServersPastTheirCeilingsSayOneEnd(): Promise<void> {
+  const holds = { GDH_HOLD_MB: '600', GDH_GROW_MB: '10', GDH_STAY_MS: '30000' };
+  const ceiling = { [CEILING_VARIABLE]: '300' };
+  await withNoCeilingSet(async () => {
+    await theyEndItOnce({ first: { ...holds, ...ceiling }, second: {} }, 'first');
+    await theyEndItOnce({ first: { ...holds, ...ceiling }, second: ceiling }, 'either');
+  });
+}
+
+/**
+ * One game held by two servers with [param holds], ended past a ceiling: [param ender] says it ended
+ * it, or either of the two when both ceilings are passed, and the other answers that end.
+ */
+async function theyEndItOnce(
+  holds: { readonly first: Record<string, string>; readonly second: Record<string, string> },
+  ender: 'first' | 'either',
+): Promise<void> {
+  await withTwoServersOfOneGame(holds, async (call) => {
+    const started = await call('first', 'editor_run', { op: 'start', headless: true });
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+    const seen = await call('second', 'editor_output', {});
+    assert.equal(get(seen, 'running'), true, `the second sees it under the ceiling: ${JSON.stringify(seen)}`);
+    const waited = call('first', 'editor_run', { op: 'wait', timeoutMs: 60_000 });
+    const theirs = await theSecondsEnd(call);
+    const ours = await waited;
+    const shown = `${JSON.stringify(theirs)} ${JSON.stringify(ours)}`;
+    const ended = String(get(ours, 'endedBy'));
+    assert.match(ended, ANOTHERS_END, shown);
+    const here = `This run was ended here, by ${ended}.`;
+    const beside = `This run was ended by another server of this project, by ${ended}.`;
+    const notes = [get(ours, 'note'), get(theirs, 'note')];
+    const firstEnded = notes[0] === here && notes[1] === beside;
+    const secondEnded = ender === 'either' && notes[0] === beside && notes[1] === here;
+    assert.ok(
+      firstEnded || secondEnded,
+      `one server says it ended the game and the other answers that end: ${shown}`,
     );
-    // The first server's ceiling is the default, so only the second's ends the game.
-    const slow = { GDH_HOLD_MB: '600', GDH_GROW_MB: '20', GDH_STAY_MS: '15000' };
-    await withTwoServersOfOneProject({ first: slow, second: { [CEILING_VARIABLE]: '300' } }, async (call) => {
-      const started = await call('first', 'editor_run', { op: 'start', headless: true });
-      assert.equal(get(started, 'started'), true, JSON.stringify(started));
-      assert.equal(
-        get(await call('second', 'editor_output', {}), 'running'),
-        true,
-        'under the ceiling still',
-      );
-      const waited = call('first', 'editor_run', { op: 'wait', timeoutMs: 60_000 });
-      let theirs: unknown = null;
-      for (let tries = 0; tries < 40 && get(theirs, 'running') !== false; tries++) {
-        await delay(500);
-        theirs = await call('second', 'editor_output', {});
-      }
-      const ours = await waited;
-      const by = /^This run was ended here, by (.*)\.$/.exec(String(get(theirs, 'note')))?.[1] ?? '';
-      assert.match(by, ANOTHERS_END, `${JSON.stringify(theirs)} ${JSON.stringify(ours)}`);
-      assert.deepEqual(
-        endOfTheAnswer(ours),
-        [false, null, by, undefined, `This run was ended by another server of this project, by ${by}.`],
-        JSON.stringify(ours),
-      );
-    });
+    for (const answer of [ours, theirs]) {
+      assert.deepEqual(endOfTheAnswer(answer), [false, null, ended, undefined, get(answer, 'note')], shown);
+    }
   });
 }
 
@@ -129131,6 +129195,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheMemoryWaitIsSaidInWholeLines,
   testAnEndJustPastTheCeilingSaysFiguresThatDiffer,
   testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun,
+  testTheFirstMemoryEndNotedOfARunStays,
   testSmallMachinesNeverWaitForMemoryWithinTheirSlots,
   testTheBudgetCountsOnlyTheLocksOfTheSlotsCounted,
   testASlotWaiterThatComesToWaitForMemoryKeepsItsPlace,
@@ -129140,6 +129205,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEndJustPastTheCeilingIsSaidInOneSentenceWithFiguresThatDiffer,
   testACommandLineLaneCountsItsOwnPeak,
   testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd,
+  testTwoServersPastTheirCeilingsSayOneEnd,
   testAMemoryEndNoteIsSweptOnceOld,
   testASlotsFigureRisesToWhatItsEngineHolds,
   testAReadingBelowASlotsFigureLeavesItsLockAlone,
