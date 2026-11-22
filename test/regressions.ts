@@ -129007,20 +129007,14 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
   });
 }
 
-/** A third place waits for an engine slot when two are allowed, and starts once one is freed. */
+/**
+ * A third place waits for an engine slot when games may hold two, and starts once one is freed.
+ * Of three slots the last stays for a short headless call, so two are the games'.
+ */
 async function testAThirdPlaceWaitsForAnEngineSlot(): Promise<void> {
-  await withRunsBeside({ slots: 2 }, async ({ main, trees, start, call, slots }) => {
+  await withRunsBeside({ slots: 3 }, async ({ main, trees, start, call, slots }) => {
     const first = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the first run');
-    const second = await Promise.race([
-      start(trees[1], { runtimeWaitMs: 0 }),
-      delay(30_000).then(() => {
-        const held = leftInSlots(slots).map((name) => {
-          const file = join(slots, name);
-          return `${name}: ${existsSync(file) && !statSync(file).isDirectory() ? readFileSync(file, 'utf8') : ''}`;
-        });
-        throw new Error(`the second start holds on a slot of two: ${held.join(' | ')}`);
-      }),
-    ]);
+    const second = await start(trees[1], { runtimeWaitMs: 0 });
     assert.equal(get(second, 'started'), true, JSON.stringify(second));
     let answered = false;
     const third = start(main, { runtimeWaitMs: 0 }).then((started) => {
