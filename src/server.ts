@@ -14556,13 +14556,17 @@ export class GodotServer {
    * reading a game gone with no code.
    */
   private endForItsMemory(game: GodotProcess, end: MemoryEnd): void {
-    if (game.pickedUp === true) {
-      // The server that started it, still answering, finds its game gone and reads why from here.
-      noteMemoryEnd(game, `its memory ceiling: ${memoryCeilingSaid(end)}`);
-    }
+    const endedBy = `its memory ceiling: ${memoryCeilingSaid(end)}`;
+    // Another server holding the game, still answering, finds it gone and reads why from here.
+    noteMemoryEnd(game, endedBy);
     const ending = (async (): Promise<void> => {
       if (this.activeProcess === game) {
-        await this.endActiveGame(`its memory ceiling: ${memoryCeilingSaid(end)}`, true, false);
+        await this.endActiveGame(endedBy, true, false);
+        // Neither its keeper nor a signal from here reached the game: another server's end had, and
+        // that end is the one this server answers.
+        if (game.endedHere === endedBy && game.endedThrough === undefined) {
+          game.endedHere = null;
+        }
       } else if (game.pid !== null) {
         try {
           process.kill(game.pid, 'SIGKILL');
@@ -17759,9 +17763,9 @@ export class GodotServer {
     // The keeper that holds the game writes its exit into the record the moment it ends, which can
     // be a moment after the process has gone: answered then, the run was over with no exit code
     // and nothing saying why.
-    if (!going && run.pickedUp !== true && typeof run.endedHere !== 'string') {
-      // Another server of the project that picked the game up and ended it for its memory says so
-      // here, since it clears the run's note, which is where its exit would be read.
+    if (!going && typeof run.endedHere !== 'string') {
+      // Another server holding the game that ended it for its memory says so here, since it clears
+      // the run's note, which is where its exit would be read.
       const beside = memoryEndOf(run);
       if (beside !== undefined) {
         run.endedBeside = beside;
