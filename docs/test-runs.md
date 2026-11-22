@@ -891,6 +891,7 @@ A tool of a game's own that starts engines takes slots the same way, in the step
   slot names each holder by it, or by its pid when it is missing.
 - An optional `"memory"` says the bytes the engine on the slot may hold. gdharness writes the larger
   of 1.5 GiB and the peak kept for the engine's project and tool, at most that engine's ceiling.
+  The process holding the lock raises it, to the next 256 MiB, as its engine grows past it.
   A lock without it counts 1.5 GiB for each slot it stands for, which is one unless it holds a
   `"wants"` above 1, a whole number of slots held in one file.
 
@@ -929,8 +930,9 @@ the wait.
 
 ### Step 5: take in order
 
-Take in the order you began to wait. At each look, read every live mark but your own and `memory`
-ones.
+Take in the order you began to wait. At each look, read every live mark but your own and the
+`memory` marks that name no `since`. A `memory` mark that names `since` stands in line as the taker
+its `kind` names.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that have waited
   long enough. A store-class taker waits two minutes. Any other waits two minutes while no
@@ -990,8 +992,9 @@ ones.
 - A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
 - The engines of one machine stay inside its memory budget, which is the physical memory less 16
   GiB, and at least what the slot count stands for at 1.5 GiB a slot. Before taking a free slot,
-  add up the `memory` of every live lock, the `memory` of the live `memory` marks ahead of you
-  that name `since` and `memory`, and your own figure. Take the slot only if the sum stays inside
+  add up the `memory` of each lock below the slot count that names a live holder, the `memory` of
+  the live `memory` marks ahead of you that name `since` and `memory`, and your own figure. A lock
+  past the count, and one still empty, count nothing. Take the slot only if the sum stays inside
   the budget. Otherwise wait, keeping your place in line, and look again as a lock goes.
 - A take that finds no other lock live takes whatever its figure, so the machine's first engine
   always starts. Count the locks again after taking, and give the slot back and wait when the

@@ -34,6 +34,9 @@ const CEILING_FLOOR_BYTES = 4 * GIB;
 /** How often the guarded engines are read. */
 const POLL_MS = 1000;
 
+/** The step a slot's figure rises by, so a growing engine does not rewrite its lock at every reading. */
+const RAISE_STEP_BYTES = 256 * MIB;
+
 /** [param bytes] as gigabytes to one decimal place. */
 export const gigabytes = (bytes: number): string => `${(bytes / GIB).toFixed(1)} GB`;
 
@@ -207,11 +210,22 @@ interface EngineKeep {
 interface Guarded {
   readonly pid: number;
   readonly ceiling: Ceiling;
-  readonly ended: (end: MemoryEnd) => void;
+  /** Undefined for an engine whose slot is only raised, which another process ends past its ceiling. */
+  readonly ended: ((end: MemoryEnd) => void) | undefined;
   readonly keep: EngineKeep | undefined;
+  readonly raise: SlotRaise | undefined;
   peak: number;
   over: boolean;
+  /** The figure its slot is known to count, or 0 before the slot is first read. */
+  counted: number;
 }
+
+/**
+ * Raises the figure the engine's slot counts to the bytes given, where it counts less, and answers
+ * what it counts after, or null for a slot this process does not hold. An answer below the bytes
+ * given is a raise that did not happen, which the next reading asks again.
+ */
+export type SlotRaise = (bytes: number) => Promise<number | null>;
 
 /** An engine's guard: what it has held at most, and the way to stop guarding it once it has ended. */
 export interface EngineGuard {
@@ -247,27 +261,52 @@ export class MemoryWatch {
    * Guards the engine [param pid]. Once it and everything below it hold more than [param ceiling],
    * the processes below it are ended and [param ended] is called, once. The caller ends the
    * engine itself there. The peak is kept for [param keep]'s project and tool when the guard is
-   * released, unless the engine was ended for it.
+   * released, unless the engine was ended for it. A reading past what the engine's slot counts
+   * raises that figure through [param raise], rounded up to the next 256 MiB and no higher than the
+   * ceiling.
    */
-  guard(pid: number, ceiling: Ceiling, ended: (end: MemoryEnd) => void, keep?: EngineKeep): EngineGuard {
-    const guarded: Guarded = {
-      pid,
-      ceiling,
-      ended,
-      keep,
-      peak: 0,
-      over: false,
-    };
-    this.guards.add(guarded);
-    watching(pid, true, true);
-    this.timer ??= setInterval(() => {
-      void this.poll();
-    }, this.everyMs);
-    this.timer.unref();
+  guard(
+    pid: number,
+    ceiling: Ceiling,
+    ended: (end: MemoryEnd) => void,
+    keep?: EngineKeep,
+    raise?: SlotRaise,
+  ): EngineGuard {
+    const guarded = this.watched({ pid, ceiling, ended, keep, raise });
     return {
       peak: () => guarded.peak,
       release: () => this.release(guarded),
     };
+  }
+
+  /**
+   * Raises the slot of the engine [param pid] through [param raise] as a guard does, to no more than
+   * [param cap], and never ends it: for the process holding a slot whose engine another process
+   * guards. Answers the way to stop.
+   */
+  follow(pid: number, cap: number, raise: SlotRaise): () => void {
+    const followed = this.watched({
+      pid,
+      ceiling: { bytes: cap, source: 'default' },
+      ended: undefined,
+      keep: undefined,
+      raise,
+    });
+    return () => {
+      this.release(followed);
+    };
+  }
+
+  /** Adds [param one] to what each reading judges, and reads while anything is added. */
+  private watched(one: Pick<Guarded, 'pid' | 'ceiling' | 'ended' | 'keep' | 'raise'>): Guarded {
+    const guarded: Guarded = { ...one, peak: 0, over: false, counted: 0 };
+    this.guards.add(guarded);
+    watching(one.pid, true, true);
+    this.timer ??= setInterval(() => {
+      void this.poll();
+    }, this.everyMs);
+    this.timer.unref();
+    return guarded;
   }
 
   private release(guarded: Guarded): number {
@@ -321,7 +360,8 @@ export class MemoryWatch {
       return;
     }
     one.peak = Math.max(one.peak, bytes);
-    if (bytes <= one.ceiling.bytes) {
+    if (bytes <= one.ceiling.bytes || one.ended === undefined) {
+      this.raiseTheSlot(one, bytes);
       return;
     }
     one.over = true;
@@ -333,6 +373,27 @@ export class MemoryWatch {
       }
     }
     one.ended({ peakBytes: one.peak, ceilingBytes: one.ceiling.bytes, source: one.ceiling.source });
+  }
+
+  /** Raises the figure [param one]'s slot counts once [param bytes] passes it. */
+  private raiseTheSlot(one: Guarded, bytes: number): void {
+    const { raise } = one;
+    const figure = Math.min(one.ceiling.bytes, Math.ceil(bytes / RAISE_STEP_BYTES) * RAISE_STEP_BYTES);
+    if (raise === undefined || figure <= one.counted) {
+      return;
+    }
+    one.counted = figure;
+    void raise(figure).then((counted) => {
+      if (counted === null) {
+        return;
+      }
+      if (counted >= figure) {
+        one.counted = Math.max(one.counted, counted);
+      } else if (one.counted === figure) {
+        // Not rewritten, so the next reading asks again, unless a later raise asked more meanwhile.
+        one.counted = counted;
+      }
+    });
   }
 }
 
