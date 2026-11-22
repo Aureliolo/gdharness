@@ -77467,23 +77467,76 @@ async function figuresWhileReadAt(
   const restore = readingMemoryWith((pids) =>
     Promise.resolve(new Map(pids.map((pid) => [pid, { bytes, below: [] }]))),
   );
-  const figures = new Set<number | null>();
-  const running = { done: false };
   try {
-    const ran = body().finally(() => {
-      running.done = true;
-    });
-    while (!running.done) {
-      for (const lock of locks()) {
-        figures.add(lockFigure(lock));
-      }
-      await delay(50);
-    }
-    await ran;
+    return await figuresWhile(locks, body);
   } finally {
     restore();
   }
+}
+
+/** Answers each figure the slot locks [param locks] names counted while [param body] ran. */
+async function figuresWhile(
+  locks: () => readonly string[],
+  body: () => Promise<void>,
+): Promise<Set<number | null>> {
+  const figures = new Set<number | null>();
+  const running = { done: false };
+  const ran = body().finally(() => {
+    running.done = true;
+  });
+  while (!running.done) {
+    for (const lock of locks()) {
+      figures.add(lockFigure(lock));
+    }
+    await delay(50);
+  }
+  await ran;
   return figures;
+}
+
+/**
+ * Runs [param script] in a process of its own, with this process's environment and [param env] on
+ * top, and answers what it passed to `say`. A process makes its engine slots once, from the folder
+ * its first engine start finds named, so an engine taking a slot in a test's own folder starts in a
+ * fresh process. The script reaches `run` (engine-run), `spent` (engine-spent), `memory`
+ * (engine-memory), `slots` (engine-slots) and `headless`.
+ */
+async function inAProcessOfItsOwn(script: readonly string[], env: Record<string, string>): Promise<unknown> {
+  const modules = {
+    run: 'engine-run.ts',
+    spent: 'engine-spent.ts',
+    memory: 'engine-memory.ts',
+    slots: 'engine-slots.ts',
+    headless: 'headless.ts',
+  };
+  const lines = [
+    ...Object.entries(modules).map(
+      ([name, file]) =>
+        `import * as ${name} from ${JSON.stringify(pathToFileURL(resolve('src', file)).href)};`,
+    ),
+    "const say = (value) => process.stdout.write('\\n' + JSON.stringify(value) + '\\n');",
+    ...script,
+    'process.exit(0);',
+  ];
+  const child = spawnHidden(process.execPath, ['-e', lines.join('\n')], {
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let printed = '';
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => {
+      printed += chunk;
+    });
+  }
+  const ended = await exitOf(child);
+  assert.equal(ended.code, 0, `the process ran its script: ${printed}`);
+  const said = printed
+    .split('\n')
+    .filter((line) => line.startsWith('{'))
+    .at(-1);
+  assert.ok(said !== undefined, `the process said what it found: ${printed}`);
+  return JSON.parse(said) as unknown;
 }
 
 /** The paths of the slot locks in the folder [param directory]. */
@@ -77503,17 +77556,20 @@ async function testAHeadlessEngineRaisesItsSlotAsItGrows(): Promise<void> {
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
   try {
     await withNoCeilingSet(async () => {
-      const figures = await figuresWhileReadAt(
-        3 * MEMORY_GIB,
+      const figures = await figuresWhile(
         () => slotLockPaths(slots),
-        () =>
-          withHoldsInTheEnvironment(
+        async () => {
+          const ran = await inAProcessOfItsOwn(
+            [
+              `spent.readingMemoryWith((pids) => Promise.resolve(new Map(pids.map((pid) => [pid, { bytes: ${String(3 * MEMORY_GIB)}, below: [] }]))));`,
+              `const project = ${JSON.stringify(project)};`,
+              `const ran = await run.runEngine(${JSON.stringify(memoryEngine())}, ['--headless', '--path', project], { project });`,
+              'say({ exitCode: ran.exitCode, failure: ran.failure });',
+            ],
             { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '20', GDH_STAY_MS: '4000' },
-            async () => {
-              const ran = await runEngine(memoryEngine(), ['--headless', '--path', project], { project });
-              assert.equal(ran.exitCode, 0, String(ran.failure));
-            },
-          ),
+          );
+          assert.equal(get(ran, 'exitCode'), 0, JSON.stringify(ran));
+        },
       );
       assert.ok(figures.has(1.5 * MEMORY_GIB), `taken at 1.5 GiB: ${JSON.stringify([...figures])}`);
       assert.ok(figures.has(3 * MEMORY_GIB), `raised to 3 GiB: ${JSON.stringify([...figures])}`);
@@ -84677,10 +84733,11 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
   const still = { everyMs: 60, said: (elapsedMs: number) => `still ${String(elapsedMs)}` };
 
   // A call that says nothing is sent the heartbeat, again and again, and nothing once it has answered.
+  // The call runs until it has heard three, so a tick a busy event loop delays cannot fail the case.
   const quiet: { number: number; message: string }[] = [];
   await withCallSignal(
     undefined,
-    () => delay(260),
+    () => untilTrue(() => quiet.length >= 3, 10_000),
     (number, message) => {
       quiet.push({ number, message });
     },
@@ -126964,8 +127021,13 @@ async function testAProjectTestPastItsMemoryCeilingIsEndedForIt(): Promise<void>
     assert.equal(get(ran, 'hung'), false, JSON.stringify(ran));
     assert.equal(get(ran, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(ran));
     assert.ok(asNumber(get(ran, 'memoryEnded', 'peakBytes')) > 300 * 1024 * 1024, JSON.stringify(ran));
+    // The project's import engine may keep a headless peak of its own, so only the run's is read.
     const peaks = readEnginePeaks(project, runtime);
-    assert.deepEqual(peaks, {}, 'an engine ended for its memory keeps no peak');
+    assert.equal(
+      peaks.project_test,
+      undefined,
+      `an engine ended for its memory keeps no peak: ${JSON.stringify(peaks)}`,
+    );
   });
 }
 
@@ -127626,37 +127688,35 @@ async function testAStartRefusedForMemorySaysSoThroughEveryTool(): Promise<void>
 async function testAHeadlessEngineIsReadNoMoreOnceItHasEnded(): Promise<void> {
   const project = memoryProject();
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  const reads: { readonly at: number; readonly pids: readonly number[] }[] = [];
-  const restore = readingMemoryWith((pids) => {
-    reads.push({ at: Date.now(), pids: [...pids] });
-    return treesHeldBy(pids);
-  });
-  let endedAt = 0;
-  let engines: number[] = [];
+  let found: unknown;
   try {
-    await withHoldsInTheEnvironment(
-      { GODOT_ENGINE_SLOTS: slots, GDH_HOLD_MB: '60', GDH_STAY_MS: '2500' },
-      async () => {
-        const ran = await runEngine(memoryEngine(), ['--headless', '--path', project], { project });
-        endedAt = Date.now();
-        assert.equal(ran.exitCode, 0, String(ran.failure));
-        engines = [...new Set(reads.flatMap((read) => read.pids))];
-        assert.deepEqual(
-          engines.filter((pid) => engineMemory.isGuarding(pid)),
-          [],
-          'the engine is no longer guarded once its run is answered',
-        );
-        assert.equal(await reservedMemory(slots), 0, 'and reserves nothing');
-      },
+    found = await inAProcessOfItsOwn(
+      [
+        'const reads = [];',
+        'spent.readingMemoryWith((pids) => {',
+        '  reads.push({ at: Date.now(), pids: [...pids] });',
+        '  return spent.treesHeldBy(pids);',
+        '});',
+        `const project = ${JSON.stringify(project)};`,
+        `const ran = await run.runEngine(${JSON.stringify(memoryEngine())}, ['--headless', '--path', project], { project });`,
+        'const endedAt = Date.now();',
+        'const engines = [...new Set(reads.flatMap((read) => read.pids))];',
+        'const guarded = engines.filter((pid) => memory.engineMemory.isGuarding(pid));',
+        `const reserved = await slots.reservedMemory(${JSON.stringify(slots)});`,
+        'await new Promise((done) => setTimeout(done, 3000));',
+        'const after = reads.filter((read) => read.at > endedAt && read.pids.some((pid) => engines.includes(pid)));',
+        'say({ exitCode: ran.exitCode, failure: ran.failure, engines, guarded, reserved, after });',
+      ],
+      { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '60', GDH_STAY_MS: '2500' },
     );
-    await delay(3000);
   } finally {
-    restore();
     sweep(project, slots);
   }
-  assert.ok(engines.length > 0, 'the engine was read while it ran');
-  const after = reads.filter((read) => read.at > endedAt && read.pids.some((pid) => engines.includes(pid)));
-  assert.deepEqual(after, [], 'nothing reads an engine that has ended');
+  assert.equal(get(found, 'exitCode'), 0, JSON.stringify(found));
+  assert.deepEqual(get(found, 'guarded'), [], 'the engine is no longer guarded once its run is answered');
+  assert.equal(get(found, 'reserved'), 0, 'and reserves nothing');
+  assert.ok(asArray(get(found, 'engines')).length > 0, 'the engine was read while it ran');
+  assert.deepEqual(get(found, 'after'), [], 'nothing reads an engine that has ended');
 }
 
 /** Two processes keeping the peaks of one project at once each keep their own last figure. */
@@ -127806,17 +127866,14 @@ async function testAnEngineRunLeavesNoReservationInTheSlots(): Promise<void> {
   try {
     await withHoldsInTheEnvironment({ GODOT_ENGINE_SLOTS: slots }, () =>
       withARuntimeDirectory(async () => {
-        const outcome = await withHoldsInTheEnvironment(
+        const outcome = await inAProcessOfItsOwn(
+          [
+            `const engine = { godotPath: ${JSON.stringify(memoryEngine())}, script: 'none', debug: false };`,
+            `say(await headless.runOperation(engine, 'get_scene_tree', {}, ${JSON.stringify(project)}));`,
+          ],
           { GDH_OPERATION_HOLD_MB: '50', GDH_GROW_MB: '50', GDH_STAY_MS: '2500' },
-          () =>
-            runOperation(
-              { godotPath: memoryEngine(), script: 'none', debug: false },
-              'get_scene_tree',
-              {},
-              project,
-            ),
         );
-        assert.equal(outcome.ok, true, JSON.stringify(outcome));
+        assert.equal(get(outcome, 'ok'), true, JSON.stringify(outcome));
         assert.deepEqual(leftInSlots(slots), [], 'an engine run leaves nothing in the slots folder');
 
         // Four engines whose projects kept 1.8 GB each, on a 64 GiB machine whose free memory reads
