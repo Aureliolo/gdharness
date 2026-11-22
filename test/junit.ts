@@ -1407,7 +1407,11 @@ function testTheDiffsHoldOnlyTheSuiteBeingPrinted(): void {
   const open = aSuiteFailingOn('res://tests/open_test.gd', value);
   const across = new SuiteDiffs();
   across.take(Buffer.from(open));
-  assert.equal(across.held, open.length, 'a value running on past a suite line is held whole');
+  assert.equal(
+    across.held,
+    open.length - open.indexOf(" but was\n '"),
+    'a value running on past a suite line is held whole from where its diff opens',
+  );
   const opened = [reportedFailing('res://tests/open_test.gd', value)];
   const acrossRead = withActualsPrinted(opened, across.finish());
   assert.deepEqual(acrossRead, withActualsPrinted(opened, open), 'and read as the whole text reads it');
@@ -1472,6 +1476,39 @@ function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
   );
 }
 
+/**
+ * Suites printing megabytes after a diff closes, and before one opens, hold a few pieces at most,
+ * whichever way their lines end, and read every diff as the whole text does.
+ */
+function testTheDiffsHoldNoTextOnceNoDiffIsOpen(): void {
+  const piece = 64 * 1024;
+  const filler = 'a frame of the loop ticked\n'.repeat(80_000);
+  const paths = ['res://tests/a_test.gd', 'res://tests/b_test.gd', 'res://tests/c_test.gd'];
+  const suites = paths.map((path, n) => {
+    const [opens, ...after] = aSuiteFailingOn(path, `value ${String(n)}`).split('\n  Expecting:');
+    return `${opens ?? ''}\n${filler}  Expecting:${after.join('')}${filler}`;
+  });
+  const failed = paths.map((path, n) => reportedFailing(path, `value ${String(n)}`));
+  for (const ending of ['\n', '\r\n']) {
+    const console = suites.join('').replaceAll('\n', ending);
+    const diffs = new SuiteDiffs();
+    let most = 0;
+    for (const one of piecesOf(Buffer.from(console), piece)) {
+      diffs.take(one);
+      most = Math.max(most, diffs.held);
+    }
+    const said = `lines ended ${JSON.stringify(ending)}`;
+    assert.ok(most <= 4 * piece, `${said}: at most four pieces are held, not ${String(most)} characters`);
+    const read = withActualsPrinted(failed, diffs.finish());
+    assert.deepEqual(read, withActualsPrinted(failed, console), `${said}: every diff is the whole text's`);
+    assert.equal(
+      read.filter((one, n) => one.detail !== failed[n]?.detail).length,
+      paths.length,
+      `${said}: each failure takes its value back`,
+    );
+  }
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1491,4 +1528,5 @@ testAnIgnoreThatLeftOutNothingIsNamed();
 testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText();
 testTheDiffsHoldOnlyTheSuiteBeingPrinted();
 testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
+testTheDiffsHoldNoTextOnceNoDiffIsOpen();
 console.log('junit reader tests passed');

@@ -1067,17 +1067,21 @@ const SUITE_OPENS = 'Run Test Suite:';
 /** The longest unfinished line held to be looked at for a suite's start. A suite's line is far shorter. */
 const LINE_HELD_MOST = 64 * 1024;
 
+/** {@link DIFF_OPENS} as a pipe on Windows spells it, before its line break is read as the report's. */
+const DIFF_OPENS_CRLF = DIFF_OPENS.replace('\n', '\r\n');
+
 /**
  * The diffs a console prints, read as {@link withActualsPrinted} reads them off the whole text, one
- * suite's text at a time. The text is held from where the last suite was read, and read once the next
- * suite opens, unless a diff that may still run on past that line is open in it, as one whose value
- * holds a suite's line. Then it is held on to the next. One suite's text is all that is held, since
- * a suite printing more than a log may hold ends the engine.
+ * suite's text at a time. No diff starts anywhere but at its opening, so the text is held only from
+ * the first opening, and let go again once each diff opened in it has its location line. What is
+ * held is read once the next suite opens, unless a diff that may still run on past that line is open
+ * in it, as one whose value holds a suite's line. Then it is held on to the next. At most one suite's
+ * text is held, since a suite printing more than a log may hold ends the engine.
  */
 export class SuiteDiffs {
   private readonly decoder = new StringDecoder('utf8');
   private readonly found: PrintedDiff[] = [];
-  /** The text since the last suite read, in the pieces it came in. */
+  /** The text held, in the pieces it came in. */
   private pieces: string[] = [];
   /** How many characters were read and let go before the first held. */
   private gone = 0;
@@ -1087,6 +1091,10 @@ export class SuiteDiffs {
   private lineFrom = 0;
   /** The unfinished last line, or null for one too long to be a suite's. */
   private line: string | null = '';
+  /** Whether the held text starts at a diff's opening, rather than being the tail that may begin one. */
+  private opened = false;
+  /** How much was held when it was last read and a diff stayed open. */
+  private triedAt = 0;
 
   /** Reads [param chunk], the bytes printed next. */
   take(chunk: Buffer): void {
@@ -1110,6 +1118,13 @@ export class SuiteDiffs {
     const rest = text.slice(from);
     this.line =
       this.line === null || this.line.length + rest.length > LINE_HELD_MOST ? null : this.line + rest;
+    if (!this.opened) {
+      this.release();
+    } else if (this.held > 2 * this.triedAt) {
+      // Read again only once the held text has doubled, so a long open value is read a few times
+      // over rather than once a piece.
+      this.readTo(this.lineFrom);
+    }
   }
 
   /** Every diff the console printed, once it has ended. */
@@ -1120,32 +1135,78 @@ export class SuiteDiffs {
     return [...this.found];
   }
 
-  /** How many characters of the console are held, which is one suite's text. */
+  /** How many characters of the console are held, at most one suite's text. */
   get held(): number {
     return this.taken - this.gone;
   }
 
   /** Reads the text held up to [param at], counted from the console's start, unless a diff may run on past it. */
   private readTo(at: number): void {
-    const held = this.pieces.join('');
+    if (!this.opened) {
+      this.release();
+    }
     const cut = at - this.gone;
-    const read = suiteDiffsIn(held.slice(0, cut));
+    if (cut <= 0) {
+      return;
+    }
+    if (!this.opened) {
+      this.letGo(cut);
+      return;
+    }
+    const read = suiteDiffsIn(this.pieces.join('').slice(0, cut));
     if (read === null) {
-      this.pieces = [held];
+      this.triedAt = this.held;
       return;
     }
     this.found.push(...read);
-    this.pieces = [held.slice(cut)];
-    this.gone = at;
+    this.letGo(cut);
+    this.opened = false;
+    this.release();
+  }
+
+  /**
+   * Lets go of the held text up to the first diff's opening in it, or of all but the tail that may
+   * begin one in the next piece.
+   */
+  private release(): void {
+    const held = this.pieces.join('');
+    const opens = [held.indexOf(DIFF_OPENS), held.indexOf(DIFF_OPENS_CRLF)].filter((at) => at >= 0);
+    if (opens.length === 0) {
+      this.letGo(Math.max(0, held.length - (DIFF_OPENS_CRLF.length - 1)));
+      return;
+    }
+    this.letGo(Math.min(...opens));
+    this.opened = true;
+    this.triedAt = this.held;
+  }
+
+  /** Lets go of the first [param length] characters held, keeping no copy of what is let go. */
+  private letGo(length: number): void {
+    let left = length;
+    const kept: string[] = [];
+    for (const piece of this.pieces) {
+      if (left >= piece.length) {
+        left -= piece.length;
+      } else {
+        kept.push(left === 0 ? piece : piece.slice(left));
+        left = 0;
+      }
+    }
+    this.pieces = kept;
+    this.gone += length;
   }
 }
 
 /**
- * The diffs in [param text], the console up to a line opening a suite, or null when a diff may run
- * on past its end: an opening no location line follows, since a diff's value ends on the first one.
+ * The diffs in [param text], the console up to the start of a line, or null when a diff may run on
+ * past its end: an opening no location line follows, since a diff's value ends on the first one, or
+ * an opening's first line, whose second may follow.
  */
 function suiteDiffsIn(text: string): PrintedDiff[] | null {
   const spelled = text.replaceAll('\r\n', '\n');
+  if (spelled.endsWith(DIFF_OPENS.slice(0, DIFF_OPENS.indexOf('\n') + 1))) {
+    return null;
+  }
   const diffs: PrintedDiff[] = [];
   let after = 0;
   for (const match of spelled.matchAll(PRINTED_ACTUAL)) {
