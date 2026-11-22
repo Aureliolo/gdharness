@@ -1,17 +1,22 @@
 /**
  * C# compiled by the Windows PowerShell every Windows machine has, for the few Windows calls Node
- * cannot make and the package ships no native code for. The compiled assembly is kept in the
- * temporary directory under a name taken from its source, so it is compiled once per machine and
- * version, by the first process to need it.
+ * cannot make and the package ships no native code for. The compiled assembly is kept under a name
+ * taken from its source, so a changed source compiles anew. It is compiled once per user and
+ * source, into the user's cache, and each directory that asks for it gets a copy. Compiling costs
+ * seconds of processor time, and a process given a temporary directory of its own would otherwise
+ * pay it again.
  */
 
 import { createHash } from 'node:crypto';
 import {
   closeSync,
+  copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -21,8 +26,12 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
+import { cacheHome } from './cache-home.js';
 import { errorCode, errorMessage } from './errors.js';
 import { spawnHidden } from './spawn.js';
+
+/** The folder of the user's cache that holds each source's compiled assembly. */
+const HELPER_STORE = 'helpers';
 
 /**
  * How long compiling is given. A few seconds as a rule, and over a minute on a loaded CI runner,
@@ -90,8 +99,8 @@ export class CompiledHelper {
   }
 
   /**
-   * Compiles the source into [param directory] unless it is there, and answers null once it is, or
-   * why it is not. One process compiles at a time: the rest wait for its assembly, or with
+   * Puts the assembly into [param directory] unless it is there, from the user's cache or by
+   * compiling, and answers null once it is, or why it is not. One process does so at a time: the rest wait for its assembly, or with
    * [param wait] false go on without it, which is what a server starting up does.
    *
    * Apart from whatever needs it, because the desktop helper used to be compiled inside the first
@@ -132,7 +141,35 @@ export class CompiledHelper {
     return `the ${this.named} was not compiled within ${String(budgetMs)} ms`;
   }
 
+  /**
+   * Puts the assembly at [param assembly]: a copy of the one the user's cache keeps for this source,
+   * compiled there first if it is not, or compiled in [param directory] where the cache cannot be
+   * used. A copy, so a program run from [param directory] is its own file.
+   */
   private async compile(directory: string, assembly: string, budgetMs: number): Promise<string | null> {
+    const until = Date.now() + budgetMs;
+    const store = join(cacheHome(), HELPER_STORE);
+    if (directory !== store) {
+      try {
+        mkdirSync(store, { recursive: true });
+        if ((await this.ensure(store, budgetMs)) === null) {
+          const partial = `${assembly.slice(0, -4)}.${String(process.pid)}.copy${assembly.slice(-4)}`;
+          try {
+            copyFileSync(this.assembly(store), partial);
+            renameSync(partial, assembly);
+            return null;
+          } finally {
+            rmSync(partial, { force: true });
+          }
+        }
+      } catch {
+        // A cache that cannot be written or read leaves the compile in the directory asked for.
+      }
+    }
+    return await this.compileIn(directory, assembly, Math.max(until - Date.now(), 1));
+  }
+
+  private async compileIn(directory: string, assembly: string, budgetMs: number): Promise<string | null> {
     const scratch = mkdtempSync(join(directory, `${this.file}-source-`));
     const source = join(scratch, 'helper.cs');
     writeFileSync(source, this.source, 'utf8');
