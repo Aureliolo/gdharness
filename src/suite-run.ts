@@ -1952,7 +1952,7 @@ async function compileCheck(
       }
       handed?.ended();
     }
-    return { faults: judgeCompile(readRun(readFileSync(log, 'utf8')), end), log };
+    return { faults: judgeCompile(readRun(readLog(log)), end), log };
   } finally {
     handed?.ended();
   }

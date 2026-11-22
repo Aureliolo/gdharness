@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { editorExitPath, editorLogPath } from './editor-log.js';
 import { exitCodeText } from './engine-run.js';
+import { readLog } from './log-read.js';
 import { ENGINE_BANNER, linesAsPrinted } from './start-race.js';
 
 /** The longest last line a sentence quotes. */
@@ -35,7 +36,7 @@ export function readEditorExit(projectPath: string, pid: number): number | null 
 function whatTheEditorPrinted(projectPath: string): string {
   let lines: string[];
   try {
-    lines = linesAsPrinted(readFileSync(editorLogPath(projectPath), 'utf8'));
+    lines = linesAsPrinted(readLog(editorLogPath(projectPath)));
   } catch {
     return 'wrote no console';
   }

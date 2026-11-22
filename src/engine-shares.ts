@@ -4,8 +4,9 @@
  * The run cuts the engine's log at the markers, so each share is judged on its own lines.
  */
 
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { bytesAt } from './log-read.js';
 import type { EngineEnd } from './suite-judge.js';
 
 /** The engine's argument naming the folder it looks for the next share in. */
@@ -69,11 +70,17 @@ function bannerOf(text: string): string {
  * the engine printed as it started, since the build it runs is judged on every share's lines.
  */
 export function shareText(log: string, from: number, to?: number): string {
-  const bytes = readFileSync(log);
-  const text = withoutMarkers(bytes.subarray(from, to).toString('utf8'));
-  return from === 0
-    ? text
-    : `${bannerOf(bytes.subarray(0, Math.min(from, BANNER_BYTES)).toString('utf8'))}${text}`;
+  // Only the share's bytes are read, since a log of several shares can pass what one read holds.
+  const fd = openSync(log, 'r');
+  try {
+    const end = Math.min(to ?? Infinity, fstatSync(fd).size);
+    const text = withoutMarkers(bytesAt(fd, from, Math.max(0, end - from)).toString('utf8'));
+    return from === 0
+      ? text
+      : `${bannerOf(bytesAt(fd, 0, Math.min(from, BANNER_BYTES)).toString('utf8'))}${text}`;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** How a share ended, as the watcher of its engine saw it. */

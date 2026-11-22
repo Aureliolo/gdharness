@@ -207,6 +207,7 @@ import {
   runEngine,
   startedUntilItRuns,
 } from '../src/engine-run.js';
+import { shareText } from '../src/engine-shares.js';
 import {
   type CallSlot,
   claimIsOurs,
@@ -751,6 +752,7 @@ import {
   judgeCompile,
   judgeEngine,
   type RowShare,
+  readEngineLog,
   readExpected,
   readRun,
   rowsAcross,
@@ -125130,6 +125132,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
   testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
+  testAnEngineLogPastTheLimitIsJudgedFromItsKeptParts,
+  testAnEngineLogWithinTheLimitIsJudgedAsItWas,
+  testAnEngineErrorInTheKeptTailOfALongLogIsNamed,
+  testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader,
 ];
 
 /**
@@ -125434,6 +125440,185 @@ function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
   assert.ok(named.size >= 9, `the sources name the slot variables: ${String(named.size)}`);
   for (const name of named) {
     assert.ok(SLOT_VARIABLES.includes(name), `${name} is cleared before a fixture runs`);
+  }
+}
+
+const LONG_LOG_CASES = 60;
+const LONG_LOG_LIMIT = 4000;
+
+/** A run's console of [param LONG_LOG_CASES] cases, with [param after] printed after the last one. */
+function longEngineLog(after: readonly string[]): string {
+  const body = Array.from({ length: LONG_LOG_CASES }, (_, index) => {
+    const name = `test_${String(index).padStart(2, '0')}`;
+    return [
+      caseLine(S_TEST, name, 'STARTED'),
+      ...(index === LONG_LOG_CASES / 2 ? ['ERROR: lost in the middle'] : []),
+      caseLine(S_TEST, name, 'PASSED', '5ms'),
+    ];
+  }).flat();
+  return cannedRun([...body, ...after], 'PASSED', LONG_LOG_CASES);
+}
+
+/**
+ * A project_test run whose engine log passes the limit is judged from the log's start and end, as
+ * gdharness test judges it, and says how much was left out.
+ */
+function testAnEngineLogPastTheLimitIsJudgedFromItsKeptParts(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-log-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    const whole = longEngineLog([]);
+    writeFileSync(log, whole);
+    const size = Buffer.byteLength(whole);
+    assert.ok(size > LONG_LOG_LIMIT, `the fixture passes the limit: ${String(size)} bytes`);
+    const judged = readEngineLog(log, [], LONG_LOG_LIMIT);
+    assert.deepEqual(judged, withNestedErrors(readRun(readLog(log, LONG_LOG_LIMIT)), []));
+    const said = judged.lines.filter((line) => line.startsWith('[gdharness: '));
+    assert.equal(said.length, 1, 'one line says part of the log was not read');
+    assert.match(
+      said[0] ?? '',
+      new RegExp(
+        `^\\[gdharness: \\d+ bytes of this ${String(size)}-byte log were not read, since at most ${String(LONG_LOG_LIMIT)} are\\]$`,
+      ),
+    );
+    const cases = judged.suites.get(S_TEST)?.cases.map((one) => one.name) ?? [];
+    assert.equal(cases[0], 'test_00', 'the start is kept');
+    assert.equal(cases.at(-1), `test_${String(LONG_LOG_CASES - 1)}`, 'the end is kept');
+    assert.ok(cases.length < LONG_LOG_CASES, `the middle is not read: ${String(cases.length)} cases`);
+    assert.equal(judged.executed, LONG_LOG_CASES, 'the closing summary is read');
+    assert.equal(judged.engineVersion, '4.7.2.stable.official');
+    assert.deepEqual(
+      judged.errors.map((one) => one.text),
+      [],
+      'an error printed in the part left out is not read',
+    );
+    assert.equal(judged.suites.get(S_TEST)?.closed?.verdict, 'PASSED');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/** A log within the limit is judged as the whole file read as text, nested errors from the streams included. */
+function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-short-log-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    const whole = longEngineLog(['ERROR: kept']);
+    writeFileSync(log, whole);
+    const piped: LogEntry[] = [
+      {
+        index: 0,
+        severity: 'info',
+        source: 'stderr',
+        text: 'While attempting to print an error, another error was printed:',
+        detail: [],
+      },
+      { index: 1, severity: 'error', source: 'stderr', text: 'Stack overflow', detail: [] },
+    ];
+    const limit = Buffer.byteLength(whole);
+    assert.deepEqual(
+      readEngineLog(log, piped, limit),
+      withNestedErrors(readRun(whole), piped),
+      'a log of exactly the limit is read whole',
+    );
+    assert.deepEqual(readEngineLog(log, [], limit + 1), readRun(whole));
+    assert.ok(
+      !readEngineLog(log, [], limit).lines.some((line) => line.startsWith('[gdharness: ')),
+      'and says nothing was left out',
+    );
+    assert.deepEqual(
+      readEngineLog(join(scratch, 'missing.log'), [], limit),
+      readRun(''),
+      'a log never written is an empty run',
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/** An engine error printed near the end of a log past the limit is judged, with the suite and case it came in. */
+function testAnEngineErrorInTheKeptTailOfALongLogIsNamed(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-log-error-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    writeFileSync(log, longEngineLog(['ERROR: boom in the tail']));
+    const judged = readEngineLog(log, [], LONG_LOG_LIMIT);
+    assert.deepEqual(
+      judged.errors.map((one) => ({ text: one.text, suite: one.suite, warning: one.warning })),
+      [{ text: 'boom in the tail', suite: S_TEST, warning: false }],
+    );
+    const verdict = judgeEngine(
+      judged,
+      {
+        suites: [
+          {
+            path: S_TEST,
+            cases: Array.from(
+              { length: LONG_LOG_CASES },
+              (_, index) => `test_${String(index).padStart(2, '0')}`,
+            ),
+          },
+        ],
+        expected: { errors: {}, warnings: {} },
+      },
+      { code: 0, signal: null, ended: null },
+    );
+    assert.equal(verdict.passed, false, JSON.stringify(verdict));
+    assert.ok(
+      verdict.faults.some((fault) => fault.includes('boom in the tail')),
+      `the error is named: ${JSON.stringify(verdict.faults)}`,
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * Each place that reads an engine's or an editor's console from a file, which grows with what a game
+ * prints, reads it with the limited reader and never whole. A share's text is read by its byte range.
+ */
+function testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader(): void {
+  const functionSource = (file: string, marker: string): string => {
+    const source = readFileSync(join('src', file), 'utf8');
+    const from = source.indexOf(marker);
+    assert.ok(from >= 0, `${marker} is in src/${file}`);
+    return source.slice(from, source.indexOf('\n}\n', from));
+  };
+  const reads: readonly (readonly [file: string, marker: string, wanted: string])[] = [
+    ['server.ts', 'private async testRead(', 'readEngineLog(engineLog,'],
+    ['suite-run.ts', 'judgeCompile(readRun(', 'readRun(readLog(log))'],
+    ['editor-end.ts', 'function whatTheEditorPrinted(', 'readLog(editorLogPath(projectPath))'],
+    ['start-watch.ts', 'function linesOf(', 'readLog(file)'],
+    ['engine-shares.ts', 'export function shareText(', 'bytesAt(fd, from,'],
+  ];
+  for (const [file, marker, wanted] of reads) {
+    const body = readFileSync(join('src', file), 'utf8');
+    const at = body.indexOf(marker);
+    assert.ok(at >= 0, `${marker} is in src/${file}`);
+    const section =
+      file === 'suite-run.ts' ? body.slice(Math.max(0, at - 40), at + 120) : functionSource(file, marker);
+    assert.ok(section.includes(wanted), `${file} reads with ${wanted}`);
+    assert.ok(
+      !/readFileSync\((?:engineLog|log|file|editorLogPath)\b/.test(section),
+      `${file} holds no whole read of a log: ${marker}`,
+    );
+  }
+
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-share-text-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    const banner = 'Godot Engine v4.7.2.stable.official - https://godotengine.org\n';
+    const first = `${banner}one\ntwo\ngdharness share ended 0 exit 0\n`;
+    const second = 'three\nfour\ngdharness share ended 1 exit 0\n';
+    writeFileSync(log, `${first}${second}five\n`);
+    const from = Buffer.byteLength(first);
+    const to = from + Buffer.byteLength(second);
+    assert.equal(shareText(log, 0, from), `${banner}one\ntwo\n`);
+    assert.equal(shareText(log, from, to), `${banner}three\nfour\n`);
+    assert.equal(shareText(log, to), `${banner}five\n`);
+    assert.equal(shareText(log, to, to + 1000), `${banner}five\n`, 'a range past the end stops at it');
+  } finally {
+    sweep(scratch);
   }
 }
 

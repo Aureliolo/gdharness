@@ -4,9 +4,9 @@
  * adds nothing to its own wait.
  */
 
-import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
+import { readLog } from './log-read.js';
 import { diedAsItStarted, linesAsPrinted } from './start-race.js';
 
 const LOOK_MS = 100;
@@ -45,7 +45,7 @@ export async function endedAsItStarted(start: EndedStart): Promise<boolean> {
 /** What [param file] holds, as lines. Empty for a file not there. */
 function linesOf(file: string): string[] {
   try {
-    return linesAsPrinted(readFileSync(file).toString('utf8'));
+    return linesAsPrinted(readLog(file));
   } catch {
     return [];
   }
