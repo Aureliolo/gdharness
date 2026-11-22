@@ -79068,7 +79068,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began,
       sinceSeconds: began / 1000,
       game: false,
-      store: false,
+      high: false,
       wants: 1,
       seen: began,
     } as const;
@@ -79087,7 +79087,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began - 10_000,
       sinceSeconds: (began - 10_000) / 1000,
       game: false,
-      store: false,
+      high: false,
       wants: 1,
       seen: began,
     } as const;
@@ -79097,7 +79097,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began,
       sinceSeconds: began / 1000,
       game: false,
-      store: false,
+      high: false,
       wants: 1,
       seen: began,
     } as const;
@@ -79107,7 +79107,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began - 121_000,
       sinceSeconds: (began - 121_000) / 1000,
       game: false,
-      store: false,
+      high: false,
       wants: 1,
       seen: began,
     } as const;
@@ -79117,7 +79117,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       since: began - 1_200_000,
       sinceSeconds: (began - 1_200_000) / 1000,
       game: true,
-      store: false,
+      high: false,
       wants: 1,
       seen: began,
     } as const;
@@ -79237,7 +79237,7 @@ function lineWaiter(
   taker: 'gate' | 'tier' | 'other',
   now: number,
   waited: number,
-  options: { readonly game?: boolean; readonly store?: boolean } = {},
+  options: { readonly game?: boolean; readonly high?: boolean } = {},
 ): ReturnType<typeof slotWaiters>[number] {
   return {
     mark,
@@ -79245,57 +79245,57 @@ function lineWaiter(
     since: now - waited,
     sinceSeconds: (now - waited) / 1000,
     game: options.game === true,
-    store: options.store === true,
+    high: options.high === true,
     wants: 1,
     seen: now,
   };
 }
 
 /**
- * A one-off of the store class goes before every other one-off younger than 600 s, and stands with
- * gate work once it has waited 120 s. With no store-class taker waiting, an ordinary one-off past
+ * A one-off of high priority goes before every other one-off younger than 600 s, and stands with
+ * gate work once it has waited 120 s. With no high-priority taker waiting, an ordinary one-off past
  * 120 s stands with gate work. A game is placed as any other one-off is.
  */
-function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
+function testAHighPriorityTakerGoesBeforeEarlierYoungSideWork(): void {
   const now = Date.now();
   const marksOf = (line: SlotLine, waiters: ReturnType<typeof slotWaiters>): string[] =>
     line.ahead(waiters).map((one) => one.mark);
 
   const young = lineWaiter('young.json', 'other', now, 30_000);
-  const store = new SlotLine('other', false, () => now, true);
+  const highLine = new SlotLine('other', false, () => now, true);
   assert.deepEqual(
-    marksOf(store, [young]),
+    marksOf(highLine, [young]),
     [],
-    'a store-class waiter has an earlier young one-off behind it',
+    'a high-priority waiter has an earlier young one-off behind it',
   );
   const plain = new SlotLine('other', false, () => now);
   assert.deepEqual(
-    marksOf(plain, [lineWaiter('store.json', 'other', now, 5000, { store: true })]),
-    ['store.json'],
-    'and a later store-class waiter is ahead of an earlier young one-off',
+    marksOf(plain, [lineWaiter('high.json', 'other', now, 5000, { high: true })]),
+    ['high.json'],
+    'and a later high-priority waiter is ahead of an earlier young one-off',
   );
   assert.deepEqual(
     marksOf(new SlotLine('other', false, () => now, true), [
-      lineWaiter('later.json', 'other', now, 5000, { store: true }),
-      lineWaiter('earlier.json', 'other', now, 9000, { store: true }),
+      lineWaiter('later.json', 'other', now, 5000, { high: true }),
+      lineWaiter('earlier.json', 'other', now, 9000, { high: true }),
     ]),
     ['earlier.json', 'later.json'],
-    'store-class waiters keep the order they began to wait',
+    'high-priority waiters keep the order they began to wait',
   );
 
   const gate = lineWaiter('gate.json', 'gate', now, 1000);
   const tier = lineWaiter('tier.json', 'tier', now, 1000);
   assert.deepEqual(
-    marksOf(store, [gate, tier]),
+    marksOf(highLine, [gate, tier]),
     ['gate.json', 'tier.json'],
-    'a gate or a tier waiter still goes before a store-class one',
+    'a gate or a tier waiter still goes before a high-priority one',
   );
   assert.deepEqual(
     marksOf(new SlotLine('gate', false, () => now), [
-      lineWaiter('s.json', 'other', now, 1000, { store: true }),
+      lineWaiter('s.json', 'other', now, 1000, { high: true }),
     ]),
     [],
-    'and has no store-class waiter ahead of it',
+    'and has no high-priority waiter ahead of it',
   );
 
   // A line that began waiting [param waited] ms before now and looks now.
@@ -79309,52 +79309,52 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
   const nearlyHeld = lineWaiter('nearly.json', 'other', now, 599_999);
   const held = lineWaiter('held.json', 'other', now, 600_000);
   assert.deepEqual(
-    marksOf(store, [aged, nearlyHeld]),
+    marksOf(highLine, [aged, nearlyHeld]),
     [],
-    'no ordinary one-off younger than 600 s goes before a store-class waiter',
+    'no ordinary one-off younger than 600 s goes before a high-priority waiter',
   );
   assert.deepEqual(
-    marksOf(store, [held, nearlyHeld]),
+    marksOf(highLine, [held, nearlyHeld]),
     ['held.json'],
     'and one that has waited 600 s stands with gate work again',
   );
-  // A stream of store-class work, one arriving a second before each look, holds an ordinary one-off
+  // A stream of high-priority work, one arriving a second before each look, holds an ordinary one-off
   // back until it has waited 600 s and not a look longer.
   const heldFor = (waited: number): string[] =>
-    marksOf(begunBefore('other', waited), [lineWaiter('s.json', 'other', now, 1000, { store: true })]);
+    marksOf(begunBefore('other', waited), [lineWaiter('s.json', 'other', now, 1000, { high: true })]);
   for (const waited of [0, 121_000, 300_000, 599_999]) {
-    assert.deepEqual(heldFor(waited), ['s.json'], `held behind store work after ${waited} ms`);
+    assert.deepEqual(heldFor(waited), ['s.json'], `held behind high-priority work after ${waited} ms`);
   }
   assert.deepEqual(heldFor(600_000), [], 'and let go of it at 600 s');
   assert.deepEqual(heldFor(3_600_000), [], 'and at an hour');
-  // A store-class waiter holds a one-off of 300 s back while its last look is under 5 s old.
+  // A high-priority waiter holds a one-off of 300 s back while its last look is under 5 s old.
   const lookedAgo = (ago: number): string[] =>
     marksOf(begunBefore('other', 300_000), [
-      { ...lineWaiter('s.json', 'other', now, 1000, { store: true }), seen: now - ago },
+      { ...lineWaiter('s.json', 'other', now, 1000, { high: true }), seen: now - ago },
     ]);
   assert.deepEqual(lookedAgo(SLOT_YIELD_MS - 1), ['s.json'], 'a look 4,999 ms old still holds it back');
   assert.deepEqual(lookedAgo(SLOT_YIELD_MS), [], 'and one exactly 5,000 ms old holds nothing');
   const agedGame = lineWaiter('game.json', 'other', now, 130_000, { game: true });
   assert.deepEqual(
-    marksOf(store, [agedGame]),
+    marksOf(highLine, [agedGame]),
     [],
-    'a game waiter past 120 s goes after a later store-class arrival',
+    'a game waiter past 120 s goes after a later high-priority arrival',
   );
-  const agedStore = lineWaiter('aged-store.json', 'other', now, 121_000, { store: true });
+  const agedHigh = lineWaiter('aged-high.json', 'other', now, 121_000, { high: true });
   assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [agedStore]),
-    ['aged-store.json'],
-    'a store-class waiter past 120 s stands with gate work that came later',
+    marksOf(new SlotLine('gate', false, () => now), [agedHigh]),
+    ['aged-high.json'],
+    'a high-priority waiter past 120 s stands with gate work that came later',
   );
   assert.deepEqual(
-    marksOf(begunBefore('gate', 200_000), [agedStore]),
+    marksOf(begunBefore('gate', 200_000), [agedHigh]),
     [],
     'and after gate work that came earlier',
   );
   assert.deepEqual(
     marksOf(begunBefore('other', 200_000), [gate]),
     [],
-    'with no store-class waiter, an ordinary one-off past 120 s stands with later gate work',
+    'with no high-priority waiter, an ordinary one-off past 120 s stands with later gate work',
   );
   assert.deepEqual(
     marksOf(new SlotLine('other', false, () => now), [agedGame, aged, gate]),
@@ -79387,24 +79387,28 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
     [],
     'as a game one millisecond short of 120 s stands behind that call',
   );
-  // While a store-class taker waits, a game of another class is held back 600 s, as a call is.
+  // While a high-priority taker waits, a game of another class is held back 600 s, as a call is.
   const heldGame = (waited: number): ReturnType<typeof lineWaiter> =>
     lineWaiter('held-game.json', 'other', now, waited, { game: true });
-  assert.deepEqual(marksOf(store, [heldGame(599_999)]), [], 'a game short of 600 s goes after store work');
-  assert.deepEqual(marksOf(store, [heldGame(600_000)]), ['held-game.json'], 'and one at 600 s before it');
+  assert.deepEqual(
+    marksOf(highLine, [heldGame(599_999)]),
+    [],
+    'a game short of 600 s goes after high-priority work',
+  );
+  assert.deepEqual(marksOf(highLine, [heldGame(600_000)]), ['held-game.json'], 'and one at 600 s before it');
   // A mark that says it is a game's has the place of one that does not, whatever its age and class.
   for (const waited of [30_000, 119_999, 120_000, 700_000]) {
-    for (const ofStore of [false, true]) {
+    for (const ofHigh of [false, true]) {
       for (const line of [
         new SlotLine('gate', false, () => now),
         plain,
-        store,
+        highLine,
         begunBefore('other', 300_000),
       ]) {
         assert.deepEqual(
-          marksOf(line, [lineWaiter('one.json', 'other', now, waited, { game: true, store: ofStore })]),
-          marksOf(line, [lineWaiter('one.json', 'other', now, waited, { store: ofStore })]),
-          `a game ${waited} ms old, store class ${ofStore}, is placed as a call is`,
+          marksOf(line, [lineWaiter('one.json', 'other', now, waited, { game: true, high: ofHigh })]),
+          marksOf(line, [lineWaiter('one.json', 'other', now, waited, { high: ofHigh })]),
+          `a game ${waited} ms old, high priority ${ofHigh}, is placed as a call is`,
         );
       }
     }
@@ -79431,37 +79435,37 @@ function testAStoreClassTakerGoesBeforeEarlierYoungSideWork(): void {
   );
   assert.deepEqual(
     marksOf(new SlotLine('other', true, () => now), [
-      lineWaiter('s.json', 'other', now, 1000, { store: true }),
+      lineWaiter('s.json', 'other', now, 1000, { high: true }),
     ]),
     ['s.json'],
-    'a young game stands behind a store-class waiter',
+    'a young game stands behind a high-priority waiter',
   );
   assert.deepEqual(
     marksOf(new SlotLine('other', false, () => now), [
-      lineWaiter('late-store.json', 'other', now, 10_000, { store: true }),
+      lineWaiter('late-high.json', 'other', now, 10_000, { high: true }),
       lineWaiter('aged-game.json', 'other', now, 200_000, { game: true }),
     ]),
-    ['late-store.json', 'aged-game.json'],
-    'a game past 120 s goes after a store-class waiter that came later',
+    ['late-high.json', 'aged-game.json'],
+    'a game past 120 s goes after a high-priority waiter that came later',
   );
-  const storeGame = lineWaiter('store-game.json', 'other', now, 3_600_000, { game: true, store: true });
+  const highGame = lineWaiter('high-game.json', 'other', now, 3_600_000, { game: true, high: true });
   assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [storeGame]),
-    ['store-game.json'],
-    'a store-class game past 120 s stands with later gate work',
+    marksOf(new SlotLine('gate', false, () => now), [highGame]),
+    ['high-game.json'],
+    'a high-priority game past 120 s stands with later gate work',
   );
   assert.deepEqual(
     marksOf(new SlotLine('gate', false, () => now), [
-      lineWaiter('young-store-game.json', 'other', now, 119_999, { game: true, store: true }),
+      lineWaiter('young-high-game.json', 'other', now, 119_999, { game: true, high: true }),
     ]),
     [],
     'and one short of 120 s behind it',
   );
   let at = now - 3_600_000;
-  const storeGameLine = new SlotLine('other', true, () => at, true);
+  const highGameLine = new SlotLine('other', true, () => at, true);
   at = now;
   assert.deepEqual(
-    marksOf(storeGameLine, [lineWaiter('gate.json', 'gate', now, 10_000)]),
+    marksOf(highGameLine, [lineWaiter('gate.json', 'gate', now, 10_000)]),
     [],
     'and has that gate work behind it',
   );
@@ -80715,11 +80719,11 @@ async function testAGatesEngineGivenASlotInALaterPassIsDroppedAtItsYieldAndNotBe
 }
 
 /**
- * A store-class waiter holds other one-offs back only while it looks. Once its look is older than
+ * A high-priority waiter holds other one-offs back only while it looks. Once its look is older than
  * {@link SLOT_YIELD_MS}, every looker reads the line without it alike, whatever each has left it,
  * as the games' tools read the same marks. Two lookers then never both go first.
  */
-async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promise<void> {
+async function testAHighPriorityWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-passed-'));
   const marks = join(directory, WAITING_FOLDER);
   mkdirSync(marks, { recursive: true });
@@ -80734,7 +80738,8 @@ async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promi
   try {
     const me = { pid: process.pid, started: await ownStart() };
     const now = Date.now();
-    marked('s-30', { ...me, taker: 'other', class: 'store', since: (now - 30_000) / 1000 }, now);
+    writeFileSync(join(directory, 'priority.json'), JSON.stringify({ high: ['high-game'] }));
+    marked('s-30', { ...me, taker: 'other', repository: 'high-game', since: (now - 30_000) / 1000 }, now);
     const gateSeen = marked('g-10', { ...me, taker: 'gate', since: (now - 10_000) / 1000 }, now);
     const ownSeen = marked('o-300', { ...me, taker: 'other', since: (now - 300_000) / 1000 }, now);
     const lineOf = (taker: 'gate' | 'other', waited: number, mark: string): SlotLine => {
@@ -80749,7 +80754,7 @@ async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promi
     assert.equal(
       await ordinary.takeFree(false, own),
       null,
-      'a one-off of 300 s waits behind a store taker that looks',
+      'a one-off of 300 s waits behind a high-priority taker that looks',
     );
     assert.deepEqual(ordinary.drawn.left, [0], 'leaving it the slot');
     assert.equal(
@@ -80762,7 +80767,7 @@ async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promi
       `This call waited 300 s for an engine slot in all. When it first waited, the one slot it could take on this machine (${directory}), slot 0, was free and left to takers ahead of it in line.`,
       'and so does its answer, which never says those takers went first',
     );
-    // The store taker stops looking. The gate's and the one-off's takers go on.
+    // The high-priority taker stops looking. The gate's and the one-off's takers go on.
     const later = Date.now() + SLOT_YIELD_MS + 100;
     utimesSync(gateSeen, later / 1000, later / 1000);
     utimesSync(ownSeen, later / 1000, later / 1000);
@@ -80771,7 +80776,7 @@ async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promi
     assert.equal(
       await gate.takeFree(false, lineOf('gate', 10_000, 'g-10.json')),
       null,
-      `gate work that never left the store taker a slot sees the one-off it began after ahead: drew ${JSON.stringify(gate.drawn)}`,
+      `gate work that never left the high-priority taker a slot sees the one-off it began after ahead: drew ${JSON.stringify(gate.drawn)}`,
     );
     assert.equal(
       await ordinary.takeFree(false, own),
@@ -80785,46 +80790,52 @@ async function testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promi
   }
 }
 
-/** What a waiting mark of a take says about its class, and what a reader makes of the marks. */
-async function testAWaitingMarkNamesTheStoreClass(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-class-'));
+/** What a waiting mark of a take names, and what a reader makes of the marks beside the priority list. */
+async function testAWaitingMarkNamesItsRepository(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-repository-'));
   const marks = join(directory, WAITING_FOLDER);
   mkdirSync(marks, { recursive: true });
   try {
     const me = { pid: process.pid, started: await ownStart() };
-    const classOf = (line: SlotLine): unknown => (line.marked(me) as { class?: unknown }).class;
+    const marked = (line: SlotLine): Record<string, unknown> => ({ ...line.marked(me) });
+    const named = new SlotLine('other', false, Date.now, false, 'listed-game');
+    assert.equal(marked(named)['repository'], 'listed-game', 'a one-off names its repository');
     assert.equal(
-      classOf(new SlotLine('other', false, Date.now, true)),
-      'store',
-      'a store-class one-off says so',
+      marked(new SlotLine('other', true, Date.now, false, 'listed-game'))['repository'],
+      'listed-game',
+      'a game included',
     );
-    assert.equal(classOf(new SlotLine('other', true, Date.now, true)), 'store', 'a game included');
-    assert.equal(classOf(new SlotLine('other')), undefined, 'any other one-off names no class');
-    for (const taker of ['gate', 'tier', 'timing'] as const) {
-      assert.equal(
-        classOf(new SlotLine(taker, false, Date.now, true)),
-        undefined,
-        `${taker} work names none`,
-      );
-    }
+    assert.equal(
+      marked(new SlotLine('gate', false, Date.now, false, 'listed-game'))['repository'],
+      'listed-game',
+    );
+    assert.ok(!('repository' in marked(new SlotLine('other'))), 'a take with none leaves the field out');
+    assert.ok(
+      !('class' in marked(new SlotLine('other', false, Date.now, true, 'listed-game'))),
+      'and no class',
+    );
 
     const stamp = (Date.now() - 1000) / 1000;
     const write = (name: string, extra: Record<string, unknown>): void => {
       writeFileSync(join(marks, name), JSON.stringify({ ...me, taker: 'other', since: stamp, ...extra }));
     };
-    write('1-1.json', { class: 'store' });
-    write('1-2.json', {});
-    write('1-3.json', { class: 'other' });
-    write('1-4.json', { class: true });
+    write('1-1.json', { repository: 'listed-game' });
+    write('1-2.json', { repository: 'unlisted-game' });
+    write('1-3.json', {});
+    write('1-4.json', { class: 'store' });
+    write('1-5.json', { repository: 7 });
+    writeFileSync(join(directory, 'priority.json'), JSON.stringify({ high: ['listed-game'] }));
+    writeFileSync(join(directory, 'store.json'), JSON.stringify({ games: ['unlisted-game'] }));
     assert.deepEqual(
-      slotWaiters(directory).map((one) => [one.mark, one.store]),
+      slotWaiters(directory).map((one) => [one.mark, one.repository, one.high]),
       [
-        ['1-1.json', true],
-        ['1-2.json', false],
-        ['1-3.json', false],
-        ['1-4.json', false],
+        ['1-1.json', 'listed-game', true],
+        ['1-2.json', 'unlisted-game', false],
+        ['1-3.json', undefined, false],
+        ['1-4.json', undefined, false],
+        ['1-5.json', undefined, false],
       ],
-      'a mark with the class reads as store and any other as not',
+      'only a mark naming a listed repository is high, a class and store.json change nothing',
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -80871,18 +80882,22 @@ function testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder(): void {
 }
 
 /**
- * Whether a take of a one-off for [param project] marks its wait with the store class, with
- * [param store] as the slot folder's `store.json` (written as given, or none when null).
+ * What the mark of a take of a one-off for [param project] says, with [param priority] as the slot
+ * folder's `priority.json` (written as given, or none when null): its repository, and whether a
+ * reader ranks it high.
  */
-async function storeClassOfATake(project: string, store: string | null): Promise<boolean | null> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-store-'));
+async function markOfATake(
+  project: string,
+  priority: string | null,
+): Promise<{ repository: string | undefined; high: boolean } | null> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-priority-'));
   const me = { pid: process.pid, started: await ownStart() };
   const holder = new EngineSlots(directory, 1, me, undefined, () => 'tier');
   const taker = new EngineSlots(directory, 1, me, undefined, () => 'other', project);
   const stop = new AbortController();
   try {
-    if (store !== null) {
-      writeFileSync(join(directory, 'store.json'), store);
+    if (priority !== null) {
+      writeFileSync(join(directory, 'priority.json'), priority);
     }
     assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
     const waiting = taker.take(stop.signal).then(
@@ -80896,7 +80911,7 @@ async function storeClassOfATake(project: string, store: string | null): Promise
     const waiter = slotWaiters(directory)[0];
     stop.abort();
     assert.equal(await waiting, 'stopped', 'the wait ended with the abort');
-    return waiter?.store ?? null;
+    return waiter === undefined ? null : { repository: waiter.repository, high: waiter.high };
   } finally {
     stop.abort();
     holder.releaseAll();
@@ -80904,8 +80919,8 @@ async function storeClassOfATake(project: string, store: string | null): Promise
   }
 }
 
-/** A take for a project of a repository `store.json` lists marks its wait with the store class. */
-async function testATakeForAListedRepositoryMarksItsWaitWithTheStoreClass(): Promise<void> {
+/** A take for a project in a git work tree marks its wait with the repository, high where listed. */
+async function testATakeForAListedRepositoryMarksItsWaitWithTheRepository(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-repository-'));
   try {
     const listed = join(root, 'listed-game');
@@ -80913,45 +80928,66 @@ async function testATakeForAListedRepositoryMarksItsWaitWithTheStoreClass(): Pro
     mkdirSync(join(listed, 'game'), { recursive: true });
     const other = join(root, 'other-game');
     mkdirSync(join(other, '.git'), { recursive: true });
-    const names = JSON.stringify({ games: ['listed-game'] });
-    assert.equal(await storeClassOfATake(join(listed, 'game'), names), true, 'a listed repository has it');
-    assert.equal(await storeClassOfATake(other, names), false, 'an unlisted one has none');
-    assert.equal(await storeClassOfATake(root, names), false, 'and a project in no repository has none');
+    const names = JSON.stringify({ high: ['listed-game'] });
+    assert.deepEqual(
+      await markOfATake(join(listed, 'game'), names),
+      { repository: 'listed-game', high: true },
+      'a listed repository is named and high',
+    );
+    assert.deepEqual(
+      await markOfATake(other, names),
+      { repository: 'other-game', high: false },
+      'an unlisted one is named and normal',
+    );
+    assert.deepEqual(
+      await markOfATake(root, names),
+      { repository: undefined, high: false },
+      'and a project in no repository names none',
+    );
     const worktree = join(root, 'tree');
     const entry = join(listed, '.git', 'worktrees', 'tree');
     mkdirSync(entry, { recursive: true });
     mkdirSync(worktree, { recursive: true });
     writeFileSync(join(entry, 'commondir'), '../..\n');
     writeFileSync(join(worktree, '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
-    assert.equal(await storeClassOfATake(worktree, names), true, "a worktree has its repository's class");
+    assert.deepEqual(
+      await markOfATake(worktree, names),
+      { repository: 'listed-game', high: true },
+      'a worktree has its repository name',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-/** A `store.json` that is missing, unreadable or malformed gives no class and throws nothing. */
-async function testAStoreFileThatCannotBeReadGivesNoClass(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-bad-'));
+/** A `priority.json` that is missing, unreadable or malformed names no repository and throws nothing. */
+async function testAPriorityFileThatCannotBeReadNamesNoRepository(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-bad-'));
   try {
     const project = join(root, 'listed-game');
     mkdirSync(join(project, '.git'), { recursive: true });
     const cases: [string, string | null][] = [
       ['a missing file', null],
       ['empty text', ''],
-      ['broken JSON', '{"games": ['],
+      ['broken JSON', '{"high": ['],
       ['a list', '["listed-game"]'],
-      ['no games', '{}'],
-      ['games that is no array', '{"games": "listed-game"}'],
-      ['a number among the games', '{"games": ["listed-game", 3]}'],
-      ['null among the games', '{"games": [null, "listed-game"]}'],
+      ['no high', '{}'],
+      ['the retired key', '{"games": ["listed-game"]}'],
+      ['high that is no array', '{"high": "listed-game"}'],
+      ['a number among the names', '{"high": ["listed-game", 3]}'],
+      ['null among the names', '{"high": [null, "listed-game"]}'],
     ];
     for (const [what, content] of cases) {
-      assert.equal(await storeClassOfATake(project, content), false, `${what} gives no class`);
+      assert.deepEqual(
+        await markOfATake(project, content),
+        { repository: 'listed-game', high: false },
+        `${what} gives normal priority`,
+      );
     }
-    assert.equal(
-      await storeClassOfATake(project, '{"games": ["listed-game"], "more": 1}'),
-      true,
-      'and a good file with another key still does',
+    assert.deepEqual(
+      await markOfATake(project, '{"high": ["listed-game"], "more": 1}'),
+      { repository: 'listed-game', high: true },
+      'and a good file with another key still names it',
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -80963,15 +80999,15 @@ async function testAStoreFileThatCannotBeReadGivesNoClass(): Promise<void> {
  * mark. [param body] is the program's text after its import of the slot functions as `slots`.
  * Its one slot is held, in a folder of its own, so the take waits.
  */
-async function storeClassOfAProgramsTake(
+async function repositoryOfAProgramsTake(
   project: string,
   body: string,
-  store: string,
-): Promise<boolean | null> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-program-'));
+  priority: string,
+): Promise<string | undefined | null> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-program-'));
   const directory = join(root, 'slots');
   mkdirSync(directory);
-  writeFileSync(join(directory, 'store.json'), store);
+  writeFileSync(join(directory, 'priority.json'), priority);
   const script = join(root, 'take.ts');
   writeFileSync(
     script,
@@ -81003,7 +81039,7 @@ async function storeClassOfAProgramsTake(
     }
     const waiter = slotWaiters(directory)[0];
     assert.ok(waiter !== undefined, `the program's take made no mark: ${said}`);
-    return waiter.store;
+    return waiter.repository;
   } finally {
     child?.kill();
     holder.releaseAll();
@@ -81012,53 +81048,53 @@ async function storeClassOfAProgramsTake(
 }
 
 /**
- * The takes the server and the commands make for a project carry the project's class: a call's slot
- * (a game a tool starts), an engine run for a call, and the one slot of a command's steps. A take
- * with no project carries none.
+ * The takes the server and the commands make for a project carry the project's repository: a call's
+ * slot (a game a tool starts), an engine run for a call, and the one slot of a command's steps. A
+ * take with no project carries none.
  */
-async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-projects-'));
+async function testATakeForAProjectCarriesItsRepositoryWhateverTakesIt(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-projects-'));
   try {
     const listed = join(root, 'listed-game');
     mkdirSync(join(listed, '.git'), { recursive: true });
-    const names = '{"games": ["listed-game"]}';
+    const names = '{"high": ["listed-game"]}';
     const held = 'new Promise(() => undefined)';
     assert.equal(
-      await storeClassOfAProgramsTake(listed, `slots.slotForCall(false, project); await ${held};`, names),
-      true,
-      "a call's slot for a listed project carries the class",
+      await repositoryOfAProgramsTake(listed, `slots.slotForCall(false, project); await ${held};`, names),
+      'listed-game',
+      "a call's slot for a project carries its repository",
     );
     assert.equal(
-      await storeClassOfAProgramsTake(listed, `slots.slotForCall(false); await ${held};`, names),
-      false,
+      await repositoryOfAProgramsTake(listed, `slots.slotForCall(false); await ${held};`, names),
+      undefined,
       'and one with no project carries none',
     );
     assert.equal(
-      await storeClassOfAProgramsTake(listed, `slots.inASlot(() => ${held}, project); await ${held};`, names),
-      true,
+      await repositoryOfAProgramsTake(listed, `slots.inASlot(() => ${held}, project); await ${held};`, names),
+      'listed-game',
       'an engine run for a project carries it',
     );
     assert.equal(
-      await storeClassOfAProgramsTake(listed, `slots.inASlot(() => ${held}); await ${held};`, names),
-      false,
+      await repositoryOfAProgramsTake(listed, `slots.inASlot(() => ${held}); await ${held};`, names),
+      undefined,
       'and one for none carries none',
     );
     assert.equal(
-      await storeClassOfAProgramsTake(
+      await repositoryOfAProgramsTake(
         listed,
         `slots.inOneSlot(() => { slots.forTheProject(project); return slots.inASlot(() => ${held}); }); await ${held};`,
         names,
       ),
-      true,
-      "a command's one slot carries the class of the project it names",
+      'listed-game',
+      "a command's one slot carries the repository of the project it names",
     );
     assert.equal(
-      await storeClassOfAProgramsTake(
+      await repositoryOfAProgramsTake(
         listed,
         `slots.inOneSlot(() => slots.inASlot(() => ${held})); await ${held};`,
         names,
       ),
-      false,
+      undefined,
       'and a command that names none gets none',
     );
     const run = `import { runEngine } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-run.ts')).href)};`;
@@ -81066,13 +81102,13 @@ async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promis
     const engine = (options: string): string =>
       `${run}\nconst [exe, args] = ${idle};\nvoid runEngine(exe, args, ${options});\nawait ${held};`;
     assert.equal(
-      await storeClassOfAProgramsTake(listed, engine('{ project }'), names),
-      true,
+      await repositoryOfAProgramsTake(listed, engine('{ project }'), names),
+      'listed-game',
       'an engine run for a project, through runEngine, carries it',
     );
     assert.equal(
-      await storeClassOfAProgramsTake(listed, engine('{}'), names),
-      false,
+      await repositoryOfAProgramsTake(listed, engine('{}'), names),
+      undefined,
       'and one given no project carries none',
     );
     // Steps that run their engine on a folder of their own, for the project's sake: the export
@@ -81080,7 +81116,7 @@ async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promis
     const headless = pathToFileURL(resolve('src', 'headless.ts')).href;
     const docs = pathToFileURL(resolve('src', 'doc-cache.ts')).href;
     assert.equal(
-      await storeClassOfAProgramsTake(
+      await repositoryOfAProgramsTake(
         listed,
         [
           `import { runOperation } from ${JSON.stringify(headless)};`,
@@ -81092,11 +81128,11 @@ async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promis
         ].join('\n'),
         names,
       ),
-      true,
+      'listed-game',
       "the export options step, which runs on an empty folder, takes its slot for the preset's project",
     );
     assert.equal(
-      await storeClassOfAProgramsTake(
+      await repositoryOfAProgramsTake(
         listed,
         [
           `import { placeEmptyScriptDocs } from ${JSON.stringify(docs)};`,
@@ -81107,7 +81143,7 @@ async function testATakeForAProjectCarriesItsStoreClassWhateverTakesIt(): Promis
         ].join('\n'),
         names,
       ),
-      true,
+      'listed-game',
       "the empty script reference of a hidden editor takes its slot for the editor's project",
     );
   } finally {
@@ -81246,10 +81282,14 @@ async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Prom
     gate.mark = 'z-gate.json';
     assert.deepEqual(atAge(gate, 119_999.5), [], 'half a millisecond short of 120 s is young');
     assert.deepEqual(atAge(gate, 120_000.5), ['short.json'], 'and half a millisecond past it is aged');
-    const store = new SlotLine('other', false, () => began, true);
-    store.mark = 'z-store.json';
-    assert.deepEqual(atAge(store, 599_999.5), [], 'half a millisecond short of 600 s is held by store work');
-    assert.deepEqual(atAge(store, 600_000.5), ['short.json'], 'and half a millisecond past it is let go');
+    const high = new SlotLine('other', false, () => began, true);
+    high.mark = 'z-high.json';
+    assert.deepEqual(
+      atAge(high, 599_999.5),
+      [],
+      'half a millisecond short of 600 s is held by high-priority work',
+    );
+    assert.deepEqual(atAge(high, 600_000.5), ['short.json'], 'and half a millisecond past it is let go');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -81257,7 +81297,7 @@ async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Prom
 
 /**
  * A game the server starts for a project, a test run among them, takes its slot for that project,
- * so its wait carries the project's store class. The server's start needs an engine to run, so the
+ * so its wait carries the project's repository. The server's start needs an engine to run, so the
  * hand-over is read from its source: every call names the project, and the slot take receives it.
  */
 function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
@@ -81291,9 +81331,9 @@ function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
   );
 }
 
-/** A look made with no line of its own still ranks the project's class: the one free slot is its. */
-async function testALookWithNoLineOfItsOwnHasTheProjectsStoreClass(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-look-'));
+/** A look made with no line of its own still ranks the project's priority: the one free slot is its. */
+async function testALookWithNoLineOfItsOwnHasTheProjectsPriority(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-look-'));
   try {
     const listed = join(root, 'listed-game');
     mkdirSync(join(listed, '.git'), { recursive: true });
@@ -81301,7 +81341,7 @@ async function testALookWithNoLineOfItsOwnHasTheProjectsStoreClass(): Promise<vo
     mkdirSync(join(unlisted, '.git'), { recursive: true });
     const directory = join(root, 'slots');
     mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
-    writeFileSync(join(directory, 'store.json'), '{"games": ["listed-game"]}');
+    writeFileSync(join(directory, 'priority.json'), '{"high": ["listed-game"]}');
     const me = { pid: process.pid, started: await ownStart() };
     writeFileSync(
       join(directory, WAITING_FOLDER, '1-1.json'),
@@ -81309,37 +81349,240 @@ async function testALookWithNoLineOfItsOwnHasTheProjectsStoreClass(): Promise<vo
     );
     const plain = new EngineSlots(directory, 1, me, undefined, () => 'other', unlisted);
     assert.equal(await plain.takeFree(), null, 'an unlisted project leaves the slot to the earlier waiter');
-    const store = new EngineSlots(directory, 1, me, undefined, () => 'other', listed);
-    assert.equal(await store.takeFree(), join(directory, '0.lock'), 'a listed one goes before it');
-    store.releaseAll();
+    const high = new EngineSlots(directory, 1, me, undefined, () => 'other', listed);
+    assert.equal(await high.takeFree(), join(directory, '0.lock'), 'a listed one goes before it');
+    high.releaseAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-/** The slot folder's `store.json` is read and never written, whatever it holds. */
-async function testTheStoreFileIsOnlyRead(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-read-'));
+/** The slot folder's `priority.json` is read and never written, whatever it holds. */
+async function testThePriorityFileIsOnlyRead(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-read-'));
   try {
     const project = join(root, 'listed-game');
     mkdirSync(join(project, '.git'), { recursive: true });
-    const written = '{"games": ["listed-game"]}';
-    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-store-only-'));
+    const written = '{"high": ["listed-game"]}';
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-priority-only-'));
     try {
-      writeFileSync(join(directory, 'store.json'), written);
+      writeFileSync(join(directory, 'priority.json'), written);
       const me = { pid: process.pid, started: await ownStart() };
       const taker = new EngineSlots(directory, 2, me, undefined, () => 'other', project);
       const lock = await taker.take();
       taker.release(lock);
-      assert.equal(readFileSync(join(directory, 'store.json'), 'utf8'), written, 'the file is as it was');
+      assert.equal(readFileSync(join(directory, 'priority.json'), 'utf8'), written, 'the file is as it was');
       assert.deepEqual(
-        readdirSync(directory).filter((name) => name.includes('store')),
-        ['store.json'],
+        readdirSync(directory).filter((name) => name.includes('priority')),
+        ['priority.json'],
         'and nothing beside it was made',
       );
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Waiting marks written in a temporary slot folder, and the order a one-off of a normal repository
+ * that began waiting now sees them in, whole, as the priority file in the folder lists the repositories.
+ */
+async function priorityFolder(
+  marks: readonly { readonly name: string; readonly secondsAgo: number; readonly body: object }[],
+  priority: string | null,
+): Promise<{ directory: string; order: (observer?: SlotLine) => string[]; clock: number }> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-order-'));
+  mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
+  const me = { pid: process.pid, started: await ownStart() };
+  const clock = Date.now();
+  for (const { name, secondsAgo, body } of marks) {
+    writeFileSync(
+      join(directory, WAITING_FOLDER, `${name}.json`),
+      JSON.stringify({ ...me, since: clock / 1000 - secondsAgo, ...body }),
+    );
+  }
+  if (priority !== null) {
+    writeFileSync(join(directory, 'priority.json'), priority);
+  }
+  return {
+    directory,
+    clock,
+    order: (observer = new SlotLine('other', false, () => clock)) =>
+      observer.ahead(slotWaiters(directory)).map((one) => one.mark.replace(/\.json$/u, '')),
+  };
+}
+
+/**
+ * Among one-offs a mark of a listed repository goes before every other whatever its `since`, listed
+ * ones in `since` order and the rest after them in `since` order. Gate work stays before all of them. A
+ * mark naming a repository that is not listed, naming none or naming a retired class is normal.
+ */
+async function testAListedRepositoryGoesBeforeEveryOtherOneOffAndAfterGateWork(): Promise<void> {
+  const one = (
+    name: string,
+    secondsAgo: number,
+    body: object,
+  ): { name: string; secondsAgo: number; body: object } => ({
+    name,
+    secondsAgo,
+    body,
+  });
+  const normal = one('1-normal', 50, { taker: 'other', repository: 'normal-game' });
+  const high = one('2-high', 10, { taker: 'other', repository: 'high-game' });
+  const highEarlier = one('3-high-earlier', 20, { taker: 'other', repository: 'high-game' });
+  const gate = one('4-gate', 5, { taker: 'gate', repository: 'high-game' });
+  const classOnly = one('5-class', 40, { taker: 'other', class: 'store' });
+  const unlisted = one('6-unlisted', 45, { taker: 'other', repository: 'unlisted-game' });
+  const list = JSON.stringify({ high: ['high-game'] });
+  const folders: string[] = [];
+  try {
+    const two = await priorityFolder([normal, high], list);
+    folders.push(two.directory);
+    assert.deepEqual(two.order(), ['2-high', '1-normal'], 'a listed mark goes first whatever its since');
+    const three = await priorityFolder([normal, high, highEarlier], list);
+    folders.push(three.directory);
+    assert.deepEqual(
+      three.order(),
+      ['3-high-earlier', '2-high', '1-normal'],
+      'two listed marks go in since order, ahead of the normal one',
+    );
+    const gated = await priorityFolder([normal, high, highEarlier, gate], list);
+    folders.push(gated.directory);
+    assert.deepEqual(
+      gated.order(),
+      ['4-gate', '3-high-earlier', '2-high', '1-normal'],
+      'a gate mark still goes before a listed one, whatever repository it names',
+    );
+    const unmatched = await priorityFolder([normal, high, classOnly, unlisted], list);
+    folders.push(unmatched.directory);
+    writeFileSync(join(unmatched.directory, 'store.json'), JSON.stringify({ games: ['normal-game'] }));
+    assert.deepEqual(
+      unmatched.order(),
+      ['2-high', '1-normal', '6-unlisted', '5-class'],
+      'a mark with an unlisted repository, or a class and none, is normal, and store.json changes nothing',
+    );
+  } finally {
+    for (const directory of folders) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/** A list changed while two takers wait reorders them at the next look of the same take. */
+async function testAPriorityListChangedWhileTakersWaitReordersThemAtTheNextLook(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-change-'));
+  try {
+    const mine = join(root, 'mine-game');
+    mkdirSync(join(mine, '.git'), { recursive: true });
+    const directory = join(root, 'slots');
+    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
+    const me = { pid: process.pid, started: await ownStart() };
+    writeFileSync(
+      join(directory, WAITING_FOLDER, '1-1.json'),
+      JSON.stringify({
+        ...me,
+        taker: 'other',
+        repository: 'ahead-game',
+        since: (Date.now() - 30_000) / 1000,
+      }),
+    );
+    writeFileSync(join(directory, 'priority.json'), '{"high": ["ahead-game"]}');
+    const taker = new EngineSlots(directory, 1, me, undefined, () => 'other');
+    const line = new SlotLine('other', false, Date.now, false, 'mine-game');
+    assert.equal(await taker.takeFree(false, line), null, 'the listed waiter stays ahead of it');
+    writeFileSync(join(directory, 'priority.json'), '{"high": ["mine-game"]}');
+    assert.equal(
+      await taker.takeFree(false, line),
+      join(directory, '0.lock'),
+      'and once the list names it instead, the same take at its next look goes first',
+    );
+    taker.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A missing, empty, mistyped or non-JSON priority file gives normal order, and a bad one is said once. */
+async function testABadPriorityFileGivesNormalOrderAndIsSaidOnce(): Promise<void> {
+  const normal = { name: '1-normal', secondsAgo: 50, body: { taker: 'other', repository: 'normal-game' } };
+  const listed = { name: '2-listed', secondsAgo: 10, body: { taker: 'other', repository: 'high-game' } };
+  const cases: [string, string | null][] = [
+    ['a missing file', null],
+    ['an empty file', ''],
+    ['high that is no array', '{"high": "x"}'],
+    ['a file that is not JSON', 'high: [high-game'],
+  ];
+  const said: string[] = [];
+  for (const [what, content] of cases) {
+    const folder = await priorityFolder([normal, listed], content);
+    try {
+      assert.deepEqual(folder.order(), ['1-normal', '2-listed'], `${what} gives normal order`);
+      const me = { pid: process.pid, started: await ownStart() };
+      const taker = new EngineSlots(
+        folder.directory,
+        1,
+        me,
+        (line) => said.push(line),
+        () => 'tier',
+      );
+      const before = said.length;
+      for (let look = 0; look < 3; look += 1) {
+        const lock = await taker.takeFree();
+        assert.ok(lock !== null, `${what}: the slot is free`);
+        taker.releaseAll();
+      }
+      assert.equal(said.length - before, content === null || content === '' ? 0 : 1, `${what}: said once`);
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/** A normal one-off stands behind listed work until it has waited 600 s, then stands with gate work. */
+async function testANormalOneOffPast600SecondsStandsWithGateWorkBesideAListedWaiter(): Promise<void> {
+  const listed = { name: '1-listed', secondsAgo: 30, body: { taker: 'other', repository: 'high-game' } };
+  const held = { name: '2-held', secondsAgo: 599, body: { taker: 'other', repository: 'normal-game' } };
+  const past = { name: '3-past', secondsAgo: 601, body: { taker: 'other', repository: 'normal-game' } };
+  const named = await priorityFolder([listed, held, past], '{"high": ["high-game"]}');
+  const unnamed = await priorityFolder([listed, held, past], null);
+  try {
+    const gate = (clock: number): SlotLine => new SlotLine('gate', false, () => clock);
+    assert.deepEqual(
+      named.order(gate(named.clock)),
+      ['3-past'],
+      'with a listed waiter, only the one-off past 600 s stands before a gate',
+    );
+    assert.deepEqual(
+      unnamed.order(gate(unnamed.clock)),
+      ['3-past', '2-held'],
+      'with no list, both one-offs past 120 s stand before it, and the young one does not',
+    );
+  } finally {
+    rmSync(named.directory, { recursive: true, force: true });
+    rmSync(unnamed.directory, { recursive: true, force: true });
+  }
+}
+
+/** A take for a project in a git work tree writes its lock as a take for none does. */
+async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-lock-'));
+  try {
+    const project = join(root, 'listed-game');
+    mkdirSync(join(project, '.git'), { recursive: true });
+    const me = { pid: process.pid, started: await ownStart() };
+    const locks: string[] = [];
+    for (const forProject of [project, undefined]) {
+      const directory = join(root, forProject === undefined ? 'none' : 'git');
+      mkdirSync(directory);
+      const taker = new EngineSlots(directory, 1, me, undefined, () => 'other', forProject);
+      const lock = await taker.take();
+      locks.push(readFileSync(lock, 'utf8'));
+      taker.release(lock);
+    }
+    assert.equal(locks[0], locks[1], 'the two locks are the same bytes');
+    assert.ok(!locks[0]?.includes('repository'), 'and name no repository');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -130495,7 +130738,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
-  testAStoreClassTakerGoesBeforeEarlierYoungSideWork,
+  testAHighPriorityTakerGoesBeforeEarlierYoungSideWork,
   testAGameHeldBackByTheGamesLimitClaimsNoSlotAheadOfACall,
   testAGameThatCanNeverRunLeavesTheGatesEngineItsOnlySlot,
   testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt,
@@ -130532,14 +130775,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakerWaitedForAndGivenASlotInALaterPassIsKeptWhileItLooks,
   testATakerGivenASlotInTheFirstPassIsDroppedOnceItStopsLooking,
   testAGatesEngineGivenASlotInALaterPassIsDroppedAtItsYieldAndNotBefore,
-  testAStoreWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
-  testAWaitingMarkNamesTheStoreClass,
+  testAHighPriorityWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
+  testAWaitingMarkNamesItsRepository,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
-  testATakeForAListedRepositoryMarksItsWaitWithTheStoreClass,
-  testAStoreFileThatCannotBeReadGivesNoClass,
-  testTheStoreFileIsOnlyRead,
-  testALookWithNoLineOfItsOwnHasTheProjectsStoreClass,
-  testATakeForAProjectCarriesItsStoreClassWhateverTakesIt,
+  testATakeForAListedRepositoryMarksItsWaitWithTheRepository,
+  testAPriorityFileThatCannotBeReadNamesNoRepository,
+  testThePriorityFileIsOnlyRead,
+  testALookWithNoLineOfItsOwnHasTheProjectsPriority,
+  testATakeForAProjectCarriesItsRepositoryWhateverTakesIt,
+  testAListedRepositoryGoesBeforeEveryOtherOneOffAndAfterGateWork,
+  testAPriorityListChangedWhileTakersWaitReordersThemAtTheNextLook,
+  testABadPriorityFileGivesNormalOrderAndIsSaidOnce,
+  testANormalOneOffPast600SecondsStandsWithGateWorkBesideAListedWaiter,
+  testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone,
   testEveryGameTheServerStartsTakesItsSlotForItsProject,
   testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
   testAnUnreadableWorktreeGitFileListsNoWorktrees,

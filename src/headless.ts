@@ -37,7 +37,7 @@ export interface HeadlessEngine {
   readonly editor?: boolean;
   /**
    * The project the run is for where its engine runs on another folder, which gives its slot that
-   * project's store class. The folder the operation names when not given.
+   * project's repository and priority. The folder the operation names when not given.
    */
   readonly project?: string;
   /** How long an operation's engine may run before it is ended. Ten minutes when not given. */

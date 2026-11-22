@@ -15957,7 +15957,7 @@ export class GodotServer {
     }
     // In one of the machine's engine slots, taken before the engine starts and given back once its
     // log is whole, so the caller's own limit counts the engine's time and not the wait. [param
-    // project] is the project the run is of, which gives the slot its store class.
+    // project] is the project the run is of, which gives the slot its repository and priority.
     const held = await slotForCall(false, project, tool);
     try {
       const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);

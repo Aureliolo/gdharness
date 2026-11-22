@@ -922,7 +922,8 @@ the wait.
 - The mark is `<directory>/waiting/<pid>-<n>.json`, with `n` unique within your process.
 - Make it exclusively as a lock is. Create the folder first if it is missing.
 - It holds what your lock will, plus `taker` (`gate`, `timing`, `tier` or `other`, as below) and
-  `since`. That is when the take began to wait, in seconds since the epoch.
+  `since`. That is when the take began to wait, in seconds since the epoch. It also holds
+  `repository` where the take has a project in a git work tree (step 5).
 - A wait for memory rather than a slot names `taker` `memory`. gdharness keeps its place in line
   with such a mark when a slot is free and the budget below leaves no room for the engine. It adds
   `kind`, the taker it would be in line, and `memory`, the bytes its engine will hold. A `memory`
@@ -935,12 +936,12 @@ Take in the order you began to wait. At each look, read every live mark but your
 its `kind` names.
 
 - The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that have waited
-  long enough. A store-class taker waits two minutes. Any other waits two minutes while no
-  store-class taker is in line, and ten minutes while one is. The second group is the other
-  store-class takers. The third is every other `other` taker. A game is placed as any other
-  `other` taker is. The wait and the class change only the place in line, never which slots a
+  long enough. A high-priority taker waits two minutes. Any other waits two minutes while no
+  high-priority taker is in line, and ten minutes while one is. The second group is the other
+  high-priority takers. The third is every other `other` taker. A game is placed as any other
+  `other` taker is. The wait and the priority change only the place in line, never which slots a
   taker may take.
-- A store-class taker is in line when you are one, or when a live store-class mark last looked
+- A high-priority taker is in line when you are one, or when a live high-priority mark last looked
   under 5,000 ms ago (its `.seen` file, below). Read that time and your clock in whole
   milliseconds, rounded down, from the file's nanoseconds where the system gives them. A taker
   that stops looking stops holding others back, and every looker reads that alike.
@@ -949,16 +950,19 @@ its `kind` names.
   byte by byte, is ahead. Name marks in ASCII, so that every reader orders them alike.
 - Before you have a mark of your own, no other taker sees you. Two takers that began in the same
   millisecond may then both go first, and the slot's lock decides between them.
-- A stream of store-class takers delays an `other` taker, a game included, by ten minutes at most.
-  A store-class taker that has waited two minutes stands with gate work and goes before an `other`
-  taker that has waited less than ten minutes. Past ten minutes the `other` taker stands with gate
-  work as well, and the earlier `since` goes first.
-- A mark may hold `class` `store`, written by an `other` taker that has the class and by no other.
-  A mark with no class, or any other, has none.
-- A taker has the class where `<directory>/store.json` lists the repository of the Godot project
-  it takes for. The file is `{"games": ["name", ...]}` with repository folder names. Its writer
-  replaces it whole. A taker only reads it, once as its take begins. A file that is missing,
-  unreadable or not that shape gives no class.
+- A stream of high-priority takers delays an `other` taker, a game included, by ten minutes at
+  most. A high-priority taker that has waited two minutes stands with gate work and goes before an
+  `other` taker that has waited less than ten minutes. Past ten minutes the `other` taker stands
+  with gate work as well, and the earlier `since` goes first.
+- A mark may hold `repository`, the name of the git repository of the Godot project the take is
+  for. Leave it out where the take has no project or the project is in no git work tree. A mark
+  without it, or a lock, is normal priority. A mark's `class` is not read.
+- A taker has high priority where `<directory>/priority.json` lists its mark's `repository` and
+  the taker is an `other` one. The file is `{"high": ["name", ...]}` with repository folder names.
+  Its writer replaces it whole. A taker only reads it, at each look, and judges every mark by the
+  list it has just read, so a list changed while takers wait reorders them at the next look. A
+  file that is missing, empty or not that shape names no repository. A file that is not that shape
+  is said once per process on the slot line's output and never stops a look.
 - A project's repository is found from its folder upwards: the first folder holding `.git`. Where
   `.git` is a file, as in a linked worktree, follow its `gitdir:` line, then the `commondir` file
   in that folder. The repository's name is the name of the folder holding the shared `.git`.

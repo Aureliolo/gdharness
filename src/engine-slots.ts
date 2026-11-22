@@ -348,14 +348,14 @@ export function keptSlotsOf(count: number): number {
 
 /**
  * How long a one-off take, a game's included, waits before it stands with gate work in the line
- * ({@link SlotLine}). A store-class one counts from it always, any other only while no store-class
- * taker waits. Its wait changes its place there, never which slots it may take.
+ * ({@link SlotLine}). A high-priority one counts from it always, any other only while no
+ * high-priority taker waits. Its wait changes its place there, never which slots it may take.
  */
 const ONE_OFF_AGED_MS = 120_000;
 
 /**
- * How long store-class side work may hold an ordinary one-off back: while a store-class taker waits,
- * a one-off of another repository goes after every store-class one until it has waited this long,
+ * How long high-priority side work may hold an ordinary one-off back: while a high-priority taker
+ * waits, a one-off of another repository goes after every high-priority one until it has waited this long,
  * then stands as one past {@link ONE_OFF_AGED_MS} does. The other side of the scheme names it
  * `ONE_OFF_HELD`.
  */
@@ -371,33 +371,67 @@ const ONE_OFF_HELD_MS = 600_000;
  */
 export const SLOT_YIELD_MS = 5000;
 
-/** The class a waiting mark names for side work of a repository that {@link STORE_FILE} lists. */
-const STORE_CLASS = 'store';
+/**
+ * The file in the slot folder that lists the repositories whose side work has high priority:
+ * `{"high": ["<repository>", ...]}`. A repository is the name of a project's git top-level folder.
+ */
+const PRIORITY_FILE = 'priority.json';
 
-/** The file in the slot folder that lists the repositories whose side work has the store class. */
-const STORE_FILE = 'store.json';
+/** The repositories no list names, for a look that has read none. */
+const NO_HIGH_PRIORITY: ReadonlySet<string> = new Set();
+
+/** What {@link PRIORITY_FILE} in a folder names, and why it was not read where it is malformed. */
+interface PriorityRead {
+  readonly high: ReadonlySet<string>;
+  /** Why the file was not read, null where it is missing, empty or read. */
+  readonly malformed: string | null;
+}
 
 /**
- * Whether side work started in [param project] has the store class: its repository's name is in the
- * `games` array of `store.json` in [param directory]. The file is read only, and its writer replaces
- * it whole, so a read meets the old list or the new. A missing or unreadable file, or one whose
- * `games` is not an array of strings, gives no class.
+ * The high-priority repositories [param directory] names. The file is read only, and its writer
+ * replaces it whole, so a read meets the old list or the new. A missing, empty or unreadable file, or
+ * one whose `high` is not an array of strings, names none.
  */
-function storeClassOf(directory: string, project: string | undefined): boolean {
-  if (project === undefined) {
-    return false;
-  }
+function readPriority(directory: string): PriorityRead {
+  let text: string;
   try {
-    const said: unknown = JSON.parse(readFileSync(join(directory, STORE_FILE), 'utf8'));
-    const games = isRecord(said) ? said['games'] : undefined;
-    if (!Array.isArray(games) || !games.every((one): one is string => typeof one === 'string')) {
-      return false;
-    }
-    const name = repositoryNameOf(project);
-    return name !== null && games.includes(name);
+    text = readFileSync(join(directory, PRIORITY_FILE), 'utf8');
   } catch {
-    return false;
+    return { high: NO_HIGH_PRIORITY, malformed: null };
   }
+  if (text.trim() === '') {
+    return { high: NO_HIGH_PRIORITY, malformed: null };
+  }
+  let said: unknown;
+  try {
+    said = JSON.parse(text);
+  } catch {
+    return { high: NO_HIGH_PRIORITY, malformed: `${PRIORITY_FILE} is not JSON` };
+  }
+  const high = isRecord(said) ? said['high'] : undefined;
+  if (!Array.isArray(high) || !high.every((one): one is string => typeof one === 'string')) {
+    return { high: NO_HIGH_PRIORITY, malformed: `${PRIORITY_FILE} has no "high" array of strings` };
+  }
+  return { high: new Set(high), malformed: null };
+}
+
+/** The malformed priority files this process has said so of, each by its path and text. */
+const priorityFilesSaid = new Set<string>();
+
+/**
+ * The high-priority repositories of [param directory], as {@link readPriority} reads them. A
+ * malformed file is said once per process, through [param say], and never stops a look.
+ */
+function highPriorityOf(directory: string, say?: (line: string) => void): ReadonlySet<string> {
+  const read = readPriority(directory);
+  if (read.malformed !== null && say !== undefined) {
+    const key = `${join(directory, PRIORITY_FILE)}\n${read.malformed}`;
+    if (!priorityFilesSaid.has(key)) {
+      priorityFilesSaid.add(key);
+      say(`${read.malformed} in ${directory}, so no repository has high priority.`);
+    }
+  }
+  return read.high;
 }
 
 /** The kind a waiting mark names for a wait for memory, which takes no slot. */
@@ -412,8 +446,10 @@ interface SlotWaiter {
   /** When it began to wait in seconds, as its mark gives it, which the line's order compares. */
   readonly sinceSeconds: number;
   readonly game: boolean;
-  /** Whether its mark names the store class: {@link storeClassOf}. */
-  readonly store: boolean;
+  /** The repository its mark names, where it names one. */
+  readonly repository?: string;
+  /** Whether it is a one-off of a high-priority repository, as the list read with its mark has it. */
+  readonly high: boolean;
   /** How many slots it waits for at once: above 1 only for a job needing several, else 1. */
   readonly wants: number;
   /** When it last looked, in milliseconds, or when its mark was made where it never says. */
@@ -434,7 +470,10 @@ const SLOTS_DRAIN_MS = 300_000;
  * another kind is a one-off's, and one naming no `since` (seconds since the epoch, as the games'
  * tools write it) waits since its file was made, which nobody writes again while it waits.
  */
-export function slotWaiters(directory: string): SlotWaiter[] {
+export function slotWaiters(
+  directory: string,
+  high: ReadonlySet<string> = highPriorityOf(directory),
+): SlotWaiter[] {
   const marks = join(directory, WAITING_FOLDER);
   const found: SlotWaiter[] = [];
   for (const mark of markNames(marks)) {
@@ -444,7 +483,7 @@ export function slotWaiters(directory: string): SlotWaiter[] {
     } catch {
       continue;
     }
-    const waiter = waiterOfMark(marks, mark, content);
+    const waiter = waiterOfMark(marks, mark, content, high);
     if (waiter !== null) {
       found.push(waiter);
     }
@@ -453,7 +492,7 @@ export function slotWaiters(directory: string): SlotWaiter[] {
 }
 
 /** {@link slotWaiters} for a take on the event loop, whose waits for a held mark are timers. */
-async function slotWaitersAsync(directory: string): Promise<SlotWaiter[]> {
+async function slotWaitersAsync(directory: string, high: ReadonlySet<string>): Promise<SlotWaiter[]> {
   const marks = join(directory, WAITING_FOLDER);
   const found: SlotWaiter[] = [];
   for (const mark of markNames(marks)) {
@@ -463,7 +502,7 @@ async function slotWaitersAsync(directory: string): Promise<SlotWaiter[]> {
     } catch {
       continue;
     }
-    const waiter = waiterOfMark(marks, mark, content);
+    const waiter = waiterOfMark(marks, mark, content, high);
     if (waiter !== null) {
       found.push(waiter);
     }
@@ -502,9 +541,14 @@ function fileTimeOr(path: string, otherwise: number): number {
 
 /**
  * The live waiter the mark file [param mark] in [param marks] names, which read as [param content],
- * or null when it names none.
+ * or null when it names none. Its repository is judged against [param highList] as the mark is read.
  */
-function waiterOfMark(marks: string, mark: string, content: string | null): SlotWaiter | null {
+function waiterOfMark(
+  marks: string,
+  mark: string,
+  content: string | null,
+  highList: ReadonlySet<string>,
+): SlotWaiter | null {
   const madeAt = fileTimeOr(join(marks, mark), Number.NaN);
   const holder = content === null ? null : holderOf(content);
   if (Number.isNaN(madeAt) || content === null || holder === null || !alive(holder.pid)) {
@@ -515,7 +559,7 @@ function waiterOfMark(marks: string, mark: string, content: string | null): Slot
     taker: marked,
     since,
     wants,
-    class: kind,
+    repository,
     kind: waiting,
     memory,
   }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
@@ -541,9 +585,24 @@ function waiterOfMark(marks: string, mark: string, content: string | null): Slot
     // two sides rounding differently each rank the other ahead for a mark begun in one millisecond.
     sinceSeconds: begun ?? Math.floor(madeAt) / 1000,
     game: holder.game === true,
-    store: kind === STORE_CLASS,
+    ...repositoryOfMark(repository, takerNamed(taker), highList),
     memory: marked === MEMORY_TAKER ? positiveOr0(memory) : 0,
   };
+}
+
+/**
+ * The repository a mark names ([param value], where it is a non-empty string) and whether it makes
+ * the mark high priority: a one-off of [param taker] whose repository [param highList] names.
+ */
+function repositoryOfMark(
+  value: unknown,
+  taker: SlotTaker,
+  highList: ReadonlySet<string>,
+): { readonly repository?: string; readonly high: boolean } {
+  if (typeof value !== 'string' || value === '') {
+    return { high: false };
+  }
+  return { repository: value, high: taker === 'other' && highList.has(value) };
 }
 
 /** The kind of taker a mark names, with any other name read as a one-off. */
@@ -599,16 +658,30 @@ export class SlotLine {
 
   readonly taker: SlotTaker;
   readonly game: boolean;
-  /** Whether it is a one-off of a store-class repository: {@link storeClassOf}. */
-  readonly store: boolean;
+  /** The repository of the project the take is for, where it is in a git work tree. */
+  readonly repository: string | undefined;
+  /** Whether it is a one-off of a high-priority repository, as of the last {@link judge}. */
+  high: boolean;
   private readonly clock: () => number;
 
-  constructor(taker: SlotTaker, game = false, clock: () => number = Date.now, store = false) {
+  constructor(
+    taker: SlotTaker,
+    game = false,
+    clock: () => number = Date.now,
+    high = false,
+    repository?: string,
+  ) {
     this.taker = taker;
     this.game = game;
-    this.store = taker === 'other' && store;
+    this.repository = repository;
+    this.high = taker === 'other' && high;
     this.clock = clock;
     this.since = clock();
+  }
+
+  /** Judges its repository against [param list], read at the look, as it judges the marks of others. */
+  judge(list: ReadonlySet<string>): void {
+    this.high = this.taker === 'other' && this.repository !== undefined && list.has(this.repository);
   }
 
   /**
@@ -626,7 +699,7 @@ export class SlotLine {
     return {
       ...holder,
       ...(this.game ? { game: true } : {}),
-      ...(this.store ? { class: STORE_CLASS } : {}),
+      ...(this.repository === undefined ? {} : { repository: this.repository }),
       taker: this.memoryWait ? MEMORY_TAKER : this.taker,
       ...(this.memoryWait ? { kind: this.taker, memory: this.need } : {}),
       since: this.since / 1000,
@@ -635,12 +708,13 @@ export class SlotLine {
 
   /**
    * The takers of [param waiters] ahead of this one, the first first, in three groups. The first
-   * holds every taker that is no one-off and the store-class one-offs that have waited
-   * {@link ONE_OFF_AGED_MS}. The second holds the other store-class one-offs. The
-   * third holds every other one-off younger than {@link ONE_OFF_HELD_MS} while a store-class taker
-   * waits, since a store-stage game's engine calls go before other side work, and younger than
-   * {@link ONE_OFF_AGED_MS} while none waits. Past that, an ordinary one-off stands with gate work, so
-   * neither gates nor store work arriving all day keep it waiting for good. A game editor_run
+   * holds every taker that is no one-off and the high-priority one-offs that have waited
+   * {@link ONE_OFF_AGED_MS}. The second holds the other high-priority one-offs. The
+   * third holds every other one-off younger than {@link ONE_OFF_HELD_MS} while a high-priority taker
+   * waits, since the work of a repository named in the priority list goes before other side work, and
+   * younger than {@link ONE_OFF_AGED_MS} while none waits. Past that, an ordinary one-off stands with
+   * gate work, so neither gates nor high-priority work arriving all day keep it waiting for good. A
+   * game editor_run
    * started is placed as any other one-off is: it holds its slot for as long as it plays, and what
    * limits that is how many of the kept slots games may hold ({@link gamesKeptOf}), not its place
    * here. Each group goes in the order it began to wait. The class moves a place in line only,
@@ -648,28 +722,28 @@ export class SlotLine {
    */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
     const now = this.clock();
-    // A store-class waiter holds others back only while it looks, which every looker reads alike
+    // A high-priority waiter holds others back only while it looks, which every looker reads alike
     // from its mark. A taker held back stops looking, and so stops holding the takers behind it.
-    const storeWaits = this.store || waiters.some((one) => one.store && now - one.seen < SLOT_YIELD_MS);
+    const highWaits = this.high || waiters.some((one) => one.high && now - one.seen < SLOT_YIELD_MS);
     // The age is read from the exact seconds the order compares, as the other side of the scheme reads it.
     const waited = (since: number, ms: number): boolean => now / 1000 - since >= ms / 1000;
-    const groupOf = (taker: SlotTaker, store: boolean, since: number): number => {
+    const groupOf = (taker: SlotTaker, high: boolean, since: number): number => {
       if (taker !== 'other') {
         return 0;
       }
-      if (store) {
+      if (high) {
         return waited(since, ONE_OFF_AGED_MS) ? 0 : 1;
       }
-      return waited(since, storeWaits ? ONE_OFF_HELD_MS : ONE_OFF_AGED_MS) ? 0 : 2;
+      return waited(since, highWaits ? ONE_OFF_HELD_MS : ONE_OFF_AGED_MS) ? 0 : 2;
     };
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
     const own = {
-      group: groupOf(this.taker, this.store, this.since / 1000),
+      group: groupOf(this.taker, this.high, this.since / 1000),
       since: this.since / 1000,
       mark: this.mark ?? '￿',
     };
     const placeOf = (one: SlotWaiter): typeof own => ({
-      group: groupOf(one.taker, one.store, one.sinceSeconds),
+      group: groupOf(one.taker, one.high, one.sinceSeconds),
       since: one.sinceSeconds,
       mark: one.mark,
     });
@@ -1462,7 +1536,7 @@ export class EngineSlots {
   /** What this process is as a taker, asked at every look, since a turn ends when its ticket goes. */
   private readonly taker: () => SlotTaker;
   private readonly say: ((line: string) => void) | undefined;
-  /** The Godot project this process's takes are for, which names the repository of the store class. */
+  /** The Godot project this process's takes are for, which names the repository its marks carry. */
   private readonly project: string | undefined;
 
   /** The physical memory of the machine, which the memory budget is counted from. */
@@ -1516,11 +1590,12 @@ export class EngineSlots {
   }
 
   /**
-   * A line for a take of [param taker], with the store class where a one-off's project has it. The
-   * file is read once for the take, never at a look, so a wait does not hold a tick up on it.
+   * A line for a take of [param taker], carrying the repository of its project where that is in a git
+   * work tree. The repository is found once for the take, and the priority list at each look.
    */
   private lineFor(taker: SlotTaker, game: boolean, project: string | undefined = this.project): SlotLine {
-    return new SlotLine(taker, game, Date.now, taker === 'other' && storeClassOf(this.directory, project));
+    const repository = project === undefined ? null : repositoryNameOf(project);
+    return new SlotLine(taker, game, Date.now, false, repository ?? undefined);
   }
 
   /**
@@ -1983,7 +2058,9 @@ export class EngineSlots {
     const drawn = this.drawn;
     const drawnBefore = drawn.numbers;
     const now = Date.now();
-    const waiting = await slotWaitersAsync(this.directory);
+    const high = highPriorityOf(this.directory, this.say);
+    placed.judge(high);
+    const waiting = await slotWaitersAsync(this.directory, high);
     for (const mark of this.passedOver.keys()) {
       if (!waiting.some((one) => one.mark === mark)) {
         this.passedOver.delete(mark);
@@ -3074,8 +3151,8 @@ function listed(named: readonly string[]): string {
  * stops waiting, and one whose client asked for progress is told that it is waiting and why.
  * Answers its lock, how to give it back, and how to hand it to an engine that outlives this process.
  * [param game] is a take for a game editor_run starts, which games may hold only some of: see
- * {@link gamesKeptOf}. [param project] is the project the take is for, which gives a one-off the
- * store class where its repository is listed. [param tool] names the engine's tool, whose kept peak
+ * {@link gamesKeptOf}. [param project] is the project the take is for, which names the
+ * repository its mark carries, which gives a one-off high priority where the list names it. [param tool] names the engine's tool, whose kept peak
  * for the project is the memory its lock counts: a game's is `editor_run`, any other engine's
  * `headless`.
  */
@@ -3249,8 +3326,8 @@ export interface CallSlot {
 const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null; project?: string }>();
 
 /**
- * Names the project the command inside {@link inOneSlot} runs for, which gives its slot the store
- * class where the project's repository has it. Call it before the first engine step. Outside
+ * Names the project the command inside {@link inOneSlot} runs for, which gives its slot the
+ * project's repository, and high priority where the list names it. Call it before the first engine step. Outside
  * {@link inOneSlot} it does nothing.
  */
 export function forTheProject(project: string): void {
