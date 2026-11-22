@@ -595,8 +595,11 @@ async function listenAndNote(
 ): Promise<KeeperListening | null> {
   const listening = await listenForTheServer(
     () => {
+      // Only the stop that reaches a live game is `signalled`. A later one answers `gone` even in
+      // the moments before the exit is handled, so two servers never both claim the end.
+      const first = !ender.stop;
       ender.stop = true;
-      return ender.end();
+      return first ? ender.end() : 'gone';
     },
     debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
   );

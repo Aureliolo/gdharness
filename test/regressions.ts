@@ -65,10 +65,12 @@ import {
 } from '../src/bridge-announce.js';
 import { cacheHome, toolHome } from '../src/cache-home.js';
 import {
+  type CallCommit,
   type CallNotes,
   callNotesSaid,
   callProgress,
   callSignal,
+  commitCall,
   newCallNotes,
   type SlotWaits,
   stillGoingSaid,
@@ -77715,8 +77717,14 @@ async function theyEndItOnce(
       firstEnded || secondEnded,
       `one server says it ended the game and the other answers that end: ${shown}`,
     );
+    // The exit code is not compared: the server that answers the other's end may read the game's
+    // exit from its keeper's note, as 1, or find none.
     for (const answer of [ours, theirs]) {
-      assert.deepEqual(endOfTheAnswer(answer), [false, null, ended, undefined, get(answer, 'note')], shown);
+      assert.deepEqual(
+        endOfTheAnswer(answer).filter((_field, at) => at !== 1),
+        [false, ended, undefined, get(answer, 'note')],
+        shown,
+      );
     }
   });
 }
@@ -77986,86 +77994,113 @@ async function testAGamesKeeperRaisesItsLockAsTheGameGrows(): Promise<void> {
 }
 
 /**
- * The script of a stand-in keeper for [param rounds] rounds of a game's slot at [param lock]: each
- * waits for the lock to name [param server] and the round file to say the round, then hands the lock
- * to itself, raises it from its game's reading and names the game's next process, as a keeper does
- * when its game restarts, all at once. It writes whether the hand took beside the lock.
- */
-function keeperRoundsScript(lock: string, server: number, rounds: number): string {
-  const slots = pathToFileURL(resolve('src', 'engine-slots.ts')).href;
-  const memory = pathToFileURL(resolve('src', 'engine-memory.ts')).href;
-  return [
-    `import { handSlot, nameSlotEngine, ownStart, raiseSlotMemory } from ${JSON.stringify(slots)};`,
-    `import { MemoryWatch } from ${JSON.stringify(memory)};`,
-    `const lock = ${JSON.stringify(lock)};`,
-    'const { readFileSync, writeFileSync, existsSync } = await import("node:fs");',
-    'const started = await ownStart();',
-    'const pause = (ms) => new Promise((done) => setTimeout(done, ms));',
-    'const holder = () => { try { return JSON.parse(readFileSync(lock, "utf8")); } catch { return null; } };',
-    `for (let round = 1; round <= ${String(rounds)}; round++) {`,
-    `  while (!(existsSync(lock + ".round") && readFileSync(lock + ".round", "utf8") === String(round) && holder()?.pid === ${String(server)})) await pause(1);`,
-    '  const game = 300000 + round;',
-    '  const reading = 2 * 1024 ** 3 + round * 256 * 1024 ** 2;',
-    '  const watch = new MemoryWatch(() => Promise.resolve({ at: 0, machine: 0, processors: null, held: new Map([[game, reading]]), below: new Map([[game, []]]) }), 5);',
-    `  const handed = handSlot(lock, ${String(server)}, { pid: process.pid, started, by: "a keeper" });`,
-    '  const stop = watch.follow(game, 64 * 1024 ** 3, (bytes) => raiseSlotMemory(lock, bytes));',
-    '  const named = nameSlotEngine(lock, process.pid, { pid: game, started: round });',
-    '  const said = String(await handed);',
-    '  await named;',
-    '  for (let wait = 0; wait < 300 && holder()?.memory !== reading; wait++) await pause(10);',
-    '  stop();',
-    '  writeFileSync(lock + ".k-" + String(round), said);',
-    '}',
-  ].join('\n');
-}
-
-/**
- * A game's slot handed to its keeper loses no hand to the raise, since only the keeper writes the
- * lock from then on. A hundred rounds of a stand-in keeper handing the server's lock to itself,
- * raising it and naming the game's next process at once each end with the lock the keeper's.
+ * A game's slot handed to its keeper loses no hand to a raise from any other process, since only the
+ * keeper writes the lock from then on. Three real keepers take over their games' slots while this
+ * process, which handed them over, keeps asking to raise each lock to 8 GiB. Every such raise is
+ * refused, and each lock ends up the keeper's, a game's, naming the game, and raised to what the
+ * keeper read and not to what was asked.
  */
 async function testAKeeperRaisingTheGameSlotItTookLosesNoHand(): Promise<void> {
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
   const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-hand-'));
-  const lock = join(directory, '0.lock');
-  const rounds = 100;
-  const keeper = spawnHidden(process.execPath, ['-e', keeperRoundsScript(lock, process.pid, rounds)], {
-    stdio: 'ignore',
-  });
-  const lost: string[] = [];
+  const projects: string[] = [];
+  const games: { readonly lock: string; readonly game: number; readonly keeper: number }[] = [];
+  const asked = { stop: false, answers: [] as (number | null)[] };
+  let hammering: Promise<void> = Promise.resolve();
   try {
-    for (let round = 1; round <= rounds; round++) {
-      writeFileSync(lock, JSON.stringify({ pid: process.pid, started, game: true, memory: 2 * MEMORY_GIB }));
-      writeFileSync(`${lock}.round`, String(round));
-      const said = `${lock}.k-${String(round)}`;
+    await withNoCeilingSet(async () => {
+      for (let at = 0; at < 3; at++) {
+        const project = memoryProject();
+        projects.push(project);
+        const lock = join(slots, `${String(at)}.lock`);
+        writeFileSync(
+          lock,
+          JSON.stringify({ pid: process.pid, started, game: true, memory: 256 * 1024 ** 2 }),
+        );
+        const launched = await launchOutsideTheTree(
+          {
+            command: process.execPath,
+            args: [join(import.meta.dirname, 'support', 'memory-engine.ts')],
+            env: { ...process.env, GDH_HOLD_MB: '400', GDH_GROW_MB: '100', GDH_STAY_MS: '25000' },
+            run: {
+              transcript: join(project, 'transcript.log'),
+              startedAt: Date.now(),
+              projectPath: project,
+              debugged: false,
+              slot: { lock, from: process.pid, by: 'a game' },
+            },
+          },
+          process.execPath,
+          resolve('build', 'keeper.js'),
+        );
+        assert.ok('pid' in launched, JSON.stringify(launched));
+        assert.ok(launched.keeperPid !== undefined, 'a keeper holds the game');
+        games.push({ lock, game: launched.pid, keeper: launched.keeperPid });
+      }
+      hammering = (async (): Promise<void> => {
+        while (!asked.stop) {
+          for (const { lock } of games) {
+            // Only while the lock is the keeper's: before that, the raise is this process's own.
+            if (holderOf(readLockOrEmpty(lock))?.pid !== process.pid) {
+              asked.answers.push(await raiseSlotMemory(lock, 8 * MEMORY_GIB));
+            }
+          }
+          await delay(2);
+        }
+      })();
+      const raised = (): boolean =>
+        games.every(({ lock, keeper }) => {
+          const holder = holderOf(readLockOrEmpty(lock));
+          return holder?.pid === keeper && (holder.memory ?? 0) >= 512 * 1024 ** 2;
+        });
       assert.ok(
-        await untilTrue(() => existsSync(said), 10_000),
-        `round ${String(round)}: the keeper answers`,
+        await untilTrue(raised, 20_000),
+        `every keeper raises its lock: ${games.map(({ lock }) => readLockOrEmpty(lock)).join(' ')}`,
       );
-      const held = holderOf(readFileSync(lock, 'utf8'));
-      const kept = {
-        handed: readFileSync(said, 'utf8'),
-        holder: held?.pid === keeper.pid,
-        game: held?.game,
-        memory: held?.memory,
-        engine: held?.engine?.pid,
-      };
-      const wanted = {
-        handed: 'true',
-        holder: true,
-        game: true,
-        memory: 2 * MEMORY_GIB + round * 256 * 1024 ** 2,
-        engine: 300_000 + round,
-      };
-      if (!isDeepStrictEqual(kept, wanted)) {
-        lost.push(`round ${String(round)}: ${JSON.stringify(kept)}`);
+      asked.stop = true;
+      await hammering;
+      for (const { lock, game, keeper } of games) {
+        const holder = holderOf(readLockOrEmpty(lock));
+        assert.deepEqual(
+          { holder: holder?.pid === keeper, game: holder?.game, engine: holder?.engine?.pid },
+          { holder: true, game: true, engine: game },
+          `the keeper's hand holds: ${readLockOrEmpty(lock)}`,
+        );
+        assert.ok(
+          (holder?.memory ?? 0) < 8 * MEMORY_GIB,
+          `no raise but the keeper's: ${readLockOrEmpty(lock)}`,
+        );
+      }
+      assert.ok(asked.answers.length > 0, 'this process asked for raises of locks the keepers held');
+      assert.deepEqual(
+        asked.answers.filter((answer) => answer !== null),
+        [],
+        'every raise by a process that does not hold the lock is refused',
+      );
+    });
+  } finally {
+    asked.stop = true;
+    await hammering;
+    for (const { game, keeper } of games) {
+      for (const pid of [game, keeper]) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
       }
     }
-    assert.deepEqual(lost, [], 'no round loses the hand, the raise or the engine named');
-  } finally {
-    keeper.kill();
-    await exitOf(keeper);
-    rmSync(directory, { recursive: true, force: true });
+    await untilTrue(() => slotLockPaths(slots).length === 0, 10_000);
+    sweep(slots, ...projects);
+  }
+}
+
+/** The text of the lock at [param lock], or an empty one while it is being replaced. */
+function readLockOrEmpty(lock: string): string {
+  try {
+    return readFileSync(lock, 'utf8');
+  } catch {
+    return '';
   }
 }
 
@@ -78329,17 +78364,464 @@ async function testALanesEngineRaisesItsSlotAsItGrows(): Promise<void> {
 
 /**
  * The guard of an engine the server holds for a call, a test run or a boot check, raises the slot
- * the server took for it. The server runs in a process of its own, where no reading can be mocked,
- * and a stand-in holds less than any take counts, so the site is read from the source.
+ * the server took for it. The server's own method that starts such an engine runs in a process of its
+ * own, where the engine is read at 3 GiB, and the slot it took is seen counting 1.5 GiB and then 3.
  */
-function testAServersHeldEngineRaisesItsSlot(): void {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  const spawned = /private async spawnGame\([\s\S]*?\n {2}\}\n/.exec(source)?.[0] ?? '';
-  assert.match(
-    spawned,
-    /const guard = engineMemory\.guard\([\s\S]*?\(bytes\) => raiseSlotMemory\(held\.lock, bytes\),\n {8}\);/,
-    'spawnGame guards its engine with a raise of its slot',
+async function testAServersHeldEngineRaisesItsSlot(): Promise<void> {
+  const project = memoryProject();
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const figures = await figuresWhile(
+        () => slotLockPaths(slots),
+        async () => {
+          const ran = await inAProcessOfItsOwn(
+            [
+              `spent.readingMemoryWith((pids) => Promise.resolve(new Map(pids.map((pid) => [pid, { bytes: ${String(3 * MEMORY_GIB)}, below: [] }]))));`,
+              `const { GodotServer } = await import(${JSON.stringify(pathToFileURL(resolve('src', 'server.ts')).href)});`,
+              'const server = Object.create(GodotServer.prototype);',
+              `const project = ${JSON.stringify(project)};`,
+              `const run = await server.spawnGame(${JSON.stringify(memoryEngine())}, ['--headless', '--path', project], undefined, undefined, 'boot_check', project);`,
+              'await run.settled;',
+              'say({ done: run.pid !== null });',
+            ],
+            { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '20', GDH_STAY_MS: '4000' },
+          );
+          assert.equal(get(ran, 'done'), true, `the engine started and ran out: ${JSON.stringify(ran)}`);
+        },
+      );
+      assert.ok(figures.has(1.5 * MEMORY_GIB), `taken at 1.5 GiB: ${JSON.stringify([...figures])}`);
+      assert.ok(figures.has(3 * MEMORY_GIB), `raised to 3 GiB: ${JSON.stringify([...figures])}`);
+    });
+  } finally {
+    sweep(project, slots);
+  }
+}
+
+/**
+ * A real keeper asked to stop its game twice, as two servers past their ceilings ask it, answers
+ * `signalled` to the stop that reached the live game and `gone` to the other, whether the asks come
+ * together or after the game has been signalled and before its exit is handled.
+ */
+async function testAKeeperAskedToStopTwiceSignalsOnlyTheFirst(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    for (const apart of [0, 50, 150]) {
+      const project = memoryProject();
+      let pids: number[] = [];
+      try {
+        const launched = await launchOutsideTheTree(
+          {
+            command: process.execPath,
+            args: [join(import.meta.dirname, 'support', 'memory-engine.ts')],
+            env: { ...process.env, GDH_HOLD_MB: '20', GDH_STAY_MS: '30000' },
+            run: {
+              transcript: join(project, 'transcript.log'),
+              startedAt: Date.now(),
+              projectPath: project,
+              debugged: false,
+            },
+          },
+          process.execPath,
+          resolve('build', 'keeper.js'),
+        );
+        assert.ok('pid' in launched, JSON.stringify(launched));
+        assert.ok(launched.keeperPid !== undefined, 'a keeper holds the game');
+        pids = [launched.pid, launched.keeperPid];
+        const address = await answeredWithin(() => {
+          const named = readRunRecord(project)?.keeper;
+          return named === undefined || named === '' ? undefined : named;
+        }, 20_000);
+        assert.ok(address !== undefined, 'the note names the keeper');
+        const first = askTheKeeperToStop(address, 5000);
+        const second = delay(apart).then(async () => await askTheKeeperToStop(address, 5000));
+        const answers = [await first, await second];
+        assert.deepEqual(
+          answers.map(String).toSorted((a, b) => a.localeCompare(b)),
+          ['gone', 'signalled'],
+          `asked twice ${String(apart)} ms apart, one stop reaches the game: ${JSON.stringify(answers)}`,
+        );
+        if (apart > 0) {
+          assert.deepEqual(
+            answers,
+            ['signalled', 'gone'],
+            `the first is the one that reaches it (${apart} ms)`,
+          );
+        }
+      } finally {
+        for (const pid of pids) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // Gone already.
+          }
+        }
+        await delay(300);
+        sweep(project);
+      }
+    }
+  });
+}
+
+/**
+ * A server whose keeper answers `gone` to its stop did not end the game, so it answers the end
+ * another server noted first and not an end of its own. The keeper here is a listener that ends the
+ * game through the real keeper and answers `gone`, as a keeper does to every stop after the first.
+ */
+async function testAServerToldGoneByTheKeeperAnswersTheEndAnotherNoted(): Promise<void> {
+  const project = memoryProject();
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  const firstsEnd =
+    'its memory ceiling: the engine held 0.77 GB, past the 0.31 GB ceiling. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it';
+  const held: {
+    server: ServerProcess | null;
+    stub: Awaited<ReturnType<typeof listenForTheServer>>;
+    pids: number[];
+  } = { server: null, stub: null, pids: [] };
+  try {
+    await withNoCeilingSet(async () => {
+      const runtime = String(process.env['GDHARNESS_RUNTIME_DIR']);
+      const launched = await launchOutsideTheTree(
+        {
+          command: memoryEngine(),
+          args: ['--path', project],
+          env: { ...process.env, GDH_HOLD_MB: '600', GDH_GROW_MB: '600', GDH_STAY_MS: '40000' },
+          run: {
+            transcript: join(project, 'transcript.log'),
+            startedAt: Date.now(),
+            projectPath: project,
+            debugged: false,
+          },
+        },
+        process.execPath,
+        resolve('build', 'keeper.js'),
+      );
+      assert.ok('pid' in launched, JSON.stringify(launched));
+      assert.ok(launched.keeperPid !== undefined, 'a keeper holds the game');
+      held.pids = [launched.pid, launched.keeperPid];
+      const record = await answeredWithin(() => {
+        const found = readRunRecord(project);
+        return found?.keeper === undefined || found.keeper === '' ? undefined : found;
+      }, 20_000);
+      assert.ok(record?.keeper !== undefined, 'the note names the keeper');
+      const real = record.keeper;
+      const stub = await listenForTheServer(() => {
+        void askTheKeeperToStop(real, 5000);
+        return 'gone';
+      }, null);
+      assert.ok(stub !== null, 'the stand-in keeper listens');
+      held.stub = stub;
+      writeRunRecord({ ...record, keeper: stub.address });
+      noteMemoryEnd({ transcript: record.transcript, startedAt: record.startedAt }, firstsEnd);
+      const server = new ServerProcess({
+        env: {
+          GODOT_PATH: memoryEngine(),
+          GDHARNESS_RUNTIME_DIR: runtime,
+          GDHARNESS_PROJECT: project,
+          [SLOTS_VARIABLE]: slots,
+          [CEILING_VARIABLE]: '300',
+        },
+      });
+      held.server = server;
+      await server.initialize('regression-test');
+      const call = async (): Promise<unknown> =>
+        parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_output', arguments: { projectPath: project } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+      let said: unknown = null;
+      for (let tries = 0; tries < 40 && get(said, 'running') !== false; tries++) {
+        said = await call();
+        await delay(500);
+      }
+      assert.deepEqual(
+        [get(said, 'running'), get(said, 'endedBy'), get(said, 'note')],
+        [false, firstsEnd, `This run was ended by another server of this project, by ${firstsEnd}.`],
+        `the server answers the end the other noted: ${JSON.stringify(said)}`,
+      );
+    });
+  } finally {
+    held.stub?.close();
+    await held.server?.stop();
+    for (const pid of held.pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Gone already.
+      }
+    }
+    await delay(300);
+    sweep(project, slots);
+  }
+}
+
+/** A replaced server's calls: what [param body] is given to start a call on the first server and replace it. */
+interface ReplacedServers {
+  readonly project: string;
+  readonly slots: string;
+  readonly first: ServerProcess;
+  readonly call: (name: string, args: Record<string, unknown>) => ReturnType<ServerProcess['request']>;
+  readonly replace: () => Promise<ServerProcess>;
+}
+
+/**
+ * Runs [param body] with a server of a new project, the stand-in engine and a folder of engine
+ * slots, and a way to start a second server of the project, which replaces the first.
+ */
+async function withAServerToBeReplaced(
+  options: { readonly runtimeScript: boolean; readonly oneSlot: boolean },
+  body: (servers: ReplacedServers) => Promise<void>,
+): Promise<void> {
+  const project = memoryProject();
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  if (options.runtimeScript) {
+    mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+  }
+  const port = await reservePort();
+  await withNoCeilingSet(async () => {
+    const env = {
+      GODOT_PATH: memoryEngine(),
+      GDHARNESS_RUNTIME_DIR: String(process.env['GDHARNESS_RUNTIME_DIR']),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(port),
+      [SLOTS_VARIABLE]: slots,
+      ...(options.oneSlot ? { [SLOT_COUNT_VARIABLE]: '1' } : {}),
+      GDH_HOLD_MB: '20',
+      GDH_STAY_MS: '60000',
+    };
+    const first = new ServerProcess({ env });
+    const replacements: ServerProcess[] = [];
+    try {
+      await first.initialize('regression-test');
+      await body({
+        project,
+        slots,
+        first,
+        call: (name, args) =>
+          first.request(
+            'tools/call',
+            { name, arguments: { projectPath: project, ...args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        replace: async () => {
+          const second = new ServerProcess({ env });
+          replacements.push(second);
+          await second.initialize('regression-test');
+          return second;
+        },
+      });
+    } finally {
+      await first.stop();
+      for (const second of replacements) {
+        await second.stop();
+      }
+      const note = readRunRecord(project);
+      for (const pid of [note?.pid, note?.keeperPid]) {
+        try {
+          if (pid !== undefined) {
+            process.kill(pid, 'SIGKILL');
+          }
+        } catch {
+          // Gone already.
+        }
+      }
+      await delay(500);
+      sweep(project, slots);
+    }
+  });
+}
+
+/** What a server said to a call: its text and whether it was an error. */
+function saidToACall(response: unknown): { readonly text: string; readonly isError: boolean } {
+  const result = get(response, 'result');
+  return {
+    text: asArray(get(result, 'content'))
+      .map((block) => String(get(block, 'text')))
+      .join('\n'),
+    isError: get(result, 'isError') === true,
+  };
+}
+
+/**
+ * A start that has spawned nothing when its server is replaced is stopped, answered to call again,
+ * and spawns nothing. Held in the wait for the one engine slot, with the slot freed once the answer
+ * is in, so a start left to run would take it and spawn the game.
+ */
+async function testAStartNotYetSpawnedWhenItsServerIsReplacedSpawnsNothing(): Promise<void> {
+  await withAServerToBeReplaced({ runtimeScript: false, oneSlot: true }, async (servers) => {
+    const holder = new EngineSlots(
+      servers.slots,
+      1,
+      { pid: process.pid, started: await ownStart() },
+      undefined,
+      () => 'tier',
+    );
+    try {
+      assert.equal(await holder.takeFree(), join(servers.slots, '0.lock'), 'the one slot is held');
+      const start = servers.call('editor_run', { op: 'start', headless: true });
+      assert.ok(
+        await untilTrue(() => slotWaiters(servers.slots).length > 0, 30_000),
+        'the start waits for a slot',
+      );
+      const second = await servers.replace();
+      const said = saidToACall(await start);
+      assert.deepEqual(
+        said,
+        {
+          text: `This gdharness server was replaced by a newer one on the same project, pid ${String(second.child.pid)}, so call again.`,
+          isError: true,
+        },
+        'the start is told to call again',
+      );
+      holder.releaseAll();
+      assert.equal(await untilTrue(() => servers.first.exited, 20_000), true, 'the replaced server exits');
+      await delay(500);
+      const note = readRunRecord(servers.project);
+      assert.equal(note, null, `no game was started: ${JSON.stringify(note)}`);
+      assert.deepEqual(
+        slotLockPaths(servers.slots).map((lock) => holderOf(readLockOrEmpty(lock))?.engine?.pid),
+        [],
+        'and no engine holds a slot',
+      );
+    } finally {
+      holder.releaseAll();
+    }
+  });
+}
+
+/**
+ * A start that has spawned its game when its server is replaced is answered with the game it
+ * started, in moments, though it was waiting a minute for the game to announce. Telling it to call
+ * again would start a second game.
+ */
+async function testAStartPastItsSpawnWhenItsServerIsReplacedAnswersWithItsGame(): Promise<void> {
+  await withAServerToBeReplaced({ runtimeScript: true, oneSlot: false }, async (servers) => {
+    const start = servers.call('editor_run', { op: 'start', headless: true, runtimeWaitMs: 60_000 });
+    const note = await answeredWithin(() => readRunRecord(servers.project) ?? undefined, 30_000);
+    assert.ok(note !== undefined, 'the start spawned its game');
+    await servers.replace();
+    const said = saidToACall(await start);
+    assert.equal(said.isError, false, `the start is not told to call again: ${said.text}`);
+    const answer: unknown = JSON.parse(said.text);
+    assert.deepEqual(
+      [get(answer, 'started'), get(answer, 'pid')],
+      [true, note.pid],
+      `it says which game it started: ${said.text}`,
+    );
+  });
+}
+
+/**
+ * A call is refused its point of no return only once it has been told to stop, and a call that
+ * passed it stays past it, whatever it is told after.
+ */
+async function testACallIsRefusedItsPointOfNoReturnOnlyOnceToldToStop(): Promise<void> {
+  const commits = async (commit: CallCommit | undefined): Promise<boolean> =>
+    await withCallSignal(
+      undefined,
+      () => {
+        try {
+          commitCall();
+          return Promise.resolve(true);
+        } catch (error) {
+          assert.equal(get(error, 'name'), 'AbortError', 'a refusal is an abort');
+          return Promise.resolve(false);
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      commit,
+    );
+  const answers = async (commit: CallCommit | undefined, told?: () => void): Promise<boolean[]> => {
+    const first = await commits(commit);
+    told?.();
+    return [first, await commits(commit)];
+  };
+  assert.deepEqual(await answers(undefined), [true, true], 'a call nobody can stop is never refused');
+  const open: CallCommit = { committed: false, refused: false };
+  assert.deepEqual(await answers(open), [true, true], 'an open call passes');
+  assert.equal(open.committed, true, 'and is then past the point');
+  const stopped: CallCommit = { committed: false, refused: true };
+  assert.deepEqual(await answers(stopped), [false, false], 'a call told to stop is refused');
+  assert.equal(stopped.committed, false, 'and is not past the point');
+  const past: CallCommit = { committed: false, refused: false };
+  assert.deepEqual(
+    await answers(past, () => {
+      past.refused = !past.committed;
+    }),
+    [true, true],
+    'a call past the point is not refused later',
   );
+}
+
+/**
+ * A server that stands down for a newer one stops every call it is answering, and refuses a call
+ * that has not yet done what cannot be undone its point of no return. The server's own method runs
+ * over two calls, one past the point and one not, with the rest of the server stood in for.
+ */
+async function testAReplacedServerStopsEveryCallAndRefusesOnlyThoseNotPastThePoint(): Promise<void> {
+  const call = (
+    committed: boolean,
+  ): {
+    tool: string;
+    op: string;
+    startedAt: number;
+    stop: AbortController;
+    commit: CallCommit;
+    settled: Promise<void>;
+  } => ({
+    tool: 'editor_run',
+    op: 'start',
+    startedAt: Date.now(),
+    stop: new AbortController(),
+    commit: { committed, refused: false },
+    settled: Promise.resolve(),
+  });
+  const idle = call(false);
+  const past = call(true);
+  const shutdowns: unknown[][] = [];
+  const standIns = {
+    replacedAnswer: null,
+    ownProject: 'a project',
+    replaced: Promise.withResolvers<unknown>(),
+    inFlight: new Map([
+      [1, idle],
+      [2, past],
+    ]),
+    noteTheEnd: () => undefined,
+    createErrorResponse: (said: string) => ({ content: [{ type: 'text', text: said }], isError: true }),
+    stopWatchingForASuccessor: () => undefined,
+    stopTryingTheBridge: () => undefined,
+    godotBridge: { stop: () => Promise.resolve() },
+    logDebug: () => undefined,
+    handleShutdown: (...said: unknown[]) => {
+      shutdowns.push(said);
+      return Promise.resolve();
+    },
+  };
+  const server: unknown = Object.create(GodotServer.prototype, Object.getOwnPropertyDescriptors(standIns));
+  const standDown: unknown = Reflect.get(GodotServer.prototype, 'standDown');
+  assert.ok(typeof standDown === 'function', 'the server stands down through standDown');
+  const standing: unknown = Reflect.apply(standDown, server, [4242]);
+  const shown = (one: { stop: AbortController; commit: CallCommit }): unknown => ({
+    stopped: one.stop.signal.aborted,
+    commit: one.commit,
+  });
+  assert.deepEqual(
+    [shown(idle), shown(past)],
+    [
+      { stopped: true, commit: { committed: false, refused: true } },
+      { stopped: true, commit: { committed: true, refused: false } },
+    ],
+    'both calls are stopped, and only the one that has done nothing is refused',
+  );
+  await standing;
+  assert.deepEqual(shutdowns, [['superseded by 4242', 0]], 'and the server then exits');
 }
 
 /**
@@ -131727,6 +132209,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessEngineRaisesItsSlotAsItGrows,
   testALanesEngineRaisesItsSlotAsItGrows,
   testAServersHeldEngineRaisesItsSlot,
+  testAKeeperAskedToStopTwiceSignalsOnlyTheFirst,
+  testAServerToldGoneByTheKeeperAnswersTheEndAnotherNoted,
+  testAStartNotYetSpawnedWhenItsServerIsReplacedSpawnsNothing,
+  testAStartPastItsSpawnWhenItsServerIsReplacedAnswersWithItsGame,
+  testACallIsRefusedItsPointOfNoReturnOnlyOnceToldToStop,
+  testAReplacedServerStopsEveryCallAndRefusesOnlyThoseNotPastThePoint,
   testAGamesKeeperRaisesTheSlotItHolds,
   testARaiseNotWrittenIsAskedAgain,
   testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,
