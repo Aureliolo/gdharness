@@ -133294,6 +133294,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatTheEngineHeldAtExitNamesTheProjectsOwnFirst,
   testATestRunsProgressCountsTheSuitesItsLogLetGo,
   testAStarvedErrorIsFoundPastAnyRunOfBlankLines,
+  testAnEngineLogDropsTheErrorsBeforeADriverFallback,
+  testAnAutoloadThatDidNotCompileIsFoundAfterTheLogLetItGo,
   testTwoWorktreesStartBesideEachOther,
   testOneProjectStartedWithTwoSavesFoldersGoesBeside,
   testAStartOfTheSamePlaceEndsOnlyThatRun,
@@ -134892,6 +134894,74 @@ function testAStarvedErrorIsFoundPastAnyRunOfBlankLines(): void {
         `${String(blanks)} blank lines, ${JSON.stringify(newline)}`,
       );
     }
+  }
+}
+
+/** An autoload that did not compile is still found once the bounded log has let its line go. */
+function testAnAutoloadThatDidNotCompileIsFoundAfterTheLogLetItGo(): void {
+  const tally = new TestRunTally({
+    autoloaded: new Map([['res://guard.gd', 'Guard']]),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: () => false,
+  });
+  const bounded = new GameLog({
+    most: 5,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  bounded.append(
+    'stderr',
+    'ERROR: Failed to load script "res://guard.gd" with error "Parse error".\n   at: load (modules/gdscript/gdscript.cpp:1)\n',
+  );
+  bounded.append('stdout', Array.from({ length: 60 }, (_line, n) => `after ${String(n)}\n`).join(''));
+  assert.ok(
+    !bounded.heldFrom(0).entries.some((entry) => entry.text.startsWith('Failed to load')),
+    'the log let the line go',
+  );
+  assert.deepEqual(tally.notCompiled, { name: 'Guard', path: 'res://guard.gd' });
+}
+
+/**
+ * An engine log read a line at a time drops the errors printed before the engine said it fell back
+ * to another video driver, from the errors it judges as from those it lists, as its whole text does.
+ */
+function testAnEngineLogDropsTheErrorsBeforeADriverFallback(): void {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-driver-fallback-'));
+  try {
+    const printed = [
+      'ERROR: before the driver',
+      '   at: thing (core/thing.cpp:1)',
+      'WARNING: Your video card drivers seem not to support Vulkan, switching to Direct3D 12.',
+      '   at: DisplayServerWindows (platform/windows/display_server_windows.cpp:7000)',
+      'ERROR: after it',
+      '   at: thing (core/thing.cpp:2)',
+      '',
+    ].join('\n');
+    const log = join(directory, 'engine.log');
+    writeFileSync(log, printed);
+    const whole = readRun(printed);
+    const read = readEngineLog(log, [], NONE_EXPECTED);
+    assert.deepEqual(
+      { errors: read.errors, judged: read.judged, dropped: read.errorsDropped },
+      { errors: whole.errors, judged: unexpectedErrors(whole, NONE_EXPECTED, []), dropped: 0 },
+    );
+    assert.deepEqual(
+      read.judged.printed.map((error) => error.text),
+      ['after it'],
+    );
+    // Past the errors a read keeps, those dropped before the fallback are not counted either.
+    const many = join(directory, 'many.log');
+    writeFileSync(many, `${engineErrors('flooded', ERRORS_KEPT + 3).join('\n')}\n${printed}`);
+    const flooded = readEngineLog(many, [], NONE_EXPECTED);
+    assert.deepEqual(
+      [flooded.errorsDropped, flooded.judged.printed.map((error) => error.text)],
+      [0, ['after it']],
+    );
+  } finally {
+    sweep(directory);
   }
 }
 
