@@ -402,7 +402,7 @@ func _write_added(
 	if not unwritten.is_empty():
 		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
 	if unwritten.is_empty():
-		unwritten = GdhGroups.change(scene, new_node, adding, [])
+		unwritten = GdhGroups.change(scene, new_node, adding, [], new_node.name)
 	return unwritten
 
 
@@ -1780,6 +1780,7 @@ func _apply_instance_modes(
 func _set_and_group(
 	scene: GdhSceneFile, node: Node, properties: Dictionary, groups: Array
 ) -> String:
+	var called: String = node.name
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	scene.asked(node, _properties.moved_by_engine.keys())
@@ -1789,7 +1790,7 @@ func _set_and_group(
 		)
 	var adding: Array = groups[0]
 	var removing: Array = groups[1]
-	return GdhGroups.change(scene, node, adding, removing)
+	return GdhGroups.change(scene, node, adding, removing, called)
 
 
 ## What [param node] holds for each of [param properties] the call set, as the answer gives it.

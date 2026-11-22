@@ -27863,6 +27863,121 @@ async function testAStopByNumberReachesAnotherProjectsGameWithNoEditor(): Promis
 }
 
 /**
+ * A stop by the number of this project's own game that names another project says the number is
+ * this project's game and the call names another one. The server holds no run at that point, and
+ * the wording for a held run of another project told of a run it did not hold. Checked with no
+ * editor, with an editor of this project and with one and no project of the server's own.
+ */
+async function testAStopByNumberNamingAnotherProjectSaysWhoseGameItIs(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-number-names-'));
+  const projectOf = (name: string): string => {
+    const dir = join(root, name);
+    mkdirSync(dir);
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="${name}"\n`,
+    );
+    return dir;
+  };
+  const here = projectOf('here');
+  const there = projectOf('there');
+  const games: ChildProcess[] = [];
+  const cases = [
+    { label: 'no editor', own: here, editor: undefined },
+    { label: 'an editor of the game', own: here, editor: here },
+    { label: 'an editor and no project of its own', own: undefined, editor: here },
+  ];
+  try {
+    for (const one of cases) {
+      const runtimeDir = mkdtempSync(join(root, 'runtime-'));
+      const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      games.push(game);
+      const pid = game.pid ?? 0;
+      assert.ok(pid > 0, 'the fixture needs a stand-in game');
+      writeFileSync(
+        join(runtimeDir, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: 51_997,
+          address: '127.0.0.1',
+          project: { name: 'Stand-in', path: here },
+          addon_version: SERVER_VERSION,
+          addon_digest: shippedRuntimeDigest(),
+        }),
+        'utf8',
+      );
+      const port = await reservePort();
+      const server = new ServerProcess({
+        env: {
+          GDHARNESS_BRIDGE_PORT: String(port),
+          GDHARNESS_RUNTIME_DIR: runtimeDir,
+          ...(one.own === undefined ? {} : { GDHARNESS_PROJECT: one.own }),
+        },
+      });
+      let socket: WebSocket | null = null;
+      try {
+        await server.initialize('regression-test');
+        if (one.editor !== undefined) {
+          const editor = one.editor;
+          socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+          const open = socket;
+          await new Promise<void>((settle, reject) => {
+            open.once('open', () => {
+              settle();
+            });
+            open.once('error', reject);
+          });
+          open.on('message', (raw: Buffer) => {
+            const message = asObject(JSON.parse(String(raw)) as unknown);
+            if (message['type'] === 'tool_invoke') {
+              open.send(
+                JSON.stringify({
+                  type: 'tool_result',
+                  id: message['id'],
+                  success: true,
+                  result: { ok: true, playing: false },
+                }),
+              );
+            }
+          });
+          open.send(JSON.stringify(greeting(editor)));
+          let greeted = false;
+          for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+            await delay(100);
+            const seen = parseTextContent(
+              await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+            );
+            greeted = text(get(seen, 'editor', 'projectPath')) === editor;
+          }
+          assert.ok(greeted, `${one.label}: the editor should have been greeted`);
+        }
+        const answer = await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop', pid, projectPath: there } },
+          60_000,
+        );
+        assert.equal(
+          textOf(answer),
+          `pid ${pid} is a game of ${here}, and this call names ${there}, so nothing was signalled. Stop it with editor_run stop and that pid, without projectPath or with projectPath ${here}.`,
+          one.label,
+        );
+        assert.ok(isAlive(pid), `${one.label}: and the game was left alone`);
+      } finally {
+        socket?.terminate();
+        await server.stop();
+      }
+    }
+  } finally {
+    for (const game of games) {
+      game.kill();
+    }
+    await delay(500);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * A run outlives the harness's tree kill of the server that started it, and the next server reads
  * its exit code.
  *
@@ -113708,6 +113823,51 @@ async function testASetThatRenamesItsNodeReadsTheFileUnderTheOldName(): Promise<
 }
 
 /**
+ * A set that renames a node and changes its groups, and is refused over a group, names the node by
+ * the name it has: the refusal writes nothing, so the rename did not happen. The same engine code
+ * answers headless and through an editor.
+ */
+async function testAGroupRefusalBesideARenameNamesTheNodeItHas(): Promise<void> {
+  const files = {
+    'base.tscn': '[gd_scene format=3]\n\n[node name="Base" type="Node2D" groups=["coins"]]\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n' +
+      '[ext_resource type="PackedScene" path="res://base.tscn" id="1_base"]\n\n' +
+      '[node name="Root" type="Node2D"]\n\n' +
+      '[node name="Holder" type="Node" parent="." groups=["keep"]]\n\n' +
+      '[node name="Coin" parent="." instance=ExtResource("1_base")]\n',
+  };
+  await withASceneProject('group refusal beside a rename', files, async ({ call, fileOf }) => {
+    const before = fileOf('main.tscn');
+    assert.equal(
+      textOf(
+        await call('scene_node', {
+          op: 'set',
+          scenePath: 'main.tscn',
+          nodePath: 'Holder',
+          properties: { name: 'Crate' },
+          removeGroups: ['nothere'],
+        }),
+      ),
+      'Holder is in no group nothere. It is in keep.',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', {
+          op: 'set',
+          scenePath: 'main.tscn',
+          nodePath: 'Coin',
+          properties: { name: 'Gem' },
+          removeGroups: ['coins'],
+        }),
+      ),
+      'Coin is in coins because res://base.tscn puts it there, and no scene using that one can take it out: remove the group in res://base.tscn, which takes it out in every scene using that one.',
+    );
+    assert.equal(fileOf('main.tscn'), before, 'and the refusals changed nothing');
+  });
+}
+
+/**
  * resource_edit modify unset drops a stored line of a .tres file, so the value is what the shader,
  * the script or the class declares.
  */
@@ -124115,6 +124275,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInstanceKeepsItsOwnValuesWithNoEditor,
   testASceneNodeUnsetDropsTheStoredLine,
   testASetThatRenamesItsNodeReadsTheFileUnderTheOldName,
+  testAGroupRefusalBesideARenameNamesTheNodeItHas,
   testAResourceUnsetDropsTheStoredLine,
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
@@ -124453,6 +124614,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunCanBeStartedOnAnotherEngine,
   testAGameNoNoteNamesIsStoppedByItsNumber,
   testAStopByNumberReachesAnotherProjectsGameWithNoEditor,
+  testAStopByNumberNamingAnotherProjectSaysWhoseGameItIs,
   testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
