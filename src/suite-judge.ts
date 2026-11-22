@@ -8,7 +8,7 @@
  * the engine's streams go into one file, so an error is read in order with the case lines around it.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
 import {
   EXIT_LEAK,
@@ -20,6 +20,7 @@ import {
 } from './engine-leaks.js';
 import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
 import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
+import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
 
 /** One case as the run reported it finishing. */
@@ -558,6 +559,15 @@ function readLine(state: RunState, line: string, at: number): void {
 // What Godot prints before an error raised while it was printing another. It writes the pair
 // straight to stderr, past every logger, so a log the engine writes with --log-file never has them.
 const NESTED_ERROR = 'While attempting to print an error, another error was printed:';
+
+/**
+ * What the engine printed into the log at [param path], read as gdharness test reads it: whole up to
+ * [param limit] bytes, else its start and its end with a line saying how much was left out. A log
+ * not there is an empty run. The errors in [param piped] are added as {@link withNestedErrors} says.
+ */
+export function readEngineLog(path: string, piped: readonly LogEntry[], limit = LOG_LIMIT_BYTES): RunPrinted {
+  return withNestedErrors(readRun(existsSync(path) ? readLog(path, limit) : ''), piped);
+}
 
 /**
  * [param printed], read off the engine's --log-file, with the errors Godot raised while printing

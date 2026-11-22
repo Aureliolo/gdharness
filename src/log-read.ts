@@ -58,7 +58,8 @@ export function prependTo(path: string, text: string): void {
   }
 }
 
-function bytesAt(fd: number, position: number, length: number): Buffer {
+/** Up to [param length] bytes of the open file [param fd] from [param position], fewer at its end. */
+export function bytesAt(fd: number, position: number, length: number): Buffer {
   const bytes = Buffer.alloc(length);
   let read = 0;
   while (read < length) {

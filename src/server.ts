@@ -447,12 +447,12 @@ import {
   named,
   printedPassing,
   pushErrorsFailedSentence,
+  readEngineLog,
   readExpected,
-  readRun,
   suiteNotRunFault,
   uncollectedSaid,
   unexpectedErrors,
-  withNestedErrors,
+  type withNestedErrors,
 } from './suite-judge.js';
 import {
   capsFrames,
@@ -10598,10 +10598,7 @@ export class GodotServer {
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
-    const casePrinted = withNestedErrors(
-      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
-      run.log.all,
-    );
+    const casePrinted = readEngineLog(engineLog, run.log.all);
     const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
