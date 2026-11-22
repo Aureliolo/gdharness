@@ -77141,7 +77141,11 @@ async function testAReadingBelowASlotsFigureLeavesItsLockAlone(): Promise<void> 
     writeFileSync(lock, written);
     const raises = await guardedAt(lock, [MEMORY_GIB, 1.9 * MEMORY_GIB]);
     assert.equal(readFileSync(lock, 'utf8'), written, 'the lock is as it was');
-    assert.equal(raises.written, 0, JSON.stringify(raises));
+    assert.deepEqual(
+      raises,
+      { asked: [MEMORY_GIB], written: 0 },
+      'the lock is read once, at the first reading',
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
