@@ -239,6 +239,11 @@ export interface GodotProcess {
    */
   endedHere?: string | null;
   /**
+   * Why another server of this project ended the run for its memory, which it noted beside the
+   * run's transcript before it did: see {@link memoryEndOf}.
+   */
+  endedBeside?: string;
+  /**
    * The last error the editor broke this game on, once it has been written into the log.
    *
    * Held so it is written down once. The adapter goes on reporting the same stop for as long as

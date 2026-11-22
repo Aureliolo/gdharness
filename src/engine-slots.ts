@@ -66,6 +66,7 @@ import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
+import { ceilingFor, engineNeed, gigabytes, MEMORY_PER_ENGINE } from './engine-memory.js';
 import { wholeFlag } from './launch.js';
 import {
   ancestorsIn,
@@ -76,6 +77,7 @@ import {
 } from './process-children.js';
 import { isRecord } from './records.js';
 import { repositoryNameOf } from './repository.js';
+import { type PeakTool, readEnginePeaks } from './run-record.js';
 import {
   askForSlot,
   delegateWaitedSaid,
@@ -121,9 +123,18 @@ export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
  */
 const PROCESSORS_A_SLOT = 2;
 /** The memory one slot stands for, as the machine's queue counts it. */
-const ENGINE_MEMORY_BYTES = 1536 * 1024 ** 2;
+const ENGINE_MEMORY_BYTES = MEMORY_PER_ENGINE;
 /** The physical memory no slot stands for: editors, language servers and sessions. */
 const OUTSIDE_MEMORY_BYTES = 16 * 1024 ** 3;
+
+/**
+ * What the engines of a machine with [param memory] bytes of physical memory may hold together: the
+ * memory above {@link OUTSIDE_MEMORY_BYTES}. The slot count and the memory a take counts both come
+ * from it.
+ */
+function engineMemoryBudget(memory: number): number {
+  return Math.max(0, memory - OUTSIDE_MEMORY_BYTES);
+}
 
 /** Where the slots are and how many there are. */
 interface SlotsChosen {
@@ -181,7 +192,7 @@ export function machineSlots(
     count = wholeFlag(counted, SLOT_COUNT_VARIABLE);
   }
   const byProcessors = Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT));
-  const byMemory = Math.floor((machine.memory - OUTSIDE_MEMORY_BYTES) / ENGINE_MEMORY_BYTES);
+  const byMemory = Math.floor(engineMemoryBudget(machine.memory) / ENGINE_MEMORY_BYTES);
   return { directory, count: count ?? Math.max(1, Math.min(byProcessors, byMemory)) };
 }
 
@@ -407,6 +418,8 @@ interface SlotWaiter {
   readonly wants: number;
   /** When it last looked, in milliseconds, or when its mark was made where it never says. */
   readonly seen: number;
+  /** The bytes its engine will hold, where it waits for memory in line, else 0. */
+  readonly memory?: number;
 }
 
 /**
@@ -470,10 +483,6 @@ function markNames(marks: string): string[] {
 }
 
 /**
- * The live waiter the mark file [param mark] in [param marks] names, which read as [param content],
- * or null when it names none.
- */
-/**
  * When the file of [param stats] was last written, in whole milliseconds rounded down. It is read
  * from the nanoseconds, since `mtimeMs` is a double that rounds a time ending in .9999 ms up to the
  * next millisecond.
@@ -482,44 +491,69 @@ export function fileTimeMs(stats: { readonly mtimeNs: bigint }): number {
   return Number(stats.mtimeNs / 1_000_000n);
 }
 
-function waiterOfMark(marks: string, mark: string, content: string | null): SlotWaiter | null {
-  let madeAt: number;
+/** When the file at [param path] was last written, or [param otherwise] where it cannot be read. */
+function fileTimeOr(path: string, otherwise: number): number {
   try {
-    madeAt = fileTimeMs(statSync(join(marks, mark), { bigint: true }));
+    return fileTimeMs(statSync(path, { bigint: true }));
   } catch {
-    return null;
+    return otherwise;
   }
+}
+
+/**
+ * The live waiter the mark file [param mark] in [param marks] names, which read as [param content],
+ * or null when it names none.
+ */
+function waiterOfMark(marks: string, mark: string, content: string | null): SlotWaiter | null {
+  const madeAt = fileTimeOr(join(marks, mark), Number.NaN);
   const holder = content === null ? null : holderOf(content);
-  if (content === null || holder === null || !alive(holder.pid)) {
+  if (Number.isNaN(madeAt) || content === null || holder === null || !alive(holder.pid)) {
     return null;
   }
   const parsed: unknown = JSON.parse(content);
-  const { taker, since, wants, class: kind }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
-  if (taker === MEMORY_TAKER) {
+  const {
+    taker: marked,
+    since,
+    wants,
+    class: kind,
+    kind: waiting,
+    memory,
+  }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+  // A memory mark that names no time is a run's own wait for the memory of an engine it holds a slot
+  // for, which takes no place in line. One that names it is a take waiting for memory in line.
+  const begun = typeof since === 'number' && Number.isFinite(since) ? since : undefined;
+  if (marked === MEMORY_TAKER && begun === undefined) {
     return null;
   }
-  let seen = madeAt;
-  try {
-    seen = fileTimeMs(statSync(join(marks, seenNoteOf(mark)), { bigint: true }));
-  } catch {
-    // No look written: the wait has only its mark's time to show it is alive.
-  }
+  const taker = marked === MEMORY_TAKER ? waiting : marked;
   return {
-    wants: typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? wants : 1,
+    wants: Number.isInteger(wants) && positiveOr0(wants) > 1 ? Number(wants) : 1,
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a waiter
     // let a slot stand its whole yield still read as inside it, and kept the slot standing.
-    seen: Math.floor(seen),
+    // No look written: the wait has only its mark's time to show it is alive.
+    seen: Math.floor(fileTimeOr(join(marks, seenNoteOf(mark)), madeAt)),
     mark,
-    taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
+    taker: takerNamed(taker),
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
     // made in the millisecond a take began read as made after it, and the take went first.
-    since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
+    since: Math.floor(begun === undefined ? madeAt : begun * 1000),
     // Exact where the mark says it, since the other side of the scheme compares exact seconds and
     // two sides rounding differently each rank the other ahead for a mark begun in one millisecond.
-    sinceSeconds: typeof since === 'number' && Number.isFinite(since) ? since : Math.floor(madeAt) / 1000,
+    sinceSeconds: begun ?? Math.floor(madeAt) / 1000,
     game: holder.game === true,
     store: kind === STORE_CLASS,
+    memory: marked === MEMORY_TAKER ? positiveOr0(memory) : 0,
   };
+}
+
+/** The kind of taker a mark names, with any other name read as a one-off. */
+function takerNamed(name: unknown): SlotTaker {
+  return name === 'gate' || name === 'timing' || name === 'tier' ? name : 'other';
+}
+
+/** [param value] where it is a number above 0, otherwise 0. */
+function positiveOr0(value: unknown): number {
+  return typeof value === 'number' && value > 0 ? value : 0;
 }
 
 /**
@@ -577,13 +611,24 @@ export class SlotLine {
     this.since = clock();
   }
 
-  /** What its waiting mark holds beside [param holder]: its kind and when it began, in seconds. */
+  /**
+   * The bytes its engine will hold, and whether its wait began for want of memory rather than a
+   * slot. Set by the take before its mark is made.
+   */
+  need = 0;
+  memoryWait = false;
+
+  /**
+   * What its waiting mark holds beside [param holder]: its kind and when it began, in seconds. A wait
+   * for memory names `memory` as its kind, with its own kind under `kind` and the bytes it needs.
+   */
   marked(holder: SlotHolder): object {
     return {
       ...holder,
       ...(this.game ? { game: true } : {}),
       ...(this.store ? { class: STORE_CLASS } : {}),
-      taker: this.taker,
+      taker: this.memoryWait ? MEMORY_TAKER : this.taker,
+      ...(this.memoryWait ? { kind: this.taker, memory: this.need } : {}),
       since: this.since / 1000,
     };
   }
@@ -709,6 +754,18 @@ const SEATED_SUFFIX = '.seated';
  */
 type SlotLimit = 'gate' | 'kept' | 'games' | 'starved';
 
+/** Why a take with a free slot waits: the machine's engines hold what its engine would not fit beside. */
+interface MemoryShort {
+  /** What the machine's engines may hold together, in bytes. */
+  readonly budget: number;
+  /** What the live locks hold. */
+  readonly held: number;
+  /** What takers waiting for memory ahead of this one need, which they are left. */
+  readonly ahead: number;
+  /** What this take's engine needs. */
+  readonly need: number;
+}
+
 /** The slot numbers a take may try, in order, and what holds it to them when something does. */
 type SlotsDrawn =
   | {
@@ -716,6 +773,8 @@ type SlotsDrawn =
       readonly limit?: Exclude<SlotLimit, 'starved'>;
       /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
       readonly left?: readonly number[];
+      /** Set where a free slot is held back by the memory budget. */
+      readonly short?: MemoryShort;
       /** The last kept slot, which a game's draw leaves out for a short headless call. */
       readonly forACall?: number;
       readonly heldFor?: undefined;
@@ -724,6 +783,7 @@ type SlotsDrawn =
       readonly numbers: readonly number[];
       readonly limit: 'starved';
       readonly left?: readonly number[];
+      readonly short?: MemoryShort;
       readonly forACall?: undefined;
       /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
       readonly heldFor: string;
@@ -1191,6 +1251,13 @@ export interface SlotHolder {
    * waiting on an engine it started. Named as the holder is, and judged the same way.
    */
   readonly engine?: SlotEngine;
+  /**
+   * The bytes the engine on the slot may hold, which the machine's memory budget counts
+   * ({@link engineMemoryBudget}). A lock without it counts {@link ENGINE_MEMORY_BYTES}.
+   */
+  readonly memory?: number;
+  /** The slots one lock stands for, above 1, where a tool holds several in one file. */
+  readonly wants?: number;
 }
 
 /** An engine a lock names beside its holder. */
@@ -1206,7 +1273,13 @@ export function holderOf(content: string): SlotHolder | null {
     if (typeof parsed !== 'object' || parsed === null) {
       return null;
     }
-    const { by, game, engine } = parsed as { by?: unknown; game?: unknown; engine?: unknown };
+    const { by, game, engine, memory, wants } = parsed as {
+      by?: unknown;
+      game?: unknown;
+      engine?: unknown;
+      memory?: unknown;
+      wants?: unknown;
+    };
     const named = namedProcess(parsed);
     if (named === null) {
       return null;
@@ -1217,6 +1290,8 @@ export function holderOf(content: string): SlotHolder | null {
       ...(typeof by === 'string' && by !== '' ? { by } : {}),
       ...(game === true ? { game } : {}),
       ...(runs === null ? {} : { engine: runs }),
+      ...(typeof memory === 'number' && Number.isFinite(memory) && memory > 0 ? { memory } : {}),
+      ...(typeof wants === 'number' && Number.isInteger(wants) && wants > 1 ? { wants } : {}),
     };
   } catch {
     return null;
@@ -1390,6 +1465,11 @@ export class EngineSlots {
   /** The Godot project this process's takes are for, which names the repository of the store class. */
   private readonly project: string | undefined;
 
+  /** The physical memory of the machine, which the memory budget is counted from. */
+  private readonly machineMemory: number;
+  /** The tool whose kept peak counts an engine this process takes a slot for, where a take names none. */
+  private readonly tool: PeakTool;
+
   constructor(
     directory: string,
     count: number,
@@ -1397,6 +1477,7 @@ export class EngineSlots {
     say?: (line: string) => void,
     taker: () => SlotTaker = () => slotTaker(),
     project?: string,
+    machine: { readonly memory?: number; readonly tool?: PeakTool } = {},
   ) {
     this.directory = directory;
     this.count = count;
@@ -1404,7 +1485,34 @@ export class EngineSlots {
     this.say = say;
     this.taker = taker;
     this.project = project;
+    this.machineMemory = machine.memory ?? totalmem();
+    this.tool = machine.tool ?? 'project_test';
     this.drawn = slotsDrawnOn(count, taker(), 'none');
+  }
+
+  /**
+   * What the engines of this directory may hold together: the machine's budget, and at least what
+   * its slots stand for, since a count that was set stands for 1.5 GiB each whatever the machine has.
+   */
+  get memoryBudget(): number {
+    return Math.max(engineMemoryBudget(this.machineMemory), this.count * ENGINE_MEMORY_BYTES);
+  }
+
+  /**
+   * What an engine of [param tool] for [param project] may hold, which its lock counts: the flat
+   * figure or the project's kept peak, at most its ceiling. A ceiling that cannot be read caps nothing
+   * here, since the start that reads it refuses it in its own words.
+   */
+  private memoryNeeded(game: boolean, project: string | undefined, tool?: PeakTool): number {
+    const kind = tool ?? (game ? 'editor_run' : this.tool);
+    let ceiling = Number.POSITIVE_INFINITY;
+    try {
+      ceiling = ceilingFor(project, process.env, this.machineMemory).bytes;
+    } catch {
+      // Refused by the start itself.
+    }
+    return engineNeed(project === undefined ? undefined : readEnginePeaks(project)[kind], ceiling, kind)
+      .bytes;
   }
 
   /**
@@ -1428,10 +1536,11 @@ export class EngineSlots {
     game = false,
     project?: string,
     queued?: () => void,
+    tool?: PeakTool,
   ): Promise<string> {
     const delegate = slotCommandOf();
     return delegate === undefined
-      ? await this.takenFromFolder(signal, waiting, blocked, game, project)
+      ? await this.takenFromFolder(signal, waiting, blocked, game, project, tool)
       : await this.takenFromCommand(
           delegate,
           { signal, waiting, blocked, queued },
@@ -1446,9 +1555,12 @@ export class EngineSlots {
     blocked: (() => void) | undefined,
     game: boolean,
     project: string | undefined,
+    tool: PeakTool | undefined,
   ): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
-    const line = this.lineFor(this.taker(), game, project ?? this.project);
+    const forProject = project ?? this.project;
+    const line = this.lineFor(this.taker(), game, forProject);
+    line.need = this.memoryNeeded(game, forProject, tool);
     const began = line.since;
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
@@ -1646,17 +1758,110 @@ export class EngineSlots {
       // several last its drain. A taker held back says nothing and stops holding the takers behind it.
       lookNoted(join(this.directory, WAITING_FOLDER, line.mark));
     }
-    const tried =
+    const ahead =
       taker === 'timing'
-        ? this.drawn.numbers
+        ? { tried: this.drawn.numbers, memory: 0 }
         : await this.leftAfterThoseAhead(line ?? this.lineFor(taker, game), queued);
-    const lock = await this.lockOneOf(tried, game);
+    const need = line?.need ?? this.memoryNeeded(game, this.project);
+    if (await this.shortOfMemory(ahead.tried, need, ahead.memory, line)) {
+      return null;
+    }
+    const lock = await this.lockOneOf(ahead.tried, game, need);
     if (lock !== null && typeof look?.queue === 'number' && (await this.overTheShare(lock))) {
       this.release(lock);
       this.drawn = slotsDrawnOn(this.count, taker, 'queued');
       return null;
     }
+    if (lock !== null && (await this.overTheBudget(lock, need, line))) {
+      this.release(lock);
+      return null;
+    }
     return lock;
+  }
+
+  /**
+   * The live locks of the directory: what each holds, and when it was written. A lock that names no
+   * holder yet is a taker still writing it and counts the flat figure, as does a lock without a
+   * figure of its own, for each slot it stands for.
+   */
+  private async liveMemory(): Promise<{ slot: number; at: number; bytes: number }[]> {
+    let names: string[];
+    try {
+      names = readdirSync(this.directory);
+    } catch {
+      return [];
+    }
+    const live: { slot: number; at: number; bytes: number }[] = [];
+    for (const name of names) {
+      const numbered = /^(\d+)\.lock$/.exec(name)?.[1];
+      const lock = join(this.directory, name);
+      const content = numbered === undefined ? null : await readWholeAsync(lock);
+      if (numbered === undefined || content === null || (await this.free(lock))) {
+        continue;
+      }
+      const holder = holderOf(content);
+      live.push({
+        slot: Number(numbered),
+        at: this.writtenAt(lock) ?? 0,
+        bytes: holder?.memory ?? ENGINE_MEMORY_BYTES * (holder?.wants ?? 1),
+      });
+    }
+    return live;
+  }
+
+  /**
+   * Whether the engine of a take may not start now for want of memory, which it then records in the
+   * draw and in [param line]. It is held back only where a slot of [param tried] is free, since
+   * otherwise the wait is for a slot. The live locks' memory, with the [param ahead] bytes of
+   * takers waiting for memory ahead of it and its own [param need], must stay inside the budget. A
+   * take that finds no other lock live starts, so the machine's first engine always does.
+   */
+  private async shortOfMemory(
+    tried: readonly number[],
+    need: number,
+    ahead: number,
+    line: SlotLine | undefined,
+  ): Promise<boolean> {
+    if (tried.length === 0) {
+      return false;
+    }
+    const live = await this.liveMemory();
+    if (!tried.some((slot) => !live.some((one) => one.slot === slot))) {
+      return false;
+    }
+    const held = live.reduce((sum, one) => sum + one.bytes, 0);
+    if (live.length === 0 || held + ahead + need <= this.memoryBudget) {
+      return false;
+    }
+    this.drawn = { ...this.drawn, short: { budget: this.memoryBudget, held, ahead, need } };
+    if (line !== undefined && line.mark === undefined) {
+      line.memoryWait = true;
+    }
+    return true;
+  }
+
+  /**
+   * Whether the lock just taken at [param lock] is one too many: the folder counted again holds more
+   * than the budget, with another lock live, and this one is the newest. Two takers that both counted
+   * room for one engine before either took it then cannot both keep theirs, since each names the
+   * same newest lock.
+   */
+  private async overTheBudget(lock: string, need: number, line: SlotLine | undefined): Promise<boolean> {
+    const live = await this.liveMemory();
+    const held = live.reduce((sum, one) => sum + one.bytes, 0);
+    if (live.length < 2 || held <= this.memoryBudget) {
+      return false;
+    }
+    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
+    const newest = live.toSorted((a, b) => b.at - a.at || b.slot - a.slot)[0];
+    if (newest?.slot !== slot) {
+      return false;
+    }
+    this.drawn = { ...this.drawn, short: { budget: this.memoryBudget, held: held - need, ahead: 0, need } };
+    if (line !== undefined && line.mark === undefined) {
+      line.memoryWait = true;
+    }
+    return true;
   }
 
   /**
@@ -1720,8 +1925,12 @@ export class EngineSlots {
   }
 
   /** Locks the first of [param slots] that is made fresh or taken over, and answers its path. */
-  private async lockOneOf(slots: readonly number[], game: boolean): Promise<string | null> {
-    const holder: SlotHolder = game ? { ...this.holder, game: true } : this.holder;
+  private async lockOneOf(slots: readonly number[], game: boolean, memory: number): Promise<string | null> {
+    const holder: SlotHolder = {
+      ...this.holder,
+      ...(game ? { game: true as const } : {}),
+      memory: Math.round(memory),
+    };
     for (const slot of slots) {
       const lock = join(this.directory, `${String(slot)}.lock`);
       if (madeInPlace(lock, JSON.stringify(holder)) || (await this.takenOver(lock, holder, true))) {
@@ -1752,7 +1961,10 @@ export class EngineSlots {
    * The slots of the last draw that [param placed] may try, once the free ones the takers ahead of it
    * take first are left to them. It records the slots it left for them in the draw.
    */
-  private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateLook>): Promise<number[]> {
+  private async leftAfterThoseAhead(
+    placed: SlotLine,
+    queued: () => Promise<GateLook>,
+  ): Promise<{ tried: number[]; memory: number }> {
     // The draw of this take, held across the awaits below: another take of the process may record
     // its own in the field meanwhile.
     const drawn = this.drawn;
@@ -1774,7 +1986,7 @@ export class EngineSlots {
     if (left.length > 0 && this.drawn === drawn) {
       this.drawn = { ...drawn, left };
     }
-    return tried;
+    return { tried, memory: ahead.reduce((sum, one) => sum + (one.memory ?? 0), 0) };
   }
 
   /**
@@ -2471,8 +2683,15 @@ export async function handSlot(lock: string, from: number, to: SlotHolder): Prom
 /** What a lock that read as [param content] holds once handed from [param from] to [param to], or null. */
 function handedText(content: string | null, from: number, to: SlotHolder): string | null {
   const holder = content === null ? null : holderOf(content);
-  // A game's slot stays a game's in the hands of whatever runs it.
-  return holder?.pid === from ? JSON.stringify(holder.game === true ? { ...to, game: true } : to) : null;
+  if (holder?.pid !== from) {
+    return null;
+  }
+  // A game's slot stays a game's in the hands of whatever runs it, and counts the memory it did.
+  return JSON.stringify({
+    ...to,
+    ...(holder.game === true ? { game: true } : {}),
+    ...(holder.memory === undefined || to.memory !== undefined ? {} : { memory: holder.memory }),
+  });
 }
 
 /**
@@ -2582,9 +2801,17 @@ function processSlots(): Promise<EngineSlots> {
   ours ??= ownStart().then((started) => {
     const chosen = machineSlots();
     const holder = { pid: process.pid, started, ...(takenBy === undefined ? {} : { by: takenBy }) };
-    return new EngineSlots(chosen.directory, chosen.count, holder, (line) => {
-      saidTo?.(line);
-    });
+    return new EngineSlots(
+      chosen.directory,
+      chosen.count,
+      holder,
+      (line) => {
+        saidTo?.(line);
+      },
+      undefined,
+      undefined,
+      { tool: 'headless' },
+    );
   });
   return ours;
 }
@@ -2615,6 +2842,9 @@ export function slotWaitSaid(
   if (drawn.limit === 'games' && gamesMayHold(count) === 0) {
     return `${so}: no game may run on this machine (${directory}) while a gate is queued, and the engine starts once no gate is queued.`;
   }
+  if (drawn.short !== undefined) {
+    return `${so}: ${memoryShortSaid(drawn.short, directory, false)}, so it starts once enough memory is given back.`;
+  }
   const allLeft = allLeftSaid(drawn, directory, false);
   if (allLeft !== '') {
     return `${so}: ${allLeft}`;
@@ -2633,6 +2863,16 @@ export function slotWaitSaid(
         ? `${waiting}, by ${named.join(', ')}, and ${starts}.`
         : `${waiting}: ${listed(named)}. ${starts.charAt(0).toUpperCase()}${starts.slice(1)}.`;
   return `${said}${leftSaid(drawn)}`;
+}
+
+/**
+ * What a take says when a slot is free and its engine does not fit the machine's memory budget: what
+ * the engines may hold, what the live locks hold, what is left to takers ahead, and what it needs.
+ * [param past] words it as it was when the take first waited.
+ */
+function memoryShortSaid(short: MemoryShort, directory: string, past: boolean): string {
+  const ahead = short.ahead > 0 ? `, ${gigabytes(short.ahead)} is left to takers ahead of it in line` : '';
+  return `the engines on this machine (${directory}) ${past ? 'could' : 'may'} hold ${gigabytes(short.budget)} together, those running ${past ? 'held' : 'hold'} ${gigabytes(short.held)}${ahead} and this engine ${past ? 'needed' : 'needs'} ${gigabytes(short.need)}`;
 }
 
 /** Slot numbers [param slots] as a reader names them: "slot 2", "slots 1 and 2". */
@@ -2740,6 +2980,9 @@ export function slotWaitedSaid(
   if (drawn.limit === 'games' && gamesMayHold(count) === 0) {
     return `${waited} When it first waited, no game could run on this machine (${directory}) while a gate was queued.`;
   }
+  if (drawn.short !== undefined) {
+    return `This call waited ${String(Math.round(waitedMs / 1000))} s for engine memory in all. When it first waited, ${memoryShortSaid(drawn.short, directory, true)}.`;
+  }
   const allLeft = allLeftSaid(drawn, directory, true);
   if (allLeft !== '') {
     return `${waited} When it first waited, ${allLeft}`;
@@ -2785,9 +3028,11 @@ function listed(named: readonly string[]): string {
  * Answers its lock, how to give it back, and how to hand it to an engine that outlives this process.
  * [param game] is a take for a game editor_run starts, which games may hold only some of: see
  * {@link gamesKeptOf}. [param project] is the project the take is for, which gives a one-off the
- * store class where its repository is listed.
+ * store class where its repository is listed. [param tool] names the engine's tool, whose kept peak
+ * for the project is the memory its lock counts: a game's is `editor_run`, any other engine's
+ * `headless`.
  */
-export async function slotForCall(game = false, project?: string): Promise<CallSlot> {
+export async function slotForCall(game = false, project?: string, tool?: PeakTool): Promise<CallSlot> {
   const slots = await processSlots();
   const progress = callProgress();
   const waits = callSlotWaits();
@@ -2814,6 +3059,8 @@ export async function slotForCall(game = false, project?: string): Promise<CallS
     },
     game,
     project,
+    undefined,
+    tool,
   );
   if (waits !== undefined && blockedBy !== undefined) {
     waits.ms += Date.now() - began;
@@ -2971,13 +3218,17 @@ export function forTheProject(project: string): void {
  * and gives it back after. Inside {@link inOneSlot} it uses the slot held there. [param project] is
  * the project the call is for, in place of the one {@link forTheProject} named.
  */
-export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: string): Promise<T> {
+export async function inASlot<T>(
+  body: (lock: string) => Promise<T>,
+  project?: string,
+  tool: PeakTool = 'headless',
+): Promise<T> {
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
-    kept.held ??= slotForCall(false, project ?? kept.project);
+    kept.held ??= slotForCall(false, project ?? kept.project, tool);
     return await body((await kept.held).lock);
   }
-  const held = await slotForCall(false, project);
+  const held = await slotForCall(false, project, tool);
   try {
     return await body(held.lock);
   } finally {

@@ -110,9 +110,25 @@ export interface MemoryEnd {
   readonly source: CeilingSource;
 }
 
+/**
+ * What an engine held and its ceiling, as gigabytes with as many decimals as it takes for the two to
+ * read differently: an end just past the ceiling is not said as equal to it.
+ */
+function endFigures(end: MemoryEnd): { readonly peak: string; readonly ceiling: string } {
+  for (let places = 1; places < 10; places += 1) {
+    const peak = (end.peakBytes / GIB).toFixed(places);
+    const ceiling = (end.ceilingBytes / GIB).toFixed(places);
+    if (peak !== ceiling) {
+      return { peak: `${peak} GB`, ceiling: `${ceiling} GB` };
+    }
+  }
+  return { peak: `${String(end.peakBytes)} bytes`, ceiling: `${String(end.ceilingBytes)} bytes` };
+}
+
 /** What an engine held past its ceiling, and the setting or variable that raises the ceiling. */
 export function memoryCeilingSaid(end: MemoryEnd): string {
-  const held = `the engine held ${gigabytes(end.peakBytes)}, past the ${gigabytes(end.ceilingBytes)} ceiling`;
+  const figures = endFigures(end);
+  const held = `the engine held ${figures.peak}, past the ${figures.ceiling} ceiling`;
   if (end.source === 'project') {
     return `${held}. Set ${CEILING_SETTING} in project.godot to raise it`;
   }
@@ -124,14 +140,15 @@ export function memoryCeilingSaid(end: MemoryEnd): string {
 
 /** [param subject] ended for its memory, in one sentence that names what sets the ceiling. */
 export function memoryEndSentence(subject: string, end: MemoryEnd): string {
-  const held = `${subject} was ended for its memory: it held ${gigabytes(end.peakBytes)}, past`;
+  const figures = endFigures(end);
+  const held = `${subject} was ended for its memory: it held ${figures.peak}, past`;
   if (end.source === 'project') {
-    return `${held} the ${gigabytes(end.ceilingBytes)} ceiling ${CEILING_SETTING} in project.godot sets.`;
+    return `${held} the ${figures.ceiling} ceiling ${CEILING_SETTING} in project.godot sets.`;
   }
   if (end.source === 'variable') {
-    return `${held} the ${gigabytes(end.ceilingBytes)} ceiling ${CEILING_VARIABLE} sets.`;
+    return `${held} the ${figures.ceiling} ceiling ${CEILING_VARIABLE} sets.`;
   }
-  return `${held} the default ${gigabytes(end.ceilingBytes)} ceiling, which ${CEILING_VARIABLE} or ${CEILING_SETTING} in project.godot raises.`;
+  return `${held} the default ${figures.ceiling} ceiling, which ${CEILING_VARIABLE} or ${CEILING_SETTING} in project.godot raises.`;
 }
 
 /** Why an engine was ended for its memory, as the reason an answer gives. */

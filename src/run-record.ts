@@ -309,6 +309,43 @@ export function profileMarkPath(run: {
   return transcript.replace(/\.log$/, '.profile-mark.json');
 }
 
+/** Where the memory end of a run is noted: beside its transcript, and swept with it. */
+function memoryEndPath(run: { readonly transcript: string | null; readonly startedAt: number }): string {
+  const transcript = run.transcript ?? join(runsDirectory(), `run-${run.startedAt}.log`);
+  return transcript.replace(/\.log$/, '.memory-end.json');
+}
+
+/**
+ * Notes that the server about to end [param run] does so for its memory, as [param endedBy] says. A
+ * server that started the run and sees it gone reads it with {@link memoryEndOf}, since the note of
+ * the run itself is cleared by the end.
+ */
+export function noteMemoryEnd(
+  run: { readonly transcript: string | null; readonly startedAt: number },
+  endedBy: string,
+): void {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    writeWhole(memoryEndPath(run), JSON.stringify({ endedBy }));
+  } catch {
+    // Unwritable leaves the other server's answer without the reason.
+  }
+}
+
+/** What another server noted as the memory end of [param run], or undefined when it noted none. */
+export function memoryEndOf(run: {
+  readonly transcript: string | null;
+  readonly startedAt: number;
+}): string | undefined {
+  try {
+    const fields: unknown = JSON.parse(readFileSync(memoryEndPath(run), 'utf8'));
+    const said = isRecord(fields) ? fields['endedBy'] : undefined;
+    return typeof said === 'string' && said !== '' ? said : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function writeRunRecord(record: RunRecord): void {
   mkdirSync(runsDirectory(), { recursive: true });
   const path = runRecordPath(record.projectPath);
@@ -1089,7 +1126,10 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
     // A partial file is what a writer that died between writing and renaming left behind.
     const transcript =
       entry.startsWith('run-') &&
-      (entry.endsWith('.log') || entry.endsWith('.profile.json') || entry.endsWith('.profile-mark.json'));
+      (entry.endsWith('.log') ||
+        entry.endsWith('.profile.json') ||
+        entry.endsWith('.profile-mark.json') ||
+        entry.endsWith('.memory-end.json'));
     if (!transcript && !entry.endsWith('.partial')) {
       continue;
     }

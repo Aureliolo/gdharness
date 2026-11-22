@@ -206,6 +206,7 @@ import {
   engineNeed,
   type MemoryEnd,
   MemoryWatch,
+  memoryCeilingSaid,
   memoryEndedSaid,
   startRefusedSaid,
 } from '../src/engine-memory.js';
@@ -546,6 +547,8 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
+  memoryEndOf,
+  noteMemoryEnd,
   openTranscript,
   profileMarkPath,
   profilePath,
@@ -72825,8 +72828,8 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
     assert.deepEqual(readdirSync(directory).toSorted(), ['0.lock', '1.lock'], 'one file a slot');
     assert.deepEqual(
       holderOf(readFileSync(first, 'utf8')),
-      { pid: process.pid, started, by: 'gdharness test of /p' },
-      'naming its holder and what took it',
+      { pid: process.pid, started, by: 'gdharness test of /p', memory: 1.5 * 1024 ** 3 },
+      'naming its holder, what took it and the memory its engine may hold',
     );
     assert.deepEqual(
       slots.holders().map((holder) => holder.by),
@@ -76273,7 +76276,7 @@ async function checksTheSixteenSlots(
     );
     assert.deepEqual(
       holderOf(readFileSync(first, 'utf8')),
-      { pid: process.ppid, started: 1, by: 'a keeper', game: true },
+      { pid: process.ppid, started: 1, by: 'a keeper', game: true, memory: 1.5 * 1024 ** 3 },
       "the keeper's lock still says it is a game's",
     );
     rmSync(first, { force: true });
@@ -76615,6 +76618,402 @@ function afterTheFirstLook(slots: EngineSlots, after: () => void): () => number 
   return () => looks;
 }
 
+const MEMORY_GIB = 1024 ** 3;
+
+/** Runs [param body] with no engine memory ceiling set and a runtime folder of its own. */
+async function withNoCeilingSet(body: () => Promise<void>): Promise<void> {
+  const kept = process.env[CEILING_VARIABLE];
+  delete process.env[CEILING_VARIABLE];
+  try {
+    await withARuntimeDirectory(body);
+  } finally {
+    if (kept !== undefined) {
+      process.env[CEILING_VARIABLE] = kept;
+    }
+  }
+}
+
+/** A slot lock of this process, as a take of [param bytes] writes it, or of another tool's with none. */
+function standInLock(
+  directory: string,
+  slot: number,
+  started: number,
+  fields: { readonly memory?: number; readonly wants?: number },
+): void {
+  writeFileSync(
+    join(directory, `${String(slot)}.lock`),
+    JSON.stringify({ pid: process.pid, started, ...fields }),
+  );
+}
+
+/**
+ * The engines of a machine together stay inside what it holds. On 64 GiB with twelve slots the
+ * budget is 48 GiB: a take counts the live locks' memory and its own, a lock without a figure counts
+ * 1.5 GiB for each slot it holds, and the first engine of a machine takes whatever it needs.
+ */
+async function testEnginesTogetherStayInsideTheMachinesMemory(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
+      const slots = new EngineSlots(
+        directory,
+        12,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 64 * MEMORY_GIB },
+      );
+      assert.equal(slots.memoryBudget, 48 * MEMORY_GIB, 'the machine less what everything else keeps');
+      for (const slot of [0, 1, 2, 3]) {
+        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
+      }
+      const fifth = await slots.takeFree();
+      assert.notEqual(fifth, null, 'the fifth 7 GiB engine fits');
+      assert.equal(
+        holderOf(readFileSync(fifth ?? '', 'utf8'))?.memory,
+        7 * MEMORY_GIB,
+        'and its lock counts the 7 GiB the project held last',
+      );
+      standInLock(directory, 5, started, { memory: 7 * MEMORY_GIB });
+      rmSync(fifth ?? '');
+      standInLock(directory, 4, started, { memory: 7 * MEMORY_GIB });
+      assert.equal(await slots.takeFree(), null, 'a seventh at 42 GiB live does not');
+      assert.deepEqual(
+        slots.drawn.short,
+        { budget: 48 * MEMORY_GIB, held: 42 * MEMORY_GIB, ahead: 0, need: 7 * MEMORY_GIB },
+        'and says what it waits for while slots are free',
+      );
+      rmSync(join(directory, '0.lock'));
+      assert.notEqual(await slots.takeFree(), null, 'it takes once a lock goes');
+      slots.releaseAll();
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A lock with no figure counts 1.5 GiB a slot it holds, so another tool's slots weigh what its queue counts. */
+async function testALockWithNoMemoryCountsOneAndAHalfGiBASlot(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
+      const slots = new EngineSlots(
+        directory,
+        12,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 64 * MEMORY_GIB },
+      );
+      standInLock(directory, 0, started, {});
+      standInLock(directory, 1, started, { wants: 3 });
+      for (const slot of [2, 3, 4, 5, 6, 7]) {
+        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
+      }
+      assert.equal(await slots.takeFree(), null, '1.5 + 4.5 + 42 GiB live and 7 more passes 48');
+      assert.equal(slots.drawn.short?.held, 48 * MEMORY_GIB, 'the one slot and the three count 6 GiB');
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two takers that both counted room for one engine before either took it cannot both keep theirs:
+ * the newest lock is given back and its take waits for memory.
+ */
+async function testALockTakenBeyondTheBudgetByARaceIsGivenBack(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
+      const slots = new EngineSlots(
+        directory,
+        12,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 64 * MEMORY_GIB },
+      );
+      for (const slot of [0, 1, 2, 3, 4]) {
+        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
+      }
+      const read: unknown = Reflect.get(slots, 'liveMemory');
+      if (typeof read !== 'function') {
+        throw new TypeError('the count of the live locks is there to watch');
+      }
+      let looks = 0;
+      Reflect.set(slots, 'liveMemory', async (): Promise<unknown> => {
+        const live: unknown = await Reflect.apply(read, slots, []);
+        looks += 1;
+        if (looks === 1) {
+          // Another taker's lock lands, older than the one this take is about to make.
+          standInLock(directory, 5, started, { memory: 7 * MEMORY_GIB });
+          standInLock(directory, 6, started, { memory: 7 * MEMORY_GIB });
+          const past = new Date(Date.now() - 60_000);
+          utimesSync(join(directory, '5.lock'), past, past);
+          utimesSync(join(directory, '6.lock'), past, past);
+        }
+        return live;
+      });
+      assert.equal(await slots.takeFree(), null, 'the lock that passes 48 GiB is given back');
+      assert.equal(
+        readdirSync(directory).filter((name) => name.endsWith('.lock')).length,
+        7,
+        'and only the takers that came first keep theirs',
+      );
+      assert.equal(slots.drawn.short?.held, 49 * MEMORY_GIB, 'with what the others hold said');
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** The first engine on a machine with no live lock takes, however much it needs. */
+async function testTheFirstEngineOnAMachineTakesWhateverItNeeds(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(project, 'project_test', 3 * MEMORY_GIB);
+      const slots = new EngineSlots(
+        directory,
+        2,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 8 * MEMORY_GIB },
+      );
+      assert.equal(slots.memoryBudget, 3 * MEMORY_GIB, 'a count set stands for 1.5 GiB a slot at least');
+      standInLock(directory, 0, started, { memory: 3 * MEMORY_GIB });
+      rmSync(join(directory, '0.lock'));
+      const first = await slots.takeFree();
+      assert.notEqual(first, null, 'the first takes at its figure');
+      assert.equal(
+        await slots.takeFree(),
+        null,
+        'the next with 3 GiB live waits for memory with a slot free',
+      );
+      assert.equal(slots.drawn.short?.held, 3 * MEMORY_GIB);
+      slots.releaseAll();
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A lock's figure is 1.5 GiB where a project has no kept peak, the peak where it has one, and at
+ * most the project's ceiling.
+ */
+async function testALocksMemoryIsThePeakKeptCappedAtTheCeiling(): Promise<void> {
+  const started = await ownStart();
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  const figureOf = async (take: (slots: EngineSlots) => Promise<string | null>): Promise<unknown> => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+    try {
+      const slots = new EngineSlots(
+        directory,
+        4,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 64 * MEMORY_GIB },
+      );
+      const lock = await take(slots);
+      const figure = holderOf(readFileSync(lock ?? '', 'utf8'))?.memory;
+      slots.releaseAll();
+      return figure;
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  };
+  try {
+    await withNoCeilingSet(async () => {
+      const side = (slots: EngineSlots) => slots.takeFree();
+      const game = (slots: EngineSlots) => slots.takeFree(true);
+      assert.equal(await figureOf(side), 1.5 * MEMORY_GIB, 'no peak kept');
+      await recordEnginePeak(project, 'editor_run', 6 * MEMORY_GIB);
+      assert.equal(await figureOf(game), 6 * MEMORY_GIB, 'the game counts the 6 GiB it held');
+      assert.equal(await figureOf(side), 1.5 * MEMORY_GIB, 'a test run has its own tool and counts its own');
+      process.env[CEILING_VARIABLE] = '2048';
+      try {
+        assert.equal(await figureOf(game), 2 * MEMORY_GIB, 'capped at the 2 GiB ceiling');
+      } finally {
+        delete process.env[CEILING_VARIABLE];
+      }
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A take that waits for memory keeps its place in line: a later one-slot take that would fit
+ * beside what runs does not fit beside what the earlier one is owed, and takes after it.
+ */
+async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  const big = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-big-'));
+  const small = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-small-'));
+  const stop = new AbortController();
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(big, 'project_test', 7 * MEMORY_GIB);
+      const slots = new EngineSlots(
+        directory,
+        12,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        undefined,
+        { memory: 64 * MEMORY_GIB },
+      );
+      for (const slot of [0, 1, 2, 3, 4, 5]) {
+        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
+      }
+      const order: string[] = [];
+      const first = slots.take(stop.signal, undefined, undefined, false, big).then((lock) => {
+        order.push('big');
+        return lock;
+      });
+      await delay(700);
+      const second = slots.take(stop.signal, undefined, undefined, false, small).then((lock) => {
+        order.push('small');
+        return lock;
+      });
+      await delay(1500);
+      assert.deepEqual(order, [], 'the small one stays behind the 7 GiB one it fits beside at 43.5 GiB');
+      const marks = readdirSync(join(directory, 'waiting')).filter((name) => name.endsWith('.json'));
+      assert.equal(marks.length, 2, `both keep a mark: ${marks.join(', ')}`);
+      rmSync(join(directory, '0.lock'));
+      await Promise.all([first, second]);
+      assert.deepEqual(order, ['big', 'small'], 'and takes once the earlier has its lock');
+      slots.releaseAll();
+    });
+  } finally {
+    stop.abort();
+    for (const folder of [directory, big, small]) {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }
+}
+
+/** What a wait for memory says, as the wait line and the block's account of it, whole. */
+function testTheMemoryWaitIsSaidInWholeLines(): void {
+  const short = { budget: 48 * MEMORY_GIB, held: 42 * MEMORY_GIB, ahead: 0, need: 7 * MEMORY_GIB };
+  const drawn = { numbers: [6, 7], short };
+  assert.equal(
+    slotWaitSaid(3000, 12, 'slots', [], drawn),
+    'Waiting 3 s so far for an engine: the engines on this machine (slots) may hold 48.0 GB together, those running hold 42.0 GB and this engine needs 7.0 GB, so it starts once enough memory is given back.',
+  );
+  assert.equal(
+    slotWaitSaid(23_000, 12, 'slots', [], { numbers: [6], short: { ...short, ahead: 7 * MEMORY_GIB } }),
+    'Waiting 23 s so far for an engine: the engines on this machine (slots) may hold 48.0 GB together, those running hold 42.0 GB, 7.0 GB is left to takers ahead of it in line and this engine needs 7.0 GB, so it starts once enough memory is given back.',
+  );
+  assert.equal(
+    slotWaitedSaid(25_000, 12, 'slots', [], drawn),
+    'This call waited 25 s for engine memory in all. When it first waited, the engines on this machine (slots) could hold 48.0 GB together, those running held 42.0 GB and this engine needed 7.0 GB.',
+  );
+}
+
+/** Figures just past the ceiling are said with enough digits to differ. */
+function testAnEndJustPastTheCeilingSaysFiguresThatDiffer(): void {
+  const end: MemoryEnd = {
+    peakBytes: 4 * MEMORY_GIB + 1024 ** 2,
+    ceilingBytes: 4 * MEMORY_GIB,
+    source: 'variable',
+  };
+  assert.equal(
+    memoryCeilingSaid(end),
+    `the engine held 4.001 GB, past the 4.000 GB ceiling. Set ${CEILING_VARIABLE} to raise it`,
+  );
+}
+
+/** A server that ends another's game for its memory leaves a note the first server reads, swept with the run. */
+async function testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun(): Promise<void> {
+  await withARuntimeDirectory(() => {
+    const runs = join(process.env['GDHARNESS_RUNTIME_DIR'] ?? '', 'runs');
+    const run = { transcript: join(runs, 'run-1.log'), startedAt: 1 };
+    assert.equal(memoryEndOf(run), undefined, 'nothing noted before');
+    noteMemoryEnd(run, 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
+    assert.equal(memoryEndOf(run), 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
+    assert.equal(memoryEndOf({ transcript: join(runs, 'run-2.log'), startedAt: 2 }), undefined);
+    return Promise.resolve();
+  });
+  const source = readFileSync('src/server.ts', 'utf8');
+  assert.match(
+    source,
+    /const memory = await this\.memoryCeiling\(projectPath, 'boot_check'\);/,
+    'the boot check refuses on the ceiling like every other start',
+  );
+}
+
+/** One, two and three slots hold what they stand for, a gate queued or not, and never wait for memory. */
+async function testSmallMachinesNeverWaitForMemoryWithinTheirSlots(): Promise<void> {
+  const started = await ownStart();
+  await withNoCeilingSet(async () => {
+    for (const count of [1, 2, 3]) {
+      for (const queued of [false, true]) {
+        await oneSmallMachineTakesTheLastSlot(count, queued, started);
+      }
+    }
+  });
+}
+
+/** A machine of [param count] slots, all but one held at 1.5 GiB, and the take of the last. */
+async function oneSmallMachineTakesTheLastSlot(
+  count: number,
+  queued: boolean,
+  started: number,
+): Promise<void> {
+  const directory = slotsWithGatesQueued(
+    queued ? { 'ticket.json': JSON.stringify({ pid: process.pid, started }) } : {},
+    [],
+    started,
+  );
+  try {
+    for (let slot = 0; slot < count - 1; slot += 1) {
+      standInLock(directory, slot, started, { memory: 1.5 * MEMORY_GIB });
+    }
+    const slots = new EngineSlots(
+      directory,
+      count,
+      { pid: process.pid, started },
+      undefined,
+      () => 'other',
+      undefined,
+      { memory: 8 * MEMORY_GIB },
+    );
+    const lock = await slots.takeFree();
+    const label = `${String(count)} slots, gate ${queued ? 'queued' : 'not queued'}`;
+    assert.equal(slots.drawn.short, undefined, `${label}: no wait for memory`);
+    assert.ok(queued || lock !== null, `${label}: the last slot is taken`);
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** A count of one spare gate slot, as a live queue process writes it half a second ago. */
 function oneSpareSlot(directory: string, started: number): void {
   writeFileSync(
@@ -76760,7 +77159,7 @@ async function testASlotTakenOverIsMadeInPlace(): Promise<void> {
     assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken over');
     assert.equal(
       readFileSync(join(directory, '0.lock'), 'utf8'),
-      JSON.stringify({ pid: process.pid, started }),
+      JSON.stringify({ pid: process.pid, started, memory: 1.5 * 1024 ** 3 }),
       'and holds its new holder',
     );
     slots.releaseAll();
@@ -76999,7 +77398,7 @@ async function testASlotLockIsCreatedWithoutAStagedFile(): Promise<void> {
     assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken with no staged file');
     assert.equal(
       readFileSync(join(directory, '0.lock'), 'utf8'),
-      JSON.stringify({ pid: process.pid, started }),
+      JSON.stringify({ pid: process.pid, started, memory: 1.5 * 1024 ** 3 }),
       'and holds its holder',
     );
     slots.releaseAll();
@@ -79598,7 +79997,7 @@ function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
       `a spawnGame call names no project: ${call}`,
     );
   }
-  const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project\);/;
+  const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project, tool\);/;
   assert.match(source, taken, 'spawnGame takes its slot for the project it is given');
   assert.equal(
     source.match(/slotForCall\(true, projectPath\)/g)?.length,
@@ -126093,7 +126492,7 @@ async function testAGamePastItsMemoryCeilingIsEndedForIt(): Promise<void> {
     assert.equal(get(output, 'running'), false, JSON.stringify(output));
     assert.match(
       String(get(output, 'endedBy')),
-      /^its memory ceiling: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
+      /^its memory ceiling: the engine held 0\.\d+ GB, past the 0\.\d+ GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
       JSON.stringify(output),
     );
   });
@@ -126710,7 +127109,7 @@ async function testAGameItsServerLeftRunningIsGuardedByTheNextServer(): Promise<
       }
       assert.match(
         String(get(output, 'endedBy')),
-        /^its memory ceiling: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
+        /^its memory ceiling: the engine held 0\.\d+ GB, past the 0\.\d+ GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
         JSON.stringify(output),
       );
     } finally {
@@ -128370,6 +128769,16 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem,
   testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots,
   testASideTakeReadsTheFreeSlotsOnce,
+  testEnginesTogetherStayInsideTheMachinesMemory,
+  testALockWithNoMemoryCountsOneAndAHalfGiBASlot,
+  testALockTakenBeyondTheBudgetByARaceIsGivenBack,
+  testTheFirstEngineOnAMachineTakesWhateverItNeeds,
+  testALocksMemoryIsThePeakKeptCappedAtTheCeiling,
+  testAMemoryWaiterKeepsItsPlaceInLine,
+  testTheMemoryWaitIsSaidInWholeLines,
+  testAnEndJustPastTheCeilingSaysFiguresThatDiffer,
+  testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun,
+  testSmallMachinesNeverWaitForMemoryWithinTheirSlots,
   testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack,
   testACountBegunInTheTickOfASeatIsStaleForSideWork,
   testATakeInTheTickOfTheCountComesOffIt,
