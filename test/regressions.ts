@@ -123843,9 +123843,12 @@ async function propertiesOf(scenes: SceneWriteProject, resourcePath = 'res://the
   );
 }
 
-/** The refusal text up to the engine's own messages, which follow it. */
-const themeBaseRefusal = (type: string, given: string, held: string, cause: string): string =>
-  `Theme.${type}/base_type was given ${given} and holds ${held} after it was set: ${cause}. remove_theme_item without item takes a base out with its type. Nothing was written.`;
+/** A refusal's own text, without the engine's messages that follow it. */
+const ownRefusal = (answer: string): string => answer.split(/\s*\{\s*"engine_messages/)[0] ?? answer;
+
+/** The refusal of an empty base for [property] on [holder], which then holds [held]. */
+const emptyBaseRefusal = (holder: string, property: string, held: string): string =>
+  `${holder}.${property} was given "" and holds ${held} after it was set: the engine takes no empty base. unset takes a base out, and remove_theme_item without item takes it out with its type. Nothing was written.`;
 
 async function testAThemeTakesATypeVariationsBaseWithNoEditor(): Promise<void> {
   await withAThemeProject('theme variation base', async (scenes) => {
@@ -123917,13 +123920,25 @@ async function testAChangedBaseLeavesOneBaseLineInTheFile(): Promise<void> {
   });
 }
 
-async function testATypeNamedAfterAnEngineClassIsRefusedAVariationBase(): Promise<void> {
-  await withAThemeProject('theme variation of an engine class', async (scenes) => {
+async function testAVariationBaseTheEngineRefusesNamesOnlyTheEnginesReason(): Promise<void> {
+  await withAThemeProject('theme variation base the engine refuses', async (scenes) => {
     const before = scenes.fileOf('theme.tres');
-    const refused = textOf(await scenes.modify({ 'Button/base_type': 'PanelContainer' })) ?? '';
-    const cause = 'the engine takes no base for a type named after an engine class';
-    assert.ok(refused.startsWith(themeBaseRefusal('Button', '"PanelContainer"', '""', cause)), refused);
-    assert.equal(scenes.fileOf('theme.tres'), before);
+    const refusedByTheEngine: [string, string, string][] = [
+      ['NewType/base_type', 'Panel Container', "Invalid type name: 'Panel Container'"],
+      ['My Type/base_type', 'PanelContainer', "Invalid type name: 'My Type'"],
+      ['NewType/base_type', '&"PanelContainer"', `Invalid type name: '&"PanelContainer"'`],
+      ['Button/base_type', 'PanelContainer', 'A type associated with a built-in class cannot be marked'],
+    ];
+    for (const [property, given, reason] of refusedByTheEngine) {
+      const refused = textOf(await scenes.modify({ [property]: given })) ?? '';
+      assert.equal(
+        ownRefusal(refused),
+        `Theme.${property} was given ${JSON.stringify(given)} and holds "" after it was set: the engine changed or refused the value, so nothing was written.`,
+        refused,
+      );
+      assert.ok(refused.includes(JSON.stringify(reason).slice(1, -1)), refused);
+      assert.equal(scenes.fileOf('theme.tres'), before, property);
+    }
   });
 }
 
@@ -123931,13 +123946,16 @@ async function testAnEmptyVariationBaseIsRefusedWhetherOrNotOneIsHeld(): Promise
   await withAThemeProject('theme variation empty base', async (scenes) => {
     const before = scenes.fileOf('theme.tres');
     const bare = textOf(await scenes.modify({ 'NewType/base_type': '' })) ?? '';
-    const cause = 'the engine takes no empty base';
-    assert.ok(bare.startsWith(themeBaseRefusal('NewType', '""', '""', cause)), bare);
+    assert.equal(ownRefusal(bare), emptyBaseRefusal('Theme', 'NewType/base_type', '""'), bare);
     assert.equal(scenes.fileOf('theme.tres'), before);
     await scenes.modify({ 'NewType/base_type': 'PanelContainer' });
     const held = scenes.fileOf('theme.tres');
     const emptied = textOf(await scenes.modify({ 'NewType/base_type': '' })) ?? '';
-    assert.ok(emptied.startsWith(themeBaseRefusal('NewType', '""', '"PanelContainer"', cause)), emptied);
+    assert.equal(
+      ownRefusal(emptied),
+      emptyBaseRefusal('Theme', 'NewType/base_type', '"PanelContainer"'),
+      emptied,
+    );
     assert.equal(scenes.fileOf('theme.tres'), held);
   });
 }
@@ -123967,19 +123985,9 @@ async function testANameThatIsNoThemeItemIsStillRefused(): Promise<void> {
     const before = scenes.fileOf('theme.tres');
     for (const name of ['NewType/base_typ', 'NewType/base_type/extra', '/base_type']) {
       const refused = textOf(await scenes.modify({ [name]: 'PanelContainer' })) ?? '';
-      assert.match(refused, new RegExp(`^Theme has no property ${name.replace(/\//g, '\\/')}\\b`), refused);
+      assert.ok(refused.startsWith(`Theme has no property ${name}. `), refused);
       assert.equal(scenes.fileOf('theme.tres'), before, name);
     }
-  });
-}
-
-async function testABaseTypeOnAResourceThatIsNoThemeIsStillRefused(): Promise<void> {
-  await withAThemeProject('base type on a style box', async (scenes) => {
-    const before = scenes.fileOf('box.tres');
-    const refused =
-      textOf(await scenes.modify({ 'NewType/base_type': 'PanelContainer' }, 'res://box.tres')) ?? '';
-    assert.match(refused, /^StyleBoxFlat has no property NewType\/base_type\b/, refused);
-    assert.equal(scenes.fileOf('box.tres'), before);
   });
 }
 
@@ -123993,6 +124001,69 @@ async function testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven(): P
       scenes.fileOf('theme.tres'),
     );
   });
+}
+
+/** A scene whose root Control holds a built-in Theme with [lines] under its section. */
+const sceneWithABuiltInTheme = (lines = ''): string =>
+  `[gd_scene load_steps=2 format=3]\n\n[sub_resource type="Theme" id="Theme_1"]\n${lines}\n[node name="Root" type="Control"]\ntheme = SubResource("Theme_1")\n`;
+
+async function testAVariationBaseTheEngineRefusesThroughAControlsThemeIsRefused(): Promise<void> {
+  await withAThemeProject(
+    'theme variation base through a control',
+    async (scenes) => {
+      const before = scenes.fileOf('main.tscn');
+      const set = async (properties: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await scenes.call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: '.', properties }),
+        ) ?? '';
+      const emptied = await set({ 'theme/NewType/base_type': '' });
+      assert.equal(
+        ownRefusal(emptied),
+        emptyBaseRefusal('Control', 'theme/NewType/base_type', '""'),
+        emptied,
+      );
+      assert.equal(scenes.fileOf('main.tscn'), before);
+      const engineClass = await set({ 'theme/Button/base_type': 'PanelContainer' });
+      assert.equal(
+        ownRefusal(engineClass),
+        'Control.theme/Button/base_type was given "PanelContainer" and holds "" after it was set: the engine changed or refused the value, so nothing was written.',
+        engineClass,
+      );
+      assert.equal(scenes.fileOf('main.tscn'), before);
+    },
+    { 'main.tscn': sceneWithABuiltInTheme() },
+  );
+}
+
+async function testAnUnsetTakesAVariationBaseOutOfTheFile(): Promise<void> {
+  const held = 'NewType/base_type = &"PanelContainer"\nNewType/constants/margin = 4\n';
+  await withAThemeProject(
+    'theme variation base unset',
+    async (scenes) => {
+      const answer = parseTextContent(
+        await scenes.call('resource_edit', {
+          op: 'modify',
+          resourcePath: 'res://theme.tres',
+          unset: ['NewType/base_type'],
+        }),
+      );
+      assert.deepEqual(get(answer, 'unset'), { 'NewType/base_type': '' }, JSON.stringify(answer));
+      const file = scenes.fileOf('theme.tres');
+      assert.doesNotMatch(file, /base_type/, file);
+      assert.match(file, /^NewType\/constants\/margin = 4$/m, file);
+      assert.deepEqual(await propertiesOf(scenes), { 'NewType/constants/margin': 4 });
+      await scenes.call('scene_node', {
+        op: 'set',
+        scenePath: 'main.tscn',
+        nodePath: '.',
+        unset: ['theme/NewType/base_type'],
+      });
+      const scene = scenes.fileOf('main.tscn');
+      assert.doesNotMatch(scene, /base_type/, scene);
+      assert.match(scene, /^NewType\/constants\/margin = 4$/m, scene);
+    },
+    { 'theme.tres': EMPTY_THEME + held, 'main.tscn': sceneWithABuiltInTheme(held) },
+  );
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -125323,12 +125394,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATypeVariationsBaseSitsBesideAStyleBoxOfTheType,
   testATypeVariationsBaseReadFromOneThemeIsWrittenWholeIntoAnother,
   testAChangedBaseLeavesOneBaseLineInTheFile,
-  testATypeNamedAfterAnEngineClassIsRefusedAVariationBase,
+  testAVariationBaseTheEngineRefusesNamesOnlyTheEnginesReason,
   testAnEmptyVariationBaseIsRefusedWhetherOrNotOneIsHeld,
   testAVariationBaseOfTheWrongKindIsRefused,
   testANameThatIsNoThemeItemIsStillRefused,
-  testABaseTypeOnAResourceThatIsNoThemeIsStillRefused,
   testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven,
+  testAVariationBaseTheEngineRefusesThroughAControlsThemeIsRefused,
+  testAnUnsetTakesAVariationBaseOutOfTheFile,
 ];
 
 /**

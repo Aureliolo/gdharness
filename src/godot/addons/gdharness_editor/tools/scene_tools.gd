@@ -1922,8 +1922,8 @@ func _unset_on(
 		places.append([resource, leaf, GdhUnset.resource_default(resource, leaf)])
 	scene.asked(node, paths)
 	for place: Array in places:
-		var holder: Object = place[0]
-		holder.set(str(place[1]), place[2])
+		var held_by: Object = place[0]
+		GdhUnset.take_back(held_by, str(place[1]), place[2])
 	for path: String in paths:
 		reverted[path] = _readable(node, _properties.read_at(node, path))
 	return ""
