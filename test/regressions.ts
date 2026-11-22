@@ -66626,7 +66626,7 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
  * guard there is, including ones that are not about ownership at all, so that fixture would pass
  * against a build that signals every live foreign run it finds. The incident was a live one.
  *
- * `editor_run start` is the call that did it. It ends whatever `currentRun()` says is going before
+ * `editor_run start` is the call that did it. It ends this server's going run of the same place before
  * it decides how to start anything, which is above the engine and above the editor, so this needs
  * neither: what is being measured is whether the foreign process is alive afterwards.
  *
@@ -129115,6 +129115,8 @@ async function testAStartOfAWorktreeAsksTheEditorOfAnotherCheckoutNothing(): Pro
       { savesIn: saves },
       { env: { GAME_PROBE: '1' } },
       { savesIn: `${saves}-2`, env: { GAME_PROBE: '2' } },
+      { runtimeWaitMs: 60_000 },
+      { savesIn: saves, runtimeWaitMs: 60_000 },
     ];
     if (windowedRunRefused() === null) {
       variants.push({ headless: false }, { headless: false, savesIn: `${saves}-3` });
