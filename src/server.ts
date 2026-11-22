@@ -2383,7 +2383,8 @@ const BOUNDARY_WAIT_MS = 2000;
 /**
  * How long a replacement waits for its predecessor to let go of the configured bridge port before
  * taking another. The predecessor looks for a successor every `SUCCESSOR_CHECK_MS`, and then has
- * its shutdown to get through, so this covers one full check and the shutdown after it.
+ * its shutdown to get through, so this covers one full check and the shutdown after it. One still
+ * answering a call stops later, once it has answered, and the replacement takes another port.
  */
 const HANDOVER_MS = SUCCESSOR_CHECK_MS + 5_000;
 
@@ -6081,7 +6082,8 @@ class GodotServer {
    *
    * The announcement is the signal because it is already the one both sides read, and it carries
    * the process that wrote it. A successor has to still be running to count, so that a
-   * replacement which died without withdrawing does not take the last server with it.
+   * replacement which died without withdrawing does not take the last server with it. A server with
+   * a call in flight answers it before it stops, since its caller is still waiting on this pipe.
    */
   private watchForASuccessor(): void {
     if (this.ownProject === null || this.successorWatch !== null) {
@@ -6089,7 +6091,7 @@ class GodotServer {
     }
     const watch = setInterval(() => {
       const successor = this.supersededBy();
-      if (successor === null) {
+      if (successor === null || this.inFlight.size > 0) {
         return;
       }
       console.error(
@@ -17961,11 +17963,14 @@ class GodotServer {
     });
   }
 
-  /** Closes the log of a run that is no longer going and notes whether an exit code can still come. */
+  /**
+   * Closes the log of a run that is no longer going and notes whether an exit code can still come. A
+   * run another server ended for its memory has that end to say, so no keeper went missing.
+   */
   private settleARunThatEnded(run: GodotProcess, going: boolean): void {
     if (run.endedUnwatched !== true && !going) {
       run.log.finish();
-      run.endedUnwatched = noCodeWillCome(run);
+      run.endedUnwatched = noCodeWillCome(run) && run.endedBeside === undefined;
     }
   }
 

@@ -1780,31 +1780,21 @@ export class EngineSlots {
   }
 
   /**
-   * The live locks of the directory: what each holds, and when it was written. A lock that names no
-   * holder yet is a taker still writing it and counts the flat figure, as does a lock without a
-   * figure of its own, for each slot it stands for.
+   * What the held slots' locks hold, and when each was written: the slots {@link heldLocks} reads. A
+   * lock without a figure of its own counts the flat figure for each slot it stands for. One that
+   * names no holder yet counts nothing, as a lock past the count does, since neither takes a slot.
    */
   private async liveMemory(): Promise<{ slot: number; at: number; bytes: number }[]> {
-    let names: string[];
-    try {
-      names = readdirSync(this.directory);
-    } catch {
-      return [];
-    }
     const live: { slot: number; at: number; bytes: number }[] = [];
-    for (const name of names) {
-      const numbered = /^(\d+)\.lock$/.exec(name)?.[1];
-      const lock = join(this.directory, name);
-      const content = numbered === undefined ? null : await readWholeAsync(lock);
-      if (numbered === undefined || content === null || (await this.free(lock))) {
-        continue;
+    for (const { slot, lock, content } of await this.heldLocks()) {
+      const holder = content === null ? null : holderOf(content);
+      if (holder !== null) {
+        live.push({
+          slot,
+          at: this.writtenAt(lock) ?? 0,
+          bytes: holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1),
+        });
       }
-      const holder = holderOf(content);
-      live.push({
-        slot: Number(numbered),
-        at: this.writtenAt(lock) ?? 0,
-        bytes: holder?.memory ?? ENGINE_MEMORY_BYTES * (holder?.wants ?? 1),
-      });
     }
     return live;
   }
@@ -1834,10 +1824,26 @@ export class EngineSlots {
       return false;
     }
     this.drawn = { ...this.drawn, short: { budget: this.memoryBudget, held, ahead, need } };
-    if (line !== undefined && line.mark === undefined) {
-      line.memoryWait = true;
-    }
+    await this.waitsForMemory(line);
     return true;
+  }
+
+  /**
+   * Makes the wait of [param line] one for memory. A take that began waiting for a slot rewrites its
+   * mark as a memory mark, with the time it began, so it keeps its place in line and the takers behind
+   * it count what it needs.
+   */
+  private async waitsForMemory(line: SlotLine | undefined): Promise<void> {
+    if (line === undefined || line.memoryWait) {
+      return;
+    }
+    line.memoryWait = true;
+    if (line.mark !== undefined) {
+      await writeWholeAsync(
+        join(this.directory, WAITING_FOLDER, line.mark),
+        JSON.stringify(line.marked(this.holder)),
+      );
+    }
   }
 
   /**
@@ -1858,9 +1864,7 @@ export class EngineSlots {
       return false;
     }
     this.drawn = { ...this.drawn, short: { budget: this.memoryBudget, held: held - need, ahead: 0, need } };
-    if (line !== undefined && line.mark === undefined) {
-      line.memoryWait = true;
-    }
+    await this.waitsForMemory(line);
     return true;
   }
 
@@ -1909,14 +1913,23 @@ export class EngineSlots {
 
   /** The slots with no lock or a lock whose holder has gone, the lowest first. */
   private async openSlots(): Promise<number[]> {
-    const open: number[] = [];
+    const held = new Set((await this.heldLocks()).map((one) => one.slot));
+    return Array.from({ length: this.count }, (_, slot) => slot).filter((slot) => !held.has(slot));
+  }
+
+  /**
+   * The slots of the count whose lock is there and whose holder has not gone, the lowest first, each
+   * with its lock and what it read as, or null where it went before it could be read.
+   */
+  private async heldLocks(): Promise<{ slot: number; lock: string; content: string | null }[]> {
+    const held: { slot: number; lock: string; content: string | null }[] = [];
     for (let slot = 0; slot < this.count; slot += 1) {
       const lock = join(this.directory, `${String(slot)}.lock`);
-      if (!existsSync(lock) || (await this.free(lock))) {
-        open.push(slot);
+      if (existsSync(lock) && !(await this.free(lock))) {
+        held.push({ slot, lock, content: await readWholeAsync(lock) });
       }
     }
-    return open;
+    return held;
   }
 
   /** Whether this process runs inside a job, whose lent slot it already holds and no take can add to. */
@@ -3218,17 +3231,13 @@ export function forTheProject(project: string): void {
  * and gives it back after. Inside {@link inOneSlot} it uses the slot held there. [param project] is
  * the project the call is for, in place of the one {@link forTheProject} named.
  */
-export async function inASlot<T>(
-  body: (lock: string) => Promise<T>,
-  project?: string,
-  tool: PeakTool = 'headless',
-): Promise<T> {
+export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: string): Promise<T> {
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
-    kept.held ??= slotForCall(false, project ?? kept.project, tool);
+    kept.held ??= slotForCall(false, project ?? kept.project);
     return await body((await kept.held).lock);
   }
-  const held = await slotForCall(false, project, tool);
+  const held = await slotForCall(false, project);
   try {
     return await body(held.lock);
   } finally {

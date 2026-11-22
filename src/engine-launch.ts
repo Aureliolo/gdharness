@@ -427,6 +427,11 @@ export interface EngineLaunch {
   readonly sample?: () => Promise<Sample>;
   /** The lane the engine runs in, counting from 0, which its `lane.json` names. Lane 0 where unset. */
   readonly lane?: number;
+  /**
+   * The name the engine's memory peak is kept under for the project, which the slot lock of the
+   * next engine of that name counts. Kept nowhere where unset.
+   */
+  readonly peakKept?: PeakTool;
 }
 
 /**
@@ -636,10 +641,16 @@ function guardTheEngine(watch: Watch): void {
   if (watch.pid === undefined || watch.guard !== undefined) {
     return;
   }
-  watch.guard = engineMemory.guard(watch.pid, watch.ceiling, (end) => {
-    watch.outcome.ended ??= memoryEndedSaid(end);
-    watch.started.stop();
-  });
+  const { peakKept, projectPath } = watch.launch;
+  watch.guard = engineMemory.guard(
+    watch.pid,
+    watch.ceiling,
+    (end) => {
+      watch.outcome.ended ??= memoryEndedSaid(end);
+      watch.started.stop();
+    },
+    peakKept === undefined ? undefined : { project: projectPath, tool: peakKept },
+  );
 }
 
 /** The files the hidden desktop's helper leaves, and where it was asked to start the engine. */
