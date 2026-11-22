@@ -86060,7 +86060,11 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
     );
     assert.match(
       slow.said,
-      /^ {2}res:\/\/tests\/slow_test\.gd > test_slow \d+\.\d{3} s, engine \d, slot \d+, priority (?:normal|nice -?\d+): .*engine\.log$/m,
+      // A priority's name holds only letters, digits, spaces and a minus sign, none special here.
+      new RegExp(
+        `^ {2}res://tests/slow_test\\.gd > test_slow \\d+\\.\\d{3} s, engine \\d, slot \\d+, priority ${priorityNamed(getPriority())}: .*engine\\.log$`,
+        'm',
+      ),
       slow.said,
     );
     assert.match(slow.said, /^Passed: /m, slow.said);
