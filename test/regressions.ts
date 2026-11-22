@@ -133293,6 +133293,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testPrintedCappedNamesTheUncaughtErrorsLeftOut,
   testWhatTheEngineHeldAtExitNamesTheProjectsOwnFirst,
   testATestRunsProgressCountsTheSuitesItsLogLetGo,
+  testAStarvedErrorIsFoundPastAnyRunOfBlankLines,
   testTwoWorktreesStartBesideEachOther,
   testOneProjectStartedWithTwoSavesFoldersGoesBeside,
   testAStartOfTheSamePlaceEndsOnlyThatRun,
@@ -134843,6 +134844,29 @@ function testATestRunsProgressCountsTheSuitesItsLogLetGo(): void {
   }
   assert.ok(bounded.retiredCount > 150, `the log let suites go: ${String(bounded.retiredCount)}`);
   assert.deepEqual(looks, expected);
+}
+
+/** The engine running out of memory is read across however many blank lines it printed before its `at:` line. */
+function testAStarvedErrorIsFoundPastAnyRunOfBlankLines(): void {
+  const found = (blanks: number, newline: string): readonly string[] =>
+    readRun(
+      [
+        'ERROR: Parameter "mem" is null.',
+        ...Array.from({ length: blanks }, () => ''),
+        '   at: alloc_static (core/os/memory.cpp:75)',
+        'after',
+      ].join(newline),
+    ).starved;
+  for (const blanks of [0, 1, 1023, 1024, 1025, 3000]) {
+    for (const newline of ['\n', '\r\n']) {
+      const spanned = [
+        'Parameter "mem" is null.',
+        ...Array.from({ length: blanks }, () => ''),
+        '   at: alloc_static (core/os/memory.cpp:',
+      ].join('\n');
+      assert.deepEqual(found(blanks, newline), [spanned], `${String(blanks)} blank lines, ${JSON.stringify(newline)}`);
+    }
+  }
 }
 
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */
