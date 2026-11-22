@@ -414,14 +414,12 @@ func _check_held(writing: GdhWriting) -> void:
 	var given: Dictionary = writing.given
 	for property: String in given:
 		var held: Variant = read_at(target, property)
-		var theme_base: bool = target is Theme and property.ends_with("/base_type")
-		if not GdhSame.same(held, _as_held(target, property, given)) or (
-			theme_base and str(given[property]).is_empty()
-		):
+		if _empty_base(writing, property):
 			unheld = property
-			if theme_base:
-				writing.stop(_base_not_held(property, given[property], held))
-				return
+			writing.stop(_no_empty_base(target, property, held))
+			return
+		if not GdhSame.same(held, _as_held(target, property, given)):
+			unheld = property
 			if writing.undone_by.has(property):
 				var in_step: String = (
 					(
@@ -453,21 +451,31 @@ func _check_held(writing: GdhWriting) -> void:
 			return
 
 
-## The refusal for a Theme's [param property], a type variation's base, that holds [param held]
-## after it was given [param given]. The engine keeps no empty base, and no base for a type named
-## after one of its classes.
-func _base_not_held(property: String, given: Variant, held: Variant) -> String:
-	var cause: String = (
-		"the engine takes no empty base"
-		if str(given).is_empty()
-		else "the engine takes no base for a type named after an engine class"
+## Whether [param property] of the call in [param writing] gives a Theme type variation an empty
+## base. The engine refuses one and keeps the base it held, which can be the empty one it was given,
+## so no read-back tells the refusal apart.
+func _empty_base(writing: GdhWriting, property: String) -> bool:
+	var place: Array = GdhPropertyPaths.holder_of(writing.target, property, writing.home)
+	var name: String = place[1]
+	var parts: PackedStringArray = name.split("/")
+	return (
+		place[0] is Theme
+		and parts.size() == 2
+		and parts[1] == "base_type"
+		and str(writing.given[property]).is_empty()
 	)
+
+
+## The refusal for [param property] of [param target], a Theme type variation's base given empty,
+## which holds [param held] after it was set.
+func _no_empty_base(target: Object, property: String, held: Variant) -> String:
 	return (
 		(
-			"Theme.%s was given %s and holds %s after it was set: %s. remove_theme_item without "
-			+ "item takes a base out with its type. Nothing was written."
+			"%s.%s was given \"\" and holds %s after it was set: the engine takes no empty base. "
+			+ "unset takes a base out, and remove_theme_item without item takes it out with its "
+			+ "type. Nothing was written."
 		)
-		% [property, shown(given), shown(held), cause]
+		% [GdhPropertyPaths.class_called(target), property, shown(held)]
 	)
 
 
