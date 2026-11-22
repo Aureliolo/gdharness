@@ -103487,6 +103487,9 @@ function fedRunAnswered(
     }));
     const word = ({ 0: 'passed', 100: 'failures' } as Record<number, string>)[exitCode] ?? 'other';
     const selected = asked.selected;
+    // Cut as the server cuts the console it reads, a suite at a time.
+    const consoleCuts = new SuiteCuts();
+    consoleCuts.take(Buffer.from(engineText));
     const input = {
       args: {
         ...(asked.ignored === undefined ? {} : { ignore: asked.ignored }),
@@ -103524,6 +103527,7 @@ function fedRunAnswered(
         exitCode,
       },
       console: [Buffer.from(engineText)],
+      consoleCuts: consoleCuts.cuts,
       report: parseJUnit(xml),
       casePrinted: withNestedErrors(readRun(engineText), []),
       declaredErrors: readExpected(join(project, 'none.json')),
@@ -103535,6 +103539,7 @@ function fedRunAnswered(
       ranAs: word,
       nothingRan: null,
       timedOut: false,
+      capped: null,
       hung: false,
       silentForMs: 0,
       savesNote: undefined,
