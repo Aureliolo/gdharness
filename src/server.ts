@@ -5837,6 +5837,16 @@ function runningGameSaid(
     : `Told to the running game (pid ${pid}), which this server started, and taken by it: it no longer stops on that line.`;
 }
 
+/** Passes a start's point of no return, or frees [param slot] for a call told to stop before it. */
+function committedOrFreed(slot: { release(): void }): void {
+  try {
+    commitCall();
+  } catch (error) {
+    slot.release();
+    throw error;
+  }
+}
+
 /** The language server request and the word for it that each script_info op uses. An op not listed is hover. */
 const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>({
   symbols: ['lsp_get_symbols', 'Symbols'],
@@ -15299,12 +15309,7 @@ export class GodotServer {
     // In one of the machine's engine slots, like every engine started for a call, taken before the
     // play so a full machine holds the play rather than the game.
     const slot = await slotForCall(true, projectPath);
-    try {
-      commitCall();
-    } catch (error) {
-      slot.release();
-      throw error;
-    }
+    committedOrFreed(slot);
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
@@ -16370,12 +16375,7 @@ export class GodotServer {
     // never took over names this server, which frees it by going.
     const slot = await slotForCall(true, projectPath);
     // The last place a call told to stop can still spawn nothing.
-    try {
-      commitCall();
-    } catch (error) {
-      slot.release();
-      throw error;
-    }
+    committedOrFreed(slot);
     // From the slot rather than the call, since the wait to announce is counted from here: counted
     // from the call, a 24-minute wait for a slot spent the whole of it before the engine began.
     const startedAt = Date.now();
