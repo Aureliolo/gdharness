@@ -76726,7 +76726,9 @@ function testACallsEngineWithNoToolCountsTheHeadlessPeak(): void {
   for (const name of SLOT_VARIABLES) {
     delete env[name];
   }
-  delete env[CEILING_VARIABLE];
+  // Above both peaks: the default ceiling is a quarter of the machine, 4 GiB on a 16 GiB one, and
+  // caps the 6 GiB figure there.
+  env[CEILING_VARIABLE] = String(8 * 1024);
   env[SLOTS_VARIABLE] = directory;
   env[SLOT_COUNT_VARIABLE] = '2';
   try {
@@ -76879,7 +76881,11 @@ async function oneCommandLineLaneCountsItsOwnPeak(command: 'spread' | 'test', to
   }
 }
 
-/** Two servers of one project on one runtime, each with [param holds] of its own, until [param body] ends. */
+/**
+ * Two servers of one project on one runtime, each with [param holds] of its own, until [param body]
+ * ends. The second is named no project of its own, so it never announces and the first is never
+ * replaced by it: both serve the project's calls for as long as the body runs.
+ */
 async function withTwoServersOfOneProject(
   holds: { readonly first: Record<string, string>; readonly second: Record<string, string> },
   body: (
@@ -76906,7 +76912,7 @@ async function withTwoServersOfOneProject(
       await untilTrue(() => announcedBy() === servers.first.child.pid, 15_000),
       'the first server announces itself',
     );
-    servers.second = new ServerProcess({ env: { ...shared, ...holds.second } });
+    servers.second = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: '', ...holds.second } });
     await servers.second.initialize('regression-test');
     const second = servers.second;
     const call = async (
@@ -76942,10 +76948,8 @@ function endOfTheAnswer(answer: unknown): unknown[] {
 
 /**
  * A server whose game another server of its project ended for its memory answers that end, with no
- * keeper said to have gone and no answer lost. The game grows past the ceiling within seconds, so
- * each wait is answered before the first server's look for a successor, which the second server is,
- * stands the first down. A second server under the same ceiling, called before the game passes it,
- * ends it and the first says so too.
+ * keeper said to have gone and no answer lost. A second server called before the game passes its
+ * ceiling ends it once it does, and the first says so too.
  */
 async function testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd(): Promise<void> {
   const grows = { GDH_HOLD_MB: '600', GDH_GROW_MB: '50', GDH_STAY_MS: '30000' };
@@ -76977,7 +76981,8 @@ async function testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd(
         );
       },
     );
-    const slow = { GDH_HOLD_MB: '600', GDH_GROW_MB: '20', GDH_STAY_MS: '15000', [CEILING_VARIABLE]: '300' };
+    // The first server's ceiling is the default, so only the second's ends the game.
+    const slow = { GDH_HOLD_MB: '600', GDH_GROW_MB: '20', GDH_STAY_MS: '15000' };
     await withTwoServersOfOneProject({ first: slow, second: { [CEILING_VARIABLE]: '300' } }, async (call) => {
       const started = await call('first', 'editor_run', { op: 'start', headless: true });
       assert.equal(get(started, 'started'), true, JSON.stringify(started));
@@ -76993,20 +76998,11 @@ async function testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd(
         theirs = await call('second', 'editor_output', {});
       }
       const ours = await waited;
-      const endedHere = /^This run was ended here, by (.*)\.$/.exec(String(get(theirs, 'note')))?.[1];
-      const by = endedHere ?? String(get(ours, 'endedBy'));
+      const by = /^This run was ended here, by (.*)\.$/.exec(String(get(theirs, 'note')))?.[1] ?? '';
       assert.match(by, ANOTHERS_END, `${JSON.stringify(theirs)} ${JSON.stringify(ours)}`);
       assert.deepEqual(
         endOfTheAnswer(ours),
-        [
-          false,
-          null,
-          by,
-          undefined,
-          endedHere === undefined
-            ? `This run was ended here, by ${by}.`
-            : `This run was ended by another server of this project, by ${by}.`,
-        ],
+        [false, null, by, undefined, `This run was ended by another server of this project, by ${by}.`],
         JSON.stringify(ours),
       );
     });
@@ -127760,7 +127756,10 @@ async function testAHeadlessOperationEndedForItsMemoryIsSaidInOneSentence(): Pro
   try {
     setTheCeilingOf(project, '300');
     const outcome = await withHoldsInTheEnvironment(
-      { GDH_OPERATION_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
+      // In one step, so the reading that ends it is at least 0.59 GB whenever it lands. In steps, a
+      // reading just past the 0.29 GB ceiling is said with two places, as figures that would read
+      // the same at one are.
+      { GDH_OPERATION_HOLD_MB: '600', GDH_GROW_MB: '600', GDH_STAY_MS: '20000' },
       () =>
         runOperation(
           { godotPath: memoryEngine(), script: 'none', debug: false },
