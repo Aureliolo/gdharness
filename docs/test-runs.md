@@ -891,6 +891,7 @@ A tool of a game's own that starts engines takes slots the same way, in the step
   slot names each holder by it, or by its pid when it is missing.
 - An optional `"memory"` says the bytes the engine on the slot may hold. gdharness writes the larger
   of 1.5 GiB and the peak kept for the engine's project and tool, at most that engine's ceiling.
+  The process holding the lock raises it, to the next 256 MiB, as its engine grows past it.
   A lock without it counts 1.5 GiB for each slot it stands for, which is one unless it holds a
   `"wants"` above 1, a whole number of slots held in one file.
 

@@ -47,7 +47,7 @@ import {
 } from './engine-memory.js';
 import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
-import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
+import { nameSlotEngineOf, onTheSlot, raiseSlotMemory, reservedMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -650,6 +650,7 @@ function guardTheEngine(watch: Watch): void {
       watch.started.stop();
     },
     peakKept === undefined ? undefined : { project: projectPath, tool: peakKept },
+    (bytes) => raiseSlotMemory(watch.lock, bytes),
   );
 }
 

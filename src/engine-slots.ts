@@ -2708,6 +2708,31 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
 }
 
 /**
+ * Raises the `memory` of the slot at [param lock] to [param bytes] where it counts less and this
+ * process holds it, so the budget counts an engine that grew past what its take counted. A figure is
+ * never lowered. Answers what the lock counts after, or null for a lock this process does not hold.
+ * Renamed over the lock, as {@link handSlot} is.
+ */
+export async function raiseSlotMemory(lock: string, bytes: number): Promise<number | null> {
+  let counted: number | null = null;
+  try {
+    await changeWholeAsync(lock, (content) => {
+      const holder = content === null ? null : holderOf(content);
+      if (holder?.pid !== process.pid) {
+        counted = null;
+        return null;
+      }
+      const was = holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1);
+      counted = Math.max(was, bytes);
+      return bytes > was ? JSON.stringify({ ...holder, memory: bytes }) : null;
+    });
+  } catch {
+    return null;
+  }
+  return counted;
+}
+
+/**
  * Names [param engine] in the slot at [param lock] as the engine running on it, when the lock still
  * names [param holder]. Answers whether it did. Renamed over the lock, as {@link handSlot} is.
  */

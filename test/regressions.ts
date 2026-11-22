@@ -252,6 +252,7 @@ import {
   QUEUED_FOLDER,
   RESERVED_FOLDER,
   RESERVED_VARIABLE,
+  raiseSlotMemory,
   reservedMemory,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
@@ -77035,6 +77036,167 @@ async function testAMemoryEndNoteIsSweptOnceOld(): Promise<void> {
   });
 }
 
+/** What a guard of a growing engine asked of its slot: the figures asked, and how often the lock changed. */
+interface SlotRaises {
+  readonly asked: readonly number[];
+  readonly written: number;
+}
+
+/**
+ * Guards this process as an engine read at [param readings] in turn, then at the last one again,
+ * whose slot is the lock at [param lock]. Answers once every reading has been judged and every
+ * raise it asked has settled.
+ */
+async function guardedAt(lock: string, readings: readonly number[]): Promise<SlotRaises> {
+  const asked: number[] = [];
+  const pending: Promise<unknown>[] = [];
+  let written = 0;
+  let read = 0;
+  const watch = new MemoryWatch(() => {
+    const bytes = readings[Math.min(read, readings.length - 1)] ?? 0;
+    read += 1;
+    return Promise.resolve({
+      at: 0,
+      machine: 0,
+      processors: null,
+      held: new Map([[process.pid, bytes]]),
+      below: new Map([[process.pid, []]]),
+    });
+  }, 10);
+  const guard = watch.guard(
+    process.pid,
+    { bytes: 16 * MEMORY_GIB, source: 'default' },
+    () => assert.fail('under its ceiling'),
+    undefined,
+    (bytes) => {
+      asked.push(bytes);
+      const before = readFileSync(lock, 'utf8');
+      const raised = raiseSlotMemory(lock, bytes).then((counted) => {
+        written += readFileSync(lock, 'utf8') === before ? 0 : 1;
+        return counted;
+      });
+      pending.push(raised);
+      return raised;
+    },
+  );
+  // A loaded machine stretches a 10 ms timer, so the readings are waited for rather than timed.
+  for (const until = Date.now() + 10_000; read < readings.length + 3 && Date.now() < until; ) {
+    await delay(10);
+  }
+  guard.release();
+  await Promise.all(pending);
+  return { asked, written };
+}
+
+/**
+ * An engine that grows past what its take counted raises its lock's figure to what it holds,
+ * rounded up to the next 256 MiB, and the next take counts that figure.
+ */
+async function testASlotsFigureRisesToWhatItsEngineHolds(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const lock = join(directory, '0.lock');
+      standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
+      const raises = await guardedAt(lock, [4.9 * MEMORY_GIB]);
+      assert.deepEqual(raises, { asked: [5 * MEMORY_GIB], written: 1 }, 'one raise, to the next 256 MiB');
+      assert.deepEqual(
+        JSON.parse(readFileSync(lock, 'utf8')),
+        { pid: process.pid, started, memory: 5 * MEMORY_GIB },
+        'the lock counts the 5 GiB its engine holds',
+      );
+      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
+      for (const slot of [1, 2, 3, 4, 5]) {
+        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
+      }
+      standInLock(directory, 6, started, { memory: 3 * MEMORY_GIB });
+      const slots = new EngineSlots(
+        directory,
+        12,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 64 * MEMORY_GIB },
+      );
+      // At the 2 GiB the take counted, 37 GiB live and 7 more fit the 48 GiB budget. At 5 GiB they do not.
+      assert.equal(await slots.takeFree(), null, 'a 7 GiB take beside 43 GiB live waits');
+      assert.equal(slots.drawn.short?.held, 43 * MEMORY_GIB, 'the raised lock counts 5 GiB');
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** An engine read below what its slot counts leaves the lock as it was, byte for byte. */
+async function testAReadingBelowASlotsFigureLeavesItsLockAlone(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  try {
+    const lock = join(directory, '0.lock');
+    const written = `{ "pid": ${String(process.pid)}, "started": ${String(started)}, "memory": ${String(2 * MEMORY_GIB)} }`;
+    writeFileSync(lock, written);
+    const raises = await guardedAt(lock, [MEMORY_GIB, 1.9 * MEMORY_GIB]);
+    assert.equal(readFileSync(lock, 'utf8'), written, 'the lock is as it was');
+    assert.equal(raises.written, 0, JSON.stringify(raises));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** Two readings in one 256 MiB step rewrite the lock once, and ask it once. */
+async function testTwoReadingsInOneStepRaiseASlotOnce(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  try {
+    const lock = join(directory, '0.lock');
+    standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
+    const raises = await guardedAt(lock, [5 * MEMORY_GIB + 10 * 1024 ** 2, 5 * MEMORY_GIB + 100 * 1024 ** 2]);
+    assert.deepEqual(raises, { asked: [5.25 * MEMORY_GIB], written: 1 });
+    assert.equal(holderOf(readFileSync(lock, 'utf8'))?.memory, 5.25 * MEMORY_GIB);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A lock another process holds is never rewritten, whatever this process's engine reads. */
+async function testASlotAnotherProcessHoldsIsNeverRaised(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  try {
+    const lock = join(directory, '0.lock');
+    const held = JSON.stringify({ pid: 4242, started: 1, memory: 2 * MEMORY_GIB });
+    writeFileSync(lock, held);
+    const raises = await guardedAt(lock, [5 * MEMORY_GIB]);
+    assert.deepEqual(raises, { asked: [5 * MEMORY_GIB], written: 0 });
+    assert.equal(await raiseSlotMemory(lock, 6 * MEMORY_GIB), null, 'not held here');
+    assert.equal(readFileSync(lock, 'utf8'), held, 'the lock is as it was');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A game's lock raised as its engine grew keeps the raised figure once handed to its keeper. */
+async function testAGamesRaisedLockHandedOnKeepsTheRaisedFigure(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
+  try {
+    const lock = join(directory, '0.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, game: true, memory: 2 * MEMORY_GIB }));
+    await guardedAt(lock, [5 * MEMORY_GIB]);
+    assert.equal(await handSlot(lock, process.pid, { pid: 4242, started: 1 }), true, 'handed');
+    assert.deepEqual(
+      JSON.parse(readFileSync(lock, 'utf8')),
+      { pid: 4242, started: 1, game: true, memory: 5 * MEMORY_GIB },
+      'the keeper holds the 5 GiB the game grew to',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** A count of one spare gate slot, as a live queue process writes it half a second ago. */
 function oneSpareSlot(directory: string, started: number): void {
   writeFileSync(
@@ -128412,6 +128574,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandLineLaneCountsItsOwnPeak,
   testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd,
   testAMemoryEndNoteIsSweptOnceOld,
+  testASlotsFigureRisesToWhatItsEngineHolds,
+  testAReadingBelowASlotsFigureLeavesItsLockAlone,
+  testTwoReadingsInOneStepRaiseASlotOnce,
+  testASlotAnotherProcessHoldsIsNeverRaised,
+  testAGamesRaisedLockHandedOnKeepsTheRaisedFigure,
   testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack,
   testACountBegunInTheTickOfASeatIsStaleForSideWork,
   testATakeInTheTickOfTheCountComesOffIt,

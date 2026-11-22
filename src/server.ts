@@ -179,6 +179,7 @@ import {
   handSlotToKeeper,
   keeperSlotOf,
   onTheSlot,
+  raiseSlotMemory,
   settledRunSlot,
   slotEngineNamed,
   slotForCall,
@@ -15773,6 +15774,7 @@ class GodotServer {
             run.stop();
           },
           project === undefined ? undefined : { project, tool },
+          (bytes) => raiseSlotMemory(held.lock, bytes),
         );
         void run.settled.finally(guard.release);
       }

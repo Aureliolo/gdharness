@@ -31,7 +31,7 @@ import {
   type MemoryEnd,
   memoryEndedSaid,
 } from './engine-memory.js';
-import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
+import { inASlot, nameSlotEngineOf, onTheSlot, raiseSlotMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -386,6 +386,7 @@ function runStarted(
           child.kill();
         },
         options.project === undefined ? undefined : { project: options.project, tool: 'headless' },
+        (bytes) => raiseSlotMemory(lock, bytes),
       );
       if (files !== null) {
         void nameSlotEngineOf(lock, process.pid, engine);
