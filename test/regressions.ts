@@ -96623,13 +96623,15 @@ async function testGdUnitRunner(): Promise<void> {
                 'sums_test:test_the_game_said_something',
                 'summary_lies_test:test_the_summary_says_passed',
                 'summary_lies_test:test_and_says_it_again',
+                // A case skipped with do_skip fails a run that does not ignore it.
+                'sums_test:test_skipped_for_now',
               ],
             },
             ENGINE_CALL_TIMEOUT_MS * 3,
           ),
         );
         assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
-        assert.equal(get(only, 'tests'), 3);
+        assert.equal(get(only, 'tests'), 2);
         assert.equal(
           existsSync(join(projectDir, '.godot', 'gdharness-reports')),
           false,
