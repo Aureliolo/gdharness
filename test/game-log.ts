@@ -406,6 +406,19 @@ function aLongRunPrinted(rounds: number): { stream: 'stdout' | 'stderr'; text: s
         text: `ERROR: first part ${String(at)}\nsecond part ${String(at)}\n   at: thing (core/thing.cpp:2)\n`,
       });
     }
+    if (at % 50 === 0) {
+      // A message running over more unindented lines than the log holds, and a headline whose `at:`
+      // line comes after more prints on the other stream than that.
+      printed.push({
+        stream: 'stderr',
+        text: `ERROR: long message ${String(at)}\n${Array.from({ length: 60 }, (_line, part) => `part ${String(part)}\n`).join('')}   at: long (core/long.cpp:3)\n`,
+      });
+      printed.push({ stream: 'stderr', text: `ERROR: awaited ${String(at)}\n` });
+      for (let between = 0; between < 60; between += 1) {
+        printed.push({ stream: 'stdout', text: `between ${String(between)}\n` });
+      }
+      printed.push({ stream: 'stderr', text: '   at: awaited (core/awaited.cpp:4)\n' });
+    }
     if (at % 6 === 0) {
       printed.push({
         stream: 'stderr',

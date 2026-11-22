@@ -1317,7 +1317,12 @@ function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
       'a value holding a line that opens a suite is read back',
     );
     const bytes = Buffer.from(whole);
-    for (const size of [1, 2, 7, bytes.length]) {
+    const atOnce = new PrintedDiffs();
+    atOnce.take(bytes);
+    const read = atOnce.finish();
+    // Chunks long enough to hold a line break and a location line cut short after it, as well as
+    // chunks shorter than any line.
+    for (const size of [1, 2, 7, 64, 101, 1000, bytes.length]) {
       const diffs = new PrintedDiffs();
       let most = 0;
       for (const piece of piecesOf(bytes, size)) {
@@ -1325,8 +1330,10 @@ function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
         most = Math.max(most, diffs.held);
       }
       const said = `read ${String(size)} bytes at a time, lines ended ${JSON.stringify(ending)}`;
+      const found = diffs.finish();
+      assert.deepEqual(found, read, `${said}: every diff is read whole, its location included`);
       assert.deepEqual(
-        withActualsPrinted(failed, diffs.finish()),
+        withActualsPrinted(failed, found),
         expected,
         `${said}: the diffs are the whole text's`,
       );

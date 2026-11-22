@@ -125161,6 +125161,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPassingRunListsTwentyUncaughtScriptErrorsAndCountsTheRest,
   testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog,
   testATestRunsTallyPastItsBoundsSaysWhatItCut,
+  testATestRunsConsoleIsReadAsItArrivesAndNeverJoined,
 ];
 
 /**
@@ -126375,6 +126376,24 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
         'uncaught script errors',
       ],
     },
+  );
+}
+
+/**
+ * A test run's console is read for its diffs as each chunk arrives and never joined, since a whole
+ * console can pass what one string holds. The engine is started from source a test cannot run, so
+ * it is read from its source.
+ */
+function testATestRunsConsoleIsReadAsItArrivesAndNeverJoined(): void {
+  const source = readFileSync('src/server.ts', 'utf8');
+  const from = source.indexOf('private async testEngineRan(');
+  assert.ok(from >= 0, 'testEngineRan is in src/server.ts');
+  const body = source.slice(from, source.indexOf('\n  }\n', from));
+  assert.ok(body.includes('diffs.take(data)'), 'each chunk of the console goes to the diffs as it arrives');
+  assert.deepEqual(
+    body.match(/\.push\(data\)|Buffer\.concat\(|data\.toString\(/g) ?? [],
+    [],
+    'and no chunk is kept or joined',
   );
 }
 
