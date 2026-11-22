@@ -22124,7 +22124,7 @@ function testADefectReportHidesTheFoldersOfTheMachine(): void {
  * editor_output takes the project it is meant to read and refuses one that is not the run's.
  *
  * Two probe sessions sent projectPath here as they do to every runtime tool, and were refused for
- * an argument the tool did not declare. It picks nothing, since the server holds one run, so it is a
+ * an argument the tool did not declare. With one run going it picks nothing, so it is a
  * check: the run's own project answers, and another is refused naming the run's, rather than handing
  * back one game's output to a caller who believes it is another's. The engine is a stand-in that
  * exits at once, which still leaves a run, ended, with the project it was started for.
@@ -128654,6 +128654,8 @@ interface RunsBesideStage {
   /** Two more folders of the same repository, each a project of its own. */
   readonly trees: readonly [string, string];
   readonly runtimeDir: string;
+  /** The folder this server takes engine slots in, when the fixture limits them. */
+  readonly slots: string;
   /** A tool call, answered as the text the server sent. */
   readonly call: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** A headless start of [param project], parsed. Its game is ended with the fixture. */
@@ -128733,6 +128735,7 @@ async function withRunsBeside(
       main,
       trees,
       runtimeDir,
+      slots,
       call,
       start: async (project, extra = {}) => {
         const started = jsonOf(
@@ -128830,7 +128833,7 @@ async function testAStartOfTheSamePlaceEndsOnlyThatRun(): Promise<void> {
       const extra = savesIn === undefined ? { runtimeWaitMs: 0 } : { runtimeWaitMs: 0, savesIn };
       const first = asNumber(get(await start(trees[0], extra), 'pid'), 'the first run');
       const again = await start(trees[0], extra);
-      assert.equal(get(again, 'endedPreviousRun', 'pid'), first, JSON.stringify(again));
+      assert.equal(get(again, 'endedPreviousRun'), first, JSON.stringify(again));
       assert.equal(alive(first), false, 'the run of the same place is gone');
       const output = jsonOf(await call('editor_output', { pid: beside }), 'output of the run beside');
       assert.equal(get(output, 'running'), true, 'and the run of another place goes on');
@@ -128925,9 +128928,9 @@ async function testARestartedServerFindsEveryRunStillGoing(): Promise<void> {
 
 /** A run that ends by itself leaves the note and the output of the run beside it alone. */
 async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
-  await withRunsBeside({}, async ({ trees, start, call }) => {
+  await withRunsBeside({}, async ({ trees, start, call, runtimeDir }) => {
     const staying = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the staying run');
-    const noted = readRunRecord(trees[0]);
+    const noted = readRunRecord(trees[0], [runtimeDir]);
     assert.equal(noted?.pid, staying, 'the staying run has its note');
     const quitting = asNumber(
       get(await start(trees[1], { runtimeWaitMs: 0, scene: 'quit.tscn' }), 'pid'),
@@ -128935,7 +128938,7 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
     );
     const ended = jsonOf(await call('editor_run', { op: 'wait', pid: quitting, timeoutMs: 60_000 }), 'wait');
     assert.equal(get(ended, 'running'), false, JSON.stringify(ended));
-    const after = readRunRecord(trees[0]);
+    const after = readRunRecord(trees[0], [runtimeDir]);
     assert.equal(after?.pid, staying, 'the note of the staying run is still there');
     assert.equal(after?.exitCode, undefined, 'and says nothing of an exit');
     const output = await outputOnceItHolds(call, staying, 'label-treea');
@@ -128946,16 +128949,26 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
 
 /** A third place waits for an engine slot when two are allowed, and starts once one is freed. */
 async function testAThirdPlaceWaitsForAnEngineSlot(): Promise<void> {
-  await withRunsBeside({ slots: 2 }, async ({ main, trees, start, call }) => {
+  await withRunsBeside({ slots: 2 }, async ({ main, trees, start, call, slots }) => {
     const first = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the first run');
-    await start(trees[1], { runtimeWaitMs: 0 });
+    const second = await Promise.race([
+      start(trees[1], { runtimeWaitMs: 0 }),
+      delay(30_000).then(() => {
+        const held = leftInSlots(slots).map((name) => {
+          const file = join(slots, name);
+          return `${name}: ${existsSync(file) && !statSync(file).isDirectory() ? readFileSync(file, 'utf8') : ''}`;
+        });
+        throw new Error(`the second start holds on a slot of two: ${held.join(' | ')}`);
+      }),
+    ]);
+    assert.equal(get(second, 'started'), true, JSON.stringify(second));
     let answered = false;
     const third = start(main, { runtimeWaitMs: 0 }).then((started) => {
       answered = true;
       return started;
     });
     await delay(4000);
-    assert.equal(answered, false, 'the third start is waiting for a slot');
+    assert.equal(answered, false, `the third start is waiting for a slot: ${leftInSlots(slots).join(', ')}`);
     await call('editor_run', { op: 'stop', pid: first });
     const started = await third;
     assert.equal(get(started, 'started'), true, JSON.stringify(started));
@@ -129019,8 +129032,8 @@ async function testAStartOfAWorktreeAsksTheEditorOfAnotherCheckoutNothing(): Pro
     const variants: Record<string, unknown>[] = [
       {},
       { savesIn: saves },
-      { env: { GDHARNESS_PROBE: '1' } },
-      { savesIn: `${saves}-2`, env: { GDHARNESS_PROBE: '2' } },
+      { env: { GAME_PROBE: '1' } },
+      { savesIn: `${saves}-2`, env: { GAME_PROBE: '2' } },
     ];
     if (windowedRunRefused() === null) {
       variants.push({ headless: false }, { headless: false, savesIn: `${saves}-3` });

@@ -241,7 +241,7 @@ const RUNNING_PROJECT_PATH: JsonSchema = {
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
-  description: 'Which game, when several run from one project: its process id.',
+  description: 'The game, by pid.',
 };
 const SCENE_PATH: JsonSchema = {
   type: 'string',
@@ -1924,7 +1924,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_run',
     title: 'Run the game',
     description:
-      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. One server keeps one run. A start ends a run of the same project first. start and check first import what changed on disk since its import.',
+      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. A start ends the run of its project and user:// folder, and goes beside any other. start and check first import what changed on disk since its import.',
     parameters: {
       // start and check need telling which project. The ops about the run already going take it
       // too, because a call copied from the start carries it, and they check it rather than ignore
@@ -1968,13 +1968,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       visible: {
         type: 'boolean',
         ops: ['start'],
-        description: `Show the window on the desktop in use. By default on Windows it goes on a desktop of its own, with --disable-vsync and --max-fps ${String(HIDDEN_WINDOW_FPS)}. On Linux and macOS the window shows either way.`,
+        description: `Show the window on the desktop in use. By default on Windows it goes on a desktop of its own. On Linux and macOS the window shows either way.`,
       },
       silent: {
         type: 'boolean',
         ops: ['start'],
         description:
-          "Default true: this server starts a windowed game with no sound. false lets a connected editor play it. A headless run is silent already, and an editor plays it only when the project's main_run_args hold --headless. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.",
+          "Default true: this server starts a windowed game with no sound. false lets a connected editor play it. A headless run is silent already. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.",
       },
       executable: {
         type: 'string',
@@ -2065,7 +2065,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['stop', 'wait', 'profile'],
         description:
-          'Which run, when several go. A stop also takes a game of this project that no server here keeps, as editor_status lists it under runtimes.',
+          'The run, by pid. A stop also takes a game no server keeps, listed under runtimes in editor_status.',
       },
     },
     requires: [],
@@ -2147,7 +2147,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: {
         type: 'string',
         description:
-          'The project whose output you mean. Refused when it is not the project of the run or editor this server keeps.',
+          'The project whose output you mean. Refused when not that of a run or the editor this server keeps.',
       },
       pid: { ...RUNNING_PID, ops: ['run'] },
       severity: {
@@ -2217,7 +2217,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Each game names the runtime addon it loaded under addonVersion, null when it cannot say. addonIsStale is true when that code is not what this server ships. staleNote says what brings it into step: the gdharness upgrade command for the project, a restart for the game, or a reconnect for this server. A second checkout, such as a git worktree, has addons of its own. A runtime_* call to a stale game is refused with the staleNote.',
       'A game speaking a protocol this server does not is listed under unreadable, with which half is older. No tool reaches it until the halves match.',
       'play.play counts the plays the editor has started since it opened, whoever started them, and play.editorPid is the editor. Two reads with different pairs are two plays even when both say playing. game.run names the run editor_output and editor_run stop answer for, with its pid and its project. adopted is true when this server took it over from another server.',
-      'game.run stays named after the run ends, beside processActive false, and is null when there is no run. With several runs going it is null and game.runs lists each, with its pid, which the calls about a run take.startedAt and endedAt say when it began and ended. heldAt says whether the run is held, as editor_output says it.',
+      'game.run stays named after the run ends, beside processActive false, and is null when there is no run. With several runs going it is null and game.runs lists each, with its pid, which the calls about a run take. startedAt and endedAt say when it began and ended. heldAt says whether the run is held, as editor_output says it.',
       'editor.lspListening and editor.dapListening say whether anything accepts connections on lspPort and dapPort, once an editor has connected. A false comes with serversNote. editor_launch rebind binds the debug adapter again, and editor_launch restart the language server.',
       'editor.scan says whether the editor is scanning or importing, and how long ago its last scan finished (finishedMsAgo). It is null when the editor did not answer. editor.openScenes lists the scenes open in its tabs, and editor.editedScene the one it shows. editor.unsavedScenes lists those with changes not on disk, an empty entry being a scene never saved. All three come with scan.',
       "addonIsStale of the editor is judged by the editor addons' code, not their version. So an editor whose code an upgrade left alone is not stale, and addonNote says so. A stale editor is refused every call but a quit, with staleNote. startedByAnEditor is an editor started by Godot's own restart or the project manager, without the arguments a server gives, and startedByAnEditorNote says what that costs. openedByAServer says a gdharness server started it, and hidden that it has no window.",
