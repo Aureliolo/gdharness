@@ -819,7 +819,10 @@ export class GameLog {
    * the log lets go has read every entry once.
    */
   heldFrom(read: number): { readonly entries: readonly LogEntry[]; readonly next: number } {
-    return { entries: this.entries.slice(Math.max(0, read - this.gone)), next: this.gone + this.entries.length };
+    return {
+      entries: this.entries.slice(Math.max(0, read - this.gone)),
+      next: this.gone + this.entries.length,
+    };
   }
 
   count(severity: Severity): number {

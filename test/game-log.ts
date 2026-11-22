@@ -510,7 +510,10 @@ function filler(stream: Printed['stream'], name: string, count: number): Printed
 function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
   const printed: Printed[] = [
     filler('stdout', 'before', 100),
-    { stream: 'stdout' as const, text: 'gdharness: debug_state evaluate raised from core/math/expression.cpp: boom\n' },
+    {
+      stream: 'stdout' as const,
+      text: 'gdharness: debug_state evaluate raised from core/math/expression.cpp: boom\n',
+    },
     filler('stdout', 'waiting', 10),
     { stream: 'stderr' as const, text: 'ERROR: boom\n   at: evaluate (core/math/expression.cpp:12)\n' },
     { stream: 'stderr' as const, text: 'ERROR: first part\nsecond part\n' },
@@ -532,7 +535,8 @@ function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
   const handed: unknown[] = [];
   const bounded = new GameLog({
     most: 10,
-    retired: (entry, byScript) => handed.push([entry.severity, entry.text, [...entry.detail], entry.raisedBy, byScript]),
+    retired: (entry, byScript) =>
+      handed.push([entry.severity, entry.text, [...entry.detail], entry.raisedBy, byScript]),
   });
   for (const { stream, text } of printed) {
     whole.append(stream, text);
@@ -540,7 +544,10 @@ function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
   }
   whole.finish();
   bounded.finish();
-  assert.ok(bounded.retiredCount > 80, `entries were handed over before the crash: ${String(bounded.retiredCount)}`);
+  assert.ok(
+    bounded.retiredCount > 80,
+    `entries were handed over before the crash: ${String(bounded.retiredCount)}`,
+  );
   bounded.handOverHeld();
   const wholeRead = whole.all.map((entry) => [
     entry.severity,
@@ -552,7 +559,8 @@ function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
   assert.deepEqual(handed, wholeRead, 'every entry reaches the reader as the whole log holds it');
   assert.deepEqual(
     wholeRead.filter(
-      ([, text]) => ['boom', 'first part', 'told twice'].includes(String(text)) || String(text).startsWith('Crash'),
+      ([, text]) =>
+        ['boom', 'first part', 'told twice'].includes(String(text)) || String(text).startsWith('Crash'),
     ),
     [
       ['info', 'boom', ['at: evaluate (core/math/expression.cpp:12)'], 'debug_state evaluate', false],
@@ -584,7 +592,10 @@ function testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded(): void {
   let read = 0;
   let lostSome = false;
   for (let chunk = 0; chunk < 30; chunk += 1) {
-    const text = Array.from({ length: 1 + (chunk % 13) }, (_line, n) => `line ${String(chunk)} ${String(n)}\n`).join('');
+    const text = Array.from(
+      { length: 1 + (chunk % 13) },
+      (_line, n) => `line ${String(chunk)} ${String(n)}\n`,
+    ).join('');
     whole.append('stdout', text);
     bounded.append('stdout', text);
     const looked = bounded.heldFrom(read);

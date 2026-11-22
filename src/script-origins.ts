@@ -202,7 +202,8 @@ export function listedMarks(entry: LogEntry): ListedMarks {
   return {
     text: entry.text,
     reloaded: reloadedAt(entry),
-    failedToLoad: /^Failed to load script "(res:\/\/[^"]+)" with error "[^"]+"\.$/.exec(entry.text)?.[1] ?? null,
+    failedToLoad:
+      /^Failed to load script "(res:\/\/[^"]+)" with error "[^"]+"\.$/.exec(entry.text)?.[1] ?? null,
   };
 }
 

@@ -1386,10 +1386,17 @@ function testTheDiffsHoldOnlyTheSuiteBeingPrinted(): void {
     }
   }
   const longest = Math.max(...suites.map((suite) => suite.length));
-  assert.ok(most <= longest + 300, `at most one suite and a piece are held: ${String(most)} of ${String(longest)}`);
+  assert.ok(
+    most <= longest + 300,
+    `at most one suite and a piece are held: ${String(most)} of ${String(longest)}`,
+  );
   const failed = paths.map((path, n) => reportedFailing(path, values[n] ?? ''));
   const read = withActualsPrinted(failed, diffs.finish());
-  assert.deepEqual(read, withActualsPrinted(failed, suites.join('')), 'every diff is read as the whole text reads it');
+  assert.deepEqual(
+    read,
+    withActualsPrinted(failed, suites.join('')),
+    'every diff is read as the whole text reads it',
+  );
   assert.equal(
     read.filter((one, n) => one.detail !== failed[n]?.detail).length,
     paths.length,
@@ -1444,7 +1451,11 @@ function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
     }
     pieces = withActualsPrinted(failed, diffs.finish());
   });
-  assert.equal(pieces[1]?.detail, whole[1]?.detail, 'the console read in pieces reads the value as the whole text does');
+  assert.equal(
+    pieces[1]?.detail,
+    whole[1]?.detail,
+    'the console read in pieces reads the value as the whole text does',
+  );
   for (const [n, path, small] of [
     [0, 'res://tests/a_test.gd', 'small'],
     [2, 'res://tests/c_test.gd', 'after'],

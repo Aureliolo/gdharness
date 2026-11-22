@@ -134605,7 +134605,11 @@ function testAnErrorDeclaredPastTheErrorsKeptIsSettled(): void {
   const flood = ERRORS_KEPT + 5;
   const { answer } = fedRunAnswered(
     [
-      { path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('the flood', flood))], closed: 'PASSED' },
+      {
+        path: FED_A,
+        cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('the flood', flood))],
+        closed: 'PASSED',
+      },
       {
         path: FED_B,
         cases: [fedCasePrinting(FED_B, 'test_b', engineErrors('the store is closed', 1))],
@@ -134660,11 +134664,20 @@ function testAnErrorDeclaredPastTheErrorsKeptIsSettled(): void {
   ] as const) {
     const declaring = fedRunAnswered(
       [
-        { path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('the flood', flood))], closed: 'PASSED' },
+        {
+          path: FED_A,
+          cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('the flood', flood))],
+          closed: 'PASSED',
+        },
         { path: FED_B, cases: [printedB], closed: 'PASSED' },
       ],
       0,
-      { declared: { errors: { [FED_A]: { test_a: Array.from({ length: flood }, () => 'the flood') } }, warnings: {} } },
+      {
+        declared: {
+          errors: { [FED_A]: { test_a: Array.from({ length: flood }, () => 'the flood') } },
+          warnings: {},
+        },
+      },
     ).answer;
     assertOneUndeclaredPastTheFlood(declaring, during);
   }
@@ -134745,7 +134758,10 @@ function testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut(): void {
 async function testPrintedCappedNamesTheUncaughtErrorsLeftOut(): Promise<void> {
   for (const [errors, said] of [
     [20, undefined],
-    [25, 'The run printed more than the answer keeps. uncaughtScriptErrors lists the first 20 and leaves out 5.'],
+    [
+      25,
+      'The run printed more than the answer keeps. uncaughtScriptErrors lists the first 20 and leaves out 5.',
+    ],
   ] as const) {
     const stderr = Array.from(
       { length: errors },
@@ -134766,7 +134782,10 @@ async function testPrintedCappedNamesTheUncaughtErrorsLeftOut(): Promise<void> {
  */
 function testWhatTheEngineHeldAtExitNamesTheProjectsOwnFirst(): void {
   const inUse = (folder: string, count: number): string[] =>
-    Array.from({ length: count }, (_line, n) => `Resource still in use: res://${folder}/r${String(n)}.tres (Resource)`);
+    Array.from(
+      { length: count },
+      (_line, n) => `Resource still in use: res://${folder}/r${String(n)}.tres (Resource)`,
+    );
   const lines = [
     ...inUse('addons/kit', 12),
     'Leaked instance: Node:123 - Node name: one',
@@ -134823,7 +134842,10 @@ function testATestRunsProgressCountsTheSuitesItsLogLetGo(): void {
   const looks: unknown[] = [];
   const expected: unknown[] = [];
   for (let n = 0; n < 12; n += 1) {
-    const chunks = [aSuite(n), ...(n % 4 === 1 ? [`Run Test Suite: res://tests/x${String(n)}_test.gd\nquiet\n`] : [])];
+    const chunks = [
+      aSuite(n),
+      ...(n % 4 === 1 ? [`Run Test Suite: res://tests/x${String(n)}_test.gd\nquiet\n`] : []),
+    ];
     for (const chunk of chunks) {
       bounded.append('stdout', chunk);
       whole.append('stdout', chunk);
@@ -134864,7 +134886,11 @@ function testAStarvedErrorIsFoundPastAnyRunOfBlankLines(): void {
         ...Array.from({ length: blanks }, () => ''),
         '   at: alloc_static (core/os/memory.cpp:',
       ].join('\n');
-      assert.deepEqual(found(blanks, newline), [spanned], `${String(blanks)} blank lines, ${JSON.stringify(newline)}`);
+      assert.deepEqual(
+        found(blanks, newline),
+        [spanned],
+        `${String(blanks)} blank lines, ${JSON.stringify(newline)}`,
+      );
     }
   }
 }
