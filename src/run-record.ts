@@ -241,7 +241,8 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
 /**
  * The engines whose memory peak is kept for their project: a tool's, editor_run check's boot, which
  * is kept apart from the game editor_run start counts, and a lane of `gdharness test` or
- * `gdharness spread`, whose engines run a share of a run rather than the whole project.
+ * `gdharness spread`, whose engines run a share of a run rather than the whole project. A windowed
+ * lane of `gdharness test` is kept apart from its headless lanes, since a window holds more.
  */
 export type PeakTool =
   | 'project_test'
@@ -250,6 +251,7 @@ export type PeakTool =
   | 'headless'
   | 'boot_check'
   | 'test_lane'
+  | 'test_windowed_lane'
   | 'spread_lane';
 
 const PEAK_TOOLS: readonly PeakTool[] = [
@@ -259,6 +261,7 @@ const PEAK_TOOLS: readonly PeakTool[] = [
   'headless',
   'boot_check',
   'test_lane',
+  'test_windowed_lane',
   'spread_lane',
 ];
 

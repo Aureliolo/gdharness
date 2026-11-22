@@ -212,6 +212,7 @@ import {
   memoryEndedSaid,
   memoryEndSentence,
   startRefusedSaid,
+  WINDOWED_MEMORY_PER_ENGINE,
 } from '../src/engine-memory.js';
 import {
   crashedAtStart,
@@ -988,6 +989,7 @@ import {
   sweep,
   sweepingFor,
 } from './support/sweep.js';
+import { type ProbeSaw, probesSaw, probeTree, readyProbe } from './support/windowed-probe.js';
 import { WINDOWS_ASK_STAND_IN } from './support/windows-ask-stand-in.js';
 
 /**
@@ -82991,22 +82993,17 @@ function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
     const declared = new Map(found.map((suite) => [suite.path, suite.cases]));
     const plans = dealt(unitsOf(found, {}), declared, 4);
     assert.deepEqual(
-      plans.map((plan) => [
-        plan.windowed,
-        plan.accessible,
-        plan.suites.map((suite) => suite.path).toSorted(),
-      ]),
-      [
-        [
-          true,
-          true,
-          ['res://tests/shared_test.gd', 'res://tests/tree_child_test.gd', 'res://tests/tree_test.gd'],
-        ],
-        ...plans
-          .filter((plan) => !plan.windowed)
-          .map((plan) => [false, false, plan.suites.map((suite) => suite.path).toSorted()]),
-      ],
-      'only the windowed engine starts with the tree on',
+      plans.map((plan) => [plan.windowed, plan.accessible]),
+      plans.map((plan) => [plan.windowed, plan.windowed]),
+      'only the windowed engines start with the tree on',
+    );
+    assert.deepEqual(
+      plans
+        .filter((plan) => plan.windowed)
+        .flatMap((plan) => plan.suites.map((suite) => suite.path))
+        .toSorted(),
+      ['res://tests/shared_test.gd', 'res://tests/tree_child_test.gd', 'res://tests/tree_test.gd'],
+      'and hold the suites asking for it',
     );
     assert.ok(
       plans.some((plan) => !plan.windowed),
@@ -131691,6 +131688,90 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
 }
 
 /**
+ * Windowed engines of one run share a desktop, so each must get what it gets alone: the input a
+ * suite sends through the scene runner, the size of its window, its focus and its frame rate. Two
+ * and four of them run at once, each held at a barrier until every peer has started.
+ */
+function testWindowedEnginesRunTogetherGetWhatEachGetsAlone(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`windowed engines probe skipped (${refused})`);
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    const names = ['probe_a', 'probe_b', 'probe_c', 'probe_d'];
+    writeTree(project, probeTree(names));
+    const run = (
+      peers: number,
+    ): { said: string; status: number | null; saw: ProbeSaw[]; result: RunResult } => {
+      readyProbe(project, peers);
+      const resultFile = join(checkouts, `result-${String(peers)}.json`);
+      const ran = test(
+        ...names.slice(0, peers).map((name) => `tests/${name}_test.gd`),
+        '--engines',
+        String(peers),
+        '--slot-count',
+        String(peers),
+        '--times',
+        join(checkouts, `times-${String(peers)}.json`),
+        '--result',
+        resultFile,
+      );
+      return { ...ran, saw: Object.values(probesSaw(project)), result: readRunResult(resultFile) };
+    };
+    const alone = run(1);
+    assert.equal(alone.status, 0, alone.said);
+    const [lone] = alone.saw;
+    assert.ok(lone !== undefined, `one engine wrote what it saw: ${alone.said}`);
+    assert.deepEqual(
+      [lone.keys, lone.clicks, lone.actions],
+      [1, 1, 1],
+      `the scene runner's input reaches the scene: ${JSON.stringify(lone)}`,
+    );
+    assert.notEqual(lone.display, 'headless', 'the engine has a window');
+    const summary: string[] = [`alone ${JSON.stringify(lone)}`];
+    // GDHARNESS_WINDOWED_PROBE_PEERS names the sizes to run, which a machine short of memory narrows.
+    const sizes = (process.env['GDHARNESS_WINDOWED_PROBE_PEERS'] ?? '2,4').split(',').map(Number);
+    for (const peers of sizes) {
+      const together = run(peers);
+      assert.equal(together.status, 0, together.said);
+      if (together.said.includes('Memory had room for')) {
+        console.log(`windowed engines probe: no room for ${String(peers)} engines at once on this machine`);
+        continue;
+      }
+      assert.equal(
+        together.result.engines.filter((engine) => engine.windowed).length,
+        peers,
+        `${String(peers)} windowed engines ran: ${together.said}`,
+      );
+      assert.equal(together.saw.length, peers, `every engine wrote what it saw: ${together.said}`);
+      for (const saw of together.saw) {
+        summary.push(`${String(peers)} together ${JSON.stringify(saw)}`);
+        assert.equal(saw.peers, peers, `the engines ran at once: ${JSON.stringify(saw)}`);
+        assert.deepEqual(
+          { ...saw, fps: 0, peers: 0 },
+          { ...lone, fps: 0, peers: 0 },
+          `an engine of ${String(peers)} sees what one alone does, its focus and window size included`,
+        );
+        assert.ok(
+          saw.fps >= lone.fps / 2,
+          `an engine of ${String(peers)} draws ${String(saw.fps)} frames a second, against ${String(lone.fps)} alone`,
+        );
+      }
+    }
+    console.log(summary.join('\n'));
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+<<<<<<< HEAD
+/**
  * An engine whose only suite was skipped whole says why nothing ran in the skip, so the run adds no
  * "executed no test case" problem. An engine that executed nothing with no skip keeps it.
  */
@@ -131745,6 +131826,217 @@ function testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem(): void {
     ['the run executed no test case at all, whatever it exited with'],
     'an engine that ran nothing with no skip',
   );
+}
+
+/** A unit of one case, windowed or not, costing [param cost] seconds. */
+function planUnit(name: string, cost: number, windowed: boolean): Unit {
+  return { ...SHARE_UNIT(name, cost), windowed, accessible: false };
+}
+
+/** A suite of [param cases] cases the scripts read as needing a window, or not. */
+function planSuite(name: string, cases: number, windowed: boolean): DeclaredSuite {
+  return {
+    path: `res://${name}.gd`,
+    cases: Array.from({ length: cases }, (_, at) => `test_${String(at)}`),
+    windowed,
+    headless: false,
+    together: false,
+    accessible: false,
+  };
+}
+
+/** The suites each plan holds, as `suite:case` for every case it runs, skipped ones left out. */
+function casesRun(plans: readonly EnginePlan[]): string[] {
+  return plans.flatMap((plan) =>
+    plan.suites.flatMap((suite) =>
+      suite.cases
+        .filter((func) => !plan.skipping.includes(`${suite.path}:${func}`))
+        .map((func) => `${suite.path}:${func}`),
+    ),
+  );
+}
+
+/** Windowed suites are dealt over several windowed lanes, each lane within one suite of the others. */
+function testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre(): void {
+  const units = Array.from({ length: 48 }, (_, at) => planUnit(`w${String(at)}`, 10, true));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const plans = dealt(units, declared, 4);
+  assert.deepEqual(
+    plans.map((plan) => plan.windowed),
+    [true, true, true, true],
+    'four engines, every one windowed',
+  );
+  assert.deepEqual(
+    plans.map((plan) => plan.lane),
+    [0, 1, 2, 3],
+    'one to a slot',
+  );
+  const costs = plans.map((plan) => plan.cost);
+  assert.ok(
+    Math.max(...costs) - Math.min(...costs) <= 10,
+    `each lane within one suite of the others: ${JSON.stringify(costs)}`,
+  );
+  assert.deepEqual(
+    plans.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    units.map((unit) => unit.suite).toSorted(),
+    'and every suite is dealt once',
+  );
+  assert.equal(windowedSaid(plans), ', all of them windowed');
+  const shares = new Shares(units, declared, 4);
+  const handed: EnginePlan[] = [];
+  for (let plan = shares.next(handed.length % 4); plan !== null; plan = shares.next(handed.length % 4)) {
+    handed.push(plan);
+  }
+  assert.ok(handed.length >= 4, `the shares go to several windowed engines: ${String(handed.length)}`);
+  assert.ok(
+    handed.every((plan) => plan.windowed),
+    'and every one of them is windowed',
+  );
+  assert.deepEqual(
+    handed.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    units.map((unit) => unit.suite).toSorted(),
+    'holding each suite once',
+  );
+}
+
+/** A budget that fits two windowed engines runs two at once, and never three. */
+async function testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo(): Promise<void> {
+  const gib = 1024 ** 3;
+  const units = Array.from({ length: 4 }, (_, at) => planUnit(`w${String(at)}`, 120, true));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  // The machine's free memory as the engines are admitted: 4 GiB are kept, and two windowed engines
+  // fit with half a gigabyte over. The stand-in engines have grown to nothing yet, so each is owed whole.
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(4 * gib + 2 * WINDOWED_MEMORY_PER_ENGINE + gib / 2),
+    2,
+  );
+  let running = 0;
+  let most = 0;
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(
+    slots,
+    units,
+    declared,
+    4,
+    ['A', 'B', 'C', 'D'],
+    {},
+    async (plan, index) => {
+      assert.ok(plan.windowed, 'every engine here is windowed');
+      running += 1;
+      most = Math.max(most, running);
+      await delay(40);
+      running -= 1;
+      return { index, printed: { started: null } };
+    },
+    undefined,
+    gate,
+  );
+  assert.equal(ran.length, 4, 'every share ran');
+  assert.equal(most, 2, 'two windowed engines at once, never three');
+  assert.deepEqual(
+    peakOf(['res://a.gd', 'res://b.gd'], { 'res://a.gd': { seconds: 1, cases: {}, peak: 2 * gib } }, gib, {
+      paths: new Set(['res://b.gd']),
+      bytes: WINDOWED_MEMORY_PER_ENGINE,
+    }),
+    { bytes: WINDOWED_MEMORY_PER_ENGINE, seen: true },
+    'a windowed suite with no peak kept counts what a window holds',
+  );
+}
+
+/** A slow windowed suite is dealt out case by case, each case run in one engine. */
+function testASlowWindowedSuiteIsDealtOutCaseByCase(): void {
+  const slow = planSuite('slow', 6, true);
+  const times = {
+    [slow.path]: { seconds: 180, cases: Object.fromEntries(slow.cases.map((func) => [func, 30])) },
+  };
+  const units = unitsOf([slow], times, SPLIT_PAST_SECONDS);
+  assert.equal(units.length, 6, 'a unit for each case');
+  assert.ok(
+    units.every((unit) => unit.windowed && unit.cases.length === 1),
+    'each one windowed',
+  );
+  const plans = dealt(units, new Map([[slow.path, slow.cases]]), 3);
+  assert.equal(plans.length, 3, 'over three engines');
+  assert.ok(
+    plans.every((plan) => plan.windowed),
+    'all of them windowed',
+  );
+  assert.deepEqual(
+    casesRun(plans).toSorted(),
+    slow.cases.map((func) => `${slow.path}:${func}`),
+    'every case runs once',
+  );
+  assert.deepEqual(
+    plans.map((plan) => plan.skipping.length + (plan.suites[0]?.cases.length ?? 0)),
+    plans.map(() => slow.cases.length),
+    'and each engine skips the cases it is not dealt',
+  );
+}
+
+/** Windowed and headless suites together each run once, in the kind of engine they need. */
+async function testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind(): Promise<void> {
+  const suites = [
+    ...Array.from({ length: 6 }, (_, at) => planSuite(`w${String(at)}`, 2, true)),
+    ...Array.from({ length: 6 }, (_, at) => planSuite(`h${String(at)}`, 2, false)),
+  ];
+  const times = Object.fromEntries(
+    suites.map((suite) => [
+      suite.path,
+      { seconds: 20, cases: Object.fromEntries(suite.cases.map((func) => [func, 10])) },
+    ]),
+  );
+  const units = unitsOf(suites, times, SPLIT_PAST_SECONDS);
+  const declared = new Map(suites.map((suite) => [suite.path, suite.cases]));
+  const needs = new Map(suites.map((suite) => [suite.path, suite.windowed]));
+  const plans = dealt(units, declared, 4);
+  assert.ok(plans.filter((plan) => plan.windowed).length >= 2, 'several windowed engines');
+  assert.ok(
+    plans.some((plan) => !plan.windowed),
+    'and headless ones',
+  );
+  assert.deepEqual(
+    casesRun(plans).toSorted(),
+    suites.flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)).toSorted(),
+    'every case runs once',
+  );
+  assert.ok(
+    plans.every((plan) => plan.suites.every((suite) => needs.get(suite.path) === plan.windowed)),
+    'in an engine of the kind it needs',
+  );
+  const handed: EnginePlan[] = [];
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  await runShares(slots, units, declared, 4, [], {}, async (plan, index) => {
+    handed.push(plan);
+    await delay(1);
+    return { index, printed: { started: null } };
+  });
+  assert.deepEqual(
+    casesRun(handed).toSorted(),
+    casesRun(plans).toSorted(),
+    'dealt a share at a time, every case still runs once',
+  );
+  assert.ok(
+    handed.every((plan) => plan.suites.every((suite) => needs.get(suite.path) === plan.windowed)),
+    'and in its own kind',
+  );
+}
+
+/** One windowed suite is one windowed engine, however many slots there are. */
+function testOneWindowedSuiteIsOneWindowedEngine(): void {
+  const only = planUnit('only', 30, true);
+  const declared = new Map([[only.suite, ['test_one']]]);
+  for (const most of [1, 4]) {
+    assert.deepEqual(
+      dealt([only], declared, most).map((plan) => [plan.lane, plan.windowed, plan.cost]),
+      [[0, true, 30]],
+      `with ${String(most)} slots`,
+    );
+  }
+  const shares = new Shares([only], declared, 4);
+  assert.equal(shares.next(0)?.windowed, true, 'the share is windowed');
+  assert.equal(shares.next(1), null, 'and no other engine is handed a share');
+  assert.equal(windowedSaid(dealt([only], declared, 4)), ', with a window');
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -133268,6 +133560,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips,
   testRealSkipsFailARunOfBothTools,
   testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem,
+  testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
+  testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre,
+  testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo,
+  testASlowWindowedSuiteIsDealtOutCaseByCase,
+  testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind,
+  testOneWindowedSuiteIsOneWindowedEngine,
 ];
 
 /**
