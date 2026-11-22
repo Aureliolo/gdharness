@@ -134588,10 +134588,10 @@ function fedCasePrinting(path: string, name: string, printed: readonly string[])
   return { name, printed: [...printed, caseLine(path, name, 'PASSED', '12ms')] };
 }
 
-/** [param times] copies of the engine error [param text], as push_error prints one. */
-function engineErrors(text: string, times: number): string[] {
+/** [param times] copies of the engine error [param said], as push_error prints one. */
+function engineErrors(said: string, times: number): string[] {
   return Array.from({ length: times }, () => [
-    `ERROR: ${text}`,
+    `ERROR: ${said}`,
     '   at: push_error (core/variant/variant_utility.cpp:1024)',
   ]).flat();
 }

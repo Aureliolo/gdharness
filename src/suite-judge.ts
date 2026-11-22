@@ -236,7 +236,7 @@ export function readRun(printed: string): RunPrinted {
 }
 
 /** A run read as {@link readRun} reads it, without its lines, which were read once and let go. */
-export type RunRead = Omit<RunPrinted, 'lines'> & {
+type RunRead = Omit<RunPrinted, 'lines'> & {
   /** How many lines the run printed. */
   readonly lineCount: number;
   /** How many errors past the most kept were judged and not kept. */
