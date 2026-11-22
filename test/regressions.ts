@@ -622,6 +622,7 @@ import {
   failedVerdict,
   finishedBeforeTheEnd,
   foldedScriptErrors,
+  GodotServer,
   gameTheEditorPlays,
   leftRunningNote,
   longerWaitNote,
@@ -99381,21 +99382,351 @@ async function testACaseThatPassedOnARetryIsNotSaidToHavePassed(): Promise<void>
         [
           false,
           0,
-          'passed only on a retry: retried_test:test_second_time',
-          ['retried_test:test_second_time'],
+          'passed only on a retry: res://test/retried_test.gd > test_second_time',
+          ['res://test/retried_test.gd > test_second_time'],
           ['test_second_time'],
         ],
         retried.text,
       );
       assert.equal(
         get(retried.answer, 'note'),
-        "retried_test:test_second_time failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it, and failed holds the first failure.",
+        "res://test/retried_test.gd > test_second_time failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it, and failed holds the first failure.",
         retried.text,
       );
     });
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
+}
+
+/** One case a fed run holds: what the console printed of it, and the failure its report keeps. */
+interface FedCase {
+  readonly name: string;
+  readonly printed: readonly string[];
+  readonly failure?: string;
+}
+
+/** One suite a fed run holds. `NEVER` prints nothing of it and `UNCLOSED` prints no statistics. */
+interface FedSuite {
+  readonly path: string;
+  readonly cases: readonly FedCase[];
+  readonly closed: 'PASSED' | 'FAILED' | 'NEVER' | 'UNCLOSED';
+}
+
+const FED_A = 'res://test/a_test.gd';
+const FED_OTHER = 'res://other/a_test.gd';
+
+/** A case that printed [param verdict] and whose report holds no failure. */
+function fedCase(path: string, name: string, verdict = 'PASSED', failure?: string): FedCase {
+  return {
+    name,
+    printed: [caseLine(path, name, verdict, '12ms')],
+    ...(failure === undefined ? {} : { failure }),
+  };
+}
+
+/** A case gdUnit4 failed once and then passed, as it prints it, with the failure its report keeps. */
+function fedRetried(path: string, name: string, keepsFailure = true): FedCase {
+  return {
+    name,
+    printed: [caseLine(path, name, 'FLAKY (2 retries)', '12ms')],
+    ...(keepsFailure ? { failure: 'Expecting: greater than 1 but was 1' } : {}),
+  };
+}
+
+/**
+ * What project_test answers for a run fed as text, as the engine's console and report would hold
+ * it, beside what gdharness test judges of the same console.
+ */
+function fedRunAnswered(
+  suites: readonly FedSuite[],
+  exitCode = 0,
+): { answer: Record<string, unknown>; faults: readonly string[] } {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-fed-run-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const ran = suites.filter((suite) => suite.closed !== 'NEVER');
+    const total = ran.reduce((sum, suite) => sum + suite.cases.length, 0);
+    const engineText = [
+      'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+      ...ran.flatMap((suite) => [
+        `Run Test Suite: ${suite.path}`,
+        ...suite.cases.flatMap((one) => [caseLine(suite.path, one.name, 'STARTED'), ...one.printed]),
+        ...(suite.closed === 'UNCLOSED'
+          ? []
+          : [
+              `Statistics: ${String(suite.cases.length)} test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | ${suite.closed} 40ms`,
+              '',
+            ]),
+      ]),
+      `Overall Summary: ${String(total)} test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |`,
+      `Executed test suites: (${String(ran.length)}/${String(ran.length)})`,
+      `Executed test cases : (${String(total)}/${String(total)})`,
+      'Total execution time: 1s 0ms',
+    ].join('\n');
+    const xml = `<?xml version="1.0" encoding="UTF-8" ?><testsuites id="x" name="report_1" tests="1" failures="0" skipped="0" flaky="0" time="0">${ran
+      .map((suite) => {
+        const name = suite.path.replace(/^.*\//, '').replace(/\.gd$/, '');
+        const cases = suite.cases
+          .map(
+            (one) =>
+              `<testcase name="${one.name}" classname="${name}" time="0.012">${
+                one.failure === undefined
+                  ? ''
+                  : `<failure message="FAILED: ${suite.path}:5" type="FAILURE">${one.failure}</failure>`
+              }</testcase>`,
+          )
+          .join('');
+        const failures = suite.cases.filter((one) => one.failure !== undefined).length;
+        return `<testsuite id="0" name="${name}" package="${suite.path.replace(/^res:\/\//, '').replace(/\/[^/]*$/, '')}" tests="${String(suite.cases.length)}" failures="${String(failures)}" errors="0" skipped="0" flaky="0" time="0.04">${cases}</testsuite>`;
+      })
+      .join('')}</testsuites>`;
+    const entries = engineText.split('\n').map((line, index) => ({
+      index,
+      severity: 'info',
+      text: line,
+      detail: [],
+      stream: 'stdout',
+      time: 0,
+    }));
+    const word = ({ 0: 'passed', 100: 'failures' } as Record<number, string>)[exitCode] ?? 'other';
+    const input = {
+      args: {},
+      project: { value: { path: project } },
+      asked: suites.map((suite) => suite.path),
+      missing: [],
+      missingNote: undefined,
+      scripts: {
+        suite: (path: string) => {
+          const found = suites.find((one) => one.path === path);
+          return found === undefined
+            ? []
+            : [{ path, cases: [...new Set(found.cases.map((one) => funcOf(one.name)))] }];
+        },
+        suitesUnder: () => [],
+      },
+      selection: { value: null },
+      notSuites: [],
+      flags: { value: [] },
+      declaredUnder: [],
+      ignored: [],
+      engineEntries: [],
+      engine: { note: null },
+      run: {
+        log: {
+          all: entries,
+          count: (kind: string) => entries.filter((entry) => entry.severity === kind).length,
+          raisedByScript: () => false,
+        },
+        exitSignal: null,
+        exitCode,
+      },
+      console: [Buffer.from(engineText)],
+      report: parseJUnit(xml),
+      casePrinted: withNestedErrors(readRun(engineText), []),
+      declaredErrors: readExpected(join(project, 'none.json')),
+      said: engineText.split('\n'),
+      uncaught: [],
+      printed: entries,
+      exitCode,
+      verdict: word,
+      ranAs: word,
+      nothingRan: null,
+      timedOut: false,
+      hung: false,
+      silentForMs: 0,
+      savesNote: undefined,
+      scanned: {},
+      windowSaid: {},
+      printedLines: {},
+      tookMs: 0,
+      tookMsBy: {},
+      classes: { payload: {} },
+    };
+    // Private to the server and reached by name, with none of the server's state: it reads only its input.
+    const server: unknown = Object.create(GodotServer.prototype);
+    const testReported: unknown = Reflect.get(GodotServer.prototype, 'testReported');
+    assert.ok(typeof testReported === 'function', 'the server answers a run through testReported');
+    const response: unknown = Reflect.apply(testReported, server, [input]);
+    const answer: unknown = JSON.parse(String(get(asArray(get(response, 'content'))[0], 'text')));
+    assert.ok(isRecord(answer), 'the answer is an object');
+    const handed = {
+      suites: suites.map((suite) => ({
+        path: suite.path,
+        cases: [...new Set(suite.cases.map((one) => funcOf(one.name)))],
+      })),
+      expected: { errors: {}, warnings: {} },
+    };
+    return {
+      answer,
+      faults: judgeEngine(readRun(engineText), handed, { code: exitCode, signal: null, ended: null }).faults,
+    };
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A case that failed and passed on a retry fails project_test's run whatever its report holds.
+ * Fed a console printing FLAKY beside a report with no failure, the answer was passed.
+ */
+function testAFlakyCaseFailsTheRunWhateverTheReportHolds(): void {
+  const { answer, faults } = fedRunAnswered([
+    {
+      path: FED_A,
+      cases: [fedRetried(FED_A, 'test_second', false), fedCase(FED_A, 'test_a')],
+      closed: 'PASSED',
+    },
+  ]);
+  assert.deepEqual(
+    answer,
+    {
+      classes: {},
+      engineEntries: [],
+      engineErrors: 0,
+      engineWarnings: 0,
+      errors: 0,
+      exitCode: 0,
+      failed: [],
+      failures: 0,
+      note: "res://test/a_test.gd > test_second failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it.",
+      passed: false,
+      passedOnARetry: ['res://test/a_test.gd > test_second'],
+      skipped: 0,
+      suites: [],
+      suitesPassed: 1,
+      tests: 2,
+      time: 0.04,
+      tookMs: 0,
+      tookMsBy: {},
+      verdict: 'passed only on a retry: res://test/a_test.gd > test_second',
+    },
+    'the whole answer',
+  );
+  assert.deepEqual(faults, [`${FED_A} > test_second failed before it passed on a retry`], 'gdharness test');
+}
+
+/** The fault of gdharness test for a case that passed only on a retry, with the case it names. */
+function retriedFault(path: string, name: string): string {
+  return `${path} > ${name} failed before it passed on a retry`;
+}
+
+/**
+ * The note of a retried case says its report holds the first failure only where the report does.
+ * Fed a report with none, it said so beside an empty `failed`.
+ */
+function testTheRetriedNoteNamesTheFailureOnlyWhereThereIsOne(): void {
+  const said = (keepsFailure: boolean): unknown =>
+    fedRunAnswered([
+      { path: FED_A, cases: [fedRetried(FED_A, 'test_second', keepsFailure)], closed: 'PASSED' },
+    ]).answer['note'];
+  const head =
+    "res://test/a_test.gd > test_second failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it";
+  assert.equal(said(false), `${head}.`, 'no failure in the report');
+  assert.equal(said(true), `${head}, and failed holds the first failure.`, 'a failure in the report');
+}
+
+/**
+ * Two suites of one file name in different folders are both named, by their paths, as gdharness
+ * test names them, and a row of a parameterised case comes back with its index and arguments.
+ */
+function testRetriedCasesAreNamedAsGdharnessTestNamesThem(): void {
+  const names = (faults: readonly string[]): string[] =>
+    faults.map((fault) => fault.replace(' failed before it passed on a retry', ''));
+  const twins = fedRunAnswered([
+    { path: FED_A, cases: [fedRetried(FED_A, 'test_second')], closed: 'PASSED' },
+    { path: FED_OTHER, cases: [fedRetried(FED_OTHER, 'test_second')], closed: 'PASSED' },
+  ]);
+  assert.deepEqual(
+    twins.answer['passedOnARetry'],
+    ['res://test/a_test.gd > test_second', 'res://other/a_test.gd > test_second'],
+    'both suites',
+  );
+  assert.deepEqual(twins.answer['passedOnARetry'], names(twins.faults), 'as gdharness test names them');
+  const rows = fedRunAnswered([
+    {
+      path: FED_A,
+      cases: [fedRetried(FED_A, 'test_p:0 (1)'), fedCase(FED_A, 'test_p:1 (2)')],
+      closed: 'PASSED',
+    },
+  ]);
+  assert.deepEqual(rows.answer['passedOnARetry'], ['res://test/a_test.gd > test_p:0 (1)'], 'the row');
+  assert.deepEqual(rows.faults, [retriedFault(FED_A, 'test_p:0 (1)')], 'as gdharness test names it');
+}
+
+/**
+ * A case whose report holds a failure and whose console line says PASSED, beside an exit of 0, is
+ * a pass in both tools. gdUnit4 decides a case's state from its last attempt, and the report it
+ * writes keeps the failures of the attempts before it, so the console line and the exit code are
+ * its verdict. A case printed FAILED stays failed.
+ */
+function testAFailureOnlyTheReportHoldsIsNoFailure(): void {
+  const kept = fedRunAnswered([
+    {
+      path: FED_A,
+      cases: [fedCase(FED_A, 'test_b', 'PASSED', 'Expecting: true but was false')],
+      closed: 'PASSED',
+    },
+  ]);
+  assert.deepEqual(
+    [
+      kept.answer['passed'],
+      kept.answer['verdict'],
+      kept.answer['failures'],
+      kept.answer['failed'],
+      kept.answer['note'],
+      kept.faults,
+    ],
+    [true, 'passed', 0, [], undefined, []],
+    JSON.stringify(kept),
+  );
+  const failing = fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [fedCase(FED_A, 'test_b', 'FAILED', 'Expecting: true but was false')],
+        closed: 'FAILED',
+      },
+    ],
+    100,
+  );
+  assert.deepEqual(
+    [failing.answer['passed'], failing.answer['failures'], failing.faults],
+    [false, 1, [`${FED_A} > test_b failed`]],
+    JSON.stringify(failing),
+  );
+}
+
+/**
+ * A suite asked for that printed no start, or no closing statistics, fails the run as it fails
+ * gdharness test's. gdUnit4 exits 0 beside the suites that did run.
+ */
+function testASuiteAskedForThatNeverRanFailsTheRun(): void {
+  const first: FedSuite = { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' };
+  const afterwards = (closed: FedSuite['closed']): ReturnType<typeof fedRunAnswered> =>
+    fedRunAnswered([first, { path: FED_OTHER, cases: [fedCase(FED_OTHER, 'test_u')], closed }]);
+  for (const [closed, fault] of [
+    ['NEVER', 'res://other/a_test.gd never started'],
+    ['UNCLOSED', 'res://other/a_test.gd never finished'],
+  ] as const) {
+    const run = afterwards(closed);
+    assert.deepEqual(run.faults, [fault], `gdharness test, ${closed}`);
+    assert.deepEqual(
+      [run.answer['passed'], run.answer['verdict'], run.answer['note']],
+      [
+        false,
+        fault,
+        `${fault}, though gdUnit4 exited without saying so. The run is not called passed, as gdharness test judges it.`,
+      ],
+      `project_test, ${closed}`,
+    );
+  }
+  const whole = afterwards('PASSED');
+  assert.deepEqual(
+    [whole.answer['passed'], whole.answer['verdict'], whole.faults],
+    [true, 'passed', []],
+    'a suite that ran',
+  );
 }
 
 /**
@@ -124151,6 +124482,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,
   testACaseThatPassedOnARetryIsNotSaidToHavePassed,
+  testTheRetriedNoteNamesTheFailureOnlyWhereThereIsOne,
+  testRetriedCasesAreNamedAsGdharnessTestNamesThem,
+  testAFailureOnlyTheReportHoldsIsNoFailure,
+  testASuiteAskedForThatNeverRanFailsTheRun,
+  testAFlakyCaseFailsTheRunWhateverTheReportHolds,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testASaveFromTheEditorIsRefusedWithNoEditor,
   testAConfigNamingAnotherVersionIsSaid,
