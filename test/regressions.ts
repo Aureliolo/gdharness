@@ -11109,11 +11109,19 @@ async function withALanguageServerThatEnds<T>(
  * What a probe run that failed printed and how it ended, for a failure message. A run killed at its
  * timeout says so only in `killed` and `signal`, and its stdout is not in the error's message.
  */
-function probeRunFailure(error: unknown): string {
+function probeRunFailure(error: unknown, bareStartMs: number): string {
   const run = isRecord(error) ? error : {};
   const fields = ['code', 'signal', 'killed'].map((name) => `${name} ${String(run[name])}`);
+  const steps = (typeof run['stderr'] === 'string' ? run['stderr'] : '')
+    .split('\n')
+    .filter((line) => /^\d+ ms (started|loaded|connected|disconnected)$/.test(line.trim()));
+  const last = steps.at(-1) ?? 'none, not even started';
+  // A bare start that took most of the probe's limit is the runner's, not the client's.
+  const slow = bareStartMs >= 15_000 ? ' Node itself started slowly on this runner.' : '';
   return [
     fields.join(', '),
+    `last step reached: ${last}`,
+    `bare Node start (node -e 0): ${bareStartMs} ms.${slow}`,
     `stdout: ${JSON.stringify(run['stdout'])}`,
     `stderr: ${JSON.stringify(run['stderr'])}`,
   ].join('\n');
@@ -11156,7 +11164,10 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
     writeFileSync(
       probe,
       [
-        `import { GodotLSPClient } from ${JSON.stringify(pathToFileURL(resolve('build', 'lsp_client.js')).href)};`,
+        reached('started'),
+        // Loaded after the first step, so a stall before it is the runtime's start and a stall
+        // between the two is the client's import.
+        `const { GodotLSPClient } = await import(${JSON.stringify(pathToFileURL(resolve('build', 'lsp_client.js')).href)});`,
         reached('loaded'),
         `const client = new GodotLSPClient(Number(process.argv[2]), '127.0.0.1');`,
         'await client.connect();',
@@ -11177,6 +11188,9 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
         '}, 2000).unref();',
       ].join('\n'),
     );
+    const bareStarted = Date.now();
+    await runHidden('node', ['-e', '0'], { timeout: 30_000 });
+    const bareStartMs = Date.now() - bareStarted;
     const ends: [LanguageServerEnd, string][] = [
       ['closes', 'ended: Godot LSP socket closed'],
       ['answers', 'answered: {"answered":"as it closed"}'],
@@ -11191,7 +11205,9 @@ async function testALanguageServerRequestLetGoEndsAsItsServerDoes(): Promise<voi
           const run = `${runtime}, with a server that ${end} on port ${port}`;
           const { stdout, stderr } = await runHidden(program, [probe, String(port)], {
             timeout: 30_000,
-          }).catch((error: unknown) => assert.fail(`${run}, the probe failed:\n${probeRunFailure(error)}`));
+          }).catch((error: unknown) =>
+            assert.fail(`${run}, the probe failed:\n${probeRunFailure(error, bareStartMs)}`),
+          );
           assert.equal(stdout.trim(), expected, `${run}. The probe's stderr:\n${stderr}`);
         });
       }
@@ -23136,7 +23152,6 @@ async function testADesktopStartIsOneCall(): Promise<void> {
         process.kill(pid);
       }
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23179,7 +23194,6 @@ async function testAHelperThatNeverRanHasEnded(): Promise<void> {
     start.child.on('error', () => undefined);
     assert.ok(await settled(retireHelper()), 'retiring a helper that never ran returns');
   } finally {
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23235,7 +23249,6 @@ async function testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine(): Promise<v
     assert.ok(waited < 5000, `the wait ends with the engine, not at the stop wait: ${String(waited)} ms`);
   } finally {
     start?.stop();
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23289,7 +23302,6 @@ async function testAStoppedRunOnTheHiddenDesktopWaitsForItsEngine(): Promise<voi
     assert.equal(existsSync(user), false, 'and its user data directory can be removed');
   } finally {
     start?.stop();
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23364,7 +23376,6 @@ async function testARunOnTheHiddenDesktopIsStoppedAfterItsHelperDied(): Promise<
     if (engine !== undefined && alive(engine)) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23403,7 +23414,6 @@ async function testAStopTheDeadHelperNeverActedOnStillEndsTheRun(): Promise<void
     for (const engine of engines.filter((pid) => alive(pid))) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23442,7 +23452,6 @@ async function testAStartAfterItsHelperDiedIsStillStopped(): Promise<void> {
     for (const engine of engines.filter((pid) => alive(pid))) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23468,7 +23477,6 @@ async function testARunOnTheDesktopInUseIsStoppedAfterItsHelperDied(): Promise<v
     if (engine !== undefined && alive(engine)) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23509,7 +23517,6 @@ async function testATimedOutRunWhoseHelperDiedEndsWithinTheStopWait(): Promise<v
     if (engine !== undefined && alive(engine)) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23546,7 +23553,6 @@ async function testARunNoHelperCanTakeOverIsStillStopped(): Promise<void> {
     for (const engine of engines.filter((pid) => alive(pid))) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23610,7 +23616,6 @@ async function testAProcessThatOnlySharesTheEnginesPidIsNeverEnded(): Promise<vo
     for (const engine of engines.filter((pid) => alive(pid))) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23674,7 +23679,6 @@ async function testAStopFileWithALongPathStillStopsTheRun(): Promise<void> {
     for (const engine of engines.filter((pid) => alive(pid))) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23739,7 +23743,6 @@ async function testTheHelperWritesItsLaneAndErrorFilesThroughLongPaths(): Promis
     if (engine !== undefined && alive(engine)) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23765,7 +23768,6 @@ async function testAnExitFileThatCannotBeWrittenStillLeavesTheEnginesCode(): Pro
     );
     assert.equal(await endWithin(start.child, 30_000), '3/null', 'the run ends with the engine code');
   } finally {
-    await retireHelper();
     sweep(root);
   }
 }
@@ -23865,7 +23867,6 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
     if (start !== undefined) {
       assert.ok(await exitedWithin(start.child, 60_000), 'the helper ends with its engine');
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -24108,7 +24109,6 @@ async function testAnEngineMadeButNeverAnsweredIsEndedByTheNextHelper(): Promise
     if (made !== undefined && alive(made)) {
       process.kill(made);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -24586,7 +24586,6 @@ async function testAKeptStartOutlivesItsKilledHelper(): Promise<void> {
     if (engine !== undefined && alive(engine)) {
       process.kill(engine);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -24693,7 +24692,6 @@ async function testStartsMadeAtOnceWaitOnNoOthersEngine(): Promise<void> {
   } finally {
     running.start.stop();
     await exitedWithin(running.start.child, 60_000);
-    await retireHelper();
     sweep(root);
   }
 }
@@ -24811,7 +24809,6 @@ async function testAHelperKilledMidRequestFailsThatStartAndTheNextGetsANewOne():
         process.kill(pid);
       }
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -24846,7 +24843,6 @@ async function testAHelperKilledBeforeItSaysItMadeTheEngineLeavesNone(): Promise
         process.kill(engine);
       }
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -24986,7 +24982,6 @@ async function testAnUnreadOutputStreamStillCloses(): Promise<void> {
       assert.equal(closed, 3, `${name}: an unread start closes with its code`);
     }
   } finally {
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25108,7 +25103,6 @@ async function testAnEnginesWholeExitIsToldWhileTheHelperServesOthers(): Promise
   } finally {
     busy.start.stop();
     await exitedWithin(busy.start.child, 60_000);
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25138,7 +25132,6 @@ async function testAnEngineThatOutlivesItsHelperStillEndsWithItsWholeCode(): Pro
     assert.ok(await exitedWithin(running.start.child, 120_000), 'its end is reported');
     assert.equal(running.start.child.exitCode, 0xc0000005, 'with the code the engine itself exited with');
   } finally {
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25189,7 +25182,6 @@ async function testAStartEndedBeforeTheHelperAnswersEndsBySigterm(): Promise<voi
       );
     }
   } finally {
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25224,7 +25216,6 @@ async function testAStartsOutputClosesWhileALaterEngineStillRuns(): Promise<void
     if (later !== undefined) {
       await exitedWithin(later.start.child, 60_000);
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25336,7 +25327,6 @@ async function testAHelperThatNeverAnswersFailsTheStartAndIsEnded(): Promise<voi
     } else {
       process.env['GDHARNESS_HELPER_ANSWER_MS'] = limit;
     }
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25394,7 +25384,6 @@ async function testTheHelperOpensNoWindowForAnyStart(): Promise<void> {
   } finally {
     running.start.stop();
     await exitedWithin(running.start.child, 60_000);
-    await retireHelper();
     sweep(root);
   }
 }
@@ -25465,7 +25454,6 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
       );
     }
   } finally {
-    await retireHelper();
     sweep(root);
   }
 }
@@ -26225,7 +26213,6 @@ async function testARunWhoseEngineMakesNoRendererOnItsOwnDesktopEnds(): Promise<
     assert.match(run.failure ?? '', NO_RENDERER_VERDICT, `the failure names the renderer: ${run.failure}`);
     assert.ok(Date.now() - began < NO_RENDERER_END_MS, 'and it ends at once');
   } finally {
-    await retireHelper();
     sweep(scratch);
   }
 }
@@ -26439,7 +26426,6 @@ async function testAPlayedGameThatMakesNoRendererIsEndedWithoutItsEditor(): Prom
   } finally {
     start.stop();
     await exitedWithin(start.child, 60_000);
-    await retireHelper();
     sweep(scratch);
   }
 }
@@ -26690,7 +26676,6 @@ async function testAHelperWatchingNoBoxUsesNoProcessorTime(): Promise<void> {
   } finally {
     start.stop();
     await exitedWithin(start.child, 60_000);
-    await retireHelper();
     sweep(scratch);
   }
 }
@@ -125130,6 +125115,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
   testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
+  testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanItsOwnRun,
 ];
 
 /**
@@ -125437,6 +125423,28 @@ function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
   }
 }
 
+/**
+ * A test that starts the process's shared desktop helper and does not end it leaves nothing open
+ * at the end of its run, because the runner ends the helper after each test. The run is a real one
+ * of testAnEngineRunSaysHowItEnded, which starts engines in the runner's own process and never
+ * retires the helper itself.
+ */
+async function testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanItsOwnRun(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('desktop helper retire regression skipped (the helper is Windows only)');
+    return;
+  }
+  const inner = 'testAnEngineRunSaysHowItEnded';
+  const said = await runHidden(process.execPath, ['test/regressions.ts', inner], { timeout: 240_000 }).then(
+    ({ stdout, stderr }) => `${stdout}\n${stderr}`,
+    (error: unknown) =>
+      assert.fail(
+        `the run of ${inner} failed:\n${isRecord(error) ? `${String(error['stdout'])}\n${String(error['stderr'])}` : String(error)}`,
+      ),
+  );
+  assert.doesNotMatch(said, /still open at the end of the run/, `the run leaves nothing open:\n${said}`);
+}
+
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */
 async function runOneRegression(test: RegressionCase, run: RegressionRun): Promise<void> {
   const { failed, ranPast, deadlineMs, budgetMs, runEnds } = run;
@@ -125491,6 +125499,10 @@ async function runOneRegression(test: RegressionCase, run: RegressionRun): Promi
   if (!passed || leftBehindBy(test.name)) {
     recordEnginesLeftRunning(await endEnginesLeft(test.name), failed);
   }
+  // The runner's own process shares one desktop helper across engine runs. It ends after the
+  // sweeps, since a test past its deadline may still be using it, and a test that ended it
+  // itself leaves nothing to end.
+  await retireHelper();
 }
 
 /** Names every failed and unreached test and sets the exit code. */
