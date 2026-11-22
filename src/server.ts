@@ -262,6 +262,7 @@ import {
 import { freeLibraryCopiesAsync } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import { statOf } from './listed-reads.js';
+import { logLimitBytes, pastTheLogLimit } from './log-read.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -434,6 +435,8 @@ import {
   pushErrorsFailedSentence,
   readEngineLog,
   readExpected,
+  SuiteCuts,
+  textsCutAt,
   uncollectedSaid,
   unexpectedErrors,
   type withNestedErrors,
@@ -5368,6 +5371,7 @@ type SpawnedTest = SpawnedGame & { readonly settled: Promise<void>; readonly sto
 /** What a test run ran as: the first of the reasons its result does not count, else the engine's own word. */
 function ranAsOf(facts: {
   notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  capped: string | null;
   cutShort: ReturnType<typeof timedOutVerdict> | null;
   nothingRan: string | null | undefined;
   brokenScripts: number;
@@ -5379,6 +5383,9 @@ function ranAsOf(facts: {
   const { notCompiled, cutShort, nothingRan, brokenScripts, uncaught, exitCode, verdicts, run } = facts;
   if (notCompiled !== null) {
     return `the autoload ${notCompiled.name} (${notCompiled.path}) did not compile, so no result counts`;
+  }
+  if (facts.capped !== null) {
+    return facts.capped;
   }
   if (cutShort !== null) {
     return cutShort.verdict;
@@ -5460,7 +5467,11 @@ interface TestPrepared extends TestScanned {
 interface TestRan extends TestPrepared {
   run: SpawnedTest;
   console: Buffer[];
+  /** The byte of the console each suite's lines begin at. */
+  consoleCuts: readonly number[];
   timedOut: boolean;
+  /** Why the engine was ended for printing past the limit a log may hold, or null when it was not. */
+  capped: string | null;
   silentForMs: number;
   saidAnything: boolean;
   autoloaded: ReturnType<typeof scriptsAutoloaded>;
@@ -10308,9 +10319,9 @@ class GodotServer {
     const attempt = await startedUntilItRuns(
       () => this.testEngineRan(prepared, onDesktop, autoloaded, seeded),
       callSignal(),
-      (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
+      (one) => !one.timedOut && one.capped === null && one.stopped.for === null && diedAtStartOf(one.run),
     );
-    const { run, console, timedOut, silentForMs, saidAnything, stopped } = attempt;
+    const { run, console, consoleCuts, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
     // Or its pid never came, which is a helper that hung until the run's limit ended it.
     const helperFailed = onDesktop
@@ -10332,7 +10343,9 @@ class GodotServer {
       ...prepared,
       run,
       console,
+      consoleCuts,
       timedOut,
+      capped,
       silentForMs,
       saidAnything,
       autoloaded,
@@ -10349,13 +10362,15 @@ class GodotServer {
   ): Promise<{
     readonly run: SpawnedTest;
     readonly console: Buffer[];
+    readonly consoleCuts: readonly number[];
     readonly timedOut: boolean;
+    readonly capped: string | null;
     readonly silentForMs: number;
     readonly saidAnything: boolean;
     readonly stopped: { for: { name: string; path: string } | null };
     readonly crashedStarts?: number;
   }> {
-    const { project, engine, cmdArgs, timeoutMs, userData, helperFiles } = prepared;
+    const { project, engine, cmdArgs, timeoutMs, userData, helperFiles, engineLog } = prepared;
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
     const run = await this.spawnGame(
@@ -10373,12 +10388,27 @@ class GodotServer {
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
     const console: Buffer[] = [];
+    // A suite printing past what a log may hold ends the engine, as a share doing so ends gdharness
+    // test's. Counted on the log and on the console alike, each from the start of the running suite.
+    const limit = logLimitBytes();
+    const logCuts = new SuiteCuts();
+    const consoleCuts = new SuiteCuts();
+    const capped: { why: string | null } = { why: null };
+    const capPast = (cuts: SuiteCuts): boolean => {
+      if (capped.why === null && cuts.printed > limit) {
+        capped.why = pastTheLogLimit(cuts.suite, limit);
+        run.stop();
+      }
+      return capped.why !== null;
+    };
     // When it last said anything, on either stream, which is what tells a run the limit cut off
     // mid-stride from one that had stopped.
     let lastSaid = Date.now();
     let saidAnything = false;
     run.process.stdout?.on('data', (data: Buffer) => {
       console.push(data);
+      consoleCuts.take(data);
+      capPast(consoleCuts);
       lastSaid = Date.now();
       saidAnything = true;
     });
@@ -10400,6 +10430,11 @@ class GodotServer {
         if (stopped.for !== null) {
           clearInterval(watching);
           run.stop();
+        } else {
+          logCuts.takeFrom(engineLog);
+          if (capPast(logCuts)) {
+            clearInterval(watching);
+          }
         }
       }, 100);
       const timer = setTimeout(() => {
@@ -10416,12 +10451,21 @@ class GodotServer {
       whenEnded(run, ended);
     });
     clearInterval(reporting);
-    if (timedOut || stopped.for !== null) {
+    if (timedOut || stopped.for !== null || capped.why !== null) {
       await untilStoppedEngineGone(run);
     }
     await run.settled;
     await keeping;
-    return { run, console, timedOut, silentForMs, saidAnything, stopped };
+    return {
+      run,
+      console,
+      consoleCuts: consoleCuts.cuts,
+      timedOut,
+      capped: capped.why,
+      silentForMs,
+      saidAnything,
+      stopped,
+    };
   }
 
   /** A test run's report, engine log and console read once the engine has ended. */
@@ -10528,6 +10572,7 @@ class GodotServer {
       asked,
       timeoutMs,
       timedOut,
+      capped,
       silentForMs,
       saidAnything,
       engine,
@@ -10535,6 +10580,8 @@ class GodotServer {
       notCompiled,
       report,
     } = read;
+    // An engine ended for printing too much is judged as one cut off by the limit.
+    const cutOff = timedOut || capped !== null;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for.
     const engineEntries = foldedRepeats(
@@ -10559,7 +10606,7 @@ class GodotServer {
     };
     const exitCode = run.neverStarted === true ? null : run.exitCode;
     const uncaught =
-      report !== null && exitCode === 0 && !timedOut && gdUnitFailsOnScriptErrors(project.value.path)
+      report !== null && exitCode === 0 && !cutOff && gdUnitFailsOnScriptErrors(project.value.path)
         ? run.log.all.filter(
             (entry) =>
               run.log.raisedByScript(entry) && !entry.detail.some((line) => line.includes(ERROR_ASSERT)),
@@ -10575,7 +10622,7 @@ class GodotServer {
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
-    const nothingRan = timedOut || notCompiled !== null ? null : whyNoReport(said, asked.join(' and '));
+    const nothingRan = cutOff || notCompiled !== null ? null : whyNoReport(said, asked.join(' and '));
     const cutShort =
       timedOut && notCompiled === null
         ? timedOutVerdict(
@@ -10589,13 +10636,14 @@ class GodotServer {
     const printedErrors =
       notCompiled !== null
         ? compileErrorsIn(run.log.all)
-        : timedOut || exitCode !== 105
+        : cutOff || exitCode !== 105
           ? []
           : scriptErrorsPrinted(said);
     const declaring = await this.declaringOrigins(printedErrors, project.value.path, engine.value);
     const scriptErrors: ScriptError[] = [...declaring.origins, ...printedErrors];
     const ranAs = ranAsOf({
       notCompiled,
+      capped,
       cutShort,
       nothingRan,
       brokenScripts: new Set(scriptErrors.map((error) => error.path)).size,
@@ -10770,9 +10818,10 @@ class GodotServer {
 
   /** The answer of a test run that wrote a report, judged against what the engine printed. */
   private testReported(reported: TestWithReport): ToolResponse {
-    const { run, console, report, casePrinted, declaredErrors, said, uncaught } = reported;
+    const { run, console, consoleCuts, report, casePrinted, declaredErrors, said, uncaught } = reported;
+    // A suite at a time, since the whole console can pass what one string holds.
     const { failed, briefed } = failedWithin(
-      failedCases(report, Buffer.concat(console).toString('utf8')),
+      failedCases(report, textsCutAt(console, consoleCuts)),
       FAILED_BUDGET,
     );
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
@@ -11078,6 +11127,7 @@ class GodotServer {
       rowsMismatched,
       testsNotRun,
       timedOut,
+      capped,
       uncaught,
       undeclaredPrinted,
     } = s;
@@ -11087,6 +11137,7 @@ class GodotServer {
       // passed beside a verdict saying no test cases were found.
       passed:
         !timedOut &&
+        capped === null &&
         exitCode === 0 &&
         nothingRan === null &&
         report.tests > 0 &&

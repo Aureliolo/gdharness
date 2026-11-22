@@ -756,8 +756,11 @@ import {
   readExpected,
   readRun,
   rowsAcross,
+  SuiteCuts,
   secondsOf,
+  textsCutAt,
   uncollectedSaid,
+  unexpectedErrors,
   versionFault,
   withNestedErrors,
 } from '../src/suite-judge.js';
@@ -125132,10 +125135,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
   testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
-  testAnEngineLogPastTheLimitIsJudgedFromItsKeptParts,
   testAnEngineLogWithinTheLimitIsJudgedAsItWas,
-  testAnEngineErrorInTheKeptTailOfALongLogIsNamed,
   testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader,
+  testAnEngineLogReadInPiecesIsJudgedAsItsWholeText,
+  testTheSuiteCutsFindEverySuiteHoweverTheBytesArrive,
+  testATestRunWhoseSuitePrintsPastTheLimitIsEnded,
+  testGdharnessTestEndsTheSameEngineWithTheSameSentence,
+  testATestRunWhoseSuitesTogetherPassTheLimitIsJudgedWhole,
+  testATestRunPrintingPastTheLimitOnItsConsoleIsEnded,
 ];
 
 /**
@@ -125444,7 +125451,6 @@ function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
 }
 
 const LONG_LOG_CASES = 60;
-const LONG_LOG_LIMIT = 4000;
 
 /** A run's console of [param LONG_LOG_CASES] cases, with [param after] printed after the last one. */
 function longEngineLog(after: readonly string[]): string {
@@ -125459,46 +125465,7 @@ function longEngineLog(after: readonly string[]): string {
   return cannedRun([...body, ...after], 'PASSED', LONG_LOG_CASES);
 }
 
-/**
- * A project_test run whose engine log passes the limit is judged from the log's start and end, as
- * gdharness test judges it, and says how much was left out.
- */
-function testAnEngineLogPastTheLimitIsJudgedFromItsKeptParts(): void {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-log-'));
-  try {
-    const log = join(scratch, 'engine.log');
-    const whole = longEngineLog([]);
-    writeFileSync(log, whole);
-    const size = Buffer.byteLength(whole);
-    assert.ok(size > LONG_LOG_LIMIT, `the fixture passes the limit: ${String(size)} bytes`);
-    const judged = readEngineLog(log, [], LONG_LOG_LIMIT);
-    assert.deepEqual(judged, withNestedErrors(readRun(readLog(log, LONG_LOG_LIMIT)), []));
-    const said = judged.lines.filter((line) => line.startsWith('[gdharness: '));
-    assert.equal(said.length, 1, 'one line says part of the log was not read');
-    assert.match(
-      said[0] ?? '',
-      new RegExp(
-        `^\\[gdharness: \\d+ bytes of this ${String(size)}-byte log were not read, since at most ${String(LONG_LOG_LIMIT)} are\\]$`,
-      ),
-    );
-    const cases = judged.suites.get(S_TEST)?.cases.map((one) => one.name) ?? [];
-    assert.equal(cases[0], 'test_00', 'the start is kept');
-    assert.equal(cases.at(-1), `test_${String(LONG_LOG_CASES - 1)}`, 'the end is kept');
-    assert.ok(cases.length < LONG_LOG_CASES, `the middle is not read: ${String(cases.length)} cases`);
-    assert.equal(judged.executed, LONG_LOG_CASES, 'the closing summary is read');
-    assert.equal(judged.engineVersion, '4.7.2.stable.official');
-    assert.deepEqual(
-      judged.errors.map((one) => one.text),
-      [],
-      'an error printed in the part left out is not read',
-    );
-    assert.equal(judged.suites.get(S_TEST)?.closed?.verdict, 'PASSED');
-  } finally {
-    sweep(scratch);
-  }
-}
-
-/** A log within the limit is judged as the whole file read as text, nested errors from the streams included. */
+/** A log is judged as the whole file read as text, nested errors from the streams included. */
 function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-short-log-'));
   try {
@@ -125515,58 +125482,20 @@ function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
       },
       { index: 1, severity: 'error', source: 'stderr', text: 'Stack overflow', detail: [] },
     ];
-    const limit = Buffer.byteLength(whole);
     assert.deepEqual(
-      readEngineLog(log, piped, limit),
+      readEngineLog(log, piped),
       withNestedErrors(readRun(whole), piped),
-      'a log of exactly the limit is read whole',
+      'a log read at once is read whole',
     );
-    assert.deepEqual(readEngineLog(log, [], limit + 1), readRun(whole));
+    assert.deepEqual(readEngineLog(log, [], 97), readRun(whole), 'and so is one read in pieces');
     assert.ok(
-      !readEngineLog(log, [], limit).lines.some((line) => line.startsWith('[gdharness: ')),
-      'and says nothing was left out',
+      !readEngineLog(log, []).lines.some((line) => line.startsWith('[gdharness: ')),
+      'and nothing says part of it was left out',
     );
     assert.deepEqual(
-      readEngineLog(join(scratch, 'missing.log'), [], limit),
+      readEngineLog(join(scratch, 'missing.log'), []),
       readRun(''),
       'a log never written is an empty run',
-    );
-  } finally {
-    sweep(scratch);
-  }
-}
-
-/** An engine error printed near the end of a log past the limit is judged, with the suite and case it came in. */
-function testAnEngineErrorInTheKeptTailOfALongLogIsNamed(): void {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-log-error-'));
-  try {
-    const log = join(scratch, 'engine.log');
-    writeFileSync(log, longEngineLog(['ERROR: boom in the tail']));
-    const judged = readEngineLog(log, [], LONG_LOG_LIMIT);
-    assert.deepEqual(
-      judged.errors.map((one) => ({ text: one.text, suite: one.suite, warning: one.warning })),
-      [{ text: 'boom in the tail', suite: S_TEST, warning: false }],
-    );
-    const verdict = judgeEngine(
-      judged,
-      {
-        suites: [
-          {
-            path: S_TEST,
-            cases: Array.from(
-              { length: LONG_LOG_CASES },
-              (_, index) => `test_${String(index).padStart(2, '0')}`,
-            ),
-          },
-        ],
-        expected: { errors: {}, warnings: {} },
-      },
-      { code: 0, signal: null, ended: null },
-    );
-    assert.equal(verdict.passed, false, JSON.stringify(verdict));
-    assert.ok(
-      verdict.faults.some((fault) => fault.includes('boom in the tail')),
-      `the error is named: ${JSON.stringify(verdict.faults)}`,
     );
   } finally {
     sweep(scratch);
@@ -125620,6 +125549,377 @@ function testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader(): void {
   } finally {
     sweep(scratch);
   }
+}
+
+/** A run of ten suites, each case printing a line between its start and its end. */
+function tenSuitesPrinted(): { text: string; suites: { path: string; cases: string[] }[] } {
+  const suites = Array.from({ length: 10 }, (_suite, at) => ({
+    path: `res://tests/s${String(at)}_test.gd`,
+    cases: Array.from({ length: 20 }, (_, index) => `test_${String(index).padStart(2, '0')}`),
+  }));
+  const lines = ['Godot Engine v4.7.2.stable.official - https://godotengine.org'];
+  for (const suite of suites) {
+    lines.push(
+      `\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m\u001b[38;2;250;235;215m${suite.path}\u001b[0m`,
+    );
+    for (const name of suite.cases) {
+      lines.push(
+        caseLine(suite.path, name, 'STARTED'),
+        `frame of ${name}`,
+        caseLine(suite.path, name, 'PASSED', '5ms'),
+      );
+    }
+    lines.push(
+      `\u001b[38;2;30;144;255mStatistics:\u001b[0m 20 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 1s 30ms`,
+    );
+  }
+  lines.push('', 'Executed test suites: (10/10)', 'Executed test cases : (200/200)', ' Exit code: 0');
+  return { text: lines.join('\r\n'), suites };
+}
+
+/** One suite whose middle case prints two hundred lines, with an engine error in the middle of them. */
+function errorInTheMiddlePrinted(): string {
+  const lines = [
+    'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+    `Run Test Suite: ${S_TEST}`,
+    caseLine(S_TEST, 'test_a', 'STARTED'),
+    caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+    caseLine(S_TEST, 'test_b', 'STARTED'),
+  ];
+  for (let at = 0; at < 200; at += 1) {
+    lines.push(`frame ${String(at).padStart(3, '0')} position (1.0, 2.0)`);
+    if (at === 100) {
+      lines.push(
+        'ERROR: only failure in the middle',
+        '   at: push_error (core/variant/variant_utility.cpp:1024)',
+      );
+    }
+  }
+  lines.push(caseLine(S_TEST, 'test_b', 'PASSED', '900ms'), caseLine(S_TEST, 'test_c', 'STARTED'));
+  lines.push(caseLine(S_TEST, 'test_c', 'PASSED', '5ms'), ' Exit code: 0');
+  return lines.join('\r\n');
+}
+
+/**
+ * project_test reads its engine's log whole, a piece at a time, and judges it as the text read at
+ * once would be judged, however the pieces cut its lines, characters and colour codes. A ten-suite
+ * run that passed passes, an error no suite declared fails, and the same error declared passes.
+ */
+function testAnEngineLogReadInPiecesIsJudgedAsItsWholeText(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-log-pieces-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    const ten = tenSuitesPrinted();
+    const middle = errorInTheMiddlePrinted();
+    const awkward = Buffer.concat([
+      Buffer.from('﻿Godot Engine v4.7.2.stable.official - https://godotengine.org\r\n'),
+      Buffer.from(`\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m${S_TEST}\r\n`),
+      Buffer.from('café \u{1F600} \u001b[1mbold\u001b[0m\r\r\nlone\rcarriage\n\r\n\n'),
+      Buffer.from([0xff, 0xfe, 0x0a, 0x41, 0xe2, 0x82, 0x0a]),
+      Buffer.from('ERROR: Failed decoding WebP image.\r\n   at: _webp_unpack (image.cpp:1)\r\n'),
+      Buffer.from([0x42, 0xf0, 0x9f]),
+    ]);
+    for (const [name, bytes] of [
+      ['ten suites', Buffer.from(ten.text)],
+      ['an error in the middle', Buffer.from(middle)],
+      ['awkward bytes', awkward],
+    ] as const) {
+      writeFileSync(log, bytes);
+      const whole = withNestedErrors(readRun(readFileSync(log, 'utf8')), []);
+      for (const chunk of [1, 2, 3, 7, 64, 4096, undefined]) {
+        assert.deepEqual(
+          readEngineLog(log, [], chunk),
+          whole,
+          `${name} read ${String(chunk ?? 'at once')} at a time`,
+        );
+      }
+    }
+    assert.deepEqual(
+      readEngineLog(log, [], 1).starved,
+      ['ERROR: Failed decoding WebP image.\n   at: _webp_unpack'],
+      'a starved decode is read across its two lines',
+    );
+
+    writeFileSync(log, ten.text);
+    const passing = readEngineLog(log, [], 5);
+    assert.deepEqual(
+      ten.suites.map((suite) => {
+        const ran = passing.suites.get(suite.path);
+        return [ran?.closed?.verdict, ran?.cases.map((one) => one.name)];
+      }),
+      ten.suites.map((suite) => ['PASSED', suite.cases]),
+    );
+    const none = { errors: {}, warnings: {} };
+    const clean = unexpectedErrors(passing, none, [...passing.suites.keys()]);
+    assert.deepEqual([clean.printed, clean.neverPrinted], [[], []], 'the ten-suite run passes');
+
+    writeFileSync(log, middle);
+    const erring = readEngineLog(log, [], 5);
+    const undeclared = unexpectedErrors(erring, none, [S_TEST]);
+    assert.deepEqual(
+      undeclared.printed.map((one) => [one.text, one.suite, one.during]),
+      [['only failure in the middle', S_TEST, 'test_b']],
+      'an error no suite declared fails the run',
+    );
+    const declared = unexpectedErrors(
+      erring,
+      { errors: { [S_TEST]: { test_b: ['only failure in the middle'] } }, warnings: {} },
+      [S_TEST],
+    );
+    assert.deepEqual([declared.printed, declared.neverPrinted], [[], []], 'and passes it once declared');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * The cuts at each suite's line are found however the bytes arrive, so what the running suite has
+ * printed is counted from its own line, and the texts cut there join back into the whole console.
+ */
+function testTheSuiteCutsFindEverySuiteHoweverTheBytesArrive(): void {
+  const { text: printed, suites } = tenSuitesPrinted();
+  const long = `${'y'.repeat(70 * 1024)} Run Test Suite: res://tests/hidden_test.gd\r\n`;
+  const whole = Buffer.from(`${printed}\r\n${long}café \u{1F600}\r\n`);
+  const expected: number[] = [];
+  for (let at = whole.indexOf('Run Test Suite:'); at >= 0; at = whole.indexOf('Run Test Suite:', at + 1)) {
+    expected.push(whole.lastIndexOf(0x0a, at) + 1);
+  }
+  for (const size of [1, 2, 5, 13, 4096, whole.length]) {
+    const chunks: Buffer[] = [];
+    for (let at = 0; at < whole.length; at += size) {
+      chunks.push(whole.subarray(at, at + size));
+    }
+    const cuts = new SuiteCuts();
+    for (const chunk of chunks) {
+      cuts.take(chunk);
+    }
+    const said = `read ${String(size)} at a time`;
+    assert.deepEqual(
+      cuts.cuts,
+      expected.slice(0, suites.length),
+      `${said}: a line too long to keep opens none`,
+    );
+    assert.equal(cuts.suite, suites.at(-1)?.path, said);
+    assert.equal(cuts.printed, whole.length - (expected[suites.length - 1] ?? 0), said);
+    const texts = textsCutAt(chunks, cuts.cuts);
+    assert.equal(texts.length, suites.length + 1, said);
+    assert.equal(texts.join(''), whole.toString('utf8'), `${said}: the texts join into the console`);
+    assert.ok(
+      texts[1]?.includes(`Run Test Suite: \u001b[0m\u001b[38;2;250;235;215m${suites[0]?.path ?? ''}`),
+      said,
+    );
+  }
+}
+
+/** The limit a test run's log is held to here, far below the real one. */
+const CHATTY_LIMIT = 300_000;
+
+let chattyEngineBuilt: string | null = null;
+
+/**
+ * A stand-in engine for project_test. It answers an operation with an empty class list. As a test
+ * run it opens each suite of GDH_SUITES (`path:bytes`, comma separated) and prints that many bytes
+ * in it, into its --log-file with GDH_PRINT_TO=log, on its console with stdout, and both with both.
+ * It ends itself after 15 s.
+ */
+function chattyEngine(): string {
+  if (chattyEngineBuilt !== null) {
+    return chattyEngineBuilt;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chatty-engine-'));
+  const source = join(directory, 'chatty.ts');
+  const program = join(directory, process.platform === 'win32' ? 'godot-chatty.exe' : 'godot-chatty');
+  writeFileSync(
+    source,
+    [
+      "import { appendFileSync, writeFileSync } from 'node:fs';",
+      'const args = process.argv.slice(2);',
+      "if (args.includes('--version')) {",
+      "  process.stdout.write('4.7.2.stable.official.ed1daf0bf\\n');",
+      '  process.exit(0);',
+      '}',
+      "const fileAt = args.findIndex((one) => one.startsWith('@file:'));",
+      'if (fileAt >= 0) {',
+      '  writeFileSync(args[fileAt + 1] ?? \'\', \'{"added":[],"removed":[],"changed":[]}\');',
+      '  process.exit(0);',
+      '}',
+      "const logAt = args.indexOf('--log-file');",
+      'const log = logAt >= 0 ? args[logAt + 1] : undefined;',
+      "const to = process.env['GDH_PRINT_TO'] ?? 'both';",
+      'const say = (text: string): void => {',
+      "  if (to !== 'log') {",
+      '    process.stdout.write(text);',
+      '  }',
+      "  if (to !== 'stdout' && log !== undefined) {",
+      '    appendFileSync(log, text);',
+      '  }',
+      '};',
+      'setTimeout(() => process.exit(3), 15_000).unref();',
+      "const line = 'x'.repeat(1023) + '\\n';",
+      'const block = line.repeat(16);',
+      "say('Godot Engine v4.7.2.stable.official - https://godotengine.org\\n');",
+      "for (const one of (process.env['GDH_SUITES'] ?? '').split(',')) {",
+      "  const at = one.lastIndexOf(':');",
+      "  say('Run Test Suite: ' + one.slice(0, at) + '\\n');",
+      '  for (let left = Number(one.slice(at + 1)); left > 0; left -= block.length) {',
+      '    say(left >= block.length ? block : line.repeat(Math.ceil(left / line.length)));',
+      '    await new Promise((settle) => setTimeout(settle, 5));',
+      '  }',
+      "  say('Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 1s 30ms\\n');",
+      '}',
+      'process.exit(0);',
+      '',
+    ].join('\n'),
+  );
+  const built = spawnSyncHidden(process.execPath, ['build', '--compile', source, '--outfile', program], {
+    encoding: 'utf8',
+  });
+  assert.equal(built.status, 0, `the chatty engine is compiled: ${built.stdout}${built.stderr}`);
+  process.once('exit', () => {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A stand-in still running holds its file, so the folder is left for the temp sweep.
+    }
+  });
+  chattyEngineBuilt = program;
+  return program;
+}
+
+const CHATTY_A = 'res://tests/a_test.gd';
+const CHATTY_B = 'res://tests/b_test.gd';
+const CHATTY_C = 'res://tests/c_test.gd';
+
+/** project_test's answer for a run of {@link chattyEngine} over [param suites], printing to [param to]. */
+async function aRunOfTheChattyEngine(suites: string, to: 'log' | 'stdout' | 'both'): Promise<unknown> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chatty-'));
+  try {
+    writeTree(project, {
+      'project.godot': '; Engine configuration file.\nconfig_version=5\n',
+      'addons/gdUnit4/plugin.cfg': '[plugin]\nname="gdUnit4"\nversion="6.0.0"\n',
+      'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends SceneTree\n',
+      ...Object.fromEntries(
+        [CHATTY_A, CHATTY_B, CHATTY_C].map((path) => [
+          path.slice('res://'.length),
+          'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
+        ]),
+      ),
+    });
+    let answer: unknown;
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+      },
+      {
+        GODOT_PATH: chattyEngine(),
+        GDHARNESS_LOG_LIMIT_BYTES: String(CHATTY_LIMIT),
+        GDH_SUITES: suites,
+        GDH_PRINT_TO: to,
+      },
+    );
+    return answer;
+  } finally {
+    sweep(project);
+  }
+}
+
+/** What a run whose second suite prints past {@link CHATTY_LIMIT} is ended with, by either tool. */
+const CHATTY_ENDED =
+  'the engine printed more than the 300000 bytes a log may hold while running res://tests/b_test.gd, so it was ended';
+
+/**
+ * A project_test run whose suite prints past the limit a log may hold into its log is ended within
+ * seconds, and fails with the sentence gdharness test ends such an engine with, naming the suite.
+ */
+async function testATestRunWhoseSuitePrintsPastTheLimitIsEnded(): Promise<void> {
+  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:1000000000`, 'log');
+  assert.deepEqual(
+    [get(answer, 'passed'), get(answer, 'verdict'), get(answer, 'exitCode'), get(answer, 'tests')],
+    [false, CHATTY_ENDED, null, 0],
+    JSON.stringify(answer),
+  );
+  const engineMs = Number(get(answer, 'tookMsBy', 'engine'));
+  assert.ok(engineMs < 8000, `ended within seconds of passing the limit: ${String(engineMs)} ms`);
+}
+
+/** gdharness test ends the same engine printing past the limit with the same sentence. */
+async function testGdharnessTestEndsTheSameEngineWithTheSameSentence(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-chatty-test-'));
+  const kept = {
+    limit: process.env['GDHARNESS_LOG_LIMIT_BYTES'],
+    suites: process.env['GDH_SUITES'],
+    to: process.env['GDH_PRINT_TO'],
+  };
+  process.env['GDHARNESS_LOG_LIMIT_BYTES'] = String(CHATTY_LIMIT);
+  process.env['GDH_SUITES'] = `${CHATTY_A}:100000,${CHATTY_B}:1000000000`;
+  process.env['GDH_PRINT_TO'] = 'stdout';
+  try {
+    const launch = {
+      godotPath: chattyEngine(),
+      projectPath: scratch,
+      deadlineSeconds: 60,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const run = join(scratch, 'run');
+    mkdirSync(run);
+    const end = await watchedEngine(
+      launch,
+      join(scratch, '0.lock'),
+      ['-s'],
+      run,
+      join(run, 'engine.log'),
+      30,
+    );
+    assert.equal(end.ended, CHATTY_ENDED, JSON.stringify(end));
+  } finally {
+    for (const [name, value] of [
+      ['GDHARNESS_LOG_LIMIT_BYTES', kept.limit],
+      ['GDH_SUITES', kept.suites],
+      ['GDH_PRINT_TO', kept.to],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+    sweep(scratch);
+  }
+}
+
+/**
+ * A project_test run whose suites each print under the limit and together pass it is not ended,
+ * since the limit counts from each suite's start, and every suite is answered as finished.
+ */
+async function testATestRunWhoseSuitesTogetherPassTheLimitIsJudgedWhole(): Promise<void> {
+  // Each under the limit, the three together past it.
+  const each = CHATTY_LIMIT - 50_000;
+  const answer = await aRunOfTheChattyEngine(
+    [CHATTY_A, CHATTY_B, CHATTY_C].map((path) => `${path}:${String(each)}`).join(','),
+    'both',
+  );
+  assert.deepEqual(
+    [get(answer, 'passed'), get(answer, 'verdict'), get(answer, 'suitesFinished'), get(answer, 'exitCode')],
+    [false, 'passed', [CHATTY_A, CHATTY_B, CHATTY_C], 0],
+    `no report is written, and nothing ended the engine: ${JSON.stringify(answer)}`,
+  );
+}
+
+/** A project_test run printing past the limit on its console alone is ended with the same sentence. */
+async function testATestRunPrintingPastTheLimitOnItsConsoleIsEnded(): Promise<void> {
+  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:100000,${CHATTY_B}:1000000000`, 'stdout');
+  assert.deepEqual(
+    [get(answer, 'passed'), get(answer, 'verdict'), get(answer, 'suitesFinished'), get(answer, 'exitCode')],
+    [false, CHATTY_ENDED, [CHATTY_A], null],
+    JSON.stringify(answer),
+  );
 }
 
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */
