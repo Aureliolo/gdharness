@@ -231,7 +231,6 @@ import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
   failedCases,
   failedWithin,
-  finishesASuite,
   ignoredForTheRunner,
   ignoredLeftOutAt,
   ignoredYetRan,
@@ -482,7 +481,13 @@ import {
   withNotRun,
   withNotSuites,
 } from './test-split.js';
-import { DISTINCT_KEPT, type RepeatedError, ScriptErrorRepeats, TestRunTally } from './test-tally.js';
+import {
+  DISTINCT_KEPT,
+  progressRead,
+  type RepeatedError,
+  ScriptErrorRepeats,
+  TestRunTally,
+} from './test-tally.js';
 import {
   asParams,
   type OperationParams,
@@ -10262,22 +10267,16 @@ export class GodotServer {
     let read = 0;
     let lastSent = began;
     const ticker = setInterval(() => {
-      // What the log let go was read by the tally, and what it still holds is read on from there.
-      const suites = tally.suites.copy();
-      const entries = log.all;
-      for (const entry of entries) {
-        suites.take(entry.text);
-      }
-      const from = log.retiredCount;
-      const finishedOne = entries.slice(Math.max(0, read - from)).some((entry) => finishesASuite(entry.text));
-      read = from + entries.length;
+      const looked = progressRead(log, tally, read);
+      const { suites, finishedOne } = looked;
+      read = looked.read;
       const now = Date.now();
       if (!finishedOne && now - lastSent < heartbeatMs()) {
         return;
       }
       lastSent = now;
       // Whole seconds, from ticks at least a second apart, so each is more than the last.
-      progress(Math.floor((now - began) / 1000), testProgressMessage(suites.result(), now - began));
+      progress(Math.floor((now - began) / 1000), testProgressMessage(suites, now - began));
     }, 1000);
     ticker.unref();
     return ticker;

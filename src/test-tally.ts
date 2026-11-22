@@ -9,14 +9,16 @@
 
 import { autoloadNotCompiled } from './autoload-failure.js';
 import { EXIT_LEAK, HeldAtExitRead, WalkRead } from './engine-leaks.js';
-import { answersTo, type FoldedEntry, FoldedRepeats, type LogEntry } from './game-log.js';
+import { answersTo, type FoldedEntry, FoldedRepeats, type GameLog, type LogEntry } from './game-log.js';
 import {
   DiscoveryRead,
+  finishesASuite,
   HookFailuresRead,
   NoReportRead,
   OrphansRead,
   RowsIgnoredRead,
   type ScriptError,
+  type SuitesPrinted,
   SuitesRead,
 } from './junit.js';
 import { owned } from './log-read.js';
@@ -335,4 +337,27 @@ export class TestRunTally {
       .map(([list, leftOut]) => ({ list, leftOut }))
       .toSorted((a, b) => (a.list < b.list ? -1 : a.list > b.list ? 1 : 0));
   }
+}
+
+/**
+ * What a test run's progress reads off [param log] while it fills: the suites printed so far, and
+ * whether one finished at or past position [param read]. [param tally] has read what the log let
+ * go, and what it still holds is read on from there. The `read` returned is the next look's.
+ */
+export function progressRead(
+  log: GameLog,
+  tally: TestRunTally,
+  read: number,
+): { suites: SuitesPrinted; finishedOne: boolean; read: number } {
+  const suites = tally.suites.copy();
+  const entries = log.all;
+  for (const entry of entries) {
+    suites.take(entry.text);
+  }
+  const from = log.retiredCount;
+  return {
+    suites: suites.result(),
+    finishedOne: entries.slice(Math.max(0, read - from)).some((entry) => finishesASuite(entry.text)),
+    read: from + entries.length,
+  };
 }

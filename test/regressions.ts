@@ -877,7 +877,7 @@ import {
   unmatchedSaid,
   withNotSuites,
 } from '../src/test-split.js';
-import { DISTINCT_KEPT, TestRunTally } from '../src/test-tally.js';
+import { DISTINCT_KEPT, progressRead, TestRunTally } from '../src/test-tally.js';
 import type { OperationParams } from '../src/tool-args.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -133291,6 +133291,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnreportedRunsEntriesAreCountedOverEveryLine,
   testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut,
   testPrintedCappedNamesTheUncaughtErrorsLeftOut,
+  testWhatTheEngineHeldAtExitNamesTheProjectsOwnFirst,
+  testATestRunsProgressCountsTheSuitesItsLogLetGo,
   testTwoWorktreesStartBesideEachOther,
   testOneProjectStartedWithTwoSavesFoldersGoesBeside,
   testAStartOfTheSamePlaceEndsOnlyThatRun,
@@ -134755,6 +134757,92 @@ async function testPrintedCappedNamesTheUncaughtErrorsLeftOut(): Promise<void> {
     });
     assert.equal(get(answer, 'printedCapped'), said, JSON.stringify(answer).slice(0, 3000));
   }
+}
+
+/**
+ * The engine's sentence on what it held at exit names the project's own resources before its
+ * addons', whichever it printed first, and counts every one past those it names.
+ */
+function testWhatTheEngineHeldAtExitNamesTheProjectsOwnFirst(): void {
+  const inUse = (folder: string, count: number): string[] =>
+    Array.from({ length: count }, (_line, n) => `Resource still in use: res://${folder}/r${String(n)}.tres (Resource)`);
+  const lines = [
+    ...inUse('addons/kit', 12),
+    'Leaked instance: Node:123 - Node name: one',
+    ...inUse('own', 3),
+    'Leaked instance: RefCounted:9',
+    'Leaked instance: Node:124 - Node name: two',
+    ...inUse('more', 9),
+  ];
+  const named = (folder: string, many: number): string =>
+    Array.from({ length: many }, (_name, n) => `res://${folder}/r${String(n)}.tres`).join(', ');
+  const expected =
+    'The engine named them: objects left alive: 2 Node, 1 RefCounted; resources still in use: ' +
+    `${named('own', 3)}, ${named('more', 5)}, and 16 more.`;
+  const said = heldAtExit(lines) ?? '';
+  assert.equal(said.slice(0, expected.length), expected, said);
+  assert.ok(said.length > expected.length, `the RefCounted sentence follows: ${said}`);
+  assert.equal(
+    heldAtExit(inUse('addons/kit', 3)),
+    `The engine named them: resources still in use: ${named('addons/kit', 3)}.`,
+  );
+}
+
+/**
+ * A test run's progress, read while its log is kept to a bound, counts every suite finished and
+ * notices each newly finished one, as a reading of the whole log does, also once the log has let
+ * go of the suites it counts.
+ */
+function testATestRunsProgressCountsTheSuitesItsLogLetGo(): void {
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: () => false,
+  });
+  const bounded = new GameLog({
+    most: 10,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  const whole = new GameLog();
+  const aSuite = (n: number): string => {
+    const failing = n % 3 === 0;
+    return [
+      `Run Test Suite: res://tests/s${String(n)}_test.gd`,
+      ...Array.from({ length: 15 }, (_line, at) => `print ${String(n)} ${String(at)}`),
+      `Statistics: 1 test cases | 0 errors | ${failing ? 1 : 0} failures | 0 flaky | 0 skipped | 0 orphans | ${failing ? 'FAILED' : 'PASSED'} 1ms`,
+      '',
+    ].join('\n');
+  };
+  let read = 0;
+  let wholeRead = 0;
+  const looks: unknown[] = [];
+  const expected: unknown[] = [];
+  for (let n = 0; n < 12; n += 1) {
+    const chunks = [aSuite(n), ...(n % 4 === 1 ? [`Run Test Suite: res://tests/x${String(n)}_test.gd\nquiet\n`] : [])];
+    for (const chunk of chunks) {
+      bounded.append('stdout', chunk);
+      whole.append('stdout', chunk);
+    }
+    const looked = progressRead(bounded, tally, read);
+    read = looked.read;
+    looks.push({ suites: looked.suites, finishedOne: looked.finishedOne });
+    const entries = whole.all;
+    expected.push({
+      suites: suitesPrinted(entries.map((entry) => entry.text)),
+      finishedOne: entries.slice(wholeRead).some((entry) => finishesASuite(entry.text)),
+    });
+    wholeRead = entries.length;
+    const again = progressRead(bounded, tally, read);
+    read = again.read;
+    looks.push({ finishedOne: again.finishedOne });
+    expected.push({ finishedOne: false });
+  }
+  assert.ok(bounded.retiredCount > 150, `the log let suites go: ${String(bounded.retiredCount)}`);
+  assert.deepEqual(looks, expected);
 }
 
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */
