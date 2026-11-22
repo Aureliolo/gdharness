@@ -615,6 +615,44 @@ export function parseJUnit(xml: string): TestReport {
   };
 }
 
+/**
+ * [param report] with each case that [param printedPassing] says the console printed passing read as
+ * passed. gdUnit4 decides a case's state from its last attempt, and its report keeps the failures of
+ * the attempts before, so the report's failure is not the case's. [param report] itself when no case
+ * is one.
+ */
+export function withPrintedPassesSettled(
+  report: TestReport,
+  printedPassing: (path: string | null, name: string) => boolean,
+): TestReport {
+  const settles = (path: string | null, entry: TestCase): boolean =>
+    (entry.status === 'failed' || entry.status === 'error') && printedPassing(path, entry.name);
+  if (!report.suites.some((suite) => suite.cases.some((entry) => settles(suite.path, entry)))) {
+    return report;
+  }
+  const suites = report.suites.map((suite): TestSuite => {
+    const cases = suite.cases.map(
+      (entry): TestCase =>
+        settles(suite.path, entry)
+          ? { ...entry, status: 'passed', message: null, detail: null, reports: [] }
+          : entry,
+    );
+    return {
+      ...suite,
+      cases,
+      failures: cases.filter(failedAnAssertion).length,
+      errors: cases.filter((entry) => entry.status === 'error').length,
+    };
+  });
+  const all = suites.flatMap((suite) => suite.cases);
+  return {
+    ...report,
+    failures: all.filter(failedAnAssertion).length,
+    errors: all.filter((entry) => entry.status === 'error').length,
+    suites,
+  };
+}
+
 /** A hook's failure as the runner printed it, which is the only place its message is. */
 interface HookFailure {
   /** The hook, `before` or `after`. */

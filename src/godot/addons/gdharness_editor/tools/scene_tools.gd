@@ -402,7 +402,7 @@ func _write_added(
 	if not unwritten.is_empty():
 		unwritten = GdhHeadlessCheck.setter_ran(new_node, _properties.unheld, unwritten)
 	if unwritten.is_empty():
-		unwritten = GdhGroups.change(scene, new_node, adding, [])
+		unwritten = GdhGroups.change(scene, new_node, adding, [], new_node.name)
 	return unwritten
 
 
@@ -1780,6 +1780,7 @@ func _apply_instance_modes(
 func _set_and_group(
 	scene: GdhSceneFile, node: Node, properties: Dictionary, groups: Array
 ) -> String:
+	var called: String = node.name
 	scene.asked(node, properties.keys())
 	var refused_property: String = _properties.write_all(node, properties)
 	scene.asked(node, _properties.moved_by_engine.keys())
@@ -1789,7 +1790,7 @@ func _set_and_group(
 		)
 	var adding: Array = groups[0]
 	var removing: Array = groups[1]
-	return GdhGroups.change(scene, node, adding, removing)
+	return GdhGroups.change(scene, node, adding, removing, called)
 
 
 ## What [param node] holds for each of [param properties] the call set, as the answer gives it.
@@ -1888,7 +1889,7 @@ func _unset_on(
 	reverted: Dictionary,
 	followed: Array[String],
 ) -> String:
-	var at: String = scene.path_of(node)
+	var at: String = scene.filed_path(node)
 	var places: Array[Array] = []
 	for path: String in paths:
 		var place: Array = GdhUnset.place_of(node, path, given)
@@ -1922,8 +1923,8 @@ func _unset_on(
 		places.append([resource, leaf, GdhUnset.resource_default(resource, leaf)])
 	scene.asked(node, paths)
 	for place: Array in places:
-		var holder: Object = place[0]
-		holder.set(str(place[1]), place[2])
+		var held_by: Object = place[0]
+		GdhUnset.take_back(held_by, str(place[1]), place[2])
 	for path: String in paths:
 		reverted[path] = _readable(node, _properties.read_at(node, path))
 	return ""

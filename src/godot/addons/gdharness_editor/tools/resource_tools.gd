@@ -531,8 +531,8 @@ func _unset_on(
 			return GdhUnset.not_stored(asked, leaf, path, lines)
 		places.append([holder, leaf, GdhUnset.resource_default(holder, leaf)])
 	for place: Array in places:
-		var holder: Resource = place[0]
-		holder.set(str(place[1]), place[2])
+		var held_by: Object = place[0]
+		GdhUnset.take_back(held_by, str(place[1]), place[2])
 	return ""
 
 

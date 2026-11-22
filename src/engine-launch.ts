@@ -34,9 +34,20 @@ import {
   helperStep,
   spawnOnDesktop,
 } from './desktop.js';
+import {
+  type Ceiling,
+  ceilingFor,
+  type EngineGuard,
+  engineMemory,
+  engineNeed,
+  gigabytes,
+  MEMORY_PER_ENGINE,
+  memoryEndedSaid,
+  startRefusedSaid,
+} from './engine-memory.js';
 import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
-import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
+import { nameSlotEngineOf, onTheSlot, raiseSlotMemory, reservedMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -47,6 +58,7 @@ import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal, priorityOf } from './priority.js';
 import { askProcessTable } from './process-table.js';
+import { type PeakTool, readEnginePeaks } from './run-record.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { diedAsItStarted, linesAsPrinted } from './start-race.js';
 import { type EngineEnd, type RunPrinted, readRun, SuiteCuts } from './suite-judge.js';
@@ -63,7 +75,9 @@ export const WINDOWS_EXCEPTION = 0xc0000000;
  * for its suites.
  */
 const MEMORY_KEPT = 4 * 1024 ** 3;
-export const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
+
+export { MEMORY_PER_ENGINE };
+
 const LOOK_MS = 500;
 
 /** How long Windows is given to say how much it can still commit, on a machine the run may load. */
@@ -212,8 +226,7 @@ export function heldRunSaid(directory: string): string {
   return `left ${directory}, which another process holds, such as an engine of that run still going`;
 }
 
-/** [param bytes] as gigabytes to one decimal place. */
-export const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+export { gigabytes };
 
 /**
  * How many of the [param most] engines asked for the machine has room for, given its [param
@@ -277,6 +290,27 @@ export async function memoryAvailable(): Promise<MemoryRoom> {
     return lessReserved({ bytes: (totalmem() * level) / 100, said: 'of memory free' }, reserved);
   }
   return memoryRoomOf(freemem(), await windowsCommitLeft(), reserved);
+}
+
+/**
+ * Why an engine of [param tool] for [param project] is not started, or null: what the project's last
+ * engine of that tool held (at most [param ceiling]) is more than the machine has left past what it
+ * keeps and what other work has reserved. A project with no peak above the flat
+ * figure is never refused, since that figure is an estimate and the machine's free memory alone
+ * says nothing against it.
+ */
+export async function memoryRefusal(
+  project: string,
+  tool: PeakTool,
+  ceiling: Ceiling,
+  room: () => Promise<MemoryRoom> = memoryAvailable,
+): Promise<string | null> {
+  const need = engineNeed(readEnginePeaks(project)[tool], ceiling.bytes, tool);
+  if (need.bytes <= MEMORY_PER_ENGINE) {
+    return null;
+  }
+  const free = await room();
+  return free.bytes - MEMORY_KEPT >= need.bytes ? null : startRefusedSaid(need, free, MEMORY_KEPT, ceiling);
 }
 
 /**
@@ -393,6 +427,11 @@ export interface EngineLaunch {
   readonly sample?: () => Promise<Sample>;
   /** The lane the engine runs in, counting from 0, which its `lane.json` names. Lane 0 where unset. */
   readonly lane?: number;
+  /**
+   * The name the engine's memory peak is kept under for the project, which the slot lock of the
+   * next engine of that name counts. Kept nowhere where unset.
+   */
+  readonly peakKept?: PeakTool;
 }
 
 /**
@@ -488,6 +527,12 @@ async function engineWatchedOnce(
   holds?: (bytes: number) => void,
   shares?: ShareHandoff,
 ): Promise<EngineEnd> {
+  let ceiling: Ceiling;
+  try {
+    ceiling = ceilingFor(launch.projectPath);
+  } catch (error) {
+    return { code: null, signal: null, ended: errorMessage(error) };
+  }
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
   const output = openSync(log, 'w');
@@ -556,6 +601,8 @@ async function engineWatchedOnce(
       suites: new SuiteCuts(),
       deciding: null,
       failure: undefined,
+      ceiling,
+      guard: undefined,
     };
     while (!finished.now) {
       await delay(LOOK_MS);
@@ -569,6 +616,7 @@ async function engineWatchedOnce(
   } finally {
     closeSync(reading);
     launch.running.delete(stop);
+    watch?.guard?.release();
     const pid = watch?.pid ?? engine;
     if (pid !== undefined) {
       watching(pid, false);
@@ -587,6 +635,24 @@ async function engineWatchedOnce(
     peakBytes: watch.peakBytes,
     priority: watch.priority,
   });
+}
+
+/** Guards the watched engine against its ceiling once its pid is known, ending it past the ceiling. */
+function guardTheEngine(watch: Watch): void {
+  if (watch.pid === undefined || watch.guard !== undefined) {
+    return;
+  }
+  const { peakKept, projectPath } = watch.launch;
+  watch.guard = engineMemory.guard(
+    watch.pid,
+    watch.ceiling,
+    (end) => {
+      watch.outcome.ended ??= memoryEndedSaid(end);
+      watch.started.stop();
+    },
+    peakKept === undefined ? undefined : { project: projectPath, tool: peakKept },
+    (bytes) => raiseSlotMemory(watch.lock, bytes),
+  );
 }
 
 /** The files the hidden desktop's helper leaves, and where it was asked to start the engine. */
@@ -766,6 +832,10 @@ interface Watch {
   deciding: Promise<void> | null;
   /** Why handing over a share failed, thrown once the engine has ended. */
   failure: Error | undefined;
+  /** The most the engine may hold, and where that figure comes from. */
+  readonly ceiling: Ceiling;
+  /** The engine's guard against its ceiling, once its pid is known. */
+  guard: EngineGuard | undefined;
 }
 
 /** One look at the engine: its pid, what it holds, whether it is past a limit and what the log has gained. */
@@ -776,6 +846,8 @@ async function lookAtTheEngine(watch: Watch): Promise<void> {
       foundEngine(watch.lock, watch.pid);
     }
   }
+  // At the first look also for an engine whose pid was known at its start, as off Windows.
+  guardTheEngine(watch);
   if (watch.pid !== undefined) {
     watch.priority = priorityOf(watch.pid) ?? watch.priority;
   }

@@ -878,6 +878,7 @@ async function openedRun(
     },
     undefined,
     options.projectPath,
+    { tool: 'test_lane' },
   );
   const running = new Set<() => void>();
   const interrupted = (): void => {
@@ -904,6 +905,7 @@ async function openedRun(
     verbose: options.verbose,
     engineArgs: options.engineArgs,
     failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
+    peakKept: 'test_lane',
   };
   return { launch, interrupted };
 }

@@ -579,6 +579,58 @@ static func embedded_in(values: Array, found: Dictionary) -> Dictionary:
 	return found
 
 
+## Whether [param state], a scene it inherits or one it instances gives a node a script that is not
+## a tool, which an editor would not have run. [param seen] holds the states already read.
+static func runs_untooled(state: SceneState, seen: Dictionary) -> bool:
+	if state == null or seen.has(state):
+		return false
+	seen[state] = true
+	for index: int in state.get_node_count():
+		for property: int in state.get_node_property_count(index):
+			if (
+				state.get_node_property_name(index, property) == &"script"
+				and untooled(state.get_node_property_value(index, property))
+			):
+				return true
+		var placed: PackedScene = state.get_node_instance(index)
+		if placed != null and runs_untooled(placed.get_state(), seen):
+			return true
+	return runs_untooled(state.get_base_scene_state(), seen)
+
+
+## What each embedded resource the nodes of [param packed] hold stores, as [resource, values], taken
+## before the scene is instanced. Empty in an editor and for a scene none of whose scripts an
+## editor would not run, since what a tool script changes is saved there too. A resource with a
+## script that is not a tool is left out: what it changes is settled against the file's text.
+static func embedded_held(packed: PackedScene) -> Array[Array]:
+	var held: Array[Array] = []
+	var state: SceneState = packed.get_state()
+	if Engine.is_editor_hint() or not runs_untooled(state, {}):
+		return held
+	var values: Array = []
+	for index: int in state.get_node_count():
+		for property: int in state.get_node_property_count(index):
+			values.append(state.get_node_property_value(index, property))
+	var by_id: Dictionary = embedded_in(values, {})
+	for id: Variant in by_id:
+		var resource: Resource = by_id[id]
+		if not untooled(resource.get_script()):
+			held.append([resource, stored(resource)])
+	return held
+
+
+## Sets each embedded resource of [param held] back to what it stored when [method embedded_held]
+## read it, which takes back what the scene's scripts did to it as the scene was instanced.
+static func hold_embedded(held: Array[Array]) -> void:
+	for pair: Array in held:
+		var resource: Resource = pair[0]
+		var values: Dictionary = pair[1]
+		for key: Variant in values:
+			var name: String = str(key)
+			if not GdhSame.same(resource.get(name), values[key]):
+				resource.set(name, values[key])
+
+
 ## Sets [param name] on [param object] back to [param held], the text a file gave it, or to its
 ## default when the file set nothing ([param was_set] false), answering "" or why it cannot be.
 ## A value naming another resource is not read back from text here.

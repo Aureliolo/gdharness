@@ -32,7 +32,10 @@ export interface SlotWaits {
  */
 export interface CallNotes {
   readonly classList: Set<string>;
-  /** What the slot command said of a slot it lost or would not hand on. */
+  /**
+   * What the slot command said of a slot it lost or would not hand on, and that the priority list
+   * of the slots was malformed.
+   */
   readonly slotNotes: Set<string>;
 }
 
@@ -49,11 +52,22 @@ export function callNotesSaid(notes: CallNotes): Record<string, string> {
   };
 }
 
+/**
+ * Whether a call has done what cannot be undone, and whether it was told to do no more before it
+ * did. A server being replaced sets [member refused] on the calls that have not committed, and
+ * the code about to start a game asks [function commitCall] first.
+ */
+export interface CallCommit {
+  committed: boolean;
+  refused: boolean;
+}
+
 interface Call {
   readonly signal: AbortSignal | undefined;
   readonly progress: CallProgress | undefined;
   readonly slotWaits: SlotWaits | undefined;
   readonly notes: CallNotes | undefined;
+  readonly commit: CallCommit | undefined;
 }
 
 const current = new AsyncLocalStorage<Call>();
@@ -86,11 +100,12 @@ export async function withCallSignal<T>(
   still?: StillGoing,
   slotWaits?: SlotWaits,
   notes?: CallNotes,
+  commit?: CallCommit,
 ): Promise<T> {
   if (progress === undefined) {
-    return signal === undefined && slotWaits === undefined && notes === undefined
+    return signal === undefined && slotWaits === undefined && notes === undefined && commit === undefined
       ? await answer()
-      : await current.run({ signal, progress: undefined, slotWaits, notes }, answer);
+      : await current.run({ signal, progress: undefined, slotWaits, notes, commit }, answer);
   }
   const began = Date.now();
   const rising = risingOnly(progress);
@@ -114,7 +129,7 @@ export async function withCallSignal<T>(
   };
   rearm();
   try {
-    return await current.run({ signal, progress: told, slotWaits, notes }, answer);
+    return await current.run({ signal, progress: told, slotWaits, notes, commit }, answer);
   } finally {
     // A ticker of the call's own can still fire once after it has answered.
     going = undefined;
@@ -159,6 +174,22 @@ export async function waitedUnlessAborted(
 /** The signal of the call being answered, or undefined outside one. */
 export function callSignal(): AbortSignal | undefined {
   return current.getStore()?.signal;
+}
+
+/**
+ * Called by the code of the call being answered just before it does what cannot be undone, such as
+ * spawning a game. It throws for a call that was told to do no more, which then does nothing. It
+ * marks any other call as past that point, so its answer says what it did.
+ */
+export function commitCall(): void {
+  const commit = current.getStore()?.commit;
+  if (commit === undefined) {
+    return;
+  }
+  if (commit.refused) {
+    throw new DOMException('The call was stopped before it did anything it could not undo.', 'AbortError');
+  }
+  commit.committed = true;
 }
 
 /** How the call being answered reports progress, or undefined when its client asked for none. */

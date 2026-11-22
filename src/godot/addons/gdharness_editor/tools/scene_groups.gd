@@ -45,8 +45,11 @@ static func asked(args: Dictionary, key: String) -> Array:
 
 
 ## Puts [param node] in each group of [param adding] and takes it out of each of [param removing],
-## or answers why not with nothing changed.
-static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Array) -> String:
+## or answers why not with nothing changed. A refusal names the node [param called], the name it had
+## before the call's own writes, since a refused call renames nothing.
+static func change(
+	scene: GdhSceneFile, node: Node, adding: Array, removing: Array, called: String
+) -> String:
 	for group: Variant in adding + removing:
 		if str(group).strip_edges().is_empty():
 			return (
@@ -56,7 +59,7 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 	for group: Variant in adding:
 		if removing.has(group):
 			return "%s is in both addGroups and removeGroups." % str(group)
-	var at: String = scene.path_of(node)
+	var at: String = scene.filed_path(node)
 	var here: PackedStringArray = scene.groups_at(at)
 	for group: Variant in removing:
 		var name: String = str(group)
@@ -65,7 +68,7 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 			return (
 				"%s is in no group %s. %s."
 				% [
-					node.name,
+					called,
 					name,
 					"It is in " + ", ".join(held) if not held.is_empty() else "It is in none",
 				]
@@ -78,7 +81,7 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 						"%s is in %s, which no scene file puts it in: something puts it there as "
 						+ "it is made, such as its script."
 					)
-					% [node.name, name]
+					% [called, name]
 				)
 			return (
 				(
@@ -86,7 +89,7 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 					+ "out: remove the group in %s, which takes it out in every scene using that "
 					+ "one."
 				)
-				% [node.name, name, from, from]
+				% [called, name, from, from]
 			)
 	for group: Variant in adding:
 		node.add_to_group(str(group), true)

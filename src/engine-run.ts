@@ -22,7 +22,16 @@ import {
   helperPid,
   spawnOnDesktop,
 } from './desktop.js';
-import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
+import { memoryRefusal } from './engine-launch.js';
+import {
+  type Ceiling,
+  ceilingFor,
+  type EngineGuard,
+  engineMemory,
+  type MemoryEnd,
+  memoryEndedSaid,
+} from './engine-memory.js';
+import { inASlot, nameSlotEngineOf, onTheSlot, raiseSlotMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -49,6 +58,10 @@ export interface EngineRun {
   readonly failure: string | null;
   /** How many starts before this one crashed before printing past the banner: see {@link crashedAtStart}. */
   readonly crashedStarts?: number;
+  /** Set when this server ended the engine for holding more than its memory ceiling. */
+  readonly memoryEnd?: MemoryEnd;
+  /** Set when the engine was not started, since the machine has no room for what it needs. */
+  readonly memoryRefused?: true;
 }
 
 export { CONSOLE_CLOSED, ENGINE_STARTS };
@@ -125,7 +138,7 @@ interface RunOptions {
    * neither shows nor takes the keyboard.
    */
   readonly desktop?: { readonly directory: string; readonly scratch: string };
-  /** The project the engine runs for, which gives its slot the store class where its repository has it. */
+  /** The project the engine runs for, which gives its slot a repository, and high priority where the list names it. */
   readonly project?: string;
 }
 
@@ -149,6 +162,17 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
+  let ceiling: Ceiling;
+  try {
+    ceiling = ceilingFor(options.project);
+  } catch (error) {
+    return { log: new GameLog(), exitCode: null, exitSignal: null, failure: errorMessage(error) };
+  }
+  const refused =
+    options.project === undefined ? null : await memoryRefusal(options.project, 'headless', ceiling);
+  if (refused !== null) {
+    return { log: new GameLog(), exitCode: null, exitSignal: null, failure: refused, memoryRefused: true };
+  }
   if (options.desktop !== undefined || process.platform === 'win32') {
     const compiled = await ensureHelperCompiled();
     if (compiled !== null) {
@@ -163,7 +187,11 @@ export async function runEngine(
   try {
     return await inASlot(
       (lock) =>
-        startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
+        startedUntilItRuns(
+          () => runStarted(executable, args, lock, options, signal, ceiling),
+          signal,
+          crashedAtStart,
+        ),
       options.project,
     );
   } catch (error) {
@@ -291,6 +319,17 @@ function desktopFailure(files: HelperFiles | null, log: GameLog, desktop: boolea
 }
 
 /**
+ * The engine's exit code from [param told], the code the process reported. A helper that could not
+ * start the engine exits with a code of its own, which is no engine's.
+ */
+function engineExitCode(files: HelperFiles | null, told: number | null): number | null {
+  if (files === null) {
+    return told;
+  }
+  return helperFailure(files.error) === null ? helperExit(files.exit, told) : null;
+}
+
+/**
  * Settles on `close` rather than `exit`: the streams can still hold the run's last lines when
  * `exit` fires, and those are the lines a verdict is read from. Node emits `close` after a failed
  * start and after an abort as well, so it is the one place every run ends.
@@ -301,6 +340,7 @@ function runStarted(
   lock: string,
   options: RunOptions,
   signal: AbortSignal | undefined,
+  ceiling: Ceiling,
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
@@ -331,8 +371,23 @@ function runStarted(
       log.append('stderr', chunk);
     });
     const state: RunState = { pid: engineAt(), failure: null, closed: false };
+    let guard: EngineGuard | undefined;
+    let memoryEnd: MemoryEnd | undefined;
     const found = (engine: number): void => {
       watching(engine, true);
+      guard ??= engineMemory.guard(
+        engine,
+        ceiling,
+        (end) => {
+          if (state.failure === null) {
+            state.failure = memoryEndedSaid(end);
+            memoryEnd = end;
+          }
+          child.kill();
+        },
+        options.project === undefined ? undefined : { project: options.project, tool: 'headless' },
+        (bytes) => raiseSlotMemory(lock, bytes),
+      );
       if (files !== null) {
         void nameSlotEngineOf(lock, process.pid, engine);
       }
@@ -367,6 +422,7 @@ function runStarted(
     });
     child.on('close', (code, closedBy) => {
       state.closed = true;
+      guard?.release();
       if (state.pid !== undefined) {
         watching(state.pid, false);
       }
@@ -375,15 +431,15 @@ function runStarted(
       const started = child.pid !== undefined;
       const told = started ? whole(code) : null;
       state.failure ??= desktopFailure(files, log, options.desktop !== undefined);
-      // A helper that could not start the engine exits with a code of its own, which is no engine's.
-      const exitCode =
-        files === null ? told : helperFailure(files.error) === null ? helperExit(files.exit, told) : null;
+      // Read before the helper's files are discarded, since they say whether it started the engine.
+      const exitCode = engineExitCode(files, told);
       discard(scratch);
       resolve({
         log,
         exitCode,
         exitSignal: closedBy,
         failure: state.failure,
+        ...(memoryEnd === undefined ? {} : { memoryEnd }),
       });
     });
   });
@@ -404,12 +460,19 @@ export function exitCodeText(code: number | null): string {
   return `exit code 0x${code.toString(16).toUpperCase()}, ${windowsStatusOf(code)?.meaning ?? 'a Windows error status'}`;
 }
 
-/** How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason. */
+/**
+ * How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason.
+ * An engine ended for its memory is said by that reason alone, since the signal it was ended with
+ * is this server's doing.
+ */
 export function howItEnded(
-  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts'> & {
+  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts' | 'memoryEnd'> & {
     readonly log?: GameLog;
   },
 ): string {
+  if (run.memoryEnd !== undefined) {
+    return memoryEndedSaid(run.memoryEnd);
+  }
   if (run.failure !== null) {
     return run.exitSignal === null ? run.failure : `ended by ${run.exitSignal}, because ${run.failure}`;
   }

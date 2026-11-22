@@ -414,6 +414,10 @@ func _check_held(writing: GdhWriting) -> void:
 	var given: Dictionary = writing.given
 	for property: String in given:
 		var held: Variant = read_at(target, property)
+		if _empty_base(writing, property):
+			unheld = property
+			writing.stop(_no_empty_base(target, property, held))
+			return
 		if not GdhSame.same(held, _as_held(target, property, given)):
 			unheld = property
 			if writing.undone_by.has(property):
@@ -445,6 +449,34 @@ func _check_held(writing: GdhWriting) -> void:
 				)
 			)
 			return
+
+
+## Whether [param property] of the call in [param writing] gives a Theme type variation an empty
+## base. The engine refuses one and keeps the base it held, which can be the empty one it was given,
+## so no read-back tells the refusal apart.
+func _empty_base(writing: GdhWriting, property: String) -> bool:
+	var place: Array = GdhPropertyPaths.holder_of(writing.target, property, writing.home)
+	var name: String = place[1]
+	var parts: PackedStringArray = name.split("/")
+	return (
+		place[0] is Theme
+		and parts.size() == 2
+		and parts[1] == "base_type"
+		and str(writing.given[property]).is_empty()
+	)
+
+
+## The refusal for [param property] of [param target], a Theme type variation's base given empty,
+## which holds [param held] after it was set.
+func _no_empty_base(target: Object, property: String, held: Variant) -> String:
+	return (
+		(
+			"%s.%s was given \"\" and holds %s after it was set: the engine takes no empty base. "
+			+ "unset takes a base out, and remove_theme_item without item takes it out with its "
+			+ "type. Nothing was written."
+		)
+		% [GdhPropertyPaths.class_called(target), property, shown(held)]
+	)
 
 
 ## Notes in [param undone_by] each property of [param given] that writing [param written] on
@@ -1082,9 +1114,12 @@ func declaration(target: Object, property: String) -> Dictionary:
 
 ## The entry a Theme would declare for [param property] once it held that item, or {} when the name
 ## is not an item's. A Theme lists only the items it holds and takes any other through set, so an
-## item a read of one theme answered with was refused when written into another that lacked it.
+## item a read of one theme answered with was refused when written into another that lacked it. A
+## type variation's `<type>/base_type` is such an entry too, a StringName.
 static func _theme_item(property: String) -> Dictionary:
 	var parts: PackedStringArray = property.split("/")
+	if parts.size() == 2 and parts[1] == "base_type" and not parts[0].is_empty():
+		return { "name": property, "type": TYPE_STRING_NAME, "usage": PROPERTY_USAGE_DEFAULT }
 	if (
 		parts.size() != 3
 		or parts[0].is_empty()

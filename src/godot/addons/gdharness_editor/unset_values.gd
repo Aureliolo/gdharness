@@ -64,6 +64,16 @@ static func resource_default(resource: Object, name: String) -> Variant:
 	return GdhHeadlessCheck.default_of(resource, name)
 
 
+## Takes [param name] on [param holder] back to [param value], what it holds once no line sets it. A
+## Theme refuses an empty type variation base, so a base is taken out as the engine clears one.
+static func take_back(holder: Object, name: String, value: Variant) -> void:
+	var parts: PackedStringArray = name.split("/")
+	if holder is Theme and parts.size() == 2 and parts[1] == "base_type":
+		(holder as Theme).clear_type_variation(parts[0])
+		return
+	holder.set(name, value)
+
+
 ## The lines [param text], a text scene or resource, holds for [param resource], by name.
 ## [param main] is the file's own resource, or null for a scene.
 static func lines_for(text: String, resource: Resource, main: Resource) -> Dictionary:
