@@ -99757,7 +99757,9 @@ const FED_ROWS = 'res://other/p_test.gd';
  * path beside them that printed nothing is no suite that never started. It failed every such run.
  */
 function testASuiteARunOfNamedCasesLeftOutIsNoSuiteThatNeverStarted(): void {
-  const beside = (selected: ReadonlyArray<{ suite: string; test: string }>): ReturnType<typeof fedRunAnswered> =>
+  const beside = (
+    selected: ReadonlyArray<{ suite: string; test: string }>,
+  ): ReturnType<typeof fedRunAnswered> =>
     fedRunAnswered(
       [
         { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' },
