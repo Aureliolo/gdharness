@@ -454,6 +454,12 @@ Two projects, two harness sessions, two servers and two editors therefore work a
 because the bridge carries a single connection. A start naming another project than the editor's
 runs a game of its own in this server and never asks the editor to play, stop, scan or wait.
 
+One server holds every run it started, in start order. A run's place is its project folder and the
+folder its `user://` is moved to, which is the project's own when `savesIn` names none. A start
+ends the run of its own place and goes beside the runs of other places, each with its own engine
+slot and its own run note. A call about a run names it with `pid`. With one run going the call
+needs none, and with several going it is refused with each run's pid, project and scene.
+
 ### Two servers on one project
 
 Two servers on one project is harder, because their games announce the same project. A game the

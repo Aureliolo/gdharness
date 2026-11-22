@@ -568,6 +568,7 @@ function startingNote(
     projectPath: run.projectPath,
     keeperPid: process.pid,
     ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
+    ...(run.savesIn === undefined ? {} : { savesIn: run.savesIn }),
     ...(run.profile === undefined ? {} : { profile: run.profile }),
     ...(run.debugged === false ? { exported: true as const } : {}),
     arguments: args,

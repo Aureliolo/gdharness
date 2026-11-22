@@ -36905,21 +36905,18 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
         `${op} naming another project is refused`,
       );
     }
-    // A start for another project, which ended this run and started that one in its place.
-    const other = await call('editor_run', {
-      projectPath: elsewhere,
-      op: 'start',
-      headless: true,
-      runtimeWaitMs: 60_000,
-    });
-    assert.match(
-      other,
-      new RegExp(
-        `^This server holds a run of .*gdharness-coming-up-\\w+ \\(pid ${String(firstPid)}\\), and one server holds one run, so .*gdharness-not-this-project-\\w+ was not started and that run goes on\\..*editor_run stop with projectPath`,
-        's',
-      ),
-      `a start naming another project is refused: ${other}`,
+    // A start for another project goes beside this run and ends nothing.
+    const other = jsonOf(
+      await call('editor_run', {
+        projectPath: elsewhere,
+        op: 'start',
+        headless: true,
+        runtimeWaitMs: 0,
+      }),
+      'start naming another project',
     );
+    assert.equal(get(other, 'started'), true, JSON.stringify(other));
+    assert.equal(get(other, 'endedPreviousRun'), undefined, `nothing was ended: ${JSON.stringify(other)}`);
     // This run was started without the profiler, so a profile naming its own project reaches it
     // and is told that, rather than being refused for the argument.
     assert.match(
@@ -36927,6 +36924,11 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       /^This run was started without profile: true/,
       'profile naming this project reaches the run',
     );
+    const besideStop = jsonOf(
+      await call('editor_run', { op: 'stop', projectPath: elsewhere }),
+      'stop of the run beside',
+    );
+    assert.equal(get(besideStop, 'endedPid'), get(other, 'pid'), JSON.stringify(besideStop));
     const still = jsonOf(await call('editor_status', {}), 'status after the refused stop');
     assert.ok(
       asArray(get(still, 'game', 'runtimes')).some((one) => get(one, 'pid') === firstPid),
@@ -127971,6 +127973,8 @@ function testAnEngineRunsItsSuitesCheapestFirstInTheGame(): void {
 interface AnotherProjectsEditor {
   playing: boolean;
   readonly asked: string[];
+  /** Every call the editor was sent, with the arguments it carried. */
+  readonly calls: { readonly tool: string; readonly args: Record<string, unknown> }[];
 }
 
 /** What a fixture is handed by `withAnEditorOfAnotherProject`. */
@@ -128031,7 +128035,7 @@ async function withAnEditorOfAnotherProject(
   const games: number[] = [];
   // Idle until the fixture has greeted, since the status calls that wait for the greeting take up
   // whatever the editor plays.
-  const editor: AnotherProjectsEditor = { playing: false, asked: [] };
+  const editor: AnotherProjectsEditor = { playing: false, asked: [], calls: [] };
   const registered =
     options.runtimeAddon === true
       ? `\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`
@@ -128051,8 +128055,9 @@ async function withAnEditorOfAnotherProject(
   try {
     await withAPlayingEditor(
       ({ adapter }) =>
-        (tool) => {
+        (tool, args) => {
           editor.asked.push(tool);
+          editor.calls.push({ tool, args });
           if (tool === 'play_scene') {
             editor.playing = true;
           }
@@ -128212,39 +128217,29 @@ async function testAStartForAnotherProjectLeavesTheEditorsPlayAlone(): Promise<v
 }
 
 /**
- * A start naming another project, while this server holds a run of the editor's own, is answered
- * as it always was: one server holds one run.
+ * A start naming another project, while this server holds a run of the editor's own, goes beside
+ * that run and ends nothing.
  */
-async function testAStartForAnotherProjectWhileARunIsHeldKeepsTheOneRunAnswer(): Promise<void> {
-  const oneRun = (held: string, wanted: string, pid: number | undefined): string =>
-    `This server holds a run of ${held}${pid === undefined ? '' : ` (pid ${String(pid)})`}, and one server holds one run, so ${wanted} was not started and that run goes on.` +
-    `Next:\n- editor_run stop with projectPath ${held} ends it\n- Then ask for this start again`;
+async function testAStartForAnotherProjectWhileARunIsHeldGoesBesideIt(): Promise<void> {
   // The run the editor plays, picked up by a call about it.
-  await withAnEditorOfAnotherProject(
-    { playing: true },
-    async ({ editor, editorProject, otherProject, call }) => {
-      const output = await call('editor_output', {});
-      assert.match(output, /"through": ?"editor"/, `the editor's play is the run held: ${output}`);
-      editor.asked.length = 0;
-      const refused = await call('editor_run', {
-        projectPath: otherProject,
-        op: 'start',
-        headless: true,
-        runtimeWaitMs: 0,
-      });
-      assert.equal(refused, oneRun(editorProject, otherProject, undefined));
-      assert.equal(editor.playing, true, 'and the editor goes on playing');
-      assert.equal(
-        editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
-        false,
-        editor.asked.join(', '),
-      );
-    },
-  );
+  await withAnEditorOfAnotherProject({ playing: true }, async ({ editor, startOther, call }) => {
+    const output = await call('editor_output', {});
+    assert.match(output, /"through": ?"editor"/, `the editor's play is the run held: ${output}`);
+    editor.asked.length = 0;
+    const started = await startOther();
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+    assert.equal(get(started, 'endedPreviousRun'), undefined, JSON.stringify(started));
+    assert.equal(editor.playing, true, 'and the editor goes on playing');
+    assert.equal(
+      editor.asked.some((tool) => tool === 'play_scene' || tool === 'stop_playing'),
+      false,
+      editor.asked.join(', '),
+    );
+  });
   // A run started here, because the editor plays this project with a window.
   await withAnEditorOfAnotherProject(
     { playsWindowed: true },
-    async ({ editorProject, otherProject, call }) => {
+    async ({ editorProject, otherProject, call, startOther }) => {
       const first = jsonOf(
         await call('editor_run', {
           projectPath: editorProject,
@@ -128256,13 +128251,13 @@ async function testAStartForAnotherProjectWhileARunIsHeldKeepsTheOneRunAnswer():
       );
       const pid = asNumber(get(first, 'pid'), 'a run of the editor project started here');
       try {
-        const refused = await call('editor_run', {
-          projectPath: otherProject,
-          op: 'start',
-          headless: true,
-          runtimeWaitMs: 0,
-        });
-        assert.equal(refused, oneRun(editorProject, otherProject, pid));
+        const second = await startOther();
+        assert.equal(get(second, 'started'), true, JSON.stringify(second));
+        assert.equal(get(second, 'endedPreviousRun'), undefined, JSON.stringify(second));
+        const refused = await call('editor_output', {});
+        assert.match(refused, new RegExp(`pid ${pid}`), `the call without a pid names both: ${refused}`);
+        assert.match(refused, new RegExp(`pid ${asNumber(get(second, 'pid'), 'the second run')}`), refused);
+        assert.ok(refused.includes(editorProject) && refused.includes(otherProject), refused);
       } finally {
         await call('editor_run', { op: 'stop', projectPath: editorProject });
       }
@@ -128650,6 +128645,418 @@ async function testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame(): Pr
       assert.equal(get(started, 'runtime', 'listening'), true, `${JSON.stringify(started)} after ${set}`);
     },
   );
+}
+
+/** What `withRunsBeside` hands a case: a served project, two worktrees of it and the calls to start games in them. */
+interface RunsBesideStage {
+  /** The project the server serves. */
+  readonly main: string;
+  /** Two more folders of the same repository, each a project of its own. */
+  readonly trees: readonly [string, string];
+  readonly runtimeDir: string;
+  /** A tool call, answered as the text the server sent. */
+  readonly call: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /** A headless start of [param project], parsed. Its game is ended with the fixture. */
+  readonly start: (project: string, extra?: Record<string, unknown>) => Promise<unknown>;
+  /** Stops this server and starts another on the same folders, which finds the runs left going. */
+  readonly restartServer: () => Promise<void>;
+  /** A folder to move `user://` into, new on each call. */
+  readonly savesFolder: (name: string) => string;
+}
+
+/** A project of one repository: a main scene that prints its label, one that quits, and the runtime addon. */
+function projectOfARepository(parent: string, name: string): string {
+  const project = join(parent, name);
+  mkdirSync(project, { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\n' +
+      `config/name="${name}"\nrun/main_scene="res://main.tscn"\n\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
+  );
+  for (const [scene, body] of [
+    ['main', `print("label-${name}")`],
+    ['quit', `print("label-${name}-quit")\n\tget_tree().quit()`],
+  ] as const) {
+    writeFileSync(join(project, `${scene}.gd`), `extends Node\n\n\nfunc _ready() -> void:\n\t${body}\n`);
+    writeFileSync(
+      join(project, `${scene}.tscn`),
+      `[gd_scene format=3]\n\n[ext_resource type="Script" path="res://${scene}.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n`,
+    );
+  }
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  return project;
+}
+
+/**
+ * A server that serves one project, with two more folders of its repository to start games in and
+ * a real engine to run them. Every game started through the fixture is ended with it. The slot
+ * count comes from [param options.slots] when given, and from the machine otherwise.
+ */
+async function withRunsBeside(
+  options: { slots?: number },
+  body: (stage: RunsBesideStage) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('runs beside each other regression skipped (Godot not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runs-beside-'));
+  const runtimeDir = join(root, 'runtime');
+  const slots = join(root, 'slots');
+  mkdirSync(runtimeDir);
+  const main = projectOfARepository(root, 'main');
+  const trees: readonly [string, string] = [
+    projectOfARepository(root, 'treea'),
+    projectOfARepository(root, 'treeb'),
+  ];
+  const env: Record<string, string> = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtimeDir,
+    GDHARNESS_PROJECT: main,
+    ...(options.slots === undefined
+      ? {}
+      : { GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: String(options.slots) }),
+  };
+  const games: number[] = [];
+  let server = new ServerProcess({ env });
+  try {
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+      textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+    await body({
+      main,
+      trees,
+      runtimeDir,
+      call,
+      start: async (project, extra = {}) => {
+        const started = jsonOf(
+          await call('editor_run', { projectPath: project, op: 'start', headless: true, ...extra }),
+          `editor_run start of ${project}`,
+        );
+        const pid = get(started, 'pid');
+        if (typeof pid === 'number') {
+          games.push(pid);
+        }
+        return started;
+      },
+      restartServer: async () => {
+        await server.stop();
+        server = new ServerProcess({ env });
+        await server.initialize('regression-test');
+      },
+      savesFolder: (name) => join(root, 'saves', name),
+    });
+  } finally {
+    await server.stop();
+    for (const pid of games) {
+      if (alive(pid)) {
+        await killTheTree(pid);
+      }
+    }
+    sweep(root);
+  }
+}
+
+/** The pid each entry of the answer's list of runs names. */
+function pidsOfTheRuns(status: unknown): number[] {
+  return asArray(get(status, 'game', 'runs')).map((one) => asNumber(get(one, 'pid'), 'a run listed'));
+}
+
+/** The answer of editor_output for [param pid], once it holds [param text], or the last answer read. */
+async function outputOnceItHolds(
+  call: RunsBesideStage['call'],
+  pid: number,
+  text: string,
+): Promise<string> {
+  let said = '';
+  for (let tries = 0; tries < 60 && !said.includes(text); tries += 1) {
+    said = await call('editor_output', { pid });
+    await delay(500);
+  }
+  return said;
+}
+
+/** Two worktrees each started with no editor: each has its own pid, nothing is ended, and both are listed. */
+async function testTwoWorktreesStartBesideEachOther(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call }) => {
+    const first = await start(trees[0], { runtimeWaitMs: 60_000 });
+    const second = await start(trees[1], { runtimeWaitMs: 60_000 });
+    const pids = [first, second].map((one) => asNumber(get(one, 'pid'), 'a started run'));
+    assert.notEqual(pids[0], pids[1]);
+    assert.equal(get(second, 'endedPreviousRun'), undefined, `nothing was ended: ${JSON.stringify(second)}`);
+    assert.equal(get(second, 'alsoRunning'), undefined, `the first run is this server's own: ${JSON.stringify(second)}`);
+    assert.equal(get(first, 'runtime', 'listening'), true, JSON.stringify(first));
+    assert.equal(get(second, 'runtime', 'listening'), true, JSON.stringify(second));
+    const status = jsonOf(await call('editor_status', {}), 'editor_status');
+    assert.deepEqual(pidsOfTheRuns(status).toSorted(), pids.toSorted(), JSON.stringify(get(status, 'game')));
+    assert.equal(get(status, 'game', 'run'), null, 'no one run is the run');
+    const listed = asArray(get(status, 'game', 'runtimes')).map((one) => get(one, 'pid'));
+    for (const started of [first, second]) {
+      assert.ok(
+        listed.includes(get(started, 'runtime', 'pid')),
+        `runtimes lists the game of ${JSON.stringify(get(started, 'pid'))}: ${JSON.stringify(listed)}`,
+      );
+    }
+  });
+}
+
+/** The main scene started with one folder for `user://` and then with another goes beside it, ending nothing. */
+async function testOneProjectStartedWithTwoSavesFoldersGoesBeside(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call, savesFolder }) => {
+    const first = await start(trees[0], { savesIn: savesFolder('a'), runtimeWaitMs: 0 });
+    const second = await start(trees[0], { savesIn: savesFolder('b'), runtimeWaitMs: 0 });
+    assert.notEqual(get(first, 'pid'), get(second, 'pid'));
+    assert.equal(get(second, 'endedPreviousRun'), undefined, JSON.stringify(second));
+    const status = jsonOf(await call('editor_status', {}), 'editor_status');
+    assert.deepEqual(
+      pidsOfTheRuns(status).toSorted(),
+      [asNumber(get(first, 'pid')), asNumber(get(second, 'pid'))].toSorted(),
+      JSON.stringify(get(status, 'game')),
+    );
+  });
+}
+
+/** A start of a place a run holds ends that run only, and names it. */
+async function testAStartOfTheSamePlaceEndsOnlyThatRun(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call, savesFolder }) => {
+    const beside = asNumber(get(await start(trees[1], { runtimeWaitMs: 0 }), 'pid'), 'the run beside');
+    for (const savesIn of [undefined, savesFolder('same')]) {
+      const extra = savesIn === undefined ? { runtimeWaitMs: 0 } : { runtimeWaitMs: 0, savesIn };
+      const first = asNumber(get(await start(trees[0], extra), 'pid'), 'the first run');
+      const again = await start(trees[0], extra);
+      assert.equal(get(again, 'endedPreviousRun', 'pid'), first, JSON.stringify(again));
+      assert.equal(alive(first), false, 'the run of the same place is gone');
+      const output = jsonOf(await call('editor_output', { pid: beside }), 'output of the run beside');
+      assert.equal(get(output, 'running'), true, 'and the run of another place goes on');
+      await call('editor_run', { op: 'stop', pid: asNumber(get(again, 'pid')) });
+    }
+    // The same folder for `user://` from two projects is two places.
+    const shared = savesFolder('shared');
+    const one = await start(trees[0], { runtimeWaitMs: 0, savesIn: shared });
+    const other = await start(trees[1], { runtimeWaitMs: 0, savesIn: shared });
+    assert.equal(get(other, 'endedPreviousRun'), undefined, JSON.stringify(other));
+    assert.equal(alive(asNumber(get(one, 'pid'))), true);
+  });
+}
+
+/** Each call about a run names it by pid, or by its folder where one run of that folder goes. */
+async function testACallNamesItsRunByPid(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call }) => {
+    const [a, b] = [
+      asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'run a'),
+      asNumber(get(await start(trees[1], { runtimeWaitMs: 0 }), 'pid'), 'run b'),
+    ];
+    for (const [pid, label, other] of [
+      [a, 'label-treea', 'label-treeb'],
+      [b, 'label-treeb', 'label-treea'],
+    ] as const) {
+      const output = await outputOnceItHolds(call, pid, label);
+      assert.ok(output.includes(label) && !output.includes(other), output);
+      const waited = jsonOf(await call('editor_run', { op: 'wait', pid, timeoutMs: 1500 }), 'wait');
+      assert.equal(get(waited, 'running'), true, JSON.stringify(waited));
+      assert.ok(JSON.stringify(waited).includes(label), JSON.stringify(waited));
+    }
+    const byFolder = await call('editor_output', { projectPath: trees[1] });
+    assert.ok(byFolder.includes('label-treeb'), byFolder);
+    const stopped = jsonOf(await call('editor_run', { op: 'stop', pid: a }), 'stop of the first');
+    assert.equal(get(stopped, 'endedPid'), a, JSON.stringify(stopped));
+    assert.equal(alive(a), false);
+    const second = jsonOf(await call('editor_output', { pid: b }), 'output of the second');
+    assert.equal(get(second, 'running'), true, 'the second run goes on');
+    const stoppedByFolder = jsonOf(await call('editor_run', { op: 'stop', projectPath: trees[1] }), 'stop');
+    assert.equal(get(stoppedByFolder, 'endedPid'), b, JSON.stringify(stoppedByFolder));
+  });
+}
+
+/** With two runs going a call naming none is refused with each run, and with one it answers as before. */
+async function testACallNamingNoRunIsRefusedWhileTwoGo(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call }) => {
+    const only = asNumber(get(await start(trees[0], { runtimeWaitMs: 60_000 }), 'pid'), 'the first run');
+    assert.equal(get(jsonOf(await call('editor_output', {}), 'one run'), 'running'), true);
+    const second = asNumber(get(await start(trees[1], { runtimeWaitMs: 60_000 }), 'pid'), 'the second run');
+    const calls: [string, Record<string, unknown>][] = [
+      ['editor_output', {}],
+      ['editor_run', { op: 'wait', timeoutMs: 500 }],
+      ['editor_run', { op: 'stop' }],
+      ['editor_run', { op: 'profile' }],
+      ['runtime_inspect', { op: 'tree' }],
+      ['runtime_wait', { op: 'frames', frames: 1 }],
+      ['debug_state', { op: 'stack' }],
+    ];
+    for (const [tool, args] of calls) {
+      const refused = await call(tool, args);
+      for (const wanted of [`pid ${only}`, `pid ${second}`, trees[0], trees[1], 'the main scene', 'Name one with pid']) {
+        assert.ok(refused.includes(wanted), `${tool} ${JSON.stringify(args)} names ${wanted}: ${refused}`);
+      }
+    }
+    assert.equal(alive(only) && alive(second), true, 'the refused stop ended nothing');
+    // A pid that names no run, and the pid of a run that ended.
+    assert.match(await call('editor_output', { pid: 2_000_000_000 }), /holds no run with pid 2000000000/);
+    assert.match(await call('editor_run', { op: 'stop', pid: 2_000_000_000 }), /2000000000/);
+    await call('editor_run', { op: 'stop', pid: only });
+    const ended = jsonOf(await call('editor_output', { pid: only }), 'the ended run');
+    assert.equal(get(ended, 'running'), false, JSON.stringify(ended));
+    assert.equal(get(jsonOf(await call('editor_output', {}), 'one run left'), 'running'), true);
+  });
+}
+
+/** A server restarted while two runs go finds both, and answers about each by pid. */
+async function testARestartedServerFindsEveryRunStillGoing(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call, restartServer }) => {
+    const pids = [
+      asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'run a'),
+      asNumber(get(await start(trees[1], { runtimeWaitMs: 0, savesIn: join(trees[1], 'saves') }), 'pid'), 'run b'),
+    ];
+    await restartServer();
+    const status = jsonOf(await call('editor_status', {}), 'editor_status');
+    assert.deepEqual(pidsOfTheRuns(status).toSorted(), pids.toSorted(), JSON.stringify(get(status, 'game')));
+    for (const pid of pids) {
+      const output = jsonOf(await call('editor_output', { pid }), 'output after the restart');
+      assert.equal(get(output, 'running'), true, JSON.stringify(output));
+    }
+  });
+}
+
+/** A run that ends by itself leaves the note and the output of the run beside it alone. */
+async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
+  await withRunsBeside({}, async ({ trees, start, call }) => {
+    const staying = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the staying run');
+    const noted = readRunRecord(trees[0]);
+    assert.equal(noted?.pid, staying, 'the staying run has its note');
+    const quitting = asNumber(
+      get(await start(trees[1], { runtimeWaitMs: 0, scene: 'quit.tscn' }), 'pid'),
+      'the quitting run',
+    );
+    const ended = jsonOf(await call('editor_run', { op: 'wait', pid: quitting, timeoutMs: 60_000 }), 'wait');
+    assert.equal(get(ended, 'running'), false, JSON.stringify(ended));
+    const after = readRunRecord(trees[0]);
+    assert.equal(after?.pid, staying, 'the note of the staying run is still there');
+    assert.equal(after?.exitCode, undefined, 'and says nothing of an exit');
+    const output = await outputOnceItHolds(call, staying, 'label-treea');
+    assert.ok(output.includes('label-treea'), output);
+    assert.equal(get(jsonOf(output, 'output'), 'running'), true);
+  });
+}
+
+/** A third place waits for an engine slot when two are allowed, and starts once one is freed. */
+async function testAThirdPlaceWaitsForAnEngineSlot(): Promise<void> {
+  await withRunsBeside({ slots: 2 }, async ({ main, trees, start, call }) => {
+    const first = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the first run');
+    await start(trees[1], { runtimeWaitMs: 0 });
+    let answered = false;
+    const third = start(main, { runtimeWaitMs: 0 }).then((started) => {
+      answered = true;
+      return started;
+    });
+    await delay(4000);
+    assert.equal(answered, false, 'the third start is waiting for a slot');
+    await call('editor_run', { op: 'stop', pid: first });
+    const started = await third;
+    assert.equal(get(started, 'started'), true, JSON.stringify(started));
+  });
+}
+
+/** A run note belongs to a place: a project and the folder its `user://` is moved to. */
+function testARunNoteIsKeptPerPlace(): void {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-place-notes-'));
+  const project = join(directory, 'project');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = directory;
+  try {
+    mkdirSync(project);
+    const noted = (pid: number, savesIn?: string) =>
+      writeRunRecord({
+        pid,
+        transcript: join(directory, `run-${pid}.log`),
+        startedAt: pid,
+        startedBy: pid,
+        projectPath: project,
+        arguments: [],
+        command: 'godot',
+        ...(savesIn === undefined ? {} : { savesIn }),
+      });
+    noted(1);
+    noted(2, join(directory, 'a'));
+    noted(3, join(directory, 'b'));
+    assert.equal(runRecordPath(project), runRecordPath(project, undefined, undefined));
+    assert.equal(readRunRecord(project)?.pid, 1);
+    assert.equal(readRunRecord(project, undefined, join(directory, 'a'))?.pid, 2);
+    assert.equal(readRunRecord(project, undefined, join(directory, 'b'))?.pid, 3);
+    assert.equal(readRunRecord(project, undefined, join(directory, 'a'))?.savesIn, join(directory, 'a'));
+    clearRunRecord(project, undefined, join(directory, 'a'));
+    assert.equal(readRunRecord(project, undefined, join(directory, 'a')), null, 'one place cleared');
+    assert.equal(readRunRecord(project)?.pid, 1, 'the project own place is left');
+    assert.equal(readRunRecord(project, undefined, join(directory, 'b'))?.pid, 3, 'and the other folder');
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(directory);
+  }
+}
+
+/**
+ * An editorless start of a worktree asks an editor with another checkout open nothing, windowed
+ * or headless, with `savesIn` and with `env`, whatever the project has behind: a class the engine's
+ * cache lacks, and a file that was never imported.
+ */
+async function testAStartOfAWorktreeAsksTheEditorOfAnotherCheckoutNothing(): Promise<void> {
+  await withAnEditorOfAnotherProject({ runtimeAddon: true }, async ({ editor, otherProject, startOther }) => {
+    writeFileSync(join(otherProject, 'gadget.gd'), 'class_name Gadget\nextends Node\n');
+    writeFileSync(
+      join(otherProject, 'icon.svg'),
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>\n',
+    );
+    const saves = join(otherProject, '..', `${basename(otherProject)}-saves`);
+    const variants: Record<string, unknown>[] = [
+      {},
+      { savesIn: saves },
+      { env: { GDHARNESS_PROBE: '1' } },
+      { savesIn: `${saves}-2`, env: { GDHARNESS_PROBE: '2' } },
+    ];
+    if (windowedRunRefused() === null) {
+      variants.push({ headless: false }, { headless: false, savesIn: `${saves}-3` });
+    }
+    for (const extra of variants) {
+      editor.calls.length = 0;
+      const started = await startOther(extra);
+      assert.equal(get(started, 'started'), true, `${JSON.stringify(extra)}: ${JSON.stringify(started)}`);
+      assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
+      const naming = editor.calls.filter((one) => JSON.stringify(one.args).includes(basename(otherProject)));
+      assert.deepEqual(naming, [], `${JSON.stringify(extra)}: the editor was asked about the worktree`);
+    }
+  });
+}
+
+/** A start through the editor ends only the editor's own game, and the run beside it goes on. */
+async function testAStartThroughTheEditorEndsOnlyTheEditorsOwnGame(): Promise<void> {
+  await withAnEditorOfAnotherProject({}, async ({ editor, editorProject, startOther, call }) => {
+    const beside = asNumber(get(await startOther(), 'pid'), 'the run beside');
+    const played = jsonOf(
+      await call('editor_run', { op: 'start', projectPath: editorProject, headless: true, runtimeWaitMs: 0 }),
+      'a start through the editor',
+    );
+    assert.equal(get(played, 'through'), 'editor', JSON.stringify(played));
+    assert.equal(get(played, 'endedPreviousRun'), undefined, JSON.stringify(played));
+    editor.asked.length = 0;
+    const again = jsonOf(
+      await call('editor_run', { op: 'start', projectPath: editorProject, headless: true, runtimeWaitMs: 0 }),
+      'a second start through the editor',
+    );
+    assert.equal(get(again, 'through'), 'editor', JSON.stringify(again));
+    assert.notEqual(get(again, 'endedPreviousRun'), undefined, `the editor's game was ended: ${JSON.stringify(again)}`);
+    assert.ok(editor.asked.includes('stop_playing'), editor.asked.join(', '));
+    const output = jsonOf(await call('editor_output', { pid: beside }), 'output of the run beside');
+    assert.equal(get(output, 'running'), true, 'the run beside went on');
+  });
 }
 
 let memoryEngineBuilt: string | null = null;
@@ -131593,7 +132000,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunsItsSuitesCheapestFirstInTheGame,
   testAStartForAnotherProjectIsPlayedHereBesideAnIdleEditor,
   testAStartForAnotherProjectLeavesTheEditorsPlayAlone,
-  testAStartForAnotherProjectWhileARunIsHeldKeepsTheOneRunAnswer,
+  testAStartForAnotherProjectWhileARunIsHeldGoesBesideIt,
   testAStopNamingAnotherProjectActsOnTheRunStartedHere,
   testAWaitNamingAnotherProjectActsOnTheRunStartedHere,
   testAProfileNamingAnotherProjectActsOnTheRunStartedHere,
@@ -131660,6 +132067,17 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdharnessTestEndsTheSameEngineWithTheSameSentence,
   testATestRunWhoseSuitesTogetherPassTheLimitIsJudgedWhole,
   testATestRunPrintingPastTheLimitOnItsConsoleIsEnded,
+  testTwoWorktreesStartBesideEachOther,
+  testOneProjectStartedWithTwoSavesFoldersGoesBeside,
+  testAStartOfTheSamePlaceEndsOnlyThatRun,
+  testACallNamesItsRunByPid,
+  testACallNamingNoRunIsRefusedWhileTwoGo,
+  testARestartedServerFindsEveryRunStillGoing,
+  testARunEndingByItselfLeavesTheOtherRunAlone,
+  testAThirdPlaceWaitsForAnEngineSlot,
+  testARunNoteIsKeptPerPlace,
+  testAStartOfAWorktreeAsksTheEditorOfAnotherCheckoutNothing,
+  testAStartThroughTheEditorEndsOnlyTheEditorsOwnGame,
 ];
 
 /**
