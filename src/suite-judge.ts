@@ -225,7 +225,13 @@ function rowRuns(share: RowShare, row: number | null): boolean {
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
 export function readRun(printed: string): RunPrinted {
   const lines = stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n');
-  const { lineCount: _lineCount, errorsDropped: _errorsDropped, ...read } = readRunLines(lines, Infinity);
+  const {
+    lineCount: _lineCount,
+    errorsDropped: _errorsDropped,
+    judged: _judged,
+    declaredErrors: _declaredErrors,
+    ...read
+  } = readRunLines(lines, Infinity);
   return { lines, ...read };
 }
 
@@ -233,12 +239,23 @@ export function readRun(printed: string): RunPrinted {
 export type RunRead = Omit<RunPrinted, 'lines'> & {
   /** How many lines the run printed. */
   readonly lineCount: number;
-  /** How many errors past the most kept were counted and not kept. */
+  /** How many errors past the most kept were judged and not kept. */
   readonly errorsDropped: number;
 };
 
+/** A log read with {@link readEngineLog}, its errors judged against what the suites declare. */
+export type LogRead = RunRead & {
+  /**
+   * As {@link unexpectedErrors} answers for every suite the log opened. Each error the log printed
+   * was judged, those past the most kept included, and `printed` lists the kept ones.
+   */
+  readonly judged: ErrorsJudged;
+  /** How many errors, not warnings, the suites declared and printed, those not kept included. */
+  readonly declaredErrors: number;
+};
+
 /** The most errors a run read off a log of any size keeps. */
-const ERRORS_KEPT = 100_000;
+export const ERRORS_KEPT = 100_000;
 
 /** The lines read once, in order, with a look at those just ahead and nothing kept behind. */
 class LinesAhead {
@@ -274,19 +291,25 @@ class LinesAhead {
   }
 }
 
-/** The most blank lines kept between an error and the `at:` line a {@link STARVED} pattern spans. */
-const STARVED_BLANKS = 1000;
-
 /**
  * As {@link readRun}, from the lines already split and stripped of colour codes, read once in order.
- * At most [param errorsKept] errors are kept.
+ * At most [param errorsKept] errors are kept, and each is judged against [param expected] as it is
+ * read, those not kept included.
  */
-function readRunLines(source: Iterable<string>, errorsKept: number): RunRead {
+function readRunLines(
+  source: Iterable<string>,
+  errorsKept: number,
+  expected: Expected = { errors: {}, warnings: {} },
+): RunRead & Pick<LogRead, 'judged' | 'declaredErrors'> {
   const lines = new LinesAhead(source[Symbol.iterator]());
   const state: RunState = {
     lines,
     errorsKept,
     errorsDropped: 0,
+    declaredErrors: 0,
+    declared: new DeclaredErrors(expected, null),
+    undeclared: [],
+    heldDropped: new Map(),
     suites: new Map(),
     errors: [],
     leaks: [],
@@ -305,7 +328,7 @@ function readRunLines(source: Iterable<string>, errorsKept: number): RunRead {
     reasonEnds: -1,
   };
   const discovery = new DiscoveryRead();
-  const starved = new StarvedRead(errorsKept === Infinity ? Infinity : STARVED_BLANKS);
+  const starved = new StarvedRead();
   let at = 0;
   for (let line = lines.at(0); line !== undefined; line = lines.at(at)) {
     readLine(state, line, at);
@@ -324,6 +347,7 @@ function readRunLines(source: Iterable<string>, errorsKept: number): RunRead {
   return {
     lineCount: at,
     errorsDropped: state.errorsDropped,
+    declaredErrors: state.declaredErrors,
     suites: state.suites,
     errors: state.errors,
     leaks: state.leaks,
@@ -339,6 +363,10 @@ function readRunLines(source: Iterable<string>, errorsKept: number): RunRead {
     orphansLeft: state.orphansLeft,
     mismatched: state.mismatched,
     unrunnable: state.unrunnable,
+    judged: {
+      printed: state.undeclared,
+      neverPrinted: state.declared.neverPrinted(state.suites, state.suites.keys()),
+    },
   };
 }
 
@@ -350,6 +378,9 @@ interface HeldError {
   readonly script: boolean;
 }
 
+/** How many blank lines {@link StarvedRead} holds apart before it joins them into one text. */
+const BLANKS_JOINED = 1024;
+
 /**
  * The {@link STARVED} lines in what was printed, read a line at a time. Each pattern spans an error
  * line, the blank lines after it and the `at:` line after those, so only those are held.
@@ -358,24 +389,24 @@ class StarvedRead {
   private readonly found: string[][] = STARVED.map(() => []);
   /** The last line that was not blank. */
   private before: string | null = null;
+  /** The blank lines since, each run of {@link BLANKS_JOINED} joined into one text so a line costs its characters. */
   private blanks: string[] = [];
-
-  private readonly blanksKept: number;
-
-  /** [param blanksKept] is the most blank lines held after an error. */
-  constructor(blanksKept: number) {
-    this.blanksKept = blanksKept;
-  }
+  /** The blank lines since the last run was joined. */
+  private loose: string[] = [];
 
   take(line: string): void {
     if (line.trim() === '') {
-      if (this.before !== null && this.blanks.length < this.blanksKept) {
-        this.blanks.push(line);
+      if (this.before !== null) {
+        this.loose.push(line);
+        if (this.loose.length >= BLANKS_JOINED) {
+          this.blanks.push(this.loose.join('\n'));
+          this.loose = [];
+        }
       }
       return;
     }
     if (this.before !== null) {
-      const spanned = [this.before, ...this.blanks, line].join('\n');
+      const spanned = [this.before, ...this.blanks, ...this.loose, line].join('\n');
       for (const [which, pattern] of STARVED.entries()) {
         for (const match of spanned.matchAll(pattern)) {
           this.found[which]?.push(owned(match[0]));
@@ -384,6 +415,7 @@ class StarvedRead {
     }
     this.before = line;
     this.blanks = [];
+    this.loose = [];
   }
 
   result(): string[] {
@@ -391,12 +423,58 @@ class StarvedRead {
   }
 }
 
-/** Keeps [param error] while fewer than the most errors are kept, and counts it either way. */
-function keptError<Error>(state: RunState, into: Error[], error: Error): void {
-  if (state.errors.length + state.afterCase.length < state.errorsKept) {
-    into.push(error);
-  } else {
+/** Whether another error can be kept, the held ones counted. */
+function errorKept(state: RunState): boolean {
+  return state.errors.length + state.afterCase.length < state.errorsKept;
+}
+
+/**
+ * Judges [param error], whose suite and case are known, against what its suite declares, and keeps
+ * it while fewer than the most errors are kept, or while fewer than that many undeclared ones are
+ * when no suite declared it. Each one not kept is counted.
+ */
+function errorRead(state: RunState, error: PrintedError, kept = errorKept(state)): void {
+  const declared = state.declared.settles(error);
+  if (declared && !error.warning) {
+    state.declaredErrors += 1;
+  }
+  // One no suite declared fails the run wherever it came, so those are kept to a bound of their own.
+  if (!kept && (declared || state.undeclared.length >= state.errorsKept)) {
     state.errorsDropped += 1;
+    return;
+  }
+  state.errors.push(error);
+  if (!declared) {
+    state.undeclared.push(error);
+  }
+}
+
+/**
+ * Holds [param error], printed after a case's verdict, until it is known whose it is. One past the
+ * most kept is held only by its text and how many times it came, and only when the open suite
+ * declares that text for some case, since no other can be settled. The rest no suite declares, and
+ * each is held whole while fewer undeclared ones are held than the most kept, then counted.
+ */
+function errorHeld(state: RunState, error: HeldError): void {
+  if (errorKept(state)) {
+    state.afterCase.push(error);
+    return;
+  }
+  const suite = state.open?.path ?? '';
+  if (!state.declared.mayDeclare(suite, error.warning, error.text)) {
+    if (state.undeclared.length + state.afterCase.length < state.errorsKept) {
+      state.afterCase.push(error);
+    } else {
+      state.errorsDropped += 1;
+    }
+    return;
+  }
+  const key = JSON.stringify([error.warning, error.script, error.text]);
+  const held = state.heldDropped.get(key);
+  if (held === undefined) {
+    state.heldDropped.set(key, { error, times: 1 });
+  } else {
+    held.times += 1;
   }
 }
 
@@ -408,6 +486,14 @@ interface RunState {
   readonly errorsKept: number;
   /** How many errors were not kept for that. */
   errorsDropped: number;
+  /** How many errors, not warnings, the suites declared and printed, of every line. */
+  declaredErrors: number;
+  /** What the suites declare, which each error is judged against as its suite and case are known. */
+  readonly declared: DeclaredErrors;
+  /** The errors kept that no suite declared, in the order printed. */
+  readonly undeclared: PrintedError[];
+  /** The errors past the most kept that are held after a verdict, by text, with how often each came. */
+  readonly heldDropped: Map<string, { readonly error: HeldError; times: number }>;
   readonly suites: Map<string, SuitePrinted>;
   readonly errors: PrintedError[];
   readonly leaks: string[];
@@ -433,10 +519,18 @@ type LineReader = (state: RunState, line: string, at: number) => boolean;
 
 /** Gives the errors held since the last verdict to [param owner]. */
 function settleAfterCase(state: RunState, owner: string): void {
-  for (const held of state.afterCase) {
-    state.errors.push({ ...held, suite: state.open?.path ?? null, during: owner });
-  }
+  const suite = state.open?.path ?? null;
+  const held = state.afterCase;
   state.afterCase = [];
+  for (const error of held) {
+    errorRead(state, { ...error, suite, during: owner }, true);
+  }
+  for (const { error, times } of state.heldDropped.values()) {
+    for (let copy = 0; copy < times; copy += 1) {
+      errorRead(state, { ...error, suite, during: owner }, false);
+    }
+  }
+  state.heldDropped.clear();
 }
 
 /** Where a run that printed no more lines was, as a sentence: in the suite [param last] open at the end. */
@@ -618,6 +712,7 @@ const readDriverFallback: LineReader = (state, line) => {
   }
   if (state.suites.size === 0) {
     state.errors.length = 0;
+    state.undeclared.length = 0;
     state.errorsDropped = 0;
   }
   return true;
@@ -641,18 +736,11 @@ const readEngineError: LineReader = (state, line, at) => {
   const warning = error === null;
   const script = /^\s*SCRIPT /.test(line);
   if (state.open === null) {
-    keptError(state, state.errors, { text, at, suite: null, during: null, warning, script });
+    errorRead(state, { text, at, suite: null, during: null, warning, script });
   } else if (state.during === null) {
-    keptError(state, state.afterCase, { text, at, warning, script });
+    errorHeld(state, { text, at, warning, script });
   } else {
-    keptError(state, state.errors, {
-      text,
-      at,
-      suite: state.open.path,
-      during: state.during,
-      warning,
-      script,
-    });
+    errorRead(state, { text, at, suite: state.open.path, during: state.during, warning, script });
   }
   return true;
 };
@@ -694,10 +782,16 @@ const NESTED_ERROR = 'While attempting to print an error, another error was prin
  * size is judged as its text would be, keeping at most {@link ERRORS_KEPT} errors. A log not there
  * is an empty run. [param nested] are the errors Godot raised while printing another, which
  * {@link nestedError} finds in the piped streams, added as {@link withNestedErrors} adds them.
- * [param chunkBytes] is how much is read at once.
+ * Every error is judged against [param expected] as it is read. [param chunkBytes] is how much is
+ * read at once.
  */
-export function readEngineLog(path: string, nested: readonly string[], chunkBytes?: number): RunRead {
-  const read = readRunLines(existsSync(path) ? eachLogLine(path, chunkBytes) : [''], ERRORS_KEPT);
+export function readEngineLog(
+  path: string,
+  nested: readonly string[],
+  expected: Expected,
+  chunkBytes?: number,
+): LogRead {
+  const read = readRunLines(existsSync(path) ? eachLogLine(path, chunkBytes) : [''], ERRORS_KEPT, expected);
   const added = nested.map((text) => ({
     text,
     at: read.lineCount,
@@ -705,7 +799,13 @@ export function readEngineLog(path: string, nested: readonly string[], chunkByte
     during: null,
     warning: false,
   }));
-  return added.length === 0 ? read : { ...read, errors: [...read.errors, ...added] };
+  return added.length === 0
+    ? read
+    : {
+        ...read,
+        errors: [...read.errors, ...added],
+        judged: { ...read.judged, printed: [...read.judged.printed, ...added] },
+      };
 }
 
 /**
@@ -1797,91 +1897,113 @@ export function unexpectedErrors(
   printed: Pick<RunPrinted, 'suites' | 'errors'>,
   expected: Expected,
   paths: readonly string[],
-): { printed: PrintedError[]; neverPrinted: MissingError[] } {
-  const owed = new Map<string, OwedErrors>();
-  for (const path of paths) {
-    addOwedBy(owed, printed, expected, path);
-  }
-  const unexpected = printed.errors.filter((error) => !settledAgainst(owed, error));
-  const neverPrinted = [...owed.values()]
-    .filter((debt) => debt.finished)
-    .flatMap((debt) =>
-      debt.texts.map((text) => ({ suite: debt.suite, during: debt.during, text, warning: debt.warning })),
-    );
-  return { printed: unexpected, neverPrinted };
+): ErrorsJudged {
+  const judged = new Set(paths.filter((path) => printed.suites.has(path)));
+  const declared = new DeclaredErrors(expected, judged);
+  return {
+    printed: printed.errors.filter((error) => !declared.settles(error)),
+    neverPrinted: declared.neverPrinted(printed.suites, judged),
+  };
 }
 
-/** The texts one case or hook of a suite declares for one kind of line, and whether it ran to its end. */
-interface OwedErrors {
-  readonly suite: string;
-  readonly during: string;
-  readonly warning: boolean;
-  readonly texts: string[];
-  readonly finished: boolean;
+/** The errors no suite declared, and the declared ones a case that ran to its end did not print. */
+export interface ErrorsJudged {
+  readonly printed: PrintedError[];
+  readonly neverPrinted: MissingError[];
 }
 
-/** The key [param owed] holds the declaration of an error or warning printed during [param during] under. */
+/** The key the declarations of one kind of line printed during [param during] are held under. */
 function owedKey(path: string, during: string, warning: boolean): string {
   return `${path}\n${during}\n${String(warning)}`;
 }
 
-/** Adds to [param owed] what the suite at [param path] declares, for the cases and hooks it ran. */
-function addOwedBy(
-  owed: Map<string, OwedErrors>,
-  printed: Pick<RunPrinted, 'suites' | 'errors'>,
-  expected: Expected,
-  path: string,
-): void {
-  const suite = printed.suites.get(path);
-  if (suite === undefined) {
-    return;
+/** The texts [param expected] declares for [param during] of the suite at [param path], or none. */
+function declaredTexts(expected: Expected, path: string, during: string, warning: boolean): string[] {
+  const texts: unknown = (warning ? expected.warnings : expected.errors)[path]?.[funcOf(during)];
+  return Array.isArray(texts) ? texts.map((text: unknown) => String(text)) : [];
+}
+
+/**
+ * What the suites declare, each declared text taken off once by every line that settles it, one
+ * error at a time and in the order printed. A case or hook owes its own texts, so a suite's errors
+ * are settled against its declarations alone, whatever another suite printed.
+ *
+ * A case the engine ended in printed what it declares all the same. It owes nothing it had yet to
+ * print, since the engine ending there is the fault and is said, so only the cases and hooks that ran
+ * to their end are owed their texts.
+ */
+class DeclaredErrors {
+  /** The texts each case or hook still owes, by {@link owedKey}, from its first line on. */
+  private readonly owed = new Map<string, string[]>();
+  /** Every text each suite declares for any case, by path and kind of line. */
+  private readonly anyCase = new Map<string, ReadonlySet<string>>();
+  private readonly expected: Expected;
+  private readonly judged: ReadonlySet<string> | null;
+
+  /** [param judged] are the suites judged, or null for every suite. */
+  constructor(expected: Expected, judged: ReadonlySet<string> | null) {
+    this.expected = expected;
+    this.judged = judged;
   }
-  const ranHooks = suite.closed === null ? ['before'] : ['before', 'after'];
-  const finished = new Set([...ranHooks, ...suite.cases.map((ran) => ran.name)]);
-  const duringAll = new Set([...finished, ...endedIn(printed, path, finished)]);
-  for (const warning of [false, true]) {
-    const declared = (warning ? expected.warnings : expected.errors)[path];
-    if (declared === undefined) {
-      continue;
+
+  /** Whether [param error] is one its suite declared, which takes one of the declared texts off. */
+  settles(error: Pick<PrintedError, 'suite' | 'during' | 'warning' | 'text'>): boolean {
+    const { suite, during, warning, text } = error;
+    if (suite === null || during === null || (this.judged !== null && !this.judged.has(suite))) {
+      return false;
     }
-    for (const during of duringAll) {
-      const texts: unknown = declared[funcOf(during)];
-      if (Array.isArray(texts) && texts.length > 0) {
-        owed.set(owedKey(path, during, warning), {
-          suite: path,
-          during,
-          warning,
-          texts: texts.map((text: unknown) => String(text)),
-          finished: finished.has(during),
-        });
+    const key = owedKey(suite, during, warning);
+    let texts = this.owed.get(key);
+    if (texts === undefined) {
+      texts = declaredTexts(this.expected, suite, during, warning);
+      this.owed.set(key, texts);
+    }
+    const index = texts.indexOf(text);
+    if (index < 0) {
+      return false;
+    }
+    texts.splice(index, 1);
+    return true;
+  }
+
+  /** Whether the suite at [param path] declares [param text] for any case, as a warning or an error. */
+  mayDeclare(path: string, warning: boolean, text: string): boolean {
+    const key = `${path}\n${String(warning)}`;
+    let texts = this.anyCase.get(key);
+    if (texts === undefined) {
+      const declared = (warning ? this.expected.warnings : this.expected.errors)[path] ?? {};
+      texts = new Set(
+        Object.values(declared).flatMap((one: unknown) =>
+          Array.isArray(one) ? one.map((each: unknown) => String(each)) : [],
+        ),
+      );
+      this.anyCase.set(key, texts);
+    }
+    return texts.has(text);
+  }
+
+  /**
+   * The declared texts still owed by the cases and hooks of the suites at [param paths] that ran
+   * to their end, by suite, then errors before warnings, then the order the cases ran in.
+   */
+  neverPrinted(suites: RunPrinted['suites'], paths: Iterable<string>): MissingError[] {
+    const missing: MissingError[] = [];
+    for (const path of new Set(paths)) {
+      const suite = suites.get(path);
+      if (suite === undefined) {
+        continue;
+      }
+      const ranHooks = suite.closed === null ? ['before'] : ['before', 'after'];
+      const finished = new Set([...ranHooks, ...suite.cases.map((ran) => ran.name)]);
+      for (const warning of [false, true]) {
+        for (const during of finished) {
+          const texts =
+            this.owed.get(owedKey(path, during, warning)) ??
+            declaredTexts(this.expected, path, during, warning);
+          missing.push(...texts.map((text) => ({ suite: path, during, text, warning })));
+        }
       }
     }
+    return missing;
   }
-}
-
-/** The cases of the suite at [param path] that printed a line and are not in [param finished]. */
-function endedIn(
-  printed: Pick<RunPrinted, 'suites' | 'errors'>,
-  path: string,
-  finished: ReadonlySet<string>,
-): string[] {
-  // A case the engine ended in printed what it declares all the same. It owes nothing it had yet
-  // to print, since the engine ending there is the fault and is said.
-  return printed.errors.flatMap((error) =>
-    error.suite === path && error.during !== null && !finished.has(error.during) ? [error.during] : [],
-  );
-}
-
-/** Whether [param error] is one a suite declared, which takes one of the declared texts off [param owed]. */
-function settledAgainst(owed: ReadonlyMap<string, OwedErrors>, error: PrintedError): boolean {
-  if (error.suite === null || error.during === null) {
-    return false;
-  }
-  const debt = owed.get(owedKey(error.suite, error.during, error.warning));
-  const index = debt?.texts.indexOf(error.text) ?? -1;
-  if (debt === undefined || index < 0) {
-    return false;
-  }
-  debt.texts.splice(index, 1);
-  return true;
 }

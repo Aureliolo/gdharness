@@ -11,6 +11,7 @@
  */
 
 import { StringDecoder } from 'node:string_decoder';
+import { stripVTControlCharacters } from 'node:util';
 import { caseLineOf, suiteOpenedBy } from './game-log.js';
 import { owned } from './log-read.js';
 
@@ -708,15 +709,10 @@ export function hookFailuresPrinted(printed: Iterable<string>): HookFailure[] {
   return foldedOver(new HookFailuresRead(), printed);
 }
 
-/** The most lines of one hook failure's message kept. An assertion's message is a handful. */
-const HOOK_MESSAGE_LINES = 1000;
-
 /** {@link hookFailuresPrinted}, a line at a time. */
 export class HookFailuresRead implements LineFold<HookFailure[]> {
   private readonly found: HookFailure[] = [];
   private above: string[] | null = null;
-  /** Whether a message ran past {@link HOOK_MESSAGE_LINES} and lost the lines after them. */
-  cut = false;
 
   take(line: string): void {
     if (REPORT_HEADING.test(line)) {
@@ -730,14 +726,7 @@ export class HookFailuresRead implements LineFold<HookFailure[]> {
     const tab = line.lastIndexOf(HOOK_LOCATION);
     const found = tab === -1 ? null : HOOK_FAILURE.exec(line.slice(tab + 1));
     if (found === null) {
-      if (this.above === null) {
-        return;
-      }
-      if (this.above.length < HOOK_MESSAGE_LINES) {
-        this.above.push(owned(line.trim()));
-      } else {
-        this.cut = true;
-      }
+      this.above?.push(owned(line.trim()));
       return;
     }
     const message = [...(this.above ?? []), line.slice(0, tab).trim()]
@@ -844,6 +833,11 @@ export class DiscoveryRead implements LineFold<DiscoveryListing | null> {
   private from = -1;
   private to = -1;
   private done = false;
+
+  /** Whether the line last taken is part of the list. */
+  get listed(): boolean {
+    return this.from >= 0 && this.at - 1 < this.to;
+  }
 
   take(line: string): void {
     const at = this.at;
@@ -1003,7 +997,7 @@ export const RENDERED_AWAY_NOTE =
  * value may be the merge, and one whose sides still read alike says why, rather than letting
  * either side stand as the value. A string gdUnit4 masked because it held BBCode is unmasked.
  *
- * [param printed] may come as the diffs {@link PrintedDiffs} read off a console as it arrived,
+ * [param printed] may come as the diffs {@link SuiteDiffs} read off a console a suite at a time,
  * since a whole console can pass what one string holds.
  */
 export function withActualsPrinted<Case extends { readonly detail: string | null }>(
@@ -1067,90 +1061,106 @@ const DIFF_OPENS = " but was\n '";
 /** The location line that ends a case's report, and with it any diff opened before it. */
 const LOCATED = new RegExp(`\\tat ${LOCATION}`, 'g');
 
+/** The text gdUnit4's line opening a suite holds, which the line is looked for by. */
+const SUITE_OPENS = 'Run Test Suite:';
+
+/** The longest unfinished line held to be looked at for a suite's start. A suite's line is far shorter. */
+const LINE_HELD_MOST = 64 * 1024;
+
 /**
- * The diffs a console prints, read as its bytes arrive, as {@link withActualsPrinted} reads them off
- * the whole text. It keeps the text from the first diff not yet ended, and otherwise only enough to
- * find a diff's opening cut between two chunks.
+ * The diffs a console prints, read as {@link withActualsPrinted} reads them off the whole text, one
+ * suite's text at a time. The text is held from where the last suite was read, and read once the next
+ * suite opens, unless a diff that may still run on past that line is open in it, as one whose value
+ * holds a suite's line. Then it is held on to the next. One suite's text is all that is held, since
+ * a suite printing more than a log may hold ends the engine.
  */
-export class PrintedDiffs {
+export class SuiteDiffs {
   private readonly decoder = new StringDecoder('utf8');
   private readonly found: PrintedDiff[] = [];
-  /** The text not yet read past, line breaks as the report spells them. */
-  private unread = '';
-  /** A carriage return the last chunk ended on, which a line feed in the next makes a line break. */
-  private carriage = false;
+  /** The text since the last suite read, in the pieces it came in. */
+  private pieces: string[] = [];
+  /** How many characters were read and let go before the first held. */
+  private gone = 0;
+  /** How many characters have come. */
+  private taken = 0;
+  /** Where the unfinished last line begins, counted from the console's start. */
+  private lineFrom = 0;
+  /** The unfinished last line, or null for one too long to be a suite's. */
+  private line: string | null = '';
 
   /** Reads [param chunk], the bytes printed next. */
   take(chunk: Buffer): void {
-    this.read(this.decoder.write(chunk), false);
+    const text = this.decoder.write(chunk);
+    if (text === '') {
+      return;
+    }
+    const base = this.taken;
+    this.pieces.push(text);
+    this.taken += text.length;
+    let from = 0;
+    for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', end + 1)) {
+      const line = this.line === null ? null : this.line + text.slice(from, end);
+      if (line?.includes(SUITE_OPENS) === true && suiteOpenedBy(stripVTControlCharacters(line)) !== null) {
+        this.readTo(this.lineFrom);
+      }
+      from = end + 1;
+      this.lineFrom = base + from;
+      this.line = '';
+    }
+    const rest = text.slice(from);
+    this.line =
+      this.line === null || this.line.length + rest.length > LINE_HELD_MOST ? null : this.line + rest;
   }
 
-  /** The diffs read, once the console has ended. */
+  /** Every diff the console printed, once it has ended. */
   finish(): PrintedDiff[] {
-    this.read(this.decoder.end(), true);
+    this.pieces.push(this.decoder.end());
+    this.found.push(...diffsIn(this.pieces.join('')));
+    this.pieces = [];
     return [...this.found];
   }
 
-  /** How many characters of the console are held, which stays small unless a diff is still open. */
+  /** How many characters of the console are held, which is one suite's text. */
   get held(): number {
-    return this.unread.length;
+    return this.taken - this.gone;
   }
 
-  private read(text: string, ended: boolean): void {
-    let more = `${this.carriage ? '\r' : ''}${text}`;
-    this.carriage = !ended && more.endsWith('\r');
-    if (this.carriage) {
-      more = more.slice(0, -1);
+  /** Reads the text held up to [param at], counted from the console's start, unless a diff may run on past it. */
+  private readTo(at: number): void {
+    const held = this.pieces.join('');
+    const cut = at - this.gone;
+    const read = suiteDiffsIn(held.slice(0, cut));
+    if (read === null) {
+      this.pieces = [held];
+      return;
     }
-    this.unread += more.replaceAll('\r\n', '\n');
-    // Every diff opens on a line break, so text with none read since the last look holds no new one.
-    const from = ended || more.includes('\n') ? this.readFound(ended) : 0;
-    const open = this.liveOpening(from, ended);
-    const keepFrom = open >= 0 ? open : Math.max(from, this.unread.length - DIFF_OPENS.length + 1);
-    this.unread = owned(this.unread.slice(keepFrom));
+    this.found.push(...read);
+    this.pieces = [held.slice(cut)];
+    this.gone = at;
   }
+}
 
-  /** Takes every diff the text held ends, and gives back where the text after the last one begins. */
-  private readFound(ended: boolean): number {
-    let from = 0;
-    PRINTED_ACTUAL.lastIndex = 0;
-    for (
-      let match = PRINTED_ACTUAL.exec(this.unread);
-      match !== null;
-      match = PRINTED_ACTUAL.exec(this.unread)
-    ) {
-      const end = match.index + match[0].length;
-      // A location runs on to the end of its line, so a match whose line has not ended may still
-      // grow. One that has ended is the match the whole text gives.
-      if (!ended && !this.unread.includes('\n', end)) {
-        break;
-      }
-      this.found.push(diffOf(match));
-      from = end;
-    }
-    PRINTED_ACTUAL.lastIndex = 0;
-    return from;
+/**
+ * The diffs in [param text], the console up to a line opening a suite, or null when a diff may run
+ * on past its end: an opening no location line follows, since a diff's value ends on the first one.
+ */
+function suiteDiffsIn(text: string): PrintedDiff[] | null {
+  const spelled = text.replaceAll('\r\n', '\n');
+  const diffs: PrintedDiff[] = [];
+  let after = 0;
+  for (const match of spelled.matchAll(PRINTED_ACTUAL)) {
+    diffs.push(diffOf(match));
+    after = match.index + match[0].length;
   }
-
-  /**
-   * Where the first opening from [param from] on that may still become a diff is, or -1. A diff ends
-   * on the first location line after its opening, so an opening past whose first location line no
-   * diff was read never becomes one, as an array's value followed by its table of differences.
-   */
-  private liveOpening(from: number, ended: boolean): number {
-    if (ended) {
-      return -1;
+  for (let open = spelled.indexOf(DIFF_OPENS, after); open >= 0; ) {
+    LOCATED.lastIndex = open + DIFF_OPENS.length;
+    const located = LOCATED.exec(spelled);
+    if (located === null) {
+      return null;
     }
-    for (let open = this.unread.indexOf(DIFF_OPENS, from); open >= 0; ) {
-      LOCATED.lastIndex = open + DIFF_OPENS.length;
-      const located = LOCATED.exec(this.unread);
-      if (located === null || !this.unread.includes('\n', located.index + located[0].length)) {
-        return open;
-      }
-      open = this.unread.indexOf(DIFF_OPENS, located.index + 1);
-    }
-    return -1;
+    open = spelled.indexOf(DIFF_OPENS, located.index + 1);
   }
+  return diffs;
 }
 
 /**

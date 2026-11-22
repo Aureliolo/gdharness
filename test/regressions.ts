@@ -398,11 +398,11 @@ import {
   ignoredYetRan,
   MalformedReportError,
   orphansPrinted,
-  PrintedDiffs,
   parseJUnit,
   RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
   type ScriptError,
+  SuiteDiffs,
   suitesPrinted,
   whyNoReport,
   withActualsPrinted,
@@ -784,14 +784,16 @@ import {
 import {
   COMPILED_SAID,
   type EngineEnd,
+  ERRORS_KEPT,
+  type Expected,
   exitNamed,
   failedOnPushErrors,
   funcOf,
   type HandedSuite,
   judgeCompile,
   judgeEngine,
+  type LogRead,
   type RowShare,
-  type RunRead,
   readEngineLog,
   readExpected,
   readRun,
@@ -104625,6 +104627,8 @@ interface FedRunAsked {
   readonly handed?: readonly string[];
   /** The cases of the selected suites that the selection leaves out, as `suite path:test`. */
   readonly selectionIgnore?: readonly string[];
+  /** The errors and warnings the suites declare, none when absent. */
+  readonly declared?: Expected;
 }
 
 /**
@@ -104681,8 +104685,10 @@ function fedRunAnswered(
       })
       .join('')}</testsuites>`;
     const { tally } = aTalliedRun([{ stream: 'stdout' as const, text: `${engineText}\n` }], 1000);
-    const diffs = new PrintedDiffs();
+    const diffs = new SuiteDiffs();
     diffs.take(Buffer.from(engineText));
+    const engineLog = join(project, 'engine.log');
+    writeFileSync(engineLog, engineText);
     const word = ({ 0: 'passed', 100: 'failures' } as Record<number, string>)[exitCode] ?? 'other';
     const selected = asked.selected;
     const input = {
@@ -104724,8 +104730,7 @@ function fedRunAnswered(
       tally,
       diffs: diffs.finish(),
       report: parseJUnit(xml),
-      casePrinted: withNestedErrors(readRun(engineText), []),
-      declaredErrors: readExpected(join(project, 'none.json')),
+      casePrinted: readEngineLog(engineLog, [], asked.declared ?? NONE_EXPECTED),
       uncaught: null,
       exitCode,
       verdict: word,
@@ -104752,7 +104757,7 @@ function fedRunAnswered(
     assert.ok(isRecord(answer), 'the answer is an object');
     const handed = {
       suites: declared.filter((suite) => asked.handed?.includes(suite.path) ?? true),
-      expected: { errors: {}, warnings: {} },
+      expected: asked.declared ?? NONE_EXPECTED,
     };
     return {
       answer,
@@ -133282,6 +133287,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog,
   testATestRunsTallyPastItsBoundsSaysWhatItCut,
   testATestRunsConsoleIsReadAsItArrivesAndNeverJoined,
+  testAnErrorDeclaredPastTheErrorsKeptIsSettled,
+  testAnUnreportedRunsEntriesAreCountedOverEveryLine,
+  testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut,
+  testPrintedCappedNamesTheUncaughtErrorsLeftOut,
   testTwoWorktreesStartBesideEachOther,
   testOneProjectStartedWithTwoSavesFoldersGoesBeside,
   testAStartOfTheSamePlaceEndsOnlyThatRun,
@@ -133655,18 +133664,22 @@ function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
       { index: 1, severity: 'error', source: 'stderr', text: 'Stack overflow', detail: [] },
     ];
     assert.deepEqual(
-      readEngineLog(log, ['Stack overflow']),
+      readEngineLog(log, ['Stack overflow'], NONE_EXPECTED),
       asRead(withNestedErrors(readRun(whole), piped)),
       'a log read at once is read whole',
     );
-    assert.deepEqual(readEngineLog(log, [], 97), asRead(readRun(whole)), 'and so is one read in pieces');
+    assert.deepEqual(
+      readEngineLog(log, [], NONE_EXPECTED, 97),
+      asRead(readRun(whole)),
+      'and so is one read in pieces',
+    );
     assert.equal(
-      readEngineLog(log, []).lineCount,
+      readEngineLog(log, [], NONE_EXPECTED).lineCount,
       whole.split('\n').length,
       'and nothing says part of it was left out',
     );
     assert.deepEqual(
-      readEngineLog(join(scratch, 'missing.log'), []),
+      readEngineLog(join(scratch, 'missing.log'), [], NONE_EXPECTED),
       asRead(readRun('')),
       'a log never written is an empty run',
     );
@@ -133724,9 +133737,25 @@ function testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader(): void {
   }
 }
 
-/** [param printed], a run read whole, as a run read a line at a time answers it. */
-function asRead({ lines, ...read }: ReturnType<typeof readRun>): RunRead {
-  return { ...read, lineCount: lines.length, errorsDropped: 0 };
+/** No suite declaring any error or warning. */
+const NONE_EXPECTED = { errors: {}, warnings: {} };
+
+/**
+ * [param printed], a run read whole, as a run read a line at a time answers it, its errors judged
+ * against [param expected] for every suite it opened.
+ */
+function asRead(printed: ReturnType<typeof readRun>, expected: Expected = NONE_EXPECTED): LogRead {
+  const { lines, ...read } = printed;
+  const judged = unexpectedErrors(printed, expected, [...printed.suites.keys()]);
+  const errors = (list: readonly { readonly warning: boolean }[]): number =>
+    list.filter((error) => !error.warning).length;
+  return {
+    ...read,
+    lineCount: lines.length,
+    errorsDropped: 0,
+    judged,
+    declaredErrors: errors(printed.errors) - errors(judged.printed),
+  };
 }
 
 /** A run of ten suites, each case printing a line between its start and its end. */
@@ -133806,20 +133835,20 @@ function testAnEngineLogReadInPiecesIsJudgedAsItsWholeText(): void {
       const whole = asRead(readRun(readFileSync(log, 'utf8')));
       for (const chunk of [1, 2, 3, 7, 64, 4096, undefined]) {
         assert.deepEqual(
-          readEngineLog(log, [], chunk),
+          readEngineLog(log, [], NONE_EXPECTED, chunk),
           whole,
           `${name} read ${String(chunk ?? 'at once')} at a time`,
         );
       }
     }
     assert.deepEqual(
-      readEngineLog(log, [], 1).starved,
+      readEngineLog(log, [], NONE_EXPECTED, 1).starved,
       ['ERROR: Failed decoding WebP image.\n   at: _webp_unpack'],
       'a starved decode is read across its two lines',
     );
 
     writeFileSync(log, ten.text);
-    const passing = readEngineLog(log, [], 5);
+    const passing = readEngineLog(log, [], NONE_EXPECTED, 5);
     assert.deepEqual(
       ten.suites.map((suite) => {
         const ran = passing.suites.get(suite.path);
@@ -133832,19 +133861,18 @@ function testAnEngineLogReadInPiecesIsJudgedAsItsWholeText(): void {
     assert.deepEqual([clean.printed, clean.neverPrinted], [[], []], 'the ten-suite run passes');
 
     writeFileSync(log, middle);
-    const erring = readEngineLog(log, [], 5);
+    const erring = readEngineLog(log, [], NONE_EXPECTED, 5);
     const undeclared = unexpectedErrors(erring, none, [S_TEST]);
     assert.deepEqual(
       undeclared.printed.map((one) => [one.text, one.suite, one.during]),
       [['only failure in the middle', S_TEST, 'test_b']],
       'an error no suite declared fails the run',
     );
-    const declared = unexpectedErrors(
-      erring,
-      { errors: { [S_TEST]: { test_b: ['only failure in the middle'] } }, warnings: {} },
-      [S_TEST],
-    );
+    assert.deepEqual(erring.judged, undeclared, 'and the log read judges it so');
+    const declaring = { errors: { [S_TEST]: { test_b: ['only failure in the middle'] } }, warnings: {} };
+    const declared = unexpectedErrors(erring, declaring, [S_TEST]);
     assert.deepEqual([declared.printed, declared.neverPrinted], [[], []], 'and passes it once declared');
+    assert.deepEqual(readEngineLog(log, [], declaring, 5).judged, declared, 'read off the log as it streams');
   } finally {
     sweep(scratch);
   }
@@ -134457,7 +134485,7 @@ function testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog(): void {
 
 /**
  * Past each bound the tally keeps the newest or the oldest of what it lists, as the answer shows
- * them, and names every list it cut. Its counts are of every entry.
+ * them, and names every list it cut with how many entries it left out. Its counts are of every entry.
  */
 function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
   const many = DISTINCT_KEPT + 50;
@@ -134475,14 +134503,14 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
     {
       stream: 'stderr' as const,
       text: lines(
-        1050,
+        many,
         (n) => `ERROR: Failed ${String(n)}\n   at: GDScript::reload (res://b_${String(n)}.gd:4)\n`,
       ),
     },
     {
       stream: 'stderr' as const,
       text: lines(
-        1050,
+        many,
         (n) =>
           `While attempting to print an error, another error was printed:\nERROR: nested ${String(n)}\n   at: p (c.cpp:1)\n`,
       ),
@@ -134514,19 +134542,21 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
     {
       engine: warned.slice(-DISTINCT_KEPT),
       uncaught: [many, uncaught.slice(0, DISTINCT_KEPT), DISTINCT_KEPT],
-      compileErrors: compileErrorsIn(all).slice(0, 1000),
-      nested: 1000,
+      compileErrors: compileErrorsIn(all).slice(0, DISTINCT_KEPT),
+      nested: DISTINCT_KEPT,
       leaked: DISTINCT_KEPT,
-      hook: [...Array.from({ length: 1000 }, (_line, n) => `part ${String(n)}`), 'Expecting: 1'].join(' '),
+      hook: [...Array.from({ length: 1050 }, (_line, n) => `part ${String(n)}`), 'Expecting: 1'].join(' '),
       errors: all.filter((entry) => entry.severity === 'error').length,
       capped: [
-        'compile errors',
-        'engine entries',
-        'hook failure messages',
-        'leaks at exit',
-        'nested errors',
-        'repeated script errors',
-        'uncaught script errors',
+        { list: 'compile errors', leftOut: 50 },
+        {
+          list: 'engine entries',
+          leftOut: warned.slice(0, -DISTINCT_KEPT).reduce((sum, entry) => sum + (entry.times ?? 1), 0),
+        },
+        { list: 'leaks at exit', leftOut: 50 },
+        { list: 'nested errors', leftOut: 50 },
+        { list: 'repeated script errors', leftOut: 100 },
+        { list: 'uncaught script errors', leftOut: 50 },
       ],
     },
   );
@@ -134548,6 +134578,183 @@ function testATestRunsConsoleIsReadAsItArrivesAndNeverJoined(): void {
     [],
     'and no chunk is kept or joined',
   );
+}
+
+/** A case of [param path] printing [param printed] between its start and its verdict. */
+function fedCasePrinting(path: string, name: string, printed: readonly string[]): FedCase {
+  return { name, printed: [...printed, caseLine(path, name, 'PASSED', '12ms')] };
+}
+
+/** [param times] copies of the engine error [param text], as push_error prints one. */
+function engineErrors(text: string, times: number): string[] {
+  return Array.from({ length: times }, () => [
+    `ERROR: ${text}`,
+    '   at: push_error (core/variant/variant_utility.cpp:1024)',
+  ]).flat();
+}
+
+/**
+ * A suite printing more errors than the answer keeps leaves the next suite's declared error
+ * settled, as the whole log settles it: the run fails on the first suite's errors alone, and
+ * the answer says how many it judged and left out.
+ */
+function testAnErrorDeclaredPastTheErrorsKeptIsSettled(): void {
+  const flood = ERRORS_KEPT + 5;
+  const { answer } = fedRunAnswered(
+    [
+      { path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('the flood', flood))], closed: 'PASSED' },
+      {
+        path: FED_B,
+        cases: [fedCasePrinting(FED_B, 'test_b', engineErrors('the store is closed', 1))],
+        closed: 'PASSED',
+      },
+    ],
+    0,
+    { declared: { errors: { [FED_B]: { test_b: ['the store is closed'] } }, warnings: {} } },
+  );
+  const kept = String(ERRORS_KEPT);
+  assert.deepEqual(answer, {
+    passed: false,
+    verdict: `${kept} engine errors no suite declared`,
+    exitCode: 0,
+    tests: 2,
+    failures: 0,
+    errors: 0,
+    skipped: 0,
+    time: 0.08,
+    tookMs: 0,
+    tookMsBy: {},
+    failed: [],
+    undeclaredErrors: [{ suite: FED_A, case: 'test_a', text: 'the flood', times: ERRORS_KEPT }],
+    note: 'An engine error or warning a suite does not declare fails the run, as gdharness test judges it. If the suite prints it on purpose, list its text under "test_a" in the suite\'s GDHARNESS_EXPECTED_ERRORS, once for each time it prints it. A suite declaring none yet does it as const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_a":["the flood"]}, keyed by case function, or by before and after for the suite\'s own hooks.',
+    suites: [
+      {
+        name: 'a_test',
+        path: FED_A,
+        tests: 1,
+        undeclaredErrors: ERRORS_KEPT,
+        failures: 0,
+        errors: 0,
+        skipped: 0,
+        time: 0.04,
+      },
+    ],
+    suitesPassed: 1,
+    engineErrors: 0,
+    engineWarnings: 0,
+    engineEntries: [],
+    printedCapped: `The run printed more than the answer keeps. Past the ${kept} engine errors and warnings it keeps, it judged 6 more against what the suites declare. It leaves those out of the errors it lists and counts by suite.`,
+    classes: {},
+  });
+
+  // Declared, the flood passes, and an error past it that no suite declares still fails the run,
+  // printed before its case's verdict or after it.
+  const late = engineErrors('nobody declared this', 1);
+  // One printed after the suite's last verdict is its after hook's.
+  for (const [printedB, during] of [
+    [fedCasePrinting(FED_B, 'test_b', late), 'test_b'],
+    [{ name: 'test_b', printed: [caseLine(FED_B, 'test_b', 'PASSED', '12ms'), ...late] }, 'after'],
+  ] as const) {
+    const declaring = fedRunAnswered(
+      [
+        { path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('the flood', flood))], closed: 'PASSED' },
+        { path: FED_B, cases: [printedB], closed: 'PASSED' },
+      ],
+      0,
+      { declared: { errors: { [FED_A]: { test_a: Array.from({ length: flood }, () => 'the flood') } }, warnings: {} } },
+    ).answer;
+    assertOneUndeclaredPastTheFlood(declaring, during);
+  }
+}
+
+/** The answer of a run whose declared flood is followed by one error no suite declared, printed [param during]. */
+function assertOneUndeclaredPastTheFlood(declaring: Record<string, unknown>, during: string): void {
+  const kept = String(ERRORS_KEPT);
+  assert.deepEqual(
+    {
+      passed: get(declaring, 'passed'),
+      verdict: get(declaring, 'verdict'),
+      undeclaredErrors: get(declaring, 'undeclaredErrors'),
+      printedCapped: get(declaring, 'printedCapped'),
+    },
+    {
+      passed: false,
+      verdict: 'one engine error no suite declared',
+      undeclaredErrors: [{ suite: FED_B, case: during, text: 'nobody declared this' }],
+      printedCapped: `The run printed more than the answer keeps. Past the ${kept} engine errors and warnings it keeps, it judged 5 more against what the suites declare. It leaves those out of the errors it lists and counts by suite.`,
+    },
+    JSON.stringify(declaring).slice(0, 3000),
+  );
+}
+
+/**
+ * A run that wrote no report and listed a script error it could not load folds every entry it
+ * printed outside that list with how often each came, however many lines that is.
+ */
+function testAnUnreportedRunsEntriesAreCountedOverEveryLine(): void {
+  const printed = [
+    'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+    'Script errors were detected during test discovery!',
+    '  Parse Error: Identifier "nope" not declared in the current scope.',
+    '   at res://test/broken_test.gd:4',
+    ...Array.from({ length: 24_000 }, (_line, n) => `frame ${String(n % 7)}`),
+    'SCRIPT ERROR: Parse Error: Identifier "nope" not declared in the current scope.',
+    '   at: GDScript::reload (res://test/broken_test.gd:4)',
+  ].join('\n');
+  const { tally, whole } = aTalliedRun([{ stream: 'stdout', text: `${printed}\n` }], 1000);
+  const errors = tally.discovery.result()?.errors ?? [];
+  assert.equal(errors.length, 1, 'the run lists one script it could not load');
+  const mains = foldedRepeats(withoutListed(whole.all, errors)).slice(0, 60);
+  assert.deepEqual(tally.entriesWithout(errors, 60), mains);
+  assert.deepEqual(
+    mains.filter((entry) => entry.text.startsWith('frame ')).map((entry) => [entry.text, entry.times]),
+    Array.from({ length: 7 }, (_text, n) => [`frame ${String(n)}`, n < 24_000 % 7 ? 3429 : 3428]),
+    'each counted over every line',
+  );
+  assert.deepEqual(tally.capped(), [], 'and nothing is cut');
+}
+
+/**
+ * printedCapped is said only of a run that reached a bound, and names each bound reached with how
+ * much it left out. A run under every bound is answered without it.
+ */
+function testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut(): void {
+  const under = fedRunAnswered([
+    { path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', engineErrors('one', 3))], closed: 'PASSED' },
+  ]).answer;
+  assert.equal(get(under, 'printedCapped'), undefined, JSON.stringify(under));
+
+  const warnings = Array.from({ length: DISTINCT_KEPT + 7 }, (_line, n) => [
+    `WARNING: warned ${String(n)}`,
+    '   at: f (a.cpp:1)',
+  ]).flat();
+  const over = fedRunAnswered([
+    { path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', warnings)], closed: 'PASSED' },
+  ]).answer;
+  assert.equal(
+    get(over, 'printedCapped'),
+    `The run printed more than the answer keeps. Past the ${String(DISTINCT_KEPT)} entries a list keeps, it leaves out 7 engine entries.`,
+    JSON.stringify(over).slice(0, 3000),
+  );
+}
+
+/** A passing run printing more uncaught script errors than its answer lists says how many it left out. */
+async function testPrintedCappedNamesTheUncaughtErrorsLeftOut(): Promise<void> {
+  for (const [errors, said] of [
+    [20, undefined],
+    [25, 'The run printed more than the answer keeps. uncaughtScriptErrors lists the first 20 and leaves out 5.'],
+  ] as const) {
+    const stderr = Array.from(
+      { length: errors },
+      (_error, n) =>
+        `SCRIPT ERROR: uncaught number ${String(n)}\n   at: test_one (${CHATTY_A}:${String(n + 1)})\n`,
+    ).join('');
+    const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:0,${CHATTY_B}:0,${CHATTY_C}:0`, 'both', false, {
+      stderr,
+      report: chattyReport(),
+    });
+    assert.equal(get(answer, 'printedCapped'), said, JSON.stringify(answer).slice(0, 3000));
+  }
 }
 
 /** Runs one test against its deadline, then sweeps the engines and servers it left. */

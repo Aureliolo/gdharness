@@ -18,11 +18,11 @@ import {
   MOST_REPORTS_SHOWN,
   orphansLeftSaid,
   orphansPrinted,
-  PrintedDiffs,
   parseJUnit,
   RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
   scriptErrorsPrinted,
+  SuiteDiffs,
   suitesPrinted,
   testProgressMessage,
   VALUE_NOT_RECOVERED_NOTE,
@@ -1317,17 +1317,15 @@ function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
       'a value holding a line that opens a suite is read back',
     );
     const bytes = Buffer.from(whole);
-    const atOnce = new PrintedDiffs();
+    const atOnce = new SuiteDiffs();
     atOnce.take(bytes);
     const read = atOnce.finish();
     // Chunks long enough to hold a line break and a location line cut short after it, as well as
     // chunks shorter than any line.
     for (const size of [1, 2, 7, 64, 101, 1000, bytes.length]) {
-      const diffs = new PrintedDiffs();
-      let most = 0;
+      const diffs = new SuiteDiffs();
       for (const piece of piecesOf(bytes, size)) {
         diffs.take(piece);
-        most = Math.max(most, diffs.held);
       }
       const said = `read ${String(size)} bytes at a time, lines ended ${JSON.stringify(ending)}`;
       const found = diffs.finish();
@@ -1337,9 +1335,131 @@ function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
         expected,
         `${said}: the diffs are the whole text's`,
       );
-      assert.ok(most < 4096, `${said}: ${String(most)} characters were held of ${String(whole.length)}`);
     }
   }
+}
+
+/**
+ * How a report spells the failure {@link aSuiteFailingOn} prints: the merge of both sides, a
+ * character of each after [param value].
+ */
+function reportedFailing(path: string, value: string): { detail: string } {
+  return { detail: `Expecting:\n 'other'\n but was\n '${value}oz'\n\tat 'test_value' in ${path}:5` };
+}
+
+/**
+ * A suite's console, a failed string equality in its one case printing [param value] and a marked
+ * difference after it, as gdUnit4 colours one.
+ */
+function aSuiteFailingOn(path: string, value: string): string {
+  const e = String.fromCharCode(0x1b);
+  const gone = `${e}[48;2;38;0;0m${e}[38;2;255;255;255mo${e}[0m`;
+  const added = `${e}[48;2;0;38;0m${e}[38;2;255;255;255mz${e}[0m`;
+  return [
+    `Run Test Suite: ${path}`,
+    `  ${path} > test_value STARTED`,
+    '  Expecting:',
+    " 'other'",
+    ' but was',
+    ` '${e}[38;2;30;144;255m${value}${gone}${added}'${e}[0m\tat 'test_value' in ${path}:5`,
+    `  ${path} > test_value FAILED 3ms`,
+    'Statistics: 1 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 40ms',
+    '',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Once a suite opens, the diffs read so far are taken and the text before it is let go, unless a
+ * diff opened there runs on into it. So what is held is the suite being printed.
+ */
+function testTheDiffsHoldOnlyTheSuiteBeingPrinted(): void {
+  const paths = Array.from({ length: 40 }, (_suite, n) => `res://tests/s${String(n)}_test.gd`);
+  const values = paths.map((_path, n) => `value ${String(n)} `.repeat(200));
+  const suites = paths.map((path, n) => aSuiteFailingOn(path, values[n] ?? ''));
+  const diffs = new SuiteDiffs();
+  let most = 0;
+  for (const suite of suites) {
+    for (const piece of piecesOf(Buffer.from(suite), 300)) {
+      diffs.take(piece);
+      most = Math.max(most, diffs.held);
+    }
+  }
+  const longest = Math.max(...suites.map((suite) => suite.length));
+  assert.ok(most <= longest + 300, `at most one suite and a piece are held: ${String(most)} of ${String(longest)}`);
+  const failed = paths.map((path, n) => reportedFailing(path, values[n] ?? ''));
+  const read = withActualsPrinted(failed, diffs.finish());
+  assert.deepEqual(read, withActualsPrinted(failed, suites.join('')), 'every diff is read as the whole text reads it');
+  assert.equal(
+    read.filter((one, n) => one.detail !== failed[n]?.detail).length,
+    paths.length,
+    'and each failure takes its value back',
+  );
+
+  const value = `a value\nRun Test Suite: res://tests/inside_test.gd\n${'more of it '.repeat(500)}`;
+  const open = aSuiteFailingOn('res://tests/open_test.gd', value);
+  const across = new SuiteDiffs();
+  across.take(Buffer.from(open));
+  assert.equal(across.held, open.length, 'a value running on past a suite line is held whole');
+  const opened = [reportedFailing('res://tests/open_test.gd', value)];
+  const acrossRead = withActualsPrinted(opened, across.finish());
+  assert.deepEqual(acrossRead, withActualsPrinted(opened, open), 'and read as the whole text reads it');
+  assert.notEqual(acrossRead[0]?.detail, opened[0]?.detail, 'taking its value back');
+}
+
+/** The CPU time [param work] takes, in milliseconds. */
+function cpuMs(work: () => void): number {
+  const before = process.cpuUsage();
+  work();
+  const { user, system } = process.cpuUsage(before);
+  return (user + system) / 1000;
+}
+
+/**
+ * A 32 MB value read off a console arriving in pieces is the one its whole text holds, read in at
+ * most twice the time the whole text takes.
+ */
+function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
+  const value = 'x'.repeat(32 * 1024 * 1024);
+  const console = [
+    aSuiteFailingOn('res://tests/a_test.gd', 'small'),
+    aSuiteFailingOn('res://tests/big_test.gd', value),
+    aSuiteFailingOn('res://tests/c_test.gd', 'after'),
+  ].join('');
+  const bytes = Buffer.from(console);
+  const failed = [
+    reportedFailing('res://tests/a_test.gd', 'small'),
+    reportedFailing('res://tests/big_test.gd', value),
+    reportedFailing('res://tests/c_test.gd', 'after'),
+  ];
+  let whole: { detail: string | null }[] = [];
+  const wholeMs = cpuMs(() => {
+    whole = withActualsPrinted(failed, console);
+  });
+  let pieces: { detail: string | null }[] = [];
+  const piecesMs = cpuMs(() => {
+    const diffs = new SuiteDiffs();
+    for (const piece of piecesOf(bytes, 64 * 1024)) {
+      diffs.take(piece);
+    }
+    pieces = withActualsPrinted(failed, diffs.finish());
+  });
+  assert.notEqual(whole[1]?.detail, failed[1]?.detail, 'the whole text gives the value back');
+  assert.equal(pieces[1]?.detail, whole[1]?.detail, 'and so does the console read in pieces');
+  for (const [n, path, small] of [
+    [0, 'res://tests/a_test.gd', 'small'],
+    [2, 'res://tests/c_test.gd', 'after'],
+  ] as const) {
+    assert.deepEqual(
+      pieces[n],
+      withActualsPrinted([reportedFailing(path, small)], aSuiteFailingOn(path, small))[0],
+      `${path} reads its value as its own suite's text gives it`,
+    );
+  }
+  assert.ok(
+    piecesMs <= 2 * wholeMs,
+    `in pieces it took ${piecesMs.toFixed(0)} ms of CPU, the whole text ${wholeMs.toFixed(0)} ms`,
+  );
 }
 
 testASecondFailedAssertionIsNotAHook();
@@ -1359,4 +1479,6 @@ testScriptErrorsAreReadOffTheConsole();
 testFinishedSuitesAreReadOffTheConsole();
 testAnIgnoreThatLeftOutNothingIsNamed();
 testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText();
+testTheDiffsHoldOnlyTheSuiteBeingPrinted();
+testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
 console.log('junit reader tests passed');
