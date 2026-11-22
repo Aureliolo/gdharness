@@ -99434,6 +99434,17 @@ function fedRetried(path: string, name: string, keepsFailure = true): FedCase {
   };
 }
 
+/** What a fed run was asked for beyond its suites. */
+interface FedRunAsked {
+  /** The run's ignore entries, and the lines the runner printed for the rows they left out. */
+  readonly ignored?: readonly string[];
+  readonly rowsIgnored?: readonly string[];
+  /** The cases a run of named cases selected, whose suites alone the runner is handed. */
+  readonly selected?: ReadonlyArray<{ readonly suite: string; readonly test: string }>;
+  /** The suites gdharness test is handed, every fed suite when absent. */
+  readonly handed?: readonly string[];
+}
+
 /**
  * What project_test answers for a run fed as text, as the engine's console and report would hold
  * it, beside what gdharness test judges of the same console.
@@ -99441,14 +99452,20 @@ function fedRetried(path: string, name: string, keepsFailure = true): FedCase {
 function fedRunAnswered(
   suites: readonly FedSuite[],
   exitCode = 0,
+  asked: FedRunAsked = {},
 ): { answer: Record<string, unknown>; faults: readonly string[] } {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-fed-run-'));
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     const ran = suites.filter((suite) => suite.closed !== 'NEVER');
     const total = ran.reduce((sum, suite) => sum + suite.cases.length, 0);
+    const declared = suites.map((suite) => ({
+      path: suite.path,
+      cases: [...new Set(suite.cases.map((one) => funcOf(one.name)))],
+    }));
     const engineText = [
       'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+      ...(asked.rowsIgnored ?? []).map((row) => `gdharness ignored ${row}`),
       ...ran.flatMap((suite) => [
         `Run Test Suite: ${suite.path}`,
         ...suite.cases.flatMap((one) => [caseLine(suite.path, one.name, 'STARTED'), ...one.printed]),
@@ -99490,26 +99507,32 @@ function fedRunAnswered(
       time: 0,
     }));
     const word = ({ 0: 'passed', 100: 'failures' } as Record<number, string>)[exitCode] ?? 'other';
+    const selected = asked.selected;
     const input = {
-      args: {},
+      args: {
+        ...(asked.ignored === undefined ? {} : { ignore: asked.ignored }),
+        ...(selected === undefined
+          ? {}
+          : { tests: selected.map((one) => `${one.suite.replace(/^.*\/|\.gd$/g, '')}:${one.test}`) }),
+      },
       project: { value: { path: project } },
       asked: suites.map((suite) => suite.path),
       missing: [],
       missingNote: undefined,
       scripts: {
-        suite: (path: string) => {
-          const found = suites.find((one) => one.path === path);
-          return found === undefined
-            ? []
-            : [{ path, cases: [...new Set(found.cases.map((one) => funcOf(one.name)))] }];
-        },
+        suite: (path: string) => declared.filter((one) => one.path === path),
         suitesUnder: () => [],
       },
-      selection: { value: null },
+      selection: {
+        value:
+          selected === undefined
+            ? null
+            : { suites: [...new Set(selected.map((one) => one.suite))], selected, ignore: [] },
+      },
       notSuites: [],
       flags: { value: [] },
-      declaredUnder: [],
-      ignored: [],
+      declaredUnder: asked.ignored === undefined ? [] : declared,
+      ignored: asked.ignored ?? [],
       engineEntries: [],
       engine: { note: null },
       run: {
@@ -99551,10 +99574,7 @@ function fedRunAnswered(
     const answer: unknown = JSON.parse(String(get(asArray(get(response, 'content'))[0], 'text')));
     assert.ok(isRecord(answer), 'the answer is an object');
     const handed = {
-      suites: suites.map((suite) => ({
-        path: suite.path,
-        cases: [...new Set(suite.cases.map((one) => funcOf(one.name)))],
-      })),
+      suites: declared.filter((suite) => asked.handed?.includes(suite.path) ?? true),
       expected: { errors: {}, warnings: {} },
     };
     return {
@@ -99726,6 +99746,87 @@ function testASuiteAskedForThatNeverRanFailsTheRun(): void {
     [whole.answer['passed'], whole.answer['verdict'], whole.faults],
     [true, 'passed', []],
     'a suite that ran',
+  );
+}
+
+const FED_B = 'res://test/b_test.gd';
+const FED_ROWS = 'res://other/p_test.gd';
+
+/**
+ * A run of cases named by `tests` hands the runner only the suites holding them, so a suite of the
+ * path beside them that printed nothing is no suite that never started. It failed every such run.
+ */
+function testASuiteARunOfNamedCasesLeftOutIsNoSuiteThatNeverStarted(): void {
+  const beside = (selected: ReadonlyArray<{ suite: string; test: string }>): ReturnType<typeof fedRunAnswered> =>
+    fedRunAnswered(
+      [
+        { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' },
+        { path: FED_B, cases: [fedCase(FED_B, 'test_b')], closed: 'NEVER' },
+      ],
+      0,
+      { selected, handed: [...new Set(selected.map((one) => one.suite))] },
+    );
+  const one = beside([{ suite: FED_A, test: 'test_a' }]);
+  assert.deepEqual(
+    [one.answer['passed'], one.answer['verdict'], one.answer['note'], one.faults],
+    [true, 'passed', undefined, []],
+    JSON.stringify(one),
+  );
+  const both = beside([
+    { suite: FED_A, test: 'test_a' },
+    { suite: FED_B, test: 'test_b' },
+  ]);
+  assert.deepEqual(
+    [both.answer['passed'], both.answer['verdict'], both.faults],
+    [false, `not run: b_test:test_b; ${FED_B} never started`, [`${FED_B} never started`]],
+    JSON.stringify(both),
+  );
+}
+
+/**
+ * A suite every case of which an ignore entry left out, whole or by each of its rows, is one
+ * gdUnit4 has nothing to run in, so its printing nothing passes the run. One whose cases were left
+ * out only in part still fails it as never started.
+ */
+function testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted(): void {
+  const plain: FedSuite = { path: FED_A, cases: [fedCase(FED_A, 'test_a')], closed: 'PASSED' };
+  const rows: FedSuite = {
+    path: FED_ROWS,
+    cases: [fedCase(FED_ROWS, 'test_p:0 (1)'), fedCase(FED_ROWS, 'test_p:1 (2)')],
+    closed: 'NEVER',
+  };
+  const verdictOf = (run: ReturnType<typeof fedRunAnswered>): unknown[] => [
+    run.answer['passed'],
+    run.answer['verdict'],
+    run.answer['ignored'],
+    run.faults,
+  ];
+  const everyRow = fedRunAnswered([plain, rows], 0, {
+    ignored: ['p_test:test_p:0', 'p_test:test_p:1'],
+    rowsIgnored: [`${FED_ROWS} > test_p:0`, `${FED_ROWS} > test_p:1`],
+    handed: [FED_A],
+  });
+  assert.deepEqual(
+    verdictOf(everyRow),
+    [true, 'passed', ['p_test:test_p:0', 'p_test:test_p:1'], []],
+    `every row ignored: ${JSON.stringify(everyRow)}`,
+  );
+  const wholeSuite = fedRunAnswered([plain, rows], 0, { ignored: ['p_test'], handed: [FED_A] });
+  assert.deepEqual(
+    verdictOf(wholeSuite),
+    [true, 'passed', ['p_test:test_p'], []],
+    `the suite ignored whole: ${JSON.stringify(wholeSuite)}`,
+  );
+  const twoCases: FedSuite = {
+    path: FED_ROWS,
+    cases: [fedCase(FED_ROWS, 'test_p'), fedCase(FED_ROWS, 'test_q')],
+    closed: 'NEVER',
+  };
+  const oneCase = fedRunAnswered([plain, twoCases], 0, { ignored: ['p_test:test_p'] });
+  assert.deepEqual(
+    verdictOf(oneCase),
+    [false, `${FED_ROWS} never started`, ['p_test:test_p'], [`${FED_ROWS} never started`]],
+    `one case of two ignored: ${JSON.stringify(oneCase)}`,
   );
 }
 
@@ -124486,6 +124587,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRetriedCasesAreNamedAsGdharnessTestNamesThem,
   testAFailureOnlyTheReportHoldsIsNoFailure,
   testASuiteAskedForThatNeverRanFailsTheRun,
+  testASuiteARunOfNamedCasesLeftOutIsNoSuiteThatNeverStarted,
+  testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted,
   testAFlakyCaseFailsTheRunWhateverTheReportHolds,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testASaveFromTheEditorIsRefusedWithNoEditor,

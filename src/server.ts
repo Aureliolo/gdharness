@@ -11047,15 +11047,15 @@ export class GodotServer {
     }));
     // gdUnit4 exits 0 on such a case, and its report holds only the failure.
     const retried = casesRetried(casePrinted);
-    // A suite asked for that printed no start or no end, which exits 0 beside the suites that ran.
-    // A suite with no case, or every case of it left out, is one gdUnit4 has nothing to run in.
-    const suitesNotRun = asked
+    // A suite the runner was handed that printed no start or no end, which exits 0 beside the suites
+    // that ran. A suite with no case, or every case of it left out, is one gdUnit4 has nothing to run
+    // in. A case counts as left out by its rows when the runner said it left out any: gdUnit4 opens
+    // a suite whenever discovery leaves it a row, so a suite that never opened kept none.
+    const leftOutWhole = (suite: string, func: string): boolean =>
+      ignoreRead.leftOut.some((one) => one === `${suite}:${func}` || one.startsWith(`${suite}:${func}:`));
+    const suitesNotRun = (selection.value?.suites ?? asked)
       .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
-      .filter(
-        (suite) =>
-          suite.cases.length > 0 &&
-          !suite.cases.every((func) => ignoreRead.leftOut.includes(`${basename(suite.path, '.gd')}:${func}`)),
-      )
+      .filter((suite) => !suite.cases.every((func) => leftOutWhole(basename(suite.path, '.gd'), func)))
       .flatMap((suite) => suiteNotRunFault(casePrinted, suite.path) ?? []);
     return this.reportAnswer({
       ...judged,
