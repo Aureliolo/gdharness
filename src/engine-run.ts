@@ -138,7 +138,7 @@ interface RunOptions {
    * neither shows nor takes the keyboard.
    */
   readonly desktop?: { readonly directory: string; readonly scratch: string };
-  /** The project the engine runs for, which gives its slot the store class where its repository has it. */
+  /** The project the engine runs for, which gives its slot a repository, and high priority where the list names it. */
   readonly project?: string;
 }
 
