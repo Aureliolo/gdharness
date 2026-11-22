@@ -99801,6 +99801,12 @@ function testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted(): void {
     run.answer['ignored'],
     run.faults,
   ];
+  const wholeSuite = fedRunAnswered([plain, rows], 0, { ignored: ['p_test'], handed: [FED_A] });
+  assert.deepEqual(
+    verdictOf(wholeSuite),
+    [true, 'passed', ['p_test:test_p'], []],
+    `the suite ignored whole: ${JSON.stringify(wholeSuite)}`,
+  );
   const everyRow = fedRunAnswered([plain, rows], 0, {
     ignored: ['p_test:test_p:0', 'p_test:test_p:1'],
     rowsIgnored: [`${FED_ROWS} > test_p:0`, `${FED_ROWS} > test_p:1`],
@@ -99810,12 +99816,6 @@ function testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted(): void {
     verdictOf(everyRow),
     [true, 'passed', ['p_test:test_p:0', 'p_test:test_p:1'], []],
     `every row ignored: ${JSON.stringify(everyRow)}`,
-  );
-  const wholeSuite = fedRunAnswered([plain, rows], 0, { ignored: ['p_test'], handed: [FED_A] });
-  assert.deepEqual(
-    verdictOf(wholeSuite),
-    [true, 'passed', ['p_test:test_p'], []],
-    `the suite ignored whole: ${JSON.stringify(wholeSuite)}`,
   );
   const twoCases: FedSuite = {
     path: FED_ROWS,
