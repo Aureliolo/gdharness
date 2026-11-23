@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { forAnswer, GameLog } from '../src/game-log.js';
 import { suitesPrinted } from '../src/junit.js';
+import { LINE_KEPT_MOST, lineCutSaid } from '../src/log-read.js';
 
 function testHeadlinesKeepTheirDetail(): void {
   const log = new GameLog();
@@ -488,6 +489,39 @@ function testALogKeptToABoundHandsOverEveryEntryWhole(): void {
   }
 }
 
+/**
+ * A log kept to a bound holds a line longer than {@link LINE_KEPT_MOST} to its first half and its
+ * last, with what was let go counted between them. That holds for a line ended in the piece after
+ * it began and for one lying whole inside a piece, and a cut never splits a surrogate pair.
+ */
+function testALogKeptToABoundHoldsALongLineToItsEnds(): void {
+  const half = LINE_KEPT_MOST / 2;
+  const kept = (line: string): string => {
+    const from = line.length - half;
+    return `${line.slice(0, half)}${lineCutSaid(Buffer.byteLength(line.slice(half, from)))}${line.slice(from)}`;
+  };
+  const long = `start ${'v'.repeat(3 * LINE_KEPT_MOST)} end`;
+  const inside = `first ${'w'.repeat(LINE_KEPT_MOST + 10)} last`;
+  const paired = `${'p'.repeat(half - 1)}${'\u{1F600}'.repeat(LINE_KEPT_MOST)}`;
+  for (const size of [65_536, 1_000_003]) {
+    const handed: string[] = [];
+    const log = new GameLog({ most: 2, retired: (entry) => handed.push(entry.text) });
+    for (const piece of piecesOfText(`${long}\nshort\n${inside}\nafter\n${paired}\n`, size)) {
+      log.append('stdout', piece);
+    }
+    log.finish();
+    log.handOverHeld();
+    const said = `read ${String(size)} characters at a time`;
+    assert.deepEqual(handed.slice(0, 4), [kept(long), 'short', kept(inside), 'after'], said);
+    const cutPair = handed[4] ?? '';
+    assert.ok(cutPair.length <= LINE_KEPT_MOST + 100, `${said}: the paired line is held`);
+    assert.ok(cutPair.isWellFormed(), `${said}: no surrogate pair is split`);
+  }
+  const whole = new GameLog();
+  whole.append('stdout', `${long}\n`);
+  assert.equal(whole.all[0]?.text, long, 'a log keeping everything keeps a long line whole');
+}
+
 interface Printed {
   readonly stream: 'stdout' | 'stderr' | 'transcript';
   readonly text: string;
@@ -624,4 +658,5 @@ testSelectionAnswersByEntry();
 testALogKeptToABoundHandsOverEveryEntryWhole();
 testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver();
 testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded();
+testALogKeptToABoundHoldsALongLineToItsEnds();
 console.log('game log tests passed');

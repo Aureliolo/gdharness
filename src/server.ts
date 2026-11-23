@@ -265,7 +265,7 @@ import {
 import { freeLibraryCopiesAsync } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import { statOf } from './listed-reads.js';
-import { logLimitBytes, pastTheLogLimit } from './log-read.js';
+import { logLimitBytes, pastTheLogLimit, readMarkup } from './log-read.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -10810,7 +10810,7 @@ export class GodotServer {
           : [];
       const newest = written.at(-1);
       if (newest !== undefined) {
-        report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
+        report = parseJUnit(readMarkup(join(reportsDir, newest, 'results.xml')));
       }
     } catch (error) {
       reportProblem = errorMessage(error);

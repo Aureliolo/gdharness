@@ -9,7 +9,7 @@
  */
 
 import { StringDecoder } from 'node:string_decoder';
-import { owned } from './log-read.js';
+import { LINE_KEPT_MOST, owned, TextLine } from './log-read.js';
 
 export type Severity = 'error' | 'warning' | 'info';
 
@@ -464,6 +464,8 @@ export class GameLog {
    */
   constructor(kept?: LogBound) {
     this.kept = kept;
+    const most = kept === undefined ? Number.POSITIVE_INFINITY : LINE_KEPT_MOST;
+    this.partial = { stdout: new TextLine(most), stderr: new TextLine(most), transcript: new TextLine(most) };
   }
   private readonly kept: LogBound | undefined;
   private readonly decoders: Record<Stream, StringDecoder> = {
@@ -474,9 +476,9 @@ export class GameLog {
   /**
    * The unfinished last line of each stream, in the pieces it arrived in. Joined only when a newline
    * ends it, because joining on every read costs the square of the line for a megabyte printed
-   * without one.
+   * without one. A log kept to a bound holds each line to {@link LINE_KEPT_MOST}.
    */
-  private readonly partial: Record<Stream, string[]> = { stdout: [], stderr: [], transcript: [] };
+  private readonly partial: Record<Stream, TextLine>;
   /**
    * The headline each stream printed last, while nothing but its detail has followed it there.
    *
@@ -529,12 +531,19 @@ export class GameLog {
   append(source: Stream, chunk: Buffer | string): void {
     const decoded = typeof chunk === 'string' ? chunk : this.decoders[source].write(chunk);
     const newline = decoded.lastIndexOf('\n');
+    const partial = this.partial[source];
     if (newline === -1) {
-      this.partial[source].push(decoded);
+      partial.add(decoded);
       return;
     }
-    const lines = [...this.partial[source], decoded.slice(0, newline)].join('').split('\n');
-    this.partial[source] = [decoded.slice(newline + 1)];
+    const first = decoded.indexOf('\n');
+    const lines = [partial.end(decoded.slice(0, first))];
+    if (first < newline) {
+      for (const one of decoded.slice(first + 1, newline).split('\n')) {
+        lines.push(partial.end(one));
+      }
+    }
+    partial.add(decoded.slice(newline + 1));
     for (const raw of lines) {
       this.line(source, raw.replace(/\r$/, ''));
     }
@@ -589,8 +598,7 @@ export class GameLog {
   /** Whatever was printed without a final newline, once the stream has ended. */
   finish(): void {
     for (const source of STREAMS) {
-      const tail = (this.partial[source].join('') + this.decoders[source].end()).replace(/\r$/, '');
-      this.partial[source] = [];
+      const tail = this.partial[source].end(this.decoders[source].end()).replace(/\r$/, '');
       if (tail !== '') {
         this.line(source, tail);
       }

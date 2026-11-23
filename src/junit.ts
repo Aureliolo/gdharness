@@ -13,7 +13,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
 import { caseLineOf, suiteOpenedBy } from './game-log.js';
-import { LOG_LIMIT_BYTES, owned } from './log-read.js';
+import { owned } from './log-read.js';
 
 export class MalformedReportError extends Error {
   constructor(message: string) {
@@ -1078,7 +1078,8 @@ const LOCATED = new RegExp(`\\tat ${LOCATION}`, 'g');
  * end of the next case's string diff, and read the two as one. A diff therefore ends at the first
  * location line after its opening, and only when the last quote before that line is followed by
  * nothing but colour marks and the " (ignoring case)" that `is_equal_ignoring_case` writes. Every
- * opening before a location line that does not end a diff is passed over with it.
+ * opening before a location line that does not end a diff is passed over with it, and so is one
+ * whose value prints more than {@link VALUE_READ_MOST} characters.
  *
  * That is looked for with the text's own search, never a pattern spanning the value: a pattern of
  * that kind stops matching under Bun once the value passes about a megabyte.
@@ -1095,7 +1096,12 @@ function printedDiffsIn(text: string): { diffs: PrintedDiff[]; open: number | nu
     }
     from = located.index;
     const closing = text.lastIndexOf("'", located.index - 1);
-    const after = closing < valueFrom ? null : AFTER_VALUE.exec(text.slice(closing + 1, located.index));
+    const after =
+      closing < valueFrom ||
+      closing - valueFrom > VALUE_READ_MOST ||
+      located.index - closing > AFTER_VALUE_MOST
+        ? null
+        : AFTER_VALUE.exec(text.slice(closing + 1, located.index));
     if (after !== null) {
       const { merged, actual } = readDiff(text.slice(valueFrom, closing));
       diffs.push({
@@ -1120,12 +1126,22 @@ const SUITE_OPENS = 'Run Test Suite:';
 const LINE_HELD_MOST = 64 * 1024;
 
 /**
- * The most text held from a diff's opening while no location line follows it: what one suite may
- * print before its engine is ended, since no character takes less than a byte. So every value a
- * suite can print is read back. Past it the opening is let go, and a console of any size is held to
- * this.
+ * The most characters a failing value may print, colour marks included, and be read back. A longer
+ * one keeps the note that it was not, since reading it back costs many times its length in memory.
  */
-const DIFF_HELD_MOST = LOG_LIMIT_BYTES;
+export const VALUE_READ_MOST = 1024 * 1024;
+
+/**
+ * The most text read between a value's closing quote and its location line, where only colour
+ * marks and " (ignoring case)" stand.
+ */
+const AFTER_VALUE_MOST = 64 * 1024;
+
+/**
+ * The most text held from a diff's opening: a value read back with what follows its quote, and as
+ * much again for its location line and the rest of that line. Past it the diff is let go, unread.
+ */
+export const DIFF_HELD_MOST = 2 * (VALUE_READ_MOST + AFTER_VALUE_MOST);
 
 /** What starts a location line. */
 const LOCATION_HEAD = "\tat '";
@@ -1171,17 +1187,15 @@ interface LocationBegun {
  * the console arrives. No diff starts anywhere but at its opening, so the text is held only from the
  * first opening that no location line has followed, and the diffs before it are taken and let go.
  * An opening is looked at again only once a location line has followed it, so a diff that never
- * closes is read once, at the console's end, and held to {@link DIFF_HELD_MOST}.
+ * closes is read once, at the console's end. What is held from an opening stops at
+ * {@link DIFF_HELD_MOST}: past it the diff is passed over, unread, and reading goes on after its
+ * location line, as the whole text passes over a value too long to read back.
  */
 export class SuiteDiffs {
   private readonly decoder = new StringDecoder('utf8');
   private readonly found: PrintedDiff[] = [];
-  /**
-   * The text held, in the pieces it came in, with every line break a line feed. While a diff is
-   * open, each piece but the last is held as its bytes, outside the script's heap: a heap holding
-   * the text grows to a few times what it holds before it is swept.
-   */
-  private pieces: HeldPiece[] = [];
+  /** The text held, in the pieces it came in, with every line break a line feed. */
+  private pieces: string[] = [];
   /** How many characters were read and let go before the first held. */
   private gone = 0;
   /** How many characters have come. */
@@ -1192,6 +1206,8 @@ export class SuiteDiffs {
   private line: string | null = '';
   /** Whether the held text starts at a diff's opening, rather than being the tail that may begin one. */
   private opened = false;
+  /** Whether the open diff ran past what is held of one, so nothing is held until its location line. */
+  private passing = false;
   /** Whether a carriage return ended the last piece, which a line feed may follow in the next. */
   private carriage = false;
   /** Where the first location line not read yet begins, counted from the console's start, or -1. */
@@ -1210,15 +1226,13 @@ export class SuiteDiffs {
       return;
     }
     const base = this.taken;
-    const last = this.pieces.length - 1;
-    const before = this.pieces[last];
-    if (this.opened && typeof before === 'string') {
-      this.pieces[last] = { bytes: Buffer.from(before), length: before.length };
-    }
     this.pieces.push(text);
     this.taken += text.length;
     if (this.opened && this.located < 0) {
       this.locate(text, base);
+    }
+    if (this.passing) {
+      this.passedTo();
     }
     const end = text.lastIndexOf('\n');
     if (end >= 0) {
@@ -1234,21 +1248,64 @@ export class SuiteDiffs {
     } else {
       this.release();
     }
-    if (this.held > DIFF_HELD_MOST) {
-      this.letGo(this.held);
-      this.opened = false;
-      this.located = -1;
+    if (this.opened && !this.passing && this.unreadable()) {
+      this.passOver();
     }
   }
 
   /** Every diff the console printed, once it has ended. */
   finish(): PrintedDiff[] {
-    this.pieces.push(this.decoder.end() + (this.carriage ? '\r' : ''));
+    this.pieces.push(this.decoder.end());
     for (const diff of printedDiffsIn(this.joined()).diffs) {
       this.found.push(diff);
     }
     this.pieces = [];
     return [...this.found];
+  }
+
+  /**
+   * Whether the open diff can no longer be read back: what is held of it passed {@link
+   * DIFF_HELD_MOST}, or its value with what follows its quote passed what {@link printedDiffsIn}
+   * reads. A location line not found yet begins no earlier than the first begun at the text's end.
+   */
+  private unreadable(): boolean {
+    const ends = this.located >= 0 ? this.located : (this.begun[0]?.at ?? this.taken);
+    return (
+      this.held > DIFF_HELD_MOST || ends - this.gone - DIFF_OPENS.length > VALUE_READ_MOST + AFTER_VALUE_MOST
+    );
+  }
+
+  /**
+   * Lets go of the open diff, unread. Reading goes on from its location line, which may not have
+   * been printed yet. Until it is, nothing is held.
+   */
+  private passOver(): void {
+    if (this.located >= 0) {
+      this.letGo(this.located - this.gone);
+      this.opened = false;
+      this.located = -1;
+      this.begun = [];
+      this.release();
+      return;
+    }
+    this.letGo(this.held);
+    this.passing = true;
+  }
+
+  /**
+   * While a diff is passed over, lets go of what came, or of what came before its location line once
+   * one is found, and reads on from there. The line may have begun in a piece already let go, and
+   * holds no opening.
+   */
+  private passedTo(): void {
+    if (this.located < 0) {
+      this.letGo(this.held);
+      return;
+    }
+    this.letGo(Math.max(0, this.located - this.gone));
+    this.passing = false;
+    this.opened = false;
+    this.located = -1;
   }
 
   /** Reads at the start of each line in [param text], whose last line break is at [param end], that opens a suite. */
@@ -1342,7 +1399,7 @@ export class SuiteDiffs {
     }
   }
 
-  /** How many characters of the console are held, at most one suite's text. */
+  /** How many characters of the console are held: what one suite printed, or an open diff's bound. */
   get held(): number {
     return this.taken - this.gone;
   }
@@ -1401,35 +1458,24 @@ export class SuiteDiffs {
 
   /** The text held, as one. */
   private joined(): string {
-    return this.pieces.map(textOf).join('');
+    return this.pieces.join('');
   }
 
   /** Lets go of the first [param length] characters held, keeping no copy of what is let go. */
   private letGo(length: number): void {
     let left = length;
-    const kept: HeldPiece[] = [];
+    const kept: string[] = [];
     for (const piece of this.pieces) {
       if (left >= piece.length) {
         left -= piece.length;
       } else {
-        kept.push(left === 0 ? piece : textOf(piece).slice(left));
+        kept.push(left === 0 ? piece : piece.slice(left));
         left = 0;
       }
     }
     this.pieces = kept;
     this.gone += length;
   }
-}
-
-/**
- * A piece of the text {@link SuiteDiffs} holds: the text, or its bytes with how many characters
- * they hold. A piece holds whole characters, so its bytes give its text back.
- */
-type HeldPiece = string | { readonly bytes: Buffer; readonly length: number };
-
-/** The text [param piece] holds. */
-function textOf(piece: HeldPiece): string {
-  return typeof piece === 'string' ? piece : piece.bytes.toString('utf8');
 }
 
 /**

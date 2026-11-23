@@ -129685,24 +129685,25 @@ async function testAStartThroughTheEditorEndsOnlyTheEditorsOwnGame(): Promise<vo
   });
 }
 
-let memoryEngineBuilt: string | null = null;
+const supportEnginesBuilt = new Map<string, string>();
 
 /**
- * A program a server accepts as an engine that holds memory on request (test/support/memory-engine.ts).
- * Compiled once per run into the OS temp folder.
+ * A program a server accepts as an engine, compiled from test/support/[param name]-engine.ts once per
+ * run into the OS temp folder.
  */
-function memoryEngine(): string {
-  if (memoryEngineBuilt !== null) {
-    return memoryEngineBuilt;
+function supportEngine(name: string): string {
+  const built = supportEnginesBuilt.get(name);
+  if (built !== undefined) {
+    return built;
   }
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-engine-'));
-  const program = join(directory, process.platform === 'win32' ? 'godot-memory.exe' : 'godot-memory');
-  const built = spawnSyncHidden(
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), `gdharness-${name}-engine-`));
+  const program = join(directory, process.platform === 'win32' ? `godot-${name}.exe` : `godot-${name}`);
+  const compiled = spawnSyncHidden(
     process.execPath,
-    ['build', '--compile', join(import.meta.dirname, 'support', 'memory-engine.ts'), '--outfile', program],
+    ['build', '--compile', join(import.meta.dirname, 'support', `${name}-engine.ts`), '--outfile', program],
     { encoding: 'utf8' },
   );
-  assert.equal(built.status, 0, `the memory engine is compiled: ${built.stdout}${built.stderr}`);
+  assert.equal(compiled.status, 0, `the ${name} engine is compiled: ${compiled.stdout}${compiled.stderr}`);
   process.once('exit', () => {
     try {
       rmSync(directory, { recursive: true, force: true });
@@ -129710,8 +129711,13 @@ function memoryEngine(): string {
       // A stand-in still running holds its file, so the folder is left for the temp sweep.
     }
   });
-  memoryEngineBuilt = program;
+  supportEnginesBuilt.set(name, program);
   return program;
+}
+
+/** A program a server accepts as an engine that holds memory on request (test/support/memory-engine.ts). */
+function memoryEngine(): string {
+  return supportEngine('memory');
 }
 
 /** A project project_test, editor_run start and editor_launch open accept with the memory engine. */
@@ -129874,6 +129880,92 @@ async function testAnEngineUnderItsMemoryCeilingRunsToItsEnd(): Promise<void> {
       assert.ok((peaks.project_test ?? 0) > 0, `its peak is kept all the same: ${JSON.stringify(peaks)}`);
     },
   );
+}
+
+/** The most memory process [param pid] has held, in bytes, or null where the system keeps no such figure. */
+function peakMemoryOf(pid: number): number | null {
+  if (process.platform === 'win32') {
+    const read = spawnSyncHidden(
+      'powershell',
+      ['-NoProfile', '-Command', `(Get-Process -Id ${String(pid)}).PeakWorkingSet64`],
+      { encoding: 'utf8' },
+    );
+    const bytes = Number(read.stdout.trim());
+    return bytes > 0 ? bytes : null;
+  }
+  if (process.platform === 'linux') {
+    const kib = /^VmHWM:\s+(\d+) kB$/m.exec(readFileSync(`/proc/${String(pid)}/status`, 'utf8'))?.[1];
+    return kib === undefined ? null : Number(kib) * 1024;
+  }
+  return null;
+}
+
+/** The most memory a server may hold while it reads a test run's console. */
+const SERVER_READING_MOST = 512 * 1024 * 1024;
+
+/**
+ * A test run whose first suite prints a failing value as long as a suite may print, closed by its
+ * location line, keeps the server under {@link SERVER_READING_MOST}, whether the report passes the
+ * case or fails it on that value. The value is too long to read back, and the run is judged all the
+ * same.
+ */
+async function testAValueAsLongAsASuiteMayPrintKeepsTheServerSmall(): Promise<void> {
+  if (peakMemoryOf(process.pid) === null) {
+    console.log(`the server memory regression skipped (this is ${process.platform})`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-value-project-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n',
+    'addons/gdUnit4/plugin.cfg': '[plugin]\nname="gdUnit4"\nversion="6.0.0"\n',
+    'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends SceneTree\n',
+    'tests/s0_test.gd': 'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
+    'tests/s1_test.gd': 'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-value-runtime-'));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: supportEngine('value'),
+      GDHARNESS_RUNTIME_DIR: runtime,
+      GDH_LIMIT: String(LOG_LIMIT_BYTES),
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    for (const failing of [false, true]) {
+      if (failing) {
+        writeFileSync(join(project, 'value-report-fails'), '');
+      }
+      const response = await server.request(
+        'tools/call',
+        {
+          name: 'project_test',
+          arguments: { projectPath: project, path: ['res://tests'], timeoutMs: 600_000 },
+        },
+        660_000,
+      );
+      const said = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+      const answer: unknown = JSON.parse(said.find((block) => block.trimStart().startsWith('{')) ?? '{}');
+      const report = failing ? 'a failing report' : 'a passing report';
+      assert.deepEqual(
+        [get(answer, 'passed'), get(answer, 'tests'), get(answer, 'failures')],
+        failing ? [false, 2, 1] : [true, 2, 0],
+        `${report} is judged: ${said.join('\n').slice(0, 2000)}`,
+      );
+      const peak = peakMemoryOf(server.child.pid ?? 0) ?? 0;
+      assert.ok(
+        peak > 0 && peak < SERVER_READING_MOST,
+        `with ${report}, the server held at most ${String(Math.round(peak / 1024 / 1024))} MiB`,
+      );
+    }
+  } finally {
+    await server.stop();
+    sweep(project, runtime);
+  }
 }
 
 /** A process below the engine counts towards the engine's memory. */
@@ -133183,6 +133275,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGamePastItsMemoryCeilingIsEndedForIt,
   testAnEditorPastItsMemoryCeilingIsEndedForIt,
   testAnEngineUnderItsMemoryCeilingRunsToItsEnd,
+  testAValueAsLongAsASuiteMayPrintKeepsTheServerSmall,
   testAChildOfTheEngineCountsTowardsItsMemory,
   testTheCeilingVariableSetsIt,
   testTheDefaultCeilingIsAQuarterOfTheMemoryAndAtLeastFourGiB,

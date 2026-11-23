@@ -27,14 +27,215 @@ export function pastTheLogLimit(suite: string | null, limit = logLimitBytes()): 
 }
 
 /**
+ * The most of one line a test run's readers keep, in bytes of a file or characters of text. A
+ * longer line keeps its first and last halves of this, with {@link lineCutSaid} between them, so a
+ * line's start and end, where its patterns are read, stay as printed.
+ */
+export const LINE_KEPT_MOST = 1024 * 1024;
+
+/**
+ * A line arriving in pieces of text, held to [param most] characters as it comes: past it only its
+ * first half is kept, and what came last.
+ */
+export class TextLine {
+  private pieces: string[] = [];
+  private length = 0;
+  /** The line's first characters once it has passed the bound, and how many bytes after them were let go. */
+  private cut: { readonly head: string; dropped: number } | null = null;
+  private readonly most: number;
+
+  constructor(most: number) {
+    this.most = most;
+  }
+
+  add(text: string): void {
+    this.pieces.push(text);
+    this.length += text.length;
+    if (this.length > this.most) {
+      this.keepEnds();
+    }
+  }
+
+  /** The line, once [param last] has ended it. Ready for the next line after. */
+  end(last: string): string {
+    if (this.length === 0 && last.length <= this.most) {
+      return last;
+    }
+    this.pieces.push(last);
+    this.length += last.length;
+    this.keepEnds();
+    const { cut } = this;
+    const tail = this.pieces.join('');
+    this.pieces = [];
+    this.length = 0;
+    this.cut = null;
+    return cut === null ? tail : `${cut.head}${lineCutSaid(cut.dropped)}${tail}`;
+  }
+
+  /** Lets go of all but the line's first half and its last, cut between characters. */
+  private keepEnds(): void {
+    const half = Math.floor(this.most / 2);
+    if (this.cut === null ? this.length <= this.most : this.length <= half) {
+      return;
+    }
+    const joined = this.pieces.join('');
+    let from = 0;
+    if (this.cut === null) {
+      from = splitsAPair(joined, half) ? half - 1 : half;
+      this.cut = { head: owned(joined.slice(0, from)), dropped: 0 };
+    }
+    let tail = Math.max(from, joined.length - half);
+    if (splitsAPair(joined, tail)) {
+      tail += 1;
+    }
+    this.cut.dropped += Buffer.byteLength(joined.slice(from, tail));
+    this.pieces = [owned(joined.slice(tail))];
+    this.length = joined.length - tail;
+  }
+}
+
+/** Whether a cut of [param text] at [param at] falls between the two halves of a surrogate pair. */
+function splitsAPair(text: string, at: number): boolean {
+  const code = text.charCodeAt(at);
+  return at > 0 && code >= 0xdc00 && code <= 0xdfff;
+}
+
+/** What stands for the [param bytes] in the middle of a line that were not kept. */
+export function lineCutSaid(bytes: number): string {
+  return `[gdharness: ${String(bytes)} bytes of this line were not kept]`;
+}
+
+/** Whether [param byte] continues a character UTF-8 spells in several bytes. */
+const continues = (byte: number | undefined): boolean => byte !== undefined && (byte & 0xc0) === 0x80;
+
+/**
+ * A line arriving in pieces of bytes, held to {@link LINE_KEPT_MOST} as it comes: past it only its
+ * first half is kept, and what came last.
+ */
+class HeldLine {
+  private pieces: Buffer[] = [];
+  private length = 0;
+  /** The line's first bytes once it has passed the bound, and how many after them were let go. */
+  private cut: { readonly head: Buffer; dropped: number } | null = null;
+
+  add(bytes: Buffer): void {
+    this.pieces.push(Buffer.from(bytes));
+    this.length += bytes.length;
+    if (this.length > LINE_KEPT_MOST) {
+      this.keepEnds();
+    }
+  }
+
+  /** The line, decoded, once [param last] has ended it. Ready for the next line after. */
+  end(last: Buffer): string {
+    if (this.length === 0 && last.length <= LINE_KEPT_MOST) {
+      return last.toString('utf8');
+    }
+    this.pieces.push(last);
+    this.length += last.length;
+    this.keepEnds();
+    const { cut } = this;
+    const tail = Buffer.concat(this.pieces).toString('utf8');
+    this.pieces = [];
+    this.length = 0;
+    this.cut = null;
+    return cut === null ? tail : `${cut.head.toString('utf8')}${lineCutSaid(cut.dropped)}${tail}`;
+  }
+
+  /**
+   * Lets go of all but the line's first half and its last, cut where a character starts and outside
+   * a character reference, so a run of markup's text cut this way is still well formed.
+   */
+  private keepEnds(): void {
+    const half = LINE_KEPT_MOST / 2;
+    if (this.cut === null ? this.length <= LINE_KEPT_MOST : this.length <= half) {
+      return;
+    }
+    const joined = Buffer.concat(this.pieces);
+    let from = 0;
+    if (this.cut === null) {
+      from = half;
+      while (from > 0 && continues(joined[from])) {
+        from -= 1;
+      }
+      from = beforeAReference(joined, from);
+      this.cut = { head: Buffer.from(joined.subarray(0, from)), dropped: 0 };
+    }
+    let tail = Math.max(from, joined.length - half);
+    while (tail < joined.length && continues(joined[tail])) {
+      tail += 1;
+    }
+    tail = afterAReference(joined, tail);
+    this.cut.dropped += tail - from;
+    this.pieces = [Buffer.from(joined.subarray(tail))];
+    this.length = joined.length - tail;
+  }
+}
+
+/** The longest character reference markup spells, such as `&#x10FFFF;`. */
+const REFERENCE_MOST = 12;
+
+/** Where a cut of [param bytes] at [param at] goes so it falls before any reference it is inside. */
+function beforeAReference(bytes: Buffer, at: number): number {
+  const amp = bytes.lastIndexOf(0x26, at - 1);
+  return amp >= 0 && at - amp < REFERENCE_MOST && bytes.indexOf(0x3b, amp) >= at ? amp : at;
+}
+
+/** Where a cut of [param bytes] at [param at] goes so it falls after any reference it is inside. */
+function afterAReference(bytes: Buffer, at: number): number {
+  const amp = at > 0 ? bytes.lastIndexOf(0x26, at - 1) : -1;
+  if (amp < 0 || at - amp >= REFERENCE_MOST) {
+    return at;
+  }
+  const semicolon = bytes.indexOf(0x3b, amp);
+  return semicolon >= at && semicolon - amp < REFERENCE_MOST ? semicolon + 1 : at;
+}
+
+/**
+ * The text of the markup file at [param path], with every run of text between two of its marks
+ * (`<` and `>`) held to {@link LINE_KEPT_MOST} bytes as a line is. A report holding a value as long
+ * as a suite may print is read in a few megabytes, and its elements stay as written.
+ */
+export function readMarkup(path: string, chunkBytes = 1024 * 1024): string {
+  const run = new HeldLine();
+  const kept: string[] = [];
+  const fd = openSync(path, 'r');
+  try {
+    const chunk = Buffer.alloc(chunkBytes);
+    for (
+      let got = readSync(fd, chunk, 0, chunkBytes, null);
+      got > 0;
+      got = readSync(fd, chunk, 0, chunkBytes, null)
+    ) {
+      let from = 0;
+      for (let at = 0; at < got; at += 1) {
+        const byte = chunk[at];
+        if (byte === 0x3c || byte === 0x3e) {
+          kept.push(run.end(chunk.subarray(from, at)), byte === 0x3c ? '<' : '>');
+          from = at + 1;
+        }
+      }
+      if (from < got) {
+        run.add(chunk.subarray(from, got));
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+  kept.push(run.end(Buffer.alloc(0)));
+  return kept.join('');
+}
+
+/**
  * The lines of the log at [param path] as the text read whole would split them, with colour codes
  * taken out and CRLF read as one line end. It is read [param chunkBytes] at a time, and each line is
- * given as it ends, so nothing holds more of the log than a chunk and a line.
+ * given as it ends, so nothing holds more of the log than a chunk and a line. A line is held to
+ * {@link LINE_KEPT_MOST}.
  */
 export function* eachLogLine(path: string, chunkBytes = 1024 * 1024): Generator<string, void, undefined> {
   // Cut in bytes and decoded a line at a time, so a line kept holds no more than itself. No byte of
   // a character UTF-8 spells in several is a line feed, so no character is cut.
-  let carry: Buffer[] = [];
+  const carry = new HeldLine();
   const fd = openSync(path, 'r');
   try {
     const chunk = Buffer.alloc(chunkBytes);
@@ -46,23 +247,18 @@ export function* eachLogLine(path: string, chunkBytes = 1024 * 1024): Generator<
       const bytes = chunk.subarray(0, got);
       let from = 0;
       for (let end = bytes.indexOf(0x0a); end >= 0; end = bytes.indexOf(0x0a, from)) {
-        const text =
-          carry.length === 0
-            ? bytes.toString('utf8', from, end)
-            : Buffer.concat([...carry, bytes.subarray(from, end)]).toString('utf8');
-        carry = [];
-        const line = stripVTControlCharacters(text);
+        const line = stripVTControlCharacters(carry.end(bytes.subarray(from, end)));
         yield line.endsWith('\r') ? line.slice(0, -1) : line;
         from = end + 1;
       }
       if (from < got) {
-        carry.push(Buffer.from(bytes.subarray(from)));
+        carry.add(bytes.subarray(from));
       }
     }
   } finally {
     closeSync(fd);
   }
-  yield stripVTControlCharacters(Buffer.concat(carry).toString('utf8'));
+  yield stripVTControlCharacters(carry.end(Buffer.alloc(0)));
 }
 
 /**
