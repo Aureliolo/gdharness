@@ -134487,6 +134487,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunsConsoleIsReadAsItArrivesAndNeverJoined,
   testAnErrorDeclaredPastTheErrorsKeptIsSettled,
   testAnUndeclaredErrorPastAHeldFloodOfDeclaredOnesIsJudged,
+  testUndeclaredErrorsHeldAfterALaterVerdictAreJudged,
+  testUndeclaredErrorsHeldAfterAVerdictStopAtTheBound,
   testAnUnreportedRunsEntriesAreCountedOverEveryLine,
   testEntriesAlikeInTheAnswerButTiedToDifferentScriptsFoldWithEveryCopy,
   testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut,
@@ -135965,6 +135967,94 @@ function testAnUndeclaredErrorPastAHeldFloodOfDeclaredOnesIsJudged(): void {
       verdict: 'one engine error no suite declared',
       undeclaredErrors: [{ suite: FED_A, case: 'after', text: 'nobody declared this' }],
       declaredNotPrinted: undefined,
+    },
+    JSON.stringify(answer).slice(0, 3000),
+  );
+}
+
+/**
+ * The answer of a run whose first case prints every error the answer keeps, declared, and after
+ * whose verdict, and that of each later case, the errors [param after] are printed.
+ */
+function heldAfterVerdicts(after: readonly (readonly string[])[]): Record<string, unknown> {
+  const names = after.map((_errors, n) => `test_${String.fromCharCode(98 + n)}`);
+  return fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [
+          {
+            name: 'test_a',
+            printed: [
+              ...engineErrors('declared', ERRORS_KEPT),
+              caseLine(FED_A, 'test_a', 'PASSED', '12ms'),
+              ...(after[0] ?? []),
+            ],
+          },
+          ...names.map((name, n) => ({
+            name,
+            printed: [caseLine(FED_A, name, 'PASSED', '12ms'), ...(after[n + 1] ?? [])],
+          })),
+        ],
+        closed: 'PASSED',
+      },
+    ],
+    0,
+    {
+      declared: {
+        errors: { [FED_A]: { test_a: Array.from({ length: ERRORS_KEPT }, () => 'declared') } },
+        warnings: {},
+      },
+    },
+  ).answer;
+}
+
+/**
+ * Past the errors the answer keeps, undeclared ones printed after a verdict are held to a bound,
+ * which counts afresh once they are judged: a second run of them after a later verdict is judged
+ * too, as the whole log judges it.
+ */
+function testUndeclaredErrorsHeldAfterALaterVerdictAreJudged(): void {
+  const first = Math.ceil(ERRORS_KEPT / 2);
+  const answer = heldAfterVerdicts([engineErrors('first', first), engineErrors('second', 1)]);
+  assert.deepEqual(
+    {
+      passed: get(answer, 'passed'),
+      verdict: get(answer, 'verdict'),
+      undeclaredErrors: get(answer, 'undeclaredErrors'),
+    },
+    {
+      passed: false,
+      verdict: `${String(first + 1)} engine errors no suite declared`,
+      undeclaredErrors: [
+        { suite: FED_A, case: 'test_a', text: 'first', times: first },
+        { suite: FED_A, case: 'test_b', text: 'second' },
+      ],
+    },
+    JSON.stringify(answer).slice(0, 3000),
+  );
+}
+
+/**
+ * Undeclared errors printed after a verdict, past the errors the answer keeps, are held no further
+ * than that bound, and the answer says how many it judged and left out, as it does for errors
+ * printed during a case.
+ */
+function testUndeclaredErrorsHeldAfterAVerdictStopAtTheBound(): void {
+  const answer = heldAfterVerdicts([engineErrors('nobody declared this', ERRORS_KEPT + 7), []]);
+  const kept = String(ERRORS_KEPT);
+  assert.deepEqual(
+    {
+      passed: get(answer, 'passed'),
+      verdict: get(answer, 'verdict'),
+      undeclaredErrors: get(answer, 'undeclaredErrors'),
+      printedCapped: get(answer, 'printedCapped'),
+    },
+    {
+      passed: false,
+      verdict: `${kept} engine errors no suite declared`,
+      undeclaredErrors: [{ suite: FED_A, case: 'test_a', text: 'nobody declared this', times: ERRORS_KEPT }],
+      printedCapped: `The run printed more than the answer keeps. Past the ${kept} engine errors and warnings it keeps, it judged 7 more against what the suites declare. It leaves those out of the errors it lists and counts by suite.`,
     },
     JSON.stringify(answer).slice(0, 3000),
   );

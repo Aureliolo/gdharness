@@ -31,6 +31,7 @@ import {
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
+import { LOG_LIMIT_BYTES } from '../src/log-read.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -1477,8 +1478,24 @@ function leastCpuMs(work: () => void, times = 3): number {
 }
 
 /**
+ * How many times longer a reading may take than one of the same text known to take time in step
+ * with its length, measured in the same process. A reading that grows with the square of the text
+ * takes ten times longer or more on these, and a loaded machine slows both alike.
+ */
+const LINEAR_SLACK = 4;
+
+/** Feeds [param bytes] to a new reader in pieces of [param size], and gives what it read. */
+function readInPieces(bytes: Buffer, size: number): PrintedDiff[] {
+  const diffs = new SuiteDiffs();
+  for (const piece of piecesOf(bytes, size)) {
+    diffs.take(piece);
+  }
+  return diffs.finish();
+}
+
+/**
  * A 32 MB value read off a console arriving in pieces is read back, as the whole text gives it, in
- * at most twice the time the whole text takes.
+ * time in step with what the whole text takes.
  */
 function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
   const value = 'x'.repeat(32 * 1024 * 1024);
@@ -1499,11 +1516,7 @@ function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
   });
   let pieces: { detail: string | null }[] = [];
   const piecesMs = leastCpuMs(() => {
-    const diffs = new SuiteDiffs();
-    for (const piece of piecesOf(bytes, 64 * 1024)) {
-      diffs.take(piece);
-    }
-    pieces = withActualsPrinted(failed, diffs.finish());
+    pieces = withActualsPrinted(failed, readInPieces(bytes, 64 * 1024));
   });
   const wholeValue = whole[1]?.detail;
   assert.equal(
@@ -1527,7 +1540,7 @@ function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
     );
   }
   assert.ok(
-    piecesMs <= 2 * wholeMs,
+    piecesMs <= LINEAR_SLACK * wholeMs,
     `in pieces it took ${piecesMs.toFixed(0)} ms of CPU, the whole text ${wholeMs.toFixed(0)} ms`,
   );
 }
@@ -1583,22 +1596,25 @@ function testADiffNoLocationLineFollowsIsReadOnceAndHeldToABound(): void {
     ),
   ].join('');
   const bytes = Buffer.from(console);
+  // The same text with nothing opened, which is let go piece by piece as it comes.
+  const unopened = Buffer.from(console.replace(' but was\n', ' but is!\n'));
+  // Each run reads the text four times, so that what the CPU clock resolves is a small part of it.
+  const times = 4;
   let read: PrintedDiff[] = [];
   const piecesMs = leastCpuMs(() => {
-    const diffs = new SuiteDiffs();
-    for (const one of piecesOf(bytes, piece)) {
-      diffs.take(one);
+    for (let run = 0; run < times; run += 1) {
+      read = readInPieces(bytes, piece);
     }
-    read = diffs.finish();
   });
-  const wholeMs = leastCpuMs(() => {
-    withActualsPrinted([], console);
+  const unopenedMs = leastCpuMs(() => {
+    for (let run = 0; run < times; run += 1) {
+      readInPieces(unopened, piece);
+    }
   });
   assert.deepEqual(read, [], 'no diff is read from an opening nothing closes');
-  // The whole text reads in a few milliseconds, below what the CPU clock resolves, so it counts as 50.
   assert.ok(
-    piecesMs <= 2 * Math.max(wholeMs, 50),
-    `1000 suites after the opening took ${piecesMs.toFixed(0)} ms of CPU in pieces, the whole text ${wholeMs.toFixed(0)} ms`,
+    piecesMs <= LINEAR_SLACK * unopenedMs,
+    `1000 suites after the opening took ${piecesMs.toFixed(0)} ms of CPU, the same text with nothing opened ${unopenedMs.toFixed(0)} ms`,
   );
 
   // A closing location line that comes after suites of lines gives the value everything between,
@@ -1617,8 +1633,9 @@ function testADiffNoLocationLineFollowsIsReadOnceAndHeldToABound(): void {
     'an opening closed by a later suite is read as the whole text reads it',
   );
 
-  // Past its bound the opening is let go, and what is held never passes it.
-  const bound = 64 * 1024 * 1024;
+  // Past its bound, what one suite may print, the opening is let go, and what is held never passes
+  // it. The failure it opened says its value was not read back.
+  const bound = LOG_LIMIT_BYTES;
   const block = Buffer.from('a frame of the loop ticked\n'.repeat(Math.floor(piece / 27)));
   const long = new SuiteDiffs();
   long.take(Buffer.from(opening));
@@ -1628,7 +1645,94 @@ function testADiffNoLocationLineFollowsIsReadOnceAndHeldToABound(): void {
     most = Math.max(most, long.held);
   }
   assert.ok(most <= bound + piece, `at most the bound is held, not ${String(most)} characters`);
-  assert.deepEqual(long.finish(), [], 'and the run is read to its end');
+  const unread = long.finish();
+  assert.deepEqual(unread, [], 'and the run is read to its end');
+  assert.equal(
+    withActualsPrinted([reportedFailing('res://tests/s0_test.gd', 'never closed')], unread)[0]?.detail,
+    `${reportedFailing('res://tests/s0_test.gd', 'never closed').detail}\n${VALUE_NOT_RECOVERED_NOTE}`,
+    'and the failure keeps the note that its value was not read back',
+  );
+}
+
+/**
+ * The console of a suite whose one case fails on a value [param length] characters of `x` long,
+ * printed with its location line after it, then the console of a suite after it. Given as the text
+ * before the value, the value's pieces of [param size] bytes, and the text after it, so that no copy
+ * of the whole is made.
+ */
+function aLongValuePrinted(length: number, size: number): Buffer[] {
+  const marker = '\u0000';
+  const [before = '', after = ''] = aSuiteFailingOn('res://tests/big_test.gd', marker).split(marker);
+  const block = Buffer.from('x'.repeat(size));
+  const pieces = [Buffer.from(before)];
+  for (let left = length; left > 0; left -= size) {
+    pieces.push(left >= size ? block : block.subarray(0, left));
+  }
+  pieces.push(Buffer.from(after + aSuiteFailingOn('res://tests/c_test.gd', 'after')));
+  return pieces;
+}
+
+/**
+ * A value as long as a suite may print before its engine is ended, or nearly, is read back whole as
+ * the whole text reads it once its location line follows, and so is the diff after it.
+ */
+function testAValueAnySuiteMayPrintIsReadBack(): void {
+  for (const mib of [70, 127]) {
+    const length = mib * 1024 * 1024;
+    const diffs = new SuiteDiffs();
+    for (const piece of aLongValuePrinted(length, 64 * 1024)) {
+      diffs.take(piece);
+    }
+    const read = diffs.finish();
+    assert.deepEqual(
+      read.map((diff) => [diff.at, diff.actual.length]),
+      [
+        ["'test_value' in res://tests/big_test.gd:5", length + 1],
+        ["'test_value' in res://tests/c_test.gd:5", 'afterz'.length],
+      ],
+      `a ${String(mib)} MiB value and the diff after it are read`,
+    );
+    assert.ok(
+      read[0]?.actual === `${'x'.repeat(length)}z`,
+      `the ${String(mib)} MiB value is read back whole`,
+    );
+  }
+}
+
+/**
+ * A location line is found when the console is cut inside it, however far back it begins, so a
+ * value is read back and let go as soon as the suite after it opens, even when more than the bound
+ * follows with no other location line. Cut a single character in, it is found too.
+ */
+function testALocationLineCutAcrossPiecesIsFoundAtAnyLength(): void {
+  const piece = 64 * 1024;
+  const block = Buffer.from('a frame of the loop ticked\n'.repeat(Math.floor(piece / 27)));
+  for (const nameLength of [100, 1500, 100_000]) {
+    const name = `test_value:0 (${'1, '.repeat(nameLength)}`.slice(0, nameLength);
+    const location = `\tat '${name}' in res://tests/a_test.gd:5`;
+    const head = aSuiteFailingOn('res://tests/a_test.gd', 'the value').replaceAll(
+      "\tat 'test_value' in res://tests/a_test.gd:5",
+      location,
+    );
+    const failed = [{ detail: `Expecting:\n 'other'\n but was\n 'the valueoz'\n${location}` }];
+    for (const into of [100, location.length - 1]) {
+      const cut = head.indexOf(location) + location.length - into;
+      const diffs = new SuiteDiffs();
+      diffs.take(Buffer.from(head.slice(0, cut)));
+      diffs.take(Buffer.from(head.slice(cut)));
+      diffs.take(Buffer.from('Run Test Suite: res://tests/b_test.gd\n'));
+      const said = `a case name of ${String(nameLength)} characters cut ${String(into)} before its end`;
+      assert.ok(diffs.held < 11, `${said}: the diff is let go once read, not ${String(diffs.held)} held`);
+      for (let fed = 0; fed <= LOG_LIMIT_BYTES; fed += block.length) {
+        diffs.take(block);
+      }
+      assert.equal(
+        withActualsPrinted(failed, diffs.finish())[0]?.detail,
+        `Expecting:\n 'other'\n but was\n 'the valuez'\n${location}`,
+        `${said}: the value is read back`,
+      );
+    }
+  }
 }
 
 testASecondFailedAssertionIsNotAHook();
@@ -1653,4 +1757,6 @@ testTheDiffsHoldOnlyTheSuiteBeingPrinted();
 testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
 testTheDiffsHoldNoTextOnceNoDiffIsOpen();
 testADiffNoLocationLineFollowsIsReadOnceAndHeldToABound();
+testAValueAnySuiteMayPrintIsReadBack();
+testALocationLineCutAcrossPiecesIsFoundAtAnyLength();
 console.log('junit reader tests passed');

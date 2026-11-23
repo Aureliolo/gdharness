@@ -13,7 +13,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
 import { caseLineOf, suiteOpenedBy } from './game-log.js';
-import { owned } from './log-read.js';
+import { LOG_LIMIT_BYTES, owned } from './log-read.js';
 
 export class MalformedReportError extends Error {
   constructor(message: string) {
@@ -1120,13 +1120,51 @@ const SUITE_OPENS = 'Run Test Suite:';
 const LINE_HELD_MOST = 64 * 1024;
 
 /**
- * The most text held from a diff's opening while no location line follows it. A value that long is
- * not read back, and its opening is let go so that a console of any size is held to this.
+ * The most text held from a diff's opening while no location line follows it: what one suite may
+ * print before its engine is ended, since no character takes less than a byte. So every value a
+ * suite can print is read back. Past it the opening is let go, and a console of any size is held to
+ * this.
  */
-const DIFF_HELD_MOST = 64 * 1024 * 1024;
+const DIFF_HELD_MOST = LOG_LIMIT_BYTES;
 
-/** How far back from a piece's end a location line is looked for, since one may begin in the piece before. */
-const LOCATION_REACH = 1024;
+/** What starts a location line. */
+const LOCATION_HEAD = "\tat '";
+
+/** {@link LOCATED} matched only where it is begun from. */
+const LOCATED_HERE = new RegExp(LOCATED.source, 'y');
+
+/**
+ * A text the start of a location line runs to the end of, cut anywhere: {@link LOCATED} up to any of
+ * its characters. The name holds no quote or line break, and the path no white space.
+ */
+const LOCATION_BEGUN = /\t(?:a(?:t(?: (?:'[^'\n]*(?:'(?: (?:i(?:n(?: \S*)?)?)?)?)?)?)?)?)?$/y;
+
+/**
+ * A short text that a location line begun at [param from] in [param text], and running to its end,
+ * goes on from as it does. Its name may be any text without a quote. Of its path only the last
+ * character matters, and whether one comes before it, since a colon there may be followed by the
+ * line's number.
+ */
+function begunAs(text: string, from: number): string {
+  if (text.length - from <= LOCATION_HEAD.length) {
+    return text.slice(from);
+  }
+  const closing = text.indexOf("'", from + LOCATION_HEAD.length);
+  if (closing < 0) {
+    return LOCATION_HEAD;
+  }
+  const after = text.slice(closing + 1, closing + 1 + ' in '.length);
+  const path = closing + 1 + ' in '.length;
+  return `${LOCATION_HEAD}'${after}${text.slice(Math.max(path, text.length - 2))}`;
+}
+
+/** A location line begun at the end of the text read so far. */
+interface LocationBegun {
+  /** Where it begins, counted from the console's start. */
+  readonly at: number;
+  /** A short text it goes on from as it does, from {@link begunAs}. */
+  readonly as: string;
+}
 
 /**
  * The diffs a console prints, read as {@link withActualsPrinted} reads them off the whole text, as
@@ -1138,8 +1176,12 @@ const LOCATION_REACH = 1024;
 export class SuiteDiffs {
   private readonly decoder = new StringDecoder('utf8');
   private readonly found: PrintedDiff[] = [];
-  /** The text held, in the pieces it came in, with every line break a line feed. */
-  private pieces: string[] = [];
+  /**
+   * The text held, in the pieces it came in, with every line break a line feed. While a diff is
+   * open, each piece but the last is held as its bytes, outside the script's heap: a heap holding
+   * the text grows to a few times what it holds before it is swept.
+   */
+  private pieces: HeldPiece[] = [];
   /** How many characters were read and let go before the first held. */
   private gone = 0;
   /** How many characters have come. */
@@ -1152,10 +1194,10 @@ export class SuiteDiffs {
   private opened = false;
   /** Whether a carriage return ended the last piece, which a line feed may follow in the next. */
   private carriage = false;
-  /** The end of the text before the last piece, in which a location line may begin. */
-  private reach = '';
   /** Where the first location line not read yet begins, counted from the console's start, or -1. */
   private located = -1;
+  /** While none is found, the location lines begun at the end of the text sought, in the order they begin. */
+  private begun: LocationBegun[] = [];
 
   /** Reads [param chunk], the bytes printed next. */
   take(chunk: Buffer): void {
@@ -1168,8 +1210,16 @@ export class SuiteDiffs {
       return;
     }
     const base = this.taken;
+    const last = this.pieces.length - 1;
+    const before = this.pieces[last];
+    if (this.opened && typeof before === 'string') {
+      this.pieces[last] = { bytes: Buffer.from(before), length: before.length };
+    }
     this.pieces.push(text);
     this.taken += text.length;
+    if (this.opened && this.located < 0) {
+      this.locate(text, base);
+    }
     const end = text.lastIndexOf('\n');
     if (end >= 0) {
       this.readAtSuiteLines(text, end, base);
@@ -1179,13 +1229,6 @@ export class SuiteDiffs {
     const rest = text.slice(end + 1);
     this.line =
       this.line === null || this.line.length + rest.length > LINE_HELD_MOST ? null : this.line + rest;
-    if (this.opened && this.located < 0) {
-      this.locate(this.reach + text, base - this.reach.length);
-    }
-    this.reach =
-      text.length >= LOCATION_REACH
-        ? text.slice(-LOCATION_REACH)
-        : (this.reach + text).slice(-LOCATION_REACH);
     if (this.opened) {
       this.readTo(this.lineFrom);
     } else {
@@ -1201,7 +1244,7 @@ export class SuiteDiffs {
   /** Every diff the console printed, once it has ended. */
   finish(): PrintedDiff[] {
     this.pieces.push(this.decoder.end() + (this.carriage ? '\r' : ''));
-    for (const diff of printedDiffsIn(this.pieces.join('')).diffs) {
+    for (const diff of printedDiffsIn(this.joined()).diffs) {
       this.found.push(diff);
     }
     this.pieces = [];
@@ -1231,12 +1274,71 @@ export class SuiteDiffs {
     }
   }
 
-  /** Notes where the first location line in [param text], which starts at [param from], begins. */
-  private locate(text: string, from: number): void {
+  /**
+   * Notes where the first location line begins that ends in [param text], the piece that starts at
+   * [param base] and follows the text already sought, or which location lines its end begins. A line
+   * begun earlier is gone on from as {@link begunAs} gives it, so a line of any length is found and
+   * no text is sought twice.
+   */
+  private locate(text: string, base: number): void {
+    for (const begun of this.begun) {
+      LOCATED_HERE.lastIndex = 0;
+      if (LOCATED_HERE.test(begun.as + text)) {
+        this.located = begun.at;
+        this.begun = [];
+        return;
+      }
+    }
     LOCATED.lastIndex = 0;
     const found = LOCATED.exec(text);
     if (found !== null) {
-      this.located = from + found.index;
+      this.located = base + found.index;
+      this.begun = [];
+      return;
+    }
+    const going: LocationBegun[] = [];
+    for (const begun of this.begun) {
+      const joined = begun.as + text;
+      LOCATION_BEGUN.lastIndex = 0;
+      if (LOCATION_BEGUN.test(joined)) {
+        going.push({ at: begun.at, as: begunAs(joined, 0) });
+      }
+    }
+    this.begun = going;
+    this.noteBegun(text, base, 0);
+  }
+
+  /**
+   * Adds the location lines begun at the end of [param text], which starts at [param base], from
+   * [param from] in it on. None runs over a line break, so only its last line is looked in.
+   */
+  private noteBegun(text: string, base: number, from: number): void {
+    const line = Math.max(from, text.lastIndexOf('\n') + 1);
+    for (let at = text.indexOf(LOCATION_HEAD, line); at >= 0; at = text.indexOf(LOCATION_HEAD, at + 1)) {
+      LOCATION_BEGUN.lastIndex = at;
+      if (LOCATION_BEGUN.test(text)) {
+        this.begun.push({ at: base + at, as: begunAs(text, at) });
+      }
+    }
+    for (let length = LOCATION_HEAD.length - 1; length > 0; length -= 1) {
+      const at = text.length - length;
+      if (at >= line && text.endsWith(LOCATION_HEAD.slice(0, length))) {
+        this.begun.push({ at: base + at, as: LOCATION_HEAD.slice(0, length) });
+      }
+    }
+  }
+
+  /**
+   * Notes where the first location line in [param held], the text held, begins from [param from] on,
+   * or which location lines its end begins.
+   */
+  private seek(held: string, from: number): void {
+    LOCATED.lastIndex = from;
+    const found = LOCATED.exec(held);
+    this.located = found === null ? -1 : this.gone + found.index;
+    this.begun = [];
+    if (found === null) {
+      this.noteBegun(held, this.gone, from);
     }
   }
 
@@ -1265,7 +1367,7 @@ export class SuiteDiffs {
     if (this.located < 0 || this.located >= at) {
       return;
     }
-    const held = this.pieces.join('');
+    const held = this.joined();
     const { diffs, open } = printedDiffsIn(held.slice(0, cut));
     for (const diff of diffs) {
       this.found.push(diff);
@@ -1277,10 +1379,7 @@ export class SuiteDiffs {
       this.release();
       return;
     }
-    const first = this.gone;
-    LOCATED.lastIndex = cut;
-    const next = LOCATED.exec(held);
-    this.located = next === null ? -1 : first + next.index;
+    this.seek(held, cut);
     this.letGo(open);
   }
 
@@ -1289,34 +1388,48 @@ export class SuiteDiffs {
    * begin one in the next piece.
    */
   private release(): void {
-    const held = this.pieces.join('');
+    const held = this.joined();
     const open = held.indexOf(DIFF_OPENS);
     if (open < 0) {
       this.letGo(Math.max(0, held.length - (DIFF_OPENS.length - 1)));
       return;
     }
-    LOCATED.lastIndex = open + DIFF_OPENS.length;
-    const found = LOCATED.exec(held);
-    this.located = found === null ? -1 : this.gone + found.index;
+    this.seek(held, open + DIFF_OPENS.length);
     this.letGo(open);
     this.opened = true;
+  }
+
+  /** The text held, as one. */
+  private joined(): string {
+    return this.pieces.map(textOf).join('');
   }
 
   /** Lets go of the first [param length] characters held, keeping no copy of what is let go. */
   private letGo(length: number): void {
     let left = length;
-    const kept: string[] = [];
+    const kept: HeldPiece[] = [];
     for (const piece of this.pieces) {
       if (left >= piece.length) {
         left -= piece.length;
       } else {
-        kept.push(left === 0 ? piece : piece.slice(left));
+        kept.push(left === 0 ? piece : textOf(piece).slice(left));
         left = 0;
       }
     }
     this.pieces = kept;
     this.gone += length;
   }
+}
+
+/**
+ * A piece of the text {@link SuiteDiffs} holds: the text, or its bytes with how many characters
+ * they hold. A piece holds whole characters, so its bytes give its text back.
+ */
+type HeldPiece = string | { readonly bytes: Buffer; readonly length: number };
+
+/** The text [param piece] holds. */
+function textOf(piece: HeldPiece): string {
+  return typeof piece === 'string' ? piece : piece.bytes.toString('utf8');
 }
 
 /**
