@@ -13,6 +13,7 @@ import { cachedClasses, cachedClassesAsync } from './class-cache.js';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
+import { memoryEndSentence } from './engine-memory.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { Sample } from './engine-spent.js';
 import { errorMessage } from './errors.js';
@@ -36,7 +37,7 @@ export interface HeadlessEngine {
   readonly editor?: boolean;
   /**
    * The project the run is for where its engine runs on another folder, which gives its slot that
-   * project's store class. The folder the operation names when not given.
+   * project's repository and priority. The folder the operation names when not given.
    */
   readonly project?: string;
   /** How long an operation's engine may run before it is ended. Ten minutes when not given. */
@@ -733,6 +734,16 @@ function asidesOf(after: readonly LogEntry[], startup: readonly LogEntry[]): Asi
 /** The failure for an operation that wrote no answer. */
 function unansweredOutcome(operation: string, ran: EngineRun, seen: OperationLog): HeadlessOutcome {
   const { problems, startup, waiting, begun, afterAnswered } = seen;
+  if (ran.memoryRefused === true && ran.failure !== null) {
+    return { ok: false, message: ran.failure, ...reported(problems) };
+  }
+  if (ran.memoryEnd !== undefined) {
+    return {
+      ok: false,
+      message: memoryEndSentence(operation, ran.memoryEnd),
+      ...reported(problems),
+    };
+  }
   if (waiting !== -1 && begun === -1) {
     return {
       ok: false,

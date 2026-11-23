@@ -241,7 +241,7 @@ const RUNNING_PROJECT_PATH: JsonSchema = {
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
-  description: 'Which game, when several run from one project: its process id.',
+  description: 'Its pid.',
 };
 const SCENE_PATH: JsonSchema = {
   type: 'string',
@@ -995,7 +995,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'A case in failed with more than one report has them all under reports, in the order the case met them. A case can fail several assertions and then stop on a runtime error, which makes its status error. Identical reports fold into one with times. At most twenty different ones are kept, and reportsLeftOut counts the rest. Past a million characters the largest cases keep only their first message (failedWithoutDetail).',
       'A suite has something to say when a case failed, erred or was skipped, a hook failed, it left orphans, or an error was undeclared or declared and not printed. hookFailures is a before() or after() that failed, with its suite, line and whole message. failures and errors count cases and leave it out, so the verdict names it as failed hooks. The cases after a failed before() still run and are counted.',
       "exitCode is the engine's own exit, gdUnit4's code for what it saw (100 a case failed, 101 only warnings, 105 script errors it detected). It is 0 beside passed false when the run is failed for something gdUnit4 does not judge, such as an engine error no suite declared. leakedAtExit is the engine's lines saying it exited still holding objects, resources, memory pages or a server's RIDs, which fail the run too. Its note names any script of the project Godot itself never frees. On a run with engineArgs [\"--verbose\"] it names what the engine held.",
-      "A run whose every case passed is still not called passed when it printed a script error no case failed on. gdUnit4 fails a case only on the script errors its logger sees, and it cannot see a stack overflow. uncaughtScriptErrors lists those errors, which are under engineEntries too, by index with detailUnder. One raised inside assert_error(...).is_runtime_error is the test's own and is not listed. None are when the project turns off gdUnit4's report/godot/script_error setting, and a suite declares them all the same.",
+      "A run whose every case passed is still not called passed when it printed a script error no case failed on. gdUnit4 fails a case only on the script errors its logger sees, and it cannot see a stack overflow. uncaughtScriptErrors lists those errors, which are under engineEntries too, by index with detailUnder. It lists twenty at most, and uncaughtScriptErrorsOmitted counts the rest. One raised inside assert_error(...).is_runtime_error is the test's own and is not listed. None are when the project turns off gdUnit4's report/godot/script_error setting, and a suite declares them all the same.",
       "engineEntries holds each engine message once, with times saying how often it was printed. One that points at a project script has its script, line and function, as editor_output's entries have. An engine message keeps the frames above gdUnit4, not the twenty inside it. In a backtrace that repeats, as a recursion's does, each repeated frame or cycle of frames is written once. It names the frames it covers and how many times.",
       'undeclaredErrors lists each engine error no suite declared in its GDHARNESS_EXPECTED_ERRORS constant, with the suite and the case that printed it. An engine warning missing from GDHARNESS_EXPECTED_WARNINGS is listed too, marked warning true. An undeclared error or warning fails the run, whether or not gdUnit4 failed the case. With report/godot/push_error on, gdUnit4 also fails the case on each one, declared or not, and the note names those cases. One printed inside assert_error(...).is_push_error(...) or is_push_warning(...) passes there, and is declared all the same.',
       'declaredNotPrinted lists each declared error or warning its case did not print. A declared text must be the whole line after ERROR: or WARNING: and its space. A longer line its case printed holding the text is named under printedInstead. Either fails the run, and each suite holding one is listed with its count. engineErrors is every engine error the run printed but those a suite declared.',
@@ -1003,7 +1003,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'scriptErrors holds the errors in full of a script that did not load, or of an autoload that did not compile. A script that does not load stops gdUnit4 before any suite runs, and an autoload that does not compile stops the run at once. The scripts that failed only because one they depend on did are listed by path under failedThroughDependency.',
       'A script in failedThroughDependency can fail on a class whose own script has a parser error, which gdUnit4 never names. Then the engine checks that script, and its error comes first, with the class it declares under declares. followFromUnresolved keeps apart the errors a script has only because that class did not resolve, which the engine reads as Variant.',
       "time is gdUnit4's own sum of the seconds its cases took, from its report. tookMs is the whole call in milliseconds, from the class rebuild to the engine's exit. tookMsBy splits it into the class rebuild (classes), the import after it (import) and the engine running the suites (engine). Each holds any wait for an engine slot or the editor's scan. Within engine, engineStart is what the engine spent before its first suite, and engineCompile the part of it compiling the suites, which no case's time holds.",
-      'gdharness test judges a run the same way. A call that waited a second or more for engine slots in all has an engine_slot_wait block giving waitedMs and who held them. A run that ends without a report, at its timeout or otherwise, answers suitesFinished, suitesFailing with their failed cases, and suiteRunning, the one it was in. previousRunCut is a run a client cut off, kept in the project and carried by the next project_test there.',
+      'gdharness test judges a run the same way. A call that waited a second or more for engine slots in all has an engine_slot_wait block giving waitedMs and who held them. A run that ends without a report, at its timeout or otherwise, answers suitesFinished, suitesFailing with their failed cases, and suiteRunning, the one it was in. A suite that prints more than the 128 MiB a log may hold ends the engine, and the verdict names that suite. printedCapped names each list the answer cut and how many entries it left out. previousRunCut is a run a client cut off, kept in the project and carried by the next project_test there.',
       "classes is the class rebuild's answer. The classes each addon declares are counted under addedInAddons and changedInAddons rather than named. classes.lostSinceLastRebuild names a class the rebuild puts back that the cache had after the last rebuild. The editor loses it by writing its shorter list over the file on every save until restarted. uidsMissing names each suite the run ran with no .uid beside it, with uidsNote.",
       `engineNote names the engine the run used and its version, when it was not this server's. A project other than the server's own runs the engine its harness config names under GODOT_PATH. ${IMPORTED_FIRST}`,
       "A user:// of its own is made for the run on Windows and Linux and goes when the run ends. On macOS the engine reads user:// off HOME, so the run writes to the player's own, and savesNote says so. A client sending a progress token is told as each suite finishes, and at least every twenty seconds.",
@@ -1011,7 +1011,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'windowNote names the suites that needed a window. It also names any suite saying it runs headless whose every case was left out of a run that had a window. engines is 2 when the set mixed windowed and headless suites and ran as two engines, the windowed one first. The answer then has the counts and lists of both, and arguments the command line of each engine under windowed and headless. hung and timedOut are true when either engine was, and an engine that wrote no report has its explanation as a text part before the answer.',
       'timeoutMs is one limit for the whole call, so the second engine gets what the first left of it. With under 5000 ms of it left the second engine is not started, suitesNotRun names its suites, and engines is 1. The verdict gives the milliseconds left and the 5000 an engine needs to start. The note says the windowed suites ran and the headless ones were not started. A call cut off keeps for previousRunCut the suites the windowed engine finished and the suites not yet run.',
       'An entry of path that is not there is left out and named under missing, and such a run is never called passed. A script that declares test_ functions and does not extend GdUnitTestSuite is refused when named, and named under notSuites in a directory run whole. A case asked for by name in a script that is no suite is answered as not run. With GDHARNESS_SUITE_FILES_ONLY set, a directory is refused with the suite files under it.',
-      'A case declared in a suite that passed and that gdUnit4 never ran comes back under testsNotRun. A row it skipped for data that does not fit the case comes back under rowsMismatched. A case it cannot run as declared (a parameter nothing fills, or a fuzzer after a setting) comes back under casesUnrunnable. Each has the reason gdUnit4 gave.',
+      'A case declared in a suite that passed and that gdUnit4 never ran comes back under testsNotRun. A row it skipped for data that does not fit the case comes back under rowsMismatched. A case it cannot run as declared (a parameter nothing fills, or a fuzzer after a setting) comes back under casesUnrunnable. A case, row or suite skipped with do_skip never ran and comes back under casesSkipped, with the skip_reason it was given. Each has the reason gdUnit4 gave.',
+      'A case that failed and then passed on a retry, with the flaky check of gdUnit4 on, comes back under passedOnARetry as suite path > case name, as gdharness test names it, and a parameterised row as name:index (arguments). Such a run is never called passed. A suite asked for that never started or never finished fails the run too, named in the verdict.',
       'An ignore entry that named a case which ran all the same comes back under ignoreNotApplied, with the form that would have left the case out. Every case the list left out comes back under ignored as suite_name:test_name, and every row as suite_name:test_name:N. An entry naming no suite, case or row under path comes back under ignoreUnmatched.',
       'A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing. It is called hung only when that was half the limit, or thirty seconds of a longer one. Otherwise it was still running and wants a longer timeoutMs or a narrower path. The limit is counted from the engine starting, and the class rebuild and any import before it are outside it, though tookMs counts them.',
       'With failFast the counts cover only what ran, and notRun counts the cases left. printed holds the lines matched, ignoring case, in the text and the backtrace, at most 200, the newest kept. printedOmitted counts the rest.',
@@ -1923,7 +1924,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_run',
     title: 'Run the game',
     description:
-      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether the runtime_* tools can reach the game. One server keeps one run. A start ends a run of the same project first. start and check first import what changed on disk since its import.',
+      'A scene that prints an answer and quits is start, then wait. A start says under runtime whether runtime_* can reach the game. A start ends the run of its project and user:// folder, and goes beside any other. start and check first import what changed on disk since its import.',
     parameters: {
       // start and check need telling which project. The ops about the run already going take it
       // too, because a call copied from the start carries it, and they check it rather than ignore
@@ -1973,13 +1974,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['start'],
         description:
-          "Default true: this server starts a windowed game with no sound. false lets a connected editor play it. A headless run is silent already, and an editor plays it only when the project's main_run_args hold --headless. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.",
+          "Default true: this server starts a windowed game muted. false lets a connected editor play it. A headless run is silent already, and the editor plays one only when the project's main_run_args hold --headless. args, engineArgs, env, savesIn, godot or executable make this server start it either way. debug_* cannot reach an executable.",
       },
       executable: {
         type: 'string',
         ops: ['start'],
         description:
-          'An exported build to run instead of the project, inside the project or an absolute path. No scene or profile.',
+          'An exported build to run instead of the project, inside the project or absolute. No scene or profile.',
       },
       godot: {
         type: 'string',
@@ -2062,9 +2063,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       pid: {
         type: 'integer',
         minimum: 1,
-        ops: ['stop'],
+        ops: ['stop', 'wait', 'profile'],
         description:
-          'A game of this project that no server here keeps, as editor_status lists it under runtimes.',
+          'Its pid. A stop also takes a game of this project that no server keeps, as editor_status lists under runtimes.',
       },
     },
     requires: [],
@@ -2098,7 +2099,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     answer: [
       "start answers through, gdharness for a game this server started itself and editor for one the editor plays. scene is the scene the game started in, the project's main scene when none was given. runtime says whether the game is listening and on which port. When it is not, mayYetAnnounce says whether that is final. false is a runtime that is not coming, and true a game still on its way up, which editor_status will see and runtimeWaitMs waits longer for.",
       "start ends a game whose engine could not create a renderer on the hidden desktop, with mayYetAnnounce false and a note naming the failure. runtime carries addonIsStale and staleNote when the game announced on a runtime addon other than this server's. No runtime_* call is then sent to it, and staleNote says what brings it into step. refreshedClasses names the class_name declarations on disk that the engine's class cache was missing, added before the game started. transcript is the file both the run's streams are written to, so a watch on it can be armed off the start.",
-      'A start ends a run of the same project first, and is refused while a run of another project is held. This server starts the game itself unless a connected editor plays it, as silent says. Its debugger is then the keeper holding it, and the debug_* tools answer for it all the same. args put after the separator, so a flag the engine reads goes to the game instead, and argsNote says so.',
+      'A call about a run names it by pid, or by projectPath when one run of that folder goes, and is refused while several go. This server starts the game itself unless a connected editor plays it, as silent says. Its debugger is then the keeper holding it, and the debug_* tools answer for it all the same. args put after the separator, so a flag the engine reads goes to the game instead, and argsNote says so.',
       "The editor plays a game headless only when the project's editor/run/main_run_args holds --headless. So this server starts a headless run of a project whose editor plays with a window. A game that restarts itself with OS.set_restart_on_exit stays one run. editor_output and editor_status follow the process it restarted into, and name those before it under restartedFrom.",
       `${IMPORTED_FIRST} An exported build carries its own imports and is not asked. A silent windowed run has --audio-driver Dummy in its arguments.`,
       'A windowed run this server starts on the hidden desktop has no display to wait on, so it is given --disable-vsync and --max-fps ' +
@@ -2145,9 +2146,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: {
         type: 'string',
-        description:
-          'The project whose output you mean. Refused when it is not the project of the run or editor this server keeps.',
+        description: 'The project whose output you mean. Refused unless a run or the editor here is of it.',
       },
+      pid: { ...RUNNING_PID, ops: ['run'] },
       severity: {
         type: 'string',
         enum: ['error', 'warning', 'info'],
@@ -2215,7 +2216,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Each game names the runtime addon it loaded under addonVersion, null when it cannot say. addonIsStale is true when that code is not what this server ships. staleNote says what brings it into step: the gdharness upgrade command for the project, a restart for the game, or a reconnect for this server. A second checkout, such as a git worktree, has addons of its own. A runtime_* call to a stale game is refused with the staleNote.',
       'A game speaking a protocol this server does not is listed under unreadable, with which half is older. No tool reaches it until the halves match.',
       'play.play counts the plays the editor has started since it opened, whoever started them, and play.editorPid is the editor. Two reads with different pairs are two plays even when both say playing. game.run names the run editor_output and editor_run stop answer for, with its pid and its project. adopted is true when this server took it over from another server.',
-      'game.run stays named after the run ends, beside processActive false, and is null when there is no run. startedAt and endedAt say when it began and ended. heldAt says whether the run is held, as editor_output says it.',
+      'game.run stays named after the run ends, beside processActive false, and is null when there is no run. With several runs going it is null and game.runs lists each, with its pid, which the calls about a run take. startedAt and endedAt say when it began and ended. heldAt says whether the run is held, as editor_output says it.',
       'editor.lspListening and editor.dapListening say whether anything accepts connections on lspPort and dapPort, once an editor has connected. A false comes with serversNote. editor_launch rebind binds the debug adapter again, and editor_launch restart the language server.',
       'editor.scan says whether the editor is scanning or importing, and how long ago its last scan finished (finishedMsAgo). It is null when the editor did not answer. editor.openScenes lists the scenes open in its tabs, and editor.editedScene the one it shows. editor.unsavedScenes lists those with changes not on disk, an empty entry being a scene never saved. All three come with scan.',
       "addonIsStale of the editor is judged by the editor addons' code, not their version. So an editor whose code an upgrade left alone is not stale, and addonNote says so. A stale editor is refused every call but a quit, with staleNote. startedByAnEditor is an editor started by Godot's own restart or the project manager, without the arguments a server gives, and startedByAnEditorNote says what that costs. openedByAServer says a gdharness server started it, and hidden that it has no window.",
@@ -3044,6 +3045,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       scriptPath: { ...SCRIPT_PATH, ops: ['set', 'remove'] },
       line: { type: 'integer', minimum: 1, ops: ['set', 'remove'], description: 'One-based line.' },
+      pid: { ...RUNNING_PID, ops: ['set', 'remove'] },
     },
     requires: ['projectPath'],
     operations: {
@@ -3074,7 +3076,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "A pause that reaches a game a breakpoint has just stopped makes the engine print an error. The run's output keeps it as info with raisedBy debug_control pause.",
       "step_out runs to the end of the current function and stops at the next line run at its caller's depth. That is in its caller, or wherever script runs next when the call was the last thing its caller did. A function the engine called, such as _process, is stepped through to its end. It stops at the next line of script the game runs, which can be the same function on another node.",
     ].join('\n\n'),
-    parameters: {},
+    parameters: { pid: RUNNING_PID },
     requires: [],
     operations: {
       pause: {
@@ -3112,6 +3114,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "An expression evaluated while the game is held inside a runtime_invoke call reports what it raises as raised by that call. The call's answer says so under errorsNote.",
     ].join('\n\n'),
     parameters: {
+      pid: RUNNING_PID,
       frameId: {
         type: 'number',
         ops: ['variables', 'evaluate'],
@@ -3150,6 +3153,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     answer:
       "A scripted object is counted under its script's class_name, or under the script's path when it declares none, with its engine class beside it. Objects of inner classes are counted under their native class, as the engine's profiler counts them, and note says how many. kind says whether a class is RefCounted, a Node or neither, and refCounted and nodes total them. The editor's ObjectDB Profiler takes every snapshot a game the editor plays sends, which is why it is only for a game this server started.",
     parameters: {
+      pid: RUNNING_PID,
       before: {
         type: 'string',
         ops: ['diff'],

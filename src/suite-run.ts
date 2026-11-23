@@ -73,6 +73,7 @@ import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { slotCommandOf } from './slot-delegate.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
+  casesRan,
   type EngineAssignment,
   type EngineEnd,
   type EngineStart,
@@ -252,7 +253,7 @@ export interface SlowCase {
   readonly slot: number | null;
   /**
    * The priority its process was read with while it ran: a Windows priority class such as
-   * `below normal`, or `nice 10` on Linux and macOS. Null when it ended before it was read.
+   * `normal`, or `nice 0` on Linux and macOS. Null when it ended before it was read.
    */
   readonly priority: string | null;
   /** The engine's log, kept beside the run's other logs. */
@@ -878,6 +879,7 @@ async function openedRun(
     },
     undefined,
     options.projectPath,
+    { tool: 'test_lane' },
   );
   const running = new Set<() => void>();
   const interrupted = (): void => {
@@ -904,6 +906,7 @@ async function openedRun(
     verbose: options.verbose,
     engineArgs: options.engineArgs,
     failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
+    peakKept: 'test_lane',
   };
   return { launch, interrupted };
 }
@@ -1952,7 +1955,7 @@ async function compileCheck(
       }
       handed?.ended();
     }
-    return { faults: judgeCompile(readRun(readFileSync(log, 'utf8')), end), log };
+    return { faults: judgeCompile(readRun(readLog(log)), end), log };
   } finally {
     handed?.ended();
   }
@@ -3106,10 +3109,7 @@ function printTimings(ran: readonly EngineRan[], closed: ReturnType<typeof close
 
 /** The line of totals a run ends on: its cases, suites, engines and times. */
 function totalsSaid(ran: readonly EngineRan[], took: number): string {
-  const cases = ran.reduce(
-    (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
-    0,
-  );
+  const cases = ran.reduce((sum, engine) => sum + casesRan(engine.printed), 0);
   const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
   const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
   return `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;

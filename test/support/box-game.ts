@@ -81,7 +81,7 @@ function escaped(text: string): string {
   return written;
 }
 
-const GAME = new CompiledHelper('box game stand-in', 'gdharness-box-game', SOURCE, true);
+const GAME = new CompiledHelper('box game stand-in', 'gdharness-box-game', SOURCE, { program: true });
 
 /** The compiled stand-in's path, or why it could not be compiled. */
 export async function boxGame(): Promise<string> {

@@ -11,6 +11,7 @@
  */
 import { declaredClassOf, eachScript } from './class-cache.js';
 import { codeOf } from './gdscript-source.js';
+import { owned } from './log-read.js';
 
 /**
  * The engine's own lines saying what it still held as it exited. One instance is "1 ObjectDB
@@ -35,14 +36,26 @@ export const WALK_ENDED = "gdharness: the engine's shutdown cleared every script
  * it never reached is reported as leaked at exit, whatever the run freed itself.
  */
 export function walkStoppedPartWay(lines: Iterable<string>): boolean {
-  let began = false;
+  const walk = new WalkRead();
   for (const line of lines) {
-    if (line.includes(WALK_ENDED)) {
-      return false;
-    }
-    began ||= line.includes(WALK_BEGAN);
+    walk.take(line);
   }
-  return began;
+  return walk.result();
+}
+
+/** {@link walkStoppedPartWay}, a line at a time. */
+export class WalkRead {
+  private began = false;
+  private ended = false;
+
+  take(line: string): void {
+    this.ended ||= line.includes(WALK_ENDED);
+    this.began ||= line.includes(WALK_BEGAN);
+  }
+
+  result(): boolean {
+    return !this.ended && this.began;
+  }
 }
 
 const LEAKED_INSTANCE = /^Leaked instance: (\w+):/;
@@ -65,29 +78,59 @@ const REFCOUNTED_HELD =
  * the engine's shutdown fault until a verbose run by hand named the game's own scripts.
  */
 export function heldAtExit(lines: Iterable<string>): string | undefined {
-  const objects = new Map<string, number>();
-  const inUse: string[] = [];
+  const held = new HeldAtExitRead();
   for (const line of lines) {
+    held.take(line);
+  }
+  return held.result();
+}
+
+/**
+ * {@link heldAtExit}, a line at a time. Of the resources still in use it keeps only the first the
+ * sentence can name of the project's own and of its addons', and counts the rest.
+ */
+export class HeldAtExitRead {
+  private readonly objects = new Map<string, number>();
+  private readonly own: string[] = [];
+  private readonly addons: string[] = [];
+  private inUse = 0;
+
+  take(line: string): void {
     const object = LEAKED_INSTANCE.exec(line.trim())?.[1];
     if (object !== undefined) {
-      objects.set(object, (objects.get(object) ?? 0) + 1);
+      this.objects.set(object, (this.objects.get(object) ?? 0) + 1);
     }
     const resource = STILL_IN_USE.exec(line.trim())?.[1];
     if (resource !== undefined) {
-      inUse.push(resource);
+      this.inUse += 1;
+      const list = resource.startsWith('res://addons/') ? this.addons : this.own;
+      if (list.length < IN_USE_NAMED) {
+        list.push(owned(resource));
+      }
     }
   }
-  if (objects.size === 0 && inUse.length === 0) {
+
+  result(): string | undefined {
+    return heldSaid(this.objects, [...this.own, ...this.addons], this.inUse);
+  }
+}
+
+/**
+ * The sentence naming [param objects] and [param ownFirst], the resources still in use with the
+ * project's own first, of [param inUse] in all.
+ */
+function heldSaid(
+  objects: ReadonlyMap<string, number>,
+  ownFirst: readonly string[],
+  inUse: number,
+): string | undefined {
+  if (objects.size === 0 && inUse === 0) {
     return undefined;
   }
   const counted = [...objects].toSorted(([a, many], [b, more]) => more - many || a.localeCompare(b));
   const objectsSaid = counted.map(([name, many]) => `${String(many)} ${name}`);
-  const ownFirst = [
-    ...inUse.filter((path) => !path.startsWith('res://addons/')),
-    ...inUse.filter((path) => path.startsWith('res://addons/')),
-  ];
   const named = ownFirst.slice(0, IN_USE_NAMED);
-  const more = ownFirst.length - named.length;
+  const more = inUse - named.length;
   const parts = [
     objectsSaid.length === 0 ? undefined : `objects left alive: ${objectsSaid.join(', ')}`,
     named.length === 0

@@ -21,7 +21,9 @@ import {
   parseJUnit,
   RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
+  SuiteDiffs,
   scriptErrorsPrinted,
+  skippedInReport,
   suitesPrinted,
   testProgressMessage,
   VALUE_NOT_RECOVERED_NOTE,
@@ -904,7 +906,21 @@ function testEveryShapeOfAStringEqualityReadsItsValue(): void {
   }
 }
 
-function readsEveryShape(ending: string): void {
+/** The cases of {@link everyShapePrinted}, one for each shape of a failing string equality. */
+type ShapeCase =
+  | 'test_ignoring_case_second'
+  | 'test_bbcode'
+  | 'test_literal_lb'
+  | 'test_dict_lb'
+  | 'test_bbcode_expected_only'
+  | 'test_has_message';
+
+/** What gdUnit4 printed for every shape of a failing string equality, and what its report says of each. */
+function everyShapePrinted(): {
+  printed: string[];
+  reported: Record<ShapeCase, string>;
+  unprintedMessage: string;
+} {
   const e = String.fromCharCode(0x1b);
   const printed = [
     `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_ignoring_case_second${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
@@ -969,6 +985,11 @@ function readsEveryShape(ending: string): void {
       "Expecting error message:\n 'Expecting:\n '3'\n but was\n '1''\n but was\n 'Expecting:\n '3'2\n but was\n '1''\n\tat 'test_has_message' in res://probe/probe_test.gd:76",
   };
   const unprintedMessage = `Expecting error message:\n 'abc'\n but was\n 'abXc'\n\tat 'test_unprinted' in res://probe/probe_test.gd:90`;
+  return { printed, reported, unprintedMessage };
+}
+
+function readsEveryShape(ending: string): void {
+  const { printed, reported, unprintedMessage } = everyShapePrinted();
   const [ignoring, bbcode, literal, dictionary, renderedAway, message, unprinted] = withActualsPrinted(
     [...Object.values(reported), unprintedMessage].map((detail) => ({ detail })),
     printed.join(ending),
@@ -1235,6 +1256,300 @@ Godot Runtime Error !
   );
 }
 
+/** [param whole] in pieces of [param size] bytes. */
+function piecesOf(whole: Buffer, size: number): Buffer[] {
+  const pieces: Buffer[] = [];
+  for (let at = 0; at < whole.length; at += size) {
+    pieces.push(whole.subarray(at, at + size));
+  }
+  return pieces;
+}
+
+/**
+ * The diffs read off a console as its bytes arrive are those its whole text holds, however the bytes
+ * are cut, and only an open diff is held. The console holds every shape of string diff twice, a
+ * value holding a line that opens a suite, an array's value that never becomes a diff, and thousands
+ * of lines with no diff at all between them.
+ */
+function testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText(): void {
+  const e = String.fromCharCode(0x1b);
+  const { printed, reported, unprintedMessage } = everyShapePrinted();
+  const suiteLine = 'Run Test Suite: res://tests/value_test.gd';
+  const inValue = [
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255ma`,
+    suiteLine,
+    `b${e}[0m'`,
+    ' but was',
+    ` '${e}[38;2;30;144;255ma`,
+    suiteLine,
+    `${e}[48;2;38;0;0m${e}[38;2;255;255;255mb${e}[0m${e}[48;2;0;38;0m${e}[38;2;255;255;255mc${e}[0m'${e}[0m\tat 'test_suite_line' in res://probe/probe_test.gd:110`,
+  ];
+  const at = "\n\tat 'test_suite_line' in res://probe/probe_test.gd:110";
+  const inValueDetail = `Expecting:\n 'a\n${suiteLine}\nb'\n but was\n 'a\n${suiteLine}\nbc'${at}`;
+  const array = [
+    '  Expecting:',
+    " '[0, 75]'",
+    ' but was',
+    " '[0, 55]'",
+    '',
+    'Differences found:',
+    "Index\tCurrent\tExpected\t1\t55\t75\t\tat 'test_array' in res://probe/probe_test.gd:4",
+  ];
+  const quiet = Array.from(
+    { length: 3000 },
+    (_line, n) => `  res://tests/f_test.gd > test_${String(n)} PASSED 1ms`,
+  );
+  const failed = [
+    ...Object.values(reported),
+    inValueDetail,
+    ...Object.values(reported),
+    unprintedMessage,
+  ].map((detail) => ({ detail }));
+  for (const ending of ['\n', '\r\n']) {
+    const shapes = [...printed, ...inValue];
+    const whole = [...shapes, ...array, ...quiet, suiteLine, ...shapes.slice(0, printed.length), ''].join(
+      ending,
+    );
+    const expected = withActualsPrinted(failed, whole);
+    assert.equal(
+      expected[6]?.detail,
+      `Expecting:\n 'a\n${suiteLine}\nb'\n but was\n 'a\n${suiteLine}\nc'${at}`,
+      'a value holding a line that opens a suite is read back',
+    );
+    const bytes = Buffer.from(whole);
+    const atOnce = new SuiteDiffs();
+    atOnce.take(bytes);
+    const read = atOnce.finish();
+    // Chunks long enough to hold a line break and a location line cut short after it, as well as
+    // chunks shorter than any line.
+    for (const size of [1, 2, 7, 64, 101, 1000, bytes.length]) {
+      const diffs = new SuiteDiffs();
+      for (const piece of piecesOf(bytes, size)) {
+        diffs.take(piece);
+      }
+      const said = `read ${String(size)} bytes at a time, lines ended ${JSON.stringify(ending)}`;
+      const found = diffs.finish();
+      assert.deepEqual(found, read, `${said}: every diff is read whole, its location included`);
+      assert.deepEqual(
+        withActualsPrinted(failed, found),
+        expected,
+        `${said}: the diffs are the whole text's`,
+      );
+    }
+  }
+}
+
+/**
+ * What gdUnit4 writes for a case skipped with do_skip, a row of a parameterised case, and a case of
+ * a suite skipped whole, whose reason is gdUnit4's own: each is listed with the reason under it.
+ */
+function testEverySkipTheReportHoldsIsListedWithItsReason(): void {
+  const skipped = (name: string, line: number, reason: string): string =>
+    `\t\t<testcase name="${name}" classname="x" time="0.000">\n\t\t\t<skipped message="SKIPPED: res://test/x.gd:${String(line)}">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`;
+  const report = parseJUnit(
+    `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-22" name="report_1" tests="10" failures="0" skipped="7" flaky="0" time="0.000">
+\t<testsuite id="0" name="one_skip_test" package="test" tests="2" failures="0" errors="0" skipped="1" flaky="0" time="0.458">
+\t\t<testcase name="test_a" classname="one_skip_test" time="0.044">
+\t\t</testcase>
+${skipped('test_skipped', 6, 'not ready yet')}\t</testsuite>
+\t<testsuite id="1" name="rows_skip_test" package="test" tests="2" failures="0" errors="0" skipped="2" flaky="0" time="0.432">
+${skipped('test_rows:0 (1)', 3, 'rows wait')}${skipped('test_rows:1 (2)', 3, 'rows wait')}\t</testsuite>
+\t<testsuite id="2" name="whole_skip_test" package="test" tests="1" failures="0" errors="0" skipped="1" flaky="0" time="0.000">
+${skipped('test_a', 6, 'Skipped from the entire test suite')}\t</testsuite>
+</testsuites>
+`,
+  );
+  assert.deepEqual(
+    skippedInReport(report),
+    [
+      { suite: 'res://test/one_skip_test.gd', name: 'test_skipped', reason: 'not ready yet' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:0 (1)', reason: 'rows wait' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:1 (2)', reason: 'rows wait' },
+      {
+        suite: 'res://test/whole_skip_test.gd',
+        name: 'test_a',
+        reason: 'Skipped from the entire test suite',
+      },
+    ],
+    'each skipped case, in the order of its suite',
+  );
+  assert.deepEqual(skippedInReport(parseJUnit(GDUNIT_REPORT)), [
+    { suite: 'res://test/sums_test.gd', name: 'test_skipped_for_now', reason: 'not today' },
+  ]);
+}
+
+/**
+ * How a report spells the failure {@link aSuiteFailingOn} prints: the merge of both sides, a
+ * character of each after [param value].
+ */
+function reportedFailing(path: string, value: string): { detail: string } {
+  return { detail: `Expecting:\n 'other'\n but was\n '${value}oz'\n\tat 'test_value' in ${path}:5` };
+}
+
+/**
+ * A suite's console, a failed string equality in its one case printing [param value] and a marked
+ * difference after it, as gdUnit4 colours one.
+ */
+function aSuiteFailingOn(path: string, value: string): string {
+  const e = String.fromCharCode(0x1b);
+  const gone = `${e}[48;2;38;0;0m${e}[38;2;255;255;255mo${e}[0m`;
+  const added = `${e}[48;2;0;38;0m${e}[38;2;255;255;255mz${e}[0m`;
+  return [
+    `Run Test Suite: ${path}`,
+    `  ${path} > test_value STARTED`,
+    '  Expecting:',
+    " 'other'",
+    ' but was',
+    ` '${e}[38;2;30;144;255m${value}${gone}${added}'${e}[0m\tat 'test_value' in ${path}:5`,
+    `  ${path} > test_value FAILED 3ms`,
+    'Statistics: 1 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 40ms',
+    '',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Once a suite opens, the diffs read so far are taken and the text before it is let go, unless a
+ * diff opened there runs on into it. So what is held is the suite being printed.
+ */
+function testTheDiffsHoldOnlyTheSuiteBeingPrinted(): void {
+  const paths = Array.from({ length: 40 }, (_suite, n) => `res://tests/s${String(n)}_test.gd`);
+  const values = paths.map((_path, n) => `value ${String(n)} `.repeat(200));
+  const suites = paths.map((path, n) => aSuiteFailingOn(path, values[n] ?? ''));
+  const diffs = new SuiteDiffs();
+  let most = 0;
+  for (const suite of suites) {
+    for (const piece of piecesOf(Buffer.from(suite), 300)) {
+      diffs.take(piece);
+      most = Math.max(most, diffs.held);
+    }
+  }
+  const longest = Math.max(...suites.map((suite) => suite.length));
+  assert.ok(
+    most <= longest + 300,
+    `at most one suite and a piece are held: ${String(most)} of ${String(longest)}`,
+  );
+  const failed = paths.map((path, n) => reportedFailing(path, values[n] ?? ''));
+  const read = withActualsPrinted(failed, diffs.finish());
+  assert.deepEqual(
+    read,
+    withActualsPrinted(failed, suites.join('')),
+    'every diff is read as the whole text reads it',
+  );
+  assert.equal(
+    read.filter((one, n) => one.detail !== failed[n]?.detail).length,
+    paths.length,
+    'and each failure takes its value back',
+  );
+
+  const value = `a value\nRun Test Suite: res://tests/inside_test.gd\n${'more of it '.repeat(500)}`;
+  const open = aSuiteFailingOn('res://tests/open_test.gd', value);
+  const across = new SuiteDiffs();
+  across.take(Buffer.from(open));
+  assert.equal(
+    across.held,
+    open.length - open.indexOf(" but was\n '"),
+    'a value running on past a suite line is held whole from where its diff opens',
+  );
+  const opened = [reportedFailing('res://tests/open_test.gd', value)];
+  const acrossRead = withActualsPrinted(opened, across.finish());
+  assert.deepEqual(acrossRead, withActualsPrinted(opened, open), 'and read as the whole text reads it');
+  assert.notEqual(acrossRead[0]?.detail, opened[0]?.detail, 'taking its value back');
+}
+
+/** The CPU time [param work] takes, in milliseconds. */
+function cpuMs(work: () => void): number {
+  const before = process.cpuUsage();
+  work();
+  const { user, system } = process.cpuUsage(before);
+  return (user + system) / 1000;
+}
+
+/**
+ * A 32 MB value read off a console arriving in pieces is the one its whole text holds, read in at
+ * most twice the time the whole text takes.
+ */
+function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
+  const value = 'x'.repeat(32 * 1024 * 1024);
+  const console = [
+    aSuiteFailingOn('res://tests/a_test.gd', 'small'),
+    aSuiteFailingOn('res://tests/big_test.gd', value),
+    aSuiteFailingOn('res://tests/c_test.gd', 'after'),
+  ].join('');
+  const bytes = Buffer.from(console);
+  const failed = [
+    reportedFailing('res://tests/a_test.gd', 'small'),
+    reportedFailing('res://tests/big_test.gd', value),
+    reportedFailing('res://tests/c_test.gd', 'after'),
+  ];
+  let whole: { detail: string | null }[] = [];
+  const wholeMs = cpuMs(() => {
+    whole = withActualsPrinted(failed, console);
+  });
+  let pieces: { detail: string | null }[] = [];
+  const piecesMs = cpuMs(() => {
+    const diffs = new SuiteDiffs();
+    for (const piece of piecesOf(bytes, 64 * 1024)) {
+      diffs.take(piece);
+    }
+    pieces = withActualsPrinted(failed, diffs.finish());
+  });
+  assert.equal(
+    pieces[1]?.detail,
+    whole[1]?.detail,
+    'the console read in pieces reads the value as the whole text does',
+  );
+  for (const [n, path, small] of [
+    [0, 'res://tests/a_test.gd', 'small'],
+    [2, 'res://tests/c_test.gd', 'after'],
+  ] as const) {
+    assert.deepEqual(
+      pieces[n],
+      withActualsPrinted([reportedFailing(path, small)], aSuiteFailingOn(path, small))[0],
+      `${path} reads its value as its own suite's text gives it`,
+    );
+  }
+  assert.ok(
+    piecesMs <= 2 * wholeMs,
+    `in pieces it took ${piecesMs.toFixed(0)} ms of CPU, the whole text ${wholeMs.toFixed(0)} ms`,
+  );
+}
+
+/**
+ * Suites printing megabytes after a diff closes, and before one opens, hold a few pieces at most,
+ * whichever way their lines end, and read every diff as the whole text does.
+ */
+function testTheDiffsHoldNoTextOnceNoDiffIsOpen(): void {
+  const piece = 64 * 1024;
+  const filler = 'a frame of the loop ticked\n'.repeat(80_000);
+  const paths = ['res://tests/a_test.gd', 'res://tests/b_test.gd', 'res://tests/c_test.gd'];
+  const suites = paths.map((path, n) => {
+    const [opens, ...after] = aSuiteFailingOn(path, `value ${String(n)}`).split('\n  Expecting:');
+    return `${opens ?? ''}\n${filler}  Expecting:${after.join('')}${filler}`;
+  });
+  const failed = paths.map((path, n) => reportedFailing(path, `value ${String(n)}`));
+  for (const ending of ['\n', '\r\n']) {
+    const console = suites.join('').replaceAll('\n', ending);
+    const diffs = new SuiteDiffs();
+    let most = 0;
+    for (const one of piecesOf(Buffer.from(console), piece)) {
+      diffs.take(one);
+      most = Math.max(most, diffs.held);
+    }
+    const said = `lines ended ${JSON.stringify(ending)}`;
+    assert.ok(most <= 4 * piece, `${said}: at most four pieces are held, not ${String(most)} characters`);
+    const read = withActualsPrinted(failed, diffs.finish());
+    assert.deepEqual(read, withActualsPrinted(failed, console), `${said}: every diff is the whole text's`);
+    assert.equal(
+      read.filter((one, n) => one.detail !== failed[n]?.detail).length,
+      paths.length,
+      `${said}: each failure takes its value back`,
+    );
+  }
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1251,4 +1566,9 @@ testOrphansAreReadOffTheConsole();
 testScriptErrorsAreReadOffTheConsole();
 testFinishedSuitesAreReadOffTheConsole();
 testAnIgnoreThatLeftOutNothingIsNamed();
+testTheDiffsReadAsTheConsoleArrivesAreThoseOfItsWholeText();
+testEverySkipTheReportHoldsIsListedWithItsReason();
+testTheDiffsHoldOnlyTheSuiteBeingPrinted();
+testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
+testTheDiffsHoldNoTextOnceNoDiffIsOpen();
 console.log('junit reader tests passed');

@@ -13,9 +13,9 @@
  * `outside.ts`), so nothing that ends the server takes it down. Its output goes to a file it holds
  * open rather than to a pipe, so it never blocks on a reader that has gone and the bytes survive
  * the reader anyway. And this record says which process and which file, so the next server can
- * pick the run back up instead of denying it. One record per project, because the directory is
- * shared by every server on the machine, and one record for all of them was overwritten by
- * whichever project started a run last.
+ * pick the run back up instead of denying it. One record per place, which is a project and the
+ * folder its run writes `user://` into, because the directory is shared by every server on the
+ * machine, and one record for all of them was overwritten by whichever run started last.
  *
  * One transcript per run, named for when it started, because the alternative is what the engine
  * does to its own log: a second run rotates the file out from under the first, and the rows the
@@ -23,7 +23,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { errorCode, errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
@@ -53,6 +53,11 @@ export interface RunRecord {
    */
   readonly startedBy: number;
   readonly projectPath: string;
+  /**
+   * The folder the run's `user://` was moved to, when the start named one. Absent for a run that
+   * writes the project's own, so a project's runs with and without it are different places.
+   */
+  readonly savesIn?: string;
   /**
    * The project the server that started the run serves, which can be another than the run's.
    *
@@ -145,14 +150,37 @@ function runsDirectory(): string {
  * the spelling a server was given and the one its editor reports name the same note.
  */
 function projectKey(projectPath: string): string {
-  const real = realAsFarAsItExists(resolve(projectPath)).replace(/[\\/]+$/, '');
-  const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
-  return createHash('sha256').update(folded.replaceAll('\\', '/')).digest('hex').slice(0, 16);
+  return createHash('sha256').update(comparedSpelling(projectPath)).digest('hex').slice(0, 16);
 }
 
-/** Where [param projectPath]'s run note is, in [param directory]'s runs. */
-export function runRecordPath(projectPath: string, directory = runtimeDirectory()): string {
-  return join(directory, 'runs', `note-${projectKey(projectPath)}.json`);
+/** [param path] spelt as `isSameDirectory` compares it: resolved as far as it exists, and folded where the filesystem folds. */
+function comparedSpelling(path: string): string {
+  const real = realAsFarAsItExists(resolve(path)).replace(/[\\/]+$/, '');
+  const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
+  return folded.replaceAll('\\', '/');
+}
+
+/**
+ * The part of a run note's name that says which place the run is: a project, and the folder its
+ * `user://` is when the start named one. A run with no folder of its own keeps its project's key,
+ * so two runs of one project that save in different folders each have a note.
+ */
+function placeKey(projectPath: string, savesIn: string | undefined): string {
+  if (savesIn === undefined) {
+    return projectKey(projectPath);
+  }
+  return createHash('sha256')
+    .update(`${comparedSpelling(projectPath)}\n${comparedSpelling(savesIn)}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * Where the run note of [param projectPath] is in [param directory]'s runs, for the run whose
+ * `user://` is in [param savesIn] when it names a folder.
+ */
+export function runRecordPath(projectPath: string, directory = runtimeDirectory(), savesIn?: string): string {
+  return join(directory, 'runs', `note-${placeKey(projectPath, savesIn)}.json`);
 }
 
 /**
@@ -211,6 +239,68 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
 }
 
 /**
+ * The engines whose memory peak is kept for their project: a tool's, editor_run check's boot, which
+ * is kept apart from the game editor_run start counts, and a lane of `gdharness test` or
+ * `gdharness spread`, whose engines run a share of a run rather than the whole project.
+ */
+export type PeakTool =
+  | 'project_test'
+  | 'editor_run'
+  | 'editor_launch'
+  | 'headless'
+  | 'boot_check'
+  | 'test_lane'
+  | 'spread_lane';
+
+const PEAK_TOOLS: readonly PeakTool[] = [
+  'project_test',
+  'editor_run',
+  'editor_launch',
+  'headless',
+  'boot_check',
+  'test_lane',
+  'spread_lane',
+];
+
+/**
+ * One file for each project and tool, written whole, so two servers keeping peaks of one project at
+ * once never write over each other's figure.
+ */
+function enginePeakPath(projectPath: string, tool: PeakTool, directory = runtimeDirectory()): string {
+  return join(directory, 'runs', `memory-${projectKey(projectPath)}-${tool}.json`);
+}
+
+/** The most bytes the last engine of each tool held for [param projectPath], by tool. */
+export function readEnginePeaks(
+  projectPath: string,
+  directory = runtimeDirectory(),
+): Partial<Record<PeakTool, number>> {
+  const peaks: Partial<Record<PeakTool, number>> = {};
+  for (const tool of PEAK_TOOLS) {
+    try {
+      const fields: unknown = JSON.parse(readFileSync(enginePeakPath(projectPath, tool, directory), 'utf8'));
+      const bytes = isRecord(fields) ? fields['bytes'] : undefined;
+      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
+        peaks[tool] = bytes;
+      }
+    } catch {
+      // Unkept or unreadable, so that tool counts the flat figure.
+    }
+  }
+  return peaks;
+}
+
+/** Keeps [param bytes] as what the last engine of [param tool] held for [param projectPath]. */
+export async function recordEnginePeak(projectPath: string, tool: PeakTool, bytes: number): Promise<void> {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    await writeWholeAsync(enginePeakPath(projectPath, tool), JSON.stringify({ bytes: Math.round(bytes) }));
+  } catch {
+    // Unwritable leaves the next start counting the flat figure.
+  }
+}
+
+/**
  * A transcript nothing else is writing to, opened for appending.
  *
  * The descriptor is handed to the child as both its streams and closed here straight afterwards:
@@ -257,9 +347,48 @@ export function profileMarkPath(run: {
   return transcript.replace(/\.log$/, '.profile-mark.json');
 }
 
+/** Where the memory end of a run is noted: beside its transcript, and swept with it. */
+function memoryEndPath(run: { readonly transcript: string | null; readonly startedAt: number }): string {
+  const transcript = run.transcript ?? join(runsDirectory(), `run-${run.startedAt}.log`);
+  return transcript.replace(/\.log$/, '.memory-end.json');
+}
+
+/**
+ * Notes that the server about to end [param run] does so for its memory, as [param endedBy] says. Any
+ * other server holding the run that sees it gone reads it with {@link memoryEndOf}, since the note of
+ * the run itself is cleared by the end. The first note stays: a server noting it later ends the game
+ * later, and finds it gone.
+ */
+export function noteMemoryEnd(
+  run: { readonly transcript: string | null; readonly startedAt: number },
+  endedBy: string,
+): void {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    // Created whole in one write, before the game is ended, so nobody reads it part written.
+    writeFileSync(memoryEndPath(run), JSON.stringify({ endedBy }), { flag: 'wx' });
+  } catch {
+    // Noted already, or unwritable, which leaves the other server's answer without the reason.
+  }
+}
+
+/** What another server noted as the memory end of [param run], or undefined when it noted none. */
+export function memoryEndOf(run: {
+  readonly transcript: string | null;
+  readonly startedAt: number;
+}): string | undefined {
+  try {
+    const fields: unknown = JSON.parse(readFileSync(memoryEndPath(run), 'utf8'));
+    const said = isRecord(fields) ? fields['endedBy'] : undefined;
+    return typeof said === 'string' && said !== '' ? said : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function writeRunRecord(record: RunRecord): void {
   mkdirSync(runsDirectory(), { recursive: true });
-  const path = runRecordPath(record.projectPath);
+  const path = runRecordPath(record.projectPath, undefined, record.savesIn);
   if (!writeWhole(path, JSON.stringify(record, null, 2))) {
     throw new Error(`the run note could not be written at ${path}`);
   }
@@ -404,7 +533,7 @@ export function sameRun(
  * changes the pid, and a later run can be handed the same pid and the same start.
  */
 export function amendRunRecord(record: RunRecord): boolean {
-  const path = runRecordPath(record.projectPath);
+  const path = runRecordPath(record.projectPath, undefined, record.savesIn);
   const there = recordAt(path);
   if (there !== null && !sameRun(there, record)) {
     return false;
@@ -414,7 +543,8 @@ export function amendRunRecord(record: RunRecord): boolean {
 }
 
 /**
- * The run of [param projectPath] a server left a note for, or null when there is none.
+ * The run of [param projectPath] a server left a note for, with its `user://` in [param savesIn]
+ * when the run named a folder, or null when there is none.
  *
  * Looked for in every runtime directory, because the two servers either side of a reconnect do not
  * have to agree about where the temporary directory is. They usually do, being started the same way
@@ -425,9 +555,10 @@ export function amendRunRecord(record: RunRecord): boolean {
 export function readRunRecord(
   projectPath: string,
   directories: readonly string[] = runtimeDirectories(),
+  savesIn?: string,
 ): RunRecord | null {
   for (const directory of directories) {
-    const own = recordAt(runRecordPath(projectPath, directory));
+    const own = recordAt(runRecordPath(projectPath, directory, savesIn));
     if (own !== null) {
       return own;
     }
@@ -503,9 +634,12 @@ function recordAt(path: string): RunRecord | null {
 /** The fields of a note that say who served the run, each present only when it holds something. */
 function namedFields(
   fields: Record<string, unknown>,
-): Pick<RunRecord, 'servedBy' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
+): Pick<RunRecord, 'servedBy' | 'savesIn' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
   return {
     ...(fields['exported'] === true ? { exported: true as const } : {}),
+    ...(typeof fields['savesIn'] === 'string' && fields['savesIn'] !== ''
+      ? { savesIn: fields['savesIn'] }
+      : {}),
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
       : {}),
@@ -981,17 +1115,19 @@ export function judgeAnnouncedGame(
 }
 
 /**
- * Take [param projectPath]'s note away for a run that has ended, wherever it was left.
+ * Take the note of [param projectPath], with its `user://` in [param savesIn] when the run named
+ * a folder, away for a run that has ended, wherever it was left.
  *
  * Every candidate directory is looked in, for the same reason they are read.
  */
 export function clearRunRecord(
   projectPath: string,
   directories: readonly string[] = runtimeDirectories(),
+  savesIn?: string,
 ): void {
   for (const directory of directories) {
     try {
-      rmSync(runRecordPath(projectPath, directory), { force: true });
+      rmSync(runRecordPath(projectPath, directory, savesIn), { force: true });
     } catch {
       // Held open for a moment, which leaves it for the next clear.
     }
@@ -1037,7 +1173,10 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
     // A partial file is what a writer that died between writing and renaming left behind.
     const transcript =
       entry.startsWith('run-') &&
-      (entry.endsWith('.log') || entry.endsWith('.profile.json') || entry.endsWith('.profile-mark.json'));
+      (entry.endsWith('.log') ||
+        entry.endsWith('.profile.json') ||
+        entry.endsWith('.profile-mark.json') ||
+        entry.endsWith('.memory-end.json'));
     if (!transcript && !entry.endsWith('.partial')) {
       continue;
     }

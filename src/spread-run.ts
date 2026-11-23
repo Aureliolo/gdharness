@@ -275,6 +275,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     },
     undefined,
     options.projectPath,
+    { tool: 'spread_lane' },
   );
   const launch: EngineLaunch = {
     godotPath,
@@ -282,6 +283,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     deadlineSeconds: options.deadlineSeconds,
     running: new Set(),
     cores: options.cores,
+    peakKept: 'spread_lane',
   };
   const interrupted = (): void => {
     for (const end of launch.running) {
