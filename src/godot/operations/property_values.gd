@@ -281,7 +281,7 @@ func _write_key(writing: GdhWriting, key: Variant) -> void:
 	var outside: String = GdhDeclared.outside(holder, declared, value[1], shown(value[1]))
 	if not outside.is_empty():
 		_outside_declared[property] = outside
-	_write(target, property, value[1])
+	_write_heard(writing, property, value[1])
 	if unscripted is Dictionary:
 		var was: Dictionary = unscripted
 		var now: Dictionary = _stored(target, {})
@@ -416,7 +416,7 @@ func _check_held(writing: GdhWriting) -> void:
 		var held: Variant = read_at(target, property)
 		if _empty_base(writing, property):
 			unheld = property
-			writing.stop(_no_empty_base(target, property, held))
+			writing.stop(_no_empty_base(writing, property, held) + _engine_said(writing, property))
 			return
 		if not GdhSame.same(held, _as_held(target, property, given)):
 			unheld = property
@@ -435,17 +435,20 @@ func _check_held(writing: GdhWriting) -> void:
 						writing.undone_by[property],
 					]
 				)
-				writing.stop(in_step)
+				writing.stop(in_step + _engine_said(writing, property))
 				return
 			var declared: Dictionary = writing.declarations[property]
 			writing.stop(
-				GdhDeclared.not_held(
-					GdhPropertyPaths.class_called(target),
-					target.get_class(),
-					property,
-					declared,
-					[given[property], shown(given[property])],
-					shown(held)
+				(
+					GdhDeclared.not_held(
+						GdhPropertyPaths.class_called(target),
+						target.get_class(),
+						property,
+						declared,
+						[given[property], shown(given[property])],
+						shown(held)
+					)
+					+ _engine_said(writing, property)
 				)
 			)
 			return
@@ -466,17 +469,47 @@ func _empty_base(writing: GdhWriting, property: String) -> bool:
 	)
 
 
-## The refusal for [param property] of [param target], a Theme type variation's base given empty,
-## which holds [param held] after it was set.
-func _no_empty_base(target: Object, property: String, held: Variant) -> String:
+## The refusal for [param property] of the call in [param writing], a Theme type variation's base
+## given empty, which holds [param held] after it was set. It names only the steps that take a base
+## out of the holder the call reached: remove_theme_item reads a Theme file, never one built into a
+## scene, and with no base held there is none to take out.
+func _no_empty_base(writing: GdhWriting, property: String, held: Variant) -> String:
+	var steps: String = "unset takes a base out, and remove_theme_item without item takes it out "
+	steps += "with its type. "
+	if str(held).is_empty():
+		steps = "No base is held, so there is none to take out. "
+	elif GdhPropertyPaths.holder_of(writing.target, property, writing.home)[0] != writing.target:
+		steps = "unset takes a base out. "
 	return (
 		(
 			"%s.%s was given \"\" and holds %s after it was set: the engine takes no empty base. "
-			+ "unset takes a base out, and remove_theme_item without item takes it out with its "
-			+ "type. Nothing was written."
+			+ "%sNothing was written."
 		)
-		% [GdhPropertyPaths.class_called(target), property, shown(held)]
+		% [GdhPropertyPaths.class_called(writing.target), property, shown(held), steps]
 	)
+
+
+## What the engine raised writing [param property] of the call in [param writing] in an editor, as
+## a sentence to follow a refusal, or "". A headless engine's output comes back with its answer, and
+## an editor's goes only to its Output panel, so a refusal there gave no reason.
+func _engine_said(writing: GdhWriting, property: String) -> String:
+	if not writing.said.has(property):
+		return ""
+	return " The engine said: %s" % " ".join(writing.said[property])
+
+
+## Writes [param value] under [param property] of the call in [param writing]. In an editor, what
+## the engine raises meanwhile is kept for the refusal, by property.
+func _write_heard(writing: GdhWriting, property: String, value: Variant) -> void:
+	if not Engine.is_editor_hint():
+		_write(writing.target, property, value)
+		return
+	var heard: GdhRaised = GdhRaised.new()
+	OS.add_logger(heard)
+	_write(writing.target, property, value)
+	OS.remove_logger(heard)
+	if not heard.raised.is_empty():
+		writing.said[property] = heard.raised
 
 
 ## Notes in [param undone_by] each property of [param given] that writing [param written] on
@@ -1401,6 +1434,8 @@ class GdhWriting:
 	var undone_by: Dictionary[String, String] = {}
 	var refusal: String = ""
 	var stopped: bool = false
+	## What the engine raised in an editor while each property was written, by name.
+	var said: Dictionary[String, PackedStringArray] = {}
 
 
 	## Stops the call with [param text] followed by the note that nothing else was written.
@@ -1412,3 +1447,31 @@ class GdhWriting:
 	func stop(text: String) -> void:
 		refusal = text
 		stopped = true
+
+
+## Each error the engine raises on the thread that made it while it is attached, as a sentence.
+class GdhRaised:
+	extends Logger
+
+	var raised: PackedStringArray = []
+	var _thread: int = OS.get_thread_caller_id()
+
+	func _log_message(_message: String, _error: bool) -> void:
+		pass
+
+	# The engine's own signature for a Logger, eight parameters and not this project's to shape.
+	# gdstyle:ignore=quality/max-parameters
+	func _log_error(
+		_function: String,
+		_file: String,
+		_line: int,
+		code: String,
+		rationale: String,
+		_editor_notify: bool,
+		_error_type: int,
+		_script_backtraces: Array[ScriptBacktrace],
+	) -> void:
+		if OS.get_thread_caller_id() != _thread:
+			return
+		var said: String = code if rationale.is_empty() else rationale
+		var _added: bool = raised.append(said if said.ends_with(".") else said + ".")
