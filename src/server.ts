@@ -5855,16 +5855,6 @@ function runningGameSaid(
     : `Told to the running game (pid ${pid}), which this server started, and taken by it: it no longer stops on that line.`;
 }
 
-/** Passes a start's point of no return, or frees [param slot] for a call told to stop before it. */
-function committedOrFreed(slot: { release(): void }): void {
-  try {
-    commitCall();
-  } catch (error) {
-    slot.release();
-    throw error;
-  }
-}
-
 /** The language server request and the word for it that each script_info op uses. An op not listed is hover. */
 const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>({
   symbols: ['lsp_get_symbols', 'Symbols'],
@@ -15055,8 +15045,7 @@ export class GodotServer {
    * process to ask, so the editor is asked instead: without that a played scene that died on boot
    * was waited for the whole budget and then reported, correctly, as no longer running.
    */
-  private giveUpOnTheAnnouncement(probe: AnnounceProbe): boolean {
-    const run = this.activeProcess;
+  private giveUpOnTheAnnouncement(run: GodotProcess, probe: AnnounceProbe): boolean {
     if (this.theEditorsSessionStoppedOn(run)) {
       return true;
     }
