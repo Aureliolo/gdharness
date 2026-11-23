@@ -22,17 +22,6 @@ const MIB = 1024 ** 2;
 /** What an engine is taken to need while its project has no peak kept. */
 export const MEMORY_PER_ENGINE = 1.5 * GIB;
 
-/**
- * What an engine with a window is taken to need while its project has no peak kept for one. A
- * window adds a renderer, its swapchain and the drawn frames to what a headless engine holds.
- */
-export const WINDOWED_MEMORY_PER_ENGINE = 3 * GIB;
-
-/** What an engine of [param tool] is taken to need with no peak kept. */
-export function flatNeed(tool: PeakTool): number {
-  return tool === 'test_windowed_lane' ? WINDOWED_MEMORY_PER_ENGINE : MEMORY_PER_ENGINE;
-}
-
 /** The variable that sets the ceiling of every engine this server starts, in megabytes. */
 export const CEILING_VARIABLE = 'GDHARNESS_ENGINE_MEMORY_CEILING_MB';
 
@@ -176,11 +165,10 @@ export function engineNeed(
   ceiling: number,
   tool: PeakTool,
 ): { readonly bytes: number; readonly said: string } {
-  const flat = flatNeed(tool);
-  const wanted = Math.max(flat, peakBytes ?? 0);
+  const wanted = Math.max(MEMORY_PER_ENGINE, peakBytes ?? 0);
   const from =
-    peakBytes === undefined || peakBytes <= flat
-      ? `${gigabytes(flat)} taken for each engine`
+    peakBytes === undefined || peakBytes <= MEMORY_PER_ENGINE
+      ? `${gigabytes(MEMORY_PER_ENGINE)} taken for each engine`
       : `the ${gigabytes(peakBytes)} the last ${tool} engine of this project held`;
   return wanted <= ceiling
     ? { bytes: wanted, said: from }
