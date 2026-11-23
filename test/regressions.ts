@@ -72467,6 +72467,10 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
         wokenAt - changedAt < 1000,
         `a change in the folder ends the wait: ${String(wokenAt - changedAt)} ms after it`,
       );
+      // macOS can report one write twice, the second past the settle, so the quiet wait starts
+      // only once the write's every report is in and taken.
+      await delay(1000);
+      await changes.next(0, 0, undefined);
       const quietFrom = Date.now();
       await changes.next(200, 50, undefined);
       assert.ok(Date.now() - quietFrom >= 150, 'and with none, the clock does');
