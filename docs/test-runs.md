@@ -592,11 +592,12 @@ of the run's work, and each windowed engine is dealt its part once, as the run s
 
 Linux and macOS run one windowed engine, which holds every windowed suite whole, since engines
 sharing a display there have not been shown to keep their windows apart. `GDHARNESS_WINDOWED_ENGINES`
-names a count to run instead, for measuring a machine.
+names a count to run instead, for measuring a machine. It takes a whole number above 0, and a run
+given anything else stops before it starts.
 
-Where one windowed engine holds several windowed suites, the run's first line says why: the
-platform, `GDHARNESS_WINDOWED_ENGINES`, `--engines 1`, the room the machine had, or a part of the
-work too small to deal out.
+The run's first line counts the windowed engines it starts. Where one holds several windowed suites,
+the line says why: the platform, `GDHARNESS_WINDOWED_ENGINES`, `--engines`, `--cores`, the
+machine's processors, the room the machine had, or a part of the work too small to deal out.
 
 A suite in a windowed engine sees the machine's real screen size, scale and keyboard layout, and
 runs slower for drawing frames. The scene runner's input is fed inside the engine, never through the

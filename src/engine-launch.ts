@@ -232,7 +232,9 @@ export { gigabytes };
 /**
  * How many of the [param most] engines asked for the machine has room for, given its [param
  * processors] and the memory [param available] past what it keeps, with what held it below
- * [param most] when something did, each taken at [param engine]'s bytes.
+ * [param most] when something did, each taken at [param engine]'s bytes. With [param windowed], the
+ * first of its `engines` are windowed and each taken at its `bytes`, and [param engine]'s `said`
+ * names the headless ones.
  */
 export function roomFor(
   most: number,
@@ -244,17 +246,30 @@ export function roomFor(
     bytes: MEMORY_PER_ENGINE,
     said: 'taken for each engine',
   },
+  windowed?: { readonly engines: number; readonly bytes: number },
 ): { engines: number; held: string | undefined } {
-  const byMemory = Math.floor((available - MEMORY_KEPT) / engine.bytes);
+  const free = available - MEMORY_KEPT;
+  const windows = Math.min(windowed?.engines ?? 0, most);
+  const forWindows = windows * (windowed?.bytes ?? 0);
+  const byMemory =
+    windowed === undefined || windows === 0
+      ? Math.floor(free / engine.bytes)
+      : free < forWindows
+        ? Math.floor(free / windowed.bytes)
+        : windows + Math.floor((free - forWindows) / engine.bytes);
   const engines = Math.max(1, Math.min(most, processors, byMemory));
   if (engines >= most) {
     return { engines, held: undefined };
   }
+  const taken =
+    windowed === undefined || windows === 0
+      ? `${gigabytes(engine.bytes)} ${engine.said}`
+      : `${gigabytes(windowed.bytes)} taken for each windowed engine and ${gigabytes(engine.bytes)} ${engine.said}`;
   return {
     engines,
     held:
       byMemory < processors
-        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(engine.bytes)} ${engine.said}`
+        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${taken}`
         : processorsSaid,
   };
 }
