@@ -380,8 +380,8 @@ export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntr
  */
 export class FoldedRepeats {
   private readonly first = new Map<string, { entry: LogEntry; times: number }>();
-  /** Whether a distinct entry was let go or not taken for the bound. */
-  overflowed = false;
+  /** How many entries the result leaves out for the bound: those not taken, or let go with their times. */
+  leftOut = 0;
 
   private readonly most: number;
   private readonly keeps: 'newest' | 'oldest';
@@ -391,28 +391,30 @@ export class FoldedRepeats {
     this.keeps = keeps;
   }
 
-  take(entry: LogEntry): void {
+  /** Takes [param entry], printed [param times] times over. */
+  take(entry: LogEntry, times = 1): void {
     const key = JSON.stringify([entry.severity, entry.source, entry.text, entry.detail]);
     const seen = this.first.get(key);
     if (seen !== undefined) {
-      seen.times += 1;
+      seen.times += times;
       return;
     }
     if (this.first.size >= this.most) {
-      this.overflowed = true;
       if (this.keeps === 'oldest') {
+        this.leftOut += times;
         return;
       }
-      const oldest = this.first.keys().next();
+      const oldest = this.first.entries().next();
       if (oldest.done !== true) {
-        this.first.delete(oldest.value);
+        this.first.delete(oldest.value[0]);
+        this.leftOut += oldest.value[1].times;
       }
     }
     // Copied, since a line holds the whole chunk it was read in for as long as it is kept.
     const kept = Number.isFinite(this.most)
       ? { ...entry, text: owned(entry.text), detail: entry.detail.map(owned) }
       : entry;
-    this.first.set(key, { entry: kept, times: 1 });
+    this.first.set(key, { entry: kept, times });
   }
 
   result(): FoldedEntry[] {
@@ -456,8 +458,9 @@ export class GameLog {
 
   /**
    * A log kept to [param kept]'s bound holds about twice that many of its newest entries, and hands
-   * each older one to its reader once no later line can change it. Such a log's `all`, `select` and
-   * `crashReport` see only the entries held, and its counts every entry.
+   * each older one to its reader once no later line can change it. Such a log's `all` and
+   * `crashReport` see only the entries held, and its counts every entry. `record` and the marks of
+   * `select` are for a log that keeps every entry.
    */
   constructor(kept?: LogBound) {
     this.kept = kept;
@@ -711,7 +714,7 @@ export class GameLog {
   private removeEntries(gone: readonly LogEntry[]): void {
     const dropped = new Set(gone.map((entry) => entry.index));
     const before = [...dropped].toSorted((a, b) => a - b);
-    const first = before[0] ?? this.gone + this.entries.length;
+    const first = before[0] ?? this.entries.length;
     const shifted = (position: number): number =>
       position - before.filter((index) => index < position).length;
     const moved = this.entries.splice(first - this.gone);
@@ -792,13 +795,12 @@ export class GameLog {
    */
   record(severity: Severity, text: string): void {
     this.entries.push({
-      index: this.gone + this.entries.length,
+      index: this.entries.length,
       severity,
       source: 'debugger',
       text,
       detail: [],
     });
-    this.retire();
   }
 
   /** The entries still held, the newest of the run when older ones were let go. */
@@ -809,6 +811,18 @@ export class GameLog {
   /** How many entries were let go before the first of {@link all}. */
   get retiredCount(): number {
     return this.gone;
+  }
+
+  /**
+   * The entries held at or past [param read], a position among every entry the log has made, and
+   * the position after the last of them, which the next look passes. A reader that also reads what
+   * the log lets go has read every entry once.
+   */
+  heldFrom(read: number): { readonly entries: readonly LogEntry[]; readonly next: number } {
+    return {
+      entries: this.entries.slice(Math.max(0, read - this.gone)),
+      next: this.gone + this.entries.length,
+    };
   }
 
   count(severity: Severity): number {
@@ -852,12 +866,12 @@ export class GameLog {
     contains?: string | undefined;
     limit: number;
   }): { entries: LogEntry[]; omitted: number } {
-    const floor = options.sinceLastCall ? Math.max(0, this.seen[options.severity] - this.gone) : 0;
+    const floor = options.sinceLastCall ? this.seen[options.severity] : 0;
     const wanted = ADMITTED[options.severity];
     const needle = options.contains?.toLowerCase();
     if (needle === undefined) {
       for (const severity of wanted) {
-        this.seen[severity] = this.gone + this.entries.length;
+        this.seen[severity] = this.entries.length;
       }
     }
     const matching = this.entries

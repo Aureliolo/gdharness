@@ -174,33 +174,47 @@ export function checkWithEngine(godotPath: string, projectPath: string): CheckSc
  * scripts it could not load, each listed error as the engine printed it with its backtrace, and the
  * load failure that follows each. A parse error in a core script took nineteen dependents down
  * with it, and their entries alone ran the answer past fifteen kilobytes after the head had already
- * folded them into one list. [param listing] is where the whole run listed them, for entries that
- * are its first only.
+ * folded them into one list.
  */
-export function withoutListed(
-  entries: readonly LogEntry[],
-  errors: readonly ScriptError[],
-  listing = discoveryListing(entries.map((entry) => entry.text)),
-): LogEntry[] {
+export function withoutListed(entries: readonly LogEntry[], errors: readonly ScriptError[]): LogEntry[] {
   if (errors.length === 0) {
     return [...entries];
   }
-  const paths = new Set(errors.map((error) => error.path));
-  return entries.filter((entry, at) => {
-    if (listing !== null && at >= listing.from && at < listing.to) {
-      return false;
-    }
-    const reloaded = reloadedAt(entry);
-    if (
-      reloaded !== null &&
+  const listing = discoveryListing(entries.map((entry) => entry.text));
+  return entries.filter(
+    (entry, at) =>
+      !(listing !== null && at >= listing.from && at < listing.to) &&
+      !listedUnder(listedMarks(entry), errors),
+  );
+}
+
+/** What of an entry says it is a listed script error, or the load failure that follows one. */
+export interface ListedMarks {
+  readonly text: string;
+  /** Where the entry says a script failed to compile, or null. */
+  readonly reloaded: { readonly path: string; readonly line: number | null } | null;
+  /** The script the entry says failed to load, or null. */
+  readonly failedToLoad: string | null;
+}
+
+/** What of [param entry] {@link listedUnder} reads. */
+export function listedMarks(entry: LogEntry): ListedMarks {
+  return {
+    text: entry.text,
+    reloaded: reloadedAt(entry),
+    failedToLoad:
+      /^Failed to load script "(res:\/\/[^"]+)" with error "[^"]+"\.$/.exec(entry.text)?.[1] ?? null,
+  };
+}
+
+/** Whether the entry [param marks] were read off is one of [param errors], or the failure to load one's script. */
+export function listedUnder(marks: ListedMarks, errors: readonly ScriptError[]): boolean {
+  const { text, reloaded, failedToLoad } = marks;
+  return (
+    (reloaded !== null &&
       errors.some(
-        (error) =>
-          error.path === reloaded.path && error.line === reloaded.line && error.message === entry.text,
-      )
-    ) {
-      return false;
-    }
-    const failedToLoad = /^Failed to load script "(res:\/\/[^"]+)" with error "[^"]+"\.$/.exec(entry.text);
-    return failedToLoad === null || !paths.has(failedToLoad[1] ?? '');
-  });
+        (error) => error.path === reloaded.path && error.line === reloaded.line && error.message === text,
+      )) ||
+    (failedToLoad !== null && errors.some((error) => error.path === failedToLoad))
+  );
 }

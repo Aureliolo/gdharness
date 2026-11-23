@@ -2,32 +2,31 @@
  * What a test run's piped streams said, read an entry at a time as its log lets each one go, so a run
  * of any length is judged without holding every line it printed.
  *
- * Each reading is the one the answer would take from the whole log. The lists an answer carries are
- * kept to a few thousand distinct entries, and below that they are exact. Past it, `capped` says
- * which were cut.
+ * Each reading is the one the answer would take from the whole log, and each count is of every
+ * entry. The lists an answer carries keep at most {@link DISTINCT_KEPT} distinct entries each, and
+ * below that they are exact. Past it, `capped` names each list cut and how many entries it left out.
  */
 
 import { autoloadNotCompiled } from './autoload-failure.js';
 import { EXIT_LEAK, HeldAtExitRead, WalkRead } from './engine-leaks.js';
-import { answersTo, type FoldedEntry, FoldedRepeats, type LogEntry } from './game-log.js';
+import { answersTo, type FoldedEntry, FoldedRepeats, type GameLog, type LogEntry } from './game-log.js';
 import {
   DiscoveryRead,
+  finishesASuite,
   HookFailuresRead,
   NoReportRead,
   OrphansRead,
   RowsIgnoredRead,
   type ScriptError,
+  type SuitesPrinted,
   SuitesRead,
 } from './junit.js';
 import { owned } from './log-read.js';
-import { compileErrorsIn, withoutListed } from './script-origins.js';
+import { compileErrorsIn, type ListedMarks, listedMarks, listedUnder } from './script-origins.js';
 import { nestedError } from './suite-judge.js';
 
-/** The most distinct entries a folded list holds before it is cut. */
+/** The most distinct entries each list an answer carries holds before it is cut. */
 export const DISTINCT_KEPT = 4096;
-
-/** The most entries of other lists kept: the compile errors, the nested errors and the first entries. */
-const LISTED_KEPT = 1000;
 
 /** How many of the newest entries naming a phrase an answer echoes. */
 const ECHOED_MOST = 200;
@@ -37,6 +36,12 @@ export interface RepeatedError {
   readonly text: string;
   readonly where: string | null;
   readonly times: number;
+}
+
+/** A list an answer carries that was cut for its bound, and how many entries it left out. */
+export interface Capped {
+  readonly list: string;
+  readonly leftOut: number;
 }
 
 /**
@@ -50,7 +55,8 @@ export class ScriptErrorRepeats {
   private readonly whole = new Map<string, LogEntry>();
   /** How many copies of each script error at each place, by text and place. */
   private readonly times = new Map<string, number>();
-  overflowed = false;
+  /** How many entries were let go for the bound: the copies counted, and the whole copies kept. */
+  leftOut = 0;
   private readonly most: number;
 
   constructor(most = Number.POSITIVE_INFINITY) {
@@ -63,10 +69,10 @@ export class ScriptErrorRepeats {
       return;
     }
     if (entry.detail.length > 0) {
-      this.newest(this.whole, owned(entry.text), entryOwned(entry));
+      this.newest(this.whole, owned(entry.text), entryOwned(entry), () => 1);
     }
     const key = JSON.stringify([entry.text, entry.detail[0] ?? null]);
-    this.newest(this.times, key, (this.times.get(key) ?? 0) + 1);
+    this.newest(this.times, key, (this.times.get(key) ?? 0) + 1, (times) => times);
   }
 
   /** The repeated error, or null when the last entry is no script error. */
@@ -81,14 +87,20 @@ export class ScriptErrorRepeats {
     return { text: last.entry.text, where, times };
   }
 
-  private newest<Value>(map: Map<string, Value>, key: string, value: Value): void {
+  /** Sets [param key] as the newest of [param map], letting the oldest go past the bound. */
+  private newest<Value>(
+    map: Map<string, Value>,
+    key: string,
+    value: Value,
+    entries: (value: Value) => number,
+  ): void {
     map.delete(key);
     map.set(key, value);
     if (map.size > this.most) {
-      this.overflowed = true;
-      const oldest = map.keys().next();
+      const oldest = map.entries().next();
       if (oldest.done !== true) {
-        map.delete(oldest.value);
+        map.delete(oldest.value[0]);
+        this.leftOut += entries(oldest.value[1]);
       }
     }
   }
@@ -125,6 +137,49 @@ function entryOwned(entry: LogEntry): LogEntry {
   return { ...entry, text: owned(entry.text), detail: entry.detail.map(owned) };
 }
 
+/**
+ * The entries outside gdUnit4's list of the scripts it could not load, folded as the answer folds
+ * them once it leaves out the script errors it lists. Which errors those are is known only once the
+ * run is over, so each entry is held with what ties it to one, and two entries the answer shows alike
+ * are held apart when those differ. The oldest {@link DISTINCT_KEPT} are held.
+ */
+class UnlistedEntries {
+  private readonly held = new Map<string, { entry: LogEntry; marks: ListedMarks; times: number }>();
+  /** How many entries were not held for the bound. */
+  leftOut = 0;
+
+  take(shown: LogEntry, entry: LogEntry): void {
+    const marks = listedMarks(entry);
+    const key = JSON.stringify([
+      shown.severity,
+      shown.source,
+      shown.text,
+      shown.detail,
+      marks.reloaded,
+      marks.failedToLoad,
+    ]);
+    const seen = this.held.get(key);
+    if (seen !== undefined) {
+      seen.times += 1;
+    } else if (this.held.size < DISTINCT_KEPT) {
+      this.held.set(key, { entry: entryOwned(shown), marks, times: 1 });
+    } else {
+      this.leftOut += 1;
+    }
+  }
+
+  /** The entries held, less those of [param errors], folded in the order each was first printed. */
+  without(errors: readonly ScriptError[]): FoldedRepeats {
+    const folded = new FoldedRepeats();
+    for (const { entry, marks, times } of this.held.values()) {
+      if (!listedUnder(marks, errors)) {
+        folded.take(entry, times);
+      }
+    }
+    return folded;
+  }
+}
+
 /** What a test run's tally is told before the run starts. */
 export interface TallyAsked {
   /** The scripts the project autoloads, by path. */
@@ -146,9 +201,8 @@ export class TestRunTally {
   readonly engine: FoldedRepeats;
   /** Every entry, folded, the oldest distinct ones kept, for the answer of a run that wrote no report. */
   readonly printedFolded = new FoldedRepeats(DISTINCT_KEPT, 'oldest');
-  /** The first entries in full, for that answer when it leaves out the script errors it lists. */
-  readonly printedFirst: LogEntry[] = [];
-  printedCount = 0;
+  /** The same outside gdUnit4's list of the scripts it could not load, for that answer when it lists them. */
+  private readonly unlisted = new UnlistedEntries();
   readonly uncaught = {
     count: 0,
     first: null as LogEntry | null,
@@ -169,7 +223,8 @@ export class TestRunTally {
   readonly held = new HeldAtExitRead();
   readonly echoed: Echoed | null;
   private previous: LogEntry | null = null;
-  private readonly cut = new Set<string>();
+  /** How many entries each list not folded left out for its bound, by the list's name. */
+  private readonly cut = new Map<string, number>();
   private readonly asked: TallyAsked;
 
   constructor(asked: TallyAsked) {
@@ -187,27 +242,21 @@ export class TestRunTally {
       this.keep(this.nested, owned(nested), 'nested errors');
     }
     this.previous = entry;
+    const shown = asked.shown(entry);
     if (answersTo(entry, asked.verbose ? 'info' : 'warning', undefined)) {
-      this.engine.take(asked.shown(entry));
+      this.engine.take(shown);
     }
-    this.printedCount += 1;
-    this.printedFolded.take(asked.shown(entry));
-    if (this.printedFirst.length < LISTED_KEPT) {
-      this.printedFirst.push(entryOwned(entry));
-    }
+    this.printedFolded.take(shown);
     if (asked.uncaught(entry, byScript)) {
-      this.takeUncaught(entry);
+      this.takeUncaught(entry, shown);
     }
     const { text } = entry;
-    for (const fold of [
-      this.noReport,
-      this.discovery,
-      this.suites,
-      this.orphans,
-      this.hooks,
-      this.rowsIgnored,
-    ]) {
+    for (const fold of [this.noReport, this.suites, this.orphans, this.hooks, this.rowsIgnored]) {
       fold.take(text);
+    }
+    this.discovery.take(text);
+    if (!this.discovery.listed) {
+      this.unlisted.take(shown, entry);
     }
     this.repeats.take(entry, byScript);
     for (const error of entry.severity === 'error' ? compileErrorsIn([entry]) : []) {
@@ -221,72 +270,93 @@ export class TestRunTally {
     this.echoed?.take(entry);
   }
 
-  private takeUncaught(entry: LogEntry): void {
+  private takeUncaught(entry: LogEntry, shown: LogEntry): void {
     const { uncaught } = this;
     uncaught.count += 1;
     uncaught.first ??= entryOwned(entry);
-    this.distinct(uncaught.texts, entry.text, 'uncaught script errors');
-    uncaught.folded.take(this.asked.shown(entry));
+    this.distinct(uncaught.texts, entry.text, null);
+    uncaught.folded.take(shown);
   }
 
-  /** Adds [param text] to [param set] while it holds fewer than its most, else notes [param what] cut. */
-  private distinct(set: Set<string>, text: string, what: string): void {
+  /**
+   * Adds [param text] to [param set] while it holds fewer than its most, else counts it left out of
+   * the list [param what] names, when the answer shows the set as one.
+   */
+  private distinct(set: Set<string>, text: string, what: string | null): void {
     if (set.has(text)) {
       return;
     }
     if (set.size < DISTINCT_KEPT) {
       set.add(owned(text));
-    } else {
-      this.cut.add(what);
+    } else if (what !== null) {
+      this.leftOut(what);
     }
   }
 
-  /** Adds [param item] to [param list] while it holds fewer than its most, else notes [param what] cut. */
+  /** Adds [param item] to [param list] while it holds fewer than its most, else counts it left out of [param what]. */
   private keep<Item>(list: Item[], item: Item, what: string): void {
-    if (list.length < LISTED_KEPT) {
+    if (list.length < DISTINCT_KEPT) {
       list.push(item);
     } else {
-      this.cut.add(what);
+      this.leftOut(what);
     }
+  }
+
+  private leftOut(what: string): void {
+    this.cut.set(what, (this.cut.get(what) ?? 0) + 1);
   }
 
   /**
    * The first [param most] distinct entries the run printed, folded, less what the answer lists
-   * under [param errors]. With no errors to leave out the oldest distinct entries are kept whole,
-   * however long the run. Otherwise they come from its first entries, and a run that printed more
-   * than those and left fewer than [param most] is noted cut.
+   * under [param errors]: gdUnit4's list of the scripts it could not load, each listed error, and
+   * the load failure that follows each.
    */
   entriesWithout(errors: readonly ScriptError[], most: number): FoldedEntry[] {
-    if (errors.length === 0) {
-      return this.printedFolded.result().slice(0, most);
+    const folded = errors.length === 0 ? this.printedFolded : this.unlisted.without(errors);
+    const leftOut = errors.length === 0 ? this.printedFolded.leftOut : this.unlisted.leftOut;
+    if (leftOut > 0) {
+      this.cut.set('entries', leftOut);
     }
-    const folded = new FoldedRepeats();
-    for (const entry of withoutListed(this.printedFirst, errors, this.discovery.result())) {
-      folded.take(this.asked.shown(entry));
-    }
-    const kept = folded.result();
-    if (kept.length < most && this.printedCount > this.printedFirst.length) {
-      this.cut.add('entries');
-    }
-    return kept.slice(0, most);
+    return folded.result().slice(0, most);
   }
 
-  /** What was cut for the bounds, each named in words, in a stable order. */
-  capped(): string[] {
-    const folds: [FoldedRepeats | ScriptErrorRepeats, string][] = [
+  /** Each list cut for its bound, with how many entries it left out, in a stable order. */
+  capped(): Capped[] {
+    const folds: [{ readonly leftOut: number }, string][] = [
       [this.engine, 'engine entries'],
       [this.uncaught.folded, 'uncaught script errors'],
       [this.repeats, 'repeated script errors'],
     ];
-    const cut = new Set(this.cut);
-    for (const [fold, what] of folds) {
-      if (fold.overflowed) {
-        cut.add(what);
+    const cut = new Map(this.cut);
+    for (const [fold, list] of folds) {
+      if (fold.leftOut > 0) {
+        cut.set(list, fold.leftOut);
       }
     }
-    if (this.hooks.cut) {
-      cut.add('hook failure messages');
-    }
-    return [...cut].toSorted();
+    return [...cut]
+      .map(([list, leftOut]) => ({ list, leftOut }))
+      .toSorted((a, b) => (a.list < b.list ? -1 : a.list > b.list ? 1 : 0));
   }
+}
+
+/**
+ * What a test run's progress reads off [param log] while it fills: the suites printed so far, and
+ * whether one finished at or past position [param read]. [param tally] has read what the log let
+ * go, and what it still holds is read on from there. The `read` returned is the next look's.
+ */
+export function progressRead(
+  log: GameLog,
+  tally: TestRunTally,
+  read: number,
+): { suites: SuitesPrinted; finishedOne: boolean; read: number } {
+  const suites = tally.suites.copy();
+  for (const entry of log.all) {
+    suites.take(entry.text);
+  }
+  const fresh = log.heldFrom(read);
+  return {
+    suites: suites.result(),
+    finishedOne: fresh.entries.some((entry) => finishesASuite(entry.text)),
+    read: fresh.next,
+  };
 }

@@ -231,7 +231,6 @@ import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
   failedCases,
   failedWithin,
-  finishesASuite,
   ignoredForTheRunner,
   ignoredLeftOutAt,
   ignoredYetRan,
@@ -239,9 +238,9 @@ import {
   orphansLeftSaid,
   type orphansPrinted,
   type PrintedDiff,
-  PrintedDiffs,
   parseJUnit,
   type ScriptError,
+  SuiteDiffs,
   skippedInReport,
   type TestReport,
   testProgressMessage,
@@ -438,18 +437,19 @@ import { endedAsItStarted } from './start-watch.js';
 import {
   casesRetried,
   declaringAdvice,
+  ERRORS_KEPT,
+  type ErrorsJudged,
   failedOnPushErrors,
   funcOf,
+  type LogRead,
   named,
   printedPassing,
   pushErrorsFailedSentence,
-  type RunRead,
   readEngineLog,
   readExpected,
   SuiteCuts,
   suiteNotRunFault,
   uncollectedSaid,
-  unexpectedErrors,
 } from './suite-judge.js';
 import {
   capsFrames,
@@ -482,7 +482,13 @@ import {
   withNotRun,
   withNotSuites,
 } from './test-split.js';
-import { DISTINCT_KEPT, type RepeatedError, ScriptErrorRepeats, TestRunTally } from './test-tally.js';
+import {
+  DISTINCT_KEPT,
+  progressRead,
+  type RepeatedError,
+  ScriptErrorRepeats,
+  TestRunTally,
+} from './test-tally.js';
 import {
   asParams,
   type OperationParams,
@@ -4541,16 +4547,37 @@ function uncaughtNote(uncaught: TestRunTally['uncaught'] | null): string | undef
 const MOST_UNCAUGHT_ERRORS = 20;
 
 /**
- * What a test run printed more of than its answer keeps, as the answer says it, or nothing. Below the
- * bounds every list is read off the whole run.
+ * What a test run printed more of than its answer keeps, as the answer says it, or nothing when it
+ * reached no bound. Below the bounds every list and count is read off the whole run. [param
+ * uncaughtOmitted] is how many uncaught script errors the answer counts and does not list, and
+ * [param errorsDropped] how many engine errors and warnings its log held past the most kept.
  */
-function printedCapped(tally: TestRunTally): { printedCapped?: string } {
-  const capped = tally.capped();
-  return capped.length === 0
+function printedCapped(
+  tally: TestRunTally,
+  uncaughtOmitted = 0,
+  errorsDropped = 0,
+): { printedCapped?: string } {
+  const lists = tally.capped();
+  const said = [
+    ...(lists.length === 0
+      ? []
+      : [
+          `Past the ${String(DISTINCT_KEPT)} entries a list keeps, it leaves out ${lists.map(({ list, leftOut }) => `${String(leftOut)} ${list}`).join(', ')}.`,
+        ]),
+    ...(uncaughtOmitted === 0
+      ? []
+      : [
+          `uncaughtScriptErrors lists the first ${String(MOST_UNCAUGHT_ERRORS)} and leaves out ${String(uncaughtOmitted)}.`,
+        ]),
+    ...(errorsDropped === 0
+      ? []
+      : [
+          `Past the ${String(ERRORS_KEPT)} engine errors and warnings it keeps, it judged ${String(errorsDropped)} more against what the suites declare. It leaves those out of the errors it lists and counts by suite.`,
+        ]),
+  ];
+  return said.length === 0
     ? {}
-    : {
-        printedCapped: `The run printed more distinct lines than an answer keeps, so ${capped.join(', ')} ${capped.length === 1 ? 'is' : 'are'} from a bounded window of ${String(DISTINCT_KEPT)} distinct entries, and the counts in ${capped.length === 1 ? 'it' : 'them'} are of that window. The counts of errors and warnings are of every line.`,
-      };
+    : { printedCapped: `The run printed more than the answer keeps. ${said.join(' ')}` };
 }
 
 /** Where gdUnit4 comes from, for a project without it or with one too old to run the tests. */
@@ -5704,11 +5731,10 @@ interface TestReadOut extends TestRan {
     engineStart?: number | undefined;
     engineCompile?: number | undefined;
   };
-  casePrinted: RunRead;
+  casePrinted: LogRead;
   notCompiled: ReturnType<typeof autoloadNotCompiled>;
   report: TestReport | null;
   reportProblem: string | null;
-  declaredErrors: ReturnType<typeof readExpected>;
 }
 
 /** A test run whose engine log is judged. */
@@ -5763,8 +5789,7 @@ interface TestErrorsJudged extends TestWithReport {
   orphans: ReturnType<typeof orphansPrinted>;
   orphansIn: (path: string | null) => number;
   warnings: Record<string, unknown>[];
-  judgedErrors: ReturnType<typeof unexpectedErrors>;
-  undeclaredPrinted: ReturnType<typeof unexpectedErrors>['printed'];
+  undeclaredPrinted: ErrorsJudged['printed'];
   undeclaredAll: UndeclaredError[];
   undeclaredErrors: UndeclaredError[];
   leakedAtExit: string[];
@@ -10257,22 +10282,16 @@ export class GodotServer {
     let read = 0;
     let lastSent = began;
     const ticker = setInterval(() => {
-      // What the log let go was read by the tally, and what it still holds is read on from there.
-      const suites = tally.suites.copy();
-      const entries = log.all;
-      for (const entry of entries) {
-        suites.take(entry.text);
-      }
-      const from = log.retiredCount;
-      const finishedOne = entries.slice(Math.max(0, read - from)).some((entry) => finishesASuite(entry.text));
-      read = from + entries.length;
+      const looked = progressRead(log, tally, read);
+      const { suites, finishedOne } = looked;
+      read = looked.read;
       const now = Date.now();
       if (!finishedOne && now - lastSent < heartbeatMs()) {
         return;
       }
       lastSent = now;
       // Whole seconds, from ticks at least a second apart, so each is more than the last.
-      progress(Math.floor((now - began) / 1000), testProgressMessage(suites.result(), now - began));
+      progress(Math.floor((now - began) / 1000), testProgressMessage(suites, now - began));
     }, 1000);
     ticker.unref();
     return ticker;
@@ -10790,8 +10809,9 @@ export class GodotServer {
     };
     const keeping = run.settled.then(keep, keep);
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
-    // marks which characters of a failing string were there, and its report drops them.
-    const diffs = new PrintedDiffs();
+    // marks which characters of a failing string were there, and its report drops them. Read a
+    // suite at a time, since the whole console can pass what one string holds.
+    const diffs = new SuiteDiffs();
     // A suite printing past what a log may hold ends the engine, as a share doing so ends gdharness
     // test's. Each suite is judged on the log and on the console, the console's errors counted with
     // its other lines, from where the suite began to where the next one does.
@@ -10829,11 +10849,11 @@ export class GodotServer {
     const timedOut = await new Promise<boolean>((resolve) => {
       let read = 0;
       const watching = setInterval(() => {
-        const from = run.log.retiredCount;
-        for (const entry of run.log.all.slice(Math.max(0, read - from))) {
+        const fresh = run.log.heldFrom(read);
+        for (const entry of fresh.entries) {
           stopped.for ??= autoloadNotCompiled(entry, autoloaded);
         }
-        read = from + run.log.all.length;
+        read = fresh.next;
         // What the log let go before this look was read by the tally.
         stopped.for ??= tally.notCompiled;
         if (stopped.for !== null) {
@@ -10886,7 +10906,8 @@ export class GodotServer {
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
-    const casePrinted = readEngineLog(engineLog, tally.nested);
+    const declaredErrors = readExpected(expectedFile);
+    const casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors);
     const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
@@ -10909,7 +10930,6 @@ export class GodotServer {
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
-    const declaredErrors = readExpected(expectedFile);
     try {
       const written =
         existsSync(reportsDir) && notCompiled === null
@@ -10943,7 +10963,6 @@ export class GodotServer {
       notCompiled,
       report,
       reportProblem,
-      declaredErrors,
     });
   }
 
@@ -11185,7 +11204,7 @@ export class GodotServer {
 
   /** The answer of a test run that wrote a report, judged against what the engine printed. */
   private testReported(reported: TestWithReport): ToolResponse {
-    const { tally, diffs, casePrinted, declaredErrors, uncaught } = reported;
+    const { tally, diffs, casePrinted, uncaught } = reported;
     // A failure the report keeps from an attempt before a case's last is not the run's: gdUnit4 and
     // gdharness test both go by what the case printed in the end.
     const report = withPrintedPassesSettled(reported.report, (path, name) =>
@@ -11220,7 +11239,7 @@ export class GodotServer {
     // answer is the size of what went wrong.
     // Judged as gdharness test judges them, so a suite the tool passes is one gdharness test passes: an
     // engine error a suite did not declare fails it, and so does one it declared and never printed.
-    const judgedErrors = unexpectedErrors(casePrinted, declaredErrors, [...casePrinted.suites.keys()]);
+    const judgedErrors = casePrinted.judged;
     // Less those already under uncaughtScriptErrors, and folded with how often each was printed: a
     // stack overflow prints an error for every frame, and came back as a thousand entries.
     const uncaughtTexts = uncaught?.texts ?? new Set<string>();
@@ -11305,7 +11324,6 @@ export class GodotServer {
       orphans,
       orphansIn,
       warnings,
-      judgedErrors,
       undeclaredPrinted,
       undeclaredAll,
       undeclaredErrors,
@@ -11329,7 +11347,6 @@ export class GodotServer {
       engineEntries,
       erring,
       ignored,
-      judgedErrors,
       orphansIn,
       report,
       tally,
@@ -11338,9 +11355,7 @@ export class GodotServer {
     } = judged;
     const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     // Errors only, since what this is taken from is the log's count of errors.
-    const declaredAndPrinted =
-      casePrinted.errors.filter((error) => !error.warning).length -
-      judgedErrors.printed.filter((error) => !error.warning).length;
+    const declaredAndPrinted = casePrinted.declaredErrors;
     // Read off the console, which prints a case a suite inherits under that suite: gdUnit4's report
     // writes it under the suite declaring it, so the inheriting one read a case short of what it
     // discovered, and that case was answered as never run beside a run that ran it.
@@ -11854,6 +11869,7 @@ export class GodotServer {
   /** The suites of a test run that were not clean, and what the engine itself printed. */
   private reportSuites(s: TestAnswer): Record<string, unknown> {
     const {
+      casePrinted,
       classes,
       tally,
       declaredAndPrinted,
@@ -11867,6 +11883,7 @@ export class GodotServer {
       ranIn,
       report,
       run,
+      uncaughtFolded,
       unclean,
     } = s;
     return {
@@ -11902,7 +11919,11 @@ export class GodotServer {
         engineEntries.length > engineEntriesShown.length
           ? engineEntries.length - engineEntriesShown.length
           : undefined,
-      ...printedCapped(tally),
+      ...printedCapped(
+        tally,
+        Math.max(0, uncaughtFolded.length - MOST_UNCAUGHT_ERRORS),
+        casePrinted.errorsDropped,
+      ),
       classes: withAddonClassesCounted(classes.payload, cachedClasses(project.value.path) ?? new Map()),
     };
   }
