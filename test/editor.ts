@@ -3302,6 +3302,70 @@ async function testABuiltInResourceIsReadWithWhatItHolds({ call, project }: Edit
   await call('scene_node', { ...scene, op: 'delete', nodePath: 'Tallied' });
 }
 
+/**
+ * A theme variation's base the engine refuses is refused with the engine's own reason, as a headless
+ * engine gives it, and an empty one names only the steps that take a base out of what was written.
+ */
+async function testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor({
+  call,
+  refusal,
+  project,
+}: Editor): Promise<void> {
+  const themed = { projectPath: project, resourcePath: 'res://theme_refused.tres' };
+  const modify = (properties: Record<string, unknown>) => ({ ...themed, op: 'modify', properties });
+  await call('resource_edit', { ...themed, op: 'create', resourceType: 'Theme' });
+  const empty = fileText(project, 'theme_refused.tres');
+  assert.equal(
+    await refusal('resource_edit', modify({ 'NewType/base_type': 'Panel Container' })),
+    `The editor answered resource_edit modify with an error: Theme.NewType/base_type was given "Panel Container" and holds "" after it was set: the engine changed or refused the value, so nothing was written. The engine said: Invalid type name: 'Panel Container'.`,
+  );
+  assert.equal(fileText(project, 'theme_refused.tres'), empty);
+  const emptyRefused = (holder: string, property: string, held: string, steps: string): string =>
+    `The editor answered ${holder === 'Theme' ? 'resource_edit modify' : 'scene_node set'} with an error: ${holder}.${property} was given "" and holds ${held} after it was set: the engine takes no empty base. ${steps}Nothing was written. The engine said: An empty theme type cannot be the base type of a variation. Use clear_type_variation() instead if you want to unmark 'NewType' as a variation.`;
+  assert.equal(
+    await refusal('resource_edit', modify({ 'NewType/base_type': '' })),
+    emptyRefused('Theme', 'NewType/base_type', '""', 'No base is held, so there is none to take out. '),
+  );
+  assert.equal(fileText(project, 'theme_refused.tres'), empty);
+
+  await call('resource_edit', modify({ 'NewType/base_type': 'PanelContainer' }));
+  const held = fileText(project, 'theme_refused.tres');
+  assert.equal(
+    await refusal('resource_edit', modify({ 'NewType/base_type': '' })),
+    emptyRefused(
+      'Theme',
+      'NewType/base_type',
+      '"PanelContainer"',
+      'unset takes a base out, and remove_theme_item without item takes it out with its type. ',
+    ),
+  );
+  assert.equal(fileText(project, 'theme_refused.tres'), held);
+  // Each step it names, as written, takes the base out.
+  await call('resource_edit', { ...themed, op: 'modify', unset: ['NewType/base_type'] });
+  assert.doesNotMatch(fileText(project, 'theme_refused.tres'), /base_type/);
+  await call('resource_edit', modify({ 'NewType/base_type': 'PanelContainer' }));
+  await call('resource_edit', { ...themed, op: 'remove_theme_item', controlType: 'NewType' });
+  assert.doesNotMatch(fileText(project, 'theme_refused.tres'), /base_type/);
+
+  // Through a Control's built-in Theme, which remove_theme_item cannot reach.
+  writeFileSync(
+    join(project, 'theme_holder.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[sub_resource type="Theme" id="Theme_1"]\nNewType/base_type = &"PanelContainer"\nNewType/constants/margin = 4\n\n[node name="Root" type="Control"]\ntheme = SubResource("Theme_1")\n',
+  );
+  await call('editor_rescan', { projectPath: project });
+  const scene = { projectPath: project, scenePath: 'res://theme_holder.tscn', op: 'set', nodePath: '.' };
+  const holding = fileText(project, 'theme_holder.tscn');
+  assert.equal(
+    await refusal('scene_node', { ...scene, properties: { 'theme/NewType/base_type': '' } }),
+    emptyRefused('Control', 'theme/NewType/base_type', '"PanelContainer"', 'unset takes a base out. '),
+  );
+  assert.equal(fileText(project, 'theme_holder.tscn'), holding);
+  await call('scene_node', { ...scene, unset: ['theme/NewType/base_type'] });
+  const unset = fileText(project, 'theme_holder.tscn');
+  assert.doesNotMatch(unset, /base_type/, unset);
+  assert.match(unset, /^NewType\/constants\/margin = 4$/m, unset);
+}
+
 async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
 
@@ -9712,6 +9776,10 @@ async function main(): Promise<void> {
     ['testSceneAnimation', testSceneAnimation],
     ['testResources', testResources],
     ['testABuiltInResourceIsReadWithWhatItHolds', testABuiltInResourceIsReadWithWhatItHolds],
+    [
+      'testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor',
+      testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor,
+    ],
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],
     ['testAHeldSceneIsWrittenFromItsFile', testAHeldSceneIsWrittenFromItsFile],

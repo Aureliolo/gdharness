@@ -131161,9 +131161,19 @@ async function propertiesOf(scenes: SceneWriteProject, resourcePath = 'res://the
 /** A refusal's own text, without the engine's messages that follow it. */
 const ownRefusal = (answer: string): string => answer.split(/\s*\{\s*"engine_messages/)[0] ?? answer;
 
-/** The refusal of an empty base for [property] on [holder], which then holds [held]. */
-const emptyBaseRefusal = (holder: string, property: string, held: string): string =>
-  `${holder}.${property} was given "" and holds ${held} after it was set: the engine takes no empty base. unset takes a base out, and remove_theme_item without item takes it out with its type. Nothing was written.`;
+/** The refusal of an empty base for [property] on [holder], which then holds [held], naming [steps]. */
+const emptyBaseRefusal = (holder: string, property: string, held: string, steps: string): string =>
+  `${holder}.${property} was given "" and holds ${held} after it was set: the engine takes no empty base. ${steps}Nothing was written.`;
+
+/** The steps an empty base's refusal names for a Theme file that holds a base. */
+const BASE_OUT_OF_A_THEME_FILE =
+  'unset takes a base out, and remove_theme_item without item takes it out with its type. ';
+
+/** The step an empty base's refusal names for a Theme built into what the call writes. */
+const BASE_OUT_THROUGH_A_HOLDER = 'unset takes a base out. ';
+
+/** What an empty base's refusal says where no base is held. */
+const NO_BASE_TO_TAKE_OUT = 'No base is held, so there is none to take out. ';
 
 async function testAThemeTakesATypeVariationsBaseWithNoEditor(): Promise<void> {
   await withAThemeProject('theme variation base', async (scenes) => {
@@ -131261,17 +131271,46 @@ async function testAnEmptyVariationBaseIsRefusedWhetherOrNotOneIsHeld(): Promise
   await withAThemeProject('theme variation empty base', async (scenes) => {
     const before = scenes.fileOf('theme.tres');
     const bare = textOf(await scenes.modify({ 'NewType/base_type': '' })) ?? '';
-    assert.equal(ownRefusal(bare), emptyBaseRefusal('Theme', 'NewType/base_type', '""'), bare);
+    assert.equal(
+      ownRefusal(bare),
+      emptyBaseRefusal('Theme', 'NewType/base_type', '""', NO_BASE_TO_TAKE_OUT),
+      bare,
+    );
     assert.equal(scenes.fileOf('theme.tres'), before);
+    // An unset of a base never held is refused as one of any other theme item not held.
+    const neverHeld =
+      textOf(
+        await scenes.call('resource_edit', {
+          op: 'modify',
+          resourcePath: 'res://theme.tres',
+          unset: ['NewType/base_type'],
+        }),
+      ) ?? '';
+    assert.ok(neverHeld.startsWith('Theme has no property NewType/base_type. '), neverHeld);
     await scenes.modify({ 'NewType/base_type': 'PanelContainer' });
     const held = scenes.fileOf('theme.tres');
     const emptied = textOf(await scenes.modify({ 'NewType/base_type': '' })) ?? '';
     assert.equal(
       ownRefusal(emptied),
-      emptyBaseRefusal('Theme', 'NewType/base_type', '"PanelContainer"'),
+      emptyBaseRefusal('Theme', 'NewType/base_type', '"PanelContainer"', BASE_OUT_OF_A_THEME_FILE),
       emptied,
     );
     assert.equal(scenes.fileOf('theme.tres'), held);
+    // Each step the refusal names, as written, takes the base out of the file.
+    await scenes.written('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://theme.tres',
+      unset: ['NewType/base_type'],
+    });
+    assert.doesNotMatch(scenes.fileOf('theme.tres'), /base_type/, scenes.fileOf('theme.tres'));
+    await scenes.modify({ 'NewType/base_type': 'PanelContainer' });
+    assert.match(scenes.fileOf('theme.tres'), /^NewType\/base_type = &"PanelContainer"$/m);
+    await scenes.written('resource_edit', {
+      op: 'remove_theme_item',
+      resourcePath: 'res://theme.tres',
+      controlType: 'NewType',
+    });
+    assert.doesNotMatch(scenes.fileOf('theme.tres'), /base_type/, scenes.fileOf('theme.tres'));
   });
 }
 
@@ -131646,17 +131685,32 @@ async function testAVariationBaseTheEngineRefusesThroughAControlsThemeIsRefused(
     'theme variation base through a control',
     async (scenes) => {
       const before = scenes.fileOf('main.tscn');
-      const set = async (properties: Record<string, unknown>): Promise<string> =>
-        textOf(
-          await scenes.call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: '.', properties }),
-        ) ?? '';
+      const set = async (properties: Record<string, unknown>, scenePath = 'main.tscn'): Promise<string> =>
+        textOf(await scenes.call('scene_node', { op: 'set', scenePath, nodePath: '.', properties })) ?? '';
       const emptied = await set({ 'theme/NewType/base_type': '' });
       assert.equal(
         ownRefusal(emptied),
-        emptyBaseRefusal('Control', 'theme/NewType/base_type', '""'),
+        emptyBaseRefusal('Control', 'theme/NewType/base_type', '""', NO_BASE_TO_TAKE_OUT),
         emptied,
       );
       assert.equal(scenes.fileOf('main.tscn'), before);
+      const heldBefore = scenes.fileOf('held.tscn');
+      const emptiedHeld = await set({ 'theme/NewType/base_type': '' }, 'held.tscn');
+      assert.equal(
+        ownRefusal(emptiedHeld),
+        emptyBaseRefusal('Control', 'theme/NewType/base_type', '"PanelContainer"', BASE_OUT_THROUGH_A_HOLDER),
+        emptiedHeld,
+      );
+      assert.equal(scenes.fileOf('held.tscn'), heldBefore);
+      // The step it names, as written, takes the base out of the Theme the scene holds.
+      await scenes.written('scene_node', {
+        op: 'set',
+        scenePath: 'held.tscn',
+        nodePath: '.',
+        unset: ['theme/NewType/base_type'],
+      });
+      assert.doesNotMatch(scenes.fileOf('held.tscn'), /base_type/, scenes.fileOf('held.tscn'));
+      assert.match(scenes.fileOf('held.tscn'), /^NewType\/constants\/margin = 4$/m);
       const engineClass = await set({ 'theme/Button/base_type': 'PanelContainer' });
       assert.equal(
         ownRefusal(engineClass),
@@ -131665,7 +131719,12 @@ async function testAVariationBaseTheEngineRefusesThroughAControlsThemeIsRefused(
       );
       assert.equal(scenes.fileOf('main.tscn'), before);
     },
-    { 'main.tscn': sceneWithABuiltInTheme() },
+    {
+      'main.tscn': sceneWithABuiltInTheme(),
+      'held.tscn': sceneWithABuiltInTheme(
+        'NewType/base_type = &"PanelContainer"\nNewType/constants/margin = 4\n',
+      ),
+    },
   );
 }
 
