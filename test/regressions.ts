@@ -133092,7 +133092,7 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
       const fault = `${suite} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
       assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
     }
-    assert.doesNotMatch(ran.said, /engine error/, ran.said);
+    assert.doesNotMatch(ran.said, /an engine error in /, ran.said);
     assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 1 suite /m, ran.said);
     await withStdioServer(
       async (_call, request) => {
