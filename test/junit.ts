@@ -1550,6 +1550,37 @@ function testTheDiffsHoldNoTextOnceNoDiffIsOpen(): void {
   }
 }
 
+/**
+ * A skip reason holding line breaks and quotes, as gdUnit4 writes it in the report, is read whole:
+ * it runs to the entry's last quote.
+ */
+function testASkipReasonOverSeveralLinesIsReadWhole(): void {
+  const skipped = (name: string, line: number, reason: string): string =>
+    `\t\t<testcase name="${name}" classname="lines_skip_test" time="0.000">\n\t\t\t<skipped message="SKIPPED: res://test/lines_skip_test.gd:${String(line)}">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`;
+  const reasons = [
+    ['test_two_lines', 6, 'line one\nline two'],
+    ['test_ends_in_quote', 9, "it is 'done'"],
+    ['test_quote_alone', 12, "first\n'\nlast"],
+    ['test_quote_ends_line', 15, "said 'no'\nthen left"],
+  ] as const;
+  const report = parseJUnit(
+    `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-23" name="report_1" tests="6" failures="0" skipped="4" flaky="0" time="0.000">
+\t<testsuite id="0" name="lines_skip_test" package="test" timestamp="2026-11-23T05:57:44" hostname="localhost" tests="6" failures="0" errors="0" skipped="4" flaky="0" time="0.448">
+\t\t<testcase name="test_ok" classname="lines_skip_test" time="0.026">
+\t\t</testcase>
+${reasons.map(([name, line, reason]) => skipped(name, line, reason)).join('')}\t\t<testcase name="test_after" classname="lines_skip_test" time="0.026">
+\t\t</testcase>
+\t</testsuite>
+</testsuites>
+`,
+  );
+  assert.deepEqual(
+    skippedInReport(report),
+    reasons.map(([name, , reason]) => ({ suite: 'res://test/lines_skip_test.gd', name, reason })),
+  );
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1571,4 +1602,5 @@ testEverySkipTheReportHoldsIsListedWithItsReason();
 testTheDiffsHoldOnlyTheSuiteBeingPrinted();
 testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
 testTheDiffsHoldNoTextOnceNoDiffIsOpen();
+testASkipReasonOverSeveralLinesIsReadWhole();
 console.log('junit reader tests passed');

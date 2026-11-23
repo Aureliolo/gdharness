@@ -687,8 +687,9 @@ interface SkippedInReport {
   readonly reason: string;
 }
 
-// The reason gdUnit4 writes under the skip's heading: `  Reason: 'not today'`.
-const REPORTED_REASON = /^\s*Reason: '(.*)'\s*$/m;
+// The reason gdUnit4 writes under the skip's heading, `  Reason: 'not today'`, which ends the entry.
+// It runs to the entry's last quote, as it can hold line breaks and quotes of its own.
+const REPORTED_REASON = /^\s*Reason: '([\s\S]*)'\s*$/m;
 
 /** Every case [param report] holds as skipped. */
 export function skippedInReport(report: TestReport): SkippedInReport[] {

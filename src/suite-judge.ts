@@ -182,7 +182,9 @@ const UNRUNNABLE_CASE =
 const CASE_SKIPPED = /^\s*This test is skipped!\s*$/;
 const SUITE_SKIPPED = /^\s*The Entire test-suite is skipped!\s*$/;
 const SUITE_SKIPPED_COUNT = /^\s*Skipped (\d+) tests\s*$/;
-const SKIP_REASON = /^\s*Reason: '(.*)'\s*$/;
+// The first line of the reason under either heading. A reason holding line breaks goes on over the
+// lines below it, and it ends on a quote with a blank line under it.
+const SKIP_REASON = /^\s*Reason: '(.*)$/;
 const SKIPPED_WITH_ITS_SUITE = 'Skipped from the entire test suite';
 // The engine's first line, `Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org`.
 // A build of its own adds when it was built, `(2026-08-17 01:18:38 UTC)`, before the address.
@@ -342,8 +344,6 @@ function readRunLines(
     mismatched: [],
     unrunnable: [],
     skipped: [],
-    skipHeading: null,
-    suiteSkipCases: 0,
     executed: null,
     open: null,
     during: null,
@@ -530,10 +530,6 @@ interface RunState {
   readonly mismatched: MismatchedRow[];
   readonly unrunnable: MismatchedRow[];
   readonly skipped: SkippedRow[];
-  /** The heading gdUnit4 printed over a skip's reason, which the next `Reason:` line belongs to. */
-  skipHeading: 'case' | 'suite' | null;
-  /** How many cases the heading of a suite skipped whole said it held. */
-  suiteSkipCases: number;
   executed: number | null;
   open: SuitePrinted | null;
   during: string | null;
@@ -647,7 +643,6 @@ const readSuiteOpened: LineReader = (state, line) => {
   state.open = open;
   state.during = 'before';
   state.lastCase = null;
-  state.skipHeading = null;
   return true;
 };
 
@@ -658,7 +653,6 @@ const readCase: LineReader = (state, line, at) => {
     return false;
   }
   const { name } = caseLine;
-  state.skipHeading = null;
   if (caseLine.verdict === 'STARTED') {
     settleAfterCase(state, state.lastCase ?? 'before');
     state.during = name;
@@ -692,37 +686,57 @@ const readStatistics: LineReader = (state, line) => {
 };
 
 /**
- * Reads the heading gdUnit4 prints over a skip, and the reason under it when the skip is one
- * `do_skip` asked for. Says whether [param line] was one of those.
+ * Reads the heading gdUnit4 prints over a skip at [param at], and keeps the skip when its reason is
+ * one `do_skip` gave. Says whether [param line] was such a heading.
  */
-function readSkipHeading(state: RunState, suite: string, lastCase: string | null, line: string): boolean {
-  if (CASE_SKIPPED.test(line)) {
-    state.skipHeading = 'case';
-    return true;
-  }
-  if (SUITE_SKIPPED.test(line)) {
-    state.skipHeading = 'suite';
-    state.suiteSkipCases = 0;
-    return true;
-  }
-  if (state.skipHeading === 'suite') {
-    const count = SUITE_SKIPPED_COUNT.exec(line)?.[1];
-    if (count !== undefined) {
-      state.suiteSkipCases = Number(count);
-      return true;
-    }
-  }
-  const reason = state.skipHeading === null ? undefined : SKIP_REASON.exec(line)?.[1];
-  if (reason === undefined) {
+function readSkipHeading(
+  state: RunState,
+  suite: string,
+  lastCase: string,
+  line: string,
+  at: number,
+): boolean {
+  const whole = SUITE_SKIPPED.test(line);
+  if (!whole && !CASE_SKIPPED.test(line)) {
     return false;
   }
-  if (state.skipHeading === 'suite') {
-    state.skipped.push({ suite, name: null, reason, cases: state.suiteSkipCases });
-  } else if (lastCase !== null && reason !== SKIPPED_WITH_ITS_SUITE) {
-    state.skipped.push({ suite, name: lastCase, reason, cases: 1 });
+  const count = whole ? SUITE_SKIPPED_COUNT.exec(state.lines.at(at + 1) ?? '')?.[1] : '1';
+  const said = count === undefined ? null : skipReasonAt(state.lines, whole ? at + 2 : at + 1);
+  if (said === null) {
+    return true;
   }
-  state.skipHeading = null;
+  state.reasonEnds = said.ends;
+  if (whole) {
+    state.skipped.push({ suite, name: null, reason: said.reason, cases: Number(count) });
+  } else if (said.reason !== SKIPPED_WITH_ITS_SUITE) {
+    state.skipped.push({ suite, name: lastCase, reason: said.reason, cases: 1 });
+  }
   return true;
+}
+
+/**
+ * The reason gdUnit4 printed from the line at [param at] on, and the line it ends on. Null when no
+ * reason is there, or the reason is gdUnit4's own for a row whose data does not fit or a case it
+ * cannot run, which are read as those.
+ */
+function skipReasonAt(lines: RunState['lines'], at: number): { reason: string; ends: number } | null {
+  const first = lines.at(at) ?? '';
+  const opened = SKIP_REASON.exec(first)?.[1];
+  if (opened === undefined || UNRUNNABLE_CASE.test(first) || MISMATCHED_ROW.test(lines.at(at + 1) ?? '')) {
+    return null;
+  }
+  const parts = [opened];
+  for (let ends = at; ; ends += 1) {
+    const next = lines.at(ends + 1);
+    const last = (parts.at(-1) ?? '').trimEnd();
+    if (last.endsWith("'") && (next === undefined || next.trim() === '')) {
+      return { reason: [...parts.slice(0, -1), last.slice(0, -1)].join('\n'), ends };
+    }
+    if (next === undefined) {
+      return null;
+    }
+    parts.push(next);
+  }
 }
 
 // A row or case gdUnit4 skips for how it is declared never ran, and it calls the run passed: a
@@ -731,19 +745,18 @@ function readSkipHeading(state: RunState, suite: string, lastCase: string | null
 // under the case, so it is read while that suite is open.
 const readSkipReason: LineReader = (state, line, at) => {
   const { open, lastCase } = state;
-  if (open === null || at <= state.reasonEnds) {
+  if (open === null || lastCase === null || at <= state.reasonEnds) {
     return false;
   }
   const declared = UNRUNNABLE_CASE.exec(line)?.[1];
-  if (declared !== undefined && lastCase !== null) {
-    state.skipHeading = null;
+  if (declared !== undefined) {
     state.unrunnable.push({ suite: open.path, name: lastCase, reason: declared });
     return true;
   }
-  if (readSkipHeading(state, open.path, lastCase, line)) {
+  if (readSkipHeading(state, open.path, lastCase, line, at)) {
     return true;
   }
-  if (!MISMATCHED_ROW.test(line) || lastCase === null) {
+  if (!MISMATCHED_ROW.test(line)) {
     return false;
   }
   state.reasonEnds = at;
@@ -1451,12 +1464,15 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
 }
 
 /**
- * How many cases [param printed] says ran. gdUnit4 prints a case skipped with `do_skip` passed, so
+ * How many cases [param printed] says ran. gdUnit4 prints every case and row it skips passed, so
  * those are taken off what it printed.
  */
-export function casesRan(printed: Pick<RunPrinted, 'suites' | 'skipped'>): number {
+export function casesRan(
+  printed: Pick<RunPrinted, 'suites' | 'skipped' | 'mismatched' | 'unrunnable'>,
+): number {
   const printedCases = [...printed.suites.values()].reduce((sum, suite) => sum + suite.cases.length, 0);
-  return Math.max(0, printedCases - printed.skipped.reduce((sum, one) => sum + one.cases, 0));
+  const skipped = printed.skipped.reduce((sum, one) => sum + one.cases, 0);
+  return Math.max(0, printedCases - skipped - printed.mismatched.length - printed.unrunnable.length);
 }
 
 /** The fault for a case, row or suite skipped with `do_skip`, which never ran. */
@@ -1569,8 +1585,9 @@ function summaryFault(
   if (nothingLeft || (printed.executed !== null && printed.executed !== 0)) {
     return undefined;
   }
-  // Every case that did not execute is a listed skip, which already says why nothing ran.
-  if (printed.executed === 0 && printed.skipped.length > 0 && casesRan(printed) === 0) {
+  // Every case that did not execute is listed as skipped, which already says why nothing ran.
+  const listed = printed.skipped.length + printed.mismatched.length + printed.unrunnable.length;
+  if (printed.executed === 0 && listed > 0 && casesRan(printed) === 0) {
     return undefined;
   }
   return printed.executed === null
