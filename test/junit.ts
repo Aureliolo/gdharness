@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   BOTH_SIDES_ALIKE_NOTE,
   DIFF_HELD_MOST,
@@ -37,6 +38,7 @@ import {
   withActualsPrinted,
 } from '../src/junit.js';
 import { eachLogLine, LINE_KEPT_MOST, lineCutSaid, readMarkup } from '../src/log-read.js';
+import { spawnSyncHidden } from '../src/spawn.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -1891,6 +1893,64 @@ function testALocationLineCutAcrossPiecesIsFoundAtAnyLength(): void {
   }
 }
 
+/**
+ * A console cut 5 characters before its location line ends, inside the line's path, has its value
+ * read back when several times {@link DIFF_HELD_MOST} of output follows with no other location line.
+ */
+function testAValueCutInItsLocationLinesPathIsReadBackBeforeLongOutput(): void {
+  const path = 'res://tests/a_test.gd';
+  const location = `\tat 'test_value' in ${path}:5`;
+  const suite = aSuiteFailingOn(path, 'the value');
+  const output = 'a frame of the loop ticked\n'.repeat(Math.ceil((4 * DIFF_HELD_MOST) / 27));
+  const console = `${suite}Run Test Suite: res://tests/b_test.gd\n${output}`;
+  const failed = [reportedFailing(path, 'the value')];
+  const whole = withActualsPrinted(failed, console);
+  assert.notEqual(whole[0]?.detail, failed[0]?.detail, 'the whole text reads the value back');
+  const bytes = Buffer.from(console);
+  const cut = suite.indexOf(location) + location.length - 5;
+  assert.equal(console.slice(cut, cut + 6), '.gd:5\n', 'the cut falls inside the path');
+  const diffs = new SuiteDiffs();
+  diffs.take(bytes.subarray(0, cut));
+  for (const piece of piecesOf(bytes.subarray(cut), 64 * 1024)) {
+    diffs.take(piece);
+  }
+  assert.deepEqual(withActualsPrinted(failed, diffs.finish()), whole, 'and so does the console cut there');
+}
+
+/** The most memory a process reading a console in 81-byte pieces may hold. */
+const SMALL_PIECES_HELD_MOST = 328 * 1024 * 1024;
+
+/**
+ * 300 MiB printed after an opening nothing closes, read in pieces of 81 bytes, keeps the reading
+ * process under {@link SMALL_PIECES_HELD_MOST}. It runs in a process of its own, so that no other
+ * case's text counts towards its peak.
+ */
+function testAnOpeningNothingClosesReadInSmallPiecesHoldsLittleMemory(): void {
+  const junit = pathToFileURL(join(import.meta.dirname, '..', 'src', 'junit.ts')).href;
+  const opening =
+    "Run Test Suite: res://tests/s0_test.gd\n  Expecting:\n 'other'\n but was\n 'never closed\n";
+  const reading = [
+    `const { SuiteDiffs } = await import(${JSON.stringify(junit)});`,
+    'const reader = new SuiteDiffs();',
+    `reader.take(Buffer.from(${JSON.stringify(opening)}));`,
+    `const piece = Buffer.from(${JSON.stringify(`${'x'.repeat(80)}\n`)});`,
+    'for (let suite = 1; suite <= 3; suite += 1) {',
+    '  reader.take(Buffer.from("Run Test Suite: res://tests/s" + String(suite) + "_test.gd\\n"));',
+    '  for (let fed = 0; fed < 100 * 1024 * 1024; fed += piece.length) reader.take(piece);',
+    '}',
+    'const diffs = reader.finish().length;',
+    'console.log(String(diffs) + " " + String(process.resourceUsage().maxRSS));',
+  ].join('\n');
+  const ran = spawnSyncHidden(process.execPath, ['-e', reading], { encoding: 'utf8', timeout: 300_000 });
+  assert.equal(ran.status, 0, `the reading process ends: ${ran.stdout}${ran.stderr}`);
+  const [diffs, peakKiB = 0] = ran.stdout.trim().split(' ').map(Number);
+  assert.equal(diffs, 0, 'no diff is read from an opening nothing closes');
+  assert.ok(
+    peakKiB > 0 && peakKiB * 1024 <= SMALL_PIECES_HELD_MOST,
+    `the reading process held at most ${String(Math.round(peakKiB / 1024))} MiB`,
+  );
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1984,6 +2044,8 @@ testAValueOfAMebibyteIsReadBackAndALongerOneIsNot();
 testADiffClosedAsTheConsoleEndsIsRead();
 testASuiteLineCutAcrossPiecesLetsGoInsideAPiece();
 testALocationLineCutAcrossPiecesIsFoundAtAnyLength();
+testAValueCutInItsLocationLinesPathIsReadBackBeforeLongOutput();
+testAnOpeningNothingClosesReadInSmallPiecesHoldsLittleMemory();
 testAReportHoldingALongValueIsReadToItsEnds();
 testALongLogLineIsReadToItsEnds();
 console.log('junit reader tests passed');
