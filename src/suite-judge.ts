@@ -18,7 +18,16 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
+import {
+  announced,
+  CRASH_HEADER,
+  caseLineOf,
+  type FoldedEntry,
+  GDUNIT_TIME,
+  type LogEntry,
+  type Severity,
+  suiteOpenedBy,
+} from './game-log.js';
 import { DiscoveryRead, type OrphansLeft, orphansLeftOn, orphansLeftSaid } from './junit.js';
 import { bytesAt, eachLogLine, owned } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
@@ -124,6 +133,11 @@ export interface RunPrinted {
   readonly unrunnable: readonly MismatchedRow[];
   /** The cases, rows and suites skipped with `do_skip`, which never ran. */
   readonly skipped: readonly SkippedRow[];
+  /**
+   * The lines of skip reasons that read as an engine's error or warning headline, as the engine's
+   * piped streams read them, which are the reason's text and nothing the engine reported.
+   */
+  readonly reasonHeadlines: readonly ReasonHeadline[];
 }
 
 /**
@@ -284,6 +298,14 @@ export type LogRead = RunRead & {
   readonly declaredErrors: number;
 };
 
+/** A line of a skip reason read as a headline, and how many times one like it came. */
+export interface ReasonHeadline {
+  readonly severity: Exclude<Severity, 'info'>;
+  /** The headline without its severity prefix, as a piped entry's text holds it. */
+  readonly text: string;
+  readonly times: number;
+}
+
 /** The most errors a run read off a log of any size keeps. */
 export const ERRORS_KEPT = 100_000;
 
@@ -357,6 +379,7 @@ function readRunLines(
     started: null,
     reusedCompiledSeconds: null,
     reasonEnds: -1,
+    reasonHeadlines: new Map(),
   };
   const discovery = new DiscoveryRead();
   const starved = new StarvedRead();
@@ -379,6 +402,7 @@ function readRunLines(
     lineCount: at,
     errorsDropped: state.errorsDropped,
     declaredErrors: state.declaredErrors,
+    reasonHeadlines: [...state.reasonHeadlines.values()],
     suites: state.suites,
     errors: state.errors,
     leaks: state.leaks,
@@ -545,6 +569,8 @@ interface RunState {
   reusedCompiledSeconds: number | null;
   /** The last line of a skip's reason, read whole where it began, which no reader looks into again. */
   reasonEnds: number;
+  /** The lines of skip reasons read as headlines, by severity and text. */
+  readonly reasonHeadlines: Map<string, ReasonHeadline>;
 }
 
 /** Reads one printed line into the state, and says whether it did. */
@@ -877,8 +903,10 @@ const LINE_READERS: readonly LineReader[] = [
 
 /** Reads [param line], the one at [param at], with the first reader that takes it. */
 function readLine(state: RunState, line: string, at: number): void {
-  // A reason's lines are its text, which an `ERROR:` line inside it does not change.
+  // A reason's lines are its text, which an `ERROR:` line inside it does not change. The piped
+  // streams count such a line as the engine's, so it is noted for them to take back.
   if (at <= state.reasonEnds) {
+    reasonHeadlineRead(state, line);
     return;
   }
   for (const read of LINE_READERS) {
@@ -886,6 +914,21 @@ function readLine(state: RunState, line: string, at: number): void {
       return;
     }
   }
+}
+
+/** Notes [param line], one of a skip reason, when the piped streams read it as a headline. */
+function reasonHeadlineRead(state: RunState, line: string): void {
+  const said = announced(line);
+  if (said === null || said.severity === 'info') {
+    return;
+  }
+  const key = JSON.stringify([said.severity, said.text]);
+  const seen = state.reasonHeadlines.get(key);
+  state.reasonHeadlines.set(key, {
+    severity: said.severity,
+    text: seen?.text ?? owned(said.text),
+    times: (seen?.times ?? 0) + 1,
+  });
 }
 
 // What Godot prints before an error raised while it was printing another. It writes the pair
@@ -921,6 +964,40 @@ export function readEngineLog(
         errors: [...read.errors, ...added],
         judged: { ...read.judged, printed: [...read.judged.printed, ...added] },
       };
+}
+
+/**
+ * [param entries], read off the piped streams, less each print of a skip reason's line in
+ * [param headlines], since gdUnit4 printed those as the reason's text on stdout.
+ */
+export function withoutReasonHeadlines(
+  entries: readonly FoldedEntry[],
+  headlines: readonly ReasonHeadline[],
+): FoldedEntry[] {
+  const left = new Map(headlines.map((one) => [JSON.stringify([one.severity, one.text]), one.times]));
+  return entries.flatMap((entry) => {
+    const key = JSON.stringify([entry.severity, entry.text]);
+    const owed = entry.source === 'stdout' ? (left.get(key) ?? 0) : 0;
+    const times = entry.times ?? 1;
+    if (owed === 0) {
+      return [entry];
+    }
+    left.set(key, Math.max(0, owed - times));
+    const kept = times - Math.min(owed, times);
+    if (kept === 0) {
+      return [];
+    }
+    const { times: _times, ...printed } = entry;
+    return [kept > 1 ? { ...printed, times: kept } : printed];
+  });
+}
+
+/** How many prints of [param severity] in [param headlines] were a skip reason's lines. */
+export function reasonHeadlinesOf(
+  headlines: readonly ReasonHeadline[],
+  severity: ReasonHeadline['severity'],
+): number {
+  return headlines.reduce((sum, one) => sum + (one.severity === severity ? one.times : 0), 0);
 }
 
 /**
