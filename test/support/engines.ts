@@ -55,6 +55,37 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
 }
 
 /**
+ * Waits up to [param withinMs] for every process whose command line names [param path] to have
+ * exited, and answers whether none is left. Ends nothing.
+ *
+ * For a fixture whose server has stopped and whose editor has gone: the keeper that held the editor
+ * and the helper that started it end themselves a moment later, and a listing taken in that moment
+ * reads them as an engine the fixture left running. An entry the table still lists for a process
+ * that has exited, which a handle on it keeps, is not running.
+ */
+export async function untilNothingRunsUnder(path: string, withinMs: number): Promise<boolean> {
+  const spelled = spelledForMatching(path);
+  const deadline = Date.now() + withinMs;
+  for (;;) {
+    const tree = await processTree();
+    const running =
+      tree === undefined
+        ? []
+        : [...tree].filter(
+            ([pid, { command }]) =>
+              pid !== process.pid && names(spelledForMatching(command), spelled) && alive(pid),
+          );
+    if (running.length === 0) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await delay(100);
+  }
+}
+
+/**
  * Every process, matched on its command line alone. Filtering by `Name='godot.exe'` first meant
  * this found nothing at all wherever the engine is not called that, which is every machine using
  * the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects

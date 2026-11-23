@@ -941,7 +941,7 @@ import {
   crashingEngine,
   ENGINE_BANNER_LINE,
 } from './support/crashing-engine.js';
-import { endEnginesUnder } from './support/engines.js';
+import { endEnginesUnder, untilNothingRunsUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
@@ -22309,6 +22309,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     await run.met.end();
     await run.met.gone(run.pid, 10_000);
     await server.stop();
+    await untilNothingRunsUnder(project, 15_000);
     sweep(project);
   }
 }
@@ -55211,7 +55212,8 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
           `the run is tied to the game the editor played, not the one naming another editor: ${JSON.stringify(output)}`,
         );
       },
-      { realAddon: true },
+      // The first round's game is still up when the second starts, and each takes a slot.
+      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: '3' } },
     );
   } finally {
     for (const game of games) {
