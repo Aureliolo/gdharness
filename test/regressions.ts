@@ -133863,8 +133863,9 @@ async function testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanIts
  * A test still running at its deadline holds the run no longer than its deadline, even while an
  * engine it started runs on through the desktop helper, and the runner says what its servers were
  * doing: the calls answered, the call still waiting and the server's last stderr lines, then the
- * slot holders. The run is test/support/deadline-run.ts, whose first test holds a 20 s engine past
- * a 3 s deadline.
+ * slot holders. A test that ended in time with an engine left with the helper holds it no more than
+ * the runner's wait for the helper. The run is test/support/deadline-run.ts, whose first test holds a
+ * 20 s engine past a 3 s deadline and whose third leaves one running.
  */
 async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersWereDoing(): Promise<void> {
   const ran = await runHidden(process.execPath, [join('test', 'support', 'deadline-run.ts')], {
@@ -133877,8 +133878,24 @@ async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersW
         `the deadline run failed:\n${isRecord(error) ? `${String(error['stdout'])}\n${String(error['stderr'])}` : String(error)}`,
       ),
   );
-  const next = Number(/^the next test started (\d+) ms after the first began$/m.exec(ran)?.[1]);
-  assert.ok(next >= 3_000 && next < 8_000, `the next test starts soon after the 3 s deadline:\n${ran}`);
+  const [past, inTime] = [
+    ...ran.matchAll(/^the next test started (\d+) ms after the one before began$/gm),
+  ].map((match) => Number(match[1]));
+  assert.ok(
+    past !== undefined && past >= 3_000 && past < 8_000,
+    `the next test starts soon after the 3 s deadline:\n${ran}`,
+  );
+  assert.ok(
+    inTime !== undefined && inTime >= 1_000 && inTime < 16_000,
+    `a test that ended in time with an engine left holds the run no more than the helper's wait:\n${ran}`,
+  );
+  if (process.platform === 'win32') {
+    assert.match(
+      ran,
+      /^the desktop helper still served an engine 10s after leavesAnEngineRunning ended, so the run goes on without it$/m,
+      ran,
+    );
+  }
   assert.match(ran, /^failed: holdsAnEnginePastItsDeadline$/m, ran);
   assert.match(
     ran,
