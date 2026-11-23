@@ -18,6 +18,7 @@ import {
   MOST_REPORTS_SHOWN,
   orphansLeftSaid,
   orphansPrinted,
+  type PrintedDiff,
   parseJUnit,
   RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
@@ -1447,12 +1448,15 @@ function testTheDiffsHoldOnlyTheSuiteBeingPrinted(): void {
   const value = `a value\nRun Test Suite: res://tests/inside_test.gd\n${'more of it '.repeat(500)}`;
   const open = aSuiteFailingOn('res://tests/open_test.gd', value);
   const across = new SuiteDiffs();
-  across.take(Buffer.from(open));
+  const located = open.indexOf("\tat 'test_value'");
+  across.take(Buffer.from(open.slice(0, located)));
   assert.equal(
     across.held,
-    open.length - open.indexOf(" but was\n '"),
+    located - open.indexOf(" but was\n '"),
     'a value running on past a suite line is held whole from where its diff opens',
   );
+  across.take(Buffer.from(open.slice(located)));
+  assert.ok(across.held < 11, `and let go once its location line is printed, not ${String(across.held)}`);
   const opened = [reportedFailing('res://tests/open_test.gd', value)];
   const acrossRead = withActualsPrinted(opened, across.finish());
   assert.deepEqual(acrossRead, withActualsPrinted(opened, open), 'and read as the whole text reads it');
@@ -1467,9 +1471,14 @@ function cpuMs(work: () => void): number {
   return (user + system) / 1000;
 }
 
+/** The least CPU time of [param times] runs of [param work], in milliseconds. */
+function leastCpuMs(work: () => void, times = 3): number {
+  return Math.min(...Array.from({ length: times }, () => cpuMs(work)));
+}
+
 /**
- * A 32 MB value read off a console arriving in pieces is the one its whole text holds, read in at
- * most twice the time the whole text takes.
+ * A 32 MB value read off a console arriving in pieces is read back, as the whole text gives it, in
+ * at most twice the time the whole text takes.
  */
 function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
   const value = 'x'.repeat(32 * 1024 * 1024);
@@ -1485,20 +1494,26 @@ function testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt(): void {
     reportedFailing('res://tests/c_test.gd', 'after'),
   ];
   let whole: { detail: string | null }[] = [];
-  const wholeMs = cpuMs(() => {
+  const wholeMs = leastCpuMs(() => {
     whole = withActualsPrinted(failed, console);
   });
   let pieces: { detail: string | null }[] = [];
-  const piecesMs = cpuMs(() => {
+  const piecesMs = leastCpuMs(() => {
     const diffs = new SuiteDiffs();
     for (const piece of piecesOf(bytes, 64 * 1024)) {
       diffs.take(piece);
     }
     pieces = withActualsPrinted(failed, diffs.finish());
   });
+  const wholeValue = whole[1]?.detail;
+  assert.equal(
+    wholeValue,
+    `Expecting:\n 'other'\n but was\n '${value}z'\n\tat 'test_value' in res://tests/big_test.gd:5`,
+    'the whole text gives the value back',
+  );
   assert.equal(
     pieces[1]?.detail,
-    whole[1]?.detail,
+    wholeValue,
     'the console read in pieces reads the value as the whole text does',
   );
   for (const [n, path, small] of [
@@ -1550,6 +1565,72 @@ function testTheDiffsHoldNoTextOnceNoDiffIsOpen(): void {
   }
 }
 
+/**
+ * A diff that opens and no location line follows is read once, as the whole text reads it, so
+ * suites printing after it cost no more than the whole text takes, and it is held to a bound rather
+ * than to the rest of the console.
+ */
+function testADiffNoLocationLineFollowsIsReadOnceAndHeldToABound(): void {
+  const piece = 64 * 1024;
+  const opening =
+    "Run Test Suite: res://tests/s0_test.gd\n  Expecting:\n 'other'\n but was\n 'never closed\n";
+  const filler = 'a frame of the loop ticked\n'.repeat(Math.ceil((20 * 1024) / 27));
+  const console = [
+    opening,
+    ...Array.from(
+      { length: 1000 },
+      (_suite, n) => `Run Test Suite: res://tests/s${String(n + 1)}_test.gd\n${filler}`,
+    ),
+  ].join('');
+  const bytes = Buffer.from(console);
+  let read: PrintedDiff[] = [];
+  const piecesMs = leastCpuMs(() => {
+    const diffs = new SuiteDiffs();
+    for (const one of piecesOf(bytes, piece)) {
+      diffs.take(one);
+    }
+    read = diffs.finish();
+  });
+  const wholeMs = leastCpuMs(() => {
+    withActualsPrinted([], console);
+  });
+  assert.deepEqual(read, [], 'no diff is read from an opening nothing closes');
+  // The whole text reads in a few milliseconds, below what the CPU clock resolves, so it counts as 50.
+  assert.ok(
+    piecesMs <= 2 * Math.max(wholeMs, 50),
+    `1000 suites after the opening took ${piecesMs.toFixed(0)} ms of CPU in pieces, the whole text ${wholeMs.toFixed(0)} ms`,
+  );
+
+  // A closing location line that comes after suites of lines gives the value everything between,
+  // as the whole text does, and the diffs after it are read as they are.
+  const paths = ['res://tests/a_test.gd', 'res://tests/b_test.gd', 'res://tests/c_test.gd'];
+  const suites = paths.map((path, n) => aSuiteFailingOn(path, `value ${String(n)}`));
+  const open = `${opening}${filler}${suites[0] ?? ''}${filler}${suites[1] ?? ''}${suites[2] ?? ''}`;
+  const failed = paths.map((path, n) => reportedFailing(path, `value ${String(n)}`));
+  const split = new SuiteDiffs();
+  for (const one of piecesOf(Buffer.from(open), 4096)) {
+    split.take(one);
+  }
+  assert.deepEqual(
+    withActualsPrinted(failed, split.finish()),
+    withActualsPrinted(failed, open),
+    'an opening closed by a later suite is read as the whole text reads it',
+  );
+
+  // Past its bound the opening is let go, and what is held never passes it.
+  const bound = 64 * 1024 * 1024;
+  const block = Buffer.from('a frame of the loop ticked\n'.repeat(Math.floor(piece / 27)));
+  const long = new SuiteDiffs();
+  long.take(Buffer.from(opening));
+  let most = 0;
+  for (let fed = 0; fed < 3 * bound; fed += block.length) {
+    long.take(block);
+    most = Math.max(most, long.held);
+  }
+  assert.ok(most <= bound + piece, `at most the bound is held, not ${String(most)} characters`);
+  assert.deepEqual(long.finish(), [], 'and the run is read to its end');
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1571,4 +1652,5 @@ testEverySkipTheReportHoldsIsListedWithItsReason();
 testTheDiffsHoldOnlyTheSuiteBeingPrinted();
 testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
 testTheDiffsHoldNoTextOnceNoDiffIsOpen();
+testADiffNoLocationLineFollowsIsReadOnceAndHeldToABound();
 console.log('junit reader tests passed');

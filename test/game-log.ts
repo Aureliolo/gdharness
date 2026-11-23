@@ -469,7 +469,7 @@ function testALogKeptToABoundHandsOverEveryEntryWhole(): void {
       largest <= 4 * most,
       `${said}: the log held ${String(largest)} entries, more than ${String(4 * most)}`,
     );
-    assert.ok(bounded.retiredCount > 0, `${said}: entries were handed over`);
+    assert.ok(handed.length > 0, `${said}: entries were handed over`);
     for (const severity of ['error', 'warning', 'info'] as const) {
       assert.equal(bounded.count(severity), whole.count(severity), `${said}: every ${severity} is counted`);
     }
@@ -544,10 +544,7 @@ function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
   }
   whole.finish();
   bounded.finish();
-  assert.ok(
-    bounded.retiredCount > 80,
-    `entries were handed over before the crash: ${String(bounded.retiredCount)}`,
-  );
+  assert.ok(handed.length > 80, `entries were handed over before the crash: ${String(handed.length)}`);
   bounded.handOverHeld();
   const wholeRead = whole.all.map((entry) => [
     entry.severity,
@@ -588,7 +585,13 @@ function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
  */
 function testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded(): void {
   const whole = new GameLog();
-  const bounded = new GameLog({ most: 5, retired: () => undefined });
+  let retired = 0;
+  const bounded = new GameLog({
+    most: 5,
+    retired: () => {
+      retired += 1;
+    },
+  });
   let read = 0;
   let lostSome = false;
   for (let chunk = 0; chunk < 30; chunk += 1) {
@@ -599,16 +602,16 @@ function testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded(): void {
     whole.append('stdout', text);
     bounded.append('stdout', text);
     const looked = bounded.heldFrom(read);
-    lostSome ||= bounded.retiredCount > read;
+    lostSome ||= retired > read;
     assert.deepEqual(
       looked.entries.map((entry) => entry.text),
-      whole.all.slice(Math.max(read, bounded.retiredCount)).map((entry) => entry.text),
+      whole.all.slice(Math.max(read, retired)).map((entry) => entry.text),
       `chunk ${String(chunk)}`,
     );
     assert.equal(looked.next, whole.all.length, `chunk ${String(chunk)}`);
     read = looked.next;
   }
-  assert.ok(bounded.retiredCount > 0 && lostSome, 'entries were let go before a look');
+  assert.ok(retired > 0 && lostSome, 'entries were let go before a look');
 }
 
 testAScriptErrorDoesNotTakeTheCasesAfterIt();

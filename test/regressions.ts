@@ -105046,6 +105046,8 @@ interface FedRunAsked {
   readonly selectionIgnore?: readonly string[];
   /** The errors and warnings the suites declare, none when absent. */
   readonly declared?: Expected;
+  /** Whether the script errors no case failed on are answered as uncaught ones, as for a run of gdUnit4 that fails on them. */
+  readonly uncaught?: boolean;
 }
 
 /**
@@ -105155,7 +105157,7 @@ This test is skipped!
       diffs: diffs.finish(),
       report: parseJUnit(xml),
       casePrinted: readEngineLog(engineLog, [], asked.declared ?? NONE_EXPECTED),
-      uncaught: null,
+      uncaught: asked.uncaught === true ? tally.uncaught : null,
       exitCode,
       verdict: word,
       ranAs: word,
@@ -134484,9 +134486,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunsTallyPastItsBoundsSaysWhatItCut,
   testATestRunsConsoleIsReadAsItArrivesAndNeverJoined,
   testAnErrorDeclaredPastTheErrorsKeptIsSettled,
+  testAnUndeclaredErrorPastAHeldFloodOfDeclaredOnesIsJudged,
   testAnUnreportedRunsEntriesAreCountedOverEveryLine,
+  testEntriesAlikeInTheAnswerButTiedToDifferentScriptsFoldWithEveryCopy,
   testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut,
   testPrintedCappedNamesTheUncaughtErrorsLeftOut,
+  testScriptErrorsPastTheDistinctBoundAreNotAlsoUndeclared,
   testWhatTheEngineHeldAtExitNamesTheProjectsOwnFirst,
   testATestRunsProgressCountsTheSuitesItsLogLetGo,
   testAStarvedErrorIsFoundPastAnyRunOfBlankLines,
@@ -135756,7 +135761,7 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
     },
     {
       engine: warned.slice(-DISTINCT_KEPT),
-      uncaught: [many, uncaught.slice(0, DISTINCT_KEPT), DISTINCT_KEPT],
+      uncaught: [many, uncaught.slice(0, DISTINCT_KEPT), many],
       compileErrors: compileErrorsIn(all).slice(0, DISTINCT_KEPT),
       nested: DISTINCT_KEPT,
       leaked: DISTINCT_KEPT,
@@ -135770,7 +135775,7 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
         },
         { list: 'leaks at exit', leftOut: 50 },
         { list: 'nested errors', leftOut: 50 },
-        { list: 'repeated script errors', leftOut: 100 },
+        { list: 'repeated script errors', leftOut: 50 },
         { list: 'uncaught script errors', leftOut: 50 },
       ],
     },
@@ -135916,6 +135921,56 @@ function assertOneUndeclaredPastTheFlood(declaring: Record<string, unknown>, dur
 }
 
 /**
+ * An after hook printing more declared errors than the answer keeps, then one error no suite
+ * declares, is judged as the whole log is: every declared copy is settled and printed, and the
+ * undeclared one fails the run.
+ */
+function testAnUndeclaredErrorPastAHeldFloodOfDeclaredOnesIsJudged(): void {
+  const flood = ERRORS_KEPT + 5;
+  const answer = fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [
+          {
+            name: 'test_a',
+            printed: [
+              caseLine(FED_A, 'test_a', 'PASSED', '12ms'),
+              ...engineErrors('the flood', flood),
+              ...engineErrors('nobody declared this', 1),
+            ],
+          },
+        ],
+        closed: 'PASSED',
+      },
+      { path: FED_B, cases: [fedCasePrinting(FED_B, 'test_b', [])], closed: 'PASSED' },
+    ],
+    0,
+    {
+      declared: {
+        errors: { [FED_A]: { after: Array.from({ length: flood }, () => 'the flood') } },
+        warnings: {},
+      },
+    },
+  ).answer;
+  assert.deepEqual(
+    {
+      passed: get(answer, 'passed'),
+      verdict: get(answer, 'verdict'),
+      undeclaredErrors: get(answer, 'undeclaredErrors'),
+      declaredNotPrinted: get(answer, 'declaredNotPrinted'),
+    },
+    {
+      passed: false,
+      verdict: 'one engine error no suite declared',
+      undeclaredErrors: [{ suite: FED_A, case: 'after', text: 'nobody declared this' }],
+      declaredNotPrinted: undefined,
+    },
+    JSON.stringify(answer).slice(0, 3000),
+  );
+}
+
+/**
  * A run that wrote no report and listed a script error it could not load folds every entry it
  * printed outside that list with how often each came, however many lines that is.
  */
@@ -135940,6 +135995,41 @@ function testAnUnreportedRunsEntriesAreCountedOverEveryLine(): void {
     'each counted over every line',
   );
   assert.deepEqual(tally.capped(), [], 'and nothing is cut');
+}
+
+/**
+ * Entries the answer shows alike but that are tied to different scripts are held apart until the
+ * scripts listed are known, and then fold into one entry counting every copy of each.
+ */
+function testEntriesAlikeInTheAnswerButTiedToDifferentScriptsFoldWithEveryCopy(): void {
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => ({ ...entry, detail: [] }),
+    uncaught: () => false,
+  });
+  const entry = (index: number, path: string): LogEntry => ({
+    index,
+    severity: 'error',
+    source: 'stderr',
+    text: 'boom',
+    detail: [`at: GDScript::reload (${path}:4)`],
+  });
+  for (const [index, path] of [
+    [0, 'res://a.gd'],
+    [1, 'res://a.gd'],
+    [2, 'res://a.gd'],
+    [3, 'res://b.gd'],
+    [4, 'res://b.gd'],
+  ] as const) {
+    tally.take(entry(index, path), false);
+  }
+  const listed: ScriptError = { path: 'res://other.gd', line: 1, message: 'other' };
+  assert.deepEqual(
+    tally.entriesWithout([listed], 60).map((one) => [one.text, one.times]),
+    [['boom', 5]],
+  );
 }
 
 /**
@@ -135989,6 +136079,31 @@ async function testPrintedCappedNamesTheUncaughtErrorsLeftOut(): Promise<void> {
 }
 
 /**
+ * Script errors past the distinct bound of the lists an answer keeps are still uncaught ones, as the
+ * whole log reads them: the verdict counts them once, and none is also an engine error no suite
+ * declared.
+ */
+function testScriptErrorsPastTheDistinctBoundAreNotAlsoUndeclared(): void {
+  const errors = DISTINCT_KEPT + 4;
+  const printed = Array.from({ length: errors }, (_error, n) => [
+    `SCRIPT ERROR: u${String(n)}`,
+    '   at: t (res://test/a_test.gd:1)',
+  ]).flat();
+  const { answer } = fedRunAnswered(
+    [{ path: FED_A, cases: [fedCasePrinting(FED_A, 'test_a', printed)], closed: 'PASSED' }],
+    0,
+    { uncaught: true },
+  );
+  assert.equal(get(answer, 'verdict'), 'passed');
+  assert.equal(get(answer, 'undeclaredErrors'), undefined, JSON.stringify(answer).slice(0, 3000));
+  assert.equal(
+    get(answer, 'printedCapped'),
+    `The run printed more than the answer keeps. Past the ${String(DISTINCT_KEPT)} entries a list keeps, it leaves out 4 engine entries, 4 repeated script errors, 4 uncaught script errors. uncaughtScriptErrors lists the first 20 and leaves out ${String(DISTINCT_KEPT - 20)}.`,
+    JSON.stringify(answer).slice(0, 3000),
+  );
+}
+
+/**
  * The engine's sentence on what it held at exit names the project's own resources before its
  * addons', whichever it printed first, and counts every one past those it names.
  */
@@ -136033,9 +136148,11 @@ function testATestRunsProgressCountsTheSuitesItsLogLetGo(): void {
     shown: (entry) => entry,
     uncaught: () => false,
   });
+  let retired = 0;
   const bounded = new GameLog({
     most: 10,
     retired: (entry, byScript) => {
+      retired += 1;
       tally.take(entry, byScript);
     },
   });
@@ -136076,7 +136193,7 @@ function testATestRunsProgressCountsTheSuitesItsLogLetGo(): void {
     looks.push({ finishedOne: again.finishedOne });
     expected.push({ finishedOne: false });
   }
-  assert.ok(bounded.retiredCount > 150, `the log let suites go: ${String(bounded.retiredCount)}`);
+  assert.ok(retired > 150, `the log let suites go: ${String(retired)}`);
   assert.deepEqual(looks, expected);
 }
 

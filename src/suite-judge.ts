@@ -348,6 +348,7 @@ function readRunLines(
     open: null,
     during: null,
     afterCase: [],
+    heldUndeclared: 0,
     lastCase: null,
     engineVersion: null,
     started: null,
@@ -490,8 +491,9 @@ function errorHeld(state: RunState, error: HeldError): void {
   }
   const suite = state.open?.path ?? '';
   if (!state.declared.mayDeclare(suite, error.warning, error.text)) {
-    if (state.undeclared.length + state.afterCase.length < state.errorsKept) {
+    if (state.undeclared.length + state.heldUndeclared < state.errorsKept) {
       state.afterCase.push(error);
+      state.heldUndeclared += 1;
     } else {
       state.errorsDropped += 1;
     }
@@ -539,6 +541,8 @@ interface RunState {
   during: string | null;
   /** Errors printed after a verdict, held until it is known whether another case follows. */
   afterCase: HeldError[];
+  /** How many of those were held past the most kept because no case of the open suite declares them. */
+  heldUndeclared: number;
   lastCase: string | null;
   engineVersion: string | null;
   started: EngineStart | null;
@@ -555,6 +559,7 @@ function settleAfterCase(state: RunState, owner: string): void {
   const suite = state.open?.path ?? null;
   const held = state.afterCase;
   state.afterCase = [];
+  state.heldUndeclared = 0;
   for (const error of held) {
     errorRead(state, { ...error, suite, during: owner }, true);
   }

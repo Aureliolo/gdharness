@@ -23,7 +23,7 @@ import {
 } from './junit.js';
 import { owned } from './log-read.js';
 import { compileErrorsIn, type ListedMarks, listedMarks, listedUnder } from './script-origins.js';
-import { nestedError } from './suite-judge.js';
+import { ERRORS_KEPT, nestedError } from './suite-judge.js';
 
 /** The most distinct entries each list an answer carries holds before it is cut. */
 export const DISTINCT_KEPT = 4096;
@@ -55,7 +55,7 @@ export class ScriptErrorRepeats {
   private readonly whole = new Map<string, LogEntry>();
   /** How many copies of each script error at each place, by text and place. */
   private readonly times = new Map<string, number>();
-  /** How many entries were let go for the bound: the copies counted, and the whole copies kept. */
+  /** How many entries were left out of the counts for the bound. A whole copy let go is no entry left out. */
   leftOut = 0;
   private readonly most: number;
 
@@ -69,7 +69,7 @@ export class ScriptErrorRepeats {
       return;
     }
     if (entry.detail.length > 0) {
-      this.newest(this.whole, owned(entry.text), entryOwned(entry), () => 1);
+      this.newest(this.whole, owned(entry.text), entryOwned(entry), () => 0);
     }
     const key = JSON.stringify([entry.text, entry.detail[0] ?? null]);
     this.newest(this.times, key, (this.times.get(key) ?? 0) + 1, (times) => times);
@@ -274,21 +274,22 @@ export class TestRunTally {
     const { uncaught } = this;
     uncaught.count += 1;
     uncaught.first ??= entryOwned(entry);
-    this.distinct(uncaught.texts, entry.text, null);
+    // Held to the most errors a run judges, since an error past that is never judged and so never
+    // has to be told from the uncaught ones.
+    if (uncaught.texts.size < ERRORS_KEPT) {
+      uncaught.texts.add(owned(entry.text));
+    }
     uncaught.folded.take(shown);
   }
 
-  /**
-   * Adds [param text] to [param set] while it holds fewer than its most, else counts it left out of
-   * the list [param what] names, when the answer shows the set as one.
-   */
-  private distinct(set: Set<string>, text: string, what: string | null): void {
+  /** Adds [param text] to [param set] while it holds fewer than its most, else counts it left out of [param what]. */
+  private distinct(set: Set<string>, text: string, what: string): void {
     if (set.has(text)) {
       return;
     }
     if (set.size < DISTINCT_KEPT) {
       set.add(owned(text));
-    } else if (what !== null) {
+    } else {
       this.leftOut(what);
     }
   }

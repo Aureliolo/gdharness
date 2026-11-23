@@ -808,11 +808,6 @@ export class GameLog {
     return this.entries;
   }
 
-  /** How many entries were let go before the first of {@link all}. */
-  get retiredCount(): number {
-    return this.gone;
-  }
-
   /**
    * The entries held at or past [param read], a position among every entry the log has made, and
    * the position after the last of them, which the next look passes. A reader that also reads what
