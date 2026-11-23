@@ -241,8 +241,7 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
 /**
  * The engines whose memory peak is kept for their project: a tool's, editor_run check's boot, which
  * is kept apart from the game editor_run start counts, and a lane of `gdharness test` or
- * `gdharness spread`, whose engines run a share of a run rather than the whole project. A windowed
- * lane of `gdharness test` is kept apart from its headless lanes, since a window holds more.
+ * `gdharness spread`, whose engines run a share of a run rather than the whole project.
  */
 export type PeakTool =
   | 'project_test'
@@ -251,7 +250,6 @@ export type PeakTool =
   | 'headless'
   | 'boot_check'
   | 'test_lane'
-  | 'test_windowed_lane'
   | 'spread_lane';
 
 const PEAK_TOOLS: readonly PeakTool[] = [
@@ -261,7 +259,6 @@ const PEAK_TOOLS: readonly PeakTool[] = [
   'headless',
   'boot_check',
   'test_lane',
-  'test_windowed_lane',
   'spread_lane',
 ];
 
@@ -488,39 +485,6 @@ function editorNoteAt(path: string): EditorRunNote | null {
   const which: EditorPlay | undefined =
     typeof count === 'number' && typeof editorPid === 'number' ? { play: count, editorPid } : undefined;
   return { projectPath, transcript, startedAt, ...(which === undefined ? {} : { play: which }) };
-}
-
-/** How a run's last process exited, as its keeper saw it. */
-export interface RunExit {
-  readonly code: number | null;
-  readonly signal: string | null;
-  readonly notTold: boolean;
-}
-
-/**
- * The end a keeper records for [param exit], where [param stopped] says a stop was sent to the live
- * game. A stop the game's exit shows ended it is recorded as ended by SIGTERM with no exit code, as
- * the server that asked for the stop says it. That exit is SIGTERM itself, one never told, or on
- * Windows TerminateProcess's code 1, which reads like a game that exited 1 of its own accord. A game
- * that exited otherwise as the stop arrived ended by itself, and keeps its own code.
- */
-export function endOfTheRun(
-  exit: RunExit,
-  stopped: boolean,
-  platform: NodeJS.Platform = process.platform,
-): { readonly exitCode: number | null; readonly exitSignal: string | null; readonly notTold: boolean } {
-  const theStops =
-    exit.signal === 'SIGTERM' ||
-    (exit.code === null && exit.signal === null) ||
-    (platform === 'win32' && exit.code === 1);
-  if (stopped && theStops) {
-    return { exitCode: null, exitSignal: 'SIGTERM', notTold: false };
-  }
-  return {
-    exitCode: exit.code,
-    exitSignal: exit.code === null ? exit.signal : null,
-    notTold: exit.notTold,
-  };
 }
 
 /**

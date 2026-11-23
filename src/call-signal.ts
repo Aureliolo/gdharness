@@ -52,24 +52,11 @@ export function callNotesSaid(notes: CallNotes): Record<string, string> {
   };
 }
 
-/**
- * Whether a call has done what cannot be undone, and whether it was told to do no more before it
- * did. A server being replaced sets [member refused] on the calls that have not committed, and
- * the code about to start a game asks [function commitCall] first. A request sent to the editor that
- * may change it or the project commits the call too, unless [member marksItsOwnPoint] says the call's own code marks its point.
- */
-export interface CallCommit {
-  committed: boolean;
-  refused: boolean;
-  marksItsOwnPoint?: boolean;
-}
-
 interface Call {
   readonly signal: AbortSignal | undefined;
   readonly progress: CallProgress | undefined;
   readonly slotWaits: SlotWaits | undefined;
   readonly notes: CallNotes | undefined;
-  readonly commit: CallCommit | undefined;
 }
 
 const current = new AsyncLocalStorage<Call>();
@@ -102,12 +89,11 @@ export async function withCallSignal<T>(
   still?: StillGoing,
   slotWaits?: SlotWaits,
   notes?: CallNotes,
-  commit?: CallCommit,
 ): Promise<T> {
   if (progress === undefined) {
-    return signal === undefined && slotWaits === undefined && notes === undefined && commit === undefined
+    return signal === undefined && slotWaits === undefined && notes === undefined
       ? await answer()
-      : await current.run({ signal, progress: undefined, slotWaits, notes, commit }, answer);
+      : await current.run({ signal, progress: undefined, slotWaits, notes }, answer);
   }
   const began = Date.now();
   const rising = risingOnly(progress);
@@ -131,7 +117,7 @@ export async function withCallSignal<T>(
   };
   rearm();
   try {
-    return await current.run({ signal, progress: told, slotWaits, notes, commit }, answer);
+    return await current.run({ signal, progress: told, slotWaits, notes }, answer);
   } finally {
     // A ticker of the call's own can still fire once after it has answered.
     going = undefined;
@@ -176,51 +162,6 @@ export async function waitedUnlessAborted(
 /** The signal of the call being answered, or undefined outside one. */
 export function callSignal(): AbortSignal | undefined {
   return current.getStore()?.signal;
-}
-
-/**
- * Called by the code of the call being answered just before it does what cannot be undone, such as
- * spawning a game. It throws for a call that was told to do no more, which then does nothing. It
- * marks any other call as past that point, so its answer says what it did.
- */
-export function commitCall(): void {
-  const commit = current.getStore()?.commit;
-  if (commit === undefined) {
-    return;
-  }
-  if (commit.refused) {
-    throw new DOMException('The call was stopped before it did anything it could not undo.', 'AbortError');
-  }
-  commit.committed = true;
-}
-
-/**
- * Said by the call being answered when its own code marks its point of no return with
- * [function commitCall], such as a start that asks the editor questions before it plays. Its
- * requests to the editor then commit nothing.
- */
-export function callMarksItsOwnPoint(): void {
-  const commit = current.getStore()?.commit;
-  if (commit !== undefined) {
-    commit.marksItsOwnPoint = true;
-  }
-}
-
-/**
- * Called just before a request goes to the editor, which may carry it out whatever happens to the
- * call after. It throws for a call told to do no more, so nothing is sent. A request that
- * [param changes] the editor or the project otherwise marks the call as past its point of no
- * return, unless the call marks its own point. A read marks nothing, since asking it again is safe.
- */
-export function commitCallAsSent(changes: boolean): void {
-  const commit = current.getStore()?.commit;
-  if (commit === undefined) {
-    return;
-  }
-  // A read, or a call marking its own point, is only refused here, as commitCall refuses.
-  if (commit.refused || (changes && commit.marksItsOwnPoint !== true)) {
-    commitCall();
-  }
 }
 
 /** How the call being answered reports progress, or undefined when its client asked for none. */

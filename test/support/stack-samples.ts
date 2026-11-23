@@ -269,7 +269,7 @@ public static class StackSampler {
 }
 `;
 
-const HELPER = new CompiledHelper('stack sampler', 'gdharness-stack-sampler', SOURCE, true);
+const HELPER = new CompiledHelper('stack sampler', 'gdharness-stack-sampler', SOURCE, { program: true });
 
 /** One walk of the sampled thread. */
 export interface StackSample {

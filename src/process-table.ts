@@ -530,7 +530,7 @@ public static class GdhProcessTable
 }
 `;
 
-const TABLE = new CompiledHelper('process table', 'gdharness-processes', SOURCE);
+const TABLE = new CompiledHelper('process table', 'gdharness-processes', SOURCE, { cached: true });
 
 /** The process table could not be compiled, which is why Windows was not asked. */
 export class ProcessTableUnbuilt extends Error {}

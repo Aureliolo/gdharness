@@ -45,7 +45,6 @@ import {
 import { startTimesOf } from './process-children.js';
 import {
   amendRunRecord,
-  endOfTheRun,
   type RestartedFrom,
   type RunRecord,
   recordRunEnded,
@@ -409,8 +408,6 @@ type Followed = NonNullable<Awaited<ReturnType<typeof followSuccessor>>>;
  */
 interface Ender {
   stop: boolean;
-  /** Whether a stop was sent to the game while it was taken for live, which its exit may yet belie. */
-  reached: boolean;
   end: () => 'signalled' | 'gone';
 }
 
@@ -595,13 +592,8 @@ async function listenAndNote(
 ): Promise<KeeperListening | null> {
   const listening = await listenForTheServer(
     () => {
-      // Only the stop that reaches a live game is `signalled`. A later one answers `gone` even in
-      // the moments before the exit is handled, so two servers never both claim the end.
-      const first = !ender.stop;
       ender.stop = true;
-      const answer = first ? ender.end() : 'gone';
-      ender.reached ||= answer === 'signalled';
-      return answer;
+      return ender.end();
     },
     debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
   );
@@ -704,7 +696,7 @@ async function followRestart(
   };
   // Asked while the restart was being looked for, and answered as nothing to end then.
   if (following.ender.stop) {
-    following.ender.reached ||= following.ender.end() === 'signalled';
+    following.ender.end();
   }
   const over = await followed.ended;
   const exitedAt = Date.now();
@@ -732,19 +724,17 @@ async function followRestarts(
   return ended;
 }
 
-/**
- * After the profile, so a server told the run ended reads the profile it ended with. Every server
- * holding the run reads this record, so a run a stop ended reads alike on each.
- */
-function recordTheEnd(ended: KeptEnd, stopped: boolean): void {
+/** After the profile, so a server told the run ended reads the profile it ended with. */
+function recordTheEnd(ended: KeptEnd): void {
   if (ended.note === null) {
     return;
   }
   try {
-    recordRunEnded(
-      ended.note,
-      endOfTheRun({ code: ended.code, signal: ended.signal, notTold: ended.notTold }, stopped),
-    );
+    recordRunEnded(ended.note, {
+      exitCode: ended.code,
+      exitSignal: ended.code === null ? ended.signal : null,
+      notTold: ended.notTold,
+    });
   } catch {
     // The run then has no recorded end, which every reader handles.
   }
@@ -790,7 +780,7 @@ async function keep(): Promise<void> {
     writeNoteIfItCan(record);
   }
   const exited = exitOf(child);
-  const ender: Ender = { stop: false, reached: false, end: endingTheGame(child, stopFile) };
+  const ender: Ender = { stop: false, end: endingTheGame(child, stopFile) };
   const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
   await sayPid(pid);
   const slot = run?.slot;
@@ -832,7 +822,7 @@ async function keep(): Promise<void> {
     looked,
     following,
   );
-  recordTheEnd(last, ender.reached);
+  recordTheEnd(last);
   raising.stop();
   if (slot !== undefined) {
     await giveBackSlotAsync(slot.lock, process.pid);

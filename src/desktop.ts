@@ -1327,7 +1327,10 @@ public static class GdharnessDesktop {
 }
 `;
 
-const HELPER = new CompiledHelper('desktop helper', 'gdharness-desktop', SOURCE, true);
+const HELPER = new CompiledHelper('desktop helper', 'gdharness-desktop', SOURCE, {
+  program: true,
+  cached: true,
+});
 
 /** The helper's C# source, which a test compiles with a change of its own to reach a case no real start can. */
 export const HELPER_SOURCE = SOURCE;
