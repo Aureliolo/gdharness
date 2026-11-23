@@ -55,13 +55,11 @@ export function callNotesSaid(notes: CallNotes): Record<string, string> {
 /**
  * Whether a call has done what cannot be undone, and whether it was told to do no more before it
  * did. A server being replaced sets [member refused] on the calls that have not committed, and
- * the code about to start a game asks [function commitCall] first. A request sent to the editor
- * commits the call too, unless [member marksItsOwnPoint] says the call's own code marks its point.
+ * the code about to start a game asks [function commitCall] first.
  */
 export interface CallCommit {
   committed: boolean;
   refused: boolean;
-  marksItsOwnPoint?: boolean;
 }
 
 interface Call {
@@ -192,31 +190,6 @@ export function commitCall(): void {
     throw new DOMException('The call was stopped before it did anything it could not undo.', 'AbortError');
   }
   commit.committed = true;
-}
-
-/**
- * Said by the call being answered when its own code marks its point of no return with
- * [function commitCall], such as a start that asks the editor questions before it plays. Its
- * requests to the editor then commit nothing.
- */
-export function callMarksItsOwnPoint(): void {
-  const commit = current.getStore()?.commit;
-  if (commit !== undefined) {
-    commit.marksItsOwnPoint = true;
-  }
-}
-
-/**
- * Called just before a request goes to the editor, which may carry it out whatever happens to the
- * call after. It throws for a call told to do no more, so nothing is sent, and otherwise marks the
- * call as past its point of no return, unless the call marks its own point.
- */
-export function commitCallAsSent(): void {
-  const commit = current.getStore()?.commit;
-  // A call marking its own point is only refused here, which commitCall does for a refused call.
-  if (commit?.marksItsOwnPoint !== true || commit.refused) {
-    commitCall();
-  }
 }
 
 /** How the call being answered reports progress, or undefined when its client asked for none. */
