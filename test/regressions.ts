@@ -79725,6 +79725,82 @@ async function testAKeeperAnswersAGameThatExitsByItselfAsTheStopArrivesAsGone():
 }
 
 /**
+ * The server that stops a game exiting 1 by itself as the stop arrives says the game's own exit,
+ * and says the keeper ended it only when the keeper did. The game exits on a file written just
+ * after the stop is sent, and rounds go on until one has seen it go by itself.
+ */
+async function testAStoppingServerSaysTheOwnExitOfAGameThatExitsAsTheStopArrives(): Promise<void> {
+  const seen: string[] = [];
+  const exitedByItself = (): boolean => seen.some((one) => one.startsWith('1 '));
+  for (let round = 0; round < 8 && !exitedByItself(); round++) {
+    const project = memoryProject();
+    const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+    const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+    const go = join(project, 'go');
+    const server = new ServerProcess({
+      env: {
+        GODOT_PATH: memoryEngine(),
+        GDHARNESS_RUNTIME_DIR: runtime,
+        GDHARNESS_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        [SLOTS_VARIABLE]: slots,
+        GDH_EXIT_ON: go,
+        GDH_STAY_MS: '60000',
+      },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { projectPath: project, ...args } },
+          120_000,
+        );
+      await call({ op: 'start', headless: true, runtimeWaitMs: 500 });
+      await delay(500);
+      const stopping = call({ op: 'stop' });
+      await delay(15);
+      writeFileSync(go, '1');
+      const stopped = await stopping;
+      const shown = textOf(stopped) ?? '';
+      const answer = parseTextContent(stopped);
+      const said = [
+        get(answer, 'exitCode') ?? null,
+        get(answer, 'exitSignal') ?? null,
+        get(answer, 'endedThrough') ?? null,
+      ];
+      seen.push(`${JSON.stringify(said[0])} ${JSON.stringify(said)}`);
+      assert.ok(
+        [JSON.stringify([1, null, null]), JSON.stringify([null, 'SIGTERM', 'keeper'])].includes(
+          JSON.stringify(said),
+        ),
+        `the stop says the game's own exit, or that the keeper ended it: ${shown}`,
+      );
+    } finally {
+      await server.stop();
+      killTheRunOf(project, runtime);
+      await delay(300);
+      sweep(project, runtime, slots);
+    }
+  }
+  assert.ok(exitedByItself(), `a game exits by itself as the stop arrives: ${seen.join(', ')}`);
+}
+
+/** Kills the game and the keeper the run note of [param project] in [param runtime] names, if any. */
+function killTheRunOf(project: string, runtime: string): void {
+  const note = readRunRecord(project, [runtime]);
+  for (const pid of [note?.pid, note?.keeperPid]) {
+    try {
+      if (pid !== undefined) {
+        process.kill(pid, 'SIGKILL');
+      }
+    } catch {
+      // Gone already.
+    }
+  }
+}
+
+/**
  * A stop asked as the keeper looks for the process a game restarted into is answered `gone`, since
  * nothing runs then, and ends the successor once it is found. The run's record says the stop ended
  * it, and not the exit code 1 the successor's end leaves on Windows.
@@ -134206,6 +134282,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReplacedServerWaitingOnASentCallLetsGoOfItsPortAtOnce,
   testAGameThatExitsByItselfAsAStopArrivesKeepsItsOwnExit,
   testAKeeperAnswersAGameThatExitsByItselfAsTheStopArrivesAsGone,
+  testAStoppingServerSaysTheOwnExitOfAGameThatExitsAsTheStopArrives,
   testAStopWhileTheKeeperLooksForARestartEndsTheRun,
   testACallToldToStopIsRefusedEveryRequestToTheEditor,
   testAGamesKeeperRaisesTheSlotItHolds,

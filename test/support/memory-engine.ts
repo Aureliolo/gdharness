@@ -3,10 +3,11 @@
  * operation by writing `{}` to the answer file named last, and otherwise runs like a game: it
  * holds GDH_HOLD_MB of touched memory, reached GDH_GROW_MB every 150 ms, starts one child that
  * holds GDH_CHILD_MB, and stays up for GDH_STAY_MS. With GDH_OPERATION_HOLD_MB set, an operation
- * holds that much the same way and answers only once it has stayed up.
+ * holds that much the same way and answers only once it has stayed up. With GDH_EXIT_ON set, a game
+ * exits by itself as soon as that file appears, with the code written in it.
  */
 
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const MIB = 1024 * 1024;
 const args = process.argv.slice(2);
@@ -39,6 +40,14 @@ if (childMb > 0) {
     stdio: ['ignore', 'ignore', 'ignore'],
     windowsHide: true,
   });
+}
+const exitOn = operation ? '' : (process.env['GDH_EXIT_ON'] ?? '');
+if (exitOn !== '') {
+  setInterval(() => {
+    if (existsSync(exitOn)) {
+      process.exit(Number(readFileSync(exitOn, 'utf8').trim() || '0'));
+    }
+  }, 2);
 }
 setTimeout(
   () => {
