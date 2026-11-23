@@ -146,6 +146,10 @@ Install the engine locally and the fixtures that need it stop skipping: `bun scr
 and `bun scripts/install-gdunit4.ts` each print a path to export as `GODOT_PATH` and `GDUNIT4_PATH`.
 Both verify a published digest and refuse anything else.
 
+The suites take four engine slots, and fewer where the machine has fewer processors. Set
+`GDHARNESS_TEST_ENGINES` to a whole number above 0 to cap that count, such as `1` on a machine
+someone is using. A fixture that needs a set number of engines at once keeps its own count.
+
 `bun run test:packaging` and `bun run release:pack` only work on Linux or macOS. Windows cannot
 record a POSIX file mode, and the packer refuses there rather than ship an archive whose executables
 are world-writable. Releases are cut by CI.

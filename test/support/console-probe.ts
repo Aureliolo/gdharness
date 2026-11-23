@@ -34,7 +34,7 @@ export async function consoleProbe(): Promise<string> {
     return built;
   }
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-probe-'));
-  const helper = new CompiledHelper('console probe', 'gdharness-console-probe', SOURCE, true);
+  const helper = new CompiledHelper('console probe', 'gdharness-console-probe', SOURCE, { program: true });
   const failed = await helper.ensure(directory);
   if (failed !== null) {
     throw new Error(`the console probe is not compiled: ${failed}`);

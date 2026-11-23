@@ -35,31 +35,35 @@ export const SLOT_VARIABLES = [
 ];
 
 /**
- * How many engines the suite may run at once: the most a run takes, and no more than the machine has
- * processors for. A caller that set a slot count of its own caps it lower still, since that count is
- * what the caller allows the run. A value that is not a whole number above 0 sets no cap.
+ * How many engines the suite may run at once, set by whoever starts it. The machine's own slot count
+ * is no cap, since it says how many engines the whole machine runs.
  */
-export function suiteSlotCount(caller: string | undefined, processors: number): number {
-  const most = Math.min(MOST_ENGINES, processors);
-  const cap = Number(caller);
-  return caller !== undefined && Number.isInteger(cap) && cap >= 1 ? Math.min(most, cap) : most;
-}
+export const TEST_ENGINES_VARIABLE = 'GDHARNESS_TEST_ENGINES';
 
-/** The slot count the process was started with, read once before the first call clears it. */
-const CALLERS_SLOT_COUNT = process.env[SLOT_COUNT_VARIABLE];
+/**
+ * How many engines the suite may run at once: the most a run takes, and no more than the machine has
+ * processors for. [param cap], the suite's own variable, caps it lower still. A value that is not a
+ * whole number above 0 sets no cap.
+ */
+export function suiteSlotCount(cap: string | undefined, processors: number): number {
+  const most = Math.min(MOST_ENGINES, processors);
+  const allowed = Number(cap);
+  return Number.isInteger(allowed) && allowed >= 1 ? Math.min(most, allowed) : most;
+}
 
 /**
  * Leaves the process with the slot variables of a bare shell and the suite's own slot directory and
  * count, so a result does not depend on the shell that started it, a queue job or a gate included.
- * The count is the caller's where that is lower than the suite's own. A fixture sets what it needs
- * itself.
+ * A fixture that needs a set count sets it itself.
  */
 export function withTheSuitesOwnSlotVariables(): void {
   for (const name of SLOT_VARIABLES) {
     delete process.env[name];
   }
   process.env[SLOTS_VARIABLE] = join(tmpdir(), 'gdharness-test-slots');
-  process.env[SLOT_COUNT_VARIABLE] = String(suiteSlotCount(CALLERS_SLOT_COUNT, availableParallelism()));
+  process.env[SLOT_COUNT_VARIABLE] = String(
+    suiteSlotCount(process.env[TEST_ENGINES_VARIABLE], availableParallelism()),
+  );
 }
 
 withTheSuitesOwnSlotVariables();

@@ -168,7 +168,7 @@ export async function crashingEngine(): Promise<string> {
     return built;
   }
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashing-engine-'));
-  const helper = new CompiledHelper('crashing engine', 'godot-crashing', SOURCE, true);
+  const helper = new CompiledHelper('crashing engine', 'godot-crashing', SOURCE, { program: true });
   const failed = await helper.ensure(directory);
   if (failed !== null) {
     throw new Error(`the crashing engine is not compiled: ${failed}`);

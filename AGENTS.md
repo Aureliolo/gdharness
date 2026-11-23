@@ -43,9 +43,11 @@ need `GODOT_PATH` and the gdUnit fixture `GDUNIT4_PATH`. Without them those case
 The engine legs set `GDHARNESS_REQUIRE_GODOT=1`, which turns those skips into failures. Windowed
 regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set.
 
-The suites take at most four engine slots, and fewer where the machine has fewer processors. A
-`GODOT_ENGINE_SLOT_COUNT` set when the suite starts caps them lower still, so a run inside a job
-that allows two engines never starts more. With none set the count is the same four.
+The suites take four engine slots, and fewer where the machine has fewer processors.
+`GDHARNESS_TEST_ENGINES`, set to a whole number above 0 when a suite starts, caps that count. Unset
+or set to anything else, it sets no cap. The machine's `GODOT_ENGINE_SLOT_COUNT` does not cap the
+suites. A fixture that needs a set number of engines at once sets its own count, which the cap
+does not change.
 
 `bun scripts/install-godot.ts` and `bun scripts/install-gdunit4.ts` fetch the pinned versions into
 the same cache folder and print where they landed. CI keeps them in the runner's temporary folder.
