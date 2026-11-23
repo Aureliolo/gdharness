@@ -67648,7 +67648,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
           [
             '',
             '',
-            `func test_oneCase${index}() -> void:`,
+            `func test_case_${index}() -> void:`,
             '\tawait get_tree().create_timer(0.05).timeout',
             '\tassert_bool(true).is_true()',
           ].join('\n'),
@@ -67917,7 +67917,7 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
           [
             '',
             '',
-            `func test_oneCase${index}() -> void:`,
+            `func test_case_${index}() -> void:`,
             '\tawait get_tree().create_timer(0.05).timeout',
             '\tassert_bool(true).is_true()',
           ].join('\n'),
@@ -84963,11 +84963,11 @@ function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): 
         `${settings} read at start is an input`,
       );
     }
-    const base = join(project, 'oneCaseprobe');
-    writeTree(project, { 'oneCaseprobe/low.gd': script('const T = preload("res://data/t.tres")') });
+    const base = join(project, 'case_probe');
+    writeTree(project, { 'case_probe/low.gd': script('const T = preload("res://data/t.tres")') });
     if (existsSync(join(base, 'LOW.gd'))) {
       assert.equal(
-        moves('res://oneCaseprobe/LOW.gd', 'data/t.tres', 'cased\n'),
+        moves('res://case_probe/LOW.gd', 'data/t.tres', 'cased\n'),
         true,
         'a script named in another letter case still names what it preloads',
       );
@@ -131747,6 +131747,580 @@ function testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem(): void {
   );
 }
 
+/**
+ * A case gdUnit4 cannot run as declared never ran either, so beside a skip, or alone, it is not
+ * counted as ran, and the run adds no "executed no test case" problem the listed cases already say.
+ */
+function testAnUnrunnableCaseIsNotCountedAsRan(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const typo = `Unknown test case argument's ["value"] found.`;
+  const run = (skip: boolean): string =>
+    [
+      'Run Test Suite: res://test/s_test.gd',
+      '  res://test/s_test.gd > test_typo STARTED',
+      '  res://test/s_test.gd > test_typo PASSED 0ms',
+      '  Report:',
+      '  This test is skipped!',
+      `  Reason: '${typo}'`,
+      '',
+      '',
+      ...(skip
+        ? [
+            '  res://test/s_test.gd > test_later STARTED',
+            '  res://test/s_test.gd > test_later PASSED 0ms',
+            ...skipBlock('not yet'),
+          ]
+        : []),
+      `Statistics: ${skip ? '2' : '1'} test cases | 0 errors | 0 failures | 0 flaky | ${skip ? '2' : '1'} skipped | 0 orphans | PASSED 0ms`,
+      '',
+      `Overall Summary: ${skip ? '2' : '1'} test cases | 0 errors | 0 failures | 0 flaky | ${skip ? '2' : '1'} skipped | 0 orphans |`,
+      'Executed test suites: (1/1)',
+      `Executed test cases : (0/${skip ? '2' : '1'}), ${skip ? '2' : '1'} skipped`,
+    ].join('\n');
+  const handed = (skip: boolean): Parameters<typeof judgeEngine>[1] => ({
+    suites: [{ path: 'res://test/s_test.gd', cases: skip ? ['test_typo', 'test_later'] : ['test_typo'] }],
+    expected: { errors: {}, warnings: {} },
+  });
+  const typoFault = `res://test/s_test.gd > test_typo never ran: gdUnit4 skipped it, saying "${typo}"`;
+  const both = readRun(run(true));
+  assert.deepEqual(
+    [casesRan(both), judgeEngine(both, handed(true), clean).faults],
+    [0, [typoFault, 'res://test/s_test.gd > test_later never ran: gdUnit4 skipped it, saying "not yet"']],
+    'a skip beside a case gdUnit4 cannot run',
+  );
+  const alone = readRun(run(false));
+  assert.deepEqual(
+    [casesRan(alone), judgeEngine(alone, handed(false), clean).faults],
+    [0, [typoFault]],
+    'a case gdUnit4 cannot run, alone',
+  );
+  const row = readRun(
+    [
+      'Run Test Suite: res://test/s_test.gd',
+      '  res://test/s_test.gd > test_p:0 (1) STARTED',
+      '  res://test/s_test.gd > test_p:0 (1) PASSED 0ms',
+      '  Report:',
+      '  This test is skipped!',
+      "  Reason: '",
+      'The test data set at index (0) does not match the expected test parameters:',
+      '\ttest function: func test...(a: int,b: int)',
+      '\ttest input values: [1]',
+      "'",
+      '',
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 0ms',
+      '',
+      'Overall Summary: 1 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans |',
+      'Executed test suites: (1/1)',
+      'Executed test cases : (0/1), 1 skipped',
+    ].join('\n'),
+  );
+  const rowHanded = { ...handed(false), suites: [{ path: 'res://test/s_test.gd', cases: ['test_p'] }] };
+  assert.deepEqual(
+    [casesRan(row), judgeEngine(row, rowHanded, clean).faults],
+    [
+      0,
+      [
+        'res://test/s_test.gd > test_p:0 (1) never ran: gdUnit4 skipped it, saying "The test data set at index (0) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [1]"',
+      ],
+    ],
+    'a row whose data does not fit, alone',
+  );
+}
+
+/** The skip reasons of {@link SKIP_LINES_PRINTED}, each as do_skip was given it. */
+const SKIP_REASONS_OVER_LINES = [
+  ['test_two_lines', 'line one\nline two'],
+  ['test_ends_in_quote', "it is 'done'"],
+  ['test_quote_alone', "first\n'\nlast"],
+  ['test_quote_ends_line', "said 'no'\nthen left"],
+] as const;
+
+/**
+ * Two suites as gdUnit4 printed them: one with the cases of {@link SKIP_REASONS_OVER_LINES} between
+ * two that ran, and one skipped whole with a reason over two lines.
+ */
+const SKIP_LINES_PRINTED = [
+  'Run Test Suite: res://test/lines_skip_test.gd',
+  '  res://test/lines_skip_test.gd > test_ok STARTED',
+  '  res://test/lines_skip_test.gd > test_ok PASSED 26ms',
+  '',
+  ...SKIP_REASONS_OVER_LINES.flatMap(([name, reason]) => [
+    `  res://test/lines_skip_test.gd > ${name} STARTED`,
+    `  res://test/lines_skip_test.gd > ${name} PASSED 0ms`,
+    ...skipBlock(reason),
+  ]),
+  '  res://test/lines_skip_test.gd > test_after STARTED',
+  '  res://test/lines_skip_test.gd > test_after PASSED 26ms',
+  '',
+  'Statistics: 6 test cases | 0 errors | 0 failures | 0 flaky | 4 skipped | 0 orphans | PASSED 448ms',
+  '',
+  '',
+  'Run Test Suite: res://test/whole_lines_test.gd',
+  ...['test_a', 'test_b'].flatMap((name) => [
+    `  res://test/whole_lines_test.gd > ${name} STARTED`,
+    `  res://test/whole_lines_test.gd > ${name} PASSED 0ms`,
+    ...skipBlock('Skipped from the entire test suite'),
+  ]),
+  '  whole_lines_test > finalize()  Report:',
+  '  The Entire test-suite is skipped!',
+  '  Skipped 2 tests',
+  "  Reason: 'waits for",
+  "the next 'build''",
+  '',
+  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans | PASSED 0ms',
+  '',
+  '',
+  'Overall Summary: 8 test cases | 0 errors | 0 failures | 0 flaky | 6 skipped | 0 orphans |',
+  'Executed test suites: (2/2)',
+  'Executed test cases : (2/8), 6 skipped',
+].join('\n');
+
+/**
+ * A skip reason holding line breaks and quotes is read whole: gdUnit4 prints it over several lines,
+ * ending on a quote with a blank line under it, and writes it so in the report. Both tools fail the
+ * run and list it as do_skip gave it.
+ */
+function testASkipReasonOverSeveralLinesIsReadWhole(): void {
+  const printed = readRun(SKIP_LINES_PRINTED);
+  const lines = 'res://test/lines_skip_test.gd';
+  const whole = 'res://test/whole_lines_test.gd';
+  assert.deepEqual(
+    printed.skipped,
+    [
+      ...SKIP_REASONS_OVER_LINES.map(([name, reason]) => ({ suite: lines, name, reason, cases: 1 })),
+      { suite: whole, name: null, reason: "waits for\nthe next 'build'", cases: 2 },
+    ],
+    'each reason whole',
+  );
+  assert.equal(casesRan(printed), 2, 'eight printed passed, six of them skipped');
+  const judged = judgeEngine(
+    printed,
+    {
+      suites: [
+        { path: lines, cases: ['test_ok', ...SKIP_REASONS_OVER_LINES.map(([name]) => name), 'test_after'] },
+        { path: whole, cases: ['test_a', 'test_b'] },
+      ],
+      expected: { errors: {}, warnings: {} },
+    },
+    { code: 0, signal: null, ended: null },
+  );
+  assert.deepEqual(
+    [judged.passed, judged.faults, judged.passedSuites],
+    [
+      false,
+      [
+        ...SKIP_REASONS_OVER_LINES.map(
+          ([name, reason]) => `${lines} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`,
+        ),
+        `${whole} never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "waits for\nthe next 'build'"`,
+      ],
+      [],
+    ],
+    'gdharness test',
+  );
+  const { answer, faults } = fedRunAnswered([
+    {
+      path: FED_A,
+      cases: [
+        fedCase(FED_A, 'test_ok'),
+        ...SKIP_REASONS_OVER_LINES.map(([name, reason]) => fedSkipped(FED_A, name, reason)),
+      ],
+      closed: 'PASSED',
+    },
+  ]);
+  assert.deepEqual(
+    [answer['passed'], answer['verdict'], answer['casesSkipped']],
+    [
+      false,
+      '4 cases skipped with do_skip, so they never ran',
+      SKIP_REASONS_OVER_LINES.map(([name, reason]) => ({ test: `${FED_A} > ${name}`, reason })),
+    ],
+    'project_test',
+  );
+  assert.equal(
+    answer['note'],
+    'gdUnit4 skipped what casesSkipped names because they were declared with do_skip, though it printed each case passed first. Each entry carries the skip_reason it was given. The run is not called passed, as gdharness test judges it.',
+  );
+  assert.deepEqual(
+    faults,
+    SKIP_REASONS_OVER_LINES.map(
+      ([name, reason]) => `${FED_A} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`,
+    ),
+    'gdharness test, fed',
+  );
+}
+
+/**
+ * A case and a suite whose skip reasons hold line breaks and quotes fail a real run of both tools,
+ * each listed with its whole reason.
+ */
+async function testARealSkipReasonOverSeveralLinesFailsBothTools(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const caseReason = "said 'no'\nthen left";
+  const suiteReason = "waits for\nthe next 'build'";
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/lines_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_runs() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_waits(_do_skip := true, _skip_reason := "said \'no\'\\nthen left") -> void:',
+        '\tassert_bool(false).is_true()',
+        '',
+      ].join('\n'),
+      'tests/whole_lines_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func before(_do_skip := true, _skip_reason := "waits for\\nthe next \'build\'") -> void:',
+        '\tpass',
+        '',
+        '',
+        'func test_first() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+      ].join('\n'),
+    });
+    const ran = test('tests/lines_test.gd', 'tests/whole_lines_test.gd');
+    assert.equal(ran.status, 1, ran.said);
+    for (const fault of [
+      `res://tests/lines_test.gd > test_waits never ran: gdUnit4 skipped it, saying "${caseReason}"`,
+      `res://tests/whole_lines_test.gd never ran its one case: gdUnit4 skipped the whole suite, saying "${suiteReason}"`,
+    ]) {
+      assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
+    }
+    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const answered = async (path: string): Promise<unknown> => {
+          const response = await request(
+            'tools/call',
+            { name: 'project_test', arguments: { projectPath: project, path } },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
+            String(get(block, 'text')),
+          );
+          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        };
+        const oneCase = await answered('res://tests/lines_test.gd');
+        assert.deepEqual(
+          [get(oneCase, 'passed'), get(oneCase, 'casesSkipped')],
+          [false, [{ test: 'res://tests/lines_test.gd > test_waits', reason: caseReason }]],
+          JSON.stringify(oneCase),
+        );
+        const whole = await answered('res://tests/whole_lines_test.gd');
+        assert.deepEqual(
+          [get(whole, 'passed'), get(whole, 'casesSkipped')],
+          [false, [{ test: 'res://tests/whole_lines_test.gd', reason: suiteReason, cases: 1 }]],
+          JSON.stringify(whole),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/** A unit of one case, windowed or not, costing [param cost] seconds. */
+function planUnit(name: string, cost: number, windowed: boolean): Unit {
+  return { ...SHARE_UNIT(name, cost), windowed, accessible: false };
+}
+
+/** A suite of [param cases] cases the scripts read as needing a window, or not. */
+function planSuite(name: string, cases: number, windowed: boolean): DeclaredSuite {
+  return {
+    path: `res://${name}.gd`,
+    cases: Array.from({ length: cases }, (_, at) => `test_${String(at)}`),
+    windowed,
+    headless: false,
+    together: false,
+    accessible: false,
+  };
+}
+
+/** The suites each plan holds, as `suite:case` for every case it runs, skipped ones left out. */
+function casesRun(plans: readonly EnginePlan[]): string[] {
+  return plans.flatMap((plan) =>
+    plan.suites.flatMap((suite) =>
+      suite.cases
+        .filter((func) => !plan.skipping.includes(`${suite.path}:${func}`))
+        .map((func) => `${suite.path}:${func}`),
+    ),
+  );
+}
+
+/** Windowed suites are dealt over several windowed lanes, each lane within one suite of the others. */
+function testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre(): void {
+  const units = Array.from({ length: 48 }, (_, at) => planUnit(`w${String(at)}`, 10, true));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const most = windowedEnginesOn('win32', {});
+  const plans = dealt(units, declared, 4, most);
+  assert.deepEqual(
+    plans.map((plan) => plan.windowed),
+    [true, true],
+    'two engines, every one windowed',
+  );
+  assert.deepEqual(
+    plans.map((plan) => plan.lane),
+    [0, 1],
+    'one to a slot',
+  );
+  const costs = plans.map((plan) => plan.cost);
+  assert.ok(
+    Math.max(...costs) - Math.min(...costs) <= 10,
+    `each lane within one suite of the others: ${JSON.stringify(costs)}`,
+  );
+  assert.deepEqual(
+    plans.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    units.map((unit) => unit.suite).toSorted(),
+    'and every suite is dealt once',
+  );
+  assert.equal(windowedSaid(plans, most), ', all of them windowed');
+  const shares = new Shares(units, declared, 4, most);
+  const handed: EnginePlan[] = [];
+  const first = shares.next(0);
+  const second = shares.next(1);
+  assert.ok(first?.windowed === true && second?.windowed === true, 'two windowed engines are handed shares');
+  assert.equal(shares.next(2), null, 'and no third while both run');
+  assert.equal(shares.nextWindowed, false, 'the slot is asked for no window');
+  handed.push(first, second);
+  shares.ended(first);
+  for (let plan = shares.next(0); plan !== null; plan = shares.next(0)) {
+    handed.push(plan);
+    shares.ended(plan);
+  }
+  assert.ok(handed.length > 2, `the shares go on to windowed engines as they end: ${String(handed.length)}`);
+  assert.ok(
+    handed.every((plan) => plan.windowed),
+    'and every one of them is windowed',
+  );
+  assert.deepEqual(
+    handed.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    units.map((unit) => unit.suite).toSorted(),
+    'holding each suite once',
+  );
+}
+
+/** A budget that fits two windowed engines runs two at once, and never three. */
+async function testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo(): Promise<void> {
+  const gib = 1024 ** 3;
+  const units = Array.from({ length: 4 }, (_, at) => planUnit(`w${String(at)}`, 120, true));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  // The machine's free memory as the engines are admitted: 4 GiB are kept, and two windowed engines
+  // fit with half a gigabyte over. The stand-in engines have grown to nothing yet, so each is owed whole.
+  const gate = new MemoryGate(
+    { markWaiting: () => () => undefined },
+    () => Promise.resolve(4 * gib + 2 * WINDOWED_MEMORY_PER_ENGINE + gib / 2),
+    2,
+  );
+  let running = 0;
+  let most = 0;
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  const ran = await runShares(
+    slots,
+    units,
+    declared,
+    4,
+    ['A', 'B', 'C', 'D'],
+    {},
+    async (plan, index) => {
+      assert.ok(plan.windowed, 'every engine here is windowed');
+      running += 1;
+      most = Math.max(most, running);
+      await delay(40);
+      running -= 1;
+      return { index, printed: { started: null } };
+    },
+    undefined,
+    gate,
+    undefined,
+    4,
+  );
+  assert.equal(ran.length, 4, 'every share ran');
+  assert.equal(most, 2, 'two windowed engines at once, never three');
+  assert.deepEqual(
+    peakOf(['res://a.gd', 'res://b.gd'], { 'res://a.gd': { seconds: 1, cases: {}, peak: 2 * gib } }, gib, {
+      paths: new Set(['res://b.gd']),
+      bytes: WINDOWED_MEMORY_PER_ENGINE,
+    }),
+    { bytes: WINDOWED_MEMORY_PER_ENGINE, seen: true },
+    'a windowed suite with no peak kept counts what a window holds',
+  );
+}
+
+/** A slow windowed suite is dealt out case by case, each case run in one engine. */
+function testASlowWindowedSuiteIsDealtOutCaseByCase(): void {
+  const slow = planSuite('slow', 6, true);
+  const times = {
+    [slow.path]: { seconds: 180, cases: Object.fromEntries(slow.cases.map((func) => [func, 30])) },
+  };
+  const units = unitsOf([slow], times, SPLIT_PAST_SECONDS);
+  assert.equal(units.length, 6, 'a unit for each case');
+  assert.ok(
+    units.every((unit) => unit.windowed && unit.cases.length === 1),
+    'each one windowed',
+  );
+  const plans = dealt(units, new Map([[slow.path, slow.cases]]), 3, 3);
+  assert.equal(plans.length, 3, 'over three engines');
+  assert.ok(
+    plans.every((plan) => plan.windowed),
+    'all of them windowed',
+  );
+  assert.deepEqual(
+    casesRun(plans).toSorted(),
+    slow.cases.map((func) => `${slow.path}:${func}`),
+    'every case runs once',
+  );
+  assert.deepEqual(
+    plans.map((plan) => plan.skipping.length + (plan.suites[0]?.cases.length ?? 0)),
+    plans.map(() => slow.cases.length),
+    'and each engine skips the cases it is not dealt',
+  );
+}
+
+/** Windowed and headless suites together each run once, in the kind of engine they need. */
+async function testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind(): Promise<void> {
+  const suites = [
+    ...Array.from({ length: 6 }, (_, at) => planSuite(`w${String(at)}`, 2, true)),
+    ...Array.from({ length: 6 }, (_, at) => planSuite(`h${String(at)}`, 2, false)),
+  ];
+  const times = Object.fromEntries(
+    suites.map((suite) => [
+      suite.path,
+      { seconds: 20, cases: Object.fromEntries(suite.cases.map((func) => [func, 10])) },
+    ]),
+  );
+  const units = unitsOf(suites, times, SPLIT_PAST_SECONDS);
+  const declared = new Map(suites.map((suite) => [suite.path, suite.cases]));
+  const needs = new Map(suites.map((suite) => [suite.path, suite.windowed]));
+  const plans = dealt(units, declared, 4, 4);
+  assert.ok(plans.filter((plan) => plan.windowed).length >= 2, 'several windowed engines');
+  assert.ok(
+    plans.some((plan) => !plan.windowed),
+    'and headless ones',
+  );
+  assert.deepEqual(
+    casesRun(plans).toSorted(),
+    suites.flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)).toSorted(),
+    'every case runs once',
+  );
+  assert.ok(
+    plans.every((plan) => plan.suites.every((suite) => needs.get(suite.path) === plan.windowed)),
+    'in an engine of the kind it needs',
+  );
+  const handed: EnginePlan[] = [];
+  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+  await runShares(
+    slots,
+    units,
+    declared,
+    4,
+    [],
+    {},
+    async (plan, index) => {
+      handed.push(plan);
+      await delay(1);
+      return { index, printed: { started: null } };
+    },
+    undefined,
+    undefined,
+    undefined,
+    4,
+  );
+  assert.deepEqual(
+    casesRun(handed).toSorted(),
+    casesRun(plans).toSorted(),
+    'dealt a share at a time, every case still runs once',
+  );
+  assert.ok(
+    handed.every((plan) => plan.suites.every((suite) => needs.get(suite.path) === plan.windowed)),
+    'and in its own kind',
+  );
+}
+
+/** One windowed suite is one windowed engine, however many slots there are. */
+function testOneWindowedSuiteIsOneWindowedEngine(): void {
+  const only = planUnit('only', 30, true);
+  const declared = new Map([[only.suite, ['test_one']]]);
+  for (const most of [1, 4]) {
+    assert.deepEqual(
+      dealt([only], declared, most).map((plan) => [plan.lane, plan.windowed, plan.cost]),
+      [[0, true, 30]],
+      `with ${String(most)} slots`,
+    );
+  }
+  const shares = new Shares([only], declared, 4);
+  assert.equal(shares.next(0)?.windowed, true, 'the share is windowed');
+  assert.equal(shares.next(1), null, 'and no other engine is handed a share');
+  assert.equal(windowedSaid(dealt([only], declared, 4)), ', with a window');
+}
+
+/** Windows runs two windowed engines at once, and Linux and macOS one, each saying why. */
+async function testWindowedEnginesPerPlatformAreCountedAndSaid(): Promise<void> {
+  assert.deepEqual(
+    (['win32', 'linux', 'darwin'] as const).map((platform) => windowedEnginesOn(platform, {})),
+    [2, 1, 1],
+    'windowed engines at once on Windows, Linux and macOS',
+  );
+  const units = Array.from({ length: 12 }, (_, at) => planUnit(`w${String(at)}`, 20, true));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  for (const platform of ['win32', 'linux', 'darwin'] as const) {
+    const most = windowedEnginesOn(platform, {});
+    const plans = dealt(units, declared, 4, most);
+    assert.equal(
+      plans.filter((plan) => plan.windowed).length,
+      most,
+      `${platform} deals ${String(most)} lanes`,
+    );
+    const shares = new Shares(units, declared, 4, most);
+    const going: EnginePlan[] = [];
+    for (let plan = shares.next(going.length); plan !== null; plan = shares.next(going.length)) {
+      going.push(plan);
+    }
+    assert.equal(going.length, most, `${platform} hands a share to ${String(most)} windowed engines at once`);
+    let running = 0;
+    let atOnce = 0;
+    const slots = { take: () => Promise.resolve('N'), release: () => undefined };
+    await runShares(
+      slots,
+      units,
+      declared,
+      4,
+      [],
+      {},
+      async (plan, index) => {
+        assert.ok(plan.windowed, 'every engine is windowed');
+        running += 1;
+        atOnce = Math.max(atOnce, running);
+        await delay(20);
+        running -= 1;
+        return { index, printed: { started: null } };
+      },
+      undefined,
+      undefined,
+      undefined,
+      most,
+    );
+    assert.equal(atOnce, most, `${platform} runs ${String(most)} windowed engines at once`);
+    const said = windowedSaid(plans, most);
+    assert.equal(
+      said.includes('with one engine holding all 12 windowed suites, since engines sharing'),
+      most === 1,
+      `${platform}: ${said}`,
+    );
+  }
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
@@ -133268,6 +133842,16 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips,
   testRealSkipsFailARunOfBothTools,
   testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem,
+  testAnUnrunnableCaseIsNotCountedAsRan,
+  testASkipReasonOverSeveralLinesIsReadWhole,
+  testARealSkipReasonOverSeveralLinesFailsBothTools,
+  testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
+  testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre,
+  testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo,
+  testASlowWindowedSuiteIsDealtOutCaseByCase,
+  testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind,
+  testOneWindowedSuiteIsOneWindowedEngine,
+  testWindowedEnginesPerPlatformAreCountedAndSaid,
 ];
 
 /**
