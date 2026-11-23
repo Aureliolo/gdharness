@@ -132093,6 +132093,40 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
   }
 }
 
+/** A skip reason the output cut off is listed by its first line, and both tools say it was cut. */
+function testASkipReasonCutOffIsSaidToBeCutInBothTools(): void {
+  const { answer, faults } = fedRunAnswered([
+    {
+      path: FED_A,
+      cases: [
+        fedCase(FED_A, 'test_ok'),
+        {
+          name: 'test_cut',
+          printed: [
+            caseLine(FED_A, 'test_cut', 'PASSED', '0ms'),
+            '  Report:',
+            '  This test is skipped!',
+            "  Reason: 'line one",
+            'line tw',
+          ],
+        },
+      ],
+      closed: 'UNCLOSED',
+    },
+  ]);
+  assert.deepEqual(
+    [answer['passed'], answer['casesSkipped']],
+    [false, [{ test: `${FED_A} > test_cut`, reason: 'line one', cut: true }]],
+    'project_test',
+  );
+  assert.ok(
+    faults.includes(
+      `${FED_A} > test_cut never ran: gdUnit4 skipped it, saying "line one" before the reason was cut off`,
+    ),
+    faults.join('\n'),
+  );
+}
+
 /** A unit of one case, windowed or not, costing [param cost] seconds. */
 function planUnit(name: string, cost: number, windowed: boolean): Unit {
   return { ...SHARE_UNIT(name, cost), windowed, accessible: false };
@@ -133908,6 +133942,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASkipReasonOverSeveralLinesIsReadWhole,
   testARealSkipReasonOverSeveralLinesFailsBothTools,
   testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
+  testASkipReasonCutOffIsSaidToBeCutInBothTools,
   testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
   testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre,
   testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo,

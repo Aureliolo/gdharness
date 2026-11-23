@@ -734,8 +734,8 @@ function entryEnds(line: string): boolean {
  *
  * The reason runs to the last line ending in a quote before the entry ends, as the report's reader
  * takes it to the entry's last quote, since a line of the reason can end in a quote with a blank
- * line under it. With no such line it is cut: what was read is the reason, and it ends on its first
- * line, so whatever came after it is still read, the engine's last errors included.
+ * line under it. With no such line it is cut, and only its first line is surely the reason's: the
+ * lines after it are read as they would be without it, the engine's last errors included.
  */
 function skipReasonAt(
   lines: RunState['lines'],
@@ -758,7 +758,7 @@ function skipReasonAt(
     parts.push(line);
   }
   if (closes < 0) {
-    return { reason: parts.join('\n').trimEnd(), ends: at, cut: true };
+    return { reason: opened.trimEnd(), ends: at, cut: true };
   }
   const last = (parts[closes] ?? '').trimEnd().slice(0, -1);
   return { reason: [...parts.slice(0, closes), last].join('\n'), ends: at + closes, cut: false };
