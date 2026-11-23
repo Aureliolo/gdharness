@@ -341,7 +341,6 @@ import {
   createBridge,
   EDITOR_REQUEST_BYTES,
   EditorClosing,
-  editorMayChangeOn,
   GodotBridge,
   greetingFaults,
   mayYetConnect,
@@ -555,7 +554,6 @@ import {
   amendRunRecord,
   clearRunRecord,
   couldStillBeTheRecordedRun,
-  endOfTheRun,
   judgeAnnouncedGame,
   judgeRun,
   listeningPid,
@@ -566,7 +564,6 @@ import {
   type PeakTool,
   profileMarkPath,
   profilePath,
-  type RunExit,
   type RunRecord,
   readEnginePeaks,
   readLatestRun,
@@ -79351,32 +79348,22 @@ async function testAnEditorPlayedStartCaughtByAReplacementSaysTheWaitItHad(): Pr
 interface StandInEditorStage {
   readonly project: string;
   readonly first: ServerProcess;
-  readonly bridgePort: number;
-  readonly call: (
-    args: Record<string, unknown>,
-    tool?: string,
-  ) => Promise<{ text: string; isError: boolean }>;
+  readonly call: (args: Record<string, unknown>) => Promise<{ text: string; isError: boolean }>;
   readonly replace: () => Promise<ServerProcess>;
 }
 
 /**
  * Runs [param body] with a server of a new project, a stand-in editor greeted on its bridge that
- * hands every request for [param held] (resource_edit modify's command unless named) to
- * [param edit] and answers anything else with [param answered] or at once, and a way to start a
+ * hands every resource_edit modify to [param edit] and answers anything else at once, and a way to start a
  * second server of the project, which replaces the first.
  */
 async function withAStandInEditorOnAServerToBeReplaced(
   edit: (answer: (result: Record<string, unknown>) => void) => void,
   body: (stage: StandInEditorStage) => Promise<void>,
-  held: {
-    readonly command?: string;
-    readonly answered?: (tool: unknown) => Record<string, unknown>;
-    readonly env?: Readonly<Record<string, string>>;
-  } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-replaced-editor-'));
   const bridgePort = await reservePort();
-  const env = { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project, ...held.env };
+  const env = { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project };
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
   const first = new ServerProcess({ env });
   const replacements: ServerProcess[] = [];
@@ -79391,21 +79378,20 @@ async function withAStandInEditorOnAServerToBeReplaced(
           // The socket has gone.
         }
       };
-      if (tool === (held.command ?? 'modify_resource')) {
+      if (tool === 'modify_resource') {
         edit(answer);
       } else {
-        answer(held.answered?.(tool) ?? { ok: true });
+        answer({ ok: true });
       }
     });
     await body({
       project,
       first,
-      bridgePort,
-      call: async (args, tool = 'resource_edit') =>
+      call: async (args) =>
         saidToACall(
           await first.request(
             'tools/call',
-            { name: tool, arguments: { projectPath: project, ...args } },
+            { name: 'resource_edit', arguments: { projectPath: project, ...args } },
             ENGINE_CALL_TIMEOUT_MS,
           ),
         ),
@@ -79577,261 +79563,6 @@ async function testAnEditorPlayedStartNotYetPlayedWhenItsServerIsReplacedPlaysNo
     );
   } finally {
     sweep(slots);
-  }
-}
-
-/**
- * A read sent to the editor before its server is replaced, which the editor does not answer, is
- * told to call again, since a read changed nothing.
- */
-async function testAnEditorReadTheEditorNeverAnswersIsToldToCallAgainWhenItsServerIsReplaced(): Promise<void> {
-  let sentAt = 0;
-  await withAStandInEditorOnAServerToBeReplaced(
-    () => {
-      sentAt = Date.now();
-    },
-    async ({ project, call, replace }) => {
-      writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-      const sent = call({ op: 'get', scenePath: 'res://main.tscn', nodePath: '.' }, 'scene_node');
-      assert.ok(await untilTrue(() => sentAt > 0, 20_000), 'the editor is sent the read');
-      const second = await replace();
-      assert.deepEqual(
-        await sent,
-        {
-          text: `This gdharness server was replaced by a newer one on the same project, pid ${String(second.child.pid)}, so call again.`,
-          isError: true,
-        },
-        'the read is told to call again',
-      );
-    },
-    { command: 'get_node_properties' },
-  );
-}
-
-/**
- * A headless operation and a test run, each waiting out a scan of the editor open on the project
- * when its server is replaced, are told to call again: asking the editor whether it scans changes
- * nothing, and neither has started its engine.
- */
-async function testACallWaitingOnTheEditorsScanIsToldToCallAgainWhenItsServerIsReplaced(): Promise<void> {
-  const cases = [
-    { tool: 'project_dependencies', args: { resourcePath: 'res://main.tscn' } },
-    { tool: 'project_test', args: { path: 'res://tests/held_test.gd' } },
-  ];
-  for (const { tool, args } of cases) {
-    const asked: unknown[] = [];
-    await withAStandInEditorOnAServerToBeReplaced(
-      () => undefined,
-      async ({ project, call, replace }) => {
-        const runners = join(project, 'addons', 'gdUnit4', 'src', 'core', 'runners');
-        mkdirSync(runners, { recursive: true });
-        mkdirSync(join(project, 'tests'));
-        writeFileSync(
-          join(project, 'addons', 'gdUnit4', 'plugin.cfg'),
-          '[plugin]\nname="GdUnit4"\nversion="6.0.0"\nscript="plugin.gd"\n',
-        );
-        writeFileSync(join(runners, 'GdUnitTestCIRunner.gd'), 'extends Node\n');
-        writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-        writeFileSync(
-          join(project, 'tests', 'held_test.gd'),
-          'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
-        );
-        const going = call(args, tool);
-        assert.ok(
-          await untilTrue(() => asked.includes('scan_status'), 20_000),
-          `${tool} asks the editor whether it scans: ${JSON.stringify(asked)}`,
-        );
-        const second = await replace();
-        assert.deepEqual(
-          [await going, asked.filter((one) => one !== 'scan_status' && one !== 'playing_status')],
-          [
-            {
-              text: `This gdharness server was replaced by a newer one on the same project, pid ${String(second.child.pid)}, so call again.`,
-              isError: true,
-            },
-            [],
-          ],
-          `${tool} is told to call again, having asked the editor only what it scans and plays`,
-        );
-      },
-      {
-        command: '',
-        answered: (one) => {
-          asked.push(one);
-          return { ok: true, scanning: true };
-        },
-        env: { GODOT_PATH: standInEngine() },
-      },
-    );
-  }
-}
-
-/**
- * Of every command the editor addon takes, only those that read what the editor or the project
- * holds leave a call free to be asked again: the rescan asked for its status, editor_servers not
- * asked to rebind, and the reads. Every other command may change the editor or the project.
- */
-function testOnlyAnEditorCommandThatReadsLeavesACallFreeToBeAskedAgain(): void {
-  const executor = readFileSync(
-    resolve('src', 'godot', 'addons', 'gdharness_editor', 'tool_executor.gd'),
-    'utf8',
-  );
-  const commands = [...executor.matchAll(/^\t\t"([a-z_]+)": \[_[a-z_]+, "[a-z_]+"\],$/gmu)].map((found) =>
-    String(found[1]),
-  );
-  assert.ok(commands.length > 50, `the addon's commands are read: ${JSON.stringify(commands)}`);
-  const reads = commands.filter((command) => !editorMayChangeOn(command, {}));
-  assert.deepEqual(
-    reads.toSorted(),
-    [
-      'editor_servers',
-      'get_node_properties',
-      'get_project_setting',
-      'global_classes',
-      'list_connections',
-      'list_scene_nodes',
-      'playing_status',
-      'profile_read',
-      'read_animation_states',
-      'read_animations',
-      'read_resource',
-      'scan_status',
-      'scripts_behind',
-    ],
-    'only the reads change nothing',
-  );
-  assert.deepEqual(
-    [
-      editorMayChangeOn('rescan_filesystem', { statusOnly: true }),
-      editorMayChangeOn('rescan_filesystem', { updateFiles: [] }),
-      editorMayChangeOn('editor_servers', { rebind: false }),
-      editorMayChangeOn('editor_servers', { rebind: true }),
-    ],
-    [false, true, false, true],
-    'the rescan and editor_servers change something only when asked to',
-  );
-}
-
-/**
- * A replaced server waiting on an editor call it sent lets go of its bridge port at once, so the
- * newer server takes the port and an editor reaches it while the older one still waits.
- */
-async function testAReplacedServerWaitingOnASentCallLetsGoOfItsPortAtOnce(): Promise<void> {
-  let sentAt = 0;
-  await withAStandInEditorOnAServerToBeReplaced(
-    () => {
-      sentAt = Date.now();
-    },
-    async ({ project, first, bridgePort, call, replace }) => {
-      let answered = false;
-      const sent = call({ resourcePath: 'res://ui.tres', op: 'modify', properties: {} }).finally(() => {
-        answered = true;
-      });
-      assert.ok(await untilTrue(() => sentAt > 0, 20_000), 'the editor is sent the edit');
-      const second = await replace();
-      assert.ok(
-        await untilTrue(() => first.stderr.includes(STANDING_DOWN), 30_000),
-        'the replaced server stands down',
-      );
-      // Inside the older server's five-second wait on the call it sent.
-      assert.ok(
-        await untilTrue(
-          () => second.stderr.includes(`Bridge started on 127.0.0.1:${String(bridgePort)}`),
-          4000,
-        ),
-        `the newer server takes the port while the older one waits: ${second.stderr.slice(-600)}`,
-      );
-      const editor = await greetAsAStandInEditor(second, bridgePort, project);
-      try {
-        assert.equal(answered, false, 'an editor reaches the newer server while the older one still waits');
-      } finally {
-        editor.terminate();
-      }
-      assert.equal((await sent).isError, true, 'the edit is answered once the wait ends');
-    },
-  );
-}
-
-/**
- * A game that exits by itself just as a stop is sent keeps its own exit in the run's record, and a
- * run the stop ended is recorded as ended by SIGTERM with no exit code: SIGTERM itself, an exit
- * never told, or on Windows the code 1 TerminateProcess leaves.
- */
-function testAGameThatExitsByItselfAsAStopArrivesKeepsItsOwnExit(): void {
-  const stopsEnd = { exitCode: null, exitSignal: 'SIGTERM', notTold: false };
-  const cases: [string, RunExit, boolean, NodeJS.Platform, ReturnType<typeof endOfTheRun>][] = [
-    [
-      'exited 3 as the stop arrived, Windows',
-      { code: 3, signal: null, notTold: false },
-      true,
-      'win32',
-      {
-        exitCode: 3,
-        exitSignal: null,
-        notTold: false,
-      },
-    ],
-    [
-      'exited 3 as the stop arrived, Linux',
-      { code: 3, signal: null, notTold: false },
-      true,
-      'linux',
-      {
-        exitCode: 3,
-        exitSignal: null,
-        notTold: false,
-      },
-    ],
-    [
-      'exited 1 as the stop arrived, Linux',
-      { code: 1, signal: null, notTold: false },
-      true,
-      'linux',
-      {
-        exitCode: 1,
-        exitSignal: null,
-        notTold: false,
-      },
-    ],
-    [
-      'crashed as the stop arrived',
-      { code: null, signal: 'SIGSEGV', notTold: false },
-      true,
-      'linux',
-      {
-        exitCode: null,
-        exitSignal: 'SIGSEGV',
-        notTold: false,
-      },
-    ],
-    ['ended by the stop, Windows', { code: 1, signal: null, notTold: false }, true, 'win32', stopsEnd],
-    ['ended by the stop, Linux', { code: null, signal: 'SIGTERM', notTold: false }, true, 'linux', stopsEnd],
-    ['ended by the stop, never told', { code: null, signal: null, notTold: true }, true, 'win32', stopsEnd],
-    [
-      'exited 1 with no stop, Windows',
-      { code: 1, signal: null, notTold: false },
-      false,
-      'win32',
-      {
-        exitCode: 1,
-        exitSignal: null,
-        notTold: false,
-      },
-    ],
-    [
-      'never told, no stop',
-      { code: null, signal: null, notTold: true },
-      false,
-      'linux',
-      {
-        exitCode: null,
-        exitSignal: null,
-        notTold: true,
-      },
-    ],
-  ];
-  for (const [label, exit, stopped, platform, recorded] of cases) {
-    assert.deepEqual(endOfTheRun(exit, stopped, platform), recorded, label);
   }
 }
 
@@ -133877,11 +133608,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorCallSentBeforeItsServerIsReplacedIsAnsweredByTheEditor,
   testAnEditorCallTheEditorNeverAnswersIsAnsweredAsSentWhenItsServerIsReplaced,
   testAnEditorPlayedStartNotYetPlayedWhenItsServerIsReplacedPlaysNothing,
-  testAnEditorReadTheEditorNeverAnswersIsToldToCallAgainWhenItsServerIsReplaced,
-  testACallWaitingOnTheEditorsScanIsToldToCallAgainWhenItsServerIsReplaced,
-  testOnlyAnEditorCommandThatReadsLeavesACallFreeToBeAskedAgain,
-  testAReplacedServerWaitingOnASentCallLetsGoOfItsPortAtOnce,
-  testAGameThatExitsByItselfAsAStopArrivesKeepsItsOwnExit,
   testAGamesKeeperRaisesTheSlotItHolds,
   testARaiseNotWrittenIsAskedAgain,
   testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,

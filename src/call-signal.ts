@@ -55,8 +55,8 @@ export function callNotesSaid(notes: CallNotes): Record<string, string> {
 /**
  * Whether a call has done what cannot be undone, and whether it was told to do no more before it
  * did. A server being replaced sets [member refused] on the calls that have not committed, and
- * the code about to start a game asks [function commitCall] first. A request sent to the editor that
- * may change it or the project commits the call too, unless [member marksItsOwnPoint] says the call's own code marks its point.
+ * the code about to start a game asks [function commitCall] first. A request sent to the editor
+ * commits the call too, unless [member marksItsOwnPoint] says the call's own code marks its point.
  */
 export interface CallCommit {
   committed: boolean;
@@ -208,17 +208,13 @@ export function callMarksItsOwnPoint(): void {
 
 /**
  * Called just before a request goes to the editor, which may carry it out whatever happens to the
- * call after. It throws for a call told to do no more, so nothing is sent. A request that
- * [param changes] the editor or the project otherwise marks the call as past its point of no
- * return, unless the call marks its own point. A read marks nothing, since asking it again is safe.
+ * call after. It throws for a call told to do no more, so nothing is sent, and otherwise marks the
+ * call as past its point of no return, unless the call marks its own point.
  */
-export function commitCallAsSent(changes: boolean): void {
+export function commitCallAsSent(): void {
   const commit = current.getStore()?.commit;
-  if (commit === undefined) {
-    return;
-  }
-  // A read, or a call marking its own point, is only refused here, as commitCall refuses.
-  if (commit.refused || (changes && commit.marksItsOwnPoint !== true)) {
+  // A call marking its own point is only refused here, which commitCall does for a refused call.
+  if (commit?.marksItsOwnPoint !== true || commit.refused) {
     commitCall();
   }
 }
