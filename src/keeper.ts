@@ -45,6 +45,7 @@ import {
 import { startTimesOf } from './process-children.js';
 import {
   amendRunRecord,
+  endOfTheRun,
   type RestartedFrom,
   type RunRecord,
   recordRunEnded,
@@ -408,7 +409,7 @@ type Followed = NonNullable<Awaited<ReturnType<typeof followSuccessor>>>;
  */
 interface Ender {
   stop: boolean;
-  /** Whether a stop reached a live game, which is then how the run ended. */
+  /** Whether a stop was sent to the game while it was taken for live, which its exit may yet belie. */
   reached: boolean;
   end: () => 'signalled' | 'gone';
 }
@@ -732,10 +733,8 @@ async function followRestarts(
 }
 
 /**
- * After the profile, so a server told the run ended reads the profile it ended with. A run a stop
- * reached is recorded as ended by SIGTERM, as the server that asked for the stop says it: on Windows
- * the end is TerminateProcess, whose exit code 1 reads like a game that exited 1 of its own accord,
- * and every server holding the run reads this record.
+ * After the profile, so a server told the run ended reads the profile it ended with. Every server
+ * holding the run reads this record, so a run a stop ended reads alike on each.
  */
 function recordTheEnd(ended: KeptEnd, stopped: boolean): void {
   if (ended.note === null) {
@@ -744,13 +743,7 @@ function recordTheEnd(ended: KeptEnd, stopped: boolean): void {
   try {
     recordRunEnded(
       ended.note,
-      stopped
-        ? { exitCode: null, exitSignal: 'SIGTERM', notTold: false }
-        : {
-            exitCode: ended.code,
-            exitSignal: ended.code === null ? ended.signal : null,
-            notTold: ended.notTold,
-          },
+      endOfTheRun({ code: ended.code, signal: ended.signal, notTold: ended.notTold }, stopped),
     );
   } catch {
     // The run then has no recorded end, which every reader handles.

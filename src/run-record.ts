@@ -490,6 +490,39 @@ function editorNoteAt(path: string): EditorRunNote | null {
   return { projectPath, transcript, startedAt, ...(which === undefined ? {} : { play: which }) };
 }
 
+/** How a run's last process exited, as its keeper saw it. */
+export interface RunExit {
+  readonly code: number | null;
+  readonly signal: string | null;
+  readonly notTold: boolean;
+}
+
+/**
+ * The end a keeper records for [param exit], where [param stopped] says a stop was sent to the live
+ * game. A stop the game's exit shows ended it is recorded as ended by SIGTERM with no exit code, as
+ * the server that asked for the stop says it. That exit is SIGTERM itself, one never told, or on
+ * Windows TerminateProcess's code 1, which reads like a game that exited 1 of its own accord. A game
+ * that exited otherwise as the stop arrived ended by itself, and keeps its own code.
+ */
+export function endOfTheRun(
+  exit: RunExit,
+  stopped: boolean,
+  platform: NodeJS.Platform = process.platform,
+): { readonly exitCode: number | null; readonly exitSignal: string | null; readonly notTold: boolean } {
+  const theStops =
+    exit.signal === 'SIGTERM' ||
+    (exit.code === null && exit.signal === null) ||
+    (platform === 'win32' && exit.code === 1);
+  if (stopped && theStops) {
+    return { exitCode: null, exitSignal: 'SIGTERM', notTold: false };
+  }
+  return {
+    exitCode: exit.code,
+    exitSignal: exit.code === null ? exit.signal : null,
+    notTold: exit.notTold,
+  };
+}
+
 /**
  * The exit code kept in the note, written by the run's keeper as the game ends.
  *
