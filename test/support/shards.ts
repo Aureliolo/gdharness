@@ -269,7 +269,6 @@ export const REGRESSION_SECONDS: Readonly<
   },
   win32: {
     testTheTestCommandDealsAndReportsARun: 198,
-    testWindowedEnginesRunTogetherGetWhatEachGetsAlone: 185,
     testAReimportReimportsThroughTheEngine: 181,
     testAPresetIsSetRemovedAndPacked: 156,
     testAWriteReadsWhatThePropertyDeclares: 149,
@@ -661,7 +660,6 @@ export const REGRESSION_SECONDS: Readonly<
     testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier: 1,
   },
   darwin: {
-    testWindowedEnginesRunTogetherGetWhatEachGetsAlone: 257,
     testAReimportReimportsThroughTheEngine: 160,
     testAWriteReadsWhatThePropertyDeclares: 143,
     testTheTestCommandDealsAndReportsARun: 132,
