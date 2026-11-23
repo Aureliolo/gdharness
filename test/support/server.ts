@@ -62,6 +62,22 @@ export async function stopServersOf(fixture: string): Promise<string[]> {
   return [...found];
 }
 
+/** How many of a server's last stderr lines a test's deadline prints. */
+const STDERR_LINES_SAID = 10;
+
+/**
+ * What each server [param fixture] started was doing when its deadline came: the calls it answered
+ * and their mean time, each call still waiting and for how long, and its last stderr lines. A slow
+ * test shows as many answered calls, a stuck one as one call waiting for minutes.
+ */
+export function serversSaidAtADeadline(fixture: string): string[] {
+  const servers = serversStarted.filter((entry) => entry.during === fixture).map(({ server }) => server);
+  if (servers.length === 0) {
+    return [`${fixture} started no server.`];
+  }
+  return servers.flatMap((server) => server.saidAtADeadline());
+}
+
 /** The projects the run notes in [param directory] name. */
 function projectsNamedIn(directory: string): string[] {
   let notes: string[];
@@ -377,6 +393,22 @@ function describeExit(code: number | null, signal: NodeJS.Signals | null): strin
   return `exit code ${code === null ? 'unknown' : String(code)}`;
 }
 
+/** [param ms] as seconds to a tenth, such as `3.1s`. */
+function seconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** What a request asks, as a deadline line names it: its method, then a tool call's tool and op. */
+function requestAsked(method: string, params: unknown): string {
+  if (!isRecord(params)) {
+    return method;
+  }
+  const tool = params['name'];
+  const args = params['arguments'];
+  const op = isRecord(args) ? args['op'] : undefined;
+  return [method, tool, op].filter((part): part is string => typeof part === 'string').join(' ');
+}
+
 /** The name and version a server gave in the `_meta` of its opening answer. */
 export function serverIdentity(opening: JsonRpcMessage): Record<string, unknown> {
   const meta = isRecord(opening.result) ? opening.result['_meta'] : undefined;
@@ -478,6 +510,10 @@ export class ServerProcess {
   private readonly waiting = new Map<number | string, (message: JsonRpcMessage) => void>();
   private readonly abandoned = new Set<(reason: Error) => void>();
   private buffered = '';
+  /** The requests sent and not yet answered, by id: what each asked and when it was sent. */
+  private readonly inFlight = new Map<number, { readonly asked: string; readonly sent: number }>();
+  private answered = 0;
+  private answeredMs = 0;
 
   /** The runtime directory this server was given, or null when the fixture named its own. */
   readonly runtimeDir: string | null;
@@ -522,7 +558,32 @@ export class ServerProcess {
       }
       this.abandoned.clear();
       this.waiting.clear();
+      this.inFlight.clear();
     });
+  }
+
+  /** This server's lines for a test that ran past its deadline, as {@link serversSaidAtADeadline} says them. */
+  saidAtADeadline(now: number = Date.now()): string[] {
+    const pid = `server pid ${String(this.child.pid)}`;
+    const answered =
+      this.answered === 0
+        ? 'no call answered'
+        : `${String(this.answered)} ${this.answered === 1 ? 'call' : 'calls'} answered, mean ${seconds(this.answeredMs / this.answered)}`;
+    const waiting = [...this.inFlight.values()].map(
+      ({ asked, sent }) => `waiting ${seconds(now - sent)} on ${asked}`,
+    );
+    const state = this.exited
+      ? `it ended, ${describeExit(this.child.exitCode, this.child.signalCode)}`
+      : waiting.length === 0
+        ? 'no call in flight'
+        : waiting.join(', ');
+    const said = this.stderr.split('\n').filter((line) => line.trim() !== '');
+    return [
+      `${pid}: ${answered}; ${state}`,
+      ...(said.length === 0
+        ? ['  it wrote nothing to stderr']
+        : ['  its last stderr lines:', ...said.slice(-STDERR_LINES_SAID).map((line) => `    ${line}`)]),
+    ];
   }
 
   get exited(): boolean {
@@ -569,9 +630,13 @@ export class ServerProcess {
         clearTimeout(timer);
         this.waiting.delete(id);
         this.abandoned.delete(reject);
+        this.inFlight.delete(id);
       };
       this.abandoned.add(reject);
+      this.inFlight.set(id, { asked: requestAsked(method, params), sent: Date.now() });
       this.waiting.set(id, (message) => {
+        this.answered += 1;
+        this.answeredMs += Date.now() - (this.inFlight.get(id)?.sent ?? Date.now());
         settle();
         resolve(message);
       });

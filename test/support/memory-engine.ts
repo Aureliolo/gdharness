@@ -3,10 +3,12 @@
  * operation by writing `{}` to the answer file named last, and otherwise runs like a game: it
  * holds GDH_HOLD_MB of touched memory, reached GDH_GROW_MB every 150 ms, starts one child that
  * holds GDH_CHILD_MB, and stays up for GDH_STAY_MS. With GDH_OPERATION_HOLD_MB set, an operation
- * holds that much the same way and answers only once it has stayed up.
+ * holds that much the same way and answers only once it has stayed up. With GDH_SAY_PRIORITY set,
+ * a game prints `priority <n>`, its own priority as Node reads it, half a second after it starts.
  */
 
 import { writeFileSync } from 'node:fs';
+import { getPriority } from 'node:os';
 
 const MIB = 1024 * 1024;
 const args = process.argv.slice(2);
@@ -22,6 +24,12 @@ if (operation && operationHolds <= 0) {
   process.exit(0);
 }
 
+if (!operation && process.env['GDH_SAY_PRIORITY'] !== undefined) {
+  // Read after a pause, so a start that changes the engine just after creating it is not missed.
+  setTimeout(() => {
+    process.stdout.write(`priority ${String(getPriority())}\n`);
+  }, 500);
+}
 const holds = operation ? operationHolds : Number(process.env['GDH_HOLD_MB'] ?? 0);
 const step = Math.max(1, Number(process.env['GDH_GROW_MB'] ?? holds));
 const childMb = operation ? 0 : Number(process.env['GDH_CHILD_MB'] ?? 0);

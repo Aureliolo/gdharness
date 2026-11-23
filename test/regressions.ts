@@ -952,7 +952,6 @@ import {
 import { watchTheLoop } from './support/loop-gaps.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import {
-  beginWindow,
   describeOpenHandles,
   openChildren,
   openTimers,
@@ -960,6 +959,13 @@ import {
   trackTimers,
 } from './support/open-handles.js';
 import { pixelPng, readPng, solidPng } from './support/png.js';
+import {
+  type RegressionCase,
+  type RegressionRun,
+  recordEnginesLeftRunning,
+  runOneRegression,
+  settledWithin,
+} from './support/regression-run.js';
 import { REAL_ENGINE_VARIABLE, rendererLessEngine } from './support/renderer-less-engine.js';
 import {
   bandWalk,
@@ -967,7 +973,6 @@ import {
   PORT_BAND,
   reservePort,
   ServerProcess,
-  stopServersOf,
   unheldPort,
 } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
@@ -978,16 +983,8 @@ import {
   slotCountForGames,
   suiteSlotCount,
   TEST_ENGINES_VARIABLE,
-  withTheSuitesOwnSlotVariables,
 } from './support/slots.js';
-import {
-  endEnginesLeft,
-  leftBehindBy,
-  lookUnder,
-  reportUnswept,
-  sweep,
-  sweepingFor,
-} from './support/sweep.js';
+import { endEnginesLeft, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 import { WINDOWS_ASK_STAND_IN } from './support/windows-ask-stand-in.js';
 
 /**
@@ -25385,23 +25382,6 @@ function collectedStart(
     });
   });
   return { start, text: () => collected, outputEnded };
-}
-
-/** Whether [param promise] settles within [param ms]. */
-async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise.then(() => true),
-      new Promise<boolean>((settle) => {
-        timer = setTimeout(() => {
-          settle(false);
-        }, ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -125256,18 +125236,37 @@ async function testABranchIsSavedAsItsOwnSceneWithNoEditor(): Promise<void> {
   }
 }
 
-async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
+/** A project with a real engine behind a server, for the theme and tile set cases. */
+interface ThemeEngineFixture {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  fileOf: (file: string) => string;
+  project: string;
+  /** Stops the server and removes the project. */
+  end: () => Promise<void>;
+}
+
+/**
+ * A new project holding [param files], imported once by the engine, with a server on it. Null after
+ * saying the [param what] regression is skipped, where no Godot is found.
+ */
+async function themeEngine(
+  what: string,
+  files: Readonly<Record<string, string | Buffer>> = {},
+): Promise<ThemeEngineFixture | null> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
       throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
     }
-    console.log('theme and tile set without an editor regression skipped (Godot not found)');
-    return;
+    console.log(`${what} without an editor regression skipped (Godot not found)`);
+    return null;
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-theme-engine-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-theme-engine-rt-'));
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Theme"\n');
+  for (const [file, content] of Object.entries(files)) {
+    writeFileSync(join(project, file), content);
+  }
   const server = new ServerProcess({
     env: {
       GODOT_PATH: godotPath,
@@ -125277,9 +125276,51 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       GDHARNESS_RUNTIME_DIR: runtimeDir,
     },
   });
-  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
-    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
-  const theme = { resourcePath: 'res://theme.tres' };
+  const end = async (): Promise<void> => {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('theme-engine');
+  } catch (error) {
+    await end();
+    throw error;
+  }
+  return {
+    call: async (name, args) =>
+      await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000),
+    fileOf: (file) => readFileSync(join(project, file), 'utf8'),
+    project,
+    end,
+  };
+}
+
+const THEME = { resourcePath: 'res://theme.tres' };
+
+/** The theme's font colour for [param controlType] set to red, and the answer read. */
+async function themeColour(call: ThemeEngineFixture['call'], controlType: string): Promise<unknown> {
+  return parseTextContent(
+    await call('resource_edit', {
+      ...THEME,
+      op: 'set_theme_color',
+      controlType,
+      colorName: 'font_color',
+      color: { r: 1, g: 0, b: 0, a: 1 },
+    }),
+  );
+}
+
+/** A theme's font size is set, and one Godot would read as unset, or not a whole number, is refused. */
+async function testAThemeFontSizeIsSetAndAnUnusableOneRefusedWithNoEditor(): Promise<void> {
+  const fixture = await themeEngine('theme font size');
+  if (fixture === null) {
+    return;
+  }
+  const { call, fileOf } = fixture;
+  const theme = THEME;
   const fontSize = async (size: unknown): Promise<JsonRpcMessage> =>
     await call('resource_edit', {
       ...theme,
@@ -125288,22 +125329,7 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       fontSizeName: 'font_size',
       size,
     });
-  const colour = async (controlType: string): Promise<unknown> =>
-    parseTextContent(
-      await call('resource_edit', {
-        ...theme,
-        op: 'set_theme_color',
-        controlType,
-        colorName: 'font_color',
-        color: { r: 1, g: 0, b: 0, a: 1 },
-      }),
-    );
-  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
   try {
-    const imported = await runImport(godotPath, project);
-    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
-    await server.initialize('theme-engine');
-
     await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
     const sized = parseTextContent(await fontSize(12));
     // Named as every other resource_edit answer names the file it wrote.
@@ -125322,7 +125348,25 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       assert.equal(textOf(await fontSize(size)), said, `size ${JSON.stringify(size)}`);
     }
     assert.match(fileOf('theme.tres'), /\nLabel\/font_sizes\/font_size = 12\n/, 'and the size set is kept');
+  } finally {
+    await fixture.end();
+  }
+}
 
+/**
+ * A theme colour set for a class is plain, one for a name no class has is a type variation and says
+ * so, and an item name a class never reads is written with the nearest names it has.
+ */
+async function testAThemeColourNamesATypeVariationOrAnItemNoClassReadsWithNoEditor(): Promise<void> {
+  const fixture = await themeEngine('theme colour names');
+  if (fixture === null) {
+    return;
+  }
+  const { call, fileOf } = fixture;
+  const theme = THEME;
+  const colour = async (controlType: string): Promise<unknown> => await themeColour(call, controlType);
+  try {
+    await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
     for (const kind of ['Button', 'PopupMenu']) {
       const set = await colour(kind);
       assert.deepEqual([get(set, 'controlType'), get(set, 'resourcePath')], [kind, 'res://theme.tres']);
@@ -125364,7 +125408,21 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       /^The engine's theme gives Button no font size font_sise, so only a script asking for it by name reads it\. The nearest it has is font_size\. remove_theme_item with item font_sizes\/font_sise takes it out\.$/,
       JSON.stringify(oddSize),
     );
-    // A colour as its html code, as scene_node takes one, and a word that is neither form.
+  } finally {
+    await fixture.end();
+  }
+}
+
+/** A theme colour is taken as its html code, as scene_node takes one, and a word that is neither form is refused. */
+async function testAThemeColourTakesAnHtmlCodeAndRefusesAWordWithNoEditor(): Promise<void> {
+  const fixture = await themeEngine('theme colour code');
+  if (fixture === null) {
+    return;
+  }
+  const { call } = fixture;
+  const theme = THEME;
+  try {
+    await call('resource_edit', { ...theme, op: 'create', resourceType: 'Theme' });
     const coded = parseTextContent(
       await call('resource_edit', {
         ...theme,
@@ -125395,8 +125453,38 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       ),
       'color is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html code such as "#ff8000" or "#ff800080". "orange" is neither.',
     );
-    // The way back from a misspelt type: one item out, or the whole type, and what the theme does
-    // not hold is refused with the names it does.
+  } finally {
+    await fixture.end();
+  }
+}
+
+/**
+ * The way back from a misspelt type: one item out, or the whole type, and what the theme does not
+ * hold is refused with the names it does. A variation's base goes out with its type.
+ */
+async function testAThemeItemOrTypeIsRemovedWithNoEditor(): Promise<void> {
+  const fixture = await themeEngine('theme removal', {
+    // What the colour and size cases leave in a theme.
+    'theme.tres': [
+      '[gd_resource type="Theme" format=3]',
+      '',
+      '[resource]',
+      'Button/colors/font_color = Color(1, 0, 0, 1)',
+      'Button/colors/font_colour = Color(0, 0, 1, 1)',
+      'Button/font_sizes/font_sise = 20',
+      'Buton/colors/font_color = Color(1, 0, 0, 1)',
+      'Label/colors/font_color = Color(1, 0.5019608, 0, 1)',
+      'Label/font_sizes/font_size = 12',
+      'PopupMenu/colors/font_color = Color(1, 0, 0, 1)',
+      '',
+    ].join('\n'),
+  });
+  if (fixture === null) {
+    return;
+  }
+  const { call, fileOf, project } = fixture;
+  const theme = THEME;
+  try {
     const remove = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
       await call('resource_edit', { ...theme, op: 'remove_theme_item', ...args });
     const gone = parseTextContent(await remove({ controlType: 'Buton' }));
@@ -125431,7 +125519,19 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     const typeOut = parseTextContent(await call('resource_edit', variant));
     assert.deepEqual(get(typeOut, 'removed'), ['Fancy/base_type'], JSON.stringify(typeOut));
     assert.doesNotMatch(fileOf('variant.tres'), /^Fancy\//m, fileOf('variant.tres'));
-    // A name cut at three would leave out a fourth that only adds to the word as the others do.
+  } finally {
+    await fixture.end();
+  }
+}
+
+/** A name cut at three would leave out a fourth that only adds to the word as the others do. */
+async function testAStyleBoxCornerRadiusNamesEveryCornerWithNoEditor(): Promise<void> {
+  const fixture = await themeEngine('style box corners');
+  if (fixture === null) {
+    return;
+  }
+  const { call } = fixture;
+  try {
     await call('resource_edit', {
       op: 'create',
       resourcePath: 'res://box.tres',
@@ -125448,27 +125548,119 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     for (const corner of ['top_left', 'top_right', 'bottom_right', 'bottom_left']) {
       assert.match(corners, new RegExp(`\\bcorner_radius_${corner}\\b`), corners);
     }
-
-    const fixture: ThemeEngineFixture = { call, fileOf, project };
-    const made = await themeEngineTileSets(fixture);
-    await themeEngineBlankCells(fixture, made);
-    await themeEngineTilemapCells(fixture);
   } finally {
-    await server.stop();
-    rmSync(project, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
+    await fixture.end();
   }
 }
 
-/** What the theme and tile set cases share once the engine is up. */
-interface ThemeEngineFixture {
-  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
-  fileOf: (file: string) => string;
-  project: string;
+/** A tile set case's project: an engine set up with [param files], then [param body] run on it. */
+async function withThemeEngine(
+  what: string,
+  files: Readonly<Record<string, string | Buffer>>,
+  body: (fixture: ThemeEngineFixture) => Promise<void>,
+): Promise<void> {
+  const fixture = await themeEngine(what, files);
+  if (fixture === null) {
+    return;
+  }
+  try {
+    await body(fixture);
+  } finally {
+    await fixture.end();
+  }
 }
 
-/** The tile set cases: a texture not yet imported, a second source, layers and terrains written by path. */
-async function themeEngineTileSets(fixture: ThemeEngineFixture): Promise<unknown> {
+/** The 4 by 4 picture the tile sets are cut from, in 2 by 2 tiles. */
+function latePicture(): Record<string, Buffer> {
+  return { 'late.png': solidPng(200, 60, 60) };
+}
+
+/** The tile set of 2 by 2 tiles from late.png. */
+const LATE_TILESET = {
+  op: 'create_tileset',
+  resourcePath: 'res://set.tres',
+  sources: [{ texture: 'res://late.png', tileSize: { x: 2, y: 2 } }],
+};
+
+/** A texture not yet imported is refused, then a tile set is made from it and says its tile size. */
+async function testATileSetWaitsForItsTextureToBeImportedWithNoEditor(): Promise<void> {
+  await withThemeEngine('tile set texture', {}, themeEngineTileSets);
+}
+
+/** A layer a TileSet has none of yet is made by writing to it, and a tile's values on it are kept. */
+async function testATileSetsLayersAreWrittenByPathWithNoEditor(): Promise<void> {
+  await withThemeEngine('tile set layers', latePicture(), themeEngineTileSetLayers);
+}
+
+/** Terrains and a tile's own properties are written by path, and a polygon past the next is refused. */
+async function testATileSetsTerrainsAndTilePropertiesAreWrittenByPathWithNoEditor(): Promise<void> {
+  await withThemeEngine('tile set terrains', latePicture(), themeEngineTileSetTerrains);
+}
+
+/** A tile set names the cell it leaves blank and the strip no tile reaches. */
+async function testATileSetNamesItsBlankCellsAndTheStripNoTileReachesWithNoEditor(): Promise<void> {
+  await withThemeEngine(
+    'tile set blank cells',
+    {
+      ...latePicture(),
+      'atlas.png': pixelPng(10, 4, (x) => (x >= 4 && x < 8 ? [0, 0, 0, 0] : [200, 40, 40, 255])),
+    },
+    themeEngineBlankCells,
+  );
+}
+
+/** The scene of three tile map layers the tile map cases paint. */
+const MAP_SCENE =
+  '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
+  '[node name="Built" type="TileMapLayer" parent="."]\n\n[node name="Bare" type="TileMapLayer" parent="."]\n';
+
+/** The picture of the tile sets and the scene of the layers they paint. */
+function mapFiles(): Record<string, string | Buffer> {
+  return { ...latePicture(), 'map.tscn': MAP_SCENE };
+}
+
+/** A layer with no TileSet names the call that gives it one, and that call lets the paint through. */
+async function testATileMapLayerWithNoTileSetNamesTheWayToOneWithNoEditor(): Promise<void> {
+  await withThemeEngine('tile map layer with no tile set', mapFiles(), themeEngineBareLayer);
+}
+
+/** A TileSet property is written where the TileSet lives, through the layer holding it. */
+async function testATileSetPropertyIsReachedThroughItsLayerWithNoEditor(): Promise<void> {
+  // The other resources the tile set cases leave in a project, which the refusal of a missing one lists.
+  const files = mapFiles();
+  for (const name of ['box', 'spaced', 'theme', 'variant', 'wide']) {
+    files[`${name}.tres`] = '[gd_resource type="Resource" format=3]\n\n[resource]\n';
+  }
+  await withThemeEngine('tile set through a layer', files, themeEngineLayerTileSet);
+}
+
+/** Every cell refused is named by where it is, and -1 erases one, as set_cell takes it. */
+async function testTileMapCellsArePaintedAndErasedWithNoEditor(): Promise<void> {
+  await withThemeEngine('tile map cells', mapFiles(), themeEngineTilemapCells);
+}
+
+/** The tree counts the cells a file keeps as packed bytes, and names the call that lists them. */
+async function testTheSceneTreeCountsATileMapLayersCellsWithNoEditor(): Promise<void> {
+  await withThemeEngine('tile map cell count', mapFiles(), themeEngineCellCount);
+}
+
+/** A TileMap keeps its cells in layers of its own, and drops an erased one only as they update too. */
+async function testAnOldTileMapDropsAnErasedCellWithNoEditor(): Promise<void> {
+  await withThemeEngine('old tile map', latePicture(), themeEngineOldTileMap);
+}
+
+/** AudioBusLayout makes a bus by naming it, and refuses a write that would skip one. */
+async function testAnAudioBusIsMadeByNamingItWithNoEditor(): Promise<void> {
+  await withThemeEngine('audio bus', {}, themeEngineAudioBuses);
+}
+
+/** SpriteFrames are written as given, and a picture imported as Keep File is refused with the way on. */
+async function testSpriteFramesAreWrittenWithNoEditor(): Promise<void> {
+  await withThemeEngine('sprite frames', latePicture(), themeEngineSpriteFrames);
+}
+
+/** The tile set cases of a texture not yet imported and a second source. */
+async function themeEngineTileSets(fixture: ThemeEngineFixture): Promise<void> {
   const { call, fileOf, project } = fixture;
   writeFileSync(join(project, 'late.png'), solidPng(200, 60, 60));
   const tileset = {
@@ -125500,16 +125692,27 @@ async function themeEngineTileSets(fixture: ThemeEngineFixture): Promise<unknown
     textOf(await call('resource_edit', tileset)),
     'res://set.tres already exists, and create_tileset builds a whole new TileSet, which would replace everything in it, the tiles a scene paints with among them. Give resourcePath a path nothing is at.',
   );
+}
 
+/** A modify of the tile set of 2 by 2 tiles from late.png. */
+const LATE_SET = { op: 'modify', resourcePath: 'res://set.tres' };
+
+/** A tile's square polygon. */
+const SQUARE = [
+  [-1, -1],
+  [1, -1],
+  [1, 1],
+  [-1, 1],
+];
+
+/** The tile set layer cases: a physics layer and a custom data layer, and the atlas source read by path. */
+async function themeEngineTileSetLayers(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf } = fixture;
+  await call('resource_edit', LATE_TILESET);
   // A layer the TileSet has none of yet is made by writing to it, and so is a tile's polygon on
   // it, reached in the atlas source the TileSet holds. One past the next is refused.
-  const set = { op: 'modify', resourcePath: 'res://set.tres' };
-  const square = [
-    [-1, -1],
-    [1, -1],
-    [1, 1],
-    [-1, 1],
-  ];
+  const set = LATE_SET;
+  const square = SQUARE;
   assert.equal(
     textOf(await call('resource_edit', { ...set, properties: { 'physics_layer_1/collision_layer': 1 } })),
     'TileSet has 0 physics layers, and a new one goes after the last, so physics_layer_1 cannot be written yet: write physics_layer_0 first.',
@@ -125549,6 +125752,16 @@ async function themeEngineTileSets(fixture: ThemeEngineFixture): Promise<unknown
     [{ x: -1, y: -1, _type: 'Vector2' }, 5],
     JSON.stringify(atlasRead),
   );
+}
+
+/** The tile set cases of terrains, a tile's own properties, and a polygon past the next. */
+async function themeEngineTileSetTerrains(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf } = fixture;
+  await call('resource_edit', LATE_TILESET);
+  const set = LATE_SET;
+  const square = SQUARE;
+  // The physics layer the polygon case writes on.
+  await call('resource_edit', { ...set, properties: { 'physics_layer_0/collision_layer': 2 } });
   // A list inside a list grows through its own add method, given the index of the one around it.
   const terrains = await call('resource_edit', {
     ...set,
@@ -125582,19 +125795,14 @@ async function themeEngineTileSets(fixture: ThemeEngineFixture): Promise<unknown
     ),
     '1:0/0/physics_layer_0 has 0 polygons, and a new one goes after the last, so 1:0/0/physics_layer_0/polygon_1 cannot be written yet: write 1:0/0/physics_layer_0/polygon_0 first.',
   );
-  return made;
 }
 
 /** The tile set that leaves a transparent cell blank and names the strip no tile reaches. */
-async function themeEngineBlankCells(fixture: ThemeEngineFixture, made: unknown): Promise<void> {
-  const { call, project } = fixture;
+async function themeEngineBlankCells(fixture: ThemeEngineFixture): Promise<void> {
+  const { call } = fixture;
+  const made = parseTextContent(await call('resource_edit', LATE_TILESET));
   // A cell wholly transparent gets no tile, and a strip the tile size does not reach is in none,
   // and the answer names both rather than leaving a count to be worked back.
-  writeFileSync(
-    join(project, 'atlas.png'),
-    pixelPng(10, 4, (x) => (x >= 4 && x < 8 ? [0, 0, 0, 0] : [200, 40, 40, 255])),
-  );
-  await call('project_import', { op: 'reimport', resourcePath: 'res://atlas.png' });
   const spaced = parseTextContent(
     await call('resource_edit', {
       op: 'create_tileset',
@@ -125617,15 +125825,10 @@ async function themeEngineBlankCells(fixture: ThemeEngineFixture, made: unknown)
   assert.equal(get(made, 'sources', 0, 'notInAnyTile'), undefined, 'and one the tiles divide has no strip');
 }
 
-/** The tile map cases of the theme and tile set fixture: cells refused, a tile set in a file and one built in. */
-async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<void> {
-  const { call, fileOf, project } = fixture;
-  // Every cell refused is named by where it is, and -1 erases one, as set_cell takes it.
-  writeFileSync(
-    join(project, 'map.tscn'),
-    '[gd_scene format=3]\n\n[node name="Map" type="Node2D"]\n\n[node name="Ground" type="TileMapLayer" parent="."]\n\n' +
-      '[node name="Built" type="TileMapLayer" parent="."]\n\n[node name="Bare" type="TileMapLayer" parent="."]\n',
-  );
+/** A layer with no TileSet refuses a paint, and is given one by the call the refusal names. */
+async function themeEngineBareLayer(fixture: ThemeEngineFixture): Promise<void> {
+  const { call } = fixture;
+  await call('resource_edit', LATE_TILESET);
   const bare = { scenePath: 'res://map.tscn', nodePath: 'Bare' };
   const cell = { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } };
   assert.equal(
@@ -125641,7 +125844,16 @@ async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<voi
     1,
     `and the call it names lets the paint through: ${JSON.stringify(given)}`,
   );
-  const map = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
+}
+
+/** The layer the tile map cases paint. */
+const GROUND = { scenePath: 'res://map.tscn', nodePath: 'Ground' };
+
+/** A TileSet kept in its own file is written there, and one built into the scene through the layer. */
+async function themeEngineLayerTileSet(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf } = fixture;
+  await call('resource_edit', LATE_TILESET);
+  const map = GROUND;
   await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
   // A TileSet kept in its own file is written there, and one built into the scene through it.
   assert.equal(
@@ -125680,6 +125892,18 @@ async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<voi
     /\[sub_resource type="TileSet" id="[^"]+"\]\nphysics_layer_0\/collision_layer = 8\n/,
     fileOf('map.tscn'),
   );
+  assert.equal(
+    textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
+    "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
+  );
+}
+
+/** Cells refused are named by where they are, and -1 erases one, as set_cell takes it. */
+async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf } = fixture;
+  await call('resource_edit', LATE_TILESET);
+  const map = GROUND;
+  await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://set.tres' } });
   const paint = async (cells: unknown[]): Promise<JsonRpcMessage> =>
     await call('scene_node', { ...map, op: 'set_tilemap_cells', cells });
   assert.equal(
@@ -125723,7 +125947,21 @@ async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<voi
     [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 }, alternativeTile: 0 }],
     JSON.stringify(ground),
   );
-  // The tree counts the cells the file keeps as packed bytes, and names the call that lists them.
+}
+
+/** The tree counts the cells the file keeps as packed bytes, and names the call that lists them. */
+async function themeEngineCellCount(fixture: ThemeEngineFixture): Promise<void> {
+  const { call } = fixture;
+  await call('resource_edit', LATE_TILESET);
+  for (const nodePath of ['Ground', 'Bare']) {
+    const layer = { scenePath: 'res://map.tscn', nodePath };
+    await call('scene_node', { ...layer, op: 'set', properties: { tile_set: 'res://set.tres' } });
+    await call('scene_node', {
+      ...layer,
+      op: 'set_tilemap_cells',
+      cells: [{ coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } }],
+    });
+  }
   const tree = parseTextContent(
     await call('scene_tree', { scenePath: 'res://map.tscn', includeProperties: true }),
   );
@@ -125740,7 +125978,12 @@ async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<voi
     ],
     JSON.stringify(tree),
   );
-  // A TileMap keeps its cells in layers of its own, and drops an erased one only as they update too.
+}
+
+/** A TileMap keeps its cells in layers of its own, and drops an erased one only as they update too. */
+async function themeEngineOldTileMap(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf, project } = fixture;
+  await call('resource_edit', LATE_TILESET);
   writeFileSync(
     join(project, 'old.tscn'),
     '[gd_scene format=3]\n\n[ext_resource type="TileSet" path="res://set.tres" id="1_set"]\n\n' +
@@ -125763,13 +126006,14 @@ async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<voi
     fileOf('old.tscn').includes('layer_0/tile_data = PackedInt32Array(1, 65536, 1)\n'),
     `the erased cell is gone from the TileMap's file: ${fileOf('old.tscn')}`,
   );
-  assert.equal(
-    textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
-    "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
-  );
+}
 
-  // AudioBusLayout lists bus/1/name only once bus 1 exists, and setting it is what makes the bus.
-  // It declares bus/1/send a float and holds the name of the bus it sends to.
+/**
+ * AudioBusLayout lists bus/1/name only once bus 1 exists, and setting it is what makes the bus. It
+ * declares bus/1/send a float and holds the name of the bus it sends to.
+ */
+async function themeEngineAudioBuses(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf } = fixture;
   const buses = { resourcePath: 'res://buses.tres', op: 'modify' };
   await call('resource_edit', { ...buses, op: 'create', resourceType: 'AudioBusLayout' });
   const skipped =
@@ -125803,9 +126047,14 @@ async function themeEngineTilemapCells(fixture: ThemeEngineFixture): Promise<voi
     assert.match(layout, line, layout);
   }
   assert.doesNotMatch(layout, /bus\/2\//, `the refused write made no bus 2: ${layout}`);
+}
 
-  // SpriteFrames hands its animations back sorted by name with loop as a number, which read as a
-  // write the engine had changed.
+/**
+ * SpriteFrames hands its animations back sorted by name with loop as a number, which read as a
+ * write the engine had changed. A picture imported as Keep File has no resource to load.
+ */
+async function themeEngineSpriteFrames(fixture: ThemeEngineFixture): Promise<void> {
+  const { call, fileOf, project } = fixture;
   const frames = { resourcePath: 'res://frames.tres', op: 'modify' };
   await call('resource_edit', { ...frames, op: 'create', resourceType: 'SpriteFrames' });
   const animated =
@@ -130301,6 +130550,22 @@ async function untilTrue(done: () => boolean | Promise<boolean>, ms: number): Pr
   return await done();
 }
 
+/**
+ * A game a server call starts runs at the server's priority. editor_run check starts its engine as
+ * a held run of the server's, a direct child on Linux and macOS and through the desktop helper on
+ * Windows. The stand-in engine prints its own priority, which the check's answer lists.
+ */
+async function testAGameAServerCallStartsRunsAtItsServersPriority(): Promise<void> {
+  await withMemoryEngine({ GDH_SAY_PRIORITY: '1', GDH_STAY_MS: '1500' }, async (call) => {
+    const checked = await call('editor_run', { op: 'check', timeoutMs: 60_000 });
+    const printed = asArray(get(checked, 'printed') ?? []).map((entry) => get(entry, 'text'));
+    assert.ok(
+      printed.includes(`priority ${String(getPriority())}`),
+      `the game runs at its server's priority, ${String(getPriority())}: ${JSON.stringify(checked)}`,
+    );
+  });
+}
+
 /** editor_run check's engine ended for its memory says so, and the check keeps its peak apart from the game's. */
 async function testABootCheckEndedForItsMemorySaysSoAndKeepsItsOwnPeak(): Promise<void> {
   await withMemoryEngine(GROWS, async (call) => {
@@ -131865,7 +132130,22 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStateMachineWrittenWithNoEditorRunsAsWritten,
   testANodeKeepsItsGroupsAndItsPlace,
   testANodeChangesItsType,
-  testAThemeAndATilesetWithNoEditor,
+  testAThemeFontSizeIsSetAndAnUnusableOneRefusedWithNoEditor,
+  testAThemeColourNamesATypeVariationOrAnItemNoClassReadsWithNoEditor,
+  testAThemeColourTakesAnHtmlCodeAndRefusesAWordWithNoEditor,
+  testAThemeItemOrTypeIsRemovedWithNoEditor,
+  testAStyleBoxCornerRadiusNamesEveryCornerWithNoEditor,
+  testATileSetWaitsForItsTextureToBeImportedWithNoEditor,
+  testATileSetsLayersAreWrittenByPathWithNoEditor,
+  testATileSetsTerrainsAndTilePropertiesAreWrittenByPathWithNoEditor,
+  testATileSetNamesItsBlankCellsAndTheStripNoTileReachesWithNoEditor,
+  testATileMapLayerWithNoTileSetNamesTheWayToOneWithNoEditor,
+  testATileSetPropertyIsReachedThroughItsLayerWithNoEditor,
+  testTileMapCellsArePaintedAndErasedWithNoEditor,
+  testTheSceneTreeCountsATileMapLayersCellsWithNoEditor,
+  testAnOldTileMapDropsAnErasedCellWithNoEditor,
+  testAnAudioBusIsMadeByNamingItWithNoEditor,
+  testSpriteFramesAreWrittenWithNoEditor,
   testABranchIsSavedAsItsOwnSceneWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,
   testAProjectsFilesAndLayersAreNamedWithNoEditor,
@@ -132892,6 +133172,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineCrashIsToldByItsWholeExitCode,
   testAnEngineStartedDirectlyIsToldByItsWholeExitCode,
   testAnEngineRunsAtNormalPriority,
+  testAGameAServerCallStartsRunsAtItsServersPriority,
   testACommandOfSeveralEnginesHoldsOneSlot,
   testASlotCommandGrantsTheSlotAnEngineRunsOn,
   testASlotCommandRefusalFailsTheStartWithItsReason,
@@ -133225,6 +133506,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAVariationBaseTheEngineRefusesThroughAControlsThemeIsRefused,
   testAnUnsetTakesAVariationBaseOutOfTheFile,
   testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanItsOwnRun,
+  testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersWereDoing,
   testAnEngineLogWithinTheLimitIsJudgedAsItWas,
   testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader,
   testAnEngineLogReadInPiecesIsJudgedAsItsWholeText,
@@ -133360,18 +133642,6 @@ async function failTheTestsThatLeftTimers(failed: string[]): Promise<void> {
   }
 }
 
-/** One test of the list, as the runner takes it. */
-type RegressionCase = () => void | Promise<void>;
-
-/** What the runner keeps while it goes down the list. */
-interface RegressionRun {
-  failed: string[];
-  ranPast: string[];
-  deadlineMs: number;
-  budgetMs: number;
-  runEnds: number;
-}
-
 /** The tests the command line names, all of them when it names none, or null after saying none match. */
 function regressionsNamedOnTheCommandLine(): RegressionCase[] | null {
   const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
@@ -133415,35 +133685,6 @@ function regressionsOfThisPart(named: RegressionCase[]): RegressionCase[] | null
     console.log(`part ${part[1]} of ${part[2]}: ${chosen.length} of ${named.length} regressions`);
   }
   return chosen;
-}
-
-/**
- * Fails each fixture that left an engine running, passed or not: it takes a core from every fixture
- * after it, and a frame rate case run beside one read the machine rather than the code. Looked for
- * at once after a failure or a directory left behind, since those are how it shows, and once more
- * over the whole run, since on Linux and macOS a held directory is removed all the same.
- */
-function recordEnginesLeftRunning(
-  engines: { pid: number; under: string; during: string | null }[],
-  failed: string[],
-): void {
-  for (const { pid, under, during } of engines) {
-    const name = during ?? 'a fixture';
-    console.error(`${name} left engine ${pid} running under ${under}; it has been ended`);
-    if (!failed.includes(name)) {
-      failed.push(name);
-    }
-  }
-}
-
-/** What a rejection reads as in the log. */
-function saidOfAFailure(error: unknown): string | undefined {
-  // A thrown event is not an Error and prints as "[object ErrorEvent]", so its message is added.
-  return error instanceof Error
-    ? error.stack
-    : typeof error === 'object' && error !== null && 'message' in error
-      ? `${Object.prototype.toString.call(error)}: ${String(error.message)}`
-      : String(error);
 }
 
 /** The step's limit ends a command that will not end, and passes the exit code of one that does. */
@@ -133576,6 +133817,32 @@ function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
 }
 
 /**
+ * This process's environment without the variables that set a regression run's part, budget and
+ * deadline, for a run inside a test. A CI leg sets the part, and a one-name list falls in part 1,
+ * so an inner run in any other part would run nothing and pass.
+ */
+function withoutTheRunsOwnVariables(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith('GDHARNESS_REGRESSION_')),
+  );
+}
+
+/** The output of `bun test/regressions.ts [param names]`, run with the outer run's own variables cleared. */
+async function innerRegressionRun(names: readonly string[]): Promise<string> {
+  const said = await runHidden(process.execPath, ['test/regressions.ts', ...names], {
+    timeout: 240_000,
+    env: withoutTheRunsOwnVariables(),
+  }).then(
+    ({ stdout, stderr }) => `${stdout}\n${stderr}`,
+    (error: unknown) =>
+      assert.fail(
+        `the run of ${names.join(' ')} failed:\n${isRecord(error) ? `${String(error['stdout'])}\n${String(error['stderr'])}` : String(error)}`,
+      ),
+  );
+  return said;
+}
+
+/**
  * A test that starts the process's shared desktop helper and does not end it leaves nothing open
  * at the end of its run, because the runner ends the helper after each test. The run is a real one
  * of testAnEngineRunSaysHowItEnded, which starts engines in the runner's own process and never
@@ -133587,14 +133854,37 @@ async function testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanIts
     return;
   }
   const inner = 'testAnEngineRunSaysHowItEnded';
-  const said = await runHidden(process.execPath, ['test/regressions.ts', inner], { timeout: 240_000 }).then(
+  const said = await innerRegressionRun([inner]);
+  assert.match(said, new RegExp(`^start ${inner}$`, 'm'), `the inner run ran the test:\n${said}`);
+  assert.doesNotMatch(said, /still open at the end of the run/, `the run leaves nothing open:\n${said}`);
+}
+
+/**
+ * A test still running at its deadline holds the run no longer than its deadline, even while an
+ * engine it started runs on through the desktop helper, and the runner says what its servers were
+ * doing: the calls answered, the call still waiting and the server's last stderr lines, then the
+ * slot holders. The run is test/support/deadline-run.ts, whose first test holds a 20 s engine past
+ * a 3 s deadline.
+ */
+async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersWereDoing(): Promise<void> {
+  const ran = await runHidden(process.execPath, [join('test', 'support', 'deadline-run.ts')], {
+    timeout: 120_000,
+    env: withoutTheRunsOwnVariables(),
+  }).then(
     ({ stdout, stderr }) => `${stdout}\n${stderr}`,
     (error: unknown) =>
       assert.fail(
-        `the run of ${inner} failed:\n${isRecord(error) ? `${String(error['stdout'])}\n${String(error['stderr'])}` : String(error)}`,
+        `the deadline run failed:\n${isRecord(error) ? `${String(error['stdout'])}\n${String(error['stderr'])}` : String(error)}`,
       ),
   );
-  assert.doesNotMatch(said, /still open at the end of the run/, `the run leaves nothing open:\n${said}`);
+  const next = Number(/^the next test started (\d+) ms after the first began$/m.exec(ran)?.[1]);
+  assert.ok(next >= 3_000 && next < 8_000, `the next test starts soon after the 3 s deadline:\n${ran}`);
+  assert.match(ran, /^failed: holdsAnEnginePastItsDeadline$/m, ran);
+  assert.match(
+    ran,
+    /^What holdsAnEnginePastItsDeadline was doing at its deadline:\nserver pid \d+: 1 call answered, mean \d+\.\ds; waiting \d+\.\ds on tools\/call resource_edit set_theme_color\n {2}its last stderr lines:\n {4}heard server\/discover\n {4}heard tools\/call\nThe slot directory /m,
+    ran,
+  );
 }
 
 const LONG_LOG_CASES = 60;
@@ -134924,66 +135214,6 @@ function testAnEngineLogDropsTheErrorsBeforeADriverFallback(): void {
   } finally {
     sweep(directory);
   }
-}
-
-/** Runs one test against its deadline, then sweeps the engines and servers it left. */
-async function runOneRegression(test: RegressionCase, run: RegressionRun): Promise<void> {
-  const { failed, ranPast, deadlineMs, budgetMs, runEnds } = run;
-  withTheSuitesOwnSlotVariables();
-  sweepingFor(test.name);
-  // Said before the test runs, since a job that never ends keeps no log and the live page is all
-  // that names the test it was in.
-  console.log(`start ${test.name}`);
-  const endWindow = beginWindow(test.name);
-  let passed = true;
-  const began = Date.now();
-  const allowedMs = Math.min(deadlineMs, runEnds - began);
-  let deadline: NodeJS.Timeout | undefined;
-  const running = Promise.resolve().then(() => test());
-  // A test that settles after its deadline has nobody waiting on it any more.
-  running.catch(() => undefined);
-  try {
-    await Promise.race([
-      running,
-      new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => {
-          ranPast.push(test.name);
-          const took = `${(allowedMs / 1000).toFixed(1)}s after it started`;
-          reject(
-            new Error(
-              allowedMs < deadlineMs
-                ? `${test.name} was still running when the run's ${budgetMs / 1000}s ran out, ${took}`
-                : `${test.name} was still running ${took}`,
-            ),
-          );
-        }, allowedMs);
-      }),
-    ]);
-  } catch (error) {
-    passed = false;
-    failed.push(test.name);
-    console.error(`\n${test.name} failed\n${saidOfAFailure(error)}\n`);
-  } finally {
-    clearTimeout(deadline);
-    endWindow();
-  }
-  // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing,
-  // and so the weights the parts are split by (test/support/shards.ts) can be read off a run.
-  const took = Date.now() - began;
-  if (took >= 5_000) {
-    console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
-  }
-  if (ranPast.includes(test.name)) {
-    // Still running, it never reached its own stops and sweeps.
-    lookUnder(test.name, await stopServersOf(test.name));
-  }
-  if (!passed || leftBehindBy(test.name)) {
-    recordEnginesLeftRunning(await endEnginesLeft(test.name), failed);
-  }
-  // The runner's own process shares one desktop helper across engine runs. It ends after the
-  // sweeps, since a test past its deadline may still be using it, and a test that ended it
-  // itself leaves nothing to end.
-  await retireHelper();
 }
 
 /** Names every failed and unreached test and sets the exit code. */
