@@ -103,6 +103,7 @@ import {
   headlessInAWindow,
   inEngines,
   lanesOf,
+  oneWindowedEngineWhy,
   ProjectScripts,
   peakOf,
   readTimes,
@@ -1215,7 +1216,51 @@ function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: D
           ? `, in the order named${windowedSaid(plans)}`
           : `, shuffled by ${String(options.order)}${windowedSaid(plans)}`;
   const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
-  return `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`;
+  // An ordered run keeps every windowed suite in one engine to keep its order, which it says already.
+  const oneWindowed =
+    options.order === null
+      ? oneWindowedEngineSaid(plans, {
+          asked: options.engines,
+          room,
+          uncapped: dealt(deal.units, declared, room.engines, Number.POSITIVE_INFINITY).filter(
+            (plan) => plan.windowed,
+          ).length,
+        })
+      : '';
+  return `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.${oneWindowed}`;
+}
+
+/**
+ * The sentence the line announcing a run ends on where one windowed engine holds several windowed
+ * suites, naming what held it to one, or '' where it did not. What held it is the first of
+ * [param held]'s `--engines` asked, the engines the machine had room for and what held it, the part
+ * of the work the windowed suites make, which alone deals [param held]'s `uncapped` windowed engines,
+ * and the count of windowed engines on [param platform].
+ */
+export function oneWindowedEngineSaid(
+  plans: readonly EnginePlan[],
+  held: {
+    readonly asked: number;
+    readonly room: { readonly engines: number; readonly held?: string | undefined };
+    readonly uncapped: number;
+  },
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const windowed = plans.filter((plan) => plan.windowed);
+  const suites = new Set(windowed.flatMap((plan) => plan.suites.map((suite) => suite.path))).size;
+  if (windowed.length !== 1 || suites < 2) {
+    return '';
+  }
+  const why =
+    held.asked === 1
+      ? '--engines is 1'
+      : held.room.engines === 1 && held.room.held !== undefined
+        ? held.room.held
+        : held.uncapped === 1
+          ? 'the windowed suites are too small a part of the work to deal out'
+          : oneWindowedEngineWhy(platform, env);
+  return why === null ? '' : ` One engine holds all ${String(suites)} windowed suites, since ${why}.`;
 }
 
 /** Says how the suites were dealt, and which were cut up, kept whole or given a window. */
@@ -1283,6 +1328,8 @@ function sayWhatWasCutUp(deal: Deal, say: (line: string) => void): void {
 interface StartedLanes<P = EnginePlan> {
   readonly lanes: ReadonlyArray<ReadonlyArray<{ readonly plan: P; readonly index: number }>>;
   readonly taken: readonly string[];
+  /** How many of [member taken], from the first, count the memory of a windowed engine. */
+  readonly windowedTaken: number;
   /** Under a slot command, the slots it was asked for up front, whose late grants the lanes take. */
   readonly granted?: AskedLanes;
   /** Whether the engines are handed shares as slots come free, rather than one lane to a slot. */
@@ -1317,11 +1364,17 @@ export function followedAt(file: string, ceiling: number, dealtLanes: number): S
   return ceiling > dealtLanes || dealtLanes > 1 ? { file, ceiling: Math.max(ceiling, dealtLanes) } : null;
 }
 
-/** Takes the slots free now, up to [param most]. */
-async function slotsFreeNow(slots: Pick<EngineSlots, 'takeFree'>, most: number): Promise<string[]> {
+/**
+ * Takes a slot free now for each of [param windowed] in turn, until one is not free, each counting
+ * the memory of a windowed engine where it is true.
+ */
+async function slotsFreeNow(
+  slots: Pick<EngineSlots, 'takeFree'>,
+  windowed: readonly boolean[],
+): Promise<string[]> {
   const taken: string[] = [];
-  while (taken.length < most) {
-    const lock = await slots.takeFree();
+  for (const window of windowed) {
+    const lock = await slots.takeFree(false, undefined, window ? WINDOWED_LANE : undefined);
     if (lock === null) {
       break;
     }
@@ -1337,7 +1390,7 @@ async function slotsFreeNow(slots: Pick<EngineSlots, 'takeFree'>, most: number):
  * lanes left over wait for it as shares are handed out, and one that comes once the work is done is
  * given back.
  */
-export async function takenLanes<P extends { readonly lane: number }>(
+export async function takenLanes<P extends { readonly lane: number; readonly windowed?: boolean }>(
   run: {
     readonly slots: Pick<EngineSlots, 'takeFree' | 'take' | 'release'>;
     readonly ordered: boolean;
@@ -1360,7 +1413,12 @@ export async function takenLanes<P extends { readonly lane: number }>(
     slotCommandOf() !== undefined && !run.ordered && lanes.length > 1
       ? await askedLanes(run.slots, startable)
       : null;
-  const taken: string[] = granted?.taken ?? (await slotsFreeNow(run.slots, startable));
+  // A lane's first engine is its windowed one, where it has one.
+  const windowed = lanes.slice(0, startable).map((lane) => lane[0]?.plan.windowed === true);
+  const taken: string[] = granted?.taken ?? (await slotsFreeNow(run.slots, windowed));
+  // A slot command counts no memory by the slots' folder, so its grants are kept for either kind.
+  const windowedTaken =
+    granted === null ? windowed.slice(0, taken.length).filter(Boolean).length : taken.length;
   if (memoryHeld) {
     say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
   }
@@ -1370,7 +1428,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   if (shared && taken.length < startable) {
     say(sharesSaid(taken.length, startable));
   }
-  return { lanes, taken, shared, follows, ...(granted === null ? {} : { granted }) };
+  return { lanes, taken, windowedTaken, shared, follows, ...(granted === null ? {} : { granted }) };
 }
 
 /** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
@@ -1420,6 +1478,8 @@ async function ranEngines(
                   return said;
                 },
               },
+          undefined,
+          started.windowedTaken,
         )
       : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
           .flat()
@@ -2261,6 +2321,12 @@ async function runLane(
   }
 }
 
+/** The slot a lane of [function runShares] holds, if any, and whether it was taken for a window. */
+interface LaneSlot {
+  lock: string | null;
+  windowed: boolean;
+}
+
 /**
  * Runs [param units] over [param lanes] lanes handed a share at a time (see [class Shares]), the
  * lanes holding the slots in [param taken] at once and the rest as slots come free, and each engine
@@ -2279,6 +2345,10 @@ async function runLane(
  * draw a lane asks the lanes file and the memory gate exactly as it does before a draw for a new
  * engine, and an engine told to stop exits, after which its lane parks as usual. Each share has its
  * own admission, result and peak.
+ *
+ * A slot taken for a windowed share counts the memory a windowed engine holds. The first
+ * [param windowedTaken] slots of [param taken] were taken so. A lane holding a slot taken for a
+ * headless engine gives it back and takes one counted for a window before it draws a windowed share.
  */
 export async function runShares<
   T extends {
@@ -2303,6 +2373,7 @@ export async function runShares<
   memory?: MemoryGate,
   raised?: Pick<FollowedLanes, 'ceiling' | 'past'> & Partial<Pick<FollowedLanes, 'told' | 'untilTold'>>,
   windowedMost?: number,
+  windowedTaken = 0,
 ): Promise<T[]> {
   const shares = new Shares(units, declared, lanes, windowedMost);
   const handedOut = new AbortController();
@@ -2332,7 +2403,7 @@ export async function runShares<
    * + 1, and waits for it to tell more, or for every share to be handed out. A check still waiting
    * for a slot takes one the ordinary way. Answers whether the lane was told to stop.
    */
-  const parkedPastTheLanesTold = async (at: number, held: { lock: string | null }): Promise<boolean> => {
+  const parkedPastTheLanesTold = async (at: number, held: LaneSlot): Promise<boolean> => {
     if (!(await fallenPast(at)) || raised?.untilTold === undefined) {
       return false;
     }
@@ -2350,20 +2421,30 @@ export async function runShares<
    */
   const slotHeld = async (
     at: number,
-    held: { lock: string | null },
+    held: LaneSlot,
   ): Promise<{ readonly lock: string } | 'again' | 'over'> => {
     if (await parkedPastTheLanesTold(at, held)) {
       return empty() ? 'over' : 'again';
     }
-    held.lock ??= await slots.take(
-      handedOut.signal,
-      undefined,
-      undefined,
-      false,
-      undefined,
-      undefined,
-      shares.nextWindowed ? WINDOWED_LANE : undefined,
-    );
+    // A slot taken for a window still counts one once its lane runs headless, which holds back other
+    // engines but never lets more start than the memory budget has room for.
+    const windowed = shares.nextWindowed;
+    if (held.lock !== null && windowed && !held.windowed) {
+      slots.release(held.lock);
+      held.lock = null;
+    }
+    if (held.lock === null) {
+      held.lock = await slots.take(
+        handedOut.signal,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        windowed ? WINDOWED_LANE : undefined,
+      );
+      held.windowed = windowed;
+    }
     const lock = held.lock;
     await handed?.lend(lock);
     return (await fallenPast(at)) ? 'again' : { lock };
@@ -2376,7 +2457,7 @@ export async function runShares<
    */
   const waitedFor = async (
     at: number,
-    held: { lock: string | null },
+    held: LaneSlot,
   ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
     for (;;) {
       const got = await slotHeld(at, held);
@@ -2403,7 +2484,7 @@ export async function runShares<
    */
   const admit = async (
     at: number,
-    held: { lock: string | null },
+    held: LaneSlot,
   ): Promise<{
     readonly lock: string;
     readonly admitted: Admitted | undefined;
@@ -2431,11 +2512,8 @@ export async function runShares<
     return { lock, admitted, ...drawn };
   };
   /** Draws the share for lane [param at], numbering its engine, or answers null once every share is handed out. */
-  const draw = (
-    at: number,
-    headlessOnly = false,
-  ): { readonly plan: EnginePlan; readonly index: number } | null => {
-    const plan = shares.next(at, headlessOnly);
+  const draw = (at: number): { readonly plan: EnginePlan; readonly index: number } | null => {
+    const plan = shares.next(at);
     if (plan === null) {
       return null;
     }
@@ -2475,7 +2553,7 @@ export async function runShares<
         if (empty() || (await fallenPast(at))) {
           return null;
         }
-        return draw(at, true);
+        return draw(at);
       },
       done: noted,
     };
@@ -2488,12 +2566,11 @@ export async function runShares<
       noted(await run(first.plan, first.index, first.lock, first.admitted?.holds, reusable));
       return ran;
     } finally {
-      shares.ended(first.plan);
       first.admitted?.ended();
     }
   };
   const lane = async (at: number): Promise<T[]> => {
-    const held = { lock: taken[at] ?? null };
+    const held: LaneSlot = { lock: taken[at] ?? null, windowed: at < windowedTaken };
     const ran: T[] = [];
     try {
       while (!empty()) {

@@ -2,7 +2,9 @@
  * A suite that needs a window, which sends input through gdUnit4's scene runner and writes what its
  * window and its scene saw. Several of them run at once in separate engines, each waiting at a
  * barrier until every peer has started, so what each engine reports is what it sees while the others
- * draw too.
+ * draw too. The scene runner feeds its input to the engine's own viewport, never through the
+ * operating system, so the input counts show that a suite's simulated input still arrives beside
+ * other windows, not that the windows keep the system's input apart.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

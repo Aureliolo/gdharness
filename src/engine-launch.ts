@@ -40,7 +40,6 @@ import {
   type EngineGuard,
   engineMemory,
   engineNeed,
-  flatNeed,
   gigabytes,
   MEMORY_PER_ENGINE,
   memoryEndedSaid,
@@ -308,7 +307,7 @@ export async function memoryRefusal(
   room: () => Promise<MemoryRoom> = memoryAvailable,
 ): Promise<string | null> {
   const need = engineNeed(readEnginePeaks(project)[tool], ceiling.bytes, tool);
-  if (need.bytes <= flatNeed(tool)) {
+  if (need.bytes <= MEMORY_PER_ENGINE) {
     return null;
   }
   const free = await room();

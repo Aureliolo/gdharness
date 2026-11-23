@@ -1819,9 +1819,10 @@ export class EngineSlots {
    * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them. A
    * one-off take takes the kept slots and as many of the gates' free ones as are spare, however
    * long it has waited. A take but a timing's leaves the free slots the takers ahead of
-   * [param line] take first ({@link SlotLine}). One given no line came last.
+   * [param line] take first ({@link SlotLine}). One given no line came last, and counts the memory
+   * an engine of [param tool] needs.
    */
-  async takeFree(game = false, line?: SlotLine): Promise<string | null> {
+  async takeFree(game = false, line?: SlotLine, tool?: PeakTool): Promise<string | null> {
     if (slotCommandOf() !== undefined) {
       // A command has no free-now answer to give, so only the inherited slot is free.
       return await this.inheritedByOne();
@@ -1854,7 +1855,7 @@ export class EngineSlots {
       taker === 'timing'
         ? { tried: this.drawn.numbers, memory: 0 }
         : await this.leftAfterThoseAhead(line ?? this.lineFor(taker, game), queued);
-    const need = line?.need ?? this.memoryNeeded(game, this.project);
+    const need = line?.need ?? this.memoryNeeded(game, this.project, tool);
     if (await this.shortOfMemory(ahead.tried, need, ahead.memory, line)) {
       return null;
     }

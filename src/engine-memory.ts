@@ -29,7 +29,7 @@ export const MEMORY_PER_ENGINE = 1.5 * GIB;
 export const WINDOWED_MEMORY_PER_ENGINE = 3 * GIB;
 
 /** What an engine of [param tool] is taken to need with no peak kept. */
-export function flatNeed(tool: PeakTool): number {
+function flatNeed(tool: PeakTool): number {
   return tool === 'test_windowed_lane' ? WINDOWED_MEMORY_PER_ENGINE : MEMORY_PER_ENGINE;
 }
 
