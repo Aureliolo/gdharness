@@ -11,7 +11,13 @@ import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
-import { ENDED_SUFFIX, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE, WAITING_FOLDER } from '../../src/engine-slots.js';
+import {
+  ENDED_SUFFIX,
+  SLOT_COUNT_VARIABLE,
+  SLOTS_VARIABLE,
+  slotsDrawnOn,
+  WAITING_FOLDER,
+} from '../../src/engine-slots.js';
 
 /**
  * The variables that tell a process how it takes engine slots, whichever program set them: the
@@ -67,6 +73,19 @@ export function withTheSuitesOwnSlotVariables(): void {
 }
 
 withTheSuitesOwnSlotVariables();
+
+/**
+ * The slot count, as the variable spells it, at which [param games] games editor_run started can
+ * run at once whatever the suite's own count. A game leaves the last kept slot to a short headless
+ * call, so two games need three slots.
+ */
+export function slotCountForGames(games: number): string {
+  let count = 1;
+  while (slotsDrawnOn(count, 'other', 'none', undefined, true).numbers.length < games) {
+    count += 1;
+  }
+  return String(count);
+}
 
 /**
  * What is left in the slot directory [param slots]: every lock, and every wait mark as

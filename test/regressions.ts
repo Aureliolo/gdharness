@@ -980,6 +980,7 @@ import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } fro
 import {
   leftInSlots,
   SLOT_VARIABLES,
+  slotCountForGames,
   suiteSlotCount,
   TEST_ENGINES_VARIABLE,
   withTheSuitesOwnSlotVariables,
@@ -23386,6 +23387,8 @@ function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
     assert.equal(suiteSlotCount(none, 32), 4, `${String(none)} sets no cap: the suite most`);
     assert.equal(suiteSlotCount(none, 2), 2, `${String(none)} sets no cap: the processors`);
   }
+  assert.equal(slotCountForGames(1), '1', 'one game takes the only slot of a machine of one');
+  assert.equal(slotCountForGames(2), '3', 'two games leave a third slot to a short call');
   const slotCountIn = (counted: string | undefined, machineCount = '12'): number => {
     const env: NodeJS.ProcessEnv = { ...process.env, [SLOT_COUNT_VARIABLE]: machineCount };
     delete env[TEST_ENGINES_VARIABLE];
@@ -28503,7 +28506,12 @@ async function testAStopByNumberReachesAnotherProjectsGameWithNoEditor(): Promis
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-'));
   const own = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-own-'));
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-runtime-'));
-  const shared = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtime };
+  // Each project's game is up at once.
+  const shared = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtime,
+    [SLOT_COUNT_VARIABLE]: slotCountForGames(2),
+  };
   const first = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: project } });
   let second: ServerProcess | null = null;
   const met = new MetProcesses();
@@ -37160,7 +37168,14 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       'run/main_scene="res://main.tscn"\n',
   );
   writeFileSync(join(elsewhere, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-  const server = new ServerProcess({ env: { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir } });
+  // The other project's game starts while this one's is up.
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      [SLOT_COUNT_VARIABLE]: slotCountForGames(2),
+    },
+  });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
   try {
@@ -55353,8 +55368,8 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
           `the run is tied to the game the editor played, not the one naming another editor: ${JSON.stringify(output)}`,
         );
       },
-      // The first round's game is still up when the second starts, and each takes a slot.
-      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: '3' } },
+      // The first round's game is still up when the second starts.
+      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: slotCountForGames(2) } },
     );
   } finally {
     for (const game of games) {
@@ -129820,7 +129835,8 @@ async function withAnEditorOfAnotherProject(
         engine: godotPath,
         ...(options.playsWindowed === true ? { playsWindowed: true } : {}),
         ...(slotFolder === null
-          ? {}
+          ? // The other project's game runs beside the editor's.
+            { env: { [SLOT_COUNT_VARIABLE]: slotCountForGames(2) } }
           : {
               env: {
                 GODOT_ENGINE_SLOTS: slotFolder,
