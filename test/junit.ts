@@ -1662,8 +1662,9 @@ function testASkipReasonEndingTheOutputIsReadWhole(): void {
 }
 
 /**
- * A skip reason the output ends in before its closing quote is listed as far as it was printed, and
- * gdharness test says it was cut off. The case is not counted as ran.
+ * A skip reason the output ends in before its closing quote is listed by its first line, and
+ * gdharness test says it was cut off. The lines after it are read as any others, so an error the
+ * engine printed last is still found. The case is not counted as ran.
  */
 function testASkipReasonTheOutputCutOffIsSaidToBeCut(): void {
   const printed = readRun(
@@ -1675,11 +1676,16 @@ function testASkipReasonTheOutputCutOffIsSaidToBeCut(): void {
       '  This test is skipped!',
       "  Reason: 'line one",
       'line tw',
+      'ERROR: the engine stopped here',
     ].join('\n'),
   );
-  assert.deepEqual(printed.skipped, [
-    { suite: REASONS_SUITE, name: 'test_cut', reason: 'line one\nline tw', cases: 1, cut: true },
-  ]);
+  assert.deepEqual(
+    [printed.skipped, printed.errors.map((one) => one.text)],
+    [
+      [{ suite: REASONS_SUITE, name: 'test_cut', reason: 'line one', cases: 1, cut: true }],
+      ['the engine stopped here'],
+    ],
+  );
   assert.equal(casesRan(printed), 0);
   assert.deepEqual(
     judgeEngine(
@@ -1689,8 +1695,9 @@ function testASkipReasonTheOutputCutOffIsSaidToBeCut(): void {
     ).faults,
     [
       'the run never printed its summary',
-      `${REASONS_SUITE} > test_cut never ran: gdUnit4 skipped it, saying "line one\nline tw" before the reason was cut off`,
+      `${REASONS_SUITE} > test_cut never ran: gdUnit4 skipped it, saying "line one" before the reason was cut off`,
       `${REASONS_SUITE} never finished`,
+      `an engine error in ${REASONS_SUITE} > after: the engine stopped here. If the suite prints it on purpose, list its text under "after" in the suite's GDHARNESS_EXPECTED_ERRORS`,
     ],
   );
 }
@@ -1805,10 +1812,7 @@ function testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd(): void {
   );
   assert.deepEqual(
     [printed.skipped, printed.errors.map((one) => [one.suite, one.during, one.text])],
-    [
-      [{ suite: REASONS_SUITE, name: 'test_last', reason: 'last', cases: 1 }],
-      [[next, 'before', missing]],
-    ],
+    [[{ suite: REASONS_SUITE, name: 'test_last', reason: 'last', cases: 1 }], [[next, 'before', missing]]],
     'the next suite',
   );
 }
