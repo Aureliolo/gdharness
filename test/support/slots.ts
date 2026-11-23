@@ -88,6 +88,14 @@ export function slotCountForGames(games: number): string {
 }
 
 /**
+ * The slot count, as the variable spells it, at which a run can hold [param engines] engines at once:
+ * [param suiteCount], the suite's own count, raised to [param engines] where a cap holds it lower.
+ */
+export function slotCountForEngines(engines: number, suiteCount = process.env[SLOT_COUNT_VARIABLE]): string {
+  return String(Math.max(engines, Number(suiteCount) || 0));
+}
+
+/**
  * What is left in the slot directory [param slots]: every lock, and every wait mark as
  * `waiting/<name>`. The folder of marks stays once a wait has made it, and so does the note each
  * ended wait leaves, which holds nothing. A run that gave back everything leaves an empty list.

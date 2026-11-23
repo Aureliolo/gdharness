@@ -980,6 +980,7 @@ import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } fro
 import {
   leftInSlots,
   SLOT_VARIABLES,
+  slotCountForEngines,
   slotCountForGames,
   suiteSlotCount,
   TEST_ENGINES_VARIABLE,
@@ -23389,6 +23390,8 @@ function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
   }
   assert.equal(slotCountForGames(1), '1', 'one game takes the only slot of a machine of one');
   assert.equal(slotCountForGames(2), '3', 'two games leave a third slot to a short call');
+  assert.equal(slotCountForEngines(2, '1'), '2', 'a run of two engines is given two under a cap of 1');
+  assert.equal(slotCountForEngines(2, '4'), '4', 'and the suite count where that is higher');
   const slotCountIn = (counted: string | undefined, machineCount = '12'): number => {
     const env: NodeJS.ProcessEnv = { ...process.env, [SLOT_COUNT_VARIABLE]: machineCount };
     delete env[TEST_ENGINES_VARIABLE];
@@ -23444,19 +23447,29 @@ async function testAHelperIsCompiledOnceForEveryDirectoryThatAsksForIt(): Promis
     assert.deepEqual(readFileSync(helper.assembly(second)), compiled, 'from the cache, compiled once');
     assert.deepEqual(readdirSync(second), [basename(helper.assembly(second))], 'with nothing left beside it');
 
-    // A cached assembly that is not the one compiled there is never handed on: the directory
-    // compiles its own, and that one replaces the cache's.
-    for (const [damage, bad] of [
-      ['junk', Buffer.from('not an assembly')],
-      ['truncated', compiled.subarray(0, compiled.length >> 1)],
+    // A cached assembly that is not the one compiled there, or has no digest beside it, is never
+    // handed on: the directory compiles its own, and that one replaces the cache's.
+    const digestFile = `${stored}.sha256`;
+    for (const [damage, bad, undigested] of [
+      ['junk', Buffer.from('not an assembly'), false],
+      ['truncated', compiled.subarray(0, compiled.length >> 1), false],
+      ['undigested', Buffer.from('not an assembly either'), true],
     ] as const) {
       writeFileSync(stored, bad);
+      if (undigested) {
+        rmSync(digestFile);
+      }
       const asked = directory(damage);
       assert.equal(await helper.ensure(asked), null, `a ${damage} cached assembly does not fail the caller`);
       const own = readFileSync(helper.assembly(asked));
       assert.equal(own.subarray(0, 2).toString('latin1'), 'MZ', `the ${damage} case compiles an assembly`);
       assert.notDeepEqual(own, compiled, `of its own, for the ${damage} case`);
       assert.deepEqual(readFileSync(stored), own, `which replaces the ${damage} one in the cache`);
+      assert.equal(
+        readFileSync(digestFile, 'utf8').trim(),
+        createHash('sha256').update(own).digest('hex'),
+        `with its digest beside it, for the ${damage} case`,
+      );
       const after = directory(`${damage}-after`);
       assert.equal(await helper.ensure(after), null);
       assert.deepEqual(readFileSync(helper.assembly(after)), own, `and is handed on after the ${damage} one`);
@@ -90975,15 +90988,28 @@ function commandTestProject(
   writeTree(project, commandTestTree());
   cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
   const env = { ...process.env, GODOT_PATH: godotPath };
-  const test = (...args: string[]): { said: string; status: number | null } => {
+  return { project, slots, checkouts, env, test: dealingTestCommand(project, slots, env) };
+}
+
+/**
+ * The test command run on [param project] with the slot directory [param slots], for a regression
+ * of how a run deals its work out over two engines at once: it gets two slots whatever the suite's
+ * own count.
+ */
+function dealingTestCommand(
+  project: string,
+  slots: string,
+  env: NodeJS.ProcessEnv,
+): (...args: string[]) => { said: string; status: number | null } {
+  const twoSlotEnv = { ...env, [SLOT_COUNT_VARIABLE]: slotCountForEngines(2) };
+  return (...args) => {
     const ran = spawnSyncHidden(
       process.execPath,
       ['build/cli.js', 'test', project, '--slots', slots, ...args],
-      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      { encoding: 'utf8', env: twoSlotEnv, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
     );
     return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
   };
-  return { project, slots, checkouts, env, test };
 }
 
 /** Godot and gdUnit4 for the test command's regressions, or null when either is missing. */
@@ -94660,18 +94686,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       'tests/matrix_test.gd': matrix(6),
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-    const test = (...args: string[]): { said: string; status: number | null } => {
-      const ran = spawnSyncHidden(
-        process.execPath,
-        ['build/cli.js', 'test', project, '--slots', slots, ...args],
-        {
-          encoding: 'utf8',
-          env: { ...process.env, GODOT_PATH: godotPath },
-          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
-        },
-      );
-      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
-    };
+    const test = dealingTestCommand(project, slots, { ...process.env, GODOT_PATH: godotPath });
     const timesFile = join(project, '.godot', 'gdharness', 'suite-times.json');
     const rowsTimed = (): number | undefined => timesWritten(timesFile)[path]?.rows?.['test_face']?.length;
     const first = test('--import', '--engines', '1');
@@ -94870,18 +94885,7 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
       'tests/bare_test.gd': suite('SharedShellSuite'),
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-    const test = (...args: string[]): { said: string; status: number | null } => {
-      const ran = spawnSyncHidden(
-        process.execPath,
-        ['build/cli.js', 'test', project, '--slots', slots, ...args],
-        {
-          encoding: 'utf8',
-          env: { ...process.env, GODOT_PATH: godotPath },
-          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
-        },
-      );
-      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
-    };
+    const test = dealingTestCommand(project, slots, { ...process.env, GODOT_PATH: godotPath });
     // Every case of every suite, a parameterised one a row, each as the suite running it says.
     const inherited = ['test_base_a', 'test_base_b', 'test_base_rows/1', 'test_base_rows/2', 'test_shell_a'];
     const expected = [
