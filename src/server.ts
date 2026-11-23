@@ -5822,8 +5822,11 @@ interface TestAnswer extends TestErrorsJudged {
   declaredAs: string;
   rowsMismatched: { test: string; reason: string }[];
   casesUnrunnable: { test: string; reason: string }[];
-  /** The cases, rows and suites skipped with do_skip, and how many cases never ran for it. */
-  casesSkipped: { test: string; reason: string; cases?: number }[];
+  /**
+   * The cases, rows and suites skipped with do_skip, how many cases never ran for it, and `cut` where
+   * the reason was cut off.
+   */
+  casesSkipped: { test: string; reason: string; cases?: number; cut?: true }[];
   engineEntriesShown: ReturnType<typeof foldedRepeats>;
 }
 
@@ -11490,11 +11493,12 @@ export class GodotServer {
       casePrinted.skipped.filter((one) => one.name === null).map((one) => one.suite),
     );
     const casesSkipped = [
-      ...casePrinted.skipped.map((one) =>
-        one.name === null
+      ...casePrinted.skipped.map((one) => ({
+        ...(one.name === null
           ? { test: one.suite, reason: one.reason, cases: one.cases }
-          : { test: `${one.suite} > ${one.name}`, reason: one.reason },
-      ),
+          : { test: `${one.suite} > ${one.name}`, reason: one.reason }),
+        ...(one.cut === true ? { cut: one.cut } : {}),
+      })),
       ...skippedInReport(report)
         .filter((one) => !consoleSkipped.has(`${one.suite} > ${one.name}`) && !skippedWhole.has(one.suite))
         .map((one) => ({ test: `${one.suite} > ${one.name}`, reason: one.reason })),
