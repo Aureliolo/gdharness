@@ -5,6 +5,7 @@ import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { callProgress, commitCallAsSent } from './call-signal.js';
 import { errorCode, errorMessage, Refusal, toError } from './errors.js';
+import { EDITOR_CALLS } from './headless-operations.js';
 import { idleClosed } from './idle-close.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory } from './paths.js';
@@ -489,6 +490,42 @@ function quitUnused(gone: GodotConnectionInfo | null): boolean {
  */
 const ASKED_OF_ANY_RELEASE: ReadonlySet<string> = new Set(['quit_editor', 'restart_editor']);
 
+/**
+ * The addon's commands that only read what the editor or the project holds, so a call that sent one
+ * and was stopped before its answer has changed nothing. Every other command may change either.
+ */
+const ONLY_READS: ReadonlySet<string> = new Set([
+  ...Object.values(EDITOR_CALLS)
+    .flatMap((ops) => Object.values(ops))
+    .filter(([, effect]) => effect === 'reads')
+    .map(([command]) => command),
+  'scan_status',
+  'playing_status',
+  'global_classes',
+  'scripts_behind',
+  'get_project_setting',
+  'list_scene_nodes',
+  'read_resource',
+  'read_animations',
+  'read_animation_states',
+  'profile_read',
+]);
+
+/**
+ * Whether the editor may change itself or the project on [param toolName] with [param args]. The
+ * rescan only reports on a scan when asked for its status, and editor_servers only reads its log
+ * unless asked to rebind the debug adapter.
+ */
+export function editorMayChangeOn(toolName: string, args: Record<string, unknown>): boolean {
+  if (toolName === 'rescan_filesystem') {
+    return args['statusOnly'] !== true;
+  }
+  if (toolName === 'editor_servers') {
+    return args['rebind'] !== undefined && args['rebind'] !== false;
+  }
+  return !ONLY_READS.has(toolName);
+}
+
 /** The editor turned a tool away unrun because it was busy with [param doing]. */
 class EditorBusy extends Error {
   readonly doing: string;
@@ -733,7 +770,6 @@ export class GodotBridge extends EventEmitter {
       const httpServer = this.httpServer;
       closeTasks.push(this.portLetGo ?? this.closeServer(httpServer));
       this.httpServer = null;
-      this.portLetGo = null;
     }
 
     await Promise.all(closeTasks);
@@ -1086,7 +1122,7 @@ export class GodotBridge extends EventEmitter {
     };
 
     // Once sent, the editor may carry the request out whatever becomes of the call.
-    commitCallAsSent();
+    commitCallAsSent(editorMayChangeOn(toolName, args));
     const startedAt = Date.now();
     const reply = this.pending.wait(requestId, waitMs, () => new BridgeTimeout(toolName, waitMs), {
       tool: toolName,
