@@ -38,9 +38,9 @@ export interface KeeperListening {
  * reach and ends the run by its pid instead. Caught here because a throw from inside the listener
  * ends the keeper, and the game it holds would run on held by nobody.
  */
-function endedOrWhyNot(end: () => KeeperAnswer): string {
+async function endedOrWhyNot(end: () => KeeperAnswer | Promise<KeeperAnswer>): Promise<string> {
   try {
-    return end();
+    return await end();
   } catch (error) {
     return `could not end it: ${errorText(error)}`;
   }
@@ -75,7 +75,7 @@ function errorText(error: unknown): string {
  * it makes without a keeper.
  */
 export async function listenForTheServer(
-  end: () => KeeperAnswer,
+  end: () => KeeperAnswer | Promise<KeeperAnswer>,
   debug: ((request: DebugRequest) => Promise<DebugAnswer>) | null,
 ): Promise<KeeperListening | null> {
   let directory: string | null = null;
@@ -98,7 +98,9 @@ export async function listenForTheServer(
         }
         answering = true;
         if (line === 'stop') {
-          socket.end(`${endedOrWhyNot(end)}\n`);
+          void endedOrWhyNot(end).then((answer) => {
+            socket.end(`${answer}\n`);
+          });
         } else if (line.startsWith(DEBUG_PREFIX)) {
           void debuggedOrWhyNot(debug, line.slice(DEBUG_PREFIX.length)).then((answer) => {
             socket.end(`${answer}\n`);

@@ -894,7 +894,9 @@ public static class GdharnessDesktop {
 
   // Starts the command line, both of its streams on this process's output, writes its pid, and
   // waits for it: the answer is its exit code, also written whole to exitFile, since Bun hands a
-  // parent on Windows only the low byte of a code. On the named desktop when there is one, whose handle
+  // parent on Windows only the low byte of a code. The code there is followed by " stopped" when
+  // this process ended it, since TerminateProcess leaves a code a process can exit with by itself.
+  // On the named desktop when there is one, whose handle
   // is held until then, since a desktop goes when the last handle to it does, and on this process's
   // own otherwise. With noActivate its first window is shown without being activated, which is
   // what a program's first ShowWindow does whatever it asks for when the start names a show state,
@@ -1214,7 +1216,7 @@ public static class GdharnessDesktop {
       // A file that cannot be written leaves the parent the code this exits with, which says less
       // but still says it.
       try {
-        WriteText(exitFile, code.ToString());
+        WriteText(exitFile, code.ToString() + (stopped ? " stopped" : ""));
       } catch (IOException) {
       } catch (Win32Exception) {
       }
@@ -1404,7 +1406,7 @@ export interface HelperFiles {
   readonly stop: string;
   /** The step the helper last reached, which a start that waited in vain reads with `helperStep`. */
   readonly step: string;
-  /** The process's exit code as the helper read it, whole, which `helperExit` reads. */
+  /** The process's exit code as the helper read it, whole, which `helperExit` reads, and `helperStopped` whether the helper ended it. */
   readonly exit: string;
 }
 
@@ -1421,7 +1423,7 @@ export function helperExit(exitFile: string, told: number | null): number | null
   }
   let written: number;
   try {
-    written = Number(readFileSync(exitFile, 'utf8').trim());
+    written = Number(readFileSync(exitFile, 'utf8').trim().split(' ')[0]);
   } catch {
     return told;
   }
@@ -1430,6 +1432,18 @@ export function helperExit(exitFile: string, told: number | null): number | null
   }
   // Node hands the whole code and Bun its low byte, so only the low bytes are compared.
   return (written & 0xff) === (told & 0xff) ? written : told;
+}
+
+/**
+ * Whether the helper behind [param exitFile] ended its process itself, which its exit code cannot
+ * say: TerminateProcess leaves 1, and a game can exit 1 by itself as the stop arrives.
+ */
+export function helperStopped(exitFile: string): boolean {
+  try {
+    return readFileSync(exitFile, 'utf8').trim().endsWith(' stopped');
+  } catch {
+    return false;
+  }
 }
 
 /**

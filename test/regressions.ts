@@ -71,6 +71,7 @@ import {
   callProgress,
   callSignal,
   commitCall,
+  commitCallAsSent,
   newCallNotes,
   type SlotWaits,
   stillGoingSaid,
@@ -134,6 +135,7 @@ import {
   helperExit,
   helperFailure,
   helperStep,
+  helperStopped,
   helperPid as pidTheHelperWrote,
   retireHelper,
   spawnOnDesktop,
@@ -23583,10 +23585,14 @@ async function testADesktopStartIsOneCall(): Promise<void> {
     assert.ok((await failed) instanceof Error, 'a helper that is not there ends the child in an error');
 
     const keeper = readFileSync(join('src', 'keeper.ts'), 'utf8');
-    assert.equal(keeper.split('endingTheGame(child, stopFile)').length - 1, 1, 'the keeper makes one ender');
+    assert.equal(
+      keeper.split('endingTheGame(child, stopFile, exitFile, exited)').length - 1,
+      1,
+      'the keeper makes one ender',
+    );
     assert.ok(
-      keeper.includes("child.kill() ? 'signalled' : 'gone'"),
-      'which answers whether anything was signalled',
+      keeper.includes("if (!child.kill()) {\n      return 'gone';"),
+      'which answers gone when nothing was signalled',
     );
 
     if (process.platform !== 'win32') {
@@ -79578,85 +79584,278 @@ async function testAReplacedServerWaitingOnASentCallLetsGoOfItsPortAtOnce(): Pro
 }
 
 /**
- * A game that exits by itself just as a stop is sent keeps its own exit in the run's record, and a
- * run the stop ended is recorded as ended by SIGTERM with no exit code: SIGTERM itself, an exit
- * never told, or on Windows the code 1 TerminateProcess leaves.
+ * A game that exits by itself just as a stop is sent keeps its own exit in the run's record, its
+ * code 1 included, and a run the stop ended is recorded as ended by SIGTERM with no exit code: one
+ * the helper or the keeper ended, SIGTERM itself, or an exit never told.
  */
 function testAGameThatExitsByItselfAsAStopArrivesKeepsItsOwnExit(): void {
   const stopsEnd = { exitCode: null, exitSignal: 'SIGTERM', notTold: false };
-  const cases: [string, RunExit, boolean, NodeJS.Platform, ReturnType<typeof endOfTheRun>][] = [
+  const own = (code: number): ReturnType<typeof endOfTheRun> => ({
+    exitCode: code,
+    exitSignal: null,
+    notTold: false,
+  });
+  const cases: [string, RunExit, boolean, ReturnType<typeof endOfTheRun>][] = [
     [
-      'exited 3 as the stop arrived, Windows',
-      { code: 3, signal: null, notTold: false },
+      'exited 3 as the stop arrived',
+      { code: 3, signal: null, notTold: false, endedHere: false },
       true,
-      'win32',
-      {
-        exitCode: 3,
-        exitSignal: null,
-        notTold: false,
-      },
+      own(3),
     ],
     [
-      'exited 3 as the stop arrived, Linux',
-      { code: 3, signal: null, notTold: false },
+      'exited 1 as the stop arrived',
+      { code: 1, signal: null, notTold: false, endedHere: false },
       true,
-      'linux',
-      {
-        exitCode: 3,
-        exitSignal: null,
-        notTold: false,
-      },
-    ],
-    [
-      'exited 1 as the stop arrived, Linux',
-      { code: 1, signal: null, notTold: false },
-      true,
-      'linux',
-      {
-        exitCode: 1,
-        exitSignal: null,
-        notTold: false,
-      },
+      own(1),
     ],
     [
       'crashed as the stop arrived',
-      { code: null, signal: 'SIGSEGV', notTold: false },
+      { code: null, signal: 'SIGSEGV', notTold: false, endedHere: false },
       true,
-      'linux',
-      {
-        exitCode: null,
-        exitSignal: 'SIGSEGV',
-        notTold: false,
-      },
+      { exitCode: null, exitSignal: 'SIGSEGV', notTold: false },
     ],
-    ['ended by the stop, Windows', { code: 1, signal: null, notTold: false }, true, 'win32', stopsEnd],
-    ['ended by the stop, Linux', { code: null, signal: 'SIGTERM', notTold: false }, true, 'linux', stopsEnd],
-    ['ended by the stop, never told', { code: null, signal: null, notTold: true }, true, 'win32', stopsEnd],
+    ['ended by the helper', { code: 1, signal: null, notTold: false, endedHere: true }, true, stopsEnd],
+    ['ended by SIGTERM', { code: null, signal: 'SIGTERM', notTold: false, endedHere: false }, true, stopsEnd],
     [
-      'exited 1 with no stop, Windows',
-      { code: 1, signal: null, notTold: false },
-      false,
-      'win32',
-      {
-        exitCode: 1,
-        exitSignal: null,
-        notTold: false,
-      },
+      'ended by the stop, never told',
+      { code: null, signal: null, notTold: true, endedHere: false },
+      true,
+      stopsEnd,
     ],
+    [
+      'ended by the helper with no stop',
+      { code: 1, signal: null, notTold: false, endedHere: true },
+      false,
+      own(1),
+    ],
+    ['exited 1 with no stop', { code: 1, signal: null, notTold: false, endedHere: false }, false, own(1)],
     [
       'never told, no stop',
-      { code: null, signal: null, notTold: true },
+      { code: null, signal: null, notTold: true, endedHere: false },
       false,
-      'linux',
-      {
-        exitCode: null,
-        exitSignal: null,
-        notTold: true,
-      },
+      { exitCode: null, exitSignal: null, notTold: true },
     ],
   ];
-  for (const [label, exit, stopped, platform, recorded] of cases) {
-    assert.deepEqual(endOfTheRun(exit, stopped, platform), recorded, label);
+  for (const [label, exit, stopped, recorded] of cases) {
+    assert.deepEqual(endOfTheRun(exit, stopped), recorded, label);
+  }
+}
+
+/**
+ * A real keeper asked to stop a game that exits 1 by itself as the stop arrives answers `gone`, and
+ * the run's record keeps the 1. A stop that did end the game is answered `signalled` and recorded as
+ * ended by SIGTERM. The game exits on a file written just before the stop, so most rounds see it go
+ * by itself, and rounds go on until one has.
+ */
+async function testAKeeperAnswersAGameThatExitsByItselfAsTheStopArrivesAsGone(): Promise<void> {
+  const seen: string[] = [];
+  const exitedByItself = (): boolean => seen.some((one) => one.startsWith('"gone"'));
+  for (let round = 0; round < 8 && !exitedByItself(); round++) {
+    const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-exits-itself-'));
+    const pids: number[] = [];
+    try {
+      const game = join(folder, 'game.ts');
+      writeFileSync(
+        game,
+        [
+          "import { existsSync } from 'node:fs';",
+          "import { join } from 'node:path';",
+          "const go = join(process.argv[2] ?? '.', 'go');",
+          'setInterval(() => {',
+          '  if (existsSync(go)) {',
+          '    process.exit(1);',
+          '  }',
+          '}, 2);',
+          'setTimeout(() => process.exit(0), 60_000);',
+          '',
+        ].join('\n'),
+      );
+      const launched = await launchOutsideTheTree(
+        {
+          command: process.execPath,
+          args: [game, folder],
+          run: {
+            transcript: join(folder, 'transcript.log'),
+            startedAt: Date.now(),
+            projectPath: folder,
+            debugged: false,
+          },
+        },
+        process.execPath,
+        resolve('build', 'keeper.js'),
+      );
+      assert.ok('pid' in launched, JSON.stringify(launched));
+      assert.ok(launched.keeperPid !== undefined, 'a keeper holds the game');
+      pids.push(launched.pid, launched.keeperPid);
+      const address = await answeredWithin(() => {
+        const named = readRunRecord(folder)?.keeper;
+        return named === undefined || named === '' ? undefined : named;
+      }, 20_000);
+      assert.ok(address !== undefined, 'the note names the keeper');
+      await delay(300);
+      writeFileSync(join(folder, 'go'), '');
+      const answer = await askTheKeeperToStop(address, 10_000);
+      const ended = await answeredWithin(() => {
+        const note = readRunRecord(folder);
+        return note?.endedAt === undefined ? undefined : note;
+      }, 20_000);
+      const end = [ended?.exitCode ?? null, ended?.exitSignal ?? null];
+      seen.push(`${JSON.stringify(answer)} ${JSON.stringify(end)}`);
+      assert.deepEqual(
+        end,
+        answer === 'signalled' ? [null, 'SIGTERM'] : [1, null],
+        `the record agrees with the answer, rounds ${seen.join(', ')}`,
+      );
+    } finally {
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
+      }
+      await delay(300);
+      sweep(folder);
+    }
+  }
+  assert.ok(
+    exitedByItself(),
+    `a game that exits by itself as the stop arrives is answered gone: ${seen.join(', ')}`,
+  );
+}
+
+/**
+ * A stop asked as the keeper looks for the process a game restarted into is answered `gone`, since
+ * nothing runs then, and ends the successor once it is found. The run's record says the stop ended
+ * it, and not the exit code 1 the successor's end leaves on Windows.
+ */
+async function testAStopWhileTheKeeperLooksForARestartEndsTheRun(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stop during a restart regression skipped (Godot not found)');
+    return;
+  }
+  const answers: unknown[] = [];
+  for (const afterMs of [0, 300]) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-stop-'));
+    const pids: number[] = [];
+    try {
+      writeTheGameThatRestartsItself(project);
+      const launched = await launchOutsideTheTree(
+        {
+          command: godotPath,
+          args: ['--headless', '--path', project],
+          run: {
+            transcript: join(project, 'transcript.log'),
+            startedAt: Date.now(),
+            projectPath: project,
+            debugged: false,
+          },
+        },
+        process.execPath,
+        resolve('build', 'keeper.js'),
+      );
+      assert.ok('pid' in launched, JSON.stringify(launched));
+      pids.push(launched.pid, launched.keeperPid ?? 0);
+      const address = await answeredWithin(() => {
+        const named = readRunRecord(project)?.keeper;
+        return named === undefined || named === '' ? undefined : named;
+      }, 30_000);
+      assert.ok(address !== undefined, 'the note names the keeper');
+      assert.ok(await untilTrue(() => !alive(launched.pid), 30_000), 'the first process restarts');
+      await delay(afterMs);
+      const answer = await askTheKeeperToStop(address, 10_000);
+      answers.push(answer);
+      const ended = await answeredWithin(() => {
+        const note = readRunRecord(project);
+        return note?.endedAt === undefined ? undefined : note;
+      }, 40_000);
+      if (ended?.pid !== undefined) {
+        pids.push(ended.pid);
+      }
+      assert.deepEqual(
+        [answer === 'gone' || answer === 'signalled', ended?.restartedFrom?.[0]?.pid],
+        [true, launched.pid],
+        `the successor is followed, ${afterMs} ms after the first went: ${JSON.stringify([answer, ended])}`,
+      );
+      assert.deepEqual(
+        [ended !== undefined && 'exitCode' in ended, ended?.exitSignal],
+        [false, 'SIGTERM'],
+        `the record says the stop ended the run, ${afterMs} ms after the first went: ${JSON.stringify(ended)}`,
+      );
+    } finally {
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
+      }
+      await retireHelper();
+      await delay(500);
+      sweep(project);
+    }
+  }
+  assert.ok(answers.includes('gone'), `a stop came as the keeper looked: ${JSON.stringify(answers)}`);
+}
+
+/**
+ * A call told to stop is refused every request to the editor, a read included, and a call that marks
+ * its own point is refused too. A call not told is never refused, and only a request that may change
+ * something commits it, unless it marks its own point.
+ */
+async function testACallToldToStopIsRefusedEveryRequestToTheEditor(): Promise<void> {
+  const sends = async (commit: CallCommit, changes: boolean): Promise<boolean> =>
+    await withCallSignal(
+      undefined,
+      () => {
+        try {
+          commitCallAsSent(changes);
+          return Promise.resolve(true);
+        } catch (error) {
+          assert.equal(get(error, 'name'), 'AbortError', 'a refusal is an abort');
+          return Promise.resolve(false);
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      commit,
+    );
+  const cases: [string, CallCommit, boolean, [boolean, boolean]][] = [
+    ['a read of a call told to stop', { committed: false, refused: true }, false, [false, false]],
+    ['a change of a call told to stop', { committed: false, refused: true }, true, [false, false]],
+    [
+      'a read of a call told to stop that marks its own point',
+      { committed: false, refused: true, marksItsOwnPoint: true },
+      false,
+      [false, false],
+    ],
+    [
+      'a change of a call told to stop that marks its own point',
+      { committed: false, refused: true, marksItsOwnPoint: true },
+      true,
+      [false, false],
+    ],
+    ['a read of an open call', { committed: false, refused: false }, false, [true, false]],
+    ['a change of an open call', { committed: false, refused: false }, true, [true, true]],
+    [
+      'a change of an open call that marks its own point',
+      { committed: false, refused: false, marksItsOwnPoint: true },
+      true,
+      [true, false],
+    ],
+  ];
+  for (const [label, commit, changes, expected] of cases) {
+    assert.deepEqual(
+      [await sends(commit, changes), commit.committed],
+      expected,
+      `${label}: [sent, committed]`,
+    );
   }
 }
 
@@ -92845,6 +93044,15 @@ async function testAnEngineCrashIsToldByItsWholeExitCode(): Promise<void> {
     assert.equal(helperExit(written, 3), 3, 'a code with another low byte is not the one written');
     assert.equal(helperExit(written, null), null, 'nor is an end without a code');
     assert.equal(helperExit(join(scratch, 'none'), 5), 5, 'a code never written leaves the told one');
+    assert.equal(helperStopped(written), false, 'a code alone is an exit the helper did not make');
+    writeFileSync(written, '3221225477 stopped');
+    assert.equal(
+      helperExit(written, 5),
+      0xc0000005,
+      'the code is read before the mark of a process the helper ended',
+    );
+    assert.equal(helperStopped(written), true, 'and the mark says the helper ended it');
+    assert.equal(helperStopped(join(scratch, 'none')), false, 'as no file never does');
     writeFileSync(written, 'not a code');
     assert.equal(helperExit(written, 5), 5, 'and so does a file holding no code');
     if (process.platform !== 'win32') {
@@ -133997,6 +134205,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOnlyAnEditorCommandThatReadsLeavesACallFreeToBeAskedAgain,
   testAReplacedServerWaitingOnASentCallLetsGoOfItsPortAtOnce,
   testAGameThatExitsByItselfAsAStopArrivesKeepsItsOwnExit,
+  testAKeeperAnswersAGameThatExitsByItselfAsTheStopArrivesAsGone,
+  testAStopWhileTheKeeperLooksForARestartEndsTheRun,
+  testACallToldToStopIsRefusedEveryRequestToTheEditor,
   testAGamesKeeperRaisesTheSlotItHolds,
   testARaiseNotWrittenIsAskedAgain,
   testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,

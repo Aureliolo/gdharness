@@ -25,6 +25,7 @@ import {
   helperExit,
   helperFailure,
   helperStep,
+  helperStopped,
   spawnOnDesktop,
 } from './desktop.js';
 import { ceilingFor, MemoryWatch } from './engine-memory.js';
@@ -409,10 +410,15 @@ type Followed = NonNullable<Awaited<ReturnType<typeof followSuccessor>>>;
  */
 interface Ender {
   stop: boolean;
-  /** Whether a stop was sent to the game while it was taken for live, which its exit may yet belie. */
+  /** Whether a stop was answered `signalled`, which a game still running then may yet belie by its exit. */
   reached: boolean;
-  end: () => 'signalled' | 'gone';
+  end: () => KeeperAnswer | Promise<KeeperAnswer>;
+  /** Settled once the stop asked of the game has been answered, which sets [member reached]. */
+  answered: Promise<unknown>;
 }
+
+/** What a stop is answered: the game ended by it, or found gone or going by itself. */
+type KeeperAnswer = 'signalled' | 'gone';
 
 /** How the game stands after each exit that is followed, from the first process to the last. */
 interface KeptEnd {
@@ -421,6 +427,8 @@ interface KeptEnd {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly notTold: boolean;
+  /** Whether the helper or this process ended it, as `RunExit` says. */
+  readonly endedHere: boolean;
   readonly exitedAt: number;
 }
 
@@ -576,14 +584,36 @@ function startingNote(
   };
 }
 
-/** Ends the game through the helper's stop file where there is one, and through the child's handle otherwise. */
-function endingTheGame(child: ChildProcess, stopFile: string): () => 'signalled' | 'gone' {
-  return () => {
+/**
+ * How long a stop waits for the game's exit before it is answered `signalled` with the game still
+ * running. Well inside the time a server waits for the answer.
+ */
+const STOP_ANSWER_MS = 5000;
+
+/**
+ * Ends the game through the helper's stop file where there is one, and through the child's handle
+ * otherwise. Answered once [param exited] says how the game went, since a game can exit by itself
+ * as the stop arrives: `signalled` only when the stop ended it, as the helper's [param exitFile]
+ * or the signal it died of says, or when the game still runs at the end of the wait.
+ */
+function endingTheGame(
+  child: ChildProcess,
+  stopFile: string,
+  exitFile: string,
+  exited: Promise<{ readonly signal: NodeJS.Signals | null }>,
+): () => Promise<KeeperAnswer> {
+  const exitWithin = (): Promise<{ readonly signal: NodeJS.Signals | null } | null> =>
+    Promise.race([exited, delay(STOP_ANSWER_MS, null, { ref: false })]);
+  return async () => {
     if (stopFile !== '') {
       writeFileSync(stopFile, '');
-      return 'signalled';
+      return (await exitWithin()) === null || helperStopped(exitFile) ? 'signalled' : 'gone';
     }
-    return child.kill() ? 'signalled' : 'gone';
+    if (!child.kill()) {
+      return 'gone';
+    }
+    const told = await exitWithin();
+    return told === null || told.signal === 'SIGTERM' ? 'signalled' : 'gone';
   };
 }
 
@@ -595,13 +625,18 @@ async function listenAndNote(
 ): Promise<KeeperListening | null> {
   const listening = await listenForTheServer(
     () => {
-      // Only the stop that reaches a live game is `signalled`. A later one answers `gone` even in
-      // the moments before the exit is handled, so two servers never both claim the end.
-      const first = !ender.stop;
+      // Only the stop that ends a live game is `signalled`. A later one answers `gone` even in the
+      // moments before the exit is handled, so two servers never both claim the end.
+      if (ender.stop) {
+        return 'gone';
+      }
       ender.stop = true;
-      const answer = first ? ender.end() : 'gone';
-      ender.reached ||= answer === 'signalled';
-      return answer;
+      const answering = Promise.resolve(ender.end()).then((answer) => {
+        ender.reached ||= answer === 'signalled';
+        return answer;
+      });
+      ender.answered = answering.catch(() => null);
+      return answering;
     },
     debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
   );
@@ -694,9 +729,11 @@ async function followRestart(
     await nameSlotEngine(following.slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
   }
   following.raising.onto(next.pid);
+  let endedHere = false;
   following.ender.end = () => {
     try {
       process.kill(next.pid);
+      endedHere = true;
       return 'signalled';
     } catch {
       return 'gone';
@@ -704,12 +741,20 @@ async function followRestart(
   };
   // Asked while the restart was being looked for, and answered as nothing to end then.
   if (following.ender.stop) {
-    following.ender.reached ||= following.ender.end() === 'signalled';
+    following.ender.reached ||= (await following.ender.end()) === 'signalled';
   }
   const over = await followed.ended;
   const exitedAt = Date.now();
   amendNoteIfItCan({ ...moved, endingAt: exitedAt });
-  return { note: moved, pid: next.pid, code: over.code, signal: null, notTold: over.code === null, exitedAt };
+  return {
+    note: moved,
+    pid: next.pid,
+    code: over.code,
+    signal: null,
+    notTold: over.code === null,
+    endedHere,
+    exitedAt,
+  };
 }
 
 /** Follows the game through each restart it made, and returns how the last process ended. */
@@ -743,7 +788,10 @@ function recordTheEnd(ended: KeptEnd, stopped: boolean): void {
   try {
     recordRunEnded(
       ended.note,
-      endOfTheRun({ code: ended.code, signal: ended.signal, notTold: ended.notTold }, stopped),
+      endOfTheRun(
+        { code: ended.code, signal: ended.signal, notTold: ended.notTold, endedHere: ended.endedHere },
+        stopped,
+      ),
     );
   } catch {
     // The run then has no recorded end, which every reader handles.
@@ -790,7 +838,12 @@ async function keep(): Promise<void> {
     writeNoteIfItCan(record);
   }
   const exited = exitOf(child);
-  const ender: Ender = { stop: false, reached: false, end: endingTheGame(child, stopFile) };
+  const ender: Ender = {
+    stop: false,
+    reached: false,
+    end: endingTheGame(child, stopFile, exitFile, exited),
+    answered: Promise.resolve(),
+  };
   const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
   await sayPid(pid);
   const slot = run?.slot;
@@ -827,11 +880,13 @@ async function keep(): Promise<void> {
     await debuggerPeer.drained(DRAIN_MS);
   }
   profiled?.finish();
+  const endedHere = exitFile !== '' && helperStopped(exitFile);
   const last = await followRestarts(
-    { note, pid, code, signal: told.signal, notTold: false, exitedAt },
+    { note, pid, code, signal: told.signal, notTold: false, endedHere, exitedAt },
     looked,
     following,
   );
+  await ender.answered;
   recordTheEnd(last, ender.reached);
   raising.stop();
   if (slot !== undefined) {

@@ -495,24 +495,25 @@ export interface RunExit {
   readonly code: number | null;
   readonly signal: string | null;
   readonly notTold: boolean;
+  /**
+   * Whether what held the process ended it: the helper through its handle, or the keeper by the pid
+   * of a process the game restarted into. Both leave Windows' code 1, which a game can exit with too.
+   */
+  readonly endedHere: boolean;
 }
 
 /**
- * The end a keeper records for [param exit], where [param stopped] says a stop was sent to the live
- * game. A stop the game's exit shows ended it is recorded as ended by SIGTERM with no exit code, as
- * the server that asked for the stop says it. That exit is SIGTERM itself, one never told, or on
- * Windows TerminateProcess's code 1, which reads like a game that exited 1 of its own accord. A game
- * that exited otherwise as the stop arrived ended by itself, and keeps its own code.
+ * The end a keeper records for [param exit], where [param stopped] says the stop reached the live
+ * game. A stop the exit shows ended it is recorded as ended by SIGTERM with no exit code, as the
+ * server that asked for the stop says it. That exit is one ended here, SIGTERM itself or one never
+ * told. A game that exited otherwise as the stop arrived ended by itself, and keeps its own code.
  */
 export function endOfTheRun(
   exit: RunExit,
   stopped: boolean,
-  platform: NodeJS.Platform = process.platform,
 ): { readonly exitCode: number | null; readonly exitSignal: string | null; readonly notTold: boolean } {
   const theStops =
-    exit.signal === 'SIGTERM' ||
-    (exit.code === null && exit.signal === null) ||
-    (platform === 'win32' && exit.code === 1);
+    exit.endedHere || exit.signal === 'SIGTERM' || (exit.code === null && exit.signal === null);
   if (stopped && theStops) {
     return { exitCode: null, exitSignal: 'SIGTERM', notTold: false };
   }
