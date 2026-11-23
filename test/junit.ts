@@ -1761,10 +1761,31 @@ function testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt(): void
 }
 
 /**
- * A skip reason ends with its suite's statistics: an error the next suite's before() prints that
- * ends in a quote is that suite's, not a line of the reason.
+ * A skip reason ends at the next case and at its suite's statistics: an error ending in a quote
+ * that the next case prints, or the next suite's before(), is theirs, not a line of the reason.
  */
-function testASkipReasonEndsWithItsSuite(): void {
+function testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd(): void {
+  const missing = "could not load 'res://data/missing.tres'";
+  const nextCase = readRun(
+    printedSkips(
+      [['test_skip', 'skip']],
+      [
+        '',
+        '',
+        `  ${REASONS_SUITE} > test_next STARTED`,
+        `ERROR: ${missing}`,
+        `  ${REASONS_SUITE} > test_next PASSED 3ms`,
+      ],
+    ),
+  );
+  assert.deepEqual(
+    [nextCase.skipped, nextCase.errors.map((one) => [one.suite, one.during, one.text])],
+    [
+      [{ suite: REASONS_SUITE, name: 'test_skip', reason: 'skip', cases: 1 }],
+      [[REASONS_SUITE, 'test_next', missing]],
+    ],
+    'the next case',
+  );
   const next = 'res://test/next_test.gd';
   const printed = readRun(
     printedSkips(
@@ -1776,7 +1797,7 @@ function testASkipReasonEndsWithItsSuite(): void {
         '',
         '',
         `Run Test Suite: ${next}`,
-        "ERROR: could not load 'res://data/missing.tres'",
+        `ERROR: ${missing}`,
         `  ${next} > test_next STARTED`,
         `  ${next} > test_next PASSED 3ms`,
       ],
@@ -1786,8 +1807,9 @@ function testASkipReasonEndsWithItsSuite(): void {
     [printed.skipped, printed.errors.map((one) => [one.suite, one.during, one.text])],
     [
       [{ suite: REASONS_SUITE, name: 'test_last', reason: 'last', cases: 1 }],
-      [[next, 'before', "could not load 'res://data/missing.tres'"]],
+      [[next, 'before', missing]],
     ],
+    'the next suite',
   );
 }
 
@@ -1835,5 +1857,5 @@ testASkipReasonTheOutputCutOffIsSaidToBeCut();
 testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
 testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
 testAnErrorLineInsideASkipReasonIsNoEngineError();
-testASkipReasonEndsWithItsSuite();
+testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
 console.log('junit reader tests passed');
