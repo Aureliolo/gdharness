@@ -1092,7 +1092,7 @@ const SUITE_OPENS = 'Run Test Suite:';
 const LINE_HELD_MOST = 64 * 1024;
 
 /** {@link DIFF_OPENS} as a pipe on Windows spells it, before its line break is read as the report's. */
-const DIFF_OPENS_CRLF = DIFF_OPENS.replace('\n', '\r\n');
+const DIFF_OPENS_CRLF = DIFF_OPENS.replaceAll('\n', '\r\n');
 
 /**
  * The diffs a console prints, read as {@link withActualsPrinted} reads them off the whole text, one
