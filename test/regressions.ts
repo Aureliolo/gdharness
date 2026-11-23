@@ -979,7 +979,9 @@ import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } fro
 import {
   leftInSlots,
   SLOT_VARIABLES,
+  slotCountForGames,
   suiteSlotCount,
+  TEST_ENGINES_VARIABLE,
   withTheSuitesOwnSlotVariables,
 } from './support/slots.js';
 import {
@@ -23370,9 +23372,9 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
 }
 
 /**
- * A suite takes no more engine slots than the process that started it allows. The slot count a
- * run's engines take is read by a fresh process from the variables this suite leaves, so it is
- * asked there, under a count of 2 and under none.
+ * A suite takes no more engine slots than the process that started it allows through the suite's
+ * own variable, and the machine's slot count does not cap it. The slot count a run's engines take
+ * is read by a fresh process from the variables this suite leaves, so it is asked there.
  */
 function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
   assert.equal(suiteSlotCount('2', 32), 2, 'a caller allowing 2 caps the suite below its own most');
@@ -23383,11 +23385,13 @@ function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
     assert.equal(suiteSlotCount(none, 32), 4, `${String(none)} sets no cap: the suite most`);
     assert.equal(suiteSlotCount(none, 2), 2, `${String(none)} sets no cap: the processors`);
   }
-  const slotCountIn = (counted: string | undefined): number => {
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    delete env['GODOT_ENGINE_SLOT_COUNT'];
+  assert.equal(slotCountForGames(1), '1', 'one game takes the only slot of a machine of one');
+  assert.equal(slotCountForGames(2), '3', 'two games leave a third slot to a short call');
+  const slotCountIn = (counted: string | undefined, machineCount = '12'): number => {
+    const env: NodeJS.ProcessEnv = { ...process.env, [SLOT_COUNT_VARIABLE]: machineCount };
+    delete env[TEST_ENGINES_VARIABLE];
     if (counted !== undefined) {
-      env['GODOT_ENGINE_SLOT_COUNT'] = counted;
+      env[TEST_ENGINES_VARIABLE] = counted;
     }
     const script = [
       `await import(${JSON.stringify(pathToFileURL(join(process.cwd(), 'test', 'support', 'slots.ts')).href)});`,
@@ -23400,14 +23404,16 @@ function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
   };
   const own = suiteSlotCount(undefined, availableParallelism());
   assert.equal(slotCountIn(undefined), own, 'with no cap the suite takes its own count');
+  assert.equal(slotCountIn(undefined, '1'), own, 'and the machine slot count is no cap');
+  assert.equal(slotCountIn('junk'), own, 'nor is a cap that is not a count');
   assert.equal(slotCountIn('2'), Math.min(2, own), 'a cap of 2 leaves the engines of a run at most 2 slots');
-  assert.equal(slotCountIn('1'), 1);
+  assert.equal(slotCountIn('1', '1'), 1);
 }
 
 /**
- * Two directories asking for one helper compile it once between them. The cache is a folder of this
- * case's own, and its copy is replaced by a marker after the first compile, so a second compile
- * would show as the real assembly where the marker should be.
+ * Two directories asking for one shipped helper compile it once between them. The cache is a
+ * folder of this case's own. Each compile writes an assembly of its own bytes, so a second compile
+ * would show as an assembly that differs from the cache's.
  */
 async function testAHelperIsCompiledOnceForEveryDirectoryThatAsksForIt(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -23418,24 +23424,49 @@ async function testAHelperIsCompiledOnceForEveryDirectoryThatAsksForIt(): Promis
   const inherited = process.env['XDG_CACHE_HOME'];
   try {
     process.env['XDG_CACHE_HOME'] = join(root, 'cache');
-    const helper = new CompiledHelper('once helper', 'gdharness-once', 'public class OnceCompiled { }');
-    const [first, second] = [join(root, 'first'), join(root, 'second')];
-    mkdirSync(first);
-    mkdirSync(second);
+    const source = 'public class OnceCompiled { }';
+    const helper = new CompiledHelper('once helper', 'gdharness-once', source, { cached: true });
+    const directory = (name: string): string => {
+      const made = join(root, name);
+      mkdirSync(made);
+      return made;
+    };
+    const [first, second] = [directory('first'), directory('second')];
     assert.equal(await helper.ensure(first), null, 'the first directory gets the helper');
-    const stored = join(root, 'cache', 'gdharness', 'helpers', basename(helper.assembly(first)));
+    const store = join(root, 'cache', 'gdharness', 'helpers');
+    const stored = join(store, basename(helper.assembly(first)));
     assert.ok(existsSync(stored), 'and the cache keeps the compiled one');
     const compiled = readFileSync(helper.assembly(first));
     assert.deepEqual(readFileSync(stored), compiled, 'which is the one the directory holds');
-    writeFileSync(stored, 'taken from the cache');
     assert.equal(await helper.ensure(second), null, 'the second directory gets it too');
-    assert.equal(
-      readFileSync(helper.assembly(second), 'utf8'),
-      'taken from the cache',
-      'from the cache, with nothing compiled again',
-    );
-    assert.deepEqual(readFileSync(helper.assembly(first)), compiled, 'and the first keeps its own copy');
+    assert.deepEqual(readFileSync(helper.assembly(second)), compiled, 'from the cache, compiled once');
     assert.deepEqual(readdirSync(second), [basename(helper.assembly(second))], 'with nothing left beside it');
+
+    // A cached assembly that is not the one compiled there is never handed on: the directory
+    // compiles its own, and that one replaces the cache's.
+    for (const [damage, bad] of [
+      ['junk', Buffer.from('not an assembly')],
+      ['truncated', compiled.subarray(0, compiled.length >> 1)],
+    ] as const) {
+      writeFileSync(stored, bad);
+      const asked = directory(damage);
+      assert.equal(await helper.ensure(asked), null, `a ${damage} cached assembly does not fail the caller`);
+      const own = readFileSync(helper.assembly(asked));
+      assert.equal(own.subarray(0, 2).toString('latin1'), 'MZ', `the ${damage} case compiles an assembly`);
+      assert.notDeepEqual(own, compiled, `of its own, for the ${damage} case`);
+      assert.deepEqual(readFileSync(stored), own, `which replaces the ${damage} one in the cache`);
+      const after = directory(`${damage}-after`);
+      assert.equal(await helper.ensure(after), null);
+      assert.deepEqual(readFileSync(helper.assembly(after)), own, `and is handed on after the ${damage} one`);
+    }
+
+    // A helper built for one run is compiled where it is asked for, and the cache is left as it was.
+    const held = readdirSync(store).toSorted();
+    const run = directory('run');
+    const perRun = new CompiledHelper('per-run helper', 'gdharness-per-run', `${source} // ${run}`);
+    assert.equal(await perRun.ensure(run), null, 'a helper outside the cache compiles');
+    assert.ok(existsSync(perRun.assembly(run)), 'into the directory that asks');
+    assert.deepEqual(readdirSync(store).toSorted(), held, 'and puts nothing into the cache');
 
     // A cache that cannot be made leaves the compile in the directory asked for.
     const blocked = join(root, 'blocked');
@@ -23485,6 +23516,119 @@ async function testCleanupEndsTheProcessesNamingAFixtureDirectoryAndNoOthers(): 
   } finally {
     target.kill();
     other.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * What [param lines] print when run by a fresh process whose temporary directory is
+ * [param root]/[param temp], made if it is not there, and whose cache is [param root]/cache.
+ * [param imports] name the modules each line may use, as `name: path under the repository`.
+ */
+function printedInAFreshTemp(
+  root: string,
+  temp: string,
+  imports: Record<string, string>,
+  lines: string[],
+): string {
+  const directory = join(root, temp);
+  mkdirSync(directory, { recursive: true });
+  const script = [
+    ...Object.entries(imports).map(
+      ([name, path]) =>
+        `const { ${name} } = await import(${JSON.stringify(pathToFileURL(join(process.cwd(), path)).href)});`,
+    ),
+    ...lines,
+    'process.exit(0);',
+  ].join('\n');
+  const ran = spawnSyncHidden(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    env: { ...process.env, TEMP: directory, TMP: directory, XDG_CACHE_HOME: join(root, 'cache') },
+    timeout: 240_000,
+  });
+  assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+  return `${ran.stdout}${ran.stderr}`;
+}
+
+/** The process table's assembly in the cache of [param root], once a process there has asked for it. */
+function cachedProcessTable(root: string): string {
+  const store = join(root, 'cache', 'gdharness', 'helpers');
+  const table = readdirSync(store).find((name) => /^gdharness-processes-[\da-f]+\.dll$/.test(name));
+  assert.ok(table !== undefined, `the cache holds the process table: ${readdirSync(store).join(', ')}`);
+  return join(store, table);
+}
+
+const TABLE_IMPORTS = {
+  processTree: 'src/process-children.ts',
+  whyTheProcessTreeFailed: 'src/process-children.ts',
+};
+
+const ASK_THE_TABLE = [
+  'const tree = await processTree();',
+  "console.log(tree === undefined ? 'table failed: ' + whyTheProcessTreeFailed() : 'table answered: ' + String(tree.has(process.pid)));",
+];
+
+/** A process table the cache holds that does not load leaves Windows answering a server with a new temporary directory. */
+function testABadProcessTableInTheCacheStillAnswers(): void {
+  if (process.platform !== 'win32') {
+    console.log('cached process table regression skipped (Windows only)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-table-cache-'));
+  try {
+    assert.match(printedInAFreshTemp(root, 'filled', TABLE_IMPORTS, ASK_THE_TABLE), /table answered: true/);
+    const stored = cachedProcessTable(root);
+    writeFileSync(stored, 'not an assembly');
+    for (const temp of ['first', 'second']) {
+      const printed = printedInAFreshTemp(root, temp, TABLE_IMPORTS, ASK_THE_TABLE);
+      assert.match(
+        printed,
+        /table answered: true/,
+        `a new temporary directory, ${temp} after the cache's copy went bad, gets a table that answers: ${printed}`,
+      );
+    }
+    assert.equal(readFileSync(stored).subarray(0, 2).toString('latin1'), 'MZ', 'and the cache is mended');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * Cleanup still ends the processes naming a fixture directory where the process table cannot be
+ * read, and says once that it listed them another way.
+ */
+async function testCleanupEndsAFixturesProcessesWhenTheTableCannotBeRead(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('unreadable process table cleanup regression skipped (Windows only)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-blind-ends-'));
+  const named = join(root, 'named');
+  const idle = ['-e', 'setInterval(() => {}, 1000)', named];
+  const target = spawnHidden(process.execPath, idle, { stdio: 'ignore' });
+  try {
+    printedInAFreshTemp(root, 'filled', TABLE_IMPORTS, ASK_THE_TABLE);
+    // The same assembly name in the cleaning process's own temporary directory, which it loads from.
+    mkdirSync(join(root, 'blind'));
+    writeFileSync(join(root, 'blind', basename(cachedProcessTable(root))), 'not an assembly');
+    assert.ok(
+      (await answeredWithin(() => (alive(target.pid ?? 0) ? true : undefined), 5_000)) === true,
+      'the stand-in runs',
+    );
+    const said = printedInAFreshTemp(root, 'blind', { endEnginesUnder: 'test/support/engines.ts' }, [
+      `const ended = await endEnginesUnder(${JSON.stringify(named)}, ${JSON.stringify(join(root, 'other'))});`,
+      `await endEnginesUnder(${JSON.stringify(join(root, 'another'))});`,
+      "console.log('ended: ' + JSON.stringify(ended.map((one) => one.pid)));",
+    ]);
+    assert.match(said, new RegExp(`ended: \\[${String(target.pid)}\\]`), `the stand-in is ended: ${said}`);
+    assert.equal(alive(target.pid ?? 0), false, 'and it is gone');
+    assert.equal(
+      said.split('the process table could not be read').length - 1,
+      1,
+      `the cleanup says once that it listed processes on its own: ${said}`,
+    );
+  } finally {
+    target.kill();
     sweep(root);
   }
 }
@@ -24476,7 +24620,7 @@ async function testAStartThroughTheHelperNamesTheEnginesOwnPid(): Promise<void> 
 function helperNamingEveryJob(name: string): CompiledHelper {
   const fixed = HELPER_SOURCE.replace('JobNamePrefix + started.processId', JSON.stringify(name));
   assert.notEqual(fixed, HELPER_SOURCE, 'the helper names its job in the place this test reaches');
-  return new CompiledHelper('collision helper', 'gdharness-collision', fixed, true);
+  return new CompiledHelper('collision helper', 'gdharness-collision', fixed, { program: true });
 }
 
 /** A job name that is taken fails the start with the cause, and the engine never runs. */
@@ -24823,7 +24967,7 @@ async function testAnEnginesJobNameIsFreeBeforeItsPidCanBeGivenAgain(): Promise<
     'uint code = 1;',
     `WriteText(${JSON.stringify(adopting)}, "adopting");\n`,
   );
-  const copy = new CompiledHelper('slow close helper', 'gdharness-slow-close', slowed, true);
+  const copy = new CompiledHelper('slow close helper', 'gdharness-slow-close', slowed, { program: true });
   const engines: number[] = [];
   /** A stand-in engine that ends once [param release] exists, started through the copy. */
   const started = async (name: string, release: string): Promise<{ start: DesktopStart; pid: number }> => {
@@ -25427,7 +25571,7 @@ async function testAHelperKilledBeforeItSaysItMadeTheEngineLeavesNone(): Promise
     HELPER_SOURCE,
     'the helper says it made the engine in the place this test reaches',
   );
-  const copy = new CompiledHelper('unsaid helper', 'gdharness-unsaid', stopped, true);
+  const copy = new CompiledHelper('unsaid helper', 'gdharness-unsaid', stopped, { program: true });
   const engines: number[] = [];
   try {
     assert.equal(await copy.ensure(root), null, 'the copy compiles');
@@ -25634,7 +25778,7 @@ async function testAStartInFlightWhenItsStarterIsKilledLeavesNoEngine(): Promise
     'Create(commandLine, ref creation, directory, environment, io, birth, ref extended, out started); Thread.Sleep(3000);',
   );
   assert.notEqual(slowed, HELPER_SOURCE, 'the helper makes its engine in the place this test reaches');
-  const copy = new CompiledHelper('in-flight helper', 'gdharness-inflight', slowed, true);
+  const copy = new CompiledHelper('in-flight helper', 'gdharness-inflight', slowed, { program: true });
   const marker = `gdharness-inflight-${String(process.pid)}`;
   const strays = (): string => {
     const read = spawnSyncHidden(
@@ -25896,7 +26040,7 @@ async function testAHelperThatNeverAnswersFailsTheStartAndIsEnded(): Promise<voi
     'silent helper',
     'gdharness-silent',
     'public static class Silent { public static void Main() { System.Threading.Thread.Sleep(600000); } }',
-    true,
+    { program: true },
   );
   const limit = process.env['GDHARNESS_HELPER_ANSWER_MS'];
   try {
@@ -28360,7 +28504,12 @@ async function testAStopByNumberReachesAnotherProjectsGameWithNoEditor(): Promis
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-'));
   const own = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-own-'));
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-number-runtime-'));
-  const shared = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtime };
+  // Each project's game is up at once.
+  const shared = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtime,
+    [SLOT_COUNT_VARIABLE]: slotCountForGames(2),
+  };
   const first = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: project } });
   let second: ServerProcess | null = null;
   const met = new MetProcesses();
@@ -37017,7 +37166,14 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       'run/main_scene="res://main.tscn"\n',
   );
   writeFileSync(join(elsewhere, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-  const server = new ServerProcess({ env: { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir } });
+  // The other project's game starts while this one's is up.
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      [SLOT_COUNT_VARIABLE]: slotCountForGames(2),
+    },
+  });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
   try {
@@ -55210,8 +55366,8 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
           `the run is tied to the game the editor played, not the one naming another editor: ${JSON.stringify(output)}`,
         );
       },
-      // The first round's game is still up when the second starts, and each takes a slot.
-      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: '3' } },
+      // The first round's game is still up when the second starts.
+      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: slotCountForGames(2) } },
     );
   } finally {
     for (const game of games) {
@@ -129682,7 +129838,8 @@ async function withAnEditorOfAnotherProject(
         engine: godotPath,
         ...(options.playsWindowed === true ? { playsWindowed: true } : {}),
         ...(slotFolder === null
-          ? {}
+          ? // The other project's game runs beside the editor's.
+            { env: { [SLOT_COUNT_VARIABLE]: slotCountForGames(2) } }
           : {
               env: {
                 GODOT_ENGINE_SLOTS: slotFolder,
@@ -133110,6 +133267,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHelperIsCompiledOnceForEveryDirectoryThatAsksForIt,
   testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows,
   testCleanupEndsTheProcessesNamingAFixtureDirectoryAndNoOthers,
+  testABadProcessTableInTheCacheStillAnswers,
+  testCleanupEndsAFixturesProcessesWhenTheTableCannotBeRead,
   testADesktopStartIsOneCall,
   testAHelperThatNeverRanHasEnded,
   testAStoppedRunThroughTheHelperWaitsOnlyForItsEngine,
