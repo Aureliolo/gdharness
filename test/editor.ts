@@ -3366,6 +3366,129 @@ async function testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor({
   assert.match(unset, /^NewType\/constants\/margin = 4$/m, unset);
 }
 
+/** A resource script whose setters push errors, for the cases that read what an editor's refusal says. */
+const RAISING_SCRIPT = `@tool
+extends Resource
+
+@export var lo: int = 0:
+	set(v):
+		lo = v
+		if hi < lo:
+			push_error("hi raised to lo")
+			hi = lo
+
+@export var hi: int = 10:
+	set(v):
+		hi = v
+		if lo > hi:
+			push_error("lo lowered to hi")
+			lo = hi
+
+@export var threaded: int = 0:
+	set(v):
+		if v > 10:
+			push_error("raised here")
+			var thread: Thread = Thread.new()
+			thread.start(func() -> void: push_error("raised elsewhere"))
+			thread.wait_to_finish()
+			return
+		threaded = v
+
+@export var errored: int = 0:
+	set(v):
+		if v > 10:
+			push_error("errored above ten")
+			return
+		errored = v
+
+@export var silent: int = 0:
+	set(v):
+		if v > 10:
+			return
+		silent = v
+
+@export var objects: int:
+	get:
+		return int(Performance.get_monitor(Performance.OBJECT_COUNT))
+`;
+
+/** Writes the raising script and a resource using it, and answers the resource's modify arguments. */
+async function raisingResource(
+  { call, project }: Editor,
+  name: string,
+): Promise<(properties: Record<string, unknown>) => Record<string, unknown>> {
+  writeFileSync(join(project, 'raising.gd'), RAISING_SCRIPT);
+  writeFileSync(
+    join(project, `${name}.tres`),
+    '[gd_resource type="Resource" load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://raising.gd" id="1_s"]\n\n[resource]\nscript = ExtResource("1_s")\n',
+  );
+  await call('editor_rescan', { projectPath: project });
+  return (properties) => ({
+    projectPath: project,
+    resourcePath: `res://${name}.tres`,
+    op: 'modify',
+    properties,
+  });
+}
+
+const REFUSED = 'The editor answered resource_edit modify with an error: ';
+
+/**
+ * A write refused because the engine keeps two properties in step says what the engine did, in an
+ * editor as headless, though the engine files its reason under the property that undid the other.
+ */
+async function testAnInStepRefusalInTheEditorSaysWhatTheEngineDid(editor: Editor): Promise<void> {
+  const modify = await raisingResource(editor, 'in_step');
+  assert.equal(
+    await editor.refusal('resource_edit', modify({ lo: 5, hi: 3 })),
+    `${REFUSED}Resource.lo was given 5 and holds 3 once hi was set as well: the engine keeps the two in step, so they cannot hold these values together. Nothing was written. The engine said: lo lowered to hi. hi raised to lo. lo lowered to hi.`,
+  );
+}
+
+/** An error raised on a thread the set starts is not the refusal's reason, only the setter's own is. */
+async function testAnErrorRaisedOnAnotherThreadIsNotSaidInTheEditor(editor: Editor): Promise<void> {
+  const modify = await raisingResource(editor, 'threads');
+  assert.equal(
+    await editor.refusal('resource_edit', modify({ threaded: 20 })),
+    `${REFUSED}Resource.threaded was given 20 and holds 0 after it was set: the engine changed or refused the value, so nothing was written. The engine said: raised here.`,
+  );
+}
+
+/**
+ * The editor's error listener is attached for one write only. A later write that raises nothing says
+ * nothing, and no listener stays attached to hold the engine's objects.
+ */
+async function testTheEditorsErrorListenerIsRemovedAfterEachWrite(editor: Editor): Promise<void> {
+  const { call, refusal } = editor;
+  const modify = await raisingResource(editor, 'listeners');
+  assert.match(
+    await refusal('resource_edit', modify({ errored: 20 })),
+    /The engine said: errored above ten\.$/,
+  );
+  assert.equal(
+    await refusal('resource_edit', modify({ silent: 20 })),
+    `${REFUSED}Resource.silent was given 20 and holds 0 after it was set: the engine changed or refused the value, so nothing was written.`,
+  );
+  const objects = async (): Promise<number> => {
+    const read = await call('resource_edit', {
+      projectPath: editor.project,
+      resourcePath: 'res://listeners.tres',
+      op: 'read',
+    });
+    return Number(get(read, 'properties', 'objects'));
+  };
+  const before = await objects();
+  for (let at = 0; at < 60; at++) {
+    await refusal('resource_edit', modify({ errored: 20 }));
+  }
+  const grew = (await objects()) - before;
+  // A refused write leaves one object in the editor, and a listener left attached leaves a second.
+  assert.ok(
+    grew <= 90,
+    `sixty refused writes left ${grew} more objects in the editor, so a listener stays attached`,
+  );
+}
+
 async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
 
@@ -9779,6 +9902,18 @@ async function main(): Promise<void> {
     [
       'testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor',
       testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor,
+    ],
+    [
+      'testAnInStepRefusalInTheEditorSaysWhatTheEngineDid',
+      testAnInStepRefusalInTheEditorSaysWhatTheEngineDid,
+    ],
+    [
+      'testAnErrorRaisedOnAnotherThreadIsNotSaidInTheEditor',
+      testAnErrorRaisedOnAnotherThreadIsNotSaidInTheEditor,
+    ],
+    [
+      'testTheEditorsErrorListenerIsRemovedAfterEachWrite',
+      testTheEditorsErrorListenerIsRemovedAfterEachWrite,
     ],
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],

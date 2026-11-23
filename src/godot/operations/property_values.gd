@@ -402,7 +402,7 @@ func _write_again_what_moved(writing: GdhWriting) -> void:
 				read_at(target, property), _as_held(target, property, writing.given)
 			)
 		):
-			_write(target, property, writing.given[property])
+			_write_heard(writing, property, writing.given[property])
 			writing.writes += 1
 			writing.written_at[property] = writing.writes
 			_note_undone(target, property, writing.given, writing.undone_by)
@@ -435,7 +435,7 @@ func _check_held(writing: GdhWriting) -> void:
 						writing.undone_by[property],
 					]
 				)
-				writing.stop(in_step + _engine_said(writing, property))
+				writing.stop(in_step + _engine_said(writing, property, writing.undone_by[property]))
 				return
 			var declared: Dictionary = writing.declarations[property]
 			writing.stop(
@@ -492,14 +492,19 @@ func _no_empty_base(writing: GdhWriting, property: String, held: Variant) -> Str
 ## What the engine raised writing [param property] of the call in [param writing] in an editor, as
 ## a sentence to follow a refusal, or "". A headless engine's output comes back with its answer, and
 ## an editor's goes only to its Output panel, so a refusal there gave no reason.
-func _engine_said(writing: GdhWriting, property: String) -> String:
-	if not writing.said.has(property):
+func _engine_said(writing: GdhWriting, property: String, also: String = "") -> String:
+	var said: PackedStringArray = []
+	for entry: Array in writing.said:
+		if entry[0] == property or entry[0] == also:
+			var raised: PackedStringArray = entry[1]
+			said.append_array(raised)
+	if said.is_empty():
 		return ""
-	return " The engine said: %s" % " ".join(writing.said[property])
+	return " The engine said: %s" % " ".join(said)
 
 
 ## Writes [param value] under [param property] of the call in [param writing]. In an editor, what
-## the engine raises meanwhile is kept for the refusal, by property.
+## the engine raises meanwhile is kept for the refusal, in the order it came, by property.
 func _write_heard(writing: GdhWriting, property: String, value: Variant) -> void:
 	if not Engine.is_editor_hint():
 		_write(writing.target, property, value)
@@ -509,7 +514,7 @@ func _write_heard(writing: GdhWriting, property: String, value: Variant) -> void
 	_write(writing.target, property, value)
 	OS.remove_logger(heard)
 	if not heard.raised.is_empty():
-		writing.said[property] = heard.raised
+		writing.said.append([property, heard.raised])
 
 
 ## Notes in [param undone_by] each property of [param given] that writing [param written] on
@@ -1434,8 +1439,9 @@ class GdhWriting:
 	var undone_by: Dictionary[String, String] = {}
 	var refusal: String = ""
 	var stopped: bool = false
-	## What the engine raised in an editor while each property was written, by name.
-	var said: Dictionary[String, PackedStringArray] = {}
+	## What the engine raised in an editor while each property was written, as the property's name
+	## and the sentences, in the order the writes came.
+	var said: Array[Array] = []
 
 
 	## Stops the call with [param text] followed by the note that nothing else was written.
