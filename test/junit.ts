@@ -1760,6 +1760,37 @@ function testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt(): void
   );
 }
 
+/**
+ * A skip reason ends with its suite's statistics: an error the next suite's before() prints that
+ * ends in a quote is that suite's, not a line of the reason.
+ */
+function testASkipReasonEndsWithItsSuite(): void {
+  const next = 'res://test/next_test.gd';
+  const printed = readRun(
+    printedSkips(
+      [['test_last', 'last']],
+      [
+        '',
+        '',
+        'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 12ms',
+        '',
+        '',
+        `Run Test Suite: ${next}`,
+        "ERROR: could not load 'res://data/missing.tres'",
+        `  ${next} > test_next STARTED`,
+        `  ${next} > test_next PASSED 3ms`,
+      ],
+    ),
+  );
+  assert.deepEqual(
+    [printed.skipped, printed.errors.map((one) => [one.suite, one.during, one.text])],
+    [
+      [{ suite: REASONS_SUITE, name: 'test_last', reason: 'last', cases: 1 }],
+      [[next, 'before', "could not load 'res://data/missing.tres'"]],
+    ],
+  );
+}
+
 /** A reason line starting `ERROR:` is part of the reason, and adds no engine error. */
 function testAnErrorLineInsideASkipReasonIsNoEngineError(): void {
   const skips = [['test_boom', 'boom\nERROR: not an engine error']] as const;
@@ -1804,4 +1835,5 @@ testASkipReasonTheOutputCutOffIsSaidToBeCut();
 testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
 testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
 testAnErrorLineInsideASkipReasonIsNoEngineError();
+testASkipReasonEndsWithItsSuite();
 console.log('junit reader tests passed');

@@ -719,16 +719,12 @@ function readSkipHeading(
   return true;
 }
 
-/** Whether gdUnit4 printed [param line] of its own after a report, which ends the report's entry. */
+/**
+ * Whether gdUnit4 printed [param line] of its own after a report, which ends the report's entry:
+ * the next case, the next report's heading, or the suite's statistics.
+ */
 function entryEnds(line: string): boolean {
-  return (
-    caseLineOf(line) !== null ||
-    suiteOpenedBy(line) !== null ||
-    STATISTICS.test(line) ||
-    REPORT_HEADING.test(line) ||
-    CASE_SKIPPED.test(line) ||
-    SUITE_SKIPPED.test(line)
-  );
+  return caseLineOf(line) !== null || REPORT_HEADING.test(line) || STATISTICS.test(line);
 }
 
 /**
