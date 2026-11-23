@@ -132031,6 +132031,68 @@ async function testARealSkipReasonOverSeveralLinesFailsBothTools(): Promise<void
   }
 }
 
+/**
+ * A skip reason with a quote ending a line and a blank line under it, and one with a line starting
+ * `ERROR:`, are each read whole in a real run of both tools, and the second adds no engine error.
+ */
+async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const reasons = [
+    ['test_quote_blank', "said 'no'\n\nthen left", String.raw`"said 'no'\n\nthen left"`],
+    ['test_error_line', 'boom\nERROR: not an engine error', String.raw`"boom\nERROR: not an engine error"`],
+  ] as const;
+  const suite = 'res://tests/reasons_test.gd';
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/reasons_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_runs() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        ...reasons.flatMap(([name, , literal]) => [
+          '',
+          '',
+          `func ${name}(_do_skip := true, _skip_reason := ${literal}) -> void:`,
+          '\tassert_bool(false).is_true()',
+        ]),
+        '',
+      ].join('\n'),
+    });
+    const ran = test('tests/reasons_test.gd');
+    assert.equal(ran.status, 1, ran.said);
+    for (const [name, reason] of reasons) {
+      const fault = `${suite} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
+      assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
+    }
+    assert.doesNotMatch(ran.said, /engine error/, ran.said);
+    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 1 suite /m, ran.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: suite } },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.deepEqual(
+          [get(answer, 'passed'), get(answer, 'casesSkipped'), get(answer, 'engineErrors')],
+          [false, reasons.map(([name, reason]) => ({ test: `${suite} > ${name}`, reason })), 0],
+          JSON.stringify(answer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
 /** A unit of one case, windowed or not, costing [param cost] seconds. */
 function planUnit(name: string, cost: number, windowed: boolean): Unit {
   return { ...SHARE_UNIT(name, cost), windowed, accessible: false };
@@ -133845,6 +133907,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnrunnableCaseIsNotCountedAsRan,
   testASkipReasonOverSeveralLinesIsReadWhole,
   testARealSkipReasonOverSeveralLinesFailsBothTools,
+  testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
   testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
   testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre,
   testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo,

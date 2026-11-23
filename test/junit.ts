@@ -30,6 +30,7 @@ import {
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
+import { casesRan, judgeEngine, readRun } from '../src/suite-judge.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -1581,6 +1582,200 @@ ${reasons.map(([name, line, reason]) => skipped(name, line, reason)).join('')}\t
   );
 }
 
+const REASONS_SUITE = 'res://test/reasons_test.gd';
+
+/**
+ * The console of a suite as gdUnit4 printed it: a case that ran, then each of [param skips] skipped
+ * with do_skip and its reason. [param ending] follows the last skip's reason line, gdUnit4's own end
+ * of the suite unless given.
+ */
+function printedSkips(
+  skips: readonly (readonly [name: string, reason: string])[],
+  ending?: readonly string[],
+): string {
+  const ran = 1;
+  const total = ran + skips.length;
+  const summary = `${String(total)} test cases | 0 errors | 0 failures | 0 flaky | ${String(skips.length)} skipped | 0 orphans |`;
+  return [
+    `Run Test Suite: ${REASONS_SUITE}`,
+    `  ${REASONS_SUITE} > test_ok STARTED`,
+    `  ${REASONS_SUITE} > test_ok PASSED 12ms`,
+    '',
+    ...skips.flatMap(([name, reason], at) => [
+      `  ${REASONS_SUITE} > ${name} STARTED`,
+      `  ${REASONS_SUITE} > ${name} PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      ...`  Reason: '${reason}'`.split('\n'),
+      ...(at === skips.length - 1 && ending !== undefined ? [] : ['', '']),
+    ]),
+    ...(ending ?? [
+      `Statistics: ${summary} PASSED 12ms`,
+      '',
+      '',
+      `Overall Summary: ${summary}`,
+      'Executed test suites: (1/1)',
+      `Executed test cases : (${String(ran)}/${String(total)}), ${String(skips.length)} skipped`,
+    ]),
+  ].join('\n');
+}
+
+/** What gdharness test finds in [param printed], handed the cases of {@link printedSkips}. */
+function skipFaults(printed: ReturnType<typeof readRun>, names: readonly string[]): readonly string[] {
+  return judgeEngine(
+    printed,
+    {
+      suites: [{ path: REASONS_SUITE, cases: ['test_ok', ...names] }],
+      expected: { errors: {}, warnings: {} },
+    },
+    { code: 0, signal: null, ended: null },
+  ).faults;
+}
+
+/** The fault gdharness test gives a case skipped with [param reason]. */
+function skipFault(name: string, reason: string): string {
+  return `${REASONS_SUITE} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
+}
+
+/**
+ * The lines of a skip reason are its text: a line of it that reads as an engine warning is no
+ * warning, and the reason is listed whole.
+ */
+function testTheLinesOfASkipReasonAreReadOnlyAsItsText(): void {
+  const reason = 'waits\nWARNING: a line of the reason';
+  const printed = readRun(printedSkips([['test_waits', reason]]));
+  assert.deepEqual(printed.skipped, [{ suite: REASONS_SUITE, name: 'test_waits', reason, cases: 1 }]);
+  assert.deepEqual(skipFaults(printed, ['test_waits']), [skipFault('test_waits', reason)]);
+}
+
+/** A skip reason over several lines on the last lines of the output is read whole, not cut. */
+function testASkipReasonEndingTheOutputIsReadWhole(): void {
+  const reason = 'line one\nline two';
+  const printed = readRun(printedSkips([['test_last', reason]], []));
+  assert.deepEqual(printed.skipped, [{ suite: REASONS_SUITE, name: 'test_last', reason, cases: 1 }]);
+  assert.equal(casesRan(printed), 1);
+  assert.deepEqual(skipFaults(printed, ['test_last']), [
+    'the run never printed its summary',
+    skipFault('test_last', reason),
+    `${REASONS_SUITE} never finished`,
+  ]);
+}
+
+/**
+ * A skip reason the output ends in before its closing quote is listed as far as it was printed, and
+ * gdharness test says it was cut off. The case is not counted as ran.
+ */
+function testASkipReasonTheOutputCutOffIsSaidToBeCut(): void {
+  const printed = readRun(
+    [
+      `Run Test Suite: ${REASONS_SUITE}`,
+      `  ${REASONS_SUITE} > test_cut STARTED`,
+      `  ${REASONS_SUITE} > test_cut PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      "  Reason: 'line one",
+      'line tw',
+    ].join('\n'),
+  );
+  assert.deepEqual(printed.skipped, [
+    { suite: REASONS_SUITE, name: 'test_cut', reason: 'line one\nline tw', cases: 1, cut: true },
+  ]);
+  assert.equal(casesRan(printed), 0);
+  assert.deepEqual(
+    judgeEngine(
+      printed,
+      { suites: [{ path: REASONS_SUITE, cases: ['test_cut'] }], expected: { errors: {}, warnings: {} } },
+      { code: 0, signal: null, ended: null },
+    ).faults,
+    [
+      'the run never printed its summary',
+      `${REASONS_SUITE} > test_cut never ran: gdUnit4 skipped it, saying "line one\nline tw" before the reason was cut off`,
+      `${REASONS_SUITE} never finished`,
+    ],
+  );
+}
+
+/**
+ * gdUnit4 prints the heading of a suite skipped whole only after each of its cases, so the same
+ * lines printed before any case, as the suite's own text, are no skip.
+ */
+function testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip(): void {
+  const printed = readRun(
+    printedSkips([]).replace(
+      `Run Test Suite: ${REASONS_SUITE}`,
+      [
+        `Run Test Suite: ${REASONS_SUITE}`,
+        '  The Entire test-suite is skipped!',
+        '  Skipped 1 tests',
+        "  Reason: 'printed by the suite'",
+        '',
+      ].join('\n'),
+    ),
+  );
+  assert.deepEqual([printed.skipped, casesRan(printed), skipFaults(printed, [])], [[], 1, []]);
+}
+
+/** The report gdUnit4 writes for the cases of [param skips], each under its skip as it writes it. */
+function reportedSkips(skips: readonly (readonly [name: string, reason: string])[]): string {
+  const entries = skips.map(
+    ([name, reason]) =>
+      `\t\t<testcase name="${name}" classname="reasons_test" time="0.000">\n\t\t\t<skipped message="SKIPPED: ${REASONS_SUITE}:9">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`,
+  );
+  const total = String(skips.length + 1);
+  const skipped = String(skips.length);
+  return `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-23" name="report_1" tests="${total}" failures="0" skipped="${skipped}" flaky="0" time="0.000">
+\t<testsuite id="0" name="reasons_test" package="test" tests="${total}" failures="0" errors="0" skipped="${skipped}" flaky="0" time="0.012">
+\t\t<testcase name="test_ok" classname="reasons_test" time="0.012">
+\t\t</testcase>
+${entries.join('')}\t</testsuite>
+</testsuites>
+`;
+}
+
+/**
+ * A reason with a line ending in a quote and a blank line under it, as do_skip(true, "said 'no'\n\nthen
+ * left") gives, is read whole off the console, as the report's reader reads it.
+ */
+function testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt(): void {
+  const skips = [
+    ['test_quote_blank', "said 'no'\n\nthen left"],
+    ['test_quote_alone', "first\n'\n\nlast"],
+    ['test_after', 'after'],
+  ] as const;
+  const printed = readRun(printedSkips(skips));
+  const listed = skips.map(([name, reason]) => ({ suite: REASONS_SUITE, name, reason }));
+  assert.deepEqual(skippedInReport(parseJUnit(reportedSkips(skips))), listed, 'the report');
+  assert.deepEqual(
+    printed.skipped,
+    listed.map((one) => ({ ...one, cases: 1 })),
+    'the console',
+  );
+  assert.deepEqual(
+    skipFaults(
+      printed,
+      skips.map(([name]) => name),
+    ),
+    skips.map(([name, reason]) => skipFault(name, reason)),
+  );
+}
+
+/** A reason line starting `ERROR:` is part of the reason, and adds no engine error. */
+function testAnErrorLineInsideASkipReasonIsNoEngineError(): void {
+  const skips = [['test_boom', 'boom\nERROR: not an engine error']] as const;
+  const printed = readRun(printedSkips(skips));
+  const listed = skips.map(([name, reason]) => ({ suite: REASONS_SUITE, name, reason }));
+  assert.deepEqual(skippedInReport(parseJUnit(reportedSkips(skips))), listed, 'the report');
+  assert.deepEqual(
+    [printed.skipped, printed.errors],
+    [listed.map((one) => ({ ...one, cases: 1 })), []],
+    'the console',
+  );
+  assert.deepEqual(skipFaults(printed, ['test_boom']), [
+    skipFault('test_boom', 'boom\nERROR: not an engine error'),
+  ]);
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1603,4 +1798,10 @@ testTheDiffsHoldOnlyTheSuiteBeingPrinted();
 testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
 testTheDiffsHoldNoTextOnceNoDiffIsOpen();
 testASkipReasonOverSeveralLinesIsReadWhole();
+testTheLinesOfASkipReasonAreReadOnlyAsItsText();
+testASkipReasonEndingTheOutputIsReadWhole();
+testASkipReasonTheOutputCutOffIsSaidToBeCut();
+testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
+testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
+testAnErrorLineInsideASkipReasonIsNoEngineError();
 console.log('junit reader tests passed');

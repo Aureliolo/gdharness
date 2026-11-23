@@ -198,7 +198,8 @@ Those functions are the cases it is expected to run, which is how a case that ne
 A case, a row or a whole suite skipped with `do_skip` never ran either, though gdUnit4 prints it
 passed and exits 0. The run fails and lists each skip with its `skip_reason`, and a suite skipped
 whole is listed once. `project_test` answers them under `casesSkipped`. `gdharness test` counts
-only the cases that ran. No option allows a skip.
+only the cases that ran. No option allows a skip. A reason the output cut off before its closing
+quote is listed as far as it was printed, and said to be cut.
 
 A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
 `PackedStringArray` of `res://` paths in `project.godot`. Benches written as suites and run by hand
