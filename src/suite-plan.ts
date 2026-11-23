@@ -724,24 +724,6 @@ export const SPLIT_PAST_SECONDS = 10;
 const ENGINE_START_SECONDS = 5;
 
 /**
- * How many windowed engines run at once on [param platform]. Two engines on Windows' hidden desktop
- * each got the input, focus, window size and frame rate one alone gets, and four found no room on a
- * 16 GB machine to be measured. No platform else has shown engines on one display to keep each
- * other's windows and input apart, so each keeps one. A whole number in
- * `GDHARNESS_WINDOWED_ENGINES` replaces the count, for measuring a machine with more.
- */
-export function windowedEnginesOn(
-  platform: NodeJS.Platform = process.platform,
-  env: NodeJS.ProcessEnv = process.env,
-): number {
-  const asked = Number(env['GDHARNESS_WINDOWED_ENGINES']);
-  if (Number.isInteger(asked) && asked >= 1) {
-    return asked;
-  }
-  return platform === 'win32' ? 2 : 1;
-}
-
-/**
  * What a suite must cost to be dealt out over [param engines] engines: an engine's even share of
  * the run, and never less than [constant SPLIT_PAST_SECONDS]. Units go slowest first to the engine
  * with least, so a whole suite within its share is balanced by the rest, and a split there gains
@@ -885,12 +867,7 @@ export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
  *
  * What a lane is dealt stays as the dealing made it, and each engine runs it by [function cheapestFirst].
  */
-export function dealt(
-  units: readonly Unit[],
-  declared: CasesBySuite,
-  most: number,
-  windowedMost: number = windowedEnginesOn(),
-): EnginePlan[] {
+export function dealt(units: readonly Unit[], declared: CasesBySuite, most: number): EnginePlan[] {
   if (units.length === 0) {
     return [];
   }
@@ -908,7 +885,7 @@ export function dealt(
       Math.ceil(total / Math.max(slowest, ENGINE_START_SECONDS)) + units.filter((unit) => !unit.timed).length,
     ),
   );
-  const windowedLanes = windowedLanesOf(windowed, windowedCost, total, count, windowedMost);
+  const windowedLanes = windowedLanesOf(windowed, windowedCost, total, count);
   const windowedBins: Unit[][] = Array.from({ length: windowedLanes }, () => []);
   const loads = Array.from({ length: count }, () => 0);
   // The windowed units first, over their lanes alone. A headless engine follows each of those lanes
@@ -939,23 +916,21 @@ export function dealt(
 
 /**
  * How many of [param lanes] lanes the windowed units take: the lanes their share of the work comes
- * to, rounded up, and no more than there are windowed units or [param most] windowed engines. The
- * other lanes run headless engines, which also follow each windowed engine in its slot, so a slot
- * never idles once its window work ends.
+ * to, rounded up, and no more than there are windowed units. The other lanes run headless engines,
+ * which also follow each windowed engine in its slot, so a slot never idles once its window work ends.
  */
 function windowedLanesOf(
   windowed: readonly Unit[],
   windowedCost: number,
   total: number,
   lanes: number,
-  most: number,
 ): number {
   if (windowed.length === 0) {
     return 0;
   }
   const share = total > 0 ? (windowedCost / total) * lanes : lanes;
   // The tolerance keeps a share that is a whole number of lanes from rounding up past it.
-  return Math.max(1, Math.min(windowed.length, lanes, most, Math.ceil(share - 1e-9)));
+  return Math.max(1, Math.min(windowed.length, lanes, Math.ceil(share - 1e-9)));
 }
 
 /**
@@ -1042,17 +1017,7 @@ export class Shares {
   /** What the engines of this run took before their first suite, in seconds, as they ended. */
   private readonly starts: number[] = [];
 
-  /** The windowed engines handed a share and not yet ended. */
-  private windowedGoing = 0;
-  private readonly windowedMost: number;
-
-  constructor(
-    units: readonly Unit[],
-    declared: CasesBySuite,
-    lanes: number,
-    windowedMost: number = windowedEnginesOn(),
-  ) {
-    this.windowedMost = windowedMost;
+  constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
     this.windowed = units.filter((unit) => unit.windowed).toSorted(slowestFirst);
     this.headless = units.filter((unit) => !unit.windowed).toSorted(slowestFirst);
     this.declared = declared;
@@ -1094,15 +1059,11 @@ export class Shares {
     return this.windowed.length === 0 && this.headless.length === 0;
   }
 
-  /**
-   * The next share, for an engine in [param lane], or null when nothing is left. An engine already
-   * running headless asks with [param headlessOnly], since it cannot take a windowed share.
-   */
-  next(lane: number, headlessOnly = false): EnginePlan | null {
-    if (!headlessOnly && this.nextWindowed) {
+  /** The next share, for an engine in [param lane], or null when nothing is left. */
+  next(lane: number): EnginePlan | null {
+    if (this.windowed.length > 0) {
       const { share, rest } = this.split(this.windowed);
       this.windowed = rest;
-      this.windowedGoing += 1;
       return planOf(cheapestFirst(share, this.declared), this.declared, true, lane, this.all);
     }
     if (this.headless.length === 0) {
@@ -1113,24 +1074,15 @@ export class Shares {
     return planOf(cheapestFirst(share, this.declared), this.declared, false, lane, this.all);
   }
 
-  /**
-   * Whether the share [method next] would hand now is a windowed one: windowed units are left and
-   * fewer windowed engines than the platform allows are going. Headless shares go meanwhile.
-   */
+  /** Whether the share [method next] would hand now is a windowed one. */
   get nextWindowed(): boolean {
-    return this.windowed.length > 0 && this.windowedGoing < this.windowedMost;
-  }
-
-  /** Notes that the engine of [param plan], handed by [method next], has ended. */
-  ended(plan: EnginePlan): void {
-    if (plan.windowed) {
-      this.windowedGoing -= 1;
-    }
+    return this.windowed.length > 0;
   }
 
   /** The suites [method next] would hand now, handing out nothing. */
   peek(): readonly string[] {
-    const units = this.nextWindowed ? this.split(this.windowed).share : this.split(this.headless).share;
+    const units =
+      this.windowed.length > 0 ? this.split(this.windowed).share : this.split(this.headless).share;
     return [...new Set(units.map((unit) => unit.suite))];
   }
 
@@ -1186,24 +1138,8 @@ export function lanesOf(plans: readonly EnginePlan[]): number {
   return new Set(plans.map((plan) => plan.lane)).size;
 }
 
-/**
- * What the line announcing a run says of its window, after the number of engines. Where only one
- * windowed engine may run, it also says why that one holds every windowed suite.
- */
-export function windowedSaid(
-  plans: readonly EnginePlan[],
-  windowedMost: number = windowedEnginesOn(),
-): string {
-  const suites = plans.filter((plan) => plan.windowed).flatMap((plan) => plan.suites);
-  const apart =
-    windowedMost === 1 && suites.length > 1
-      ? `, with one engine holding all ${String(suites.length)} windowed suites, since engines sharing this machine's display have not been shown to keep their windows and input apart`
-      : '';
-  return `${windowedShapeSaid(plans)}${apart}`;
-}
-
-/** What the line announcing a run says of how many of its engines have a window. */
-function windowedShapeSaid(plans: readonly EnginePlan[]): string {
+/** What the line announcing a run says of its window, after the number of engines. */
+export function windowedSaid(plans: readonly EnginePlan[]): string {
   if (!plans.some((plan) => plan.windowed)) {
     return '';
   }

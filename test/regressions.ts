@@ -832,7 +832,6 @@ import {
   timesAfter,
   type Unit,
   unitsOf,
-  windowedEnginesOn,
   windowedSaid,
   windowNeedsOf,
   writeJson,
@@ -132643,7 +132642,7 @@ function testWindowedEnginesRunTogetherGetWhatEachGetsAlone(): void {
     console.log(`windowed engines probe skipped (${refused})`);
     return;
   }
-  const { project, slots, checkouts, test, env } = commandTestProject(engines.godotPath, engines.gdunit);
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
   try {
     const names = ['probe_a', 'probe_b', 'probe_c', 'probe_d'];
     writeTree(project, probeTree(names));
@@ -132651,8 +132650,6 @@ function testWindowedEnginesRunTogetherGetWhatEachGetsAlone(): void {
       peers: number,
     ): { said: string; status: number | null; saw: ProbeSaw[]; result: RunResult } => {
       readyProbe(project, peers);
-      // The probe measures what the platform's count leaves out, so it names the count it runs.
-      env['GDHARNESS_WINDOWED_ENGINES'] = String(peers);
       const resultFile = join(checkouts, `result-${String(peers)}.json`);
       const ran = test(
         ...names.slice(0, peers).map((name) => `tests/${name}_test.gd`),
@@ -132802,16 +132799,15 @@ function casesRun(plans: readonly EnginePlan[]): string[] {
 function testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre(): void {
   const units = Array.from({ length: 48 }, (_, at) => planUnit(`w${String(at)}`, 10, true));
   const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const most = windowedEnginesOn('win32', {});
-  const plans = dealt(units, declared, 4, most);
+  const plans = dealt(units, declared, 4);
   assert.deepEqual(
     plans.map((plan) => plan.windowed),
-    [true, true],
-    'two engines, every one windowed',
+    [true, true, true, true],
+    'four engines, every one windowed',
   );
   assert.deepEqual(
     plans.map((plan) => plan.lane),
-    [0, 1],
+    [0, 1, 2, 3],
     'one to a slot',
   );
   const costs = plans.map((plan) => plan.cost);
@@ -132824,21 +132820,13 @@ function testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre(): void {
     units.map((unit) => unit.suite).toSorted(),
     'and every suite is dealt once',
   );
-  assert.equal(windowedSaid(plans, most), ', all of them windowed');
-  const shares = new Shares(units, declared, 4, most);
+  assert.equal(windowedSaid(plans), ', all of them windowed');
+  const shares = new Shares(units, declared, 4);
   const handed: EnginePlan[] = [];
-  const first = shares.next(0);
-  const second = shares.next(1);
-  assert.ok(first?.windowed === true && second?.windowed === true, 'two windowed engines are handed shares');
-  assert.equal(shares.next(2), null, 'and no third while both run');
-  assert.equal(shares.nextWindowed, false, 'the slot is asked for no window');
-  handed.push(first, second);
-  shares.ended(first);
-  for (let plan = shares.next(0); plan !== null; plan = shares.next(0)) {
+  for (let plan = shares.next(handed.length % 4); plan !== null; plan = shares.next(handed.length % 4)) {
     handed.push(plan);
-    shares.ended(plan);
   }
-  assert.ok(handed.length > 2, `the shares go on to windowed engines as they end: ${String(handed.length)}`);
+  assert.ok(handed.length >= 4, `the shares go to several windowed engines: ${String(handed.length)}`);
   assert.ok(
     handed.every((plan) => plan.windowed),
     'and every one of them is windowed',
@@ -132882,8 +132870,6 @@ async function testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo(): Promise<void
     },
     undefined,
     gate,
-    undefined,
-    4,
   );
   assert.equal(ran.length, 4, 'every share ran');
   assert.equal(most, 2, 'two windowed engines at once, never three');
@@ -132909,7 +132895,7 @@ function testASlowWindowedSuiteIsDealtOutCaseByCase(): void {
     units.every((unit) => unit.windowed && unit.cases.length === 1),
     'each one windowed',
   );
-  const plans = dealt(units, new Map([[slow.path, slow.cases]]), 3, 3);
+  const plans = dealt(units, new Map([[slow.path, slow.cases]]), 3);
   assert.equal(plans.length, 3, 'over three engines');
   assert.ok(
     plans.every((plan) => plan.windowed),
@@ -132942,7 +132928,7 @@ async function testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind(): Promi
   const units = unitsOf(suites, times, SPLIT_PAST_SECONDS);
   const declared = new Map(suites.map((suite) => [suite.path, suite.cases]));
   const needs = new Map(suites.map((suite) => [suite.path, suite.windowed]));
-  const plans = dealt(units, declared, 4, 4);
+  const plans = dealt(units, declared, 4);
   assert.ok(plans.filter((plan) => plan.windowed).length >= 2, 'several windowed engines');
   assert.ok(
     plans.some((plan) => !plan.windowed),
@@ -132959,23 +132945,11 @@ async function testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind(): Promi
   );
   const handed: EnginePlan[] = [];
   const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-  await runShares(
-    slots,
-    units,
-    declared,
-    4,
-    [],
-    {},
-    async (plan, index) => {
-      handed.push(plan);
-      await delay(1);
-      return { index, printed: { started: null } };
-    },
-    undefined,
-    undefined,
-    undefined,
-    4,
-  );
+  await runShares(slots, units, declared, 4, [], {}, async (plan, index) => {
+    handed.push(plan);
+    await delay(1);
+    return { index, printed: { started: null } };
+  });
   assert.deepEqual(
     casesRun(handed).toSorted(),
     casesRun(plans).toSorted(),
@@ -133002,62 +132976,6 @@ function testOneWindowedSuiteIsOneWindowedEngine(): void {
   assert.equal(shares.next(0)?.windowed, true, 'the share is windowed');
   assert.equal(shares.next(1), null, 'and no other engine is handed a share');
   assert.equal(windowedSaid(dealt([only], declared, 4)), ', with a window');
-}
-
-/** Windows runs two windowed engines at once, and Linux and macOS one, each saying why. */
-async function testWindowedEnginesPerPlatformAreCountedAndSaid(): Promise<void> {
-  assert.deepEqual(
-    (['win32', 'linux', 'darwin'] as const).map((platform) => windowedEnginesOn(platform, {})),
-    [2, 1, 1],
-    'windowed engines at once on Windows, Linux and macOS',
-  );
-  const units = Array.from({ length: 12 }, (_, at) => planUnit(`w${String(at)}`, 20, true));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  for (const platform of ['win32', 'linux', 'darwin'] as const) {
-    const most = windowedEnginesOn(platform, {});
-    const plans = dealt(units, declared, 4, most);
-    assert.equal(
-      plans.filter((plan) => plan.windowed).length,
-      most,
-      `${platform} deals ${String(most)} lanes`,
-    );
-    const shares = new Shares(units, declared, 4, most);
-    const going: EnginePlan[] = [];
-    for (let plan = shares.next(going.length); plan !== null; plan = shares.next(going.length)) {
-      going.push(plan);
-    }
-    assert.equal(going.length, most, `${platform} hands a share to ${String(most)} windowed engines at once`);
-    let running = 0;
-    let atOnce = 0;
-    const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-    await runShares(
-      slots,
-      units,
-      declared,
-      4,
-      [],
-      {},
-      async (plan, index) => {
-        assert.ok(plan.windowed, 'every engine is windowed');
-        running += 1;
-        atOnce = Math.max(atOnce, running);
-        await delay(20);
-        running -= 1;
-        return { index, printed: { started: null } };
-      },
-      undefined,
-      undefined,
-      undefined,
-      most,
-    );
-    assert.equal(atOnce, most, `${platform} runs ${String(most)} windowed engines at once`);
-    const said = windowedSaid(plans, most);
-    assert.equal(
-      said.includes('with one engine holding all 12 windowed suites, since engines sharing'),
-      most === 1,
-      `${platform}: ${said}`,
-    );
-  }
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -134601,7 +134519,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlowWindowedSuiteIsDealtOutCaseByCase,
   testMixedWindowedAndHeadlessSuitesEachRunOnceInTheirKind,
   testOneWindowedSuiteIsOneWindowedEngine,
-  testWindowedEnginesPerPlatformAreCountedAndSaid,
 ];
 
 /**

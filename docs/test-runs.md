@@ -586,16 +586,8 @@ first suite starts. A run that could not ask prints why, starting with
 Windowed suites are dealt as headless ones are, to windowed engines that run nothing else. Each
 counts toward `--engines`. The windowed engines take the share of the lanes that the windowed
 suites make of the run's work, and never more than there are windowed units. One windowed suite runs
-in one windowed engine.
-
-Windows runs up to two windowed engines at once, on its one hidden desktop. Two there each got the
-input, focus, window size and frame rate one alone gets. Linux and macOS run one windowed engine,
-which holds every windowed suite, since engines sharing a display there have not been shown to keep
-their windows and input apart. The run's first line says so. `GDHARNESS_WINDOWED_ENGINES` names a
-count to run instead, for measuring a machine.
-
-A suite in a windowed engine sees the machine's real screen size, scale and keyboard layout, and
-runs slower for drawing frames.
+in one windowed engine. A suite there sees the machine's real screen size, scale and keyboard
+layout, and runs slower for drawing frames.
 
 A windowed engine is counted as holding 3 GB until a peak is kept for the project's windowed
 engines, so the machine's memory budget lets fewer of them start at once than headless ones.

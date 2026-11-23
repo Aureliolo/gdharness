@@ -2302,9 +2302,8 @@ export async function runShares<
   handed?: HandedSlot,
   memory?: MemoryGate,
   raised?: Pick<FollowedLanes, 'ceiling' | 'past'> & Partial<Pick<FollowedLanes, 'told' | 'untilTold'>>,
-  windowedMost?: number,
 ): Promise<T[]> {
-  const shares = new Shares(units, declared, lanes, windowedMost);
+  const shares = new Shares(units, declared, lanes);
   const handedOut = new AbortController();
   if (shares.empty) {
     handedOut.abort();
@@ -2431,11 +2430,8 @@ export async function runShares<
     return { lock, admitted, ...drawn };
   };
   /** Draws the share for lane [param at], numbering its engine, or answers null once every share is handed out. */
-  const draw = (
-    at: number,
-    headlessOnly = false,
-  ): { readonly plan: EnginePlan; readonly index: number } | null => {
-    const plan = shares.next(at, headlessOnly);
+  const draw = (at: number): { readonly plan: EnginePlan; readonly index: number } | null => {
+    const plan = shares.next(at);
     if (plan === null) {
       return null;
     }
@@ -2475,7 +2471,7 @@ export async function runShares<
         if (empty() || (await fallenPast(at))) {
           return null;
         }
-        return draw(at, true);
+        return draw(at);
       },
       done: noted,
     };
@@ -2488,7 +2484,6 @@ export async function runShares<
       noted(await run(first.plan, first.index, first.lock, first.admitted?.holds, reusable));
       return ran;
     } finally {
-      shares.ended(first.plan);
       first.admitted?.ended();
     }
   };
