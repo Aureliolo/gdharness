@@ -558,7 +558,6 @@ export class ServerProcess {
       }
       this.abandoned.clear();
       this.waiting.clear();
-      this.inFlight.clear();
     });
   }
 
