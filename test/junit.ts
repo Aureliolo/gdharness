@@ -5,6 +5,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { type FoldedEntry, GameLog } from '../src/game-log.js';
 import {
   BOTH_SIDES_ALIKE_NOTE,
   failedCases,
@@ -30,7 +34,15 @@ import {
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
-import { casesRan, judgeEngine, readRun } from '../src/suite-judge.js';
+import {
+  casesRan,
+  judgeEngine,
+  readEngineLog,
+  readRun,
+  reasonHeadlinesOf,
+  withoutReasonHeadlines,
+} from '../src/suite-judge.js';
+import { TestRunTally } from '../src/test-tally.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -1833,6 +1845,152 @@ function testAnErrorLineInsideASkipReasonIsNoEngineError(): void {
   ]);
 }
 
+/** Godot 4.7.2 and gdUnit4's stdout for a case with an engine error and two skips, colours and all. */
+const REAL_SKIP_STDOUT = [
+  'gdharness timing: started 1885 ms, compiled together 0 ms',
+  '\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m\u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m',
+  'gdharness timing: res://tests/reasons_test.gd loaded 3 ms, before 9 ms',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_runs\u001b[0m\u001b[38;2;34;139;34m STARTED\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_runs\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 4ms\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_quote_blank\u001b[0m\u001b[38;2;34;139;34m STARTED\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_quote_blank\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 0ms\u001b[0m',
+  '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
+  '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
+  "  Reason: '\u001b[38;2;30;144;255msaid 'no'",
+  '',
+  "then left\u001b[0m'",
+  '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_error_line\u001b[0m\u001b[38;2;34;139;34m STARTED\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_error_line\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 0ms\u001b[0m',
+  '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
+  '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
+  "  Reason: '\u001b[38;2;30;144;255mboom",
+  "ERROR: not an engine error\u001b[0m'",
+  '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;30;144;255mStatistics:\u001b[0m\u001b[38;2;128;128;128m 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 26ms\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;30;144;255mOverall Summary:\u001b[0m\u001b[38;2;255;255;255m 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |\u001b[0m',
+  '\u001b[38;2;233;150;122mExecuted test suites: (1/1)\u001b[0m',
+  '\u001b[38;2;233;150;122mExecuted test cases : (1/3), 2 skipped\u001b[0m',
+  '\u001b[38;2;233;150;122mTotal execution time: 26ms\u001b[0m',
+  '\u001b[38;2;233;150;122mExit code: 0\u001b[0m',
+  'Run dispose test resources',
+  "gdharness: the engine's shutdown began clearing scripts",
+  "gdharness: the engine's shutdown cleared every script",
+];
+
+/** The same run's stderr, its runner frame left out. */
+const REAL_SKIP_STDERR = [
+  'ERROR: a real engine error',
+  '   at: push_error (core/variant/variant_utility.cpp:1023)',
+  '   GDScript backtrace (most recent call first):',
+  '       [0] test_runs (res://tests/reasons_test.gd:5)',
+  '       [1] _execute_test_case (res://addons/gdUnit4/src/core/_TestCase.gd:79)',
+  '       [2] execute (res://addons/gdUnit4/src/core/_TestCase.gd:40)',
+  '       [3] _execute (res://addons/gdUnit4/src/core/execution/stages/single/GdUnitTestCaseSingleTestStage.gd:10)',
+  '       [4] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  '       [5] _execute (res://addons/gdUnit4/src/core/execution/stages/single/GdUnitTestCaseSingleExecutionStage.gd:17)',
+  '       [6] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  '       [7] _execute (res://addons/gdUnit4/src/core/execution/stages/GdUnitTestCaseExecutionStage.gd:24)',
+  '       [8] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+];
+
+/** The same run's log, which the engine writes with both streams in order and no colours. */
+const REAL_SKIP_LOG = [
+  'gdharness timing: started 1885 ms, compiled together 0 ms',
+  'Run Test Suite: res://tests/reasons_test.gd',
+  'gdharness timing: res://tests/reasons_test.gd loaded 3 ms, before 9 ms',
+  '  res://tests/reasons_test.gd > test_runs STARTED',
+  ...REAL_SKIP_STDERR,
+  '  res://tests/reasons_test.gd > test_runs PASSED 4ms',
+  '',
+  '  res://tests/reasons_test.gd > test_quote_blank STARTED',
+  '  res://tests/reasons_test.gd > test_quote_blank PASSED 0ms',
+  '  Report:',
+  '  This test is skipped!',
+  "  Reason: 'said 'no'",
+  '',
+  "then left'",
+  '',
+  '',
+  '  res://tests/reasons_test.gd > test_error_line STARTED',
+  '  res://tests/reasons_test.gd > test_error_line PASSED 0ms',
+  '  Report:',
+  '  This test is skipped!',
+  "  Reason: 'boom",
+  "ERROR: not an engine error'",
+  '',
+  '',
+  'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans | PASSED 26ms',
+  '',
+  '',
+  'Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |',
+  'Executed test suites: (1/1)',
+  'Executed test cases : (1/3), 2 skipped',
+  'Total execution time: 26ms',
+  'Exit code: 0',
+  'Run dispose test resources',
+];
+
+/**
+ * A real run's piped streams, read as project_test reads them, hold an engine entry and count an
+ * error for a skip reason's `ERROR:` line, which the reading of its log takes back. The engine's own
+ * error in the case that ran stays.
+ */
+function testARealSkipReasonsErrorLineLeavesTheEngineEntries(): void {
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: () => false,
+  });
+  const log = new GameLog({
+    most: 4,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  log.append('stdout', `${REAL_SKIP_STDOUT.join('\r\n')}\r\n`);
+  log.append('stderr', `${REAL_SKIP_STDERR.join('\r\n')}\r\n`);
+  log.finish();
+  log.handOverHeld();
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-skip-log-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${REAL_SKIP_LOG.join('\n')}\n`);
+    const read = readEngineLog(path, [], { errors: {}, warnings: {} });
+    const piped = (entries: readonly FoldedEntry[]): string[][] =>
+      entries.map((entry) => [entry.severity, entry.source, entry.text]);
+    assert.deepEqual(
+      [piped(tally.engine.result()), log.count('error')],
+      [
+        [
+          ['error', 'stdout', "not an engine error'"],
+          ['error', 'stderr', 'a real engine error'],
+        ],
+        2,
+      ],
+      'the piped streams',
+    );
+    assert.deepEqual(
+      [
+        piped(withoutReasonHeadlines(tally.engine.result(), read.reasonHeadlines)),
+        log.count('error') - reasonHeadlinesOf(read.reasonHeadlines, 'error'),
+        read.errors.map((error) => error.text),
+      ],
+      [[['error', 'stderr', 'a real engine error']], 1, ['a real engine error']],
+      'less the reason',
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1861,5 +2019,6 @@ testASkipReasonTheOutputCutOffIsSaidToBeCut();
 testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
 testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
 testAnErrorLineInsideASkipReasonIsNoEngineError();
+testARealSkipReasonsErrorLineLeavesTheEngineEntries();
 testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
 console.log('junit reader tests passed');

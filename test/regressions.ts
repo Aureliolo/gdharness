@@ -133057,6 +133057,7 @@ async function testARealSkipReasonOverSeveralLinesFailsBothTools(): Promise<void
 /**
  * A skip reason with a quote ending a line and a blank line under it, and one with a line starting
  * `ERROR:`, are each read whole in a real run of both tools, and the second adds no engine error.
+ * The engine's own error in the case that ran is still counted, in both tools.
  */
 async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Promise<void> {
   const engines = commandTestEngines();
@@ -133076,6 +133077,7 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
         '',
         '',
         'func test_runs() -> void:',
+        '\tpush_error("a real engine error")',
         '\tassert_int(1).is_equal(1)',
         ...reasons.flatMap(([name, , literal]) => [
           '',
@@ -133092,8 +133094,12 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
       const fault = `${suite} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
       assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
     }
-    assert.doesNotMatch(ran.said, /an engine error in /, ran.said);
-    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 1 suite /m, ran.said);
+    assert.deepEqual(
+      ran.said.match(/an engine error in .+?(?=\. )/g),
+      [`an engine error in ${suite} > test_runs: a real engine error`],
+      ran.said,
+    );
+    assert.match(ran.said, /^Failed: 3 problems, listed above\. Ran 1 case in 1 suite /m, ran.said);
     await withStdioServer(
       async (_call, request) => {
         const response = await request(
@@ -133103,9 +133109,17 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
         );
         const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
         const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        const errorTexts = asArray(get(answer, 'engineEntries'))
+          .filter((entry) => get(entry, 'severity') === 'error')
+          .map((entry) => get(entry, 'text'));
         assert.deepEqual(
-          [get(answer, 'passed'), get(answer, 'casesSkipped'), get(answer, 'engineErrors')],
-          [false, reasons.map(([name, reason]) => ({ test: `${suite} > ${name}`, reason })), 0],
+          [get(answer, 'passed'), get(answer, 'casesSkipped'), get(answer, 'engineErrors'), errorTexts],
+          [
+            false,
+            reasons.map(([name, reason]) => ({ test: `${suite} > ${name}`, reason })),
+            1,
+            ['a real engine error'],
+          ],
           JSON.stringify(answer),
         );
       },
