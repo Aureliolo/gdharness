@@ -77238,6 +77238,236 @@ async function testALockTakenBeyondTheBudgetByARaceIsGivenBack(): Promise<void> 
   }
 }
 
+interface TakerReport {
+  readonly locks: number;
+  readonly gib: number;
+  readonly budget: number;
+}
+
+/** The report a taker printed last, as its fields. */
+function takerReportOf(printed: string): TakerReport {
+  const report: unknown = JSON.parse(printed.trim().split('\n').pop() ?? '');
+  if (!isRecord(report)) {
+    throw new TypeError(`a taker's report is an object: ${printed}`);
+  }
+  const { locks, gib, budget } = report;
+  if (typeof locks !== 'number' || typeof gib !== 'number' || typeof budget !== 'number') {
+    throw new TypeError(`a taker's report holds the locks, memory and budget: ${printed}`);
+  }
+  return { locks, gib, budget };
+}
+
+/** Whether the take that just made [param lock] gives it back for want of memory. */
+async function givenBackForMemory(slots: EngineSlots, lock: string): Promise<boolean> {
+  const judge: unknown = Reflect.get(slots, 'overTheBudget');
+  if (typeof judge !== 'function') {
+    throw new TypeError('the judgement of a lock taken beyond the budget is there to call');
+  }
+  const given: unknown = await Reflect.apply(judge, slots, [lock, 3.5 * MEMORY_GIB, undefined]);
+  return given === true;
+}
+
+/** How many tries of takers run beside each other. */
+const TRIES_TOGETHER = 5;
+
+/**
+ * Three processes ask for a slot at once, as often as [param tries], a few tries at a time. With
+ * [param windowed] they ask as windowed engines, with another engine holding a slot until they all
+ * wait on it. Answers each try's takers' reports: the locks and the memory in GiB live as it saw
+ * them, and the budget.
+ */
+async function takersAtOnce(windowed: boolean, tries: number): Promise<TakerReport[][]> {
+  const started = await ownStart();
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takers-project-'));
+  const taker = resolve('test', 'support', 'slot-taker.ts');
+  const tried: TakerReport[][] = [];
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(project, 'test_windowed_lane', 3.5 * MEMORY_GIB);
+      const oneTry = async (): Promise<void> => {
+        const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takers-'));
+        const sync = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takers-sync-'));
+        try {
+          const other = new EngineSlots(
+            directory,
+            3,
+            { pid: process.pid, started },
+            undefined,
+            () => 'other',
+            undefined,
+            { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
+          );
+          const held = windowed ? await other.takeFree() : null;
+          const ended = [0, 1, 2].map((number) => {
+            const child = spawnHidden(
+              process.execPath,
+              [
+                taker,
+                directory,
+                '3',
+                project,
+                windowed ? 'windowed' : 'headless',
+                sync,
+                String(number),
+                '600',
+                '250',
+              ],
+              { stdio: ['ignore', 'pipe', 'inherit'] },
+            );
+            let said = '';
+            child.stdout.setEncoding('utf8');
+            child.stdout.on('data', (chunk: string) => {
+              said += chunk;
+            });
+            return new Promise<string>((done) => {
+              child.once('close', () => {
+                done(said);
+              });
+            });
+          });
+          const until = Date.now() + 30_000;
+          while (readdirSync(sync).length < 3 && Date.now() < until) {
+            await delay(10);
+          }
+          writeFileSync(join(sync, 'go'), '');
+          if (held !== null) {
+            await delay(400);
+            other.release(held);
+          }
+          const said = await Promise.race([Promise.all(ended), delay(60_000).then(() => [] as string[])]);
+          assert.equal(said.length, 3, 'every taker of the try got a slot and reported');
+          tried.push(said.map(takerReportOf));
+        } finally {
+          rmSync(directory, { recursive: true, force: true });
+          rmSync(sync, { recursive: true, force: true });
+        }
+      };
+      for (let begun = 0; begun < tries; begun += TRIES_TOGETHER) {
+        await Promise.all(Array.from({ length: Math.min(TRIES_TOGETHER, tries - begun) }, oneTry));
+      }
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+  return tried;
+}
+
+/** Three processes taking a windowed engine's slot at once never run two windows past the budget. */
+async function testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudget(): Promise<void> {
+  const tried = await takersAtOnce(true, 20);
+  const over = tried.filter((takers) => takers.some((one) => one.locks > 1 && one.gib > one.budget));
+  assert.equal(tried[0]?.[0]?.budget, 4.5, 'the budget is 4.5 GiB on 3 slots of a 20 GiB machine');
+  assert.deepEqual(over, [], 'no try ran windows together past 4.5 GiB');
+}
+
+/** Takers that fit the budget together all keep their slots, however they race. */
+async function testTakersThatFitTheBudgetTogetherAllKeepTheirSlots(): Promise<void> {
+  const tried = await takersAtOnce(false, 20);
+  for (const takers of tried) {
+    assert.deepEqual(
+      takers.map((one) => one.locks),
+      [3, 3, 3],
+      `three engines of 1.5 GiB in 4.5 GiB are all live at once: ${JSON.stringify(takers)}`,
+    );
+  }
+}
+
+/** Two stand-in locks held by two live processes, written at the same moment. */
+async function lockedByTwoHolders(
+  directory: string,
+  body: (slots: EngineSlots, low: number, high: number) => Promise<void>,
+): Promise<void> {
+  const script = join(directory, 'hold.mjs');
+  writeFileSync(script, 'setInterval(() => undefined, 1000);\n');
+  const child = spawnHidden(process.execPath, [script], { stdio: 'ignore' });
+  try {
+    const pid = child.pid ?? 0;
+    const starts = await startTimesOf([pid, process.pid]);
+    const low = Math.min(pid, process.pid);
+    const high = Math.max(pid, process.pid);
+    const slots = new EngineSlots(
+      directory,
+      3,
+      { pid: process.pid, started: starts.get(process.pid) ?? 0 },
+      undefined,
+      () => 'other',
+      undefined,
+      { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
+    );
+    const lockOf = (slot: number, holder: number): void => {
+      writeFileSync(
+        join(directory, `${String(slot)}.lock`),
+        JSON.stringify({ pid: holder, started: starts.get(holder), memory: 3.5 * MEMORY_GIB }),
+      );
+    };
+    // The lower pid holds the higher slot, so an order by slot alone would name the other holder.
+    lockOf(0, high);
+    lockOf(1, low);
+    const same = new Date(Date.now() - 5000);
+    utimesSync(join(directory, '0.lock'), same, same);
+    utimesSync(join(directory, '1.lock'), same, same);
+    await body(slots, low, high);
+  } finally {
+    child.kill();
+  }
+}
+
+/** Two locks written at the same moment: exactly one taker gives its lock back, the later holder. */
+async function testTwoLocksWrittenAtTheSameMomentGiveBackExactlyOne(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-tied-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await lockedByTwoHolders(directory, async (slots) => {
+        assert.equal(slots.memoryBudget, 4.5 * MEMORY_GIB);
+        const gives = await Promise.all(
+          ['0.lock', '1.lock'].map(async (lock) => await givenBackForMemory(slots, join(directory, lock))),
+        );
+        assert.deepEqual(
+          gives,
+          [true, false],
+          'the lock of the higher pid, in slot 0, is the one given back',
+        );
+      });
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A lock written after a taker's first look is counted by the look it takes again. */
+async function testALockWrittenAfterTheFirstLookIsCounted(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-settled-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await lockedByTwoHolders(directory, async (slots) => {
+        const other = join(directory, '1.lock');
+        const lockText = readFileSync(other, 'utf8');
+        const when = statSync(other).mtime;
+        rmSync(other);
+        const read: unknown = Reflect.get(slots, 'liveMemory');
+        if (typeof read !== 'function') {
+          throw new TypeError('the count of the live locks is there to watch');
+        }
+        let looks = 0;
+        Reflect.set(slots, 'liveMemory', async (): Promise<unknown> => {
+          looks += 1;
+          if (looks === 2) {
+            writeFileSync(other, lockText);
+            utimesSync(other, when, when);
+          }
+          const live: unknown = await Reflect.apply(read, slots, []);
+          return live;
+        });
+        const given = await givenBackForMemory(slots, join(directory, '0.lock'));
+        assert.equal(given, true, 'the second look finds the lock written since the first');
+        assert.equal(looks, 2, 'a look is taken again, once');
+      });
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** The first engine on a machine with no live lock takes, however much it needs. */
 async function testTheFirstEngineOnAMachineTakesWhateverItNeeds(): Promise<void> {
   const started = await ownStart();
@@ -134980,6 +135210,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEnginesTogetherStayInsideTheMachinesMemory,
   testALockWithNoMemoryCountsOneAndAHalfGiBASlot,
   testALockTakenBeyondTheBudgetByARaceIsGivenBack,
+  testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudget,
+  testTakersThatFitTheBudgetTogetherAllKeepTheirSlots,
+  testTwoLocksWrittenAtTheSameMomentGiveBackExactlyOne,
+  testALockWrittenAfterTheFirstLookIsCounted,
   testTheFirstEngineOnAMachineTakesWhateverItNeeds,
   testALocksMemoryIsThePeakKeptCappedAtTheCeiling,
   testAMemoryWaiterKeepsItsPlaceInLine,
