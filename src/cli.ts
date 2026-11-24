@@ -63,7 +63,13 @@ import {
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
 import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
-import { runTestCommand, testOptionsOf, wholeTreeSaid, writeRefusedResult } from './suite-run.js';
+import {
+  listedSuites,
+  runTestCommand,
+  testOptionsOf,
+  wholeTreeSaid,
+  writeRefusedResult,
+} from './suite-run.js';
 import { getLocalVersion } from './version.js';
 import { prepareWholeExits } from './whole-exit.js';
 
@@ -1011,7 +1017,7 @@ Usage:
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
-                 [--whole-tree] [--import] [--godot PATH] [--godot-version V] [--cores N]
+                 [--whole-tree] [--list [--json]] [--import] [--godot PATH] [--godot-version V] [--cores N]
                  [--order reversed|named|SEED] [--print-output] [--verbose] [--engine-arg ARG ...]
                  [--keep-slower-than S] [--result FILE] [--times FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
@@ -1022,7 +1028,11 @@ Usage:
                                      suites that passed on exactly the files their engine loaded,
                                      all unchanged, and still compiles every script. --whole-tree
                                      names each script that makes suites depend on every file,
-                                     with the line, and runs nothing. --print-output
+                                     with the line, and runs nothing. --list prints the suites
+                                     the run would take, one res:// path per line (a JSON array
+                                     with --json), and runs nothing. It reads the scripts the
+                                     way the run does and needs no engine, apart from
+                                     --changed-only, which keys on the engine. --print-output
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
                                      so a leak at exit is named. --engine-arg gives every engine
@@ -1081,6 +1091,21 @@ function checkFlags(): void {
   }
 }
 
+/** `gdharness test --list`: the suites the run would take, one per line or as a JSON array. */
+async function printListed(options: ReturnType<typeof testOptionsOf>): Promise<void> {
+  const godotPath = options.changedOnly
+    ? (await engine(options.projectPath, options.godotPath ?? undefined)).godotPath
+    : null;
+  const suites = listedSuites(options, godotPath);
+  if (options.json) {
+    console.log(JSON.stringify(suites));
+    return;
+  }
+  for (const suite of suites) {
+    console.log(suite);
+  }
+}
+
 /** `gdharness test`, whose options are its own, read by {@link testOptionsOf} rather than {@link checkFlags}. */
 async function test(): Promise<void> {
   const rest = args.slice(1);
@@ -1093,6 +1118,10 @@ async function test(): Promise<void> {
     for (const line of wholeTreeSaid(options)) {
       console.log(line);
     }
+    return;
+  }
+  if (options.list) {
+    await printListed(options);
     return;
   }
   const startedAt = Date.now();

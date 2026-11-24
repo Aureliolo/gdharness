@@ -855,6 +855,7 @@ import {
   reportsFault,
   roomSaid,
   runShares,
+  runTestCommand,
   type ShareReuse,
   sharesSaid,
   silenceWhile,
@@ -82530,6 +82531,264 @@ function testAnInnerClassBaseIsFollowedToTheInnerClass(): void {
   }
 }
 
+/** A suite body of one passing case, for the projects a listing is checked against. */
+const LISTED_CASE = '\n\nfunc test_it() -> void:\n\tassert_bool(true).is_true()\n';
+
+/** The gdUnit4 files a project needs for a run to take it, as stand-ins. */
+const LISTED_GDUNIT4 = {
+  'addons/gdUnit4/plugin.cfg': '[plugin]\n',
+  'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends Node\n',
+} as const;
+
+/**
+ * Writes a tests folder holding a junction back to itself, a symlinked folder with a suite, a suite
+ * whose file name says nothing, a script with no case and a folder the engine ignores. [param outside]
+ * holds the linked folder. [param loop] adds the junction, which an engine cannot import.
+ */
+function writeLinkedSuites(project: string, outside: string, loop = true): void {
+  const suite = `extends GdUnitTestSuite${LISTED_CASE}`;
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'tests/a_test.gd': suite,
+    'tests/sub/b_test.gd': suite,
+    'tests/j_suite.gd': suite,
+    'tests/k_test.gd': 'extends Node\n',
+    'tests/ignored/.gdignore': '',
+    'tests/ignored/i_test.gd': suite,
+  });
+  writeTree(outside, { 's_test.gd': suite });
+  if (loop) {
+    symlinkSync(join(project, 'tests'), join(project, 'tests', 'loop'), 'junction');
+  }
+  symlinkSync(outside, join(project, 'tests', 'linked'), 'junction');
+}
+
+/**
+ * Writes a [param folder] of suites the way a game ports its own search wrong: cases from a base in
+ * an addon, a suite on an inner class, a static case, a name led by a digit and a quoted base.
+ */
+function writeFoundSuites(project: string, folder: string, inner = true): void {
+  const own = `extends GdUnitTestSuite${LISTED_CASE}`;
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'addons/shared/base_cases.gd': `class_name SharedBaseCases\nextends GdUnitTestSuite${LISTED_CASE}`,
+    'support/outer.gd':
+      'class_name ListedOuter\nextends RefCounted\n\nclass Inner extends GdUnitTestSuite:\n\tfunc test_inner() -> void:\n\t\tassert_bool(true).is_true()\n',
+    [`${folder}/based_test.gd`]: 'extends SharedBaseCases\n',
+    ...(inner ? { [`${folder}/inner_test.gd`]: 'extends ListedOuter.Inner\n' } : {}),
+    [`${folder}/static_test.gd`]: 'extends GdUnitTestSuite\n\nstatic func test_static() -> void:\n\tpass\n',
+    [`${folder}/10_digit_test.gd`]: own,
+    [`${folder}/quoted_test.gd`]: `extends "res://addons/shared/base_cases.gd"\n`,
+    [`${folder}/code_test.gd`]: `extends GdUnitTestSuite\n\nconst NOTE = "func test_in_a_string(): extends Node"\n${LISTED_CASE}`,
+  });
+}
+
+/** `gdharness test [project] --list` with [param args], its lines, error and exit code. */
+function listCommand(
+  project: string,
+  args: string[],
+): { lines: string[]; said: string; status: number | null } {
+  const ran = spawnSyncHidden(process.execPath, ['build/cli.js', 'test', project, '--list', ...args], {
+    encoding: 'utf8',
+  });
+  return {
+    lines: ran.stdout.split('\n').filter((line) => line !== ''),
+    said: `${ran.stdout}${ran.stderr}`,
+    status: ran.status,
+  };
+}
+
+/**
+ * `test --list` prints the suites a run takes and nothing from a junction back up the tree, a
+ * script with no case or a folder holding a `.gdignore`. A symlinked folder's suite and a suite
+ * whose file name says nothing are printed.
+ */
+function testListNamesEverySuiteOfALinkedTree(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-linked-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-outside-'));
+  try {
+    writeLinkedSuites(project, outside);
+    writeTree(project, LISTED_GDUNIT4);
+    const listed = listCommand(project, []);
+    assert.equal(listed.status, 0, listed.said);
+    assert.deepEqual(listed.lines, [
+      'res://tests/a_test.gd',
+      'res://tests/j_suite.gd',
+      'res://tests/linked/s_test.gd',
+      'res://tests/sub/b_test.gd',
+    ]);
+  } finally {
+    sweep(project, outside);
+  }
+}
+
+/**
+ * `test --list` takes the suites a run deals: cases from a base in an addon, a suite on an inner
+ * class, a static case, a digit-led name and a quoted base, in a `tests` folder and in a `test` one.
+ */
+function testListFindsSuitesThroughBasesInnerClassesAndTheTestFolder(): void {
+  for (const folder of ['tests', 'test']) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-found-'));
+    try {
+      writeFoundSuites(project, folder);
+      writeTree(project, LISTED_GDUNIT4);
+      const listed = listCommand(project, []);
+      assert.equal(listed.status, 0, listed.said);
+      assert.deepEqual(
+        listed.lines,
+        [
+          '10_digit_test.gd',
+          'based_test.gd',
+          'code_test.gd',
+          'inner_test.gd',
+          'quoted_test.gd',
+          'static_test.gd',
+        ].map((name) => `res://${folder}/${name}`),
+        folder,
+      );
+    } finally {
+      sweep(project);
+    }
+  }
+}
+
+/**
+ * Every option that narrows a run narrows `--list` the same way: `--tests`, a named suite or
+ * directory, a named case, `--order`. `--json` prints the same paths as an array, and goes only
+ * with `--list`.
+ */
+function testListIsNarrowedAsARunIs(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-narrow-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-narrow-outside-'));
+  try {
+    writeLinkedSuites(project, outside);
+    writeTree(project, { ...LISTED_GDUNIT4, 'other/o_test.gd': `extends GdUnitTestSuite${LISTED_CASE}` });
+    assert.deepEqual(listCommand(project, ['--tests', 'tests/sub']).lines, ['res://tests/sub/b_test.gd']);
+    assert.deepEqual(listCommand(project, ['--tests', 'other', '--tests', 'tests/sub']).lines, [
+      'res://other/o_test.gd',
+      'res://tests/sub/b_test.gd',
+    ]);
+    assert.deepEqual(listCommand(project, ['tests/sub', 'tests/a_test.gd']).lines, [
+      'res://tests/a_test.gd',
+      'res://tests/sub/b_test.gd',
+    ]);
+    assert.deepEqual(listCommand(project, ['tests/j_suite.gd:test_it']).lines, ['res://tests/j_suite.gd']);
+    assert.deepEqual(listCommand(project, ['tests/sub', 'tests/a_test.gd', '--order', 'reversed']).lines, [
+      'res://tests/sub/b_test.gd',
+      'res://tests/a_test.gd',
+    ]);
+    assert.deepEqual(listCommand(project, ['tests/sub', 'tests/a_test.gd', '--order', 'named']).lines, [
+      'res://tests/sub/b_test.gd',
+      'res://tests/a_test.gd',
+    ]);
+    const json = listCommand(project, ['tests/sub', 'tests/a_test.gd', '--json']);
+    assert.deepEqual(JSON.parse(json.said), ['res://tests/a_test.gd', 'res://tests/sub/b_test.gd']);
+    const stray = spawnSyncHidden(process.execPath, ['build/cli.js', 'test', project, '--json'], {
+      encoding: 'utf8',
+    });
+    assert.notEqual(stray.status, 0);
+    assert.match(stray.stderr, /--json goes with --list/);
+  } finally {
+    sweep(project, outside);
+  }
+}
+
+/**
+ * A project with no suite prints nothing and exits 0. One the run refuses, for a gdUnit4 it cannot
+ * use, a directory that is not there or a named directory holding no suite, is refused with the
+ * run's words.
+ */
+async function testListOfNoSuiteIsEmptyAndARefusalIsTheRuns(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-none-'));
+  try {
+    writeTree(project, {
+      ...LISTED_GDUNIT4,
+      'project.godot': 'config_version=5\n',
+      'tests/k_test.gd': 'extends Node\n',
+    });
+    const none = listCommand(project, []);
+    assert.deepEqual([none.status, none.lines, none.said], [0, [], '']);
+    assert.equal(listCommand(project, ['--json']).said.trim(), '[]');
+    for (const args of [['--tests', 'nowhere'], ['tests/nowhere.gd'], ['tests/k_test.gd']]) {
+      const asked = testOptionsOf([project, ...args], project);
+      let reason = '';
+      try {
+        await runTestCommand(asked, process.execPath);
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error);
+      }
+      assert.notEqual(reason, '', `the run refuses ${args.join(' ')}`);
+      const listed = listCommand(project, args);
+      assert.notEqual(listed.status, 0, listed.said);
+      assert.ok(listed.said.includes(reason), `${args.join(' ')}: ${listed.said} says ${reason}`);
+    }
+    rmSync(join(project, 'addons'), { recursive: true });
+    let reason = '';
+    try {
+      await runTestCommand(testOptionsOf([project], project), process.execPath);
+    } catch (error) {
+      reason = error instanceof Error ? error.message : String(error);
+    }
+    assert.match(reason, /gdUnit4 is not installed/);
+    assert.ok(listCommand(project, []).said.includes(reason), 'the same words without gdUnit4');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The suites `test --list` prints are the suites a real `test` of the same arguments runs, for the
+ * linked tree, the found suites in `tests` and in `test`. Run headless in one engine.
+ */
+function testListNamesTheSuitesARealRunRuns(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test list regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-slots-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-real-outside-'));
+  const fresh = (): string => mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-real-'));
+  const [linked, tests, test] = [fresh(), fresh(), fresh()];
+  const projects = [linked, tests, test];
+  try {
+    writeLinkedSuites(linked, outside, false);
+    writeFoundSuites(tests, 'tests', false);
+    writeFoundSuites(test, 'test', false);
+    for (const project of projects) {
+      cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+      const listed = listCommand(project, []);
+      assert.equal(listed.status, 0, listed.said);
+      const resultFile = join(project, 'result.json');
+      const ran: SpawnSyncReturns<string> = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, '--import', '--result', resultFile],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+      assert.deepEqual(
+        readRunResult(resultFile)
+          .suites.map((one) => one.path)
+          .toSorted(),
+        [...listed.lines].toSorted(),
+        'the suites the run ran are the suites listed',
+      );
+      assert.ok(listed.lines.length > 0, 'something was listed');
+    }
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+  } finally {
+    sweep(slots, outside, ...projects);
+  }
+}
+
 /**
  * Suites are found from the scripts and dealt to engines by what their cases cost.
  *
@@ -132823,6 +133082,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testASuiteIsFoundUnderAnySpellingOfItsPath,
   testAnInnerClassBaseIsFollowedToTheInnerClass,
+  testListNamesEverySuiteOfALinkedTree,
+  testListFindsSuitesThroughBasesInnerClassesAndTheTestFolder,
+  testListIsNarrowedAsARunIs,
+  testListOfNoSuiteIsEmptyAndARefusalIsTheRuns,
+  testListNamesTheSuitesARealRunRuns,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAnEngineRunsTheCheapEndOfItsUnitsFirst,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,

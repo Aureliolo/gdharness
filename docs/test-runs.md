@@ -16,6 +16,7 @@ gdharness test path/to/game            the same, for a project elsewhere
 gdharness test tests/combat            every suite in a directory
 gdharness test tests/a_test.gd         one suite
 gdharness test tests/a_test.gd:test_x  one case
+gdharness test --list                  print the suites a run takes, run nothing
 ```
 
 It exits 0 when every case passed and nothing else was wrong. It exits 1 when anything failed, and 2
@@ -70,6 +71,11 @@ when the command line itself is wrong.
   reuse check.
 - `--whole-tree`: run nothing, and print each script that makes suites depend on every file, as
   `path:line: argument`. Each line says how many suites reach it from their code and the autoloads.
+- `--list`: run nothing, and print the suites the same command would run, one `res://` path per line
+  in the order of their paths (`--order` applies), with `--json` as a JSON array. It finds them as
+  the run does, from the scripts alone, so it starts no engine and needs none except for
+  `--changed-only`, which keys on the engine. A project the run refuses is refused the same way.
+  A project whose search finds no suite prints nothing and exits 0.
 - `--times FILE`: deal the suites by the times in `FILE` and record what they took into it, in
   place of `.godot/gdharness/suite-times.json`. A missing file deals as no times would.
 

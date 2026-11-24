@@ -148,6 +148,10 @@ interface TestOptions {
   readonly changedOnly: boolean;
   /** Name the scripts that make suites depend on every file, and run nothing. */
   readonly wholeTree: boolean;
+  /** Print the suites the run would take, one `res://` path each, and run nothing. */
+  readonly list: boolean;
+  /** With {@link list}, print them as a JSON array. */
+  readonly json: boolean;
   readonly reachAlso: readonly string[];
   readonly importFirst: boolean;
   /**
@@ -365,7 +369,15 @@ function racingSaid(engineArgs: readonly string[], plans: readonly EnginePlan[])
   ];
 }
 
-const SWITCHES = new Set(['--changed-only', '--whole-tree', '--import', '--print-output', '--verbose']);
+const SWITCHES = new Set([
+  '--changed-only',
+  '--whole-tree',
+  '--list',
+  '--json',
+  '--import',
+  '--print-output',
+  '--verbose',
+]);
 
 /** The arguments of `gdharness test` sorted into the options with values, the switches and the rest. */
 interface SortedArguments {
@@ -495,6 +507,8 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     roots: (valued.get('--tests') ?? []).map((root) => resPathOf(root, projectPath, cwd).replace(/\/$/, '')),
     changedOnly: switches.has('--changed-only'),
     wholeTree: switches.has('--whole-tree'),
+    list: switches.has('--list'),
+    json: jsonListed(switches),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
     order: orderNamed(last('--order'), selected),
@@ -517,6 +531,14 @@ function seedOf(value: string): number {
   return seed;
 }
 
+/** Whether `--json` was given, which only a `--list` can use. */
+function jsonListed(switches: ReadonlySet<string>): boolean {
+  if (switches.has('--json') && !switches.has('--list')) {
+    throw new EngineUsageError('--json goes with --list, which prints the suites as a JSON array.');
+  }
+  return switches.has('--json');
+}
+
 /** The directories a run with nothing selected looks for suites in. */
 function rootsOf(options: TestOptions): readonly string[] {
   return options.roots.length > 0
@@ -537,9 +559,9 @@ function searchedRoots(options: TestOptions): readonly string[] {
 }
 
 /** The suites a run is asked for, each with the cases asked of it. */
-function selectedSuites(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
+function selectedSuites(scripts: ProjectScripts, options: TestOptions, mayBeNone = false): DeclaredSuite[] {
   if (options.selected.length === 0) {
-    return suitesOfTheRoots(scripts, options);
+    return suitesOfTheRoots(scripts, options, mayBeNone);
   }
   const chosen = new Map<string, { suite: DeclaredSuite; cases: Set<string> }>();
   for (const entry of options.selected) {
@@ -573,15 +595,22 @@ function casesAsked(suite: DeclaredSuite, asked: string | undefined): readonly s
   return [asked];
 }
 
-/** Every suite under the directories a run with nothing selected looks in, refusing where there is none. */
-function suitesOfTheRoots(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
+/**
+ * Every suite under the directories a run with nothing selected looks in, refusing where there is
+ * none unless [param mayBeNone], which a listing sets: no suite is an answer there.
+ */
+function suitesOfTheRoots(
+  scripts: ProjectScripts,
+  options: TestOptions,
+  mayBeNone: boolean,
+): DeclaredSuite[] {
   const roots = rootsOf(options);
   const missing = roots.find((root) => !existsSync(join(options.projectPath, root.slice('res://'.length))));
   if (missing !== undefined) {
     throw new EngineUsageError(`Nothing at ${missing} in the project at ${options.projectPath}.`);
   }
   const found = scripts.suitesUnder(roots);
-  if (found.length === 0) {
+  if (found.length === 0 && !mayBeNone) {
     throw new EngineUsageError(
       roots.length === 0
         ? 'The project has no tests or test directory to look for suites in. Name one with --tests.'
@@ -790,12 +819,45 @@ export function wholeTreeSaid(options: TestOptions): string[] {
   );
 }
 
-/** Runs the suites [param options] asks for with the engine at [param godotPath]. Answers the exit code. */
-export async function runTestCommand(options: TestOptions, godotPath: string): Promise<number> {
-  const unusable = gdUnit4Unusable(options.projectPath);
+/** Refuses a project whose gdUnit4 a run could not use, in the words a run and a listing share. */
+function requireGdUnit4(projectPath: string): void {
+  const unusable = gdUnit4Unusable(projectPath);
   if (unusable !== null) {
     throw new EngineUsageError(`${unusable.reason}. Install gdUnit4 6.0 or later under addons/gdUnit4.`);
   }
+}
+
+/**
+ * The suites `--list` prints: those the run with the same arguments takes, found by the one
+ * selection the run uses and in the order the run deals them by path (`--order` applies). A run
+ * that refuses is refused the same. `--changed-only` leaves out what the run would, and only that
+ * option reads the engine, through [param godotPath].
+ */
+export function listedSuites(options: TestOptions, godotPath: string | null): string[] {
+  requireGdUnit4(options.projectPath);
+  const scripts = new ProjectScripts(options.projectPath);
+  let suites: readonly DeclaredSuite[] = selectedSuites(scripts, options, true);
+  if (options.changedOnly && godotPath !== null) {
+    const state = join(homeOf(options.projectPath), '.godot', 'gdharness');
+    const unchanged = suitesUnchanged(
+      suites,
+      join(state, 'suite-passed.json'),
+      scripts,
+      passKeyOf(options, godotPath),
+    );
+    suites = suites.filter((suite) => !unchanged.includes(suite));
+  }
+  const whole = unitsOf(suites, {}, Number.POSITIVE_INFINITY);
+  const inOrder =
+    options.order === null
+      ? whole.toSorted((a, b) => byCodeUnit(a.suite, b.suite))
+      : ordered(whole, options.order, options.selected);
+  return inOrder.map((unit) => unit.suite);
+}
+
+/** Runs the suites [param options] asks for with the engine at [param godotPath]. Answers the exit code. */
+export async function runTestCommand(options: TestOptions, godotPath: string): Promise<number> {
+  requireGdUnit4(options.projectPath);
   const startedAt = Date.now();
   const scripts = new ProjectScripts(options.projectPath);
   const home = homeOf(options.projectPath);
@@ -923,14 +985,7 @@ async function runStages(context: RunContext): Promise<number> {
   // Read again from here, since a script edited during the import is loaded as it is now, and
   // one edited from here on is newer than suitesBegan, which keeps its pass unrecorded.
   const loaded = new ProjectScripts(options.projectPath);
-  const always = [
-    getLocalVersion(),
-    readFileSync(shippedListedRunner(), 'utf8'),
-    engineSaid(godotPath),
-    ...reachedAlsoSaid(options.reachAlso),
-    // A pass holds for the flags its engine ran with, since a frame step or a speed decides it.
-    ...(launch.engineArgs.length > 0 ? [`engine flags ${JSON.stringify(launch.engineArgs)}`] : []),
-  ];
+  const always = passKeyOf(options, godotPath);
   const compileKept = options.changedOnly
     ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
     : null;
@@ -1038,18 +1093,40 @@ async function importedFirst(context: RunContext): Promise<number | null> {
   return exitAfter(1, unwritten);
 }
 
+/** What a pass holds for besides a suite's own files: this gdharness, the runner, the engine and its flags. */
+function passKeyOf(options: TestOptions, godotPath: string): string[] {
+  return [
+    getLocalVersion(),
+    readFileSync(shippedListedRunner(), 'utf8'),
+    engineSaid(godotPath),
+    ...reachedAlsoSaid(options.reachAlso),
+    // A pass holds for the flags its engine ran with, since a frame step or a speed decides it.
+    ...(options.engineArgs.length > 0 ? [`engine flags ${JSON.stringify(options.engineArgs)}`] : []),
+  ];
+}
+
+/** The suites among [param suites] that passed on everything their engine loads as it stands now. */
+function suitesUnchanged(
+  suites: readonly DeclaredSuite[],
+  passedFile: string,
+  loaded: ProjectScripts,
+  always: readonly string[],
+): readonly DeclaredSuite[] {
+  const inputs = new SuiteInputs(loaded, always);
+  const passedBefore = readPassed(passedFile);
+  return suites.filter((suite) => {
+    const passed = passedBefore[suite.path];
+    return passed !== undefined && inputs.printOf(passed.inputs) === passed.print;
+  });
+}
+
 /** The suites of the run less those that passed on everything their engine loads as it stands now. */
 function withoutTheUnchanged(
   context: RunContext,
   loaded: ProjectScripts,
   always: readonly string[],
 ): readonly DeclaredSuite[] {
-  const inputs = new SuiteInputs(loaded, always);
-  const passedBefore = readPassed(context.passedFile);
-  const unchanged = context.suites.filter((suite) => {
-    const passed = passedBefore[suite.path];
-    return passed !== undefined && inputs.printOf(passed.inputs) === passed.print;
-  });
+  const unchanged = suitesUnchanged(context.suites, context.passedFile, loaded, always);
   if (unchanged.length > 0) {
     console.log(
       `${plural(unchanged.length, 'suite')} passed on everything ${unchanged.length === 1 ? 'its engine' : 'their engines'} loaded as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run: ${named(unchanged.map((suite) => suite.path))}.`,
