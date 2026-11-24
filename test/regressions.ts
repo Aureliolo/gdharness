@@ -75626,6 +75626,106 @@ async function testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain(): Promise
 }
 
 /**
+ * Looks, as a gate's engine on four slots with one lock live, behind a gate's waiting mark that each
+ * of [param steps] adds to, and answers what each look took: the lock's name, or null. Gates draw
+ * two slots there. The 16 GiB machine's budget is 6 GiB and the live lock holds 1.5 GiB.
+ */
+async function needMarkLooks(steps: readonly Record<string, unknown>[]): Promise<(string | null)[]> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-need-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    writeFileSync(join(directory, '3.lock'), JSON.stringify(me));
+    const looks: (string | null)[] = [];
+    for (const step of steps) {
+      writeFileSync(
+        join(marks, '1-1.json'),
+        JSON.stringify({ ...me, taker: 'gate', since: (Date.now() - 60_000) / 1000, ...step }),
+      );
+      const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'gate', undefined, {
+        memory: 16 * 1024 ** 3,
+      });
+      try {
+        const lock = await newcomer.takeFree();
+        looks.push(lock === null ? null : basename(lock));
+      } finally {
+        newcomer.releaseAll();
+      }
+    }
+    return looks;
+  } finally {
+    sweep(directory);
+  }
+}
+
+/** A waiter of four ahead, with a draw of two and a need the memory cannot hold, is passed at once. */
+async function testAWaiterOfSeveralThatMemoryRefusesIsPassedForAFreeSlot(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(await needMarkLooks([{ wants: 4, need: 6 * gib }]), ['0.lock']);
+}
+
+/** The same waiter keeps the slots where the memory can hold its need, and loses them where it cannot. */
+async function testAWaiterOfSeveralKeepsTheSlotsWhereMemoryCanHoldIt(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(
+    await needMarkLooks([
+      { wants: 4, need: 6 * gib },
+      { wants: 4, need: 3 * gib },
+      { wants: 4, need: 6 * gib },
+    ]),
+    ['0.lock', null, '0.lock'],
+  );
+}
+
+/** A waiter whose draw covers all it wants is never passed, whatever its need. */
+async function testAWaiterWhoseDrawCoversWhatItWantsIsNeverPassedForItsNeed(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(
+    await needMarkLooks([
+      { wants: 2, need: 600 * gib },
+      { wants: 2, need: 6 * gib },
+    ]),
+    [null, null],
+  );
+}
+
+/** A mark with no need, or a need that is no whole positive number, is read as before. */
+async function testAMarkWithNoNeedIsReadAsBefore(): Promise<void> {
+  const looks = await needMarkLooks([
+    { wants: 4 },
+    { wants: 4, need: 0 },
+    { wants: 4, need: -1 },
+    { wants: 4, need: '6' },
+    { wants: 4, need: 1.5 },
+    { wants: 4, need: null },
+  ]);
+  assert.deepEqual(looks, [null, null, null, null, null, null]);
+}
+
+/** A waiter's wants is read from its mark at every look, so a mark that changes is judged anew. */
+async function testAWaitersWantsIsReadFromItsMarkAtEveryLook(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(
+    await needMarkLooks([
+      { wants: 2, need: 6 * gib },
+      { wants: 4, need: 6 * gib },
+      { wants: 2, need: 6 * gib },
+    ]),
+    [null, '0.lock', null],
+  );
+}
+
+/** A wait for memory in line is read as before, whatever need its mark names. */
+async function testAMemoryMarkIsStillSkippedForItsNeed(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(
+    await needMarkLooks([{ taker: 'memory', kind: 'gate', memory: 1, wants: 4, need: 6 * gib }]),
+    [null],
+  );
+}
+
+/**
  * A program inside a timing or a heavy job runs on the slot the job lends, one engine at a time,
  * and takes none beside it. Once the lender has gone it takes slots as any program does.
  */
@@ -132817,6 +132917,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing,
   testTheSlotCountIsHeldToTheMemoryThereIs,
   testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
+  testAWaiterOfSeveralThatMemoryRefusesIsPassedForAFreeSlot,
+  testAWaiterOfSeveralKeepsTheSlotsWhereMemoryCanHoldIt,
+  testAWaiterWhoseDrawCoversWhatItWantsIsNeverPassedForItsNeed,
+  testAMarkWithNoNeedIsReadAsBefore,
+  testAWaitersWantsIsReadFromItsMarkAtEveryLook,
+  testAMemoryMarkIsStillSkippedForItsNeed,
   testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,

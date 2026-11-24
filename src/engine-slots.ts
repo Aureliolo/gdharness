@@ -456,6 +456,11 @@ interface SlotWaiter {
   readonly seen: number;
   /** The bytes its engine will hold, where it waits for memory in line, else 0. */
   readonly memory?: number;
+  /**
+   * The bytes of memory its mark says a wait for several slots needs, else 0. A taker of several
+   * that memory refuses a start on fewer than it wants is passed, at the look that finds it so.
+   */
+  readonly need?: number;
 }
 
 /**
@@ -562,6 +567,7 @@ function waiterOfMark(
     repository,
     kind: waiting,
     memory,
+    need,
   }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
   // A memory mark that names no time is a run's own wait for the memory of an engine it holds a slot
   // for, which takes no place in line. One that names it is a take waiting for memory in line.
@@ -587,7 +593,13 @@ function waiterOfMark(
     game: holder.game === true,
     ...repositoryOfMark(repository, takerNamed(taker), highList),
     memory: marked === MEMORY_TAKER ? positiveOr0(memory) : 0,
+    need: needOfMark(marked, need),
   };
+}
+
+/** The bytes a mark of [param taker] names under [param value], where a wait for slots says a whole number above 0. */
+function needOfMark(taker: unknown, value: unknown): number {
+  return taker === MEMORY_TAKER || !Number.isInteger(value) ? 0 : positiveOr0(value);
 }
 
 /**
@@ -2159,7 +2171,11 @@ export class EngineSlots {
   /**
    * The free slots the takers [param ahead] take first, in their order, each with the mark of the one
    * taking it: see {@link slotsClaimed}. A game the games limit holds back draws only slots that are
-   * held, so it claims none. A taker never takes a slot [param passed] names for its mark.
+   * held, so it claims none. A taker never takes a slot [param passed] names for its mark. A taker of
+   * several, whose mark names the memory it needs, claims none at a look where its draw is fewer
+   * than it wants and the live locks' memory with its need is past the budget, since it cannot start
+   * on that draw. It claims again at the first look where the memory allows. Its wants and need are
+   * read from its mark at each look.
    */
   private async claimedAhead(
     ahead: readonly SlotWaiter[],
@@ -2175,12 +2191,31 @@ export class EngineSlots {
     }
     const now = Date.now();
     const drawn: (readonly number[])[] = [];
+    const draws = new Map<string, readonly number[]>();
+    let live: { bytes: number }[] | undefined;
+    const refused = async (one: SlotWaiter, draw: readonly number[]): Promise<boolean> => {
+      const most = Math.min(one.wants, draw.length);
+      const need = one.need ?? 0;
+      if (need === 0 || most === 0 || most >= one.wants) {
+        return false;
+      }
+      live ??= await this.liveMemory();
+      return live.length > 0 && live.reduce((sum, lock) => sum + lock.bytes, need) > this.memoryBudget;
+    };
+    const kept: SlotWaiter[] = [];
+    for (const one of ahead) {
+      const draw = (await this.drawnFor(one.taker, one.game, queued)).numbers;
+      if (!(await refused(one, draw))) {
+        draws.set(one.mark, draw);
+        kept.push(one);
+      }
+    }
     // A taker waiting for several slots at once is ahead once for each, for its first drain.
-    const places = ahead.flatMap((one) =>
+    const places = kept.flatMap((one) =>
       Array.from({ length: now - one.since < SLOTS_DRAIN_MS ? one.wants : 1 }, () => one),
     );
     for (const one of places) {
-      const numbers = (await this.drawnFor(one.taker, one.game, queued)).numbers;
+      const numbers = draws.get(one.mark) ?? [];
       drawn.push(numbers.filter((slot) => passed.get(one.mark)?.has(slot) !== true));
     }
     return new Map(
