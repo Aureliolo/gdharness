@@ -129905,8 +129905,9 @@ function addAWindowedSuite(project: string): void {
 
 /**
  * One server whose engine is the memory engine, with a memory project for each of [param projects]:
- * its ceiling in megabytes, and a windowed suite where it is windowed. The server has a slot for
- * each project whatever the suite's own count, so their runs can overlap. Each [param body] call of
+ * its ceiling in megabytes, and a windowed suite where it is windowed. The server has a slot folder
+ * of its own, with a slot for each project whatever the suite's own count, so their runs can overlap
+ * even beside another suite. Each [param body] call of
  * run runs project_test on one project. Each test engine writes its pid and its parent's to
  * [param pids], one line each.
  */
@@ -129929,11 +129930,13 @@ async function withMemoryProjects(
     return project;
   });
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
   const pids = join(runtime, 'engine-pids');
   const server = new ServerProcess({
     env: {
       GODOT_PATH: memoryEngine(),
       GDHARNESS_RUNTIME_DIR: runtime,
+      [SLOTS_VARIABLE]: slots,
       [SLOT_COUNT_VARIABLE]: slotCountForEngines(projects.length),
       GDH_PID_FILE: pids,
       ...holds,
@@ -129961,7 +129964,7 @@ async function withMemoryProjects(
     );
   } finally {
     await server.stop();
-    sweep(...paths, runtime);
+    sweep(...paths, runtime, slots);
   }
 }
 
