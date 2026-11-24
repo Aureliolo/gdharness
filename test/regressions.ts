@@ -75625,33 +75625,55 @@ async function testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain(): Promise
   }
 }
 
+/** A step of {@link needMarkLooks}: the mark's own fields, the memory free at the look, and the live lock. */
+interface NeedMarkStep {
+  /** The fields the mark adds, or its members written as JSON text, for a figure JSON.stringify never writes. */
+  readonly mark: Record<string, unknown> | string;
+  /** The memory free at the look, in GiB. */
+  readonly free?: number;
+  /** What the live locks add to their holder, each lock by its slot. */
+  readonly locks?: Readonly<Record<number, Record<string, unknown>>>;
+}
+
 /**
- * Looks, as a gate's engine on four slots with one lock live, behind a gate's waiting mark that each
- * of [param steps] adds to, and answers what each look took: the lock's name, or null. Gates draw
- * two slots there. The 16 GiB machine's budget is 6 GiB and the live lock holds 1.5 GiB.
+ * Looks, as one gate's engine on four slots taking again and again with one line, behind a gate's
+ * waiting mark that each of [param steps] writes anew, and answers what each look took: the lock's
+ * name, or null. Slot 3's lock is live unless a step names its own. Gates draw two slots there. The
+ * 64 GiB machine's slots leave it 58 GiB, and the memory free is 14.2 GiB where a step names none,
+ * so a waiter of four on that draw is refused a start needing more than 1.2 GiB.
  */
-async function needMarkLooks(steps: readonly Record<string, unknown>[]): Promise<(string | null)[]> {
+async function needMarkLooks(steps: readonly NeedMarkStep[]): Promise<(string | null)[]> {
+  const gib = 1024 ** 3;
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-need-'));
   const marks = join(directory, WAITING_FOLDER);
   mkdirSync(marks, { recursive: true });
   try {
     const me = { pid: process.pid, started: await ownStart() };
-    writeFileSync(join(directory, '3.lock'), JSON.stringify(me));
+    let free = 14.2;
+    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'gate', undefined, {
+      memory: 64 * gib,
+      available: () => Promise.resolve(free * gib),
+    });
+    const line = new SlotLine('gate');
     const looks: (string | null)[] = [];
     for (const step of steps) {
+      free = step.free ?? 14.2;
+      for (const slot of [0, 1, 2, 3]) {
+        rmSync(join(directory, `${String(slot)}.lock`), { force: true });
+      }
+      for (const [slot, more] of Object.entries(step.locks ?? { 3: {} })) {
+        writeFileSync(join(directory, `${slot}.lock`), JSON.stringify({ ...me, ...more }));
+      }
+      const head = JSON.stringify({ ...me, taker: 'gate', since: (Date.now() - 60_000) / 1000 });
       writeFileSync(
         join(marks, '1-1.json'),
-        JSON.stringify({ ...me, taker: 'gate', since: (Date.now() - 60_000) / 1000, ...step }),
+        typeof step.mark === 'string'
+          ? `${head.slice(0, -1)},${step.mark}}`
+          : JSON.stringify({ ...JSON.parse(head), ...step.mark }),
       );
-      const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'gate', undefined, {
-        memory: 16 * 1024 ** 3,
-      });
-      try {
-        const lock = await newcomer.takeFree();
-        looks.push(lock === null ? null : basename(lock));
-      } finally {
-        newcomer.releaseAll();
-      }
+      const lock = await newcomer.takeFree(false, line);
+      looks.push(lock === null ? null : basename(lock));
+      newcomer.releaseAll();
     }
     return looks;
   } finally {
@@ -75659,10 +75681,10 @@ async function needMarkLooks(steps: readonly Record<string, unknown>[]): Promise
   }
 }
 
-/** A waiter of four ahead, with a draw of two and a need the memory cannot hold, is passed at once. */
+/** A waiter of four ahead, with a draw of two and a need the memory free cannot hold, is passed at once. */
 async function testAWaiterOfSeveralThatMemoryRefusesIsPassedForAFreeSlot(): Promise<void> {
   const gib = 1024 ** 3;
-  assert.deepEqual(await needMarkLooks([{ wants: 4, need: 6 * gib }]), ['0.lock']);
+  assert.deepEqual(await needMarkLooks([{ mark: { wants: 4, need: 6 * gib } }]), ['0.lock']);
 }
 
 /** The same waiter keeps the slots where the memory can hold its need, and loses them where it cannot. */
@@ -75670,11 +75692,52 @@ async function testAWaiterOfSeveralKeepsTheSlotsWhereMemoryCanHoldIt(): Promise<
   const gib = 1024 ** 3;
   assert.deepEqual(
     await needMarkLooks([
-      { wants: 4, need: 6 * gib },
-      { wants: 4, need: 3 * gib },
-      { wants: 4, need: 6 * gib },
+      { mark: { wants: 4, need: 6 * gib } },
+      { mark: { wants: 4, need: gib } },
+      { mark: { wants: 4, need: 6 * gib } },
     ]),
     ['0.lock', null, '0.lock'],
+  );
+}
+
+/** Memory that frees between looks of one take gives the waiter its slots again at the next look. */
+async function testAWaiterOfSeveralHasTheSlotsAgainOnceMemoryFrees(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(
+    await needMarkLooks([
+      { mark: { wants: 4, need: 6 * gib } },
+      { mark: { wants: 4, need: 6 * gib }, free: 30 },
+      { mark: { wants: 4, need: 6 * gib } },
+    ]),
+    ['0.lock', null, '0.lock'],
+  );
+}
+
+/** The memory free counts only up to what the slots leave of physical memory, however much is free. */
+async function testTheRoomToStartShortIsBoundByWhatTheSlotsLeave(): Promise<void> {
+  const gib = 1024 ** 3;
+  assert.deepEqual(
+    await needMarkLooks([
+      { mark: { wants: 4, need: 40 * gib }, free: 100 },
+      { mark: { wants: 4, need: 50 * gib }, free: 100 },
+    ]),
+    [null, '0.lock'],
+  );
+}
+
+/** A start short records what its job has yet to take, once a job, and that is not free to the waiter. */
+async function testAStartShortCountsAgainstTheWaiterOncePerJob(): Promise<void> {
+  const gib = 1024 ** 3;
+  const mark = { wants: 4, need: 6 * gib };
+  assert.deepEqual(
+    await needMarkLooks([
+      { mark, free: 30 },
+      { mark, free: 30, locks: { 3: { short: 12 * gib, job: 'build' } } },
+      { mark, free: 30, locks: { 2: { short: 7 * gib, job: 'build' }, 3: { short: 7 * gib, job: 'build' } } },
+      { mark, free: 30, locks: { 3: { short: 12 * gib } } },
+      { mark, free: 30, locks: { 3: { short: String(12 * gib), job: 'build' } } },
+    ]),
+    [null, '0.lock', null, null, null],
   );
 }
 
@@ -75682,35 +75745,48 @@ async function testAWaiterOfSeveralKeepsTheSlotsWhereMemoryCanHoldIt(): Promise<
 async function testAWaiterWhoseDrawCoversWhatItWantsIsNeverPassedForItsNeed(): Promise<void> {
   const gib = 1024 ** 3;
   assert.deepEqual(
-    await needMarkLooks([
-      { wants: 2, need: 600 * gib },
-      { wants: 2, need: 6 * gib },
-    ]),
+    await needMarkLooks([{ mark: { wants: 2, need: 600 * gib } }, { mark: { wants: 2, need: 6 * gib } }]),
     [null, null],
   );
 }
 
-/** A mark with no need, or a need that is no whole positive number, is read as before. */
+/** A mark with no need, or a need of 0 or less, is read as before, however little memory is free. */
 async function testAMarkWithNoNeedIsReadAsBefore(): Promise<void> {
   const looks = await needMarkLooks([
-    { wants: 4 },
-    { wants: 4, need: 0 },
-    { wants: 4, need: -1 },
-    { wants: 4, need: '6' },
-    { wants: 4, need: 1.5 },
-    { wants: 4, need: null },
+    { mark: { wants: 4 } },
+    { mark: { wants: 4, need: 0 } },
+    { mark: { wants: 4, need: -1 } },
+    { mark: { wants: 4, need: null } },
+    { mark: { wants: 4 }, free: 1 },
   ]);
-  assert.deepEqual(looks, [null, null, null, null, null, null]);
+  assert.deepEqual(looks, [null, null, null, null, null]);
 }
 
-/** A waiter's wants is read from its mark at every look, so a mark that changes is judged anew. */
+/**
+ * A need that is no whole number as JSON writes it, text, a fraction, a list or a whole figure
+ * written with a point or an exponent, is read as none.
+ */
+async function testAMalformedNeedIsReadAsNone(): Promise<void> {
+  const gib = 1024 ** 3;
+  const looks = await needMarkLooks([
+    { mark: { wants: 4, need: String(6 * gib) } },
+    { mark: { wants: 4, need: 6 * gib + 0.5 } },
+    { mark: { wants: 4, need: [6 * gib] } },
+    { mark: `"wants":4,"need":${String(6 * gib)}.0` },
+    { mark: '"wants":4,"need":6.442450944e9' },
+    { mark: `"wants":4,"need":${String(6 * gib)}` },
+  ]);
+  assert.deepEqual(looks, [null, null, null, null, null, '0.lock']);
+}
+
+/** A waiter's wants is read from its mark at every look of one take, so a mark that changes is judged anew. */
 async function testAWaitersWantsIsReadFromItsMarkAtEveryLook(): Promise<void> {
   const gib = 1024 ** 3;
   assert.deepEqual(
     await needMarkLooks([
-      { wants: 2, need: 6 * gib },
-      { wants: 4, need: 6 * gib },
-      { wants: 2, need: 6 * gib },
+      { mark: { wants: 2, need: 6 * gib } },
+      { mark: { wants: 4, need: 6 * gib } },
+      { mark: { wants: 2, need: 6 * gib } },
     ]),
     [null, '0.lock', null],
   );
@@ -75720,7 +75796,7 @@ async function testAWaitersWantsIsReadFromItsMarkAtEveryLook(): Promise<void> {
 async function testAMemoryMarkIsStillSkippedForItsNeed(): Promise<void> {
   const gib = 1024 ** 3;
   assert.deepEqual(
-    await needMarkLooks([{ taker: 'memory', kind: 'gate', memory: 1, wants: 4, need: 6 * gib }]),
+    await needMarkLooks([{ mark: { taker: 'memory', kind: 'gate', memory: 1, wants: 4, need: 6 * gib } }]),
     [null],
   );
 }
@@ -132919,8 +132995,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
   testAWaiterOfSeveralThatMemoryRefusesIsPassedForAFreeSlot,
   testAWaiterOfSeveralKeepsTheSlotsWhereMemoryCanHoldIt,
+  testAWaiterOfSeveralHasTheSlotsAgainOnceMemoryFrees,
+  testAStartShortCountsAgainstTheWaiterOncePerJob,
+  testTheRoomToStartShortIsBoundByWhatTheSlotsLeave,
   testAWaiterWhoseDrawCoversWhatItWantsIsNeverPassedForItsNeed,
   testAMarkWithNoNeedIsReadAsBefore,
+  testAMalformedNeedIsReadAsNone,
   testAWaitersWantsIsReadFromItsMarkAtEveryLook,
   testAMemoryMarkIsStillSkippedForItsNeed,
   testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,
