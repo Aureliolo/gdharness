@@ -75802,6 +75802,89 @@ async function testAMemoryMarkIsStillSkippedForItsNeed(): Promise<void> {
 }
 
 /**
+ * A short start recorded by a lock whose holder has gone takes nothing from the waiter's room, as
+ * the same record held by a live holder does.
+ */
+async function testAGoneHoldersStartShortDoesNotCountAgainstTheWaiter(): Promise<void> {
+  const gib = 1024 ** 3;
+  const mark = { wants: 4, need: 6 * gib };
+  const short = { short: 30 * gib, job: 'build' };
+  assert.deepEqual(
+    await needMarkLooks([
+      { mark, free: 30, locks: { 2: { pid: 999_999_1, started: 1, ...short }, 3: {} } },
+      { mark, free: 30, locks: { 2: short, 3: {} } },
+    ]),
+    [null, '0.lock'],
+  );
+}
+
+/** A need exactly at the room to start short is held, and one byte past it is refused. */
+async function testANeedExactlyAtTheRoomIsNotRefused(): Promise<void> {
+  const gib = 1024 ** 3;
+  // 20 GiB free less the 16 GiB kept outside leaves 4 GiB, and the draw of two stands for 3 GiB.
+  assert.deepEqual(
+    await needMarkLooks([
+      { mark: { wants: 4, need: 7 * gib }, free: 20 },
+      { mark: { wants: 4, need: 7 * gib + 1 }, free: 20 },
+    ]),
+    [null, '0.lock'],
+  );
+}
+
+/**
+ * A take given no reading of its own reads the machine's memory left to give engines, less what
+ * other work has reserved in its slot folder, so a reservation past any machine refuses the waiter.
+ */
+async function testTheMemoryFreeIsReadLessReservationsWhenNoneIsGiven(): Promise<void> {
+  const gib = 1024 ** 3;
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-default-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  mkdirSync(join(directory, RESERVED_FOLDER), { recursive: true });
+  const names = [SLOTS_VARIABLE, RESERVED_VARIABLE] as const;
+  const before = names.map((name) => process.env[name]);
+  process.env[SLOTS_VARIABLE] = directory;
+  delete process.env[RESERVED_VARIABLE];
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    writeFileSync(join(directory, '3.lock'), JSON.stringify(me));
+    writeFileSync(join(directory, RESERVED_FOLDER, 'other.json'), JSON.stringify({ ...me, owed: 2 ** 50 }));
+    writeFileSync(
+      join(marks, '1-1.json'),
+      JSON.stringify({
+        ...me,
+        taker: 'gate',
+        since: (Date.now() - 60_000) / 1000,
+        wants: 4,
+        need: 3 * gib + 1,
+      }),
+    );
+    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'gate', undefined, {
+      memory: 64 * gib,
+    });
+    try {
+      const lock = await newcomer.takeFree();
+      assert.deepEqual(
+        [lock === null ? null : basename(lock), [...(newcomer.drawn.left ?? [])]],
+        ['0.lock', []],
+      );
+    } finally {
+      newcomer.releaseAll();
+    }
+  } finally {
+    names.forEach((name, at) => {
+      const value = before[at];
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    });
+    sweep(directory);
+  }
+}
+
+/**
  * A program inside a timing or a heavy job runs on the slot the job lends, one engine at a time,
  * and takes none beside it. Once the lender has gone it takes slots as any program does.
  */
@@ -133003,6 +133086,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMalformedNeedIsReadAsNone,
   testAWaitersWantsIsReadFromItsMarkAtEveryLook,
   testAMemoryMarkIsStillSkippedForItsNeed,
+  testAGoneHoldersStartShortDoesNotCountAgainstTheWaiter,
+  testANeedExactlyAtTheRoomIsNotRefused,
+  testTheMemoryFreeIsReadLessReservationsWhenNoneIsGiven,
   testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
