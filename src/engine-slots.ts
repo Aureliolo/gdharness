@@ -1575,38 +1575,29 @@ export class EngineSlots {
   /**
    * Makes the slot at [param lock], which this process holds, count what the next engine of [param tool]
    * needs, as a take for it would: down for a headless one after a window has ended, and up for a
-   * windowed engine after a headless one. A raise asks memory as a take does: it waits until the other
-   * live locks leave room in the budget for its new figure, or finds none live. A raise that two
-   * takers counted room for at once is undone where its lock is the newest, as {@link takeFree}'s
-   * take is, and waits again. Answers what the lock counts after, as {@link raiseSlotMemory} does.
+   * windowed engine after a headless one. A raise asks memory once, as a take does, and never waits:
+   * it is written where the other live locks leave room in the budget for its new figure, or none is
+   * live. One that two takers counted room for at once is undone where its lock is the newest, as
+   * {@link takeFree}'s take is. Answers false where the slot was not raised and counts what it did,
+   * so its holder gives it back and takes a slot for the engine, waiting with nothing held: a raise
+   * that waited holding its slot could wait forever on another that waits on it.
    */
-  async counting(lock: string, tool?: PeakTool): Promise<number | null> {
+  async counting(lock: string, tool?: PeakTool): Promise<boolean> {
     const need = Math.round(this.memoryNeeded(false, this.project, tool));
-    let changes: FolderChanges | undefined;
-    try {
-      for (;;) {
-        const was = await this.figureHeld(lock);
-        // A command's grant is counted by the command, whose locks this folder does not hold.
-        if (was === null || need <= was || slotCommandOf() !== undefined) {
-          return await slotMemoryWritten(lock, need, true);
-        }
-        if (await this.roomToRaise(lock, need)) {
-          const written = await slotMemoryWritten(lock, need, true);
-          if (written !== need || !(await this.overTheBudget(lock, need, undefined))) {
-            return written;
-          }
-          await slotMemoryWritten(lock, was, true);
-        }
-        if (changes === undefined) {
-          // Looked at again once watched, since a slot given back before the watch began says nothing.
-          changes = new FolderChanges(this.directory);
-          continue;
-        }
-        await changes.next(SLOT_LOOK_MS, SLOT_SETTLE_MS, undefined);
-      }
-    } finally {
-      changes?.close();
+    const was = await this.figureHeld(lock);
+    // A command's grant is counted by the command, whose locks this folder does not hold.
+    if (was === null || need <= was || slotCommandOf() !== undefined) {
+      await slotMemoryWritten(lock, need, true);
+      return true;
     }
+    if (!(await this.roomToRaise(lock, need)) || (await slotMemoryWritten(lock, need, true)) !== need) {
+      return false;
+    }
+    if (await this.overTheBudget(lock, need, undefined)) {
+      await slotMemoryWritten(lock, was, true);
+      return false;
+    }
+    return true;
   }
 
   /** What the slot at [param lock] counts, or null where this process does not hold it. */
@@ -1618,7 +1609,7 @@ export class EngineSlots {
 
   /**
    * Whether the slot at [param lock] may count [param need]: no other lock is live, or the others
-   * leave room for it in the budget. Where they do not, the draw records what the raise waits for.
+   * leave room for it in the budget. Where they do not, the draw records what the raise lacks.
    */
   private async roomToRaise(lock: string, need: number): Promise<boolean> {
     const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);

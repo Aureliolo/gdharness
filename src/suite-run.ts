@@ -2403,12 +2403,14 @@ export function importEnd(ended: EngineEnd): string | null {
 }
 
 /**
- * Runs the engines of one lane one after another in a single slot, taken before the first and given
+ * Runs the engines of one lane one after another in one slot, taken before the first and given
  * back after the last, so another run on the machine cannot take it in between. The slot counts what
  * the engine running in it needs: a lane that goes from a windowed engine to a headless one lowers
- * it, and one that goes back raises it once memory has room, so a window's memory is held only while
- * it is open. A slot handed to the compile check after a window counts the check's headless engine.
- * [param taken] was taken for the lane's first engine, or is null.
+ * it, and one that goes back raises it where memory has room now, so a window's memory is held only
+ * while it is open. Where memory has none, the lane gives the slot back and takes one for the window
+ * as a fresh windowed engine does, so it never waits holding a slot. A slot handed to the compile
+ * check after a window counts the check's headless engine. [param taken] was taken for the lane's
+ * first engine, or is null, in which case a slot counted for its first engine is taken.
  */
 export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
   slots: Pick<EngineSlots, 'take' | 'release' | 'counting'>,
@@ -2417,27 +2419,47 @@ export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
   run: (plan: P, index: number, lock: string) => Promise<T>,
   handed?: HandedSlot,
 ): Promise<T[]> {
-  const lock = taken ?? (await slots.take());
-  let counting = taken !== null && (lane[0]?.plan.windowed ?? false);
+  let counting = lane[0]?.plan.windowed ?? false;
+  let lock: string | null = taken ?? (await slotTakenFor(slots, counting));
   try {
     await handed?.lend(lock);
     const ran: T[] = [];
     for (const { plan, index } of lane) {
       if (plan.windowed !== counting) {
         counting = plan.windowed;
-        await slots.counting(lock, counting ? WINDOWED_LANE : undefined);
+        if (!(await slots.counting(lock, counting ? WINDOWED_LANE : undefined))) {
+          slots.release(lock);
+          lock = null;
+          lock = await slotTakenFor(slots, counting);
+        }
       }
       ran.push(await run(plan, index, lock));
     }
     return ran;
   } finally {
-    try {
-      if (counting && handed?.wants === true) {
-        await slots.counting(lock);
-      }
-    } finally {
-      doneWith(slots, lock, handed);
+    await laneDone(slots, lock, counting, handed);
+  }
+}
+
+/**
+ * Gives back the slot at [param lock] a lane ended in, if it holds one, or hands it to the compile
+ * check, counting the check's headless engine where the lane's last engine was [param windowed].
+ */
+async function laneDone(
+  slots: Pick<EngineSlots, 'release' | 'counting'>,
+  lock: string | null,
+  windowed: boolean,
+  handed: HandedSlot | undefined,
+): Promise<void> {
+  if (lock === null) {
+    return;
+  }
+  try {
+    if (windowed && handed?.wants === true) {
+      await slots.counting(lock);
     }
+  } finally {
+    doneWith(slots, lock, handed);
   }
 }
 
@@ -2987,6 +3009,22 @@ function engineArguments(
 }
 
 /**
+ * Takes a slot for an engine, waiting for one, counted for a window where [param windowed]. A wait
+ * keeps its mark and says it waits, as every take does.
+ */
+function slotTakenFor(slots: Pick<EngineSlots, 'take'>, windowed: boolean): Promise<string> {
+  return slots.take(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    windowed ? WINDOWED_LANE : undefined,
+  );
+}
+
+/**
  * The slot [param plan]'s engine runs in, which is [param slot] where its lane holds one and otherwise
  * one taken once free, and the launch it starts from in its lane. A windowed plan's slot counts what a
  * window holds and its peak is kept apart from a headless lane's.
@@ -2998,17 +3036,7 @@ export async function engineSlotAndLaunch<
   plan: Pick<EnginePlan, 'lane' | 'windowed'>,
   slot: string | null,
 ): Promise<{ readonly lock: string; readonly launched: L & { readonly lane: number } }> {
-  const lock =
-    slot ??
-    (await launch.slots.take(
-      undefined,
-      undefined,
-      undefined,
-      false,
-      undefined,
-      undefined,
-      plan.windowed ? WINDOWED_LANE : undefined,
-    ));
+  const lock = slot ?? (await slotTakenFor(launch.slots, plan.windowed));
   return {
     lock,
     launched: { ...launch, lane: plan.lane, ...(plan.windowed ? { peakKept: WINDOWED_LANE } : {}) },

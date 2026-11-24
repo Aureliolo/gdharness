@@ -134172,7 +134172,7 @@ async function testASharedRunNeverRewritesASlotsFigure(): Promise<void> {
       const countings: unknown[] = [];
       real.counting = (...args) => {
         countings.push(args);
-        return Promise.resolve(null);
+        return Promise.resolve(true);
       };
       const plans = dealt(units, declared, 3, 1);
       const started = await takenLanes(
@@ -134389,21 +134389,28 @@ async function testAStarvedEngineIsRunAgainByRanEngines(): Promise<void> {
   }
 }
 
-/** A lane handed no slot takes one, and counts a window on it where its first engine is windowed. */
+/**
+ * A lane handed no slot takes one counted for its first engine, as a fresh engine of its kind takes
+ * one, and rewrites no figure.
+ */
 async function testALaneHandedNoSlotTakesOneCountedForItsFirstEngine(): Promise<void> {
   for (const windowed of [true, false]) {
     const counted: Array<Parameters<EngineSlots['counting']>[1]> = [];
+    const asked: unknown[] = [];
     const released: string[] = [];
     const ranIn: string[] = [];
     await runLane(
       {
-        take: () => Promise.resolve('T'),
+        take: (...args: Parameters<EngineSlots['take']>) => {
+          asked.push(args[6]);
+          return Promise.resolve('T');
+        },
         release: (lock: string) => {
           released.push(lock);
         },
         counting: (_lock: string, tool?: Parameters<EngineSlots['counting']>[1]) => {
           counted.push(tool);
-          return Promise.resolve(0);
+          return Promise.resolve(true);
         },
       },
       [{ plan: { windowed }, index: 0 }],
@@ -134417,20 +134424,24 @@ async function testALaneHandedNoSlotTakesOneCountedForItsFirstEngine(): Promise<
     assert.deepEqual(ranIn, ['T'], `a ${kind} engine ran in the slot the lane took`);
     assert.deepEqual(released, ['T'], `and the slot was given back`);
     assert.deepEqual(
-      counted,
-      windowed ? ['test_windowed_lane'] : [],
-      `a slot taken headless is counted for a window only when the engine is windowed (${kind})`,
+      asked,
+      [windowed ? 'test_windowed_lane' : undefined],
+      `the slot is taken counted for a ${kind} engine`,
     );
+    assert.deepEqual(counted, [], `and its figure is not rewritten (${kind})`);
   }
 }
 
-/** How many times the reader of [function testALoweringWriteRacingAReaderLeavesAFigure] reads the lock. */
-const RACING_READS = 5000;
+/** How many raises and lowerings [function testALoweringWriteRacingAReaderLeavesAFigure] writes. */
+const RACING_ROUNDS = 50;
+
+/** How long a step of [function testALoweringWriteRacingAReaderLeavesAFigure] may wait on its reader. */
+const RACING_PATIENCE_MS = 60_000;
 
 /**
  * A slot's figure rewritten again and again while another server reads its lock is never torn,
  * missing or at a figure neither write made. A reader a rename holds off reads again. The writes
- * begin once the reader says it reads, and go on until it has read a set number of times.
+ * begin once the reader says it reads, and it reads until they are done, however late either starts.
  */
 async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
@@ -134452,7 +134463,8 @@ async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
         return;
       }
       const fileBefore = statSync(lock, { bigint: true }).ino;
-      assert.equal(await slots.counting(lock), MEMORY_PER_ENGINE, 'the lowering was written');
+      assert.equal(await slots.counting(lock), true, 'the lowering was made');
+      assert.equal(lockFigure(lock), MEMORY_PER_ENGINE, 'the lowering was written');
       assert.notEqual(
         statSync(lock, { bigint: true }).ino,
         fileBefore,
@@ -134460,27 +134472,30 @@ async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
       );
       const reader = join(scripts, 'reader.mjs');
       const ready = join(scripts, 'ready');
+      const stop = join(scripts, 'stop');
       writeFileSync(
         reader,
         [
-          "import { readFileSync, writeFileSync } from 'node:fs';",
-          'const [lock, ready, reads] = process.argv.slice(2);',
+          "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+          'const [lock, ready, stop] = process.argv.slice(2);',
           "const held = ['EBUSY', 'EPERM', 'EACCES'];",
           'const figures = new Set();',
           'let bad = 0;',
-          'for (let read = 0; read < Number(reads); read += 1) {',
+          'let reads = 0;',
+          'do {',
           '  try {',
           "    const figure = JSON.parse(readFileSync(lock, 'utf8')).memory;",
           "    if (typeof figure === 'number') figures.add(figure); else bad += 1;",
           '  } catch (error) {',
           '    if (!held.includes(error.code)) bad += 1;',
           '  }',
-          "  if (read === 0) writeFileSync(ready, '');",
-          '}',
-          'console.log(JSON.stringify({ bad, figures: [...figures] }));',
+          "  if (reads === 0) writeFileSync(ready, '');",
+          '  reads += 1;',
+          '} while (!existsSync(stop));',
+          'console.log(JSON.stringify({ bad, reads, figures: [...figures] }));',
         ].join('\n'),
       );
-      const child = spawnHidden(process.execPath, [reader, lock, ready, String(RACING_READS)], {
+      const child = spawnHidden(process.execPath, [reader, lock, ready, stop], {
         stdio: ['ignore', 'pipe', 'ignore'],
       });
       const out: Buffer[] = [];
@@ -134491,18 +134506,23 @@ async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
       child.stdout.on('end', () => {
         finished.abort();
       });
-      while (!finished.signal.aborted && !existsSync(ready)) {
-        await delay(5);
+      try {
+        assert.ok(
+          await cameTrue(() => finished.signal.aborted || existsSync(ready), RACING_PATIENCE_MS),
+          'the reader began',
+        );
+        assert.ok(existsSync(ready), 'the reader said it reads');
+        // One after another, as a lane writes them, giving the timers and the reader's output a turn.
+        for (let round = 0; round < RACING_ROUNDS; round += 1) {
+          await slots.counting(lock, 'test_windowed_lane');
+          await slots.counting(lock);
+          await delay(0);
+        }
+        assert.ok(!finished.signal.aborted, 'the reader read until the writes were done');
+      } finally {
+        writeFileSync(stop, '');
       }
-      assert.ok(existsSync(ready), 'the reader said it reads');
-      let rounds = 0;
-      // One after another, as a lane writes them.
-      do {
-        await slots.counting(lock, 'test_windowed_lane');
-        await slots.counting(lock);
-        rounds += 1;
-      } while (!finished.signal.aborted);
-      assert.ok(rounds > 1, `the writes went on while the reader read: ${String(rounds)} rounds`);
+      assert.ok(await cameTrue(() => finished.signal.aborted, RACING_PATIENCE_MS), 'the reader ended');
       const read: unknown = JSON.parse(Buffer.concat(out).toString('utf8'));
       assert.ok(
         typeof read === 'object' && read !== null && 'bad' in read && 'figures' in read,
@@ -134628,13 +134648,11 @@ async function testALoweredSlotCountsTheProjectsKeptHeadlessPeak(): Promise<void
         [3.5 * MEMORY_GIB, 2.5 * MEMORY_GIB],
         'a window counts its kept peak, and a fresh headless take its own',
       );
-      assert.equal(await slots.counting(lock), 2.5 * MEMORY_GIB, 'lowered to the kept headless peak');
+      assert.equal(await slots.counting(lock), true, 'the lowering is made');
+      assert.equal(lockFigure(lock), 2.5 * MEMORY_GIB, 'lowered to the kept headless peak');
       assert.equal(lockFigure(lock), lockFigure(fresh), 'as a fresh headless take counts');
-      assert.equal(
-        await slots.counting(lock, 'test_windowed_lane'),
-        3.5 * MEMORY_GIB,
-        'and raised again to the kept windowed peak',
-      );
+      assert.equal(await slots.counting(lock, 'test_windowed_lane'), true, 'the raise is made');
+      assert.equal(lockFigure(lock), 3.5 * MEMORY_GIB, 'and raised again to the kept windowed peak');
       slots.releaseAll();
     });
   } finally {
@@ -134656,10 +134674,23 @@ async function fourGiBSlots(directory: string): Promise<EngineSlots> {
   );
 }
 
+/** The slot locks in [param directory], by name. */
+function slotLockNamesIn(directory: string): string[] {
+  return readdirSync(directory)
+    .filter((name) => name.endsWith('.lock'))
+    .toSorted();
+}
+
+/** The marks of the takers waiting on the slots in [param directory]. */
+function waitMarksIn(directory: string): string[] {
+  const marks = join(directory, WAITING_FOLDER);
+  return existsSync(marks) ? readdirSync(marks).filter((name) => name.endsWith('.json')) : [];
+}
+
 /**
- * A lane that found no slot free up front takes a headless one, and raises it for its windowed engine
- * only as a windowed take would start: with another engine's 1.5 GiB live beside its own on a 4 GiB
- * budget, the window waits, and starts once that engine has ended.
+ * A lane whose raise for its window finds no room gives its headless slot back and waits for one
+ * counted for a window as a fresh windowed take does, holding nothing: with another engine's 1.5 GiB
+ * live beside its own on a 4 GiB budget, the window waits, and starts once that engine has ended.
  */
 async function testALaneRaisingItsSlotForAWindowWaitsForMemory(): Promise<void> {
   await withNoCeilingSet(async () => {
@@ -134668,37 +134699,258 @@ async function testALaneRaisingItsSlotForAWindowWaitsForMemory(): Promise<void> 
       const slots = await fourGiBSlots(directory);
       const other = await fourGiBSlots(directory);
       const otherLock = await other.takeFree();
-      assert.notEqual(otherLock, null, 'the other engine took its slot');
+      const taken = await slots.takeFree();
+      assert.ok(otherLock !== null && taken !== null, 'the other engine and this lane took their slots');
       const ran: Array<[boolean, number | null]> = [];
       const lane = runLane(
         slots,
         [
-          { plan: { windowed: true }, index: 0 },
-          { plan: { windowed: false }, index: 1 },
+          { plan: { windowed: false }, index: 0 },
+          { plan: { windowed: true }, index: 1 },
         ],
-        null,
+        taken,
         (plan, index, lock) => {
           ran.push([plan.windowed, lockFigure(lock)]);
           return Promise.resolve(index);
         },
       );
-      assert.ok(await cameTrue(() => slots.drawn.short !== undefined, 30_000), 'the raise waits for memory');
+      assert.ok(
+        await cameTrue(() => waitMarksIn(directory).length > 0, 30_000),
+        'the window waits as a take does, its mark kept',
+      );
+      assert.deepEqual(slotLockNamesIn(directory), [basename(otherLock)], "with the lane's slot given back");
       assert.deepEqual(
         slots.drawn.short,
         { budget: 4 * MEMORY_GIB, held: MEMORY_PER_ENGINE, ahead: 0, need: WINDOWED_MEMORY_PER_ENGINE },
         "for room beside the other engine's 1.5 GiB",
       );
-      assert.deepEqual(ran, [], 'and the window has not started short');
-      other.release(otherLock ?? '');
+      assert.deepEqual(ran, [[false, MEMORY_PER_ENGINE]], 'and the window has not started short');
+      other.release(otherLock);
       await lane;
       assert.deepEqual(
         ran,
         [
-          [true, WINDOWED_MEMORY_PER_ENGINE],
           [false, MEMORY_PER_ENGINE],
+          [true, WINDOWED_MEMORY_PER_ENGINE],
         ],
         'the window starts counted once the other engine has ended',
       );
+      assert.deepEqual(slotLockNamesIn(directory), [], 'and its slot is given back once it ends');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+/** [param line] with its numbers of seconds left out, which two waits begun apart say apart. */
+function waitLineShape(line: string): string {
+  return line.replaceAll(/\d+ s\b/g, 'n s');
+}
+
+/**
+ * A lane whose raise for its window finds no room says it waits, in the line a fresh windowed take
+ * in its place says, once the wait has gone on as long as a take's.
+ */
+async function testALaneWaitingForRoomForItsWindowSaysItWaits(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    try {
+      const started = await ownStart();
+      const slotsSaying = (said: string[]): EngineSlots =>
+        new EngineSlots(
+          directory,
+          2,
+          { pid: process.pid, started },
+          (line) => said.push(line),
+          () => 'other',
+          undefined,
+          { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
+        );
+      const other = await fourGiBSlots(directory);
+      const otherLock = await other.takeFree();
+      assert.notEqual(otherLock, null, 'the other engine took its slot');
+      const freshSaid: string[] = [];
+      const fresh = slotsSaying(freshSaid);
+      const stop = new AbortController();
+      const waiting = fresh
+        .take(stop.signal, undefined, undefined, false, undefined, undefined, 'test_windowed_lane')
+        .then(
+          () => 'taken',
+          () => 'stopped',
+        );
+      assert.ok(await cameTrue(() => freshSaid.length > 0, 30_000), 'a fresh windowed take says it waits');
+      stop.abort();
+      assert.equal(await waiting, 'stopped', 'and is stopped');
+      const laneSaid: string[] = [];
+      const slots = slotsSaying(laneSaid);
+      const taken = await slots.takeFree();
+      assert.notEqual(taken, null, 'the lane took a headless slot');
+      const lane = runLane(
+        slots,
+        [
+          { plan: { windowed: false }, index: 0 },
+          { plan: { windowed: true }, index: 1 },
+        ],
+        taken,
+        (_plan, index) => Promise.resolve(index),
+      );
+      assert.ok(await cameTrue(() => laneSaid.length > 0, 30_000), 'its window is said to wait');
+      other.release(otherLock ?? '');
+      await lane;
+      assert.deepEqual(
+        laneSaid.slice(0, 1).map(waitLineShape),
+        freshSaid.slice(0, 1).map(waitLineShape),
+        'in the line the fresh take says',
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+/** How long a try of [function testTwoRunsRaisingForAWindowBothEnd] may take before it counts as hung. */
+const RAISING_TRY_MS = 30_000;
+
+/**
+ * Two runs, each holding a headless slot and going on to a windowed engine, on [param count] slots of
+ * a 20 GiB machine with [param project]'s kept peaks, once another engine's slot is given back. The
+ * second run takes its slot as the other engine ends where [param secondWaits]. Answers whether both
+ * ended within {@link RAISING_TRY_MS}.
+ */
+async function twoRunsRaisingEnd(
+  count: number,
+  project: string | undefined,
+  secondWaits: boolean,
+): Promise<boolean> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+  const started = await ownStart();
+  const slotsOn = (): EngineSlots =>
+    new EngineSlots(directory, count, { pid: process.pid, started }, undefined, () => 'other', project, {
+      memory: 20 * MEMORY_GIB,
+      tool: 'test_lane',
+    });
+  const runs = [slotsOn(), slotsOn()];
+  const other = slotsOn();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const otherLock = await other.takeFree();
+    const first = await runs[0]?.takeFree();
+    const second = secondWaits ? null : await runs[1]?.takeFree();
+    assert.ok(
+      otherLock !== null && first !== null && first !== undefined,
+      'the other engine and a run took slots',
+    );
+    assert.ok(secondWaits || (second !== null && second !== undefined), 'and so did the second run');
+    const lanes = runs.map((slots, at) =>
+      runLane(
+        slots,
+        [
+          { plan: { windowed: false }, index: 0 },
+          { plan: { windowed: true }, index: 1 },
+        ],
+        at === 0 ? first : (second ?? null),
+        async (_plan, index) => {
+          await delay(20);
+          return index;
+        },
+      ).then(
+        () => true,
+        () => false,
+      ),
+    );
+    await delay(secondWaits ? 50 : 0);
+    other.release(otherLock);
+    const hung = new Promise<false>((ended) => {
+      timer = setTimeout(() => {
+        ended(false);
+      }, RAISING_TRY_MS);
+    });
+    const ended = await Promise.race([Promise.all(lanes).then((both) => both.every(Boolean)), hung]);
+    return ended;
+  } finally {
+    clearTimeout(timer);
+    for (const slots of [...runs, other]) {
+      slots.releaseAll();
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two runs that each hold a headless slot and go on to a windowed engine both end, where neither
+ * slot has room for a window beside the other's: on three slots for a project whose window keeps
+ * 3.5 GiB, and on the two slots of a 20 GiB machine at the flat figures, the second run's take
+ * racing the first one's raise. A raise that waited holding its slot waited on the other forever.
+ */
+async function testTwoRunsRaisingForAWindowBothEnd(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-project-'));
+    try {
+      await recordEnginePeak(project, 'test_windowed_lane', 3.5 * MEMORY_GIB);
+      for (let attempt = 1; attempt <= 10; attempt += 1) {
+        assert.ok(await twoRunsRaisingEnd(3, project, false), `on three slots, try ${String(attempt)} ended`);
+      }
+      for (let attempt = 1; attempt <= 10; attempt += 1) {
+        assert.ok(await twoRunsRaisingEnd(2, undefined, true), `on two slots, try ${String(attempt)} ended`);
+      }
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+}
+
+/**
+ * On a one-slot machine, whose 1.5 GiB budget is less than a window's figure, a lane holding the
+ * only slot raises it for its window where no other engine runs, and keeps it.
+ */
+async function testARaiseWithNoOtherEngineLiveIsMade(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    try {
+      const slots = new EngineSlots(
+        directory,
+        1,
+        { pid: process.pid, started: await ownStart() },
+        undefined,
+        () => 'other',
+        undefined,
+        { memory: 16 * MEMORY_GIB, tool: 'test_lane' },
+      );
+      assert.ok(slots.memoryBudget < WINDOWED_MEMORY_PER_ENGINE, "the budget is below a window's figure");
+      const lock = await slots.takeFree();
+      assert.notEqual(lock, null, 'the lane took the slot');
+      assert.equal(await slots.counting(lock ?? '', 'test_windowed_lane'), true, 'the raise is made');
+      assert.equal(lockFigure(lock ?? ''), WINDOWED_MEMORY_PER_ENGINE, 'and written');
+      slots.releaseAll();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+/**
+ * Under a slot command, a raise of a granted slot that names this process writes its figure and
+ * asks the slots' folder nothing, which the command counts: another engine's 1.5 GiB there on a
+ * 4 GiB budget does not hold it back.
+ */
+async function testARaiseUnderASlotCommandAsksTheFolderNothing(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    try {
+      const slots = await fourGiBSlots(directory);
+      const other = await fourGiBSlots(directory);
+      const lock = await slots.takeFree();
+      const otherLock = await other.takeFree();
+      assert.ok(lock !== null && otherLock !== null, 'both slots were taken');
+      const restore = settingEnvironment({ [SLOT_COMMAND_VARIABLE]: 'a-slot-command' });
+      try {
+        assert.equal(await slots.counting(lock, 'test_windowed_lane'), true, 'the raise is made');
+      } finally {
+        restore();
+      }
+      assert.equal(lockFigure(lock), WINDOWED_MEMORY_PER_ENGINE, 'and written');
+      slots.releaseAll();
+      other.releaseAll();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -134707,7 +134959,7 @@ async function testALaneRaisingItsSlotForAWindowWaitsForMemory(): Promise<void> 
 
 /**
  * A raise that found room as another engine's take did, before either was written, is undone where
- * its lock is the newest, as such a take is, and waits until the other engine has ended.
+ * its lock is the newest, as such a take is, and answers that the slot was not raised.
  */
 async function testARaiseTwoTakersCountedRoomForAtOnceIsUndone(): Promise<void> {
   await withNoCeilingSet(async () => {
@@ -134735,11 +134987,20 @@ async function testARaiseTwoTakersCountedRoomForAtOnceIsUndone(): Promise<void> 
         const answer: unknown = await Reflect.apply(room, slots, args);
         return answer;
       });
-      const raising = slots.counting(lock ?? '', 'test_windowed_lane');
-      assert.ok(await cameTrue(() => looks >= 2, 30_000), 'the raise looks for room again');
-      assert.equal(lockFigure(lock ?? ''), MEMORY_PER_ENGINE, 'undone while the other engine runs');
+      assert.equal(await slots.counting(lock ?? '', 'test_windowed_lane'), false, 'the slot was not raised');
+      assert.equal(looks, 1, 'and the raise asked once, waiting for nothing');
+      assert.equal(
+        lockFigure(lock ?? ''),
+        MEMORY_PER_ENGINE,
+        'its figure undone while the other engine runs',
+      );
       rmSync(otherLock);
-      assert.equal(await raising, WINDOWED_MEMORY_PER_ENGINE, 'and written once it has ended');
+      assert.equal(await slots.counting(lock ?? '', 'test_windowed_lane'), true, 'asked again, it is raised');
+      assert.equal(
+        lockFigure(lock ?? ''),
+        WINDOWED_MEMORY_PER_ENGINE,
+        'and written once the other has ended',
+      );
       slots.releaseAll();
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -136488,6 +136749,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALoweredSlotCountsTheProjectsKeptHeadlessPeak,
   testALaneRaisingItsSlotForAWindowWaitsForMemory,
   testARaiseTwoTakersCountedRoomForAtOnceIsUndone,
+  testALaneWaitingForRoomForItsWindowSaysItWaits,
+  testTwoRunsRaisingForAWindowBothEnd,
+  testARaiseWithNoOtherEngineLiveIsMade,
+  testARaiseUnderASlotCommandAsksTheFolderNothing,
   testAnEngineTakesItsSlotAndKeepsItsPeakByItsKind,
   testAWindowedLanesPeakIsReadBackApart,
   testHeadlessEnginesAreSizedByHeadlessSuites,
