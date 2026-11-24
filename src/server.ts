@@ -490,6 +490,7 @@ import {
   type RepeatedError,
   ScriptErrorRepeats,
   TestRunTally,
+  type UncaughtRead,
 } from './test-tally.js';
 import {
   asParams,
@@ -4531,7 +4532,7 @@ function gdUnitFailsOnScriptErrors(projectPath: string): boolean {
  * at the deepest call the engine allows, where that logger cannot be called. The case then passes
  * on whatever the faulted call returned, beside thousands of engine errors, and the run exits 0.
  */
-function uncaughtNote(uncaught: TestRunTally['uncaught'] | null): string | undefined {
+function uncaughtNote(uncaught: UncaughtRead | null): string | undefined {
   const first = uncaught?.first;
   if (uncaught === null || first === null || first === undefined) {
     return undefined;
@@ -5744,7 +5745,7 @@ interface TestJudged extends TestReadOut {
   engineEntries: ReturnType<typeof foldedRepeats>;
   exitCode: SpawnedTest['exitCode'];
   /** The script errors no case failed on, or none when the run is not judged on them. */
-  uncaught: TestRunTally['uncaught'] | null;
+  uncaught: UncaughtRead | null;
   nothingRan: ReturnType<typeof whyNoReport> | null;
   hung: boolean;
   printedErrors: ScriptError[];
@@ -11017,7 +11018,7 @@ export class GodotServer {
     const exitCode = run.neverStarted === true ? null : run.exitCode;
     const uncaught =
       report !== null && exitCode === 0 && !cutOff && gdUnitFailsOnScriptErrors(project.value.path)
-        ? tally.uncaught
+        ? tally.uncaughtWithout(casePrinted.reasonHeadlines)
         : null;
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those. Read off
@@ -11099,6 +11100,7 @@ export class GodotServer {
     const {
       project,
       asked,
+      casePrinted,
       missing,
       run,
       cmdArgs,
@@ -11130,7 +11132,7 @@ export class GodotServer {
     // off by its timeout or by the client otherwise answers nothing of the suites it got through.
     if (report === null) {
       const { finished, running } = tally.suites.result();
-      const entries = tally.entriesWithout(scriptErrors, 60);
+      const entries = tally.entriesWithout(scriptErrors, 60, casePrinted.reasonHeadlines);
       const failing = finished.filter((suite) => suite.errors + suite.failures > 0);
       const atTheEnd = {
         ...nonEmpty({

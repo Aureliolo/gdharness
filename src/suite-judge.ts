@@ -303,6 +303,8 @@ export interface ReasonHeadline {
   readonly severity: Exclude<Severity, 'info'>;
   /** The headline without its severity prefix, as a piped entry's text holds it. */
   readonly text: string;
+  /** Whether the line was headed `SCRIPT ERROR:`, which the piped streams read as an uncaught script error. */
+  readonly script: boolean;
   readonly times: number;
 }
 
@@ -922,11 +924,12 @@ function reasonHeadlineRead(state: RunState, line: string): void {
   if (said === null || said.severity === 'info') {
     return;
   }
-  const key = JSON.stringify([said.severity, said.text]);
+  const key = JSON.stringify([said.severity, said.text, said.byScript]);
   const seen = state.reasonHeadlines.get(key);
   state.reasonHeadlines.set(key, {
     severity: said.severity,
     text: seen?.text ?? owned(said.text),
+    script: said.byScript,
     times: (seen?.times ?? 0) + 1,
   });
 }
@@ -968,13 +971,22 @@ export function readEngineLog(
 
 /**
  * [param entries], read off the piped streams, less each print of a skip reason's line in
- * [param headlines], since gdUnit4 printed those as the reason's text on stdout.
+ * [param headlines], since gdUnit4 printed those as the reason's text on stdout. With
+ * [param scriptsOnly], only the lines headed `SCRIPT ERROR:` are taken back, for entries that are
+ * script errors alone.
  */
 export function withoutReasonHeadlines(
   entries: readonly FoldedEntry[],
   headlines: readonly ReasonHeadline[],
+  scriptsOnly = false,
 ): FoldedEntry[] {
-  const left = new Map(headlines.map((one) => [JSON.stringify([one.severity, one.text]), one.times]));
+  const left = new Map<string, number>();
+  for (const one of headlines) {
+    if (!scriptsOnly || one.script) {
+      const key = JSON.stringify([one.severity, one.text]);
+      left.set(key, (left.get(key) ?? 0) + one.times);
+    }
+  }
   return entries.flatMap((entry) => {
     const key = JSON.stringify([entry.severity, entry.text]);
     const owed = entry.source === 'stdout' ? (left.get(key) ?? 0) : 0;

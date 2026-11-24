@@ -1991,6 +1991,156 @@ function testARealSkipReasonsErrorLineLeavesTheEngineEntries(): void {
   }
 }
 
+/** The reason line of [param stdout], a real run's, made a line headed [param heading]. */
+function withReasonHeading(lines: readonly string[], heading: string): string[] {
+  return lines.map((line) =>
+    line.startsWith('ERROR: not an engine error')
+      ? line.replace('ERROR: not an engine error', heading)
+      : line,
+  );
+}
+
+/** What a real engine prints to stderr for a script error raised outside any case. */
+const REAL_SCRIPT_ERROR_STDERR = [
+  "SCRIPT ERROR: Invalid call. Nonexistent function 'missing' in base 'Nil'.",
+  '          at: after (res://tests/reasons_test.gd:12)',
+];
+
+/**
+ * A skip reason's line headed `SCRIPT ERROR:` is the reason's text. Beside it a real push_error and a
+ * real script error are each counted once, by the piped streams and by the log, and every index
+ * under uncaughtScriptErrors is an entry the answer still lists.
+ */
+function testASkipReasonsScriptErrorLineIsNoUncaughtScriptErrorAndNoEntry(): void {
+  const stdout = withReasonHeading(REAL_SKIP_STDOUT, 'SCRIPT ERROR: not a script error');
+  const stderr = [...REAL_SKIP_STDERR, ...REAL_SCRIPT_ERROR_STDERR];
+  const logLines = withReasonHeading(REAL_SKIP_LOG, 'SCRIPT ERROR: not a script error');
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: (_entry, byScript) => byScript,
+  });
+  const log = new GameLog({
+    most: 4,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  log.append('stdout', `${stdout.join('\r\n')}\r\n`);
+  log.append('stderr', `${stderr.join('\r\n')}\r\n`);
+  log.finish();
+  log.handOverHeld();
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-skip-log-'));
+  try {
+    const path = join(folder, 'engine.log');
+    const passedAt = logLines.findIndex((line) => line.includes('test_runs PASSED'));
+    writeFileSync(
+      path,
+      `${[...logLines.slice(0, passedAt), ...REAL_SCRIPT_ERROR_STDERR, ...logLines.slice(passedAt)].join('\n')}\n`,
+    );
+    const read = readEngineLog(path, [], { errors: {}, warnings: {} });
+    const texts = (entries: readonly FoldedEntry[]): string[] => entries.map((entry) => entry.text);
+    assert.deepEqual(
+      [tally.uncaught.count, texts(tally.uncaught.folded.result())],
+      [2, ["not a script error'", "Invalid call. Nonexistent function 'missing' in base 'Nil'."]],
+      'the piped streams',
+    );
+    const uncaught = tally.uncaughtWithout(read.reasonHeadlines);
+    const listed = withoutReasonHeadlines(tally.engine.result(), read.reasonHeadlines);
+    assert.deepEqual(
+      [uncaught.count, texts(uncaught.folded.result()), uncaught.first?.text, [...uncaught.texts]],
+      [
+        1,
+        ["Invalid call. Nonexistent function 'missing' in base 'Nil'."],
+        "Invalid call. Nonexistent function 'missing' in base 'Nil'.",
+        ["Invalid call. Nonexistent function 'missing' in base 'Nil'."],
+      ],
+      'the uncaught script errors',
+    );
+    assert.deepEqual(
+      [
+        texts(listed.filter((entry) => entry.severity === 'error')),
+        log.count('error') - reasonHeadlinesOf(read.reasonHeadlines, 'error'),
+        read.errors.map((error) => error.text),
+      ],
+      [
+        ['a real engine error', "Invalid call. Nonexistent function 'missing' in base 'Nil'."],
+        2,
+        ['a real engine error', "Invalid call. Nonexistent function 'missing' in base 'Nil'."],
+      ],
+      'each real error once',
+    );
+    const entryIndexes = new Set(listed.map((entry) => entry.index));
+    assert.ok(
+      uncaught.folded.result().every((entry) => entryIndexes.has(entry.index)),
+      `every uncaught index is a listed entry: ${JSON.stringify([uncaught.folded.result(), listed])}`,
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/** The piped entries of a run that wrote no report, its output cut after a skipped case. */
+function noReportEntries(reasonLines: readonly string[]): FoldedEntry[] {
+  const printed = [
+    'Run Test Suite: res://tests/reasons_test.gd',
+    '  res://tests/reasons_test.gd > test_skip STARTED',
+    '  res://tests/reasons_test.gd > test_skip PASSED 0ms',
+    '  Report:',
+    '  This test is skipped!',
+    "  Reason: 'boom",
+    ...reasonLines.slice(0, -1),
+    `${reasonLines.at(-1) ?? ''}'`,
+    '',
+    '',
+    '  res://tests/reasons_test.gd > test_waits STARTED',
+  ];
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: () => false,
+  });
+  const log = new GameLog({
+    most: 4,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  log.append('stdout', `${printed.join('\n')}\n`);
+  log.finish();
+  log.handOverHeld();
+  const read = readRun(printed.join('\n'));
+  assert.equal(
+    tally.entriesWithout([], 60).filter((entry) => entry.severity !== 'info').length,
+    reasonLines.length,
+    'the piped streams hold each reason line',
+  );
+  return tally.entriesWithout([], 60, read.reasonHeadlines);
+}
+
+/**
+ * A run ended before its report lists none of a skip reason's lines among its entries, whatever
+ * heading each has.
+ */
+function testAReasonLineOfEveryHeadingIsNoEntryOfARunWithNoReport(): void {
+  assert.deepEqual(
+    noReportEntries(['ERROR: x']).filter((entry) => entry.severity !== 'info'),
+    [],
+    'ERROR',
+  );
+  assert.deepEqual(
+    noReportEntries(['SHADER ERROR: a', 'WARNING: b', 'ERROR: c']).filter(
+      (entry) => entry.severity !== 'info',
+    ),
+    [],
+    'SHADER ERROR, WARNING and ERROR',
+  );
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -2021,4 +2171,6 @@ testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
 testAnErrorLineInsideASkipReasonIsNoEngineError();
 testARealSkipReasonsErrorLineLeavesTheEngineEntries();
 testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
+testASkipReasonsScriptErrorLineIsNoUncaughtScriptErrorAndNoEntry();
+testAReasonLineOfEveryHeadingIsNoEntryOfARunWithNoReport();
 console.log('junit reader tests passed');

@@ -133130,6 +133130,132 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
   }
 }
 
+/**
+ * A skip reason with a line starting `SCRIPT ERROR:` is the reason's text in a real run of both
+ * tools: neither lists it as a script error, and the engine's own error in the case that ran is
+ * still counted once.
+ */
+async function testASkipReasonsScriptErrorLineIsNoScriptErrorInEitherTool(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const reason = 'boom\nSCRIPT ERROR: not a script error';
+  const suite = 'res://tests/script_reason_test.gd';
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/script_reason_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_runs() -> void:',
+        '\tpush_error("a real engine error")',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        `func test_skip(_do_skip := true, _skip_reason := "boom\\nSCRIPT ERROR: not a script error") -> void:`,
+        '\tassert_bool(false).is_true()',
+        '',
+      ].join('\n'),
+    });
+    const ran = test('tests/script_reason_test.gd');
+    assert.equal(ran.status, 1, ran.said);
+    assert.ok(
+      ran.said.includes(`${suite} > test_skip never ran: gdUnit4 skipped it, saying "${reason}"`),
+      ran.said,
+    );
+    assert.deepEqual(
+      ran.said.match(/(?:an engine error|a script error)[^\n]*? in .+?(?=\. )/g),
+      [`an engine error in ${suite} > test_runs: a real engine error`],
+      ran.said,
+    );
+    assert.match(ran.said, /^Failed: 2 problems, listed above\. /m, ran.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: suite } },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.deepEqual(
+          [
+            get(answer, 'casesSkipped'),
+            get(answer, 'engineErrors'),
+            get(answer, 'uncaughtScriptErrors') !== undefined,
+            /script error/i.test(String(get(answer, 'verdict'))),
+            asArray(get(answer, 'engineEntries'))
+              .filter((entry) => get(entry, 'severity') === 'error')
+              .map((entry) => get(entry, 'text')),
+          ],
+          [[{ test: `${suite} > test_skip`, reason }], 1, false, false, ['a real engine error']],
+          JSON.stringify(answer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A run ended by its timeout after a skipped case lists none of the skip reason's lines, whatever
+ * their heading, among its entries.
+ */
+async function testARunCutOffAfterASkipReasonListsNoReasonLine(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/hang_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_skip(_do_skip := true, _skip_reason := "boom\\nERROR: x\\nSHADER ERROR: y\\nWARNING: z") -> void:',
+        '\tassert_bool(false).is_true()',
+        '',
+        '',
+        'func test_hang() -> void:',
+        '\tawait get_tree().create_timer(600.0).timeout',
+        '',
+      ].join('\n'),
+    });
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: project, path: 'res://tests/hang_test.gd', timeoutMs: 25_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.deepEqual(
+          [
+            get(answer, 'timedOut'),
+            asArray(get(answer, 'entries'))
+              .filter((entry) => get(entry, 'severity') !== 'info')
+              .map((entry) => get(entry, 'text')),
+          ],
+          [true, []],
+          JSON.stringify(answer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
 /** A skip reason the output cut off is listed by its first line, and both tools say it was cut. */
 function testASkipReasonCutOffIsSaidToBeCutInBothTools(): void {
   const { answer, faults } = fedRunAnswered([
@@ -134993,6 +135119,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASkipReasonOverSeveralLinesIsReadWhole,
   testARealSkipReasonOverSeveralLinesFailsBothTools,
   testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
+  testASkipReasonsScriptErrorLineIsNoScriptErrorInEitherTool,
+  testARunCutOffAfterASkipReasonListsNoReasonLine,
   testASkipReasonCutOffIsSaidToBeCutInBothTools,
   testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
   testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre,

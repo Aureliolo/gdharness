@@ -23,7 +23,7 @@ import {
 } from './junit.js';
 import { owned } from './log-read.js';
 import { compileErrorsIn, type ListedMarks, listedMarks, listedUnder } from './script-origins.js';
-import { nestedError } from './suite-judge.js';
+import { nestedError, type ReasonHeadline, withoutReasonHeadlines } from './suite-judge.js';
 
 /** The most distinct entries each list an answer carries holds before it is cut. */
 export const DISTINCT_KEPT = 4096;
@@ -194,6 +194,14 @@ export interface TallyAsked {
   readonly uncaught: (entry: LogEntry, byScript: boolean) => boolean;
 }
 
+/** The script errors no case failed on, as an answer reads them. */
+export interface UncaughtRead {
+  readonly count: number;
+  readonly first: LogEntry | FoldedEntry | null;
+  readonly texts: ReadonlySet<string>;
+  readonly folded: { result(): FoldedEntry[] };
+}
+
 /** Every reading of a test run's piped streams its answer takes. */
 export class TestRunTally {
   /** The first autoload the run said did not compile. */
@@ -311,13 +319,38 @@ export class TestRunTally {
    * under [param errors]: gdUnit4's list of the scripts it could not load, each listed error, and
    * the load failure that follows each.
    */
-  entriesWithout(errors: readonly ScriptError[], most: number): FoldedEntry[] {
+  entriesWithout(
+    errors: readonly ScriptError[],
+    most: number,
+    reasons: readonly ReasonHeadline[] = [],
+  ): FoldedEntry[] {
     const folded = errors.length === 0 ? this.printedFolded : this.unlisted.without(errors);
     const leftOut = errors.length === 0 ? this.printedFolded.leftOut : this.unlisted.leftOut;
     if (leftOut > 0) {
       this.cut.set('entries', leftOut);
     }
-    return folded.result().slice(0, most);
+    return withoutReasonHeadlines(folded.result(), reasons).slice(0, most);
+  }
+
+  /**
+   * The script errors no case failed on, less each print of a skip reason's line headed
+   * `SCRIPT ERROR:` in [param reasons], which is the reason's text.
+   */
+  uncaughtWithout(reasons: readonly ReasonHeadline[]): UncaughtRead {
+    const { uncaught } = this;
+    const taken = reasons.reduce((sum, one) => sum + (one.script ? one.times : 0), 0);
+    if (taken === 0) {
+      return uncaught;
+    }
+    const folded = withoutReasonHeadlines(uncaught.folded.result(), reasons, true);
+    const left = new Set(folded.map((entry) => entry.text));
+    const gone = new Set(reasons.filter((one) => one.script && !left.has(one.text)).map((one) => one.text));
+    return {
+      count: Math.max(0, uncaught.count - taken),
+      first: folded[0] ?? null,
+      texts: new Set([...uncaught.texts].filter((text) => !gone.has(text))),
+      folded: { result: () => folded },
+    };
   }
 
   /** Each list cut for its bound, with how many entries it left out, in a stable order. */
