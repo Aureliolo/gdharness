@@ -133326,16 +133326,161 @@ async function testRanEnginesDealsTheRunOverTheLanesItTook(): Promise<void> {
   );
 }
 
+/** An engine of a stand-in run that ended as [param passed] says, starving when it failed. */
+function engineEnded(plan: EnginePlan, index: number, passed: boolean) {
+  return {
+    index,
+    plan,
+    printed: { started: null },
+    peakBytes: 0,
+    verdict: { passed, starved: !passed },
+  };
+}
+
 /**
- * The figure [param lock] counts as another server reads it, 'held off' where a rename has the file
- * for that moment, or what is wrong with it.
+ * A run that is not shared runs each lane's engines in the slot it took, one after another: the
+ * slot counts a window while the lane's windowed engine runs and a headless engine's memory once the
+ * headless ones after it do, and the engines come back in the order of the deal.
  */
-function figureReadFrom(lock: string): number | string {
+async function testAnUnsharedRunRunsEachLaneInItsOwnSlot(): Promise<void> {
+  const units = [planUnit('w0', 60, true), planUnit('h0', 60, false), planUnit('h1', 60, false)];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const plans = dealt(units, declared, 3, 1);
+  const at = (windowed: boolean, skip = 0): number =>
+    plans.flatMap((plan, index) => (plan.windowed === windowed ? [index] : []))[skip] ?? -1;
+  const laneOf = (...indices: number[]) =>
+    indices.flatMap((index) => {
+      const plan = plans[index];
+      return plan === undefined ? [] : [{ plan, index }];
+    });
+  const lanes = [laneOf(at(true), at(false)), laneOf(at(false, 1))];
+  await withNoCeilingSet(async () => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    try {
+      const slots = new EngineSlots(
+        directory,
+        2,
+        { pid: process.pid, started: await ownStart() },
+        undefined,
+        () => 'other',
+        undefined,
+        { memory: 24 * MEMORY_GIB, tool: 'test_lane' },
+      );
+      const taken = [await slots.takeFree(false, undefined, 'test_windowed_lane'), await slots.takeFree()];
+      assert.ok(
+        taken.every((lock) => lock !== null),
+        'both lanes took a slot',
+      );
+      const seen: string[] = [];
+      const ran = await ranEngines(
+        { launch: { slots }, declared },
+        { units, times: {} },
+        {
+          lanes,
+          taken: taken.filter((lock): lock is string => typeof lock === 'string'),
+          windowedTaken: 1,
+          shared: false,
+          follows: null,
+        },
+        new HandedSlot(false),
+        undefined,
+        () => undefined,
+        (_launch, plan, index, _times, _again, lock) => {
+          seen.push(`${String(plan.windowed)} ${String(typeof lock === 'string' ? lockFigure(lock) : null)}`);
+          return Promise.resolve(engineEnded(plan, index, true));
+        },
+      );
+      assert.deepEqual(
+        ran.map((one) => one.index),
+        ran.map((one) => one.index).toSorted((a, b) => a - b),
+        'the engines come back in the order of the deal',
+      );
+      assert.equal(ran.length, 3, 'every engine ran');
+      assert.deepEqual(
+        seen.toSorted(),
+        [
+          `true ${String(WINDOWED_MEMORY_PER_ENGINE)}`,
+          `false ${String(MEMORY_PER_ENGINE)}`,
+          `false ${String(MEMORY_PER_ENGINE)}`,
+        ].toSorted(),
+        'a window counts 3 GiB, and each headless engine, the one after the window included, 1.5 GiB',
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+/** An engine that ran out of memory is run again alone, as a fresh engine with no slot of its lane's. */
+async function testAStarvedEngineIsRunAgainByRanEngines(): Promise<void> {
+  const units = [planUnit('h0', 60, false), planUnit('h1', 60, false)];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const plans = dealt(units, declared, 2, 1);
+  const lanes = plans.map((plan, index) => [{ plan, index }]);
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
   try {
-    return holderOf(readFileSync(lock, 'utf8'))?.memory ?? 'no figure';
-  } catch (error) {
-    const code = error instanceof Error && 'code' in error ? String(error.code) : '';
-    return ['EBUSY', 'EPERM', 'EACCES'].includes(code) ? 'held off' : `read failed: ${code}`;
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started: await ownStart() });
+    const calls: string[] = [];
+    const said: string[] = [];
+    const ran = await ranEngines(
+      { launch: { slots }, declared },
+      { units, times: {} },
+      { lanes, taken: ['A', 'B'], windowedTaken: 0, shared: false, follows: null },
+      new HandedSlot(false),
+      undefined,
+      (line) => said.push(line),
+      (_launch, plan, index, _times, again, lock) => {
+        calls.push(`${String(index)} ${again ?? ''} ${String(lock ?? null)}`);
+        return Promise.resolve(engineEnded(plan, index, again === 'again' || index !== 0));
+      },
+    );
+    assert.deepEqual(
+      calls.toSorted(),
+      ['0  A', '0 again null', '1  B'],
+      'the starved engine ran again with no slot of its lane',
+    );
+    assert.ok(
+      ran.every((one) => one.verdict.passed),
+      'and the run is what the second try came to',
+    );
+    assert.equal(said.length, 1, 'the run says it ran the engine again');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A lane handed no slot takes one, and counts a window on it where its first engine is windowed. */
+async function testALaneHandedNoSlotTakesOneCountedForItsFirstEngine(): Promise<void> {
+  for (const windowed of [true, false]) {
+    const counted: Array<Parameters<EngineSlots['counting']>[1]> = [];
+    const released: string[] = [];
+    const ranIn: string[] = [];
+    await runLane(
+      {
+        take: () => Promise.resolve('T'),
+        release: (lock: string) => {
+          released.push(lock);
+        },
+        counting: (_lock: string, tool?: Parameters<EngineSlots['counting']>[1]) => {
+          counted.push(tool);
+          return Promise.resolve(0);
+        },
+      },
+      [{ plan: { windowed }, index: 0 }],
+      null,
+      (_plan, _index, lock) => {
+        ranIn.push(lock);
+        return Promise.resolve(0);
+      },
+    );
+    const kind = windowed ? 'windowed' : 'headless';
+    assert.deepEqual(ranIn, ['T'], `a ${kind} engine ran in the slot the lane took`);
+    assert.deepEqual(released, ['T'], `and the slot was given back`);
+    assert.deepEqual(
+      counted,
+      windowed ? ['test_windowed_lane'] : [],
+      `a slot taken headless is counted for a window only when the engine is windowed (${kind})`,
+    );
   }
 }
 
@@ -133345,6 +133490,7 @@ function figureReadFrom(lock: string): number | string {
  */
 async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+  const scripts = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-reader-'));
   try {
     await withNoCeilingSet(async () => {
       const slots = new EngineSlots(
@@ -133361,39 +133507,68 @@ async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
       if (lock === null) {
         return;
       }
-      const state = { writing: true };
-      const bad: string[] = [];
-      const seen = new Set<number>();
-      const reading = (async () => {
-        while (state.writing) {
-          const read = figureReadFrom(lock);
-          if (typeof read === 'number') {
-            seen.add(read);
-          } else if (read !== 'held off') {
-            bad.push(read);
-          }
-          await delay(1);
-        }
-      })();
-      for (let at = 0; at < 60; at += 1) {
+      const fileBefore = statSync(lock, { bigint: true }).ino;
+      assert.equal(await slots.counting(lock), MEMORY_PER_ENGINE, 'the lowering was written');
+      assert.notEqual(
+        statSync(lock, { bigint: true }).ino,
+        fileBefore,
+        'the lock is replaced by a rename, never written in place where a reader would find it empty',
+      );
+      const reader = join(scripts, 'reader.mjs');
+      const stop = join(scripts, 'stop');
+      writeFileSync(
+        reader,
+        [
+          "import { existsSync, readFileSync } from 'node:fs';",
+          'const [lock, stop] = process.argv.slice(2);',
+          "const held = ['EBUSY', 'EPERM', 'EACCES'];",
+          'const figures = new Set();',
+          'let bad = 0;',
+          'for (let reads = 0; reads % 64 !== 0 || !existsSync(stop); reads += 1) {',
+          '  try {',
+          "    const figure = JSON.parse(readFileSync(lock, 'utf8')).memory;",
+          "    if (typeof figure === 'number') figures.add(figure); else bad += 1;",
+          '  } catch (error) {',
+          '    if (!held.includes(error.code)) bad += 1;',
+          '  }',
+          '}',
+          'console.log(JSON.stringify({ bad, figures: [...figures] }));',
+        ].join('\n'),
+      );
+      const child = spawnHidden(process.execPath, [reader, lock, stop], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const out: Buffer[] = [];
+      child.stdout.on('data', (chunk: Buffer) => out.push(chunk));
+      await delay(300);
+      for (let at = 0; at < 200; at += 1) {
         await Promise.all([
           slots.counting(lock),
           slots.counting(lock, 'test_windowed_lane'),
           slots.counting(lock),
         ]);
       }
-      state.writing = false;
-      await reading;
-      assert.deepEqual(bad, [], 'every read found a figure');
-      assert.ok(seen.size > 0, 'the reader read the lock');
+      writeFileSync(stop, '');
+      await exitOf(child);
+      const read: unknown = JSON.parse(Buffer.concat(out).toString('utf8'));
       assert.ok(
-        [...seen].every((figure) => figure === MEMORY_PER_ENGINE || figure === WINDOWED_MEMORY_PER_ENGINE),
-        `only the two figures were ever read: ${[...seen].join(', ')}`,
+        typeof read === 'object' && read !== null && 'bad' in read && 'figures' in read,
+        'the reader reported',
+      );
+      assert.equal(read.bad, 0, 'every read found a figure');
+      assert.ok(Array.isArray(read.figures) && read.figures.length > 0, 'the reader read the lock');
+      assert.ok(
+        Array.isArray(read.figures) &&
+          read.figures.every(
+            (figure) => figure === MEMORY_PER_ENGINE || figure === WINDOWED_MEMORY_PER_ENGINE,
+          ),
+        `only the two figures were ever read: ${JSON.stringify(read.figures)}`,
       );
       assert.equal(lockFigure(lock), MEMORY_PER_ENGINE, 'the last write stands');
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
+    rmSync(scripts, { recursive: true, force: true });
   }
 }
 
@@ -135116,6 +135291,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaneCountsUpDownAndUpAsItsEnginesChangeKind,
   testASharedRunNeverRewritesASlotsFigure,
   testRanEnginesDealsTheRunOverTheLanesItTook,
+  testAnUnsharedRunRunsEachLaneInItsOwnSlot,
+  testAStarvedEngineIsRunAgainByRanEngines,
+  testALaneHandedNoSlotTakesOneCountedForItsFirstEngine,
   testALoweringWriteRacingAReaderLeavesAFigure,
   testAnEngineTakesItsSlotAndKeepsItsPeakByItsKind,
   testAWindowedLanesPeakIsReadBackApart,
