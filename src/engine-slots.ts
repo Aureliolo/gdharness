@@ -2202,16 +2202,12 @@ export class EngineSlots {
       live ??= await this.liveMemory();
       return live.length > 0 && live.reduce((sum, lock) => sum + lock.bytes, need) > this.memoryBudget;
     };
-    const kept: SlotWaiter[] = [];
     for (const one of ahead) {
       const draw = (await this.drawnFor(one.taker, one.game, queued)).numbers;
-      if (!(await refused(one, draw))) {
-        draws.set(one.mark, draw);
-        kept.push(one);
-      }
+      draws.set(one.mark, (await refused(one, draw)) ? [] : draw);
     }
     // A taker waiting for several slots at once is ahead once for each, for its first drain.
-    const places = kept.flatMap((one) =>
+    const places = ahead.flatMap((one) =>
       Array.from({ length: now - one.since < SLOTS_DRAIN_MS ? one.wants : 1 }, () => one),
     );
     for (const one of places) {
