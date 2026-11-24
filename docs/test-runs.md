@@ -72,7 +72,8 @@ when the command line itself is wrong.
 - `--whole-tree`: run nothing, and print each script that makes suites depend on every file, as
   `path:line: argument`. Each line says how many suites reach it from their code and the autoloads.
 - `--list`: run nothing, and print the suites the same command would run, one `res://` path per line
-  in the order of their paths (`--order` applies), with `--json` as a JSON array. It finds them as
+  sorted by path, or by `--order`, with `--json` as a JSON array. A seed with a times file that
+  splits a suite can run them in another order. It finds them as
   the run does, from the scripts alone, so it starts no engine and needs none except for
   `--changed-only`, which keys on the engine. A project the run refuses is refused the same way.
   A project whose search finds no suite prints nothing and exits 0.
