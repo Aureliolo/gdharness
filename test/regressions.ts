@@ -134241,6 +134241,180 @@ async function testALoweredSlotCountsTheProjectsKeptHeadlessPeak(): Promise<void
   }
 }
 
+/**
+ * The figures the slot of a lane of [param kinds] (true for a windowed engine) counts at each of its
+ * engines, on a machine of 64 GiB whose project keeps [param peaks] (in bytes). The slot is taken as a
+ * run takes it, by `takenLanes` or by `runLane` itself.
+ */
+async function figuresOfALaneKeeping(
+  kinds: readonly boolean[],
+  peaks: { readonly headless?: number; readonly windowed?: number },
+  takenBy: 'takenLanes' | 'runLane',
+): Promise<Array<number | null>> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-memory-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-memory-project-'));
+  const figures: Array<number | null> = [];
+  try {
+    await withNoCeilingSet(async () => {
+      if (peaks.headless !== undefined) {
+        await recordEnginePeak(project, 'test_lane', peaks.headless);
+      }
+      if (peaks.windowed !== undefined) {
+        await recordEnginePeak(project, 'test_windowed_lane', peaks.windowed);
+      }
+      const slots = new EngineSlots(
+        directory,
+        4,
+        { pid: process.pid, started: await ownStart() },
+        undefined,
+        () => 'other',
+        project,
+        { memory: 64 * MEMORY_GIB, tool: 'test_lane' },
+      );
+      const lane = kinds.map((windowed, index) => ({ plan: { windowed }, index }));
+      const taken =
+        takenBy === 'runLane'
+          ? null
+          : ((
+              await takenLanes(
+                {
+                  slots,
+                  ordered: true,
+                  plans: kinds.map((windowed) => ({ lane: 0, windowed })),
+                  memoryHeld: false,
+                  byMemory: { engines: 4 },
+                  followed: () => null,
+                },
+                () => undefined,
+              )
+            ).taken[0] ?? null);
+      await runLane(slots, lane, taken, (_plan, index, lock) => {
+        figures.push(lockFigure(lock));
+        return Promise.resolve(index);
+      });
+      slots.releaseAll();
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+  return figures;
+}
+
+/**
+ * A lane that runs a window and then a headless engine whose kept peak is above the window's figure
+ * counts that peak at both engines, as a fresh headless take does, however its slot was taken.
+ */
+async function testALaneCountsAHeavierHeadlessPeakThroughout(): Promise<void> {
+  for (const takenBy of ['takenLanes', 'runLane'] as const) {
+    assert.deepEqual(
+      await figuresOfALaneKeeping([true, false], { headless: 4 * MEMORY_GIB }, takenBy),
+      [4 * MEMORY_GIB, 4 * MEMORY_GIB],
+      `the slot counts the headless peak while the window runs and while the headless engine does (${takenBy})`,
+    );
+  }
+}
+
+/**
+ * A lane whose kept headless peak is below the window's figure counts the window while it runs and
+ * the headless peak after it.
+ */
+async function testALaneLowersToALighterHeadlessPeakAfterItsWindow(): Promise<void> {
+  for (const takenBy of ['takenLanes', 'runLane'] as const) {
+    assert.deepEqual(
+      await figuresOfALaneKeeping([true, false], { headless: 2 * MEMORY_GIB }, takenBy),
+      [WINDOWED_MEMORY_PER_ENGINE, 2 * MEMORY_GIB],
+      `3 GiB for the window, then the kept 2 GiB (${takenBy})`,
+    );
+  }
+}
+
+/**
+ * A lane of headless engines only counts what a fresh headless take counts, and a lane of windowed
+ * engines only counts a window.
+ */
+async function testALaneOfOneKindCountsAsItDidOnItsOwn(): Promise<void> {
+  const peaks = { headless: 4 * MEMORY_GIB };
+  for (const takenBy of ['takenLanes', 'runLane'] as const) {
+    const headless = await figuresOfALaneKeeping([false, false], peaks, takenBy);
+    const windowed = await figuresOfALaneKeeping([true, true], peaks, takenBy);
+    const flat = await figuresOfALaneKeeping([false, false], {}, takenBy);
+    assert.deepEqual(
+      [takenBy, headless, windowed, flat],
+      [
+        takenBy,
+        [4 * MEMORY_GIB, 4 * MEMORY_GIB],
+        [WINDOWED_MEMORY_PER_ENGINE, WINDOWED_MEMORY_PER_ENGINE],
+        [MEMORY_PER_ENGINE, MEMORY_PER_ENGINE],
+      ],
+      'headless engines count the kept peak or the flat figure, and windows count a window',
+    );
+  }
+}
+
+/**
+ * A lane handed no slot, whose headless engine needs more than the window and more than the machine
+ * leaves, waits as a fresh take of that size does: holding no slot, keeping its mark and saying why.
+ * It starts once the memory is given back, counting what the larger engine needs.
+ */
+async function testALaneHeavierThanItsWindowWaitsForItsLargerNeed(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-memory-'));
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lane-memory-project-'));
+    const said: string[] = [];
+    const started = await ownStart();
+    const slotsOn = (say?: (line: string) => void, kept?: string): EngineSlots =>
+      new EngineSlots(directory, 2, { pid: process.pid, started }, say, () => 'other', kept, {
+        memory: 20 * MEMORY_GIB,
+        tool: 'test_lane',
+      });
+    const slots = slotsOn((line) => said.push(line), project);
+    const other = slotsOn();
+    try {
+      await recordEnginePeak(project, 'test_lane', 3.5 * MEMORY_GIB);
+      const otherLock = await other.takeFree();
+      assert.notEqual(otherLock, null, 'the other engine took its slot');
+      const figures: Array<number | null> = [];
+      const lane = runLane(
+        slots,
+        [
+          { plan: { windowed: true }, index: 0 },
+          { plan: { windowed: false }, index: 1 },
+        ],
+        null,
+        (_plan, index, lock) => {
+          figures.push(lockFigure(lock));
+          return Promise.resolve(index);
+        },
+      );
+      assert.ok(await cameTrue(() => said.length > 0, 30_000), 'the lane is said to wait');
+      assert.equal(
+        said[0]?.replace(/^Waiting \d+ s so far/, 'Waiting n s so far'),
+        `Waiting n s so far for an engine: the engines on this machine (${directory}) may hold 4.0 GB together, those running hold 1.5 GB and this engine needs 3.5 GB, so it starts once enough memory is given back.`,
+        'for the larger of its engines, as a fresh take of that size says',
+      );
+      const marks = join(directory, WAITING_FOLDER);
+      assert.ok(
+        existsSync(marks) && readdirSync(marks).some((name) => name.endsWith('.json')),
+        'keeping its mark while it waits',
+      );
+      assert.deepEqual(
+        readdirSync(directory).filter((name) => name.endsWith('.lock')),
+        [basename(otherLock ?? '')],
+        'and holding no slot',
+      );
+      other.release(otherLock ?? '');
+      assert.ok(await settledWithin(lane, 30_000), 'the lane ends once the other engine has');
+      assert.deepEqual(figures, [3.5 * MEMORY_GIB, 3.5 * MEMORY_GIB], 'both engines count the larger need');
+    } finally {
+      slots.releaseAll();
+      other.releaseAll();
+      rmSync(directory, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+}
+
 /** The lanes of [param plans] that run a windowed engine after a headless one, by lane number. */
 function lanesWindowedAfterHeadless(plans: readonly EnginePlan[]): number[] {
   return byLane(plans).flatMap((lane) => {
@@ -136034,6 +136208,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALoweringWriteRacingAReaderLeavesAFigure,
   testASlotHandedToTheCheckAfterAWindowCountsAHeadlessEngine,
   testALoweredSlotCountsTheProjectsKeptHeadlessPeak,
+  testALaneCountsAHeavierHeadlessPeakThroughout,
+  testALaneLowersToALighterHeadlessPeakAfterItsWindow,
+  testALaneOfOneKindCountsAsItDidOnItsOwn,
+  testALaneHeavierThanItsWindowWaitsForItsLargerNeed,
   testNoLaneRunsAWindowedEngineAfterAHeadlessOne,
   testALaneWhoseWindowFindsNoRoomSaysItWaits,
   testAnEngineTakesItsSlotAndKeepsItsPeakByItsKind,

@@ -58,6 +58,7 @@ import {
   ownStart,
   poolCount,
   reservedMemory,
+  type SlotTool,
 } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
@@ -1441,16 +1442,16 @@ export function followedAt(file: string, ceiling: number, dealtLanes: number): S
 }
 
 /**
- * Takes a slot free now for each of [param windowed] in turn, until one is not free, each counting
- * the memory of a windowed engine where it is true.
+ * Takes a slot free now for each of [param tools] in turn, until one is not free, each counting
+ * the memory of the engines it is for.
  */
 async function slotsFreeNow(
   slots: Pick<EngineSlots, 'takeFree'>,
-  windowed: readonly boolean[],
+  tools: readonly (SlotTool | undefined)[],
 ): Promise<string[]> {
   const taken: string[] = [];
-  for (const window of windowed) {
-    const lock = await slots.takeFree(false, undefined, window ? WINDOWED_LANE : undefined);
+  for (const tool of tools) {
+    const lock = await slots.takeFree(false, undefined, tool);
     if (lock === null) {
       break;
     }
@@ -1489,7 +1490,12 @@ export async function takenLanes<P extends { readonly lane: number; readonly win
       : null;
   // A lane's first engine is its windowed one, where it has one.
   const windowed = lanes.slice(0, startable).map((lane) => lane[0]?.plan.windowed === true);
-  const taken: string[] = granted?.taken ?? (await slotsFreeNow(run.slots, windowed));
+  const taken: string[] =
+    granted?.taken ??
+    (await slotsFreeNow(
+      run.slots,
+      lanes.slice(0, startable).map((lane) => laneTool(lane)),
+    ));
   // A slot command counts no memory by the slots' folder, so its grants are kept for either kind.
   const windowedTaken =
     granted === null ? windowed.slice(0, taken.length).filter(Boolean).length : taken.length;
@@ -2404,8 +2410,9 @@ export function importEnd(ended: EngineEnd): string | null {
 /**
  * Runs the engines of one lane one after another in one slot, taken before the first and given
  * back after the last, so another run on the machine cannot take it in between. The slot counts what
- * the engine running in it needs: a lane that goes from a windowed engine to a headless one lowers
- * it, so a window's memory is held only while it is open. A deal never puts a windowed engine after a
+ * the engine running in it needs. A lane that goes from a windowed engine to a headless one takes its
+ * slot counted for the larger of the two, and lowers it to the headless figure once the window ends, so
+ * a window's memory is held only while it is open. A deal never puts a windowed engine after a
  * headless one in a lane ([function dealt]), so the slot is never raised. A slot handed to the compile
  * check after a window counts the check's headless engine. [param taken] was taken for the lane's
  * first engine, or is null, in which case a slot counted for its first engine is taken.
@@ -2418,7 +2425,7 @@ export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
   handed?: HandedSlot,
 ): Promise<T[]> {
   let windowed = lane[0]?.plan.windowed ?? false;
-  const lock = taken ?? (await slotTakenFor(slots, windowed));
+  const lock = taken ?? (await slotTakenFor(slots, laneTool(lane)));
   try {
     await handed?.lend(lock);
     const ran: T[] = [];
@@ -2987,19 +2994,25 @@ function engineArguments(
 }
 
 /**
- * Takes a slot for an engine, waiting for one, counted for a window where [param windowed]. A wait
- * keeps its mark and says it waits, as every take does.
+ * What a slot taken for [param lane] is counted for: nothing in particular for a lane that starts
+ * headless, a window for one that only runs windowed engines, and the larger of a window and a
+ * headless engine for one that runs both, since its slot is only ever lowered.
  */
-function slotTakenFor(slots: Pick<EngineSlots, 'take'>, windowed: boolean): Promise<string> {
-  return slots.take(
-    undefined,
-    undefined,
-    undefined,
-    false,
-    undefined,
-    undefined,
-    windowed ? WINDOWED_LANE : undefined,
-  );
+function laneTool(
+  lane: ReadonlyArray<{ readonly plan: { readonly windowed?: boolean } }>,
+): SlotTool | undefined {
+  if (lane[0]?.plan.windowed !== true) {
+    return undefined;
+  }
+  return lane.some(({ plan }) => plan.windowed !== true) ? [WINDOWED_LANE, undefined] : WINDOWED_LANE;
+}
+
+/**
+ * Takes a slot for an engine, waiting for one, counted for [param tool]. A wait keeps its mark and
+ * says it waits, as every take does.
+ */
+function slotTakenFor(slots: Pick<EngineSlots, 'take'>, tool: SlotTool | undefined): Promise<string> {
+  return slots.take(undefined, undefined, undefined, false, undefined, undefined, tool);
 }
 
 /**
@@ -3014,7 +3027,7 @@ export async function engineSlotAndLaunch<
   plan: Pick<EnginePlan, 'lane' | 'windowed'>,
   slot: string | null,
 ): Promise<{ readonly lock: string; readonly launched: L & { readonly lane: number } }> {
-  const lock = slot ?? (await slotTakenFor(launch.slots, plan.windowed));
+  const lock = slot ?? (await slotTakenFor(launch.slots, plan.windowed ? WINDOWED_LANE : undefined));
   return {
     lock,
     launched: { ...launch, lane: plan.lane, ...(plan.windowed ? { peakKept: WINDOWED_LANE } : {}) },

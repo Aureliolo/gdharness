@@ -117,6 +117,13 @@ export function onTheSlot(env: NodeJS.ProcessEnv, lock: string): NodeJS.ProcessE
 export const SLOTS_VARIABLE = 'GODOT_ENGINE_SLOTS';
 /** The variable naming the slot count in place of the machine's. */
 export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
+
+/**
+ * The kind of engine a take counts its slot for, where `undefined` is the slots' own kind. A list is
+ * the kinds of the engines a lane runs in the slot one after another, and the slot is counted for the
+ * largest of them, since a slot is only ever lowered once taken.
+ */
+export type SlotTool = PeakTool | readonly (PeakTool | undefined)[];
 /**
  * Processors to each slot by default. A test engine was measured at 0.5 to 0.86 of a processor, so
  * one slot to five left the machine about half idle while gates waited in line for engines.
@@ -1608,16 +1615,21 @@ export class EngineSlots {
    * figure or the project's kept peak, at most its ceiling. A ceiling that cannot be read caps nothing
    * here, since the start that reads it refuses it in its own words.
    */
-  private memoryNeeded(game: boolean, project: string | undefined, tool?: PeakTool): number {
-    const kind = tool ?? (game ? 'editor_run' : this.tool);
+  private memoryNeeded(game: boolean, project: string | undefined, tool?: SlotTool): number {
     let ceiling = Number.POSITIVE_INFINITY;
     try {
       ceiling = ceilingFor(project, process.env, this.machineMemory).bytes;
     } catch {
       // Refused by the start itself.
     }
-    return engineNeed(project === undefined ? undefined : readEnginePeaks(project)[kind], ceiling, kind)
-      .bytes;
+    const peaks = project === undefined ? undefined : readEnginePeaks(project);
+    const kinds = tool === undefined || typeof tool === 'string' ? [tool] : tool;
+    return Math.max(
+      ...kinds.map((one) => {
+        const kind = one ?? (game ? 'editor_run' : this.tool);
+        return engineNeed(peaks?.[kind], ceiling, kind).bytes;
+      }),
+    );
   }
 
   /**
@@ -1651,6 +1663,8 @@ export class EngineSlots {
    * slot held keeps a mark of its wait until it ends, however it ends, and calls [param blocked]
    * once, as it begins waiting. [param game] is a take for a game editor_run started. [param project]
    * is the Godot project the take is for, in place of the one this process's takes are for.
+   * [param tool] names the kind of engine the slot is counted for, or the kinds of the engines it
+   * runs one after another, where it is counted for the largest of them.
    */
   async take(
     signal?: AbortSignal,
@@ -1659,7 +1673,7 @@ export class EngineSlots {
     game = false,
     project?: string,
     queued?: () => void,
-    tool?: PeakTool,
+    tool?: SlotTool,
   ): Promise<string> {
     const delegate = slotCommandOf();
     return delegate === undefined
@@ -1678,7 +1692,7 @@ export class EngineSlots {
     blocked: (() => void) | undefined,
     game: boolean,
     project: string | undefined,
-    tool: PeakTool | undefined,
+    tool: SlotTool | undefined,
   ): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
     const forProject = project ?? this.project;
@@ -1853,7 +1867,7 @@ export class EngineSlots {
    * [param line] take first ({@link SlotLine}). One given no line came last, and counts the memory
    * an engine of [param tool] needs.
    */
-  async takeFree(game = false, line?: SlotLine, tool?: PeakTool): Promise<string | null> {
+  async takeFree(game = false, line?: SlotLine, tool?: SlotTool): Promise<string | null> {
     if (slotCommandOf() !== undefined) {
       // A command has no free-now answer to give, so only the inherited slot is free.
       return await this.inheritedByOne();
