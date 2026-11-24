@@ -30,9 +30,13 @@ const runtimeDirsMade: { directory: string; during: string | null }[] = [];
 let serversStarted: { server: ServerProcess; during: string | null }[] = [];
 
 function started(server: ServerProcess): void {
-  // Each holds everything its server printed, and about ninety fixtures start one.
-  serversStarted = serversStarted.filter((entry) => !entry.server.exited);
-  serversStarted.push({ server, during: fixtureNow() });
+  // Each holds everything its server printed, and about ninety fixtures start one. An ended one
+  // stays while its own fixture runs, which a deadline report still names.
+  const during = fixtureNow();
+  serversStarted = serversStarted.filter(
+    (entry) => !entry.server.exited || (during !== null && entry.during === during),
+  );
+  serversStarted.push({ server, during });
 }
 
 /**
@@ -514,6 +518,8 @@ export class ServerProcess {
   private readonly inFlight = new Map<number, { readonly asked: string; readonly sent: number }>();
   private answered = 0;
   private answeredMs = 0;
+  /** Why the process could not be started, such as a working directory that does not exist. */
+  private neverStarted: Error | null = null;
 
   /** The runtime directory this server was given, or null when the fixture named its own. */
   readonly runtimeDir: string | null;
@@ -559,10 +565,25 @@ export class ServerProcess {
       this.abandoned.clear();
       this.waiting.clear();
     });
+    // A failed start comes as an error event with no process behind it, and no exit follows.
+    this.child.on('error', (error) => {
+      if (this.child.pid !== undefined) {
+        throw error;
+      }
+      this.neverStarted = error;
+      for (const reject of this.abandoned) {
+        reject(new Error(`Server never started: ${error.message}`));
+      }
+      this.abandoned.clear();
+      this.waiting.clear();
+    });
   }
 
   /** This server's lines for a test that ran past its deadline, as {@link serversSaidAtADeadline} says them. */
   saidAtADeadline(now: number = Date.now()): string[] {
+    if (this.neverStarted !== null) {
+      return [`a server that never started: ${this.neverStarted.message}`];
+    }
     const pid = `server pid ${String(this.child.pid)}`;
     const answered =
       this.answered === 0
@@ -585,8 +606,9 @@ export class ServerProcess {
     ];
   }
 
+  /** True once the server has ended, or when it never started. */
   get exited(): boolean {
-    return this.child.exitCode !== null || this.child.signalCode !== null;
+    return this.neverStarted !== null || this.child.exitCode !== null || this.child.signalCode !== null;
   }
 
   notify(method: string, params?: unknown): void {
@@ -610,6 +632,9 @@ export class ServerProcess {
   async request(method: string, params: unknown = {}, timeoutMs = 30_000): Promise<JsonRpcMessage> {
     const id = this.nextId;
     this.nextId += 1;
+    if (this.neverStarted !== null) {
+      throw new Error(`Server never started: ${this.neverStarted.message}, so it cannot send ${method}.`);
+    }
     if (this.exited) {
       throw new Error(
         `Server already exited, ${describeExit(this.child.exitCode, this.child.signalCode)}, so it cannot send ${method}.\n${this.stderr}`,

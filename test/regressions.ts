@@ -133864,9 +133864,11 @@ async function testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanIts
  * engine it started runs on through the desktop helper, and the runner says what its servers were
  * doing: the calls answered, the call still waiting and the server's last stderr lines, then the
  * slot holders. An engine that never ends holds it no longer either, and a test that ended in time
- * with one left with the helper holds it no more than the runner's wait for the helper. The run is
+ * with one left with the helper holds it no more than the runner's wait for the helper. The report
+ * names every server the test started, one it ended and one that never started included. The run is
  * test/support/deadline-run.ts, whose first test holds a 20 s engine past a 3 s deadline, whose
- * third holds one that never ends and whose fifth leaves one that never ends running.
+ * third holds one that never ends, whose fifth leaves one that never ends running and whose seventh
+ * ends a server and starts two more.
  */
 async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersWereDoing(): Promise<void> {
   const ran = await runHidden(process.execPath, [join('test', 'support', 'deadline-run.ts')], {
@@ -133905,13 +133907,50 @@ async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersW
   }
   assert.match(
     ran,
-    /^failed: holdsAnEnginePastItsDeadline, holdsAnEngineThatNeverEndsPastItsDeadline$/m,
+    /^failed: holdsAnEnginePastItsDeadline, holdsAnEngineThatNeverEndsPastItsDeadline, endsAServerThenStartsAnotherAndOneThatCannotStart$/m,
     ran,
   );
-  assert.match(
-    ran,
-    /^What holdsAnEnginePastItsDeadline was doing at its deadline:\nserver pid \d+: 1 call answered, mean \d+\.\ds; waiting \d+\.\ds on tools\/call resource_edit set_theme_color\n {2}its last stderr lines:\n {4}heard server\/discover\n {4}heard tools\/call\nThe slot directory /m,
-    ran,
+  const said = (pattern: RegExp, what: string): RegExpExecArray => {
+    const match = pattern.exec(ran);
+    assert.ok(match, `${what}:\n${ran}`);
+    return match;
+  };
+  const openedMs = Number(said(/^the opening was answered (\d+) ms after it was sent$/m, 'the opening')[1]);
+  const sentMs = Number(said(/^the tool call was sent (\d+) ms after the test began$/m, 'the tool call')[1]);
+  const [, mean, waited] = said(
+    /^What holdsAnEnginePastItsDeadline was doing at its deadline:\nserver pid \d+: 1 call answered, mean (\d+\.\d)s; waiting (\d+\.\d)s on tools\/call resource_edit set_theme_color\n {2}its last stderr lines:\n {4}heard server\/discover\n {4}heard tools\/call\nThe slot directory /m,
+    'a server with a call answered and one in flight',
+  );
+  // The stand-in answers the opening after half a second, and the deadline comes 3 s after the
+  // test began, so the mean is the opening's own time and the wait runs from the call to the deadline.
+  assert.ok(
+    Number(mean) >= 0.5 && Math.abs(Number(mean) - openedMs / 1000) <= 0.15,
+    `the mean is the ${String(openedMs)} ms the opening took:\n${ran}`,
+  );
+  const fromCallToDeadline = (3_000 - sentMs) / 1000;
+  assert.ok(
+    Number(waited) >= fromCallToDeadline - 0.15 && Number(waited) <= fromCallToDeadline + 2,
+    `the call has waited from ${String(sentMs)} ms to the deadline:\n${ran}`,
+  );
+  said(
+    /^What holdsAnEngineThatNeverEndsPastItsDeadline was doing at its deadline:\nholdsAnEngineThatNeverEndsPastItsDeadline started no server\.\nThe slot directory /m,
+    'a test with no server',
+  );
+  const [, endedPid, nextPid] = said(
+    /^the ended server was pid (\d+), the next pid (\d+)$/m,
+    'the pids of the two servers',
+  );
+  const calls = Array.from({ length: 10 }, (_, at) => ` {4}heard call-${String(at + 2)}\\n`).join('');
+  said(
+    new RegExp(
+      `^What endsAServerThenStartsAnotherAndOneThatCannotStart was doing at its deadline:\\nserver pid ${String(endedPid)}: 12 calls answered, mean \\d+\\.\\ds; it ended, (?:killed by signal SIGTERM|exit code 0)\\n {2}its last stderr lines:\\n${calls}server pid ${String(nextPid)}: no call answered; no call in flight\\n {2}it wrote nothing to stderr\\na server that never started: \\S[^\\n]*\\nThe slot directory `,
+      'm',
+    ),
+    'an ended server with its last ten stderr lines, a quiet one and one that never started',
+  );
+  said(
+    /^the server that cannot start refused its opening: Error: Server never started: \S/m,
+    'a call to a server that never started fails at once',
   );
 }
 

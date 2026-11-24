@@ -1,11 +1,13 @@
 /**
- * Six regressions through the runner's own step, with a deadline of three seconds. The first starts
- * a server that answers its opening and never a tool call, then an engine that runs for twenty
- * seconds, so it is still running at its deadline. The third holds an engine that never ends past
- * its deadline, and the fifth ends after a second and leaves such an engine running. The tests
- * between print how long after the test before them began they started, then end the engine that
- * never ends, so only a runner that waited on it is held until this run ends it itself. The engines
- * are waited for before the process ends, so it leaves nothing running.
+ * Seven regressions through the runner's own step, with a deadline of three seconds. The first starts
+ * a server that answers its opening after half a second and never a tool call, then an engine that
+ * runs for twenty seconds, so it is still running at its deadline. It prints how long the opening
+ * took and when it sent the tool call. The third holds an engine that never ends past its deadline,
+ * and the fifth ends after a second and leaves such an engine running. The tests between print how
+ * long after the test before them began they started, then end the engine that never ends, so only
+ * a runner that waited on it is held until this run ends it itself. The seventh makes twelve calls
+ * of one server and ends it, then starts a second server and one that cannot start, and waits past
+ * its deadline. The engines are waited for before the process ends, so it leaves nothing running.
  * Usage: deadline-run.ts
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -58,10 +60,15 @@ function engineThatNeverEnds(): Promise<unknown> {
   return engine;
 }
 
+const STAND_IN = join(import.meta.dirname, 'unanswering-server.ts');
+
 async function holdsAnEnginePastItsDeadline(): Promise<void> {
   began = Date.now();
-  const server = new ServerProcess({ entry: join(import.meta.dirname, 'unanswering-server.ts') });
+  const server = new ServerProcess({ entry: STAND_IN, args: ['--opening-ms', '500'] });
+  const opened = Date.now();
   await server.initialize('deadline-run');
+  console.log(`the opening was answered ${String(Date.now() - opened)} ms after it was sent`);
+  console.log(`the tool call was sent ${String(Date.now() - began)} ms after the test began`);
   server
     .request('tools/call', { name: 'resource_edit', arguments: { op: 'set_theme_color' } }, 60_000)
     .catch(() => undefined);
@@ -85,6 +92,24 @@ async function leavesAnEngineThatNeverEndsRunning(): Promise<void> {
   await delay(1_000);
 }
 
+async function endsAServerThenStartsAnotherAndOneThatCannotStart(): Promise<void> {
+  const first = new ServerProcess({ entry: STAND_IN });
+  await first.initialize('deadline-run');
+  for (let call = 1; call <= 11; call += 1) {
+    await first.request(`call-${String(call)}`);
+  }
+  await first.end();
+  const second = new ServerProcess({ entry: STAND_IN });
+  console.log(
+    `the ended server was pid ${String(first.child.pid)}, the next pid ${String(second.child.pid)}`,
+  );
+  const cannot = new ServerProcess({ entry: STAND_IN, cwd: join(stops, 'no-such-folder') });
+  await cannot.initialize('deadline-run').catch((error: unknown) => {
+    console.log(`the server that cannot start refused its opening: ${String(error).split('\n')[0]}`);
+  });
+  await delay(10_000);
+}
+
 const run: RegressionRun = {
   failed: [],
   ranPast: [],
@@ -99,6 +124,7 @@ for (const test of [
   saysWhenItStarts,
   leavesAnEngineThatNeverEndsRunning,
   saysWhenItStarts,
+  endsAServerThenStartsAnotherAndOneThatCannotStart,
 ]) {
   await runOneRegression(test, run);
 }
