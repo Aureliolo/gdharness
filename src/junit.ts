@@ -13,7 +13,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
 import { caseLineOf, suiteOpenedBy } from './game-log.js';
-import { owned } from './log-read.js';
+import { LOG_LIMIT_BYTES, owned } from './log-read.js';
 
 export class MalformedReportError extends Error {
   constructor(message: string) {
@@ -915,7 +915,7 @@ const IGNORING_CASE = ' \\(ignoring case\\)';
  * What stands between a failing value's closing quote and the location line after it: colour marks,
  * and the " (ignoring case)" that `is_equal_ignoring_case` writes after the quote.
  */
-const AFTER_VALUE = new RegExp(`^(?:${ESCAPE}\\[[0-9;]*m)*(${IGNORING_CASE})?(?:${ESCAPE}\\[[0-9;]*m)*$`);
+const AFTER_VALUE = new RegExp(`(?:${ESCAPE}\\[[0-9;]*m)*(${IGNORING_CASE})?(?:${ESCAPE}\\[[0-9;]*m)*`, 'y');
 
 /**
  * A failing equality between two quoted values as the report writes it, a string's being a merged
@@ -1078,8 +1078,7 @@ const LOCATED = new RegExp(`\\tat ${LOCATION}`, 'g');
  * end of the next case's string diff, and read the two as one. A diff therefore ends at the first
  * location line after its opening, and only when the last quote before that line is followed by
  * nothing but colour marks and the " (ignoring case)" that `is_equal_ignoring_case` writes. Every
- * opening before a location line that does not end a diff is passed over with it, and so is one
- * whose value prints more than {@link VALUE_READ_MOST} characters.
+ * opening before a location line that does not end a diff is passed over with it.
  *
  * That is looked for with the text's own search, never a pattern spanning the value: a pattern of
  * that kind stops matching under Bun once the value passes about a megabyte.
@@ -1096,13 +1095,9 @@ function printedDiffsIn(text: string): { diffs: PrintedDiff[]; open: number | nu
     }
     from = located.index;
     const closing = text.lastIndexOf("'", located.index - 1);
-    const after =
-      closing < valueFrom ||
-      closing - valueFrom > VALUE_READ_MOST ||
-      located.index - closing > AFTER_VALUE_MOST
-        ? null
-        : AFTER_VALUE.exec(text.slice(closing + 1, located.index));
-    if (after !== null) {
+    AFTER_VALUE.lastIndex = closing + 1;
+    const after = closing < valueFrom ? null : AFTER_VALUE.exec(text);
+    if (after !== null && AFTER_VALUE.lastIndex === located.index) {
       const { merged, actual } = readDiff(text.slice(valueFrom, closing));
       diffs.push({
         suffix: owned(after[1] ?? ''),
@@ -1126,22 +1121,11 @@ const SUITE_OPENS = 'Run Test Suite:';
 const LINE_HELD_MOST = 64 * 1024;
 
 /**
- * The most characters a failing value may print, colour marks included, and be read back. A longer
- * one keeps the note that it was not, since reading it back costs many times its length in memory.
+ * How many characters of a console are held in the pieces they came in before those are joined into
+ * one. Each string held costs more than its characters, which adds up when a pipe hands the text
+ * over a line at a time.
  */
-export const VALUE_READ_MOST = 1024 * 1024;
-
-/**
- * The most text read between a value's closing quote and its location line, where only colour
- * marks and " (ignoring case)" stand.
- */
-const AFTER_VALUE_MOST = 64 * 1024;
-
-/**
- * The most text held from a diff's opening: a value read back with what follows its quote, and as
- * much again for its location line and the rest of that line. Past it the diff is let go, unread.
- */
-export const DIFF_HELD_MOST = 2 * (VALUE_READ_MOST + AFTER_VALUE_MOST);
+const LOOSE_MOST = 1024 * 1024;
 
 /** What starts a location line. */
 const LOCATION_HEAD = "\tat '";
@@ -1187,15 +1171,28 @@ interface LocationBegun {
  * the console arrives. No diff starts anywhere but at its opening, so the text is held only from the
  * first opening that no location line has followed, and the diffs before it are taken and let go.
  * An opening is looked at again only once a location line has followed it, so a diff that never
- * closes is read once, at the console's end. What is held from an opening stops at
- * {@link DIFF_HELD_MOST}: past it the diff is passed over, unread, and reading goes on after its
- * location line, as the whole text passes over a value too long to read back.
+ * closes is read once, at the console's end.
+ *
+ * A value held from its opening past what a suite may print is passed over, unread, and reading goes
+ * on after its location line. No run prints one, since a suite printing that much ends its engine,
+ * and holding it would cost the rest of the console. The rest of the location line's own line is
+ * held to as much again.
  */
 export class SuiteDiffs {
+  /** The most characters held from an opening to its value's location line. */
+  private readonly most: number;
   private readonly decoder = new StringDecoder('utf8');
   private readonly found: PrintedDiff[] = [];
-  /** The text held, in the pieces it came in, with every line break a line feed. */
+  /**
+   * The text held, in the pieces it came in, with every line break a line feed. The pieces that
+   * came since the last were joined are joined into one once they hold {@link LOOSE_MOST}
+   * characters.
+   */
   private pieces: string[] = [];
+  /** How many of the last pieces came since the last were joined. */
+  private loose = 0;
+  /** How many characters those pieces hold. */
+  private looseLength = 0;
   /** How many characters were read and let go before the first held. */
   private gone = 0;
   /** How many characters have come. */
@@ -1215,6 +1212,11 @@ export class SuiteDiffs {
   /** While none is found, the location lines begun at the end of the text sought, in the order they begin. */
   private begun: LocationBegun[] = [];
 
+  /** A reader of a console whose suites may each print [param most] bytes before their engine is ended. */
+  constructor(most = LOG_LIMIT_BYTES) {
+    this.most = most;
+  }
+
   /** Reads [param chunk], the bytes printed next. */
   take(chunk: Buffer): void {
     // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
@@ -1228,6 +1230,11 @@ export class SuiteDiffs {
     const base = this.taken;
     this.pieces.push(text);
     this.taken += text.length;
+    this.loose += 1;
+    this.looseLength += text.length;
+    if (this.looseLength >= LOOSE_MOST) {
+      this.joinLoose();
+    }
     if (this.opened && this.located < 0) {
       this.locate(text, base);
     }
@@ -1264,15 +1271,13 @@ export class SuiteDiffs {
   }
 
   /**
-   * Whether the open diff can no longer be read back: what is held of it passed {@link
-   * DIFF_HELD_MOST}, or its value with what follows its quote passed what {@link printedDiffsIn}
-   * reads. A location line not found yet begins no earlier than the first begun at the text's end.
+   * Whether the open diff is no longer held: its value, with what follows its quote, passed what a
+   * suite may print, or what is held passed twice that. A location line not found yet begins no
+   * earlier than the first begun at the text's end.
    */
   private unreadable(): boolean {
     const ends = this.located >= 0 ? this.located : (this.begun[0]?.at ?? this.taken);
-    return (
-      this.held > DIFF_HELD_MOST || ends - this.gone - DIFF_OPENS.length > VALUE_READ_MOST + AFTER_VALUE_MOST
-    );
+    return this.held > 2 * this.most || ends - this.gone - DIFF_OPENS.length > this.most;
   }
 
   /**
@@ -1474,7 +1479,19 @@ export class SuiteDiffs {
       }
     }
     this.pieces = kept;
+    this.loose = Math.min(this.loose, kept.length);
+    this.looseLength = 0;
+    for (let at = kept.length - this.loose; at < kept.length; at += 1) {
+      this.looseLength += kept[at]?.length ?? 0;
+    }
     this.gone += length;
+  }
+
+  /** Joins the pieces that came since the last were joined into one. */
+  private joinLoose(): void {
+    this.pieces.push(this.pieces.splice(this.pieces.length - this.loose).join(''));
+    this.loose = 0;
+    this.looseLength = 0;
   }
 }
 

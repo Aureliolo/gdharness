@@ -142,10 +142,7 @@ class HeldLine {
     return cut === null ? tail : `${cut.head.toString('utf8')}${lineCutSaid(cut.dropped)}${tail}`;
   }
 
-  /**
-   * Lets go of all but the line's first half and its last, cut where a character starts and outside
-   * a character reference, so a run of markup's text cut this way is still well formed.
-   */
+  /** Lets go of all but the line's first half and its last, cut where a character starts. */
   private keepEnds(): void {
     const half = LINE_KEPT_MOST / 2;
     if (this.cut === null ? this.length <= LINE_KEPT_MOST : this.length <= half) {
@@ -158,72 +155,16 @@ class HeldLine {
       while (from > 0 && continues(joined[from])) {
         from -= 1;
       }
-      from = beforeAReference(joined, from);
       this.cut = { head: Buffer.from(joined.subarray(0, from)), dropped: 0 };
     }
     let tail = Math.max(from, joined.length - half);
     while (tail < joined.length && continues(joined[tail])) {
       tail += 1;
     }
-    tail = afterAReference(joined, tail);
     this.cut.dropped += tail - from;
     this.pieces = [Buffer.from(joined.subarray(tail))];
     this.length = joined.length - tail;
   }
-}
-
-/** The longest character reference markup spells, such as `&#x10FFFF;`. */
-const REFERENCE_MOST = 12;
-
-/** Where a cut of [param bytes] at [param at] goes so it falls before any reference it is inside. */
-function beforeAReference(bytes: Buffer, at: number): number {
-  const amp = bytes.lastIndexOf(0x26, at - 1);
-  return amp >= 0 && at - amp < REFERENCE_MOST && bytes.indexOf(0x3b, amp) >= at ? amp : at;
-}
-
-/** Where a cut of [param bytes] at [param at] goes so it falls after any reference it is inside. */
-function afterAReference(bytes: Buffer, at: number): number {
-  const amp = at > 0 ? bytes.lastIndexOf(0x26, at - 1) : -1;
-  if (amp < 0 || at - amp >= REFERENCE_MOST) {
-    return at;
-  }
-  const semicolon = bytes.indexOf(0x3b, amp);
-  return semicolon >= at && semicolon - amp < REFERENCE_MOST ? semicolon + 1 : at;
-}
-
-/**
- * The text of the markup file at [param path], with every run of text between two of its marks
- * (`<` and `>`) held to {@link LINE_KEPT_MOST} bytes as a line is. A report holding a value as long
- * as a suite may print is read in a few megabytes, and its elements stay as written.
- */
-export function readMarkup(path: string, chunkBytes = 1024 * 1024): string {
-  const run = new HeldLine();
-  const kept: string[] = [];
-  const fd = openSync(path, 'r');
-  try {
-    const chunk = Buffer.alloc(chunkBytes);
-    for (
-      let got = readSync(fd, chunk, 0, chunkBytes, null);
-      got > 0;
-      got = readSync(fd, chunk, 0, chunkBytes, null)
-    ) {
-      let from = 0;
-      for (let at = 0; at < got; at += 1) {
-        const byte = chunk[at];
-        if (byte === 0x3c || byte === 0x3e) {
-          kept.push(run.end(chunk.subarray(from, at)), byte === 0x3c ? '<' : '>');
-          from = at + 1;
-        }
-      }
-      if (from < got) {
-        run.add(chunk.subarray(from, got));
-      }
-    }
-  } finally {
-    closeSync(fd);
-  }
-  kept.push(run.end(Buffer.alloc(0)));
-  return kept.join('');
 }
 
 /**

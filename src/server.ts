@@ -265,7 +265,7 @@ import {
 import { freeLibraryCopiesAsync } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
 import { statOf } from './listed-reads.js';
-import { logLimitBytes, pastTheLogLimit, readMarkup } from './log-read.js';
+import { logLimitBytes, pastTheLogLimit } from './log-read.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -10679,14 +10679,14 @@ export class GodotServer {
       await keepPipelineCache(userData, project.value.path, engine.value, undefined, seeded);
     };
     const keeping = run.settled.then(keep, keep);
-    // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
-    // marks which characters of a failing string were there, and its report drops them. Read a
-    // suite at a time, since the whole console can pass what one string holds.
-    const diffs = new SuiteDiffs();
     // A suite printing past what a log may hold ends the engine, as a share doing so ends gdharness
     // test's. Each suite is judged on the log and on the console, the console's errors counted with
     // its other lines, from where the suite began to where the next one does.
     const limit = logLimitBytes();
+    // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
+    // marks which characters of a failing string were there, and its report drops them. Read a
+    // suite at a time, since the whole console can pass what one string holds.
+    const diffs = new SuiteDiffs(limit);
     const logCuts = new SuiteCuts(limit);
     const consoleCuts = new SuiteCuts(limit);
     const capped: { why: string | null } = { why: null };
@@ -10810,7 +10810,7 @@ export class GodotServer {
           : [];
       const newest = written.at(-1);
       if (newest !== undefined) {
-        report = parseJUnit(readMarkup(join(reportsDir, newest, 'results.xml')));
+        report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
       }
     } catch (error) {
       reportProblem = errorMessage(error);

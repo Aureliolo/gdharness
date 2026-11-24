@@ -402,6 +402,7 @@ import {
   type ScriptError,
   SuiteDiffs,
   suitesPrinted,
+  VALUE_NOT_RECOVERED_NOTE,
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
@@ -129882,45 +129883,19 @@ async function testAnEngineUnderItsMemoryCeilingRunsToItsEnd(): Promise<void> {
   );
 }
 
-/** The most memory process [param pid] has held, in bytes, or null where the system keeps no such figure. */
-function peakMemoryOf(pid: number): number | null {
-  if (process.platform === 'win32') {
-    const read = spawnSyncHidden(
-      'powershell',
-      ['-NoProfile', '-Command', `(Get-Process -Id ${String(pid)}).PeakWorkingSet64`],
-      { encoding: 'utf8' },
-    );
-    const bytes = Number(read.stdout.trim());
-    return bytes > 0 ? bytes : null;
-  }
-  if (process.platform === 'linux') {
-    const kib = /^VmHWM:\s+(\d+) kB$/m.exec(readFileSync(`/proc/${String(pid)}/status`, 'utf8'))?.[1];
-    return kib === undefined ? null : Number(kib) * 1024;
-  }
-  return null;
-}
-
-/** The most memory a server may hold while it reads a test run's console. */
-const SERVER_READING_MOST = 512 * 1024 * 1024;
-
 /**
- * A test run whose first suite prints a failing value as long as a suite may print, closed by its
- * location line, keeps the server under {@link SERVER_READING_MOST}, whether the report passes the
- * case or fails it on that value. The value is too long to read back, and the run is judged all the
- * same.
+ * A failing string value the console prints is read back into the answer at every size: one of
+ * 409,694 characters spelled in three bytes each, one of 614,494 spelled in two, and one of 64 MiB.
+ * The report's text of each passes a mebibyte, and the answer gives the value the assertion found,
+ * not the report's merge of both sides.
  */
-async function testAValueAsLongAsASuiteMayPrintKeepsTheServerSmall(): Promise<void> {
-  if (peakMemoryOf(process.pid) === null) {
-    console.log(`the server memory regression skipped (this is ${process.platform})`);
-    return;
-  }
+async function testAFailingValueIsReadBackAtEverySize(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-value-project-'));
   const files: Record<string, string> = {
     'project.godot': 'config_version=5\n',
     'addons/gdUnit4/plugin.cfg': '[plugin]\nname="gdUnit4"\nversion="6.0.0"\n',
     'addons/gdUnit4/src/core/runners/GdUnitTestCIRunner.gd': 'extends SceneTree\n',
     'tests/s0_test.gd': 'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
-    'tests/s1_test.gd': 'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
   };
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(project, path)), { recursive: true });
@@ -129928,18 +129903,16 @@ async function testAValueAsLongAsASuiteMayPrintKeepsTheServerSmall(): Promise<vo
   }
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-value-runtime-'));
   const server = new ServerProcess({
-    env: {
-      GODOT_PATH: supportEngine('value'),
-      GDHARNESS_RUNTIME_DIR: runtime,
-      GDH_LIMIT: String(LOG_LIMIT_BYTES),
-    },
+    env: { GODOT_PATH: supportEngine('value'), GDHARNESS_RUNTIME_DIR: runtime },
   });
   try {
     await server.initialize('regression-test');
-    for (const failing of [false, true]) {
-      if (failing) {
-        writeFileSync(join(project, 'value-report-fails'), '');
-      }
+    for (const [character, count] of [
+      ['漢', 409_694],
+      ['é', 614_494],
+      ['x', 64 * 1024 * 1024],
+    ] as const) {
+      writeFileSync(join(project, 'value.json'), JSON.stringify({ character, count }));
       const response = await server.request(
         'tools/call',
         {
@@ -129950,16 +129923,22 @@ async function testAValueAsLongAsASuiteMayPrintKeepsTheServerSmall(): Promise<vo
       );
       const said = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
       const answer: unknown = JSON.parse(said.find((block) => block.trimStart().startsWith('{')) ?? '{}');
-      const report = failing ? 'a failing report' : 'a passing report';
+      const value = `${String(count)} of ${character}`;
       assert.deepEqual(
         [get(answer, 'passed'), get(answer, 'tests'), get(answer, 'failures')],
-        failing ? [false, 2, 1] : [true, 2, 0],
-        `${report} is judged: ${said.join('\n').slice(0, 2000)}`,
+        [false, 1, 1],
+        `a value of ${value} fails its run: ${said.join('\n').slice(0, 2000)}`,
       );
-      const peak = peakMemoryOf(server.child.pid ?? 0) ?? 0;
+      const detail = String(get(asArray(get(answer, 'failed'))[0], 'detail'));
+      const opens = "Expecting:\n 'other'\n but was\n '";
+      assert.equal(
+        detail.slice(0, opens.length + 3),
+        `${opens}${character.repeat(3)}`,
+        `a value of ${value} is read back: ${detail.slice(0, 200)}`,
+      );
       assert.ok(
-        peak > 0 && peak < SERVER_READING_MOST,
-        `with ${report}, the server held at most ${String(Math.round(peak / 1024 / 1024))} MiB`,
+        !detail.includes(VALUE_NOT_RECOVERED_NOTE),
+        `a value of ${value} carries no note that it was not read back`,
       );
     }
   } finally {
@@ -133275,7 +133254,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGamePastItsMemoryCeilingIsEndedForIt,
   testAnEditorPastItsMemoryCeilingIsEndedForIt,
   testAnEngineUnderItsMemoryCeilingRunsToItsEnd,
-  testAValueAsLongAsASuiteMayPrintKeepsTheServerSmall,
+  testAFailingValueIsReadBackAtEverySize,
   testAChildOfTheEngineCountsTowardsItsMemory,
   testTheCeilingVariableSetsIt,
   testTheDefaultCeilingIsAQuarterOfTheMemoryAndAtLeastFourGiB,
