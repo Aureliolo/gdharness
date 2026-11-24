@@ -32,6 +32,31 @@ const ONE_SHOT_CLOSE_CODE: int = 4002
 ## What a server closes with when another editor already holds its bridge. Kept in step with
 ## `SECOND_CONNECTION_CLOSE_CODE` in src/godot-bridge.ts.
 const TAKEN_CLOSE_CODE: int = 4000
+## The engine's options that make a run do one job and quit. The engine hands an editor plugin none
+## of them (`OS.get_cmdline_args()` answers `["--editor"]` under each), so [method one_shot_option]
+## reads the process's own command line. Kept in step with `ONE_SHOT_OPTIONS` in
+## src/process-children.ts.
+const ONE_SHOT_OPTIONS: Array[String] = [
+	"--import",
+	"--quit",
+	"--quit-after",
+	"--export-release",
+	"--export-debug",
+	"--export-pack",
+	"--export-patch",
+	"--doctool",
+	"--gdscript-docs",
+	"--script",
+	"-s",
+	"--check-only",
+	"--build-solutions",
+	"--dump-gdextension-interface",
+	"--dump-extension-api",
+	"--dump-extension-api-with-docs",
+	"--validate-extension-api",
+	"--convert-3to4",
+	"--validate-conversion-3to4",
+]
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
 ## file is one for every editor of this engine version on the machine, so two open at once want the
 ## same three and the second one binds nothing. Read here and never written, for the reason
@@ -536,6 +561,71 @@ func _keep_breakpoints_through_sessions() -> void:
 			% SYNC_BREAKPOINTS_SETTING
 		)
 	)
+
+
+## The option that makes this process one job that quits, such as `--import`, or an empty string
+## when it has none or the platform would not say. A run that quits by itself is nobody's editor
+## and is never driven through the bridge, so it does not dial in: a server already holding an
+## editor would turn it away, and the warning that earns fails a setup step that refuses engine
+## warnings. A command line that cannot be read is an editor's.
+static func one_shot_option() -> String:
+	return one_shot_option_in(_own_command_line())
+
+
+## The option in [param line] that makes a run one job that quits, or an empty string. Only as far
+## as the first `--` or `++`, after which the engine reads nothing.
+static func one_shot_option_in(line: String) -> String:
+	for word: String in line.replace("\"", " ").replace("\u0000", " ").split(" ", false):
+		if word == "--" or word == "++":
+			return ""
+		if ONE_SHOT_OPTIONS.has(word):
+			return word
+	return ""
+
+
+## The text [param written] spells in hex, whatever separates or surrounds the digits.
+static func _from_hex(written: String) -> String:
+	var digits: String = ""
+	for character: String in written:
+		if "0123456789abcdefABCDEF".contains(character):
+			digits += character
+	if digits.length() % 2 != 0:
+		return ""
+	return digits.hex_decode().get_string_from_utf8()
+
+
+## The command line this process was started with, or an empty string when it cannot be read.
+static func _own_command_line() -> String:
+	var pid: int = OS.get_process_id()
+	var output: Array = []
+	if OS.get_name() == "Windows":
+		# Asked for as hex, because a PowerShell started with no console writes its text in an
+		# encoding Godot cannot read back, and hex survives every one of them.
+		var asked: String = (
+			(
+				"[BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes("
+				+ "(Get-CimInstance Win32_Process -Filter 'ProcessId=%d').CommandLine))"
+			)
+			% pid
+		)
+		if OS.execute(
+			"powershell.exe",
+			["-NoProfile", "-NonInteractive", "-Command", asked],
+			output,
+		) != 0:
+			return ""
+		return _from_hex(str(output[0]) if output.size() > 0 else "")
+	elif FileAccess.file_exists("/proc/self/cmdline"):
+		var file: FileAccess = FileAccess.open("/proc/self/cmdline", FileAccess.READ)
+		if file == null:
+			return ""
+		var bytes: PackedByteArray = PackedByteArray()
+		while not file.eof_reached():
+			bytes.append_array(file.get_buffer(4096))
+		return bytes.get_string_from_utf8()
+	elif OS.execute("ps", ["-o", "command=", "-p", str(pid)], output) != 0:
+		return ""
+	return str(output[0]) if output.size() > 0 else ""
 
 
 ## Whether this editor runs with no window anybody sees: headless, on the hidden desktop a server
