@@ -75834,6 +75834,8 @@ async function testANeedExactlyAtTheRoomIsNotRefused(): Promise<void> {
 /**
  * A take given no reading of its own reads the machine's memory left to give engines, less what
  * other work has reserved in its slot folder, so a reservation past any machine refuses the waiter.
+ * A waiter of sixteen draws twelve, which stand for 18 GiB, more than its 1 GiB need plus the 16 GiB
+ * kept outside. So no reading of the free memory alone refuses it, however little is free.
  */
 async function testTheMemoryFreeIsReadLessReservationsWhenNoneIsGiven(): Promise<void> {
   const gib = 1024 ** 3;
@@ -75847,7 +75849,7 @@ async function testTheMemoryFreeIsReadLessReservationsWhenNoneIsGiven(): Promise
   delete process.env[RESERVED_VARIABLE];
   try {
     const me = { pid: process.pid, started: await ownStart() };
-    writeFileSync(join(directory, '3.lock'), JSON.stringify(me));
+    writeFileSync(join(directory, '15.lock'), JSON.stringify(me));
     writeFileSync(join(directory, RESERVED_FOLDER, 'other.json'), JSON.stringify({ ...me, owed: 2 ** 50 }));
     writeFileSync(
       join(marks, '1-1.json'),
@@ -75855,11 +75857,11 @@ async function testTheMemoryFreeIsReadLessReservationsWhenNoneIsGiven(): Promise
         ...me,
         taker: 'gate',
         since: (Date.now() - 60_000) / 1000,
-        wants: 4,
-        need: 3 * gib + 1,
+        wants: 16,
+        need: gib,
       }),
     );
-    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'gate', undefined, {
+    const newcomer = new EngineSlots(directory, 16, me, undefined, () => 'gate', undefined, {
       memory: 64 * gib,
     });
     try {
