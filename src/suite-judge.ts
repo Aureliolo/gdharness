@@ -758,10 +758,13 @@ function entryEnds(line: string): boolean {
  * reason is there, or the reason is gdUnit4's own for a row whose data does not fit or a case it
  * cannot run, which are read as those.
  *
- * The reason runs to the last line ending in a quote before the entry ends, as the report's reader
- * takes it to the entry's last quote, since a line of the reason can end in a quote with a blank
- * line under it. With no such line it is cut, and only its first line is surely the reason's: the
- * lines after it are read as they would be without it, the engine's last errors included.
+ * A first line ending in a quote, with its quotes paired once the opening one is counted, is the
+ * whole reason: gdUnit4 runs the suite's `after()` before its statistics, so what that prints can
+ * follow a skipped last case and end in a quote too. Otherwise the reason runs to the last line
+ * ending in a quote before the entry ends, as the report's reader takes it to the entry's last
+ * quote, since a line of the reason can end in a quote with a blank line under it. With no such
+ * line it is cut, and only its first line is surely the reason's: the lines after it are read as
+ * they would be without it, the engine's last errors included.
  */
 function skipReasonAt(
   lines: RunState['lines'],
@@ -771,6 +774,10 @@ function skipReasonAt(
   const opened = SKIP_REASON.exec(first)?.[1];
   if (opened === undefined || UNRUNNABLE_CASE.test(first) || MISMATCHED_ROW.test(lines.at(at + 1) ?? '')) {
     return null;
+  }
+  const alone = opened.trimEnd();
+  if (alone.endsWith("'") && alone.split("'").length % 2 === 0) {
+    return { reason: alone.slice(0, -1), ends: at, cut: false };
   }
   const parts: string[] = [];
   let closes = -1;
