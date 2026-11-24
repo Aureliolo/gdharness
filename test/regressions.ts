@@ -133560,7 +133560,9 @@ async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
         return;
       }
       const fileBefore = statSync(lock, { bigint: true }).ino;
-      await slots.counting(lock);
+      const lowering = slots.counting(lock);
+      assert.ok(await settledWithin(lowering, RACING_PATIENCE_MS), 'the lowering ended');
+      await lowering;
       assert.equal(lockFigure(lock), MEMORY_PER_ENGINE, 'the lowering was written');
       assert.notEqual(
         statSync(lock, { bigint: true }).ino,
