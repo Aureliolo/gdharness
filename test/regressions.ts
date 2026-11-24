@@ -129891,6 +129891,189 @@ async function testAChildOfTheEngineCountsTowardsItsMemory(): Promise<void> {
   );
 }
 
+/**
+ * The project's one suite made one whose declaration puts its run on a window, which on Windows is
+ * the hidden desktop's. A headless suite beside it would run as a second engine.
+ */
+function addAWindowedSuite(project: string): void {
+  rmSync(join(project, 'tests', 'held_test.gd'));
+  writeFileSync(
+    join(project, 'tests', 'needs_window_test.gd'),
+    'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n\nfunc test_one() -> void:\n\tpass\n',
+  );
+}
+
+/**
+ * One server whose engine is the memory engine, with a memory project for each of [param ceilings]
+ * (megabytes) and a windowed suite in each of [param windowed]'s. Each [param body] call runs
+ * project_test on one project.
+ */
+async function withMemoryProjects(
+  holds: Record<string, string>,
+  projects: readonly { readonly ceiling: number; readonly windowed: boolean }[],
+  body: (
+    run: (which: number) => Promise<unknown>,
+    paths: readonly string[],
+    runtime: string,
+  ) => Promise<void>,
+): Promise<void> {
+  const paths = projects.map(({ ceiling, windowed }) => {
+    const project = memoryProject();
+    setTheCeilingOf(project, String(ceiling));
+    if (windowed) {
+      addAWindowedSuite(project);
+    }
+    return project;
+  });
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: memoryEngine(), GDHARNESS_RUNTIME_DIR: runtime, ...holds },
+  });
+  try {
+    await server.initialize('regression-test');
+    await body(
+      async (which) => {
+        const response = await server.request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: paths[which], path: 'res://tests', timeoutMs: 60_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const json = blocks.find((block) => block.trimStart().startsWith('{'));
+        return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
+      },
+      paths,
+      runtime,
+    );
+  } finally {
+    await server.stop();
+    sweep(...paths, runtime);
+  }
+}
+
+/**
+ * A windowed run past its ceiling ends only itself. On Windows one helper starts every desktop
+ * engine of a server, so a guard on the helper summed every engine and ended them all.
+ */
+async function testAWindowedRunPastItsCeilingEndsNoRunBeside(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '12000' },
+    [
+      { ceiling: 300, windowed: true },
+      { ceiling: 2000, windowed: true },
+      { ceiling: 2000, windowed: false },
+    ],
+    async (run) => {
+      const [over, besideOnTheDesktop, besideHeadless] = await Promise.all([run(0), run(1), run(2)]);
+      assert.match(String(get(over, 'verdict')), MEMORY_END_SAID_ABOVE_300, JSON.stringify(over));
+      const peak = asNumber(get(over, 'memoryEnded', 'peakBytes'));
+      assert.ok(peak > 300 * 1024 * 1024 && peak < 1000 * 1024 * 1024, `its own engine's peak: ${peak}`);
+      for (const beside of [besideOnTheDesktop, besideHeadless]) {
+        assert.equal(get(beside, 'memoryEnded'), undefined, JSON.stringify(beside));
+        assert.equal(get(beside, 'exitCode'), 0, JSON.stringify(beside));
+        assert.doesNotMatch(String(get(beside, 'verdict')), /memory/, JSON.stringify(beside));
+      }
+    },
+  );
+}
+
+const MEMORY_END_SAID_ABOVE_300 =
+  /^ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\./;
+
+/** Two windowed runs ended for memory at once each name their own engine's peak. */
+async function testTwoWindowedRunsEndedForMemoryEachReportTheirOwnPeak(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '12000' },
+    [
+      { ceiling: 300, windowed: true },
+      { ceiling: 300, windowed: true },
+    ],
+    async (run) => {
+      const ended = await Promise.all([run(0), run(1)]);
+      const peaks = ended.map((one) => {
+        assert.match(String(get(one, 'verdict')), MEMORY_END_SAID_ABOVE_300, JSON.stringify(one));
+        return asNumber(get(one, 'memoryEnded', 'peakBytes'));
+      });
+      for (const peak of peaks) {
+        assert.ok(peak < 1000 * 1024 * 1024, `one engine's peak, not the helper's whole tree: ${peak}`);
+      }
+      assert.notEqual(peaks[0], peaks[1], `two engines cannot hold the same byte count: ${peaks.join(', ')}`);
+    },
+  );
+}
+
+/**
+ * What the memory watch was asked to guard while project_test ran a suite of the memory project on
+ * this platform, and the pid and parent pid the engine of that run named for itself.
+ */
+async function guardedWhileTestingOnTheMemoryEngine(
+  windowed: boolean,
+): Promise<{ roots: number[]; engine: number; parent: number }> {
+  const project = memoryProject();
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+  const pids = join(runtime, 'engine-pids');
+  if (windowed) {
+    addAWindowedSuite(project);
+  }
+  try {
+    const found = await inAProcessOfItsOwn(
+      [
+        'const { GodotServer } = await import(' +
+          JSON.stringify(pathToFileURL(resolve('src', 'server.ts')).href) +
+          ');',
+        'const roots = [];',
+        'const guard = memory.engineMemory.guard.bind(memory.engineMemory);',
+        'memory.engineMemory.guard = (pid, ...rest) => { roots.push(pid); return guard(pid, ...rest); };',
+        'const server = new GodotServer();',
+        `const ran = await server.handleRunTests({ projectPath: ${JSON.stringify(project)}, path: 'res://tests', timeoutMs: 60000 });`,
+        'say({ roots, text: ran.content.map((block) => block.text).join("\\n") });',
+      ],
+      {
+        GODOT_PATH: memoryEngine(),
+        GDHARNESS_RUNTIME_DIR: runtime,
+        GDH_HOLD_MB: '60',
+        GDH_STAY_MS: '4000',
+        GDH_PID_FILE: pids,
+      },
+    );
+    const named = readFileSync(pids, 'utf8').trim().split('\n').at(-1)?.split(' ') ?? [];
+    const [engine, parent] = named.map(Number);
+    assert.ok(engine !== undefined && parent !== undefined, `the engine named itself: ${named.join(' ')}`);
+    return { roots: asArray(get(found, 'roots')).map(Number), engine, parent };
+  } finally {
+    sweep(project, runtime);
+  }
+}
+
+/** On Windows the guard of a windowed run reads the engine's own pid, never the helper that started it. */
+async function testTheGuardOfAWindowedRunWatchesItsEngineNotTheHelper(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { roots, engine, parent } = await guardedWhileTestingOnTheMemoryEngine(true);
+  assert.ok(roots.includes(engine), `the engine ${engine} is guarded: ${roots.join(', ')}`);
+  assert.ok(!roots.includes(parent), `the helper ${parent} is not: ${roots.join(', ')}`);
+}
+
+/** Elsewhere a desktop run starts the engine itself, and its guard watches that process as it always did. */
+async function testTheGuardOfARunWithoutTheWindowsHelperWatchesTheEngineItself(): Promise<void> {
+  if (process.platform === 'win32') {
+    return;
+  }
+  const { roots, engine, parent } = await guardedWhileTestingOnTheMemoryEngine(true);
+  assert.ok(roots.includes(engine), `the engine ${engine} is guarded: ${roots.join(', ')}`);
+  assert.ok(!roots.includes(parent), `and not the process that started it: ${roots.join(', ')}`);
+}
+
 const EMPTY_THEME = '[gd_resource type="Theme" format=3]\n\n[resource]\n';
 
 /** Runs [run] against a headless server over a project holding an empty theme and a style box. */
@@ -133182,6 +133365,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorPastItsMemoryCeilingIsEndedForIt,
   testAnEngineUnderItsMemoryCeilingRunsToItsEnd,
   testAChildOfTheEngineCountsTowardsItsMemory,
+  testAWindowedRunPastItsCeilingEndsNoRunBeside,
+  testTwoWindowedRunsEndedForMemoryEachReportTheirOwnPeak,
+  testTheGuardOfAWindowedRunWatchesItsEngineNotTheHelper,
+  testTheGuardOfARunWithoutTheWindowsHelperWatchesTheEngineItself,
   testTheCeilingVariableSetsIt,
   testTheDefaultCeilingIsAQuarterOfTheMemoryAndAtLeastFourGiB,
   testAPeakIsKeptPerProjectAndToolAndCountedByTheNextStart,

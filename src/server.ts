@@ -16137,7 +16137,7 @@ export class GodotServer {
         log,
       );
       void run.settled.finally(held.release);
-      void slotEngineNamed(held.lock, run, onDesktop?.files.pid ?? run.engineFiles?.pid);
+      void slotEngineNamed(held.lock, run, run.engineFiles?.pid);
       // The pid callers read is the engine's, which the helper writes down once it has started it.
       if (run.engineFiles !== undefined) {
         await this.engineKnown(run, run.engineFiles);
@@ -16190,7 +16190,10 @@ export class GodotServer {
   ): SpawnedGame & {
     readonly settled: Promise<void>;
     readonly stop: () => void;
-    /** The helper's files, for an engine it started on the desktop in use. */
+    /**
+     * The helper's files, for an engine it started on either desktop. The child's pid is the
+     * helper's, which one server shares among its engines, so the engine's own pid is read from them.
+     */
     readonly engineFiles?: HelperFiles;
   } {
     // Through the helper the child is the helper, and ending it would leave the engine running on a
@@ -16316,7 +16319,7 @@ export class GodotServer {
     return Object.assign(started, {
       settled,
       stop,
-      ...(ownScratch === null || helped === null ? {} : { engineFiles: helped.files }),
+      ...(helped === null ? {} : { engineFiles: helped.files }),
     });
   }
 

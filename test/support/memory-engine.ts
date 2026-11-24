@@ -3,10 +3,11 @@
  * operation by writing `{}` to the answer file named last, and otherwise runs like a game: it
  * holds GDH_HOLD_MB of touched memory, reached GDH_GROW_MB every 150 ms, starts one child that
  * holds GDH_CHILD_MB, and stays up for GDH_STAY_MS. With GDH_OPERATION_HOLD_MB set, an operation
- * holds that much the same way and answers only once it has stayed up.
+ * holds that much the same way and answers only once it has stayed up. A test run (one given
+ * `--suites-in`) appends its own pid and its parent's to the file GDH_PID_FILE names.
  */
 
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 
 const MIB = 1024 * 1024;
 const args = process.argv.slice(2);
@@ -20,6 +21,11 @@ const operationHolds = Number(process.env['GDH_OPERATION_HOLD_MB'] ?? 0);
 if (operation && operationHolds <= 0) {
   writeFileSync(last, '{}');
   process.exit(0);
+}
+
+const pidFile = process.env['GDH_PID_FILE'];
+if (pidFile !== undefined && args.includes('--suites-in')) {
+  appendFileSync(pidFile, `${String(process.pid)} ${String(process.ppid)}\n`);
 }
 
 const holds = operation ? operationHolds : Number(process.env['GDH_HOLD_MB'] ?? 0);
