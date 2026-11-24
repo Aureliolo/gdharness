@@ -919,6 +919,10 @@ export type CasesBySuite = ReadonlyMap<string, readonly string[]>;
  * asked for.
  *
  * What a lane is dealt stays as the dealing made it, and each engine runs it by [function cheapestFirst].
+ *
+ * A lane never runs a windowed engine after a headless one: each windowed plan comes before every
+ * headless plan, and [function byLane] keeps that order within a lane. A lane's slot is so lowered
+ * once its window ends and never raised again.
  */
 export function dealt(
   units: readonly Unit[],
@@ -1230,6 +1234,18 @@ export function peakOf(
     : { bytes: Math.max(...known), seen: kept.length > 0 };
 }
 
+/**
+ * The engines of [param plans] lane by lane, each with its place among them, the lanes in the order
+ * they first come and each lane's engines in the order of the plans.
+ */
+export function byLane<P extends { readonly lane: number }>(
+  plans: readonly P[],
+): Array<Array<{ readonly plan: P; readonly index: number }>> {
+  return [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
+    plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
+  );
+}
+
 /** How many slots [param plans] take at once: one a lane. */
 export function lanesOf(plans: readonly EnginePlan[]): number {
   return new Set(plans.map((plan) => plan.lane)).size;
@@ -1273,8 +1289,8 @@ export function headlessInAWindow(plans: readonly EnginePlan[], units: readonly 
 
 /**
  * Every unit in the order given, in one engine for the windowed units and one for the rest, each
- * keeping that order. A headless engine follows the windowed one in its slot, and a run with only
- * one kind is one engine.
+ * keeping that order. A headless engine follows the windowed one in its slot, never the other way
+ * round, as in [function dealt]. A run with only one kind is one engine.
  */
 export function inEngines(units: readonly Unit[], declared: CasesBySuite): EnginePlan[] {
   const windowed = units.filter((unit) => unit.windowed);
