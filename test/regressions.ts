@@ -134375,6 +134375,58 @@ async function testAStarvedEngineIsRunAgainByRanEngines(): Promise<void> {
 }
 
 /**
+ * A lane handed no slot whose first engine is windowed, on a machine whose engines may hold 4 GiB with
+ * another engine's 1.5 GiB running, waits for a slot as a fresh windowed take does: holding no slot,
+ * keeping its mark, and saying why it waits. Its window starts counted once the other engine ends.
+ */
+async function testALaneWhoseWindowFindsNoRoomSaysItWaits(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    const said: string[] = [];
+    const started = await ownStart();
+    const slotsOn = (say?: (line: string) => void): EngineSlots =>
+      new EngineSlots(directory, 2, { pid: process.pid, started }, say, () => 'other', undefined, {
+        memory: 20 * MEMORY_GIB,
+        tool: 'test_lane',
+      });
+    const slots = slotsOn((line) => said.push(line));
+    const other = slotsOn();
+    try {
+      const otherLock = await other.takeFree();
+      assert.notEqual(otherLock, null, 'the other engine took its slot');
+      const figures: Array<number | null> = [];
+      const lane = runLane(slots, [{ plan: { windowed: true }, index: 0 }], null, (_plan, index, lock) => {
+        figures.push(lockFigure(lock));
+        return Promise.resolve(index);
+      });
+      assert.ok(await cameTrue(() => said.length > 0, 30_000), 'the window is said to wait');
+      assert.equal(
+        said[0]?.replace(/^Waiting \d+ s so far/, 'Waiting n s so far'),
+        `Waiting n s so far for an engine: the engines on this machine (${directory}) may hold 4.0 GB together, those running hold 1.5 GB and this engine needs 3.0 GB, so it starts once enough memory is given back.`,
+        'in the line a fresh windowed take says',
+      );
+      const marks = join(directory, WAITING_FOLDER);
+      assert.ok(
+        existsSync(marks) && readdirSync(marks).some((name) => name.endsWith('.json')),
+        'keeping its mark while it waits',
+      );
+      assert.deepEqual(
+        readdirSync(directory).filter((name) => name.endsWith('.lock')),
+        [basename(otherLock ?? '')],
+        'and holding no slot',
+      );
+      other.release(otherLock ?? '');
+      assert.ok(await settledWithin(lane, 30_000), 'the lane ends once the other engine has');
+      assert.deepEqual(figures, [WINDOWED_MEMORY_PER_ENGINE], 'its window starts counted');
+    } finally {
+      slots.releaseAll();
+      other.releaseAll();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+/**
  * A lane handed no slot takes one counted for its first engine, as a fresh engine of its kind takes
  * one, and rewrites no figure.
  */
@@ -134498,11 +134550,15 @@ async function testALoweringWriteRacingAReaderLeavesAFigure(): Promise<void> {
         );
         assert.ok(existsSync(ready), 'the reader said it reads');
         // One after another, as a lane writes them, giving the timers and the reader's output a turn.
-        for (let round = 0; round < RACING_ROUNDS; round += 1) {
-          await raiseSlotMemory(lock, WINDOWED_MEMORY_PER_ENGINE);
-          await slots.counting(lock);
-          await delay(0);
-        }
+        const writes = (async (): Promise<void> => {
+          for (let round = 0; round < RACING_ROUNDS; round += 1) {
+            await raiseSlotMemory(lock, WINDOWED_MEMORY_PER_ENGINE);
+            await slots.counting(lock);
+            await delay(0);
+          }
+        })();
+        assert.ok(await settledWithin(writes, RACING_PATIENCE_MS), 'the writes ended');
+        await writes;
         assert.ok(!finished.signal.aborted, 'the reader read until the writes were done');
       } finally {
         writeFileSync(stop, '');
@@ -136444,6 +136500,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotHandedToTheCheckAfterAWindowCountsAHeadlessEngine,
   testALoweredSlotCountsTheProjectsKeptHeadlessPeak,
   testNoLaneRunsAWindowedEngineAfterAHeadlessOne,
+  testALaneWhoseWindowFindsNoRoomSaysItWaits,
   testAnEngineTakesItsSlotAndKeepsItsPeakByItsKind,
   testAWindowedLanesPeakIsReadBackApart,
   testHeadlessEnginesAreSizedByHeadlessSuites,
