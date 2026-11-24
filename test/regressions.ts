@@ -33,7 +33,7 @@ import { text as pipedText } from 'node:stream/consumers';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { deflateSync, inflateSync } from 'node:zlib';
-import { WebSocket } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { headingIdsOf } from '../scripts/doc-slug.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
@@ -407,6 +407,7 @@ import {
 } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
+  commandLineWords,
   editorArguments,
   engineFlags,
   engineFlagsAmongGameArgs,
@@ -60678,6 +60679,8 @@ async function testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing(): Promi
   const rejections = (): number => server.stderr.split('Rejecting second Godot connection').length - 1;
   // The addon's own lines about the bridge, not its other notices such as a setting it turned on.
   const bridgeWarning = /\[gdharness\](?! turned on)/;
+  // What the engine prints when it trips over something: none of it on an editor start or an import.
+  const complaint = /Unicode parsing error|ERROR|WARNING/;
   const readItsLine = "gdharness: reading this process's command line";
   const ended = async (child: ChildProcess): Promise<void> => {
     for (let waited = 0; waited < 120_000 && child.exitCode === null; waited += 250) {
@@ -60704,6 +60707,7 @@ async function testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing(): Promi
     await until(() => connections() > 0);
     assert.equal(connections(), 1, `a headless editor still connects:\n${server.stderr}\n${editor.said()}`);
     await delay(3_000);
+    assert.doesNotMatch(editor.said(), complaint, `an editor start prints nothing amiss:\n${editor.said()}`);
     assert.ok(
       !editor.said().includes(readItsLine),
       `an editor start reads no command line:\n${editor.said()}`,
@@ -60717,6 +60721,7 @@ async function testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing(): Promi
       const said = `${option.join(' ')}:\n${run.said().slice(-4000)}\n${server.stderr.slice(before)}`;
       assert.equal(run.child.exitCode, 0, `it finishes by itself ${said}`);
       assert.doesNotMatch(run.said(), bridgeWarning, `it prints nothing about the bridge ${said}`);
+      assert.doesNotMatch(run.said(), complaint, `nor anything amiss ${said}`);
       assert.equal(connections(), 1, `and is not the editor ${said}`);
     }
 
@@ -60777,6 +60782,353 @@ async function testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing(): Promi
     rmSync(project, { recursive: true, force: true });
     rmSync(other, { recursive: true, force: true });
     rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The editor addon reads a one-shot option off its own command line as the server's
+ * `readCommandLine` reads it off the process table, on the same lines.
+ *
+ * A quoted project directory such as `D:\games\Demo -s` is one word to both, so an editor opened
+ * on it stays an editor. Linux hands over the words each ended by a zero byte, and the engine's
+ * decoding stops at the first one, so the addon splits the bytes before it decodes them. Loading
+ * the addon's script prints nothing: a literal it once held made the engine print an error at
+ * every load, so every editor start and every `--import` printed it.
+ */
+function testTheAddonReadsACommandLineAsTheServerDoes(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('command line words regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-command-words-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Words"\n',
+    );
+    installAddons(project);
+    const b = '\\';
+    const lines = [
+      `"C:${b}Godot${b}godot.exe" --path "D:${b}games${b}Demo -s" -e`,
+      `"C:${b}Godot${b}godot.exe" --path "D:${b}scratch${b}a --quit b" -e`,
+      `"C:${b}Godot${b}godot.exe" --path "D:${b}a -- b" -e --import`,
+      `"C:${b}Program Files${b}Godot${b}godot.exe" -e --path "D:${b}Spiele mit Ümläut${b}Démo s" --quit-after 5`,
+      `"C:${b}Godot${b}godot.exe" -e --path D:${b}p -- --import`,
+      `"C:${b}Godot${b}godot.exe" -e --path D:${b}p ++ --quit`,
+      `godot\t-e\t--export-release Linux out`,
+      `godot${String.fromCodePoint(0xa0)}--import`,
+      'godot -e --im"port"',
+      `godot "-e --path D:${b}p --import`,
+      'godot -e --build-solutions',
+      'godot -e --dump-gdextension-interface-json',
+      '',
+    ];
+    const ended = [
+      '/opt/godot/godot',
+      '--headless',
+      '-e',
+      '--path',
+      '/home/me/Demo -s',
+      '--import',
+      '/home/me/Démo ü',
+    ];
+    writeFileSync(join(project, 'lines.json'), JSON.stringify(lines));
+    writeFileSync(join(project, 'cmdline.bin'), Buffer.concat(ended.map((word) => Buffer.from(`${word}\0`))));
+    writeFileSync(
+      join(project, 'probe.gd'),
+      [
+        'extends SceneTree',
+        '',
+        'const BridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")',
+        '',
+        '',
+        'func _initialize() -> void:',
+        '\tvar read: Array = []',
+        '\tfor line: String in JSON.parse_string(FileAccess.get_file_as_string("res://lines.json")):',
+        '\t\tvar words: PackedStringArray = BridgeClient.command_line_words(line)',
+        '\t\tread.append({ "words": Array(words), "option": BridgeClient.one_shot_option_in(words) })',
+        '\tvar bytes: PackedByteArray = FileAccess.get_file_as_bytes("res://cmdline.bin")',
+        '\tvar zero: PackedStringArray = BridgeClient.words_of_zero_ended(bytes)',
+        '\tvar out: FileAccess = FileAccess.open("res://read.json", FileAccess.WRITE)',
+        '\tvar _stored: bool = out.store_string(JSON.stringify({',
+        '\t\t"lines": read, "zero": { "words": Array(zero), "option": BridgeClient.one_shot_option_in(zero) },',
+        '\t}))',
+        '\tout.close()',
+        '\tquit()',
+        '',
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const said = stripVTControlCharacters(`${ran.stdout}${ran.stderr}`);
+    assert.equal(ran.status, 0, said);
+    assert.doesNotMatch(
+      said,
+      /Unicode parsing error|ERROR|WARNING/,
+      `loading the addon prints nothing: ${said}`,
+    );
+    const read: unknown = JSON.parse(readFileSync(join(project, 'read.json'), 'utf8'));
+    for (const [at, line] of lines.entries()) {
+      assert.deepEqual(
+        get(read, 'lines', at, 'words'),
+        commandLineWords(line),
+        `the addon splits ${JSON.stringify(line)} as the server`,
+      );
+      assert.equal(
+        get(read, 'lines', at, 'option'),
+        readCommandLine(line).oneShot ?? '',
+        `and reads its option as the server`,
+      );
+    }
+    assert.deepEqual(
+      lines.map((_line, at) => get(read, 'lines', at, 'option')),
+      [
+        '',
+        '',
+        '--import',
+        '--quit-after',
+        '',
+        '',
+        '--export-release',
+        '--import',
+        '--import',
+        '',
+        '',
+        '--dump-gdextension-interface-json',
+        '',
+      ],
+      'a quoted directory is one word, and a run that quits is read as one',
+    );
+    assert.deepEqual(get(read, 'zero', 'words'), ended, 'every word of a zero-ended reading is read');
+    assert.equal(get(read, 'zero', 'option'), '--import', 'and its option with it');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A stand-in bridge: when each connection opens it closes it as [param closing] says, or keeps it. */
+async function closingBridge(
+  closing: (opened: number) => { code: number | undefined; after: number } | null,
+): Promise<{ port: number; opens: number[]; greeted: () => number[]; stop: () => Promise<void> }> {
+  const opens: number[] = [];
+  const greeted: number[] = [];
+  const timers: NodeJS.Timeout[] = [];
+  const bridge = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  bridge.on('connection', (socket) => {
+    opens.push(Date.now());
+    const opened = opens.length;
+    socket.on('message', (data) => {
+      const message = (Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)).toString('utf8');
+      if (/"type"\s*:\s*"godot_ready"/.test(message)) {
+        greeted.push(opened);
+      }
+    });
+    const how = closing(opened);
+    if (how === null) {
+      return;
+    }
+    const shut = (): void => {
+      if (how.code === undefined) {
+        socket.close();
+      } else {
+        socket.close(how.code, 'closed by the stand-in');
+      }
+    };
+    if (how.after === 0) {
+      shut();
+    } else {
+      timers.push(setTimeout(shut, how.after));
+    }
+  });
+  await once(bridge, 'listening');
+  const address = bridge.address();
+  assert.ok(typeof address === 'object' && address !== null, 'the stand-in listens');
+  return {
+    port: address.port,
+    opens,
+    greeted: () => greeted,
+    stop: () =>
+      new Promise<void>((done) => {
+        for (const timer of timers) {
+          clearTimeout(timer);
+        }
+        for (const client of bridge.clients) {
+          client.terminate();
+        }
+        bridge.close(() => {
+          done();
+        });
+      }),
+  };
+}
+
+/**
+ * An editor acts on a close by its code, at once or once it saw the socket open, and on the
+ * close a server turns an editor away with (4000) by whether the run quits by itself.
+ *
+ * A stand-in bridge closes each connection as a scenario says: at once, inside the editor's first
+ * poll so it never sees the socket open, or a second and a half after it opened. A run that quits by
+ * itself stays quiet and dials once wherever the 4000 lands. An open editor on a project whose
+ * directory holds an option word is still an editor: it is told and connects once it is let in.
+ * Every other close is read as an editor always read it: 1000, no code and 4001 at once set the
+ * announced address aside for the fallback, and once seen open the editor dials the address again.
+ */
+async function testAnEditorHeedsEachCloseWhereverItLands(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('close handling regression skipped (Godot not found)');
+    return;
+  }
+  const made: string[] = [];
+  const bridgeWarning = /\[gdharness\](?! turned on)/;
+  const told = /\[gdharness\] ws:\/\/\S+ already serves another editor, so this editor is not connected\./;
+  const elsewhere = /\[gdharness\] ws:\/\/\S+ is another project's server, so this editor is not connected/g;
+  const readItsLine = "gdharness: reading this process's command line";
+  interface Scenario {
+    readonly name: string;
+    readonly folder?: string;
+    readonly args: readonly string[];
+    readonly announced: boolean;
+    readonly closing: (opened: number) => { code: number | undefined; after: number } | null;
+    readonly until: (bridge: { opens: number[]; greeted: () => number[] }) => boolean;
+    readonly check: (said: string, bridge: { opens: number[]; greeted: () => number[] }) => void;
+  }
+  const after = 1_500;
+  const watched = 10_000;
+  const settled = (bridge: { opens: number[] }): boolean =>
+    bridge.opens.length > 0 && Date.now() - (bridge.opens[0] ?? 0) > watched;
+  const late = (code: number | undefined) => () => ({ code, after });
+  const atOnce = (code: number | undefined) => () => ({ code, after: 0 });
+  const scenarios: Scenario[] = [
+    {
+      name: 'a lingering one-shot run closed 4000 after the open',
+      args: ['--verbose', '--quit-after', '100000000'],
+      announced: false,
+      closing: late(4000),
+      until: settled,
+      check: (said, bridge) => {
+        assert.doesNotMatch(said, bridgeWarning, 'it says nothing');
+        assert.equal(bridge.opens.length, 1, 'and dials once');
+        assert.ok(said.includes(readItsLine), 'having read its command line');
+      },
+    },
+    {
+      name: 'an open editor on a directory holding " -s", closed 4000 until let in',
+      folder: 'Demo -s',
+      args: [],
+      announced: false,
+      closing: (opened) => (opened === 1 ? { code: 4000, after } : null),
+      // The first open greets too, before it is closed, so only a later one counts.
+      until: (bridge) => bridge.greeted().some((opened) => opened > 1),
+      check: (said, bridge) => {
+        assert.match(said, told, 'it is told it was turned away');
+        assert.ok(
+          bridge.greeted().some((opened) => opened > 1),
+          'and connects once let in',
+        );
+      },
+    },
+    ...([1000, undefined, 4001] as const).map(
+      (code): Scenario => ({
+        name: `an editor closed ${code ?? 'with no code'} at once`,
+        args: [],
+        announced: true,
+        closing: atOnce(code),
+        until: settled,
+        check: (said, bridge) => {
+          assert.doesNotMatch(said, bridgeWarning, 'it says nothing');
+          assert.equal(bridge.opens.length, 1, 'and sets the announced address aside');
+        },
+      }),
+    ),
+    ...([1000, undefined, 4001] as const).map(
+      (code): Scenario => ({
+        name: `an editor closed ${code ?? 'with no code'} after the open`,
+        args: [],
+        announced: true,
+        closing: late(code),
+        until: settled,
+        check: (said, bridge) => {
+          assert.equal(
+            said.match(elsewhere)?.length ?? 0,
+            code === 4001 ? 1 : 0,
+            'it is told only of another project',
+          );
+          assert.ok(bridge.opens.length >= 2, 'and dials the announced address again');
+        },
+      }),
+    ),
+  ];
+  const play = async (scenario: Scenario): Promise<void> => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-closes-'));
+    made.push(root);
+    const project = join(root, scenario.folder ?? 'project');
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Closes"\n\n' +
+        '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    installAddons(project);
+    const bridge = await closingBridge(scenario.closing);
+    const fallback = scenario.announced ? await reservePort() : bridge.port;
+    if (scenario.announced) {
+      await announceBridge(project, { host: '127.0.0.1', port: bridge.port, version: '1.0.0' });
+    }
+    const lines: string[] = [];
+    const child = spawnHidden(godotPath, ['-e', '--headless', '--path', project, ...scenario.args], {
+      env: {
+        ...process.env,
+        GDHARNESS_BRIDGE_PORT: String(fallback),
+        GDHARNESS_RUNTIME_DIR: join(root, 'runtime'),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (chunk: Buffer) => lines.push(String(chunk)));
+    child.stderr.on('data', (chunk: Buffer) => lines.push(String(chunk)));
+    try {
+      for (let waited = 0; waited < 90_000 && !scenario.until(bridge); waited += 250) {
+        await delay(250);
+      }
+      const said = lines.join('');
+      const opened = bridge.opens.map((at) => at - (bridge.opens[0] ?? at));
+      const seen = `${scenario.name}, opened at ${JSON.stringify(opened)}:\n${said.slice(-4000)}`;
+      try {
+        scenario.check(said, bridge);
+      } catch (error) {
+        throw new Error(`${seen}\n${errorMessage(error)}`, { cause: error });
+      }
+    } finally {
+      if (child.exitCode === null && child.pid !== undefined) {
+        await killTheTree(child.pid);
+      }
+      await bridge.stop();
+    }
+  };
+  try {
+    const failed: string[] = [];
+    // Two at a time, which keeps the engines inside the memory one regression is given.
+    for (let at = 0; at < scenarios.length; at += 2) {
+      for (const ended of await Promise.allSettled(scenarios.slice(at, at + 2).map(play))) {
+        if (ended.status === 'rejected') {
+          failed.push(errorMessage(ended.reason));
+        }
+      }
+    }
+    assert.deepEqual(failed, [], failed.join('\n\n'));
+  } finally {
+    for (const root of made) {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 }
 
@@ -132491,6 +132843,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testAOneShotEngineRunIsNotTheEditor,
   testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing,
+  testTheAddonReadsACommandLineAsTheServerDoes,
+  testAnEditorHeedsEachCloseWhereverItLands,
   testASubViewportCaptureIsDrawnNow,
   testAStartRefusesAnotherBuildOfItsRuntimeAddon,
   testAScreenshotHoldsTheGamesOwnWindows,

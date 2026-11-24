@@ -36,6 +36,8 @@ const TAKEN_CLOSE_CODE: int = 4000
 ## of them (`OS.get_cmdline_args()` answers `["--editor"]` under each), so
 ## [method _own_one_shot_option] reads the process's own command line. Held equal to
 ## `ONE_SHOT_OPTIONS` in src/process-children.ts by a regression.
+##
+## `--build-solutions` is not one: it builds once and the editor stays open.
 const ONE_SHOT_OPTIONS: Array[String] = [
 	"--import",
 	"--quit",
@@ -49,13 +51,19 @@ const ONE_SHOT_OPTIONS: Array[String] = [
 	"--script",
 	"-s",
 	"--check-only",
-	"--build-solutions",
 	"--dump-gdextension-interface",
+	"--dump-gdextension-interface-json",
 	"--dump-extension-api",
 	"--dump-extension-api-with-docs",
 	"--validate-extension-api",
 	"--convert-3to4",
 	"--validate-conversion-3to4",
+]
+## The code points a JavaScript `\s` reads as white space, besides U+2000 to U+200A, so the addon
+## splits a command line where the server's `commandLineWords` does.
+const WHITE_SPACE: Array[int] = [
+	0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680,
+	0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
 ]
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
 ## file is one for every editor of this engine version on the machine, so two open at once want the
@@ -206,14 +214,16 @@ func _process(_delta: float) -> void:
 			# A connection refused never opened, so it reaches CLOSED without passing through
 			# _handle_disconnect and nothing would ask again. An editor opened before the server
 			# is the ordinary way that happens, and it then sat there for the rest of the day.
-			if socket.get_close_code() != -1:
-				# Opened and closed by the server inside one poll, as a server turning this editor
-				# away does, so it was never seen connected. Refused it was not.
+			if socket.get_close_code() == TAKEN_CLOSE_CODE:
+				# Opened and turned away inside one poll, so it was never seen connected. The
+				# address is the right one and is held by another editor, so it is kept.
 				_heed_the_close()
-			elif _tried_announced:
+				if _should_reconnect:
+					_schedule_reconnect()
+				return
+			if _tried_announced:
 				_refused_url = server_url
-			if _should_reconnect:
-				_schedule_reconnect()
+			_schedule_reconnect()
 		return
 
 	socket.poll()
@@ -580,19 +590,66 @@ func _keep_breakpoints_through_sessions() -> void:
 func _own_one_shot_option() -> String:
 	if not _one_shot_read:
 		_one_shot_read = true
-		_one_shot = one_shot_option_in(_own_command_line())
+		_one_shot = one_shot_option_in(_own_command_words())
 	return _one_shot
 
 
-## The option in [param line] that makes a run one job that quits, or an empty string. Only as far
-## as the first `--` or `++`, after which the engine reads nothing.
-static func one_shot_option_in(line: String) -> String:
-	for word: String in line.replace("\"", " ").replace("\u0000", " ").split(" ", false):
+## The option among [param words] that makes a run one job that quits, or an empty string. Only as
+## far as the first `--` or `++`, after which the engine reads nothing. The server's
+## `readCommandLine` in src/process-children.ts reads the same, which a regression holds.
+static func one_shot_option_in(words: PackedStringArray) -> String:
+	for word: String in words:
 		if word == "--" or word == "++":
 			return ""
 		if ONE_SHOT_OPTIONS.has(word):
 			return word
 	return ""
+
+
+## [param line] split into its words as the server's `commandLineWords` in src/launch.ts splits
+## it: on white space outside double quotes, with the quotes taken out. Windows hands over a
+## command line as the one string it was started with, so a quoted directory such as
+## `"X:\games\Demo -s"` stays one word.
+static func command_line_words(line: String) -> PackedStringArray:
+	var words: PackedStringArray = PackedStringArray()
+	var word: String = ""
+	var in_word: bool = false
+	var quoted: bool = false
+	for character: String in line:
+		if character == "\"":
+			quoted = not quoted
+			in_word = true
+		elif not quoted and _is_white_space(character):
+			if in_word:
+				var _added: bool = words.append(word)
+			word = ""
+			in_word = false
+		else:
+			word += character
+			in_word = true
+	if in_word:
+		var _added: bool = words.append(word)
+	return words
+
+
+## Whether [param character] is white space as a JavaScript `\s` reads it.
+static func _is_white_space(character: String) -> bool:
+	var code: int = character.unicode_at(0)
+	return WHITE_SPACE.has(code) or (code >= 0x2000 and code <= 0x200a)
+
+
+## The words of a Linux `/proc/<pid>/cmdline`, which ends each one with a zero byte. Split as bytes,
+## since decoding stops at the first zero.
+static func words_of_zero_ended(bytes: PackedByteArray) -> PackedStringArray:
+	var words: PackedStringArray = PackedStringArray()
+	var start: int = 0
+	while start < bytes.size():
+		var end: int = bytes.find(0, start)
+		if end == -1:
+			end = bytes.size()
+		var _added: bool = words.append(bytes.slice(start, end).get_string_from_utf8())
+		start = end + 1
+	return words
 
 
 ## The text [param written] spells in hex, whatever separates or surrounds the digits.
@@ -606,8 +663,8 @@ static func _from_hex(written: String) -> String:
 	return digits.hex_decode().get_string_from_utf8()
 
 
-## The command line this process was started with, or an empty string when it cannot be read.
-static func _own_command_line() -> String:
+## The words of the command line this process was started with, or none when it cannot be read.
+static func _own_command_words() -> PackedStringArray:
 	# Under `--verbose` only, so a test can tell an editor start that read nothing.
 	print_verbose("gdharness: reading this process's command line")
 	var pid: int = OS.get_process_id()
@@ -627,19 +684,20 @@ static func _own_command_line() -> String:
 			["-NoProfile", "-NonInteractive", "-Command", asked],
 			output,
 		) != 0:
-			return ""
-		return _from_hex(str(output[0]) if output.size() > 0 else "")
-	elif FileAccess.file_exists("/proc/self/cmdline"):
+			return PackedStringArray()
+		return command_line_words(_from_hex(str(output[0]) if output.size() > 0 else ""))
+	if FileAccess.file_exists("/proc/self/cmdline"):
 		var file: FileAccess = FileAccess.open("/proc/self/cmdline", FileAccess.READ)
 		if file == null:
-			return ""
+			return PackedStringArray()
 		var bytes: PackedByteArray = PackedByteArray()
 		while not file.eof_reached():
 			bytes.append_array(file.get_buffer(4096))
-		return bytes.get_string_from_utf8()
-	elif OS.execute("ps", ["-o", "command=", "-p", str(pid)], output) != 0:
-		return ""
-	return str(output[0]) if output.size() > 0 else ""
+		return words_of_zero_ended(bytes)
+	# macOS's `ps` joins the words with spaces and quotes nothing, which the server reads alike.
+	if OS.execute("ps", ["-o", "command=", "-p", str(pid)], output) != 0:
+		return PackedStringArray()
+	return command_line_words(str(output[0]) if output.size() > 0 else "")
 
 
 ## Whether this editor runs with no window anybody sees: headless, on the hidden desktop a server

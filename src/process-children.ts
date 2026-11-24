@@ -397,7 +397,8 @@ export interface CommandLineRead {
  * run a script, convert, dump or validate an API, or load and quit. An editor plugin is handed none
  * of them (OS.get_cmdline_args() answered ["--editor"] under --import and under --quit-after alike,
  * measured on 4.7.2), so whether a run that connects is an editor is read here from its command line.
- * The editor addon holds the same list as `ONE_SHOT_OPTIONS` in bridge_client.gd.
+ * The editor addon holds the same list as `ONE_SHOT_OPTIONS` in bridge_client.gd. `--build-solutions`
+ * is not one: it builds once and the editor stays open.
  */
 export const ONE_SHOT_OPTIONS: readonly string[] = [
   '--import',
@@ -412,8 +413,8 @@ export const ONE_SHOT_OPTIONS: readonly string[] = [
   '--script',
   '-s',
   '--check-only',
-  '--build-solutions',
   '--dump-gdextension-interface',
+  '--dump-gdextension-interface-json',
   '--dump-extension-api',
   '--dump-extension-api-with-docs',
   '--validate-extension-api',
