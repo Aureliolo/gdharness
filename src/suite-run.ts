@@ -95,6 +95,7 @@ import {
 } from './suite-judge.js';
 import {
   byCodeUnit,
+  byLane,
   type CasesBySuite,
   capsFrames,
   type DeclaredSuite,
@@ -1477,9 +1478,7 @@ export async function takenLanes<P extends { readonly lane: number; readonly win
   say: (line: string) => void,
 ): Promise<StartedLanes<P>> {
   const { plans, memoryHeld, byMemory } = run;
-  const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
-    plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
-  );
+  const lanes = byLane(plans);
   // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
   // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
   // The rest take theirs in the slots' queue, then wait for memory holding them.
@@ -2406,9 +2405,8 @@ export function importEnd(ended: EngineEnd): string | null {
  * Runs the engines of one lane one after another in one slot, taken before the first and given
  * back after the last, so another run on the machine cannot take it in between. The slot counts what
  * the engine running in it needs: a lane that goes from a windowed engine to a headless one lowers
- * it, and one that goes back raises it where memory has room now, so a window's memory is held only
- * while it is open. Where memory has none, the lane gives the slot back and takes one for the window
- * as a fresh windowed engine does, so it never waits holding a slot. A slot handed to the compile
+ * it, so a window's memory is held only while it is open. A deal never puts a windowed engine after a
+ * headless one in a lane ([function dealt]), so the slot is never raised. A slot handed to the compile
  * check after a window counts the check's headless engine. [param taken] was taken for the lane's
  * first engine, or is null, in which case a slot counted for its first engine is taken.
  */
@@ -2419,47 +2417,27 @@ export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
   run: (plan: P, index: number, lock: string) => Promise<T>,
   handed?: HandedSlot,
 ): Promise<T[]> {
-  let counting = lane[0]?.plan.windowed ?? false;
-  let lock: string | null = taken ?? (await slotTakenFor(slots, counting));
+  let windowed = lane[0]?.plan.windowed ?? false;
+  const lock = taken ?? (await slotTakenFor(slots, windowed));
   try {
     await handed?.lend(lock);
     const ran: T[] = [];
     for (const { plan, index } of lane) {
-      if (plan.windowed !== counting) {
-        counting = plan.windowed;
-        if (!(await slots.counting(lock, counting ? WINDOWED_LANE : undefined))) {
-          slots.release(lock);
-          lock = null;
-          lock = await slotTakenFor(slots, counting);
-        }
+      if (windowed && !plan.windowed) {
+        windowed = false;
+        await slots.counting(lock);
       }
       ran.push(await run(plan, index, lock));
     }
     return ran;
   } finally {
-    await laneDone(slots, lock, counting, handed);
-  }
-}
-
-/**
- * Gives back the slot at [param lock] a lane ended in, if it holds one, or hands it to the compile
- * check, counting the check's headless engine where the lane's last engine was [param windowed].
- */
-async function laneDone(
-  slots: Pick<EngineSlots, 'release' | 'counting'>,
-  lock: string | null,
-  windowed: boolean,
-  handed: HandedSlot | undefined,
-): Promise<void> {
-  if (lock === null) {
-    return;
-  }
-  try {
-    if (windowed && handed?.wants === true) {
-      await slots.counting(lock);
+    try {
+      if (windowed && handed?.wants === true) {
+        await slots.counting(lock);
+      }
+    } finally {
+      doneWith(slots, lock, handed);
     }
-  } finally {
-    doneWith(slots, lock, handed);
   }
 }
 

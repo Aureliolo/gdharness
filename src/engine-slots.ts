@@ -1573,31 +1573,16 @@ export class EngineSlots {
   }
 
   /**
-   * Makes the slot at [param lock], which this process holds, count what the next engine of [param tool]
-   * needs, as a take for it would: down for a headless one after a window has ended, and up for a
-   * windowed engine after a headless one. A raise asks memory once, as a take does, and never waits:
-   * it is written where the other live locks leave room in the budget for its new figure, or none is
-   * live. One that two takers counted room for at once is undone where its lock is the newest, as
-   * {@link takeFree}'s take is. Answers false where the slot was not raised and counts what it did,
-   * so its holder gives it back and takes a slot for the engine, waiting with nothing held: a raise
-   * that waited holding its slot could wait forever on another that waits on it.
+   * Makes the slot at [param lock], which this process holds, count a headless engine once the window
+   * in it has ended, as a fresh headless take would. It only ever lowers the figure, since a deal never
+   * puts a windowed engine after a headless one in a lane.
    */
-  async counting(lock: string, tool?: PeakTool): Promise<boolean> {
-    const need = Math.round(this.memoryNeeded(false, this.project, tool));
+  async counting(lock: string): Promise<void> {
+    const need = Math.round(this.memoryNeeded(false, this.project));
     const was = await this.figureHeld(lock);
-    // A command's grant is counted by the command, whose locks this folder does not hold.
-    if (was === null || need <= was || slotCommandOf() !== undefined) {
+    if (was !== null && need < was) {
       await slotMemoryWritten(lock, need, true);
-      return true;
     }
-    if (!(await this.roomToRaise(lock, need)) || (await slotMemoryWritten(lock, need, true)) !== need) {
-      return false;
-    }
-    if (await this.overTheBudget(lock, need, undefined)) {
-      await slotMemoryWritten(lock, was, true);
-      return false;
-    }
-    return true;
   }
 
   /** What the slot at [param lock] counts, or null where this process does not hold it. */
@@ -1605,21 +1590,6 @@ export class EngineSlots {
     const content = await readWholeAsync(lock);
     const holder = content === null ? null : holderOf(content);
     return holder?.pid === process.pid ? (holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1)) : null;
-  }
-
-  /**
-   * Whether the slot at [param lock] may count [param need]: no other lock is live, or the others
-   * leave room for it in the budget. Where they do not, the draw records what the raise lacks.
-   */
-  private async roomToRaise(lock: string, need: number): Promise<boolean> {
-    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
-    const others = (await this.liveMemory()).filter((one) => one.slot !== slot);
-    const held = others.reduce((sum, one) => sum + one.bytes, 0);
-    if (others.length === 0 || held + need <= this.memoryBudget) {
-      return true;
-    }
-    this.drawn = { ...this.drawn, short: { budget: this.memoryBudget, held, ahead: 0, need } };
-    return false;
   }
 
   /**
@@ -2864,7 +2834,7 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
  * Raises the `memory` of the slot at [param lock] to [param bytes] where it counts less and this
  * process holds it, so the budget counts an engine that grew past what its take counted. A figure is
  * never lowered here, since a running engine's reading only grows ({@link EngineSlots.counting}
- * sets it to another engine's need). Renamed over the lock, as {@link handSlot} is.
+ * lowers it once a window ends). Renamed over the lock, as {@link handSlot} is.
  *
  * Answers what the lock counts after: [param bytes] once it is rewritten, and the figure it held
  * where that was as much already or the rewrite failed, as it does while a reader holds the lock
