@@ -49610,6 +49610,10 @@ async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
  * An engine's ceiling counts its own processor time while other work crowds the machine, up to
  * eight times the ceiling on the clock. A gate's add_autoload, at below normal priority on a machine
  * 94% busy, was ended at ten minutes while it worked. The machine is read through a stand-in here.
+ *
+ * The ceiling promises when it ends an engine in the time its readings count, so each case reads
+ * that from the readings the stand-in gave. How long the process takes to start, to be ended and to
+ * report is the machine's, and no case bounds it.
  */
 async function testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine(): Promise<void> {
   class NoneUsed extends Map<number, number> {
@@ -49617,35 +49621,77 @@ async function testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine(): Promise<v
       return 0;
     }
   }
-  const quiet = (): Promise<Sample> => Promise.resolve({ at: nowSeconds(), machine: 0, processors: null });
-  const crowdedMachine = (): Promise<Sample> => {
+  const readings: number[] = [];
+  let onReading: (span: number) => void = () => undefined;
+  const standIn = (busy: boolean) => (): Promise<Sample> => {
     const at = nowSeconds();
-    return Promise.resolve({ at, machine: at * availableParallelism(), processors: new NoneUsed() });
+    readings.push(at);
+    onReading(at - (readings[0] ?? at));
+    return Promise.resolve(
+      busy
+        ? { at, machine: at * availableParallelism(), processors: new NoneUsed() }
+        : { at, machine: 0, processors: null },
+    );
   };
-  const timed = async (
-    sample: () => Promise<Sample>,
-    sleepMs: number,
-  ): Promise<{ ran: Awaited<ReturnType<typeof runEngine>>; took: number }> => {
-    const began = Date.now();
-    const ran = await runEngine(process.execPath, ['-e', `setTimeout(() => {}, ${String(sleepMs)})`], {
+  // The seconds of each reading from the first.
+  const spans = (): number[] => readings.map((at) => at - (readings[0] ?? at));
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ceiling-count-'));
+  try {
+    // A quiet machine counts the clock: the engine is ended at the first reading past its second,
+    // and at none before it. The first reading comes a moment after the count starts.
+    readings.length = 0;
+    onReading = () => undefined;
+    const quiet = await runEngine(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
       timeout: { ms: 1000, said: 'second' },
-      sample,
+      sample: standIn(false),
     });
-    return { ran, took: Date.now() - began };
-  };
-  const onQuiet = await timed(quiet, 6000);
-  assert.equal(onQuiet.ran.failure, 'it ran past its second', howItEnded(onQuiet.ran));
-  assert.ok(onQuiet.took < 5000, `ended near its second: ${String(onQuiet.took)} ms`);
-  const starved = await timed(crowdedMachine, 4000);
-  assert.equal(starved.ran.failure, null, `a starved engine runs on to its end: ${howItEnded(starved.ran)}`);
-  assert.equal(starved.ran.exitCode, 0, howItEnded(starved.ran));
-  const stuck = await timed(crowdedMachine, 60_000);
-  assert.match(
-    stuck.ran.failure ?? '',
-    /^it ran past its second, 8 times over on the clock \(\d+ s\), the machine kept busy by other work$/,
-    howItEnded(stuck.ran),
-  );
-  assert.ok(stuck.took < 20_000, `and one that never ends is ended on the clock: ${String(stuck.took)} ms`);
+    assert.equal(quiet.failure, 'it ran past its second', howItEnded(quiet));
+    const quietSpans = spans();
+    assert.ok(quietSpans.length >= 2, `read at least twice: ${JSON.stringify(quietSpans)}`);
+    assert.ok((quietSpans.at(-1) ?? 0) > 0.95, `ended past its second: ${JSON.stringify(quietSpans)}`);
+    assert.ok((quietSpans.at(-2) ?? 0) <= 1, `not ended before it: ${JSON.stringify(quietSpans)}`);
+
+    // A crowded machine where the engine uses none: its own time stays at nothing while the clock
+    // runs past its second, so the engine is left to end by itself. It is told to once the readings
+    // span three seconds, which is past its second and short of the clock's bound.
+    readings.length = 0;
+    const marker = join(folder, 'leave');
+    onReading = (span) => {
+      if (span >= 3) {
+        writeFileSync(marker, '');
+      }
+    };
+    const starved = await runEngine(
+      process.execPath,
+      [
+        '-e',
+        `const { existsSync } = require('node:fs'); setInterval(() => { if (existsSync(${JSON.stringify(marker)})) process.exit(0); }, 50)`,
+      ],
+      { timeout: { ms: 1000, said: 'second' }, sample: standIn(true) },
+    );
+    assert.equal(starved.failure, null, `a starved engine runs on to its end: ${howItEnded(starved)}`);
+    assert.equal(starved.exitCode, 0, howItEnded(starved));
+    assert.ok((spans().at(-1) ?? 0) >= 3, `read past its second: ${JSON.stringify(spans())}`);
+
+    // The same machine and an engine that never ends: it is ended at the first reading past eight
+    // times its second on the clock, and at none before it.
+    readings.length = 0;
+    onReading = () => undefined;
+    const stuck = await runEngine(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+      timeout: { ms: 1000, said: 'second' },
+      sample: standIn(true),
+    });
+    assert.match(
+      stuck.failure ?? '',
+      /^it ran past its second, 8 times over on the clock \(\d+ s\), the machine kept busy by other work$/,
+      howItEnded(stuck),
+    );
+    const stuckSpans = spans();
+    assert.ok((stuckSpans.at(-1) ?? 0) > 7.95, `ended past eight seconds: ${JSON.stringify(stuckSpans)}`);
+    assert.ok((stuckSpans.at(-2) ?? 0) <= 8, `not ended before them: ${JSON.stringify(stuckSpans)}`);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 }
 
 /**
