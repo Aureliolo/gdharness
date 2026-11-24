@@ -615,6 +615,10 @@ suites. With `--engines 1` the run is that one slot, the windowed engine and the
 On a machine with room for fewer engines than asked for, the slots run one after the other. The
 line announcing the run says so.
 
+A run handed out a share at a time works differently. Once no windowed share is left, the windowed
+engine's lane gives its slot back and takes one counted as headless. The memory the window held then
+goes to other engines.
+
 An ordered run (`--order`) is one engine, or two when it mixes the kinds: a windowed engine for the
 suites needing a window and a headless one after it. Each keeps the order of the run within it.
 

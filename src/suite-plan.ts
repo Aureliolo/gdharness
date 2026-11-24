@@ -937,9 +937,7 @@ export function dealt(
   // The windowed engines there may be, and the longest of them at the least: as slow as its slowest
   // unit, and as an even part of the windowed work. With one, that is all of the windowed work.
   const windowedEngines =
-    windowed.length === 0
-      ? 0
-      : Math.max(1, Math.min(windowedMost, most, windowed.length, windowedEnginesWorth(windowedCost)));
+    windowed.length === 0 ? 0 : Math.max(1, Math.min(windowedMost, most, windowed.length));
   const windowedLongest =
     windowedEngines === 0 ? 0 : Math.max(windowed[0]?.cost ?? 0, windowedCost / windowedEngines);
   const slowest = Math.max(windowedLongest, headless[0]?.cost ?? 0);
@@ -981,11 +979,10 @@ export function dealt(
 
 /**
  * How many of [param lanes] lanes the windowed units take: the lanes their share of the work comes
- * to, rounded up, and no more than there are windowed units, [param most] windowed engines or
- * engines their work is worth ([function windowedEnginesWorth]). The other lanes run headless
- * engines, which also follow each windowed engine in its slot, so a slot never idles once its window
- * work ends. A run dealt in shares cuts its windowed shares by this too, so the line announcing a
- * run names the windowed engines either way of running starts.
+ * to, rounded up, and no more than there are windowed units or [param most] windowed engines. The
+ * other lanes run headless engines, which also follow each windowed engine in its slot, so a slot
+ * never idles once its window work ends. A run dealt in shares cuts its windowed shares by this too,
+ * so the line announcing a run names the windowed engines either way of running starts.
  */
 function windowedLanesOf(
   windowed: readonly Unit[],
@@ -999,10 +996,7 @@ function windowedLanesOf(
   }
   const share = total > 0 ? (windowedCost / total) * lanes : lanes;
   // The tolerance keeps a share that is a whole number of lanes from rounding up past it.
-  return Math.max(
-    1,
-    Math.min(windowed.length, lanes, most, windowedEnginesWorth(windowedCost), Math.ceil(share - 1e-9)),
-  );
+  return Math.max(1, Math.min(windowed.length, lanes, most, Math.ceil(share - 1e-9)));
 }
 
 /** [param units], given slowest first, dealt over [param count] bins, each to the bin with least so far. */
@@ -1070,14 +1064,6 @@ function slowestFirst(a: Unit, b: Unit): number {
 const SHARE_FLOOR_STARTS = 6;
 
 /**
- * The windowed engines [param windowedCost] seconds of windowed work is worth: one for each
- * [constant SHARE_FLOOR_STARTS] engine starts of it, and at least one.
- */
-function windowedEnginesWorth(windowedCost: number): number {
-  return Math.max(1, Math.floor(windowedCost / (SHARE_FLOOR_STARTS * ENGINE_START_SECONDS)));
-}
-
-/**
  * The most work a share holds, apart from one suite longer than that, which is a share of its own.
  * A lane gives its slot back between shares, so a run told to hold fewer slots frees them within
  * this long, not after the lane's whole part.
@@ -1099,9 +1085,8 @@ const SHARE_MOST_SECONDS = 120;
  * is handed a part cut for the lanes there are now.
  *
  * A windowed engine takes no second share, so the windowed units are dealt once, as the run starts,
- * into one share for each windowed engine: at most [param windowedMost], no more than the lanes
- * their part of the work comes to, and none under [constant SHARE_FLOOR_STARTS] engine starts. With
- * one, every windowed unit is in one share. No share waits for another to end. An engine without a
+ * into one share for each windowed engine: at most [param windowedMost] and no more than the lanes
+ * their part of the work comes to. With one, every windowed unit is in one share. No share waits for another to end. An engine without a
  * window draws headless shares alone, so a lane on such a slot finds nothing left once the headless
  * units are gone, while windowed shares may still wait for a windowed engine.
  */
