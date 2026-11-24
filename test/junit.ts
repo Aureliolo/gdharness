@@ -36,6 +36,7 @@ import {
 } from '../src/junit.js';
 import {
   casesRan,
+  type Expected,
   judgeEngine,
   readEngineLog,
   readRun,
@@ -2019,6 +2020,88 @@ function testARealSkipReasonsErrorLineLeavesTheEngineEntries(): void {
   }
 }
 
+/**
+ * Godot 4.7.2 and gdUnit4's log of a suite whose `after()` pushed an error ending in a quote, after
+ * a skipped last case, its runner frame left out.
+ */
+const REAL_AFTER_LOG = [
+  'gdharness timing: started 3205 ms, compiled together 0 ms',
+  'Run Test Suite: res://tests/after_error_test.gd',
+  'gdharness timing: res://tests/after_error_test.gd loaded 5 ms, before 19 ms',
+  '  res://tests/after_error_test.gd > test_ok STARTED',
+  '  res://tests/after_error_test.gd > test_ok PASSED 17ms',
+  '',
+  '  res://tests/after_error_test.gd > test_skip STARTED',
+  '  res://tests/after_error_test.gd > test_skip PASSED 0ms',
+  '  Report:',
+  '  This test is skipped!',
+  "  Reason: 'not today'",
+  '',
+  '',
+  "ERROR: could not load 'res://gone.tres'",
+  '   at: push_error (core/variant/variant_utility.cpp:1023)',
+  '   GDScript backtrace (most recent call first):',
+  '       [0] after (res://tests/after_error_test.gd:5)',
+  '       [1] _execute (res://addons/gdUnit4/src/core/execution/stages/GdUnitTestSuiteAfterStage.gd:14)',
+  '       [2] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  '       [3] _execute (res://addons/gdUnit4/src/core/execution/stages/GdUnitTestSuiteExecutionStage.gd:47)',
+  '       [4] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 81ms',
+  '',
+  '',
+  'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans |',
+  'Executed test suites: (1/1)',
+  'Executed test cases : (1/2), 1 skipped',
+  'Total execution time: 81ms',
+  'Exit code: 0',
+  'Run dispose test resources',
+];
+
+/**
+ * gdUnit4 runs a suite's `after()` before its statistics, so what it prints follows a skipped last
+ * case's reason. A reason closed on its first line ends there: the error after it is found by both
+ * readers, settled when declared, and a print there stays out of the reason.
+ */
+function testAnAfterHooksLinesAreNoPartOfASkippedLastCasesReason(): void {
+  const suite = 'res://tests/after_error_test.gd';
+  const error = "could not load 'res://gone.tres'";
+  const skipped = [{ suite, name: 'test_skip', reason: 'not today', cases: 1 }];
+  const faultsOf = (text: string, errors: Expected['errors']): readonly string[] =>
+    judgeEngine(
+      readRun(text),
+      { suites: [{ path: suite, cases: ['test_ok', 'test_skip'] }], expected: { errors, warnings: {} } },
+      { code: 0, signal: null, ended: null },
+    ).faults;
+  const skipLine = `${suite} > test_skip never ran: gdUnit4 skipped it, saying "not today"`;
+  const errorLog = REAL_AFTER_LOG.join('\n');
+  const printed = readRun(errorLog);
+  assert.deepEqual(
+    [printed.skipped, printed.errors.map((one) => one.text)],
+    [skipped, [error]],
+    'the console',
+  );
+  assert.deepEqual(faultsOf(errorLog, {}), [
+    skipLine,
+    `an engine error in ${suite} > after: ${error}. If the suite prints it on purpose, list its text under "after" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+  ]);
+  assert.deepEqual(faultsOf(errorLog, { [suite]: { after: [error] } }), [skipLine]);
+  const printLog = errorLog.replace(/^ERROR: [\s\S]*?(?=^Statistics:)/m, "cleaned 'tmp'\n");
+  assert.deepEqual([readRun(printLog).skipped, faultsOf(printLog, {})], [skipped, [skipLine]], 'a print');
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-after-log-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${errorLog}\n`);
+    const read = readEngineLog(path, [], { errors: {}, warnings: {} });
+    assert.deepEqual(
+      [read.skipped, read.errors.map((one) => one.text), read.reasonHeadlines],
+      [skipped, [error], []],
+      'the log project_test reads',
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -2049,5 +2132,6 @@ testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
 testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
 testAnErrorLineInsideASkipReasonIsNoEngineError();
 testARealSkipReasonsErrorLineLeavesTheEngineEntries();
+testAnAfterHooksLinesAreNoPartOfASkippedLastCasesReason();
 testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
 console.log('junit reader tests passed');
