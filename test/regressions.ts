@@ -132687,10 +132687,11 @@ function testWindowedEnginesRunTogetherGetWhatEachGetsAlone(): void {
       `the scene runner's input reaches the scene: ${JSON.stringify(lone)}`,
     );
     assert.notEqual(lone.display, 'headless', 'the engine has a window');
+    // The run's other engines keep a headless peak of their own beside it.
     const peaks = readEnginePeaks(project);
     assert.ok(
-      peaks.test_windowed_lane !== undefined && peaks.test_lane === undefined,
-      `a windowed engine's peak is kept for windowed lanes alone: ${JSON.stringify(peaks)}`,
+      peaks.test_windowed_lane !== undefined,
+      `the windowed engine keeps its peak for windowed lanes: ${JSON.stringify(peaks)}`,
     );
     // Each probe suite is sized by what the engine alone was seen to hold, in place of the flat
     // figure a window is taken to need, so a small machine fits as many as it really can.
