@@ -997,6 +997,29 @@ function describeHalt(halt: StoppedAt): string {
 }
 
 /**
+ * How a held engine's process ended. One this server ended through the helper has no exit code of
+ * its own, since the helper's is no engine's, so it answers as one ended by a signal does.
+ */
+function heldExit(
+  ended: {
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+    readonly endedByUs: boolean;
+    readonly exitFile: string | undefined;
+  },
+  whole: (code: number | null) => number | null,
+): { readonly code: number | null; readonly signal: NodeJS.Signals | null } {
+  const { code, signal, endedByUs, exitFile } = ended;
+  if (endedByUs && code !== null) {
+    return { code: null, signal: 'SIGTERM' };
+  }
+  return {
+    code: exitFile === undefined ? whole(code) : helperExit(exitFile, whole(code)),
+    signal: code === null ? signal : null,
+  };
+}
+
+/**
  * Whether the process has exited, with a code or to a signal, or with neither where the platform
  * would not tell the keeper how a process the game restarted into ended.
  */
@@ -16209,10 +16232,14 @@ export class GodotServer {
           })
         : helped.child;
     const whole = holdChildExit(child);
+    // Set when this server ends the engine through the helper. The helper then exits with a code
+    // of its own, which is no engine's, so the run answers as one ended by a signal does.
+    const ending = { asked: false };
     const stop = (): void => {
       if (helped === null) {
         child.kill();
       } else {
+        ending.asked = true;
         helped.stop();
       }
     };
@@ -16259,8 +16286,9 @@ export class GodotServer {
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
-      started.exitCode = exitFile === undefined ? whole(code) : helperExit(exitFile, whole(code));
-      started.exitSignal = code === null ? signal : null;
+      const told = heldExit({ code, signal, endedByUs: ending.asked, exitFile }, whole);
+      started.exitCode = told.code;
+      started.exitSignal = told.signal;
       started.endedAt = Date.now();
       // Read here, as the exit is seen: under Bun both streams close before it, and the folder the
       // helper wrote its cause in is removed once they have. The exit code alone names nothing.
