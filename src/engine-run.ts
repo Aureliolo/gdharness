@@ -29,6 +29,7 @@ import {
   type EngineGuard,
   engineMemory,
   type MemoryEnd,
+  type MemoryWatch,
   memoryEndedSaid,
 } from './engine-memory.js';
 import { inASlot, nameSlotEngineOf, onTheSlot, raiseSlotMemory } from './engine-slots.js';
@@ -132,6 +133,8 @@ export async function startedUntilItRuns<Ran extends { readonly crashedStarts?: 
 interface RunOptions {
   readonly timeout?: { readonly ms: number; readonly said: string };
   readonly sample?: () => Promise<Sample>;
+  /** The watcher that guards the engine's memory, for a test. */
+  readonly memory?: MemoryWatch;
   /**
    * Windows only: start the engine on the hidden desktop, from [code]directory[/code], with the
    * helper's files in [code]scratch[/code]. An engine that draws opens a window, which there
@@ -370,12 +373,13 @@ function runStarted(
     child.stderr?.on('data', (chunk: Buffer) => {
       log.append('stderr', chunk);
     });
+    const memory = options.memory ?? engineMemory;
     const state: RunState = { pid: engineAt(), failure: null, closed: false };
     let guard: EngineGuard | undefined;
     let memoryEnd: MemoryEnd | undefined;
     const found = (engine: number): void => {
       watching(engine, true);
-      guard ??= engineMemory.guard(
+      guard ??= memory.guard(
         engine,
         ceiling,
         (end) => {
@@ -434,13 +438,22 @@ function runStarted(
       // Read before the helper's files are discarded, since they say whether it started the engine.
       const exitCode = engineExitCode(files, told);
       discard(scratch);
-      resolve({
+      const ended: EngineRun = {
         log,
         exitCode,
         exitSignal: closedBy,
         failure: state.failure,
         ...(memoryEnd === undefined ? {} : { memoryEnd }),
-      });
+      };
+      // A reading of the engine's memory still out holds a timer of the process table's question, so the
+      // run is not over until it is answered.
+      if (guard === undefined) {
+        resolve(ended);
+      } else {
+        void memory.settled().then(() => {
+          resolve(ended);
+        });
+      }
     });
   });
 }

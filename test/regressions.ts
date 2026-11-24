@@ -49730,6 +49730,61 @@ async function testAMemoryReadingStillOutAtReleaseIsWaitedFor(): Promise<void> {
 }
 
 /**
+ * An engine's run is not over while a reading of its memory is still out, since the reading holds a
+ * timer of the process table's question for up to three seconds, past the last line of a run.
+ */
+async function testAnEngineRunEndsOnlyOnceItsLastMemoryReadingIsAnswered(): Promise<void> {
+  let started: () => void = () => undefined;
+  const asked = new Promise<void>((begun) => {
+    started = begun;
+  });
+  let answer: () => void = () => undefined;
+  const watch = new MemoryWatch(
+    () =>
+      new Promise<Sample>((given) => {
+        started();
+        answer = () => {
+          given({ at: nowSeconds(), machine: 0, processors: null });
+        };
+      }),
+    10,
+  );
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reading-out-'));
+  try {
+    const leave = join(folder, 'leave');
+    const left = join(folder, 'left');
+    const run = runEngine(
+      process.execPath,
+      [
+        '-e',
+        `const fs = require('node:fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(leave)})) { fs.writeFileSync(${JSON.stringify(left)}, ''); process.exit(0); } }, 20)`,
+      ],
+      { memory: watch },
+    );
+    let ended = false;
+    void run.then(() => {
+      ended = true;
+    });
+    const deadline = Date.now() + 60_000;
+    await asked;
+    writeFileSync(leave, '');
+    while (!existsSync(left) && Date.now() < deadline) {
+      await delay(10);
+    }
+    assert.ok(existsSync(left), 'the engine left');
+    await delay(500);
+    assert.equal(ended, false, 'the run waits for the reading that is out');
+    answer();
+    const ran = await run;
+    assert.equal(ran.exitCode, 0, howItEnded(ran));
+    assert.equal(ran.failure, null, howItEnded(ran));
+  } finally {
+    answer();
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
  * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
  * A timeout kills with a signal and leaves no code, and a program that never started has none
@@ -131906,6 +131961,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKilledRunHasNoExitCode,
   testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine,
   testAMemoryReadingStillOutAtReleaseIsWaitedFor,
+  testAnEngineRunEndsOnlyOnceItsLastMemoryReadingIsAnswered,
   testAnEngineRunSaysHowItEnded,
   testAnEngineThatCrashesAsItStartsIsStartedAgain,
   testAnEngineThatDiesAfterItsBannerIsStartedAgain,
