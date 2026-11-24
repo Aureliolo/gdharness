@@ -9,6 +9,7 @@ import {
   cpSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -848,6 +849,7 @@ import {
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
+  passKeyOf,
   RESERVED_WAIT_MS,
   RunLogs,
   type RunResult,
@@ -82737,6 +82739,128 @@ async function testListOfNoSuiteIsEmptyAndARefusalIsTheRuns(): Promise<void> {
 }
 
 /**
+ * `test --list --changed-only` leaves out the suites that passed on exactly the files their engine
+ * loads, as a run does: with one suite changed and one not, only the changed one is listed.
+ */
+function testListWithChangedOnlyLeavesOutWhatPassedOnTheSameFiles(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-changed-'));
+  try {
+    const suite = `extends GdUnitTestSuite${LISTED_CASE}`;
+    writeTree(project, {
+      ...LISTED_GDUNIT4,
+      'project.godot': 'config_version=5\n',
+      'tests/a_test.gd': suite,
+      'tests/b_test.gd': suite,
+    });
+    const stand = standInEngine();
+    const options = testOptionsOf([project, '--changed-only', '--godot', stand], project);
+    const inputs = new SuiteInputs(new ProjectScripts(project), passKeyOf(options, stand));
+    const passed = Object.fromEntries(
+      ['a', 'b'].map((name) => {
+        const path = `res://tests/${name}_test.gd`;
+        const kept = inputs.inputsOf([path]);
+        return [path, { print: inputs.printOf(kept), inputs: kept }];
+      }),
+    );
+    mkdirSync(join(project, '.godot', 'gdharness'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), JSON.stringify(passed));
+    const changedOnly = ['--changed-only', '--godot', stand];
+    assert.deepEqual(listCommand(project, changedOnly).lines, [], 'both passed on what they load');
+    writeFileSync(join(project, 'tests', 'b_test.gd'), `${suite}\n# edited\n`);
+    assert.deepEqual(listCommand(project, changedOnly).lines, ['res://tests/b_test.gd']);
+    assert.deepEqual(listCommand(project, []).lines, ['res://tests/a_test.gd', 'res://tests/b_test.gd']);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Links are followed as each platform makes them: a junction on Windows, a symlink to a folder with
+ * a relative target elsewhere. Either leads to a suite, and a link up the tree is not walked again.
+ */
+function testListFollowsLinksAsThePlatformMakesThem(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-platform-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-platform-outside-'));
+  try {
+    writeTree(project, {
+      ...LISTED_GDUNIT4,
+      'project.godot': 'config_version=5\n',
+      'tests/a_test.gd': `extends GdUnitTestSuite${LISTED_CASE}`,
+    });
+    writeTree(outside, { 's_test.gd': `extends GdUnitTestSuite${LISTED_CASE}` });
+    if (process.platform === 'win32') {
+      symlinkSync(outside, join(project, 'tests', 'linked'), 'junction');
+      symlinkSync(join(project, 'tests'), join(project, 'tests', 'up'), 'junction');
+    } else {
+      symlinkSync(relative(join(project, 'tests'), outside), join(project, 'tests', 'linked'), 'dir');
+      symlinkSync('..', join(project, 'tests', 'up'), 'dir');
+    }
+    assert.ok(lstatSync(join(project, 'tests', 'linked')).isSymbolicLink(), 'the link is one');
+    assert.deepEqual(listCommand(project, []).lines, [
+      'res://tests/a_test.gd',
+      'res://tests/linked/s_test.gd',
+    ]);
+  } finally {
+    sweep(project, outside);
+  }
+}
+
+/**
+ * With `--changed-only`, `--list` names the suites a real run then runs: nothing after a pass, and
+ * the one edited suite after an edit.
+ */
+function testListWithChangedOnlyNamesWhatARealRunRuns(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test list changed-only regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-changed-slots-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-list-changed-real-'));
+  try {
+    const suite = `extends GdUnitTestSuite${LISTED_CASE}`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'tests/a_test.gd': suite,
+      'tests/b_test.gd': suite,
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const resultFile = join(project, 'result.json');
+    const run = (...args: string[]): void => {
+      const ran: SpawnSyncReturns<string> = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile, ...args],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+    };
+    const ranSuites = (): string[] =>
+      readRunResult(resultFile)
+        .suites.map((one) => one.path)
+        .toSorted();
+    run('--import');
+    assert.deepEqual(ranSuites(), ['res://tests/a_test.gd', 'res://tests/b_test.gd']);
+    assert.deepEqual(listCommand(project, ['--changed-only']).lines, [], 'nothing changed since the pass');
+    writeFileSync(join(project, 'tests', 'b_test.gd'), `${suite}\n# edited\n`);
+    const listed = listCommand(project, ['--changed-only']).lines;
+    assert.deepEqual(listed, ['res://tests/b_test.gd']);
+    run('--changed-only');
+    assert.deepEqual(ranSuites(), listed, 'the run takes what the listing named');
+    assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
+  } finally {
+    sweep(slots, project);
+  }
+}
+
+/**
  * The suites `test --list` prints are the suites a real `test` of the same arguments runs, for the
  * linked tree, the found suites in `tests` and in `test`. Run headless in one engine.
  */
@@ -133087,6 +133211,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testListIsNarrowedAsARunIs,
   testListOfNoSuiteIsEmptyAndARefusalIsTheRuns,
   testListNamesTheSuitesARealRunRuns,
+  testListWithChangedOnlyLeavesOutWhatPassedOnTheSameFiles,
+  testListFollowsLinksAsThePlatformMakesThem,
+  testListWithChangedOnlyNamesWhatARealRunRuns,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAnEngineRunsTheCheapEndOfItsUnitsFirst,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,

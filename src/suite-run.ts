@@ -1094,7 +1094,7 @@ async function importedFirst(context: RunContext): Promise<number | null> {
 }
 
 /** What a pass holds for besides a suite's own files: this gdharness, the runner, the engine and its flags. */
-function passKeyOf(options: TestOptions, godotPath: string): string[] {
+export function passKeyOf(options: TestOptions, godotPath: string): string[] {
   return [
     getLocalVersion(),
     readFileSync(shippedListedRunner(), 'utf8'),
