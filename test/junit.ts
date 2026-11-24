@@ -1714,6 +1714,34 @@ function testASkipReasonTheOutputCutOffIsSaidToBeCut(): void {
   );
 }
 
+/** gdharness test says a suite skipped whole was cut off when its reason was. */
+function testAWholeSuiteSkipReasonTheOutputCutOffIsSaidToBeCut(): void {
+  const printed = readRun(
+    [
+      `Run Test Suite: ${REASONS_SUITE}`,
+      `  ${REASONS_SUITE} > test_ok STARTED`,
+      `  ${REASONS_SUITE} > test_ok PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      "  Reason: 'Skipped from the entire test suite'",
+      `  ${REASONS_SUITE} > finalize()  Report:`,
+      '  The Entire test-suite is skipped!',
+      '  Skipped 1 tests',
+      "  Reason: 'line one",
+      'line tw',
+    ].join('\n'),
+  );
+  assert.deepEqual(printed.skipped, [
+    { suite: REASONS_SUITE, name: null, reason: 'line one', cases: 1, cut: true },
+  ]);
+  assert.ok(
+    skipFaults(printed, []).includes(
+      `${REASONS_SUITE} never ran its one case: gdUnit4 skipped the whole suite, saying "line one" before the reason was cut off`,
+    ),
+    skipFaults(printed, []).join('\n'),
+  );
+}
+
 /**
  * gdUnit4 prints the heading of a suite skipped whole only after each of its cases, so the same
  * lines printed before any case, as the suite's own text, are no skip.
@@ -2016,6 +2044,7 @@ testASkipReasonOverSeveralLinesIsReadWhole();
 testTheLinesOfASkipReasonAreReadOnlyAsItsText();
 testASkipReasonEndingTheOutputIsReadWhole();
 testASkipReasonTheOutputCutOffIsSaidToBeCut();
+testAWholeSuiteSkipReasonTheOutputCutOffIsSaidToBeCut();
 testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
 testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
 testAnErrorLineInsideASkipReasonIsNoEngineError();

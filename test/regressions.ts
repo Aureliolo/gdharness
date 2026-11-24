@@ -105049,6 +105049,15 @@ interface FedRunAsked {
   readonly selectionIgnore?: readonly string[];
   /** The errors and warnings the suites declare, none when absent. */
   readonly declared?: Expected;
+  /** Whether the run's log reads the console as the piped streams would, an empty log when absent. */
+  readonly logged?: boolean;
+}
+
+/** A log that has read [param printed] off the engine's stdout. */
+function loggedFrom(printed: string): GameLog {
+  const log = new GameLog();
+  log.append('stdout', `${printed}\n`);
+  return log;
 }
 
 /**
@@ -105151,7 +105160,7 @@ This test is skipped!
       engine: { note: null },
       run: {
         exitSignal: null,
-        log: new GameLog(),
+        log: asked.logged === true ? loggedFrom(engineText) : new GameLog(),
         exitCode,
       },
       tally,
@@ -133130,6 +133139,111 @@ async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Prom
   }
 }
 
+/**
+ * gdUnit4 runs a suite's `after()` between its last case's report and its statistics, so what
+ * `after()` prints follows a skipped last case's reason. A reason closed on its first line ends
+ * there in a real run of both tools: an error ending in a quote is still found, a declared one
+ * adds no fault for being unprinted, and a print stays out of the reason.
+ */
+async function testAnAfterHookPrintingAQuoteKeepsOutOfASkippedLastCasesReason(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const error = "could not load 'res://gone.tres'";
+  const suiteOf = (...head: string[]): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      '',
+      ...head,
+      'func test_ok() -> void:',
+      '\tassert_int(1).is_equal(1)',
+      '',
+      '',
+      'func test_skip(_do_skip := true, _skip_reason := "not today") -> void:',
+      '\tassert_bool(false).is_true()',
+      '',
+    ].join('\n');
+  const after = (line: string): string[] => ['func after() -> void:', `\t${line}`, '', ''];
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/after_error_test.gd': suiteOf(...after(`push_error("${error}")`)),
+      'tests/after_declared_test.gd': suiteOf(
+        `const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"after": ["${error}"]}`,
+        '',
+        '',
+        ...after(`push_error("${error}")`),
+      ),
+      'tests/after_print_test.gd': suiteOf(...after(`print("cleaned 'tmp'")`)),
+    });
+    const skipFault = (suite: string): string =>
+      `res://tests/${suite} > test_skip never ran: gdUnit4 skipped it, saying "not today"\n`;
+    const errored = test('tests/after_error_test.gd');
+    assert.ok(errored.said.includes(skipFault('after_error_test.gd')), errored.said);
+    assert.deepEqual(
+      errored.said.match(/an engine error in .+?(?=\. If )/g),
+      [`an engine error in res://tests/after_error_test.gd > after: ${error}`],
+      errored.said,
+    );
+    assert.match(errored.said, /^Failed: 2 problems, listed above\. Ran 1 case /m, errored.said);
+    const declared = test('tests/after_declared_test.gd');
+    assert.ok(declared.said.includes(skipFault('after_declared_test.gd')), declared.said);
+    assert.match(declared.said, /^Failed: 1 problem, listed above\. Ran 1 case /m, declared.said);
+    const printed = test('tests/after_print_test.gd');
+    assert.ok(printed.said.includes(skipFault('after_print_test.gd')), printed.said);
+    assert.match(printed.said, /^Failed: 1 problem, listed above\. Ran 1 case /m, printed.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const answered = async (suite: string): Promise<unknown> => {
+          const response = await request(
+            'tools/call',
+            { name: 'project_test', arguments: { projectPath: project, path: `res://tests/${suite}` } },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
+            String(get(block, 'text')),
+          );
+          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        };
+        const skipped = (suite: string): unknown[] => [
+          { test: `res://tests/${suite} > test_skip`, reason: 'not today' },
+        ];
+        const erroredAnswer = await answered('after_error_test.gd');
+        assert.deepEqual(
+          [
+            get(erroredAnswer, 'casesSkipped'),
+            get(erroredAnswer, 'engineErrors'),
+            asArray(get(erroredAnswer, 'undeclaredErrors')).map((one) => get(one, 'text')),
+          ],
+          [skipped('after_error_test.gd'), 1, [error]],
+          JSON.stringify(erroredAnswer),
+        );
+        const declaredAnswer = await answered('after_declared_test.gd');
+        assert.deepEqual(
+          [
+            get(declaredAnswer, 'casesSkipped'),
+            get(declaredAnswer, 'undeclaredErrors'),
+            get(declaredAnswer, 'declaredNotPrinted'),
+          ],
+          [skipped('after_declared_test.gd'), undefined, undefined],
+          JSON.stringify(declaredAnswer),
+        );
+        const printedAnswer = await answered('after_print_test.gd');
+        assert.deepEqual(
+          get(printedAnswer, 'casesSkipped'),
+          skipped('after_print_test.gd'),
+          JSON.stringify(printedAnswer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
 /** A skip reason the output cut off is listed by its first line, and both tools say it was cut. */
 function testASkipReasonCutOffIsSaidToBeCutInBothTools(): void {
   const { answer, faults } = fedRunAnswered([
@@ -133161,6 +133275,47 @@ function testASkipReasonCutOffIsSaidToBeCutInBothTools(): void {
       `${FED_A} > test_cut never ran: gdUnit4 skipped it, saying "line one" before the reason was cut off`,
     ),
     faults.join('\n'),
+  );
+}
+
+/**
+ * A skip reason's line headed `WARNING:` is no engine warning in project_test's count, which still
+ * counts the engine's own warning in the case that ran.
+ */
+function testASkipReasonsWarningLineLeavesProjectTestsWarningCount(): void {
+  const reason = 'hmm\nWARNING: a line of the reason';
+  const { answer } = fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [
+          {
+            name: 'test_runs',
+            printed: ['WARNING: a real engine warning', caseLine(FED_A, 'test_runs', 'PASSED', '4ms'), ''],
+          },
+          {
+            name: 'test_skip',
+            printed: [
+              caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
+              '  Report:',
+              '  This test is skipped!',
+              ...`  Reason: '${reason}'`.split('\n'),
+              '',
+              '',
+            ],
+            skipped: reason,
+          },
+        ],
+        closed: 'PASSED',
+      },
+    ],
+    0,
+    { logged: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineWarnings']],
+    [[{ test: `${FED_A} > test_skip`, reason }], 1],
+    JSON.stringify(answer),
   );
 }
 
@@ -134993,7 +135148,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASkipReasonOverSeveralLinesIsReadWhole,
   testARealSkipReasonOverSeveralLinesFailsBothTools,
   testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
+  testAnAfterHookPrintingAQuoteKeepsOutOfASkippedLastCasesReason,
   testASkipReasonCutOffIsSaidToBeCutInBothTools,
+  testASkipReasonsWarningLineLeavesProjectTestsWarningCount,
   testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
   testWindowedSuitesAreDealtOverTheLanesAsHeadlessOnesAre,
   testAMemoryBudgetFittingTwoWindowedEnginesRunsTwo,
