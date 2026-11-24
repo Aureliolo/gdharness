@@ -2000,10 +2000,10 @@ function withReasonHeading(lines: readonly string[], heading: string): string[] 
   );
 }
 
-/** What a real engine prints to stderr for a script error raised outside any case. */
+/** What a real engine prints to stderr for a script error raised in a suite's after, outside any case. */
 const REAL_SCRIPT_ERROR_STDERR = [
   "SCRIPT ERROR: Invalid call. Nonexistent function 'missing' in base 'Nil'.",
-  '          at: after (res://tests/reasons_test.gd:12)',
+  '   at: after (res://tests/reasons_test.gd:12)',
 ];
 
 /**
@@ -2141,6 +2141,95 @@ function testAReasonLineOfEveryHeadingIsNoEntryOfARunWithNoReport(): void {
   );
 }
 
+/** The tally and the reasons of a run whose stdout skips each of [param reasons] in its own case. */
+function skippedReasonsRun(reasons: readonly string[]): {
+  tally: TestRunTally;
+  read: ReturnType<typeof readRun>;
+} {
+  const printed = reasons.flatMap((reason, at) => {
+    const lines = reason.split('\n');
+    return [
+      `  res://tests/reasons_test.gd > test_skip${at} PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      `  Reason: '${lines[0] ?? ''}`,
+      ...lines.slice(1, -1),
+      ...(lines.length > 1 ? [`${lines.at(-1) ?? ''}'`] : []),
+      '',
+      '',
+    ];
+  });
+  const output = ['Run Test Suite: res://tests/reasons_test.gd', ...printed];
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: (_entry, byScript) => byScript,
+  });
+  const log = new GameLog({
+    most: 4,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  log.append('stdout', `${output.join('\n')}\n`);
+  log.finish();
+  log.handOverHeld();
+  return { tally, read: readRun(output.join('\n')) };
+}
+
+/**
+ * A skip reason's `SCRIPT ERROR:` line and another reason's `ERROR:` line with the same text are
+ * two headlines, so only the first is taken from the uncaught script errors, and each of the two
+ * leaves the entries of a run with no report.
+ */
+function testASkipReasonsScriptErrorLineAndAnErrorLineOfOneTextAreTakenApart(): void {
+  const { tally, read } = skippedReasonsRun(['boom\nSCRIPT ERROR: same', 'boom\nERROR: same']);
+  assert.equal(tally.uncaught.count, 1, 'the piped streams hold one script error');
+  const uncaught = tally.uncaughtWithout(read.reasonHeadlines);
+  assert.deepEqual(
+    [uncaught.count, uncaught.folded.result().length, uncaught.first],
+    [0, 0, null],
+    'the uncaught script errors',
+  );
+  assert.deepEqual(
+    tally.entriesWithout([], 60, read.reasonHeadlines).filter((entry) => entry.severity !== 'info'),
+    [],
+    'the entries',
+  );
+}
+
+/**
+ * Every index under the uncaught script errors is an entry the answer still lists, which the
+ * entries of the piped streams less the reasons' lines give.
+ */
+function testEveryUncaughtScriptErrorIndexIsAnEntryTheAnswerStillLists(): void {
+  const { tally, read } = skippedReasonsRun(['boom\nSCRIPT ERROR: not a script error']);
+  const log = new GameLog({
+    most: 4,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  log.append('stderr', `${REAL_SCRIPT_ERROR_STDERR.join('\r\n')}\r\n`);
+  log.finish();
+  log.handOverHeld();
+  const listed = new Set(
+    withoutReasonHeadlines(tally.engine.result(), read.reasonHeadlines).map((entry) => entry.index),
+  );
+  const indexes = tally
+    .uncaughtWithout(read.reasonHeadlines)
+    .folded.result()
+    .map((entry) => entry.index);
+  assert.ok(indexes.length > 0, 'the real script error is still uncaught');
+  assert.deepEqual(
+    indexes.filter((index) => !listed.has(index)),
+    [],
+    `indexes of ${JSON.stringify(indexes)} among ${JSON.stringify([...listed])}`,
+  );
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -2173,4 +2262,6 @@ testARealSkipReasonsErrorLineLeavesTheEngineEntries();
 testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
 testASkipReasonsScriptErrorLineIsNoUncaughtScriptErrorAndNoEntry();
 testAReasonLineOfEveryHeadingIsNoEntryOfARunWithNoReport();
+testASkipReasonsScriptErrorLineAndAnErrorLineOfOneTextAreTakenApart();
+testEveryUncaughtScriptErrorIndexIsAnEntryTheAnswerStillLists();
 console.log('junit reader tests passed');

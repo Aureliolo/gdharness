@@ -133202,6 +133202,96 @@ async function testASkipReasonsScriptErrorLineIsNoScriptErrorInEitherTool(): Pro
 }
 
 /**
+ * A skip reason with a line starting `SCRIPT ERROR:` beside a real push_error and a real script
+ * error, raised in `after` where no case fails on it: both tools count each real error once and
+ * the reason's line none.
+ */
+async function testARealScriptErrorBesideASkipReasonsScriptErrorLineIsCountedOnce(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const suite = 'res://tests/script_both_test.gd';
+  const reason = 'boom\nSCRIPT ERROR: not a script error';
+  const SCRIPT_ERROR = "Invalid call. Nonexistent function 'missing' in base 'Nil'.";
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/script_both_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func after() -> void:',
+        '\tvar held: Variant = null',
+        '\theld.missing()',
+        '',
+        '',
+        'func test_runs() -> void:',
+        '\tpush_error("a real engine error")',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        `func test_skip(_do_skip := true, _skip_reason := "boom\\nSCRIPT ERROR: not a script error") -> void:`,
+        '\tassert_bool(false).is_true()',
+        '',
+      ].join('\n'),
+    });
+    const ran = test('tests/script_both_test.gd');
+    assert.equal(ran.status, 1, ran.said);
+    assert.ok(
+      ran.said.includes(`${suite} > test_skip never ran: gdUnit4 skipped it, saying "${reason}"`),
+      ran.said,
+    );
+    assert.deepEqual(
+      ran.said.match(/an engine error in .+?(?=\. If the suite)/g),
+      [
+        `an engine error in ${suite} > test_runs: a real engine error`,
+        `an engine error in ${suite} > after: ${SCRIPT_ERROR}`,
+      ],
+      ran.said,
+    );
+    assert.match(ran.said, /^Failed: 3 problems, listed above\. /m, ran.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: suite } },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        const entries = asArray(get(answer, 'engineEntries'));
+        const uncaught = asArray(get(answer, 'uncaughtScriptErrors'));
+        assert.deepEqual(
+          [
+            get(answer, 'casesSkipped'),
+            get(answer, 'engineErrors'),
+            entries.map((entry) => get(entry, 'text')),
+            uncaught.map((entry) => get(entry, 'text')),
+            /^one script error that failed no case; one engine error no suite declared; one case skipped/.test(
+              String(get(answer, 'verdict')),
+            ),
+            uncaught.every((one) => entries.some((entry) => get(entry, 'index') === get(one, 'index'))),
+          ],
+          [
+            [{ test: `${suite} > test_skip`, reason }],
+            2,
+            ['a real engine error', SCRIPT_ERROR],
+            [SCRIPT_ERROR],
+            true,
+            true,
+          ],
+          JSON.stringify(answer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
  * A run ended by its timeout after a skipped case lists none of the skip reason's lines, whatever
  * their heading, among its entries.
  */
@@ -135120,6 +135210,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARealSkipReasonOverSeveralLinesFailsBothTools,
   testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
   testASkipReasonsScriptErrorLineIsNoScriptErrorInEitherTool,
+  testARealScriptErrorBesideASkipReasonsScriptErrorLineIsCountedOnce,
   testARunCutOffAfterASkipReasonListsNoReasonLine,
   testASkipReasonCutOffIsSaidToBeCutInBothTools,
   testWindowedEnginesRunTogetherGetWhatEachGetsAlone,
