@@ -77075,49 +77075,314 @@ async function testALockTakenBeyondTheBudgetByARaceIsGivenBack(): Promise<void> 
   }
 }
 
-interface TakerReport {
-  readonly locks: number;
-  readonly gib: number;
-  readonly budget: number;
+/** Calls the private method [param name] of [param slots] with [param args]. */
+async function callPrivate(slots: EngineSlots, name: string, args: readonly unknown[]): Promise<unknown> {
+  const method: unknown = Reflect.get(slots, name);
+  if (typeof method !== 'function') {
+    throw new TypeError(`the take's step ${name} is there to call`);
+  }
+  const answer: unknown = await Reflect.apply(method, slots, args);
+  return answer;
 }
 
-/** The report a taker printed last, as its fields. */
-function takerReportOf(printed: string): TakerReport {
-  const report: unknown = JSON.parse(printed.trim().split('\n').pop() ?? '');
-  if (!isRecord(report)) {
-    throw new TypeError(`a taker's report is an object: ${printed}`);
+/**
+ * Puts [param around] in the place of the private method [param name] of [param slots], so a test
+ * sets when each step of a take runs. It is given the call of the method itself.
+ */
+function aroundPrivate(
+  slots: EngineSlots,
+  name: string,
+  around: (call: () => Promise<unknown>) => Promise<unknown>,
+): void {
+  const method: unknown = Reflect.get(slots, name);
+  if (typeof method !== 'function') {
+    throw new TypeError(`the take's step ${name} is there to wrap`);
   }
-  const { locks, gib, budget } = report;
-  if (typeof locks !== 'number' || typeof gib !== 'number' || typeof budget !== 'number') {
-    throw new TypeError(`a taker's report holds the locks, memory and budget: ${printed}`);
-  }
-  return { locks, gib, budget };
+  Reflect.set(slots, name, async (...args: unknown[]): Promise<unknown> => {
+    const answer: unknown = await around(async (): Promise<unknown> => {
+      const called: unknown = await Reflect.apply(method, slots, args);
+      return called;
+    });
+    return answer;
+  });
+}
+
+/** A meeting point for [param count] takes: each call waits until all of them have called. */
+function meetingOf(count: number): () => Promise<void> {
+  const all = Promise.withResolvers<undefined>();
+  let arrived = 0;
+  return async () => {
+    arrived += 1;
+    if (arrived === count) {
+      all.resolve(undefined);
+    }
+    await all.promise;
+  };
 }
 
 /** Whether the take that just made [param lock] gives it back for want of memory. */
 async function givenBackForMemory(slots: EngineSlots, lock: string): Promise<boolean> {
-  const judge: unknown = Reflect.get(slots, 'overTheBudget');
-  if (typeof judge !== 'function') {
-    throw new TypeError('the judgement of a lock taken beyond the budget is there to call');
-  }
-  const given: unknown = await Reflect.apply(judge, slots, [lock, 3.5 * MEMORY_GIB, undefined]);
+  const given = await callPrivate(slots, 'overTheBudget', [lock, 3.5 * MEMORY_GIB, undefined]);
   return given === true;
+}
+
+/** Takes of a windowed engine of 3.5 GiB on 3 slots of a 20 GiB machine, sharing one folder. */
+async function withWindowedTakers(
+  body: (slotsOf: () => EngineSlots, directory: string) => Promise<void>,
+): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takes-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takes-project-'));
+  try {
+    await withNoCeilingSet(async () => {
+      await recordEnginePeak(project, 'test_windowed_lane', 3.5 * MEMORY_GIB);
+      await body(
+        () =>
+          new EngineSlots(directory, 3, { pid: process.pid, started }, undefined, () => 'other', project, {
+            memory: 20 * MEMORY_GIB,
+            tool: 'test_lane',
+          }),
+        directory,
+      );
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two windowed takes that each counted room before either took: the first looks before the
+ * second's lock is written, and keeps its slot. The file system dates the second's write to the
+ * tick of the first's, and the second sorts in the lower slot, yet it gives its lock back.
+ */
+async function testATakeWrittenAfterAnotherLookedGivesItsLockBack(): Promise<void> {
+  await withWindowedTakers(async (slotsOf, directory) => {
+    const first = slotsOf();
+    const second = slotsOf();
+    assert.equal(first.memoryBudget, 4.5 * MEMORY_GIB, 'one window of 3.5 GiB fits, two do not');
+    const placeholder = join(directory, '0.lock');
+    const made = Promise.withResolvers<undefined>();
+    const looked = Promise.withResolvers<string>();
+    let secondLock: unknown = null;
+    aroundPrivate(second, 'lockOneOf', async (call) => {
+      // The second take holds its first slot unwritten while the first take looks.
+      writeFileSync(placeholder, '');
+      made.resolve(undefined);
+      const firstLock = await looked.promise;
+      rmSync(placeholder);
+      secondLock = await call();
+      // The file system dates this write to the tick of the first take's.
+      const tick = statSync(firstLock).mtime;
+      if (typeof secondLock === 'string') {
+        utimesSync(secondLock, tick, tick);
+      }
+      return secondLock;
+    });
+    const secondTake = second.takeFree(false, undefined, 'test_windowed_lane');
+    await made.promise;
+    const firstLock = await first.takeFree(false, undefined, 'test_windowed_lane');
+    assert.notEqual(firstLock, null, 'the take that looked first keeps its slot');
+    looked.resolve(firstLock ?? '');
+    assert.equal(await secondTake, null, 'the take written after the other looked gives its lock back');
+    const slotOf = (lock: unknown): number => Number(/(\d+)\.lock$/.exec(String(lock))?.[1]);
+    assert.ok(slotOf(secondLock) < slotOf(firstLock), 'the second take wrote the lower slot');
+    if (firstLock !== null) {
+      first.release(firstLock);
+    }
+  });
+}
+
+/** Takers that fit the budget together all keep their slots, though each looks with all written. */
+async function testTakersThatFitTheBudgetTogetherAllKeepTheirSlots(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-fit-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const takers = [0, 1, 2].map(
+        () =>
+          new EngineSlots(directory, 3, { pid: process.pid, started }, undefined, () => 'other', undefined, {
+            memory: 20 * MEMORY_GIB,
+            tool: 'test_lane',
+          }),
+      );
+      // Every take counts the folder before any writes, and judges once all have written.
+      const counted = meetingOf(takers.length);
+      const written = meetingOf(takers.length);
+      let givenBack = 0;
+      for (const slots of takers) {
+        aroundPrivate(slots, 'lockOneOf', async (call) => {
+          await counted();
+          const lock = await call();
+          await written();
+          return lock;
+        });
+        aroundPrivate(slots, 'overTheBudget', async (call) => {
+          const given = await call();
+          if (given === true) {
+            givenBack += 1;
+          }
+          return given;
+        });
+      }
+      assert.equal(takers[0]?.memoryBudget, 4.5 * MEMORY_GIB, 'three engines of 1.5 GiB fit');
+      const locks = await Promise.all(takers.map(async (slots) => await slots.takeFree()));
+      assert.equal(givenBack, 0, 'no taker gives its lock back');
+      assert.deepEqual(
+        locks.map((lock) => lock !== null),
+        [true, true, true],
+        'every taker keeps its slot',
+      );
+      for (const [at, lock] of locks.entries()) {
+        if (lock !== null) {
+          takers[at]?.release(lock);
+        }
+      }
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A lock given back between the list of the folder and the read of its time counts nothing. */
+async function testALockGoneBeforeItsTimeIsReadIsLeftOut(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const slots = new EngineSlots(
+        directory,
+        3,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        undefined,
+        { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
+      );
+      standInLock(directory, 0, started, { memory: 3.5 * MEMORY_GIB });
+      standInLock(directory, 1, started, { memory: 3.5 * MEMORY_GIB });
+      const older = new Date(Date.now() - 10_000);
+      const gone = join(directory, '0.lock');
+      const aside = join(directory, 'aside');
+      utimesSync(gone, older, older);
+      aroundPrivate(slots, 'heldLocks', async (call) => {
+        if (existsSync(aside)) {
+          renameSync(aside, gone);
+        }
+        const held = await call();
+        renameSync(gone, aside);
+        return held;
+      });
+      assert.equal(
+        await givenBackForMemory(slots, join(directory, '1.lock')),
+        false,
+        'the lock given back is not counted ahead of this one',
+      );
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Each lock keeps its slot where it fits beside the locks kept before it. In 6 GiB, A of 1.5 GiB,
+ * B and C of 3.5 GiB and D of 1 GiB, written in that order: C gives back, and D fits once C has.
+ */
+async function testALockThatFitsOnceAnEarlierOneGivesBackKeepsItsSlot(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-greedy-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const slots = new EngineSlots(
+        directory,
+        4,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        undefined,
+        { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
+      );
+      assert.equal(slots.memoryBudget, 6 * MEMORY_GIB);
+      const now = Date.now();
+      for (const [slot, gib] of [1.5, 3.5, 3.5, 1].entries()) {
+        standInLock(directory, slot, started, { memory: gib * MEMORY_GIB });
+        const at = new Date(now - 4000 + slot * 1000);
+        utimesSync(join(directory, `${String(slot)}.lock`), at, at);
+      }
+      const gives: boolean[] = [];
+      for (const slot of [1, 2, 3]) {
+        gives.push(await givenBackForMemory(slots, join(directory, `${String(slot)}.lock`)));
+      }
+      assert.deepEqual(gives, [false, true, false], 'B and D keep their slots, C gives its back');
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A take that finds no other live lock looks once, with no wait for another. */
+async function testATakeWithNoOtherLiveLockLooksOnce(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-alone-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const slots = new EngineSlots(
+        directory,
+        3,
+        { pid: process.pid, started },
+        undefined,
+        () => 'other',
+        undefined,
+        { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
+      );
+      standInLock(directory, 0, started, { memory: 3.5 * MEMORY_GIB });
+      const older = new Date(Date.now() - 5000);
+      utimesSync(join(directory, '0.lock'), older, older);
+      let looks = 0;
+      aroundPrivate(slots, 'liveMemory', async (call) => {
+        looks += 1;
+        return await call();
+      });
+      assert.equal(await givenBackForMemory(slots, join(directory, '0.lock')), false);
+      assert.equal(looks, 1, 'the folder is counted once');
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+interface TakerWindow {
+  readonly began: number;
+  readonly ended: number;
+  readonly budget: number;
+}
+
+/** The window a taker printed last, as its fields. */
+function takerWindowOf(printed: string): TakerWindow {
+  const report: unknown = JSON.parse(printed.trim().split('\n').pop() ?? '');
+  if (!isRecord(report)) {
+    throw new TypeError(`a taker's report is an object: ${printed}`);
+  }
+  const { began, ended, budget } = report;
+  if (typeof began !== 'number' || typeof ended !== 'number' || typeof budget !== 'number') {
+    throw new TypeError(`a taker's report holds when its window began and ended, and the budget: ${printed}`);
+  }
+  return { began, ended, budget };
 }
 
 /** How many tries of takers run beside each other. */
 const TRIES_TOGETHER = 5;
 
 /**
- * Three processes ask for a slot at once, as often as [param tries], a few tries at a time. With
- * [param windowed] they ask as windowed engines, with another engine holding a slot until they all
- * wait on it. Answers each try's takers' reports: the locks and the memory in GiB live as it saw
- * them, and the budget.
+ * Three processes ask for a windowed engine's slot at once, as often as [param tries], a few tries
+ * at a time, with another engine holding a slot until they all wait on it. Answers each try's
+ * takers' windows.
  */
-async function takersAtOnce(windowed: boolean, tries: number): Promise<TakerReport[][]> {
+async function windowedTakersAtOnce(tries: number): Promise<TakerWindow[][]> {
   const started = await ownStart();
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takers-project-'));
   const taker = resolve('test', 'support', 'slot-taker.ts');
-  const tried: TakerReport[][] = [];
+  const tried: TakerWindow[][] = [];
   try {
     await withNoCeilingSet(async () => {
       await recordEnginePeak(project, 'test_windowed_lane', 3.5 * MEMORY_GIB);
@@ -77134,21 +77399,11 @@ async function takersAtOnce(windowed: boolean, tries: number): Promise<TakerRepo
             undefined,
             { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
           );
-          const held = windowed ? await other.takeFree() : null;
+          const held = await other.takeFree();
           const ended = [0, 1, 2].map((number) => {
             const child = spawnHidden(
               process.execPath,
-              [
-                taker,
-                directory,
-                '3',
-                project,
-                windowed ? 'windowed' : 'headless',
-                sync,
-                String(number),
-                '600',
-                '250',
-              ],
+              [taker, directory, '3', project, sync, String(number), '300'],
               { stdio: ['ignore', 'pipe', 'inherit'] },
             );
             let said = '';
@@ -77167,13 +77422,13 @@ async function takersAtOnce(windowed: boolean, tries: number): Promise<TakerRepo
             await delay(10);
           }
           writeFileSync(join(sync, 'go'), '');
+          await delay(400);
           if (held !== null) {
-            await delay(400);
             other.release(held);
           }
           const said = await Promise.race([Promise.all(ended), delay(60_000).then(() => [] as string[])]);
           assert.equal(said.length, 3, 'every taker of the try got a slot and reported');
-          tried.push(said.map(takerReportOf));
+          tried.push(said.map(takerWindowOf));
         } finally {
           rmSync(directory, { recursive: true, force: true });
           rmSync(sync, { recursive: true, force: true });
@@ -77189,24 +77444,16 @@ async function takersAtOnce(windowed: boolean, tries: number): Promise<TakerRepo
   return tried;
 }
 
-/** Three processes taking a windowed engine's slot at once never run two windows past the budget. */
+/** Three processes taking a windowed engine's slot at once never hold two windows at one time. */
 async function testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudget(): Promise<void> {
-  const tried = await takersAtOnce(true, 20);
-  const over = tried.filter((takers) => takers.some((one) => one.locks > 1 && one.gib > one.budget));
+  const tried = await windowedTakersAtOnce(10);
   assert.equal(tried[0]?.[0]?.budget, 4.5, 'the budget is 4.5 GiB on 3 slots of a 20 GiB machine');
-  assert.deepEqual(over, [], 'no try ran windows together past 4.5 GiB');
-}
-
-/** Takers that fit the budget together all keep their slots, however they race. */
-async function testTakersThatFitTheBudgetTogetherAllKeepTheirSlots(): Promise<void> {
-  const tried = await takersAtOnce(false, 20);
-  for (const takers of tried) {
-    assert.deepEqual(
-      takers.map((one) => one.locks),
-      [3, 3, 3],
-      `three engines of 1.5 GiB in 4.5 GiB are all live at once: ${JSON.stringify(takers)}`,
-    );
-  }
+  const together = tried.filter((windows) =>
+    windows.some((one, at) =>
+      windows.slice(at + 1).some((other) => one.began < other.ended && other.began < one.ended),
+    ),
+  );
+  assert.deepEqual(together, [], 'no two windows of 3.5 GiB ran at one time in 4.5 GiB');
 }
 
 /** Two stand-in locks held by two live processes, written at the same moment. */
@@ -77271,29 +77518,31 @@ async function testTwoLocksWrittenAtTheSameMomentGiveBackExactlyOne(): Promise<v
   }
 }
 
-/** A lock written after a taker's first look is counted by the look it takes again. */
+/**
+ * A lock written after a take's first look, and dated before its own, is counted by the second
+ * look, which the take takes because another lock is live.
+ */
 async function testALockWrittenAfterTheFirstLookIsCounted(): Promise<void> {
+  const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-settled-'));
   try {
     await withNoCeilingSet(async () => {
       await lockedByTwoHolders(directory, async (slots) => {
+        standInLock(directory, 2, started, { memory: MEMORY_GIB });
+        const oldest = new Date(Date.now() - 10_000);
+        utimesSync(join(directory, '2.lock'), oldest, oldest);
         const other = join(directory, '1.lock');
         const lockText = readFileSync(other, 'utf8');
         const when = statSync(other).mtime;
         rmSync(other);
-        const read: unknown = Reflect.get(slots, 'liveMemory');
-        if (typeof read !== 'function') {
-          throw new TypeError('the count of the live locks is there to watch');
-        }
         let looks = 0;
-        Reflect.set(slots, 'liveMemory', async (): Promise<unknown> => {
+        aroundPrivate(slots, 'liveMemory', async (call) => {
           looks += 1;
           if (looks === 2) {
             writeFileSync(other, lockText);
             utimesSync(other, when, when);
           }
-          const live: unknown = await Reflect.apply(read, slots, []);
-          return live;
+          return await call();
         });
         const given = await givenBackForMemory(slots, join(directory, '0.lock'));
         assert.equal(given, true, 'the second look finds the lock written since the first');
@@ -136148,10 +136397,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEnginesTogetherStayInsideTheMachinesMemory,
   testALockWithNoMemoryCountsOneAndAHalfGiBASlot,
   testALockTakenBeyondTheBudgetByARaceIsGivenBack,
-  testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudget,
-  testTakersThatFitTheBudgetTogetherAllKeepTheirSlots,
+  testATakeWrittenAfterAnotherLookedGivesItsLockBack,
   testTwoLocksWrittenAtTheSameMomentGiveBackExactlyOne,
   testALockWrittenAfterTheFirstLookIsCounted,
+  testTakersThatFitTheBudgetTogetherAllKeepTheirSlots,
+  testALockGoneBeforeItsTimeIsReadIsLeftOut,
+  testALockThatFitsOnceAnEarlierOneGivesBackKeepsItsSlot,
+  testATakeWithNoOtherLiveLockLooksOnce,
+  testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudget,
   testTheFirstEngineOnAMachineTakesWhateverItNeeds,
   testALocksMemoryIsThePeakKeptCappedAtTheCeiling,
   testAMemoryWaiterKeepsItsPlaceInLine,
