@@ -133755,9 +133755,10 @@ function waitMarksIn(directory: string): string[] {
 async function testALaneRaisingItsSlotForAWindowWaitsForMemory(): Promise<void> {
   await withNoCeilingSet(async () => {
     const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    let other: EngineSlots | undefined;
     try {
       const slots = await fourGiBSlots(directory);
-      const other = await fourGiBSlots(directory);
+      other = await fourGiBSlots(directory);
       const otherLock = await other.takeFree();
       const taken = await slots.takeFree();
       assert.ok(otherLock !== null && taken !== null, 'the other engine and this lane took their slots');
@@ -133797,6 +133798,8 @@ async function testALaneRaisingItsSlotForAWindowWaitsForMemory(): Promise<void> 
       );
       assert.deepEqual(slotLockNamesIn(directory), [], 'and its slot is given back once it ends');
     } finally {
+      // A build whose lane waits holding its slot is let go, so the tests after it run.
+      other?.releaseAll();
       rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -133814,6 +133817,7 @@ function waitLineShape(line: string): string {
 async function testALaneWaitingForRoomForItsWindowSaysItWaits(): Promise<void> {
   await withNoCeilingSet(async () => {
     const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-window-memory-'));
+    let other: EngineSlots | undefined;
     try {
       const started = await ownStart();
       const slotsSaying = (said: string[]): EngineSlots =>
@@ -133826,7 +133830,7 @@ async function testALaneWaitingForRoomForItsWindowSaysItWaits(): Promise<void> {
           undefined,
           { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
         );
-      const other = await fourGiBSlots(directory);
+      other = await fourGiBSlots(directory);
       const otherLock = await other.takeFree();
       assert.notEqual(otherLock, null, 'the other engine took its slot');
       const freshSaid: string[] = [];
@@ -133863,6 +133867,8 @@ async function testALaneWaitingForRoomForItsWindowSaysItWaits(): Promise<void> {
         'in the line the fresh take says',
       );
     } finally {
+      // A build whose lane waits holding its slot is let go, so the tests after it run.
+      other?.releaseAll();
       rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -133891,7 +133897,6 @@ async function twoRunsRaisingEnd(
     });
   const runs = [slotsOn(), slotsOn()];
   const other = slotsOn();
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const otherLock = await other.takeFree();
     const first = await runs[0]?.takeFree();
@@ -133920,15 +133925,9 @@ async function twoRunsRaisingEnd(
     );
     await delay(secondWaits ? 50 : 0);
     other.release(otherLock);
-    const hung = new Promise<false>((ended) => {
-      timer = setTimeout(() => {
-        ended(false);
-      }, RAISING_TRY_MS);
-    });
-    const ended = await Promise.race([Promise.all(lanes).then((both) => both.every(Boolean)), hung]);
-    return ended;
+    const both = Promise.all(lanes);
+    return (await settledWithin(both, RAISING_TRY_MS)) && (await both).every(Boolean);
   } finally {
-    clearTimeout(timer);
     for (const slots of [...runs, other]) {
       slots.releaseAll();
     }
@@ -134047,8 +134046,10 @@ async function testARaiseTwoTakersCountedRoomForAtOnceIsUndone(): Promise<void> 
         const answer: unknown = await Reflect.apply(room, slots, args);
         return answer;
       });
-      assert.equal(await slots.counting(lock ?? '', 'test_windowed_lane'), false, 'the slot was not raised');
-      assert.equal(looks, 1, 'and the raise asked once, waiting for nothing');
+      const raising = slots.counting(lock ?? '', 'test_windowed_lane');
+      assert.ok(await settledWithin(raising, 30_000), 'the raise answers, waiting for nothing');
+      assert.equal(await raising, false, 'the slot was not raised');
+      assert.equal(looks, 1, 'and the raise asked once');
       assert.equal(
         lockFigure(lock ?? ''),
         MEMORY_PER_ENGINE,
