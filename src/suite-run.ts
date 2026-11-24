@@ -987,7 +987,7 @@ async function runStages(context: RunContext): Promise<number> {
   );
   // Awaited after the suites. A run failing before then reports its own error, not this one too.
   compiling.catch(() => undefined);
-  const ran = await ranEngines(context, deal, started, handed, memory, say);
+  const ran = await ranEngines(context, deal, started, handed, memory, say, runEngine);
   recordTimes(context, loaded, ran);
   const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
   const passKept = recordPassed(
@@ -1507,14 +1507,30 @@ export async function takenLanes<P extends { readonly lane: number; readonly win
 }
 
 /** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
-async function ranEngines(
-  context: RunContext,
-  deal: Deal,
+export async function ranEngines<
+  L extends { readonly slots: EngineSlots },
+  R extends Pick<EngineRan, 'index' | 'plan' | 'peakBytes'> & {
+    readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'>;
+    readonly printed?: { readonly started: { readonly seconds: number } | null };
+  },
+>(
+  context: { readonly launch: L; readonly declared: CasesBySuite },
+  deal: Pick<Deal, 'units' | 'times'>,
   started: StartedLanes,
   handed: HandedSlot,
   memory: MemoryGate | undefined,
   say: (line: string) => void,
-): Promise<EngineRan[]> {
+  engine: (
+    launch: L,
+    plan: EnginePlan,
+    index: number,
+    times: SuiteTimes,
+    again?: string,
+    slot?: string | null,
+    holds?: (bytes: number) => void,
+    reuse?: ShareReuse<R>,
+  ) => Promise<R>,
+): Promise<R[]> {
   const { launch, declared } = context;
   const { units, times } = deal;
   const { lanes, taken, shared, follows } = started;
@@ -1528,7 +1544,7 @@ async function ranEngines(
           undefined,
           follows.ceiling > lanes.length,
         );
-  let ran: EngineRan[];
+  let ran: R[];
   try {
     ran = shared
       ? await sharedRun(
@@ -1537,7 +1553,7 @@ async function ranEngines(
           units,
           declared,
           times,
-          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, '', lock, holds, reuse),
+          (plan, index, lock, holds, reuse) => engine(launch, plan, index, times, '', lock, holds, reuse),
           handed,
           memory,
           follower === null
@@ -1553,7 +1569,19 @@ async function ranEngines(
                 },
               },
         )
-      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
+      : (
+          await Promise.all(
+            lanes.map((lane, at) =>
+              runLane(
+                launch.slots,
+                lane,
+                taken[at] ?? null,
+                (plan, index, lock) => engine(launch, plan, index, times, '', lock),
+                handed,
+              ),
+            ),
+          )
+        )
           .flat()
           .toSorted((a, b) => a.index - b.index);
   } finally {
@@ -1561,8 +1589,8 @@ async function ranEngines(
     // A grant that came once the work was done goes back unused.
     started.granted?.end();
   }
-  return await rerunAfterStarving(ran, say, (engine) =>
-    runEngine(launch, engine.plan, engine.index, times, 'again'),
+  return await rerunAfterStarving(ran, say, (failed) =>
+    engine(launch, failed.plan, failed.index, times, 'again'),
   );
 }
 
@@ -2371,25 +2399,33 @@ export function importEnd(ended: EngineEnd): string | null {
 
 /**
  * Runs the engines of one lane one after another in a single slot, taken before the first and given
- * back after the last, so another run on the machine cannot take it in between.
+ * back after the last, so another run on the machine cannot take it in between. The slot counts what
+ * the engine running in it needs: a lane that goes from a windowed engine to a headless one lowers
+ * it, and one that goes back raises it, so a window's memory is held only while it is open.
+ * [param taken] was taken for the lane's first engine, or is null.
  */
-async function runLane(
-  launch: Launch,
-  lane: ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>,
-  times: SuiteTimes,
+export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
+  slots: Pick<EngineSlots, 'take' | 'release' | 'counting'>,
+  lane: ReadonlyArray<{ readonly plan: P; readonly index: number }>,
   taken: string | null,
+  run: (plan: P, index: number, lock: string) => Promise<T>,
   handed?: HandedSlot,
-): Promise<EngineRan[]> {
-  const lock = taken ?? (await launch.slots.take());
+): Promise<T[]> {
+  const lock = taken ?? (await slots.take());
   try {
     await handed?.lend(lock);
-    const ran: EngineRan[] = [];
+    const ran: T[] = [];
+    let counting = taken !== null && (lane[0]?.plan.windowed ?? false);
     for (const { plan, index } of lane) {
-      ran.push(await runEngine(launch, plan, index, times, '', lock));
+      if (plan.windowed !== counting) {
+        counting = plan.windowed;
+        await slots.counting(lock, counting ? WINDOWED_LANE : undefined);
+      }
+      ran.push(await run(plan, index, lock));
     }
     return ran;
   } finally {
-    doneWith(launch.slots, lock, handed);
+    doneWith(slots, lock, handed);
   }
 }
 

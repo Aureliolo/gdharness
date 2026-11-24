@@ -1573,6 +1573,15 @@ export class EngineSlots {
   }
 
   /**
+   * Makes the slot at [param lock], which this process holds, count what the next engine of [param tool]
+   * needs, as a take for it would: up for a windowed engine after a headless one, down for a headless
+   * one after a window has ended. Answers what the lock counts after, as {@link raiseSlotMemory} does.
+   */
+  async counting(lock: string, tool?: PeakTool): Promise<number | null> {
+    return await slotMemoryWritten(lock, Math.round(this.memoryNeeded(false, this.project, tool)), true);
+  }
+
+  /**
    * What an engine of [param tool] for [param project] may hold, which its lock counts: the flat
    * figure or the project's kept peak, at most its ceiling. A ceiling that cannot be read caps nothing
    * here, since the start that reads it refuses it in its own words.
@@ -2813,7 +2822,8 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
 /**
  * Raises the `memory` of the slot at [param lock] to [param bytes] where it counts less and this
  * process holds it, so the budget counts an engine that grew past what its take counted. A figure is
- * never lowered. Renamed over the lock, as {@link handSlot} is.
+ * never lowered here, since a running engine's reading only grows ({@link EngineSlots.counting}
+ * sets it to another engine's need). Renamed over the lock, as {@link handSlot} is.
  *
  * Answers what the lock counts after: [param bytes] once it is rewritten, and the figure it held
  * where that was as much already or the rewrite failed, as it does while a reader holds the lock
@@ -2821,6 +2831,15 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
  * answer below [param bytes] is a raise to ask again.
  */
 export async function raiseSlotMemory(lock: string, bytes: number): Promise<number | null> {
+  return await slotMemoryWritten(lock, bytes, false);
+}
+
+/**
+ * Writes the `memory` of the slot at [param lock] as [param bytes] where this process holds it, and
+ * where it differs: any figure when [param exact], otherwise only a higher one. The one writer of a
+ * slot's figure, answering as {@link raiseSlotMemory} does.
+ */
+async function slotMemoryWritten(lock: string, bytes: number, exact: boolean): Promise<number | null> {
   // Set in the change, which runs again on each try: null for a lock held elsewhere.
   const read: { held?: number | null } = {};
   let written = false;
@@ -2833,7 +2852,7 @@ export async function raiseSlotMemory(lock: string, bytes: number): Promise<numb
       }
       const was = holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1);
       read.held = was;
-      return bytes > was ? JSON.stringify({ ...holder, memory: bytes }) : null;
+      return (exact ? bytes !== was : bytes > was) ? JSON.stringify({ ...holder, memory: bytes }) : null;
     });
   } catch {
     // Not rewritten, and the figure read, if any, stands.
