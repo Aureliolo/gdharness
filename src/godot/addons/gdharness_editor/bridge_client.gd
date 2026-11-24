@@ -33,9 +33,9 @@ const ONE_SHOT_CLOSE_CODE: int = 4002
 ## `SECOND_CONNECTION_CLOSE_CODE` in src/godot-bridge.ts.
 const TAKEN_CLOSE_CODE: int = 4000
 ## The engine's options that make a run do one job and quit. The engine hands an editor plugin none
-## of them (`OS.get_cmdline_args()` answers `["--editor"]` under each), so [method one_shot_option]
-## reads the process's own command line. Kept in step with `ONE_SHOT_OPTIONS` in
-## src/process-children.ts.
+## of them (`OS.get_cmdline_args()` answers `["--editor"]` under each), so
+## [method _own_one_shot_option] reads the process's own command line. Held equal to
+## `ONE_SHOT_OPTIONS` in src/process-children.ts by a regression.
 const ONE_SHOT_OPTIONS: Array[String] = [
 	"--import",
 	"--quit",
@@ -143,6 +143,11 @@ var _tried_announced: bool = false
 ## The address this editor has already been told is another project's, so a reconnect loop says it
 ## once rather than every few seconds for the rest of the session.
 var _told_about_url: String = ""
+## The option read off this process's command line that makes it one job that quits, held once
+## read. Read only when a server turns this editor away, since the reading costs a child process
+## on Windows and macOS.
+var _one_shot: String = ""
+var _one_shot_read: bool = false
 var _connecting_for: float = 0.0
 ## A plain socket sent ahead of the WebSocket, to learn whether anything listens. Measured on
 ## macOS 26.7: a refused connect asked again answers EISCONN, which the engine reads as connected.
@@ -201,9 +206,14 @@ func _process(_delta: float) -> void:
 			# A connection refused never opened, so it reaches CLOSED without passing through
 			# _handle_disconnect and nothing would ask again. An editor opened before the server
 			# is the ordinary way that happens, and it then sat there for the rest of the day.
-			if _tried_announced:
+			if socket.get_close_code() != -1:
+				# Opened and closed by the server inside one poll, as a server turning this editor
+				# away does, so it was never seen connected. Refused it was not.
+				_heed_the_close()
+			elif _tried_announced:
 				_refused_url = server_url
-			_schedule_reconnect()
+			if _should_reconnect:
+				_schedule_reconnect()
 		return
 
 	socket.poll()
@@ -564,12 +574,14 @@ func _keep_breakpoints_through_sessions() -> void:
 
 
 ## The option that makes this process one job that quits, such as `--import`, or an empty string
-## when it has none or the platform would not say. A run that quits by itself is nobody's editor
-## and is never driven through the bridge, so it does not dial in: a server already holding an
-## editor would turn it away, and the warning that earns fails a setup step that refuses engine
-## warnings. A command line that cannot be read is an editor's.
-static func one_shot_option() -> String:
-	return one_shot_option_in(_own_command_line())
+## when it has none or the platform would not say. The engine hands a plugin none of these options,
+## so the process's own command line is read, once. A command line that cannot be read is an
+## editor's, so such an editor is still told it was turned away.
+func _own_one_shot_option() -> String:
+	if not _one_shot_read:
+		_one_shot_read = true
+		_one_shot = one_shot_option_in(_own_command_line())
+	return _one_shot
 
 
 ## The option in [param line] that makes a run one job that quits, or an empty string. Only as far
@@ -596,6 +608,8 @@ static func _from_hex(written: String) -> String:
 
 ## The command line this process was started with, or an empty string when it cannot be read.
 static func _own_command_line() -> String:
+	# Under `--verbose` only, so a test can tell an editor start that read nothing.
+	print_verbose("gdharness: reading this process's command line")
 	var pid: int = OS.get_process_id()
 	var output: Array = []
 	if OS.get_name() == "Windows":
@@ -695,13 +709,25 @@ func _read_marker(path: String) -> String:
 
 func _handle_disconnect() -> void:
 	_is_connected = false
-	_said_elsewhere()
-	if socket.get_close_code() == ONE_SHOT_CLOSE_CODE:
-		_should_reconnect = false
+	_heed_the_close()
 	disconnected.emit()
 
 	if _should_reconnect:
 		_schedule_reconnect()
+
+
+## Acts on what the server closed the socket with: says so when it turned this editor away, and
+## stops dialling when there is no point.
+func _heed_the_close() -> void:
+	var code: int = socket.get_close_code()
+	if code == TAKEN_CLOSE_CODE and not _own_one_shot_option().is_empty():
+		# A run that quits by itself, such as a gate's `--import`, is nobody's editor. The warning
+		# would fail a setup step that refuses engine warnings, and dialling again changes nothing.
+		_should_reconnect = false
+	else:
+		_said_elsewhere()
+	if code == ONE_SHOT_CLOSE_CODE:
+		_should_reconnect = false
 
 
 ## Says so when the server turned this editor away, as another project's or as one too many.

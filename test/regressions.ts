@@ -494,6 +494,7 @@ import {
   editorsOfProjectIn,
   linuxStartEarliest,
   listingFailure,
+  ONE_SHOT_OPTIONS,
   type ProcessTree,
   parseProcessTable,
   processTree,
@@ -11827,6 +11828,19 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
   // without the ports it was moved to, and every tool behind them is answered by another editor.
   const opened = /const OPENED_BY_A_SERVER: String = "(.+)"/.exec(addon)?.[1];
   assert.equal(opened, OPENED_BY_A_SERVER, 'the addon should read the variable the server sets');
+}
+
+/**
+ * The server and the editor addon hold one list of the engine options that make a run quit by
+ * itself. An option only the server knows is a run the server turns away whose addon still warns
+ * when another editor is served, and the other way round an editor the addon stays silent for.
+ */
+function testBothEndsHoldTheSameOneShotOptions(): void {
+  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
+  const listed = /const ONE_SHOT_OPTIONS: Array\[String\] = \[([^\]]*)\]/.exec(addon)?.[1];
+  assert.ok(listed, 'the addon should hold the one-shot options as a list');
+  const inAddon = [...listed.matchAll(/"([^"]+)"/g)].map((found) => found[1]);
+  assert.deepEqual(inAddon, [...ONE_SHOT_OPTIONS], 'the addon should list the options the server reads');
 }
 
 /**
@@ -60538,14 +60552,25 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
     assert.equal(get(served, 'editorPid'), editor.pid, JSON.stringify(served));
     await end(editor);
 
-    // The same editor told to quit after more frames than it will draw: one job that quits, whose
-    // addon never dials in. One that did would reach the bridge within its first seconds.
+    // The same editor told to quit after more frames than it will draw: one job that quits.
     const quitting = engine(['-e', '--headless', '--path', project, '--quit-after', '100000000']);
-    await delay(15_000);
+    for (let waited = 0; waited < 90_000; waited += 250) {
+      const away = get(await editorStatus(), 'turnedAway');
+      if (away !== undefined && get(away, 'pid') === quitting.pid) {
+        break;
+      }
+      await delay(250);
+    }
     const away = await editorStatus();
-    assert.equal(get(away, 'connected'), false, `it is not the editor: ${JSON.stringify(away)}`);
-    assert.equal(get(away, 'turnedAway'), undefined, `and never reached the bridge: ${JSON.stringify(away)}`);
+    assert.equal(get(away, 'turnedAway', 'pid'), quitting.pid, `it is turned away: ${JSON.stringify(away)}`);
+    assert.equal(get(away, 'turnedAway', 'option'), '--quit-after', JSON.stringify(away));
+    assert.equal(get(away, 'connected'), false, 'and is not the editor');
     assert.equal(identified(quitting.pid), false, `and was never served:\n${server.stderr}`);
+    // Told once, and it stops dialling in: the addon backs off from three seconds, so an addon that
+    // kept trying would have been turned away again inside this wait.
+    await delay(8_000);
+    const told = server.stderr.split(`Turning away an engine run: pid ${quitting.pid} `).length - 1;
+    assert.equal(told, 1, `a run turned away stops dialling in:\n${server.stderr}`);
     await end(quitting);
 
     // The run reported: an import, and a start for another project while it runs.
@@ -60598,16 +60623,16 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
 }
 
 /**
- * An engine run that quits by itself makes no bridge connection beside a served editor, and prints
- * nothing about one.
+ * An engine run that quits by itself, turned away beside a served editor, says nothing about it.
  *
- * Such a run (`--import`, `--quit`) loads the editor addon. It read the announced address, dialled
- * in, was closed as taken by the editor the server already held, and printed a warning that a setup
- * step refusing engine warnings fails on (#1727). The engine hands an editor plugin none of its
- * options, so the addon reads its own command line. A headless editor with none of them still
- * connects, and project_import's own headless run is held to the same silence.
+ * Such a run (`--import`, `--quit`, `--quit-after`) loads the editor addon, dials in and is closed
+ * as taken by the editor the server already holds. It printed the warning an open editor gets, which
+ * a setup step refusing engine warnings fails on (#1727). The engine hands a plugin none of these
+ * options, so the addon reads its own command line, and only once turned away: on Windows that is a
+ * child process of half a second, which no editor start should pay. The addon says it read the line
+ * under `--verbose`, which is how an ordinary start is shown to read nothing.
  */
-async function testAQuittingRunBesideAServedEditorDoesNotDial(): Promise<void> {
+async function testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -60647,38 +60672,94 @@ async function testAQuittingRunBesideAServedEditorDoesNotDial(): Promise<void> {
     child.stdout.on('data', (chunk: Buffer) => lines.push(String(chunk)));
     child.stderr.on('data', (chunk: Buffer) => lines.push(String(chunk)));
     engines.push(child);
-    return { child, said: () => lines.join('').slice(-4000) };
+    return { child, said: () => lines.join('') };
   };
   const connections = (): number => server.stderr.split('Godot editor connected').length - 1;
+  const rejections = (): number => server.stderr.split('Rejecting second Godot connection').length - 1;
   // The addon's own lines about the bridge, not its other notices such as a setting it turned on.
   const bridgeWarning = /\[gdharness\](?! turned on)/;
+  const readItsLine = "gdharness: reading this process's command line";
   const ended = async (child: ChildProcess): Promise<void> => {
     for (let waited = 0; waited < 120_000 && child.exitCode === null; waited += 250) {
+      await delay(250);
+    }
+  };
+  const stop = async (child: ChildProcess): Promise<void> => {
+    if (child.exitCode === null && child.pid !== undefined) {
+      await killTheTree(child.pid);
+      await ended(child);
+    }
+  };
+  const until = async (done: () => boolean): Promise<void> => {
+    for (let waited = 0; waited < 90_000 && !done(); waited += 250) {
       await delay(250);
     }
   };
   try {
     await server.initialize('regression-test');
 
-    // The editor the server holds, headless with none of the quitting options: it connects.
-    const editor = engine(['-e', '--headless', '--path', project]);
-    for (let waited = 0; waited < 90_000 && connections() === 0; waited += 250) {
-      await delay(250);
-    }
+    // The editor the server holds, headless with none of the quitting options: it connects, and
+    // reads no command line on the way.
+    const editor = engine(['-e', '--headless', '--verbose', '--path', project]);
+    await until(() => connections() > 0);
     assert.equal(connections(), 1, `a headless editor still connects:\n${server.stderr}\n${editor.said()}`);
-    const before = server.stderr.length;
+    await delay(3_000);
+    assert.ok(
+      !editor.said().includes(readItsLine),
+      `an editor start reads no command line:\n${editor.said()}`,
+    );
 
-    for (const option of [['--import'], ['--quit']]) {
+    // Runs that quit by themselves: turned away, and silent about it.
+    for (const option of [['--import'], ['--quit'], ['--quit-after', '1000']]) {
+      const before = server.stderr.length;
       const run = engine(['--headless', '-e', '--path', project, ...option]);
       await ended(run.child);
-      const said = `${option.join(' ')}:\n${run.said()}\n${server.stderr.slice(before)}`;
+      const said = `${option.join(' ')}:\n${run.said().slice(-4000)}\n${server.stderr.slice(before)}`;
       assert.equal(run.child.exitCode, 0, `it finishes by itself ${said}`);
       assert.doesNotMatch(run.said(), bridgeWarning, `it prints nothing about the bridge ${said}`);
-      assert.equal(connections(), 1, `it makes no connection the server sees ${said}`);
-      assert.doesNotMatch(server.stderr.slice(before), /Rejecting second Godot connection/, said);
+      assert.equal(connections(), 1, `and is not the editor ${said}`);
     }
 
+    // One that stays a while: turned away once, it reads its line and does not dial again. The
+    // addon backs off from three seconds, so one that kept trying would be turned away again here.
+    const rejectedBefore = rejections();
+    const lingering = engine([
+      '--headless',
+      '--verbose',
+      '-e',
+      '--path',
+      project,
+      '--quit-after',
+      '100000000',
+    ]);
+    await until(() => rejections() > rejectedBefore);
+    await delay(8_000);
+    const lingered = `${lingering.said().slice(-4000)}\n${server.stderr}`;
+    assert.equal(rejections(), rejectedBefore + 1, `a run turned away does not dial again:\n${lingered}`);
+    assert.doesNotMatch(lingering.said(), bridgeWarning, `and says nothing about it:\n${lingered}`);
+    assert.ok(
+      lingering.said().includes(readItsLine),
+      `it read its command line once turned away:\n${lingered}`,
+    );
+    await stop(lingering.child);
+
+    // A second editor that stays open is still told, as before.
+    const second = engine(['-e', '--headless', '--path', project]);
+    const told = new RegExp(
+      String.raw`\[gdharness\] ws://\S+:${port}/godot already serves another editor, so this editor is not` +
+        String.raw` connected\. It connects once that editor closes\. Give this project its own server with` +
+        String.raw` GDHARNESS_BRIDGE_PORT to use both at once\.`,
+    );
+    await until(() => told.test(second.said()));
+    assert.match(
+      second.said(),
+      told,
+      `a second editor is told it was turned away:\n${second.said().slice(-4000)}`,
+    );
+    await stop(second.child);
+
     // project_import's own headless run, with another editor served.
+    const importBefore = server.stderr.length;
     writeFileSync(join(other, 'stranger.gd'), 'class_name Stranger\nextends RefCounted\n');
     const rebuilt = await server.request(
       'tools/call',
@@ -60687,17 +60768,10 @@ async function testAQuittingRunBesideAServedEditorDoesNotDial(): Promise<void> {
     );
     const answered = textOf(rebuilt) ?? '';
     assert.doesNotMatch(answered, bridgeWarning, `the answer carries no bridge warning: ${answered}`);
-    assert.doesNotMatch(
-      server.stderr.slice(before),
-      /Rejecting second Godot connection/,
-      `and its run made no connection:\n${server.stderr}`,
-    );
+    assert.equal(connections(), 1, `and its run is not the editor:\n${server.stderr.slice(importBefore)}`);
   } finally {
     for (const started of engines) {
-      if (started.exitCode === null && started.pid !== undefined) {
-        await killTheTree(started.pid);
-        await ended(started);
-      }
+      await stop(started);
     }
     await server.stop().catch(() => undefined);
     rmSync(project, { recursive: true, force: true });
@@ -132140,6 +132214,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
+  testBothEndsHoldTheSameOneShotOptions,
   testARestartLeftHalfDoneIsSaid,
   testTheRestartNoteIsReplacedWholeOrNotAtAll,
   testAnEditorStillArrivingIsNotOpenedBeside,
@@ -132415,7 +132490,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureBeforeTheFirstFrameWaitsForIt,
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testAOneShotEngineRunIsNotTheEditor,
-  testAQuittingRunBesideAServedEditorDoesNotDial,
+  testAQuittingRunTurnedAwayBesideAServedEditorSaysNothing,
   testASubViewportCaptureIsDrawnNow,
   testAStartRefusesAnotherBuildOfItsRuntimeAddon,
   testAScreenshotHoldsTheGamesOwnWindows,

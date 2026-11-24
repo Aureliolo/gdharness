@@ -77,8 +77,7 @@ func _enter_tree() -> void:
 	_listen(_client.tool_requested, _on_tool_requested)
 
 	_setup_status_indicator()
-	if GdhBridgeClient.one_shot_option().is_empty():
-		_client.connect_to_server()
+	_client.connect_to_server()
 	_look_for_a_quit_request()
 	_look_for_idleness()
 
