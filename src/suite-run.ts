@@ -2034,6 +2034,11 @@ export class HandedSlot {
     return this.handedInALend;
   }
 
+  /** Whether the check still wants a slot, so a lock offered now would be handed over. */
+  get wants(): boolean {
+    return this.wanted;
+  }
+
   /**
    * Lends [param lock] to a check that still wants a slot, in a paced run, and settles once the
    * check has ended. Otherwise it settles at once. Only the first offer is taken.
@@ -2401,7 +2406,8 @@ export function importEnd(ended: EngineEnd): string | null {
  * Runs the engines of one lane one after another in a single slot, taken before the first and given
  * back after the last, so another run on the machine cannot take it in between. The slot counts what
  * the engine running in it needs: a lane that goes from a windowed engine to a headless one lowers
- * it, and one that goes back raises it, so a window's memory is held only while it is open.
+ * it, and one that goes back raises it once memory has room, so a window's memory is held only while
+ * it is open. A slot handed to the compile check after a window counts the check's headless engine.
  * [param taken] was taken for the lane's first engine, or is null.
  */
 export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
@@ -2412,10 +2418,10 @@ export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
   handed?: HandedSlot,
 ): Promise<T[]> {
   const lock = taken ?? (await slots.take());
+  let counting = taken !== null && (lane[0]?.plan.windowed ?? false);
   try {
     await handed?.lend(lock);
     const ran: T[] = [];
-    let counting = taken !== null && (lane[0]?.plan.windowed ?? false);
     for (const { plan, index } of lane) {
       if (plan.windowed !== counting) {
         counting = plan.windowed;
@@ -2425,7 +2431,13 @@ export async function runLane<P extends Pick<EnginePlan, 'windowed'>, T>(
     }
     return ran;
   } finally {
-    doneWith(slots, lock, handed);
+    try {
+      if (counting && handed?.wants === true) {
+        await slots.counting(lock);
+      }
+    } finally {
+      doneWith(slots, lock, handed);
+    }
   }
 }
 
