@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
 import { discard, type Surviving, untilDiscarded } from '../../src/scratch.js';
 import { type EndedEngine, endEnginesUnder } from './engines.js';
@@ -40,6 +41,23 @@ export function sweepingFor(fixture: string | null): void {
 /** The fixture running now, or null between fixtures. */
 export function fixtureNow(): string | null {
   return during;
+}
+
+/**
+ * The fixture whose own code is running, kept through its awaits and timers. A fixture past its
+ * deadline still runs after the runner has moved on, so this can name an earlier one than
+ * {@link fixtureNow}.
+ */
+const calling = new AsyncLocalStorage<string>();
+
+/** Runs [param work] as [param fixture]'s own code, for {@link fixtureCalling} to name. */
+export function runAsFixture<T>(fixture: string, work: () => T): T {
+  return calling.run(fixture, work);
+}
+
+/** The fixture whose code is calling, or undefined outside {@link runAsFixture}. */
+export function fixtureCalling(): string | undefined {
+  return calling.getStore();
 }
 
 /**

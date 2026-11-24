@@ -133865,10 +133865,11 @@ async function testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanIts
  * doing: the calls answered, the call still waiting and the server's last stderr lines, then the
  * slot holders. An engine that never ends holds it no longer either, and a test that ended in time
  * with one left with the helper holds it no more than the runner's wait for the helper. The report
- * names every server the test started, one it ended and one that never started included. The run is
- * test/support/deadline-run.ts, whose first test holds a 20 s engine past a 3 s deadline, whose
- * third holds one that never ends, whose fifth leaves one that never ends running and whose seventh
- * ends a server and starts two more.
+ * names every server the test started, one it ended and one that never started included, and none
+ * an earlier test started after its own deadline. The run is test/support/deadline-run.ts, whose
+ * first test holds a 20 s engine past a 3 s deadline, whose third holds one that never ends, whose
+ * fifth leaves one that never ends running, whose seventh starts a server once the eighth has begun,
+ * and whose eighth ends a server and starts two more.
  */
 async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersWereDoing(): Promise<void> {
   const ran = await runHidden(process.execPath, [join('test', 'support', 'deadline-run.ts')], {
@@ -133898,16 +133899,9 @@ async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersW
     inTime !== undefined && inTime >= 1_000 && inTime < 16_000,
     `a test that ended in time with an engine left holds the run no more than the helper's wait:\n${ran}`,
   );
-  if (process.platform === 'win32') {
-    assert.match(
-      ran,
-      /^the desktop helper still served an engine 10s after leavesAnEngineThatNeverEndsRunning ended, so the run goes on without it$/m,
-      ran,
-    );
-  }
   assert.match(
     ran,
-    /^failed: holdsAnEnginePastItsDeadline, holdsAnEngineThatNeverEndsPastItsDeadline, endsAServerThenStartsAnotherAndOneThatCannotStart$/m,
+    /^failed: holdsAnEnginePastItsDeadline, holdsAnEngineThatNeverEndsPastItsDeadline, startsAServerOnceTheRunHasMovedOn, endsAServerThenStartsAnotherAndOneThatCannotStart$/m,
     ran,
   );
   const said = (pattern: RegExp, what: string): RegExpExecArray => {
@@ -133915,17 +133909,22 @@ async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersW
     assert.ok(match, `${what}:\n${ran}`);
     return match;
   };
-  const openedMs = Number(said(/^the opening was answered (\d+) ms after it was sent$/m, 'the opening')[1]);
+  const [, firstMs, secondMs] = said(
+    /^the two openings were answered (\d+) and (\d+) ms after they were sent$/m,
+    'the openings',
+  );
   const sentMs = Number(said(/^the tool call was sent (\d+) ms after the test began$/m, 'the tool call')[1]);
   const [, mean, waited] = said(
-    /^What holdsAnEnginePastItsDeadline was doing at its deadline:\nserver pid \d+: 1 call answered, mean (\d+\.\d)s; waiting (\d+\.\d)s on tools\/call resource_edit set_theme_color\n {2}its last stderr lines:\n {4}heard server\/discover\n {4}heard tools\/call\nThe slot directory /m,
-    'a server with a call answered and one in flight',
+    /^What holdsAnEnginePastItsDeadline was doing at its deadline:\nserver pid \d+: 2 calls answered, mean (\d+\.\d)s; waiting (\d+\.\d)s on tools\/call resource_edit set_theme_color\n {2}its last stderr lines:\n {4}heard server\/discover\n {4}heard server\/discover\n {4}heard tools\/call\nThe slot directory /m,
+    'a server with two calls answered and one in flight',
   );
-  // The stand-in answers the opening after half a second, and the deadline comes 3 s after the
-  // test began, so the mean is the opening's own time and the wait runs from the call to the deadline.
+  // The stand-in answers each opening after half a second, and the deadline comes 3 s after the
+  // test began, so the mean is half the two openings' time and the wait runs from the call to the
+  // deadline. Their total, a second or more, is outside the bound.
+  const openingsMean = (Number(firstMs) + Number(secondMs)) / 2;
   assert.ok(
-    Number(mean) >= 0.5 && Math.abs(Number(mean) - openedMs / 1000) <= 0.15,
-    `the mean is the ${String(openedMs)} ms the opening took:\n${ran}`,
+    Number(mean) >= 0.5 && Math.abs(Number(mean) - openingsMean / 1000) <= 0.15,
+    `the mean is the ${String(openingsMean)} ms each opening took:\n${ran}`,
   );
   const fromCallToDeadline = (3_000 - sentMs) / 1000;
   assert.ok(
@@ -133935,6 +133934,16 @@ async function testATestPastItsDeadlineHoldsTheRunNoLongerAndSaysWhatItsServersW
   said(
     /^What holdsAnEngineThatNeverEndsPastItsDeadline was doing at its deadline:\nholdsAnEngineThatNeverEndsPastItsDeadline started no server\.\nThe slot directory /m,
     'a test with no server',
+  );
+  said(
+    /^What startsAServerOnceTheRunHasMovedOn was doing at its deadline:\nstartsAServerOnceTheRunHasMovedOn started no server\.\nThe slot directory /m,
+    'a test that starts its server after its deadline',
+  );
+  const latePid = said(/^the server started after its test's deadline was pid (\d+)$/m, 'the late pid')[1];
+  assert.doesNotMatch(
+    ran,
+    new RegExp(`^server pid ${String(latePid)}:`, 'm'),
+    `a server started after its test's deadline is in no report:\n${ran}`,
   );
   const [, endedPid, nextPid] = said(
     /^the ended server was pid (\d+), the next pid (\d+)$/m,

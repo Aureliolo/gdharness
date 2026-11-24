@@ -2,7 +2,7 @@ import { retireHelper } from '../../src/desktop.js';
 import { beginWindow } from './open-handles.js';
 import { serversSaidAtADeadline, stopServersOf } from './server.js';
 import { slotsSaid, withTheSuitesOwnSlotVariables } from './slots.js';
-import { endEnginesLeft, leftBehindBy, lookUnder, sweepingFor } from './sweep.js';
+import { endEnginesLeft, leftBehindBy, lookUnder, runAsFixture, sweepingFor } from './sweep.js';
 
 /** One test of the list, as the runner takes it. */
 export type RegressionCase = () => void | Promise<void>;
@@ -82,7 +82,7 @@ export async function runOneRegression(test: RegressionCase, run: RegressionRun)
   const began = Date.now();
   const allowedMs = Math.min(deadlineMs, runEnds - began);
   let deadline: NodeJS.Timeout | undefined;
-  const running = Promise.resolve().then(() => test());
+  const running = Promise.resolve().then(() => runAsFixture(test.name, test));
   // A test that settles after its deadline has nobody waiting on it any more.
   running.catch(() => undefined);
   try {

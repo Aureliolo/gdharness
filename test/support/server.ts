@@ -11,7 +11,7 @@ import { acceptsConnections } from '../../src/port-probe.js';
 import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
 import { isRecord, type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
 import { slotsSaid } from './slots.js';
-import { fixtureNow, sweep } from './sweep.js';
+import { fixtureCalling, fixtureNow, sweep } from './sweep.js';
 
 /** A runtime directory nothing else on this machine is using. */
 function runtimeDirForTest(): string {
@@ -27,7 +27,11 @@ function runtimeDirForTest(): string {
  * its servers kept in these directories.
  */
 const runtimeDirsMade: { directory: string; during: string | null }[] = [];
-let serversStarted: { server: ServerProcess; during: string | null }[] = [];
+/**
+ * `startedBy` is the test whose own code started the server. It differs from `during` when a test
+ * past its deadline starts one after the runner has moved on to the next test.
+ */
+let serversStarted: { server: ServerProcess; during: string | null; startedBy: string | null }[] = [];
 
 function started(server: ServerProcess): void {
   // Each holds everything its server printed, and about ninety fixtures start one. An ended one
@@ -36,7 +40,7 @@ function started(server: ServerProcess): void {
   serversStarted = serversStarted.filter(
     (entry) => !entry.server.exited || (during !== null && entry.during === during),
   );
-  serversStarted.push({ server, during });
+  serversStarted.push({ server, during, startedBy: fixtureCalling() ?? during });
 }
 
 /**
@@ -72,10 +76,13 @@ const STDERR_LINES_SAID = 10;
 /**
  * What each server [param fixture] started was doing when its deadline came: the calls it answered
  * and their mean time, each call still waiting and for how long, and its last stderr lines. A slow
- * test shows as many answered calls, a stuck one as one call waiting for minutes.
+ * test shows as many answered calls, a stuck one as one call waiting for minutes. A server an
+ * earlier test started after its own deadline is not this one's, and its own report has been said.
  */
 export function serversSaidAtADeadline(fixture: string): string[] {
-  const servers = serversStarted.filter((entry) => entry.during === fixture).map(({ server }) => server);
+  const servers = serversStarted
+    .filter((entry) => entry.during === fixture && entry.startedBy === fixture)
+    .map(({ server }) => server);
   if (servers.length === 0) {
     return [`${fixture} started no server.`];
   }
@@ -606,9 +613,8 @@ export class ServerProcess {
     ];
   }
 
-  /** True once the server has ended, or when it never started. */
   get exited(): boolean {
-    return this.neverStarted !== null || this.child.exitCode !== null || this.child.signalCode !== null;
+    return this.child.exitCode !== null || this.child.signalCode !== null;
   }
 
   notify(method: string, params?: unknown): void {
@@ -632,9 +638,6 @@ export class ServerProcess {
   async request(method: string, params: unknown = {}, timeoutMs = 30_000): Promise<JsonRpcMessage> {
     const id = this.nextId;
     this.nextId += 1;
-    if (this.neverStarted !== null) {
-      throw new Error(`Server never started: ${this.neverStarted.message}, so it cannot send ${method}.`);
-    }
     if (this.exited) {
       throw new Error(
         `Server already exited, ${describeExit(this.child.exitCode, this.child.signalCode)}, so it cannot send ${method}.\n${this.stderr}`,

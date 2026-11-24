@@ -1,13 +1,15 @@
 /**
- * Seven regressions through the runner's own step, with a deadline of three seconds. The first starts
- * a server that answers its opening after half a second and never a tool call, then an engine that
- * runs for twenty seconds, so it is still running at its deadline. It prints how long the opening
- * took and when it sent the tool call. The third holds an engine that never ends past its deadline,
- * and the fifth ends after a second and leaves such an engine running. The tests between print how
- * long after the test before them began they started, then end the engine that never ends, so only
- * a runner that waited on it is held until this run ends it itself. The seventh makes twelve calls
- * of one server and ends it, then starts a second server and one that cannot start, and waits past
- * its deadline. The engines are waited for before the process ends, so it leaves nothing running.
+ * Eight regressions through the runner's own step, with a deadline of three seconds. The first starts
+ * a server that answers each opening after half a second and never a tool call, sends two openings,
+ * then starts an engine that runs for twenty seconds, so it is still running at its deadline. It
+ * prints how long each opening took and when it sent the tool call. The third holds an engine that
+ * never ends past its deadline, and the fifth ends after a second and leaves such an engine running.
+ * The tests between print how long after the test before them began they started, then end the
+ * engine that never ends, so only a runner that waited on it is held until this run ends it itself.
+ * The seventh waits past its deadline until the eighth has begun, then starts a server. The eighth
+ * makes twelve calls of one server and ends it, then starts a second server and one that cannot
+ * start, and waits past its deadline. The engines are waited for before the process ends, so it
+ * leaves nothing running.
  * Usage: deadline-run.ts
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,6 +20,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { runEngine } from '../../src/engine-run.js';
 import { type RegressionRun, runOneRegression, settledWithin } from './regression-run.js';
 import { ServerProcess } from './server.js';
+import { fixtureNow } from './sweep.js';
 
 const ENGINE_MS = 20_000;
 /**
@@ -67,11 +70,20 @@ async function holdsAnEnginePastItsDeadline(): Promise<void> {
   const server = new ServerProcess({ entry: STAND_IN, args: ['--opening-ms', '500'] });
   const opened = Date.now();
   await server.initialize('deadline-run');
-  console.log(`the opening was answered ${String(Date.now() - opened)} ms after it was sent`);
+  const reopened = Date.now();
+  // A second opening takes the same half second, so the mean of the two is half their total.
+  await server.request('server/discover');
+  console.log(
+    `the two openings were answered ${String(reopened - opened)} and ${String(Date.now() - reopened)} ms after they were sent`,
+  );
   console.log(`the tool call was sent ${String(Date.now() - began)} ms after the test began`);
   server
     .request('tools/call', { name: 'resource_edit', arguments: { op: 'set_theme_color' } }, 60_000)
     .catch(() => undefined);
+  // Starting an engine can hold this process a while, so the server's line for the call is read first.
+  while (!server.stderr.includes('heard tools/call')) {
+    await delay(10);
+  }
   await engineOfTwentySeconds();
 }
 
@@ -90,6 +102,15 @@ async function leavesAnEngineThatNeverEndsRunning(): Promise<void> {
   void engineThatNeverEnds();
   // Long enough for the engine to be with the helper when the test ends.
   await delay(1_000);
+}
+
+async function startsAServerOnceTheRunHasMovedOn(): Promise<void> {
+  while (fixtureNow() === startsAServerOnceTheRunHasMovedOn.name) {
+    await delay(10);
+  }
+  const late = new ServerProcess({ entry: STAND_IN });
+  console.log(`the server started after its test's deadline was pid ${String(late.child.pid)}`);
+  await late.initialize('deadline-run').catch(() => undefined);
 }
 
 async function endsAServerThenStartsAnotherAndOneThatCannotStart(): Promise<void> {
@@ -124,6 +145,7 @@ for (const test of [
   saysWhenItStarts,
   leavesAnEngineThatNeverEndsRunning,
   saysWhenItStarts,
+  startsAServerOnceTheRunHasMovedOn,
   endsAServerThenStartsAnotherAndOneThatCannotStart,
 ]) {
   await runOneRegression(test, run);
