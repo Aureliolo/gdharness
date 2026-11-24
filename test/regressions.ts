@@ -132634,6 +132634,9 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
   }
 }
 
+/** The least each windowed probe suite is timed at when run together: two engine starts of work. */
+const PROBE_TOGETHER_SECONDS = 10;
+
 /**
  * Windowed engines of one run share a desktop, so each must get what it gets alone: the size of its
  * window, its focus and its frame rate. Two and four of them run at once, each held at a barrier
@@ -132696,17 +132699,32 @@ function testWindowedEnginesRunTogetherGetWhatEachGetsAlone(): void {
     // Each probe suite is sized by what the engine alone was seen to hold, in place of the flat
     // figure a window is taken to need, so a small machine fits as many as it really can.
     const held = readTimes(aloneTimes)[`res://tests/${names[0] ?? ''}_test.gd`];
-    if (held?.peak !== undefined) {
+    // Together each suite waits at its barrier for every peer, so it lasts past its time alone.
+    // Timed as alone, four suites of about 3 s are too little work to keep four engines busy, and
+    // the deal gives them three. Every suite is timed alike before each size, so none is the slowest.
+    const timeTogether = (): void => {
+      if (held?.peak === undefined) {
+        return;
+      }
+      const scale = held.seconds > 0 ? Math.max(1, PROBE_TOGETHER_SECONDS / held.seconds) : 1;
+      const timed = {
+        ...held,
+        seconds: Math.max(held.seconds * scale, PROBE_TOGETHER_SECONDS),
+        cases: Object.fromEntries(
+          Object.entries(held.cases).map(([func, seconds]) => [func, seconds * scale]),
+        ),
+      };
       writeJson(
         togetherTimes,
-        Object.fromEntries(names.map((name) => [`res://tests/${name}_test.gd`, held])),
+        Object.fromEntries(names.map((name) => [`res://tests/${name}_test.gd`, timed])),
       );
-    }
+    };
     const summary: string[] = [`alone ${JSON.stringify(lone)}`];
     let measured = 0;
     // GDHARNESS_WINDOWED_PROBE_PEERS names the sizes to run, which a machine short of memory narrows.
     const sizes = (process.env['GDHARNESS_WINDOWED_PROBE_PEERS'] ?? '2,4').split(',').map(Number);
     for (const peers of sizes) {
+      timeTogether();
       const together = run(peers);
       assert.equal(together.status, 0, together.said);
       if (together.said.includes('Memory had room for')) {
